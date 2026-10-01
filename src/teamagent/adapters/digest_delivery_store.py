@@ -28,6 +28,28 @@ _TTL_DAYS = 14  # 診断の猶予だけ取る（長期保持しない）
 CLAIM_CLAIMED = "claimed"
 CLAIM_TAKEN = "taken"
 CLAIM_FAILED = "failed"
+#: 一括実行が当たった行が、planner の「後で個別に送る」予約だった（送らない・正常）。
+CLAIM_RESERVED = "reserved"
+
+# planner が「この人には後で個別に送る」と予約する印（migration 0031 で origin に追加）。
+# 一括実行（既定時刻）はこの行に当たって送らない。予約の発火（scheduled）は UPDATE で
+# 印を「送った」に変えて送る。⚠️ 印を作ったのに予約（Scheduler）が作れなかったら、
+# planner が必ず印を消す（消さないとその日は誰も送らない）。
+_RESERVE_SQL = """
+INSERT INTO digest_delivery (user_email, digest_date, origin, expires_at)
+VALUES (%(email)s, %(day)s, 'reserved', NOW() + make_interval(days => %(ttl_days)s))
+ON CONFLICT (user_email, digest_date) DO NOTHING
+"""
+
+# 予約の発火: 自分の予約印だけを「送った」に変える（1 行なら送ってよい）。
+_TAKE_RESERVED_SQL = """
+UPDATE digest_delivery SET origin = 'scheduled', claimed_at = NOW()
+WHERE user_email = %(email)s AND digest_date = %(day)s AND origin = 'reserved'
+"""
+
+_ORIGIN_SQL = """
+SELECT origin FROM digest_delivery WHERE user_email = %(email)s AND digest_date = %(day)s
+"""
 
 _CLAIM_SQL = """
 INSERT INTO digest_delivery (user_email, digest_date, origin, expires_at)
@@ -109,29 +131,71 @@ class DigestDeliveryStore:
                 self._ensure_pg().connection(app_role="teamagent_app", user_email=email) as conn,
                 conn.cursor() as cur,
             ):
-                cur.execute(
-                    _CLAIM_SQL,
-                    {
-                        "email": email,
-                        "day": day,
-                        "origin": origin,
-                        "ttl_days": _TTL_DAYS,
-                    },
-                )
-                claimed = int(cur.rowcount) == 1
+                claimed = False
+                if origin == "scheduled":
+                    # 予約の発火: まず自分の予約印を「送った」に変える。
+                    cur.execute(_TAKE_RESERVED_SQL, {"email": email, "day": day})
+                    claimed = int(cur.rowcount) == 1
+                if not claimed:
+                    cur.execute(
+                        _CLAIM_SQL,
+                        {
+                            "email": email,
+                            "day": day,
+                            "origin": origin,
+                            "ttl_days": _TTL_DAYS,
+                        },
+                    )
+                    claimed = int(cur.rowcount) == 1
+                held_by = ""
+                if not claimed:
+                    # 誰が持っているか（予約印なら「後で個別に送る」＝一括は正常に見送る）。
+                    cur.execute(_ORIGIN_SQL, {"email": email, "day": day})
+                    row = cur.fetchone()
+                    if row is not None:
+                        held_by = str(row["origin"] if isinstance(row, dict) else row[0])
                 # ⚠️ rowcount を読んでから掃除する（順序を入れ替えると claim の
                 #   判定が DELETE の rowcount になり、毎回 False＝1 通も出なくなる）。
                 cur.execute(_PURGE_SQL)
                 conn.commit()
             logger.info(
-                "digest_delivery_claim", request_id=request_id, claimed=claimed, origin=origin
+                "digest_delivery_claim",
+                request_id=request_id,
+                claimed=claimed,
+                origin=origin,
+                held_by=held_by,
             )
-            return CLAIM_CLAIMED if claimed else CLAIM_TAKEN
+            if claimed:
+                return CLAIM_CLAIMED
+            return CLAIM_RESERVED if held_by == "reserved" else CLAIM_TAKEN
         except Exception:
             # fail-closed。error レベルで出して既存の ErrorCount alarm へ流す
             # （無音配信停止を「正常」に見せない）。
             logger.error("digest_delivery_claim_failed", request_id=request_id, origin=origin)
             return CLAIM_FAILED
+
+    def reserve(self, user_email: str, day: _dt.date, *, request_id: str) -> bool:
+        """planner が「この人には後で個別に送る」と印を付ける。付けられたときだけ True。
+
+        False（既に行がある・DB 障害）なら planner は予約を作らない＝一括実行に残す
+        （予約と印の片方だけが残る状態を作らない）。
+        """
+        email = _normalise_email(user_email)
+        if not email or "@" not in email:
+            return False
+        try:
+            with (
+                self._ensure_pg().connection(app_role="teamagent_app", user_email=email) as conn,
+                conn.cursor() as cur,
+            ):
+                cur.execute(_RESERVE_SQL, {"email": email, "day": day, "ttl_days": _TTL_DAYS})
+                reserved = int(cur.rowcount) == 1
+                conn.commit()
+            logger.info("digest_delivery_reserve", request_id=request_id, reserved=reserved)
+            return reserved
+        except Exception:
+            logger.error("digest_delivery_reserve_failed", request_id=request_id)
+            return False
 
     def release(self, user_email: str, day: _dt.date, *, request_id: str) -> bool:
         """配信に失敗したときに印を戻す（次の経路に再挑戦させる）。
@@ -157,4 +221,4 @@ class DigestDeliveryStore:
             return False
 
 
-__all__ = ["CLAIM_CLAIMED", "CLAIM_FAILED", "CLAIM_TAKEN", "DigestDeliveryStore"]
+__all__ = ["CLAIM_CLAIMED", "CLAIM_FAILED", "CLAIM_RESERVED", "CLAIM_TAKEN", "DigestDeliveryStore"]

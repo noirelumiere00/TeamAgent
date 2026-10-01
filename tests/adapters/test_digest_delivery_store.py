@@ -21,6 +21,7 @@ class _FakeCursor:
     def __init__(self, owner: _FakePg) -> None:
         self._owner = owner
         self.rowcount = 0
+        self._row: Any = None
 
     def __enter__(self) -> _FakeCursor:
         return self
@@ -40,19 +41,35 @@ class _FakeCursor:
             self.rowcount = len(expired)
             return
         key = (params["email"], params["day"])
+        if sql.strip().startswith("SELECT"):
+            row = self._owner.rows.get(key)
+            self._row = None if row is None else (row["origin"],)
+            return
+        if sql.strip().startswith("UPDATE"):
+            # 予約の発火: 予約印（reserved）の行だけ scheduled に変わる。
+            row = self._owner.rows.get(key)
+            if row is not None and row["origin"] == "reserved":
+                row["origin"] = "scheduled"
+                self.rowcount = 1
+            else:
+                self.rowcount = 0
+            return
         if "INSERT" in sql:
             # 一意制約の再現。既にあれば 0 行（＝claim 失敗）。
             if key in self._owner.rows:
                 self.rowcount = 0
             else:
                 self._owner.rows[key] = {
-                    "origin": params.get("origin", "bulk"),
+                    "origin": "reserved" if "'reserved'" in sql else params.get("origin", "bulk"),
                     "expires_at": self._owner.now
                     + _dt.timedelta(days=int(params.get("ttl_days", 14))),
                 }
                 self.rowcount = 1
         else:  # DELETE（release）
             self.rowcount = 1 if self._owner.rows.pop(key, None) is not None else 0
+
+    def fetchone(self) -> Any:
+        return self._row
 
 
 class _FakeConn:
@@ -198,3 +215,67 @@ def test_claim_result_tells_taken_apart_from_failed() -> None:
     assert store.claim_result("not-an-email", DAY, origin="bulk", request_id="r") == CLAIM_FAILED
     # 真偽の claim は claim_result と同じ判定（送ってよいのは CLAIM_CLAIMED だけ）。
     assert DigestDeliveryStore(_FakePg()).claim(USER, DAY, origin="bulk", request_id="r") is True
+
+
+# ── 予約印（migration 0031・10-01「一律 9:30 撤廃」）──────────────────────
+
+
+def test_bulk_skips_a_reserved_user_and_says_so() -> None:
+    """planner が予約した人（最初の予定が遅い日）を 9:30 の一括は送らない。
+
+    変異: 一括の claim が予約印を無視して送る（CHECK 追加前の INSERT が通る等）と 2 通・
+    CLAIM_RESERVED を CLAIM_TAKEN に潰すと管理者 DM が「送信済み」と誤報して赤。
+    """
+    from teamagent.adapters.digest_delivery_store import CLAIM_RESERVED
+
+    store = DigestDeliveryStore(_FakePg())
+    assert store.reserve(USER, DAY, request_id="plan") is True
+    assert store.claim_result(USER, DAY, origin="bulk", request_id="r") == CLAIM_RESERVED
+
+
+def test_scheduled_fire_takes_its_own_reservation_once() -> None:
+    """予約の発火は自分の予約印を取って送る。2 回目（再発火）は送らない。"""
+    from teamagent.adapters.digest_delivery_store import CLAIM_CLAIMED, CLAIM_TAKEN
+
+    pg = _FakePg()
+    store = DigestDeliveryStore(pg)
+    store.reserve(USER, DAY, request_id="plan")
+    assert store.claim_result(USER, DAY, origin="scheduled", request_id="r1") == CLAIM_CLAIMED
+    assert pg.rows[(USER, DAY)]["origin"] == "scheduled"
+    assert store.claim_result(USER, DAY, origin="scheduled", request_id="r2") == CLAIM_TAKEN
+
+
+def test_scheduled_fire_without_reservation_still_works() -> None:
+    """予約印の無い旧経路の発火も、従来どおり INSERT で取れる。"""
+    from teamagent.adapters.digest_delivery_store import CLAIM_CLAIMED
+
+    store = DigestDeliveryStore(_FakePg())
+    assert store.claim_result(USER, DAY, origin="scheduled", request_id="r") == CLAIM_CLAIMED
+
+
+def test_reserve_is_once_per_day_and_fail_closed() -> None:
+    store = DigestDeliveryStore(_FakePg())
+    assert store.reserve(USER, DAY, request_id="a") is True
+    assert store.reserve(USER, DAY, request_id="b") is False  # 再実行で二重予約しない
+    assert DigestDeliveryStore(_FakePg(fail=True)).reserve(USER, DAY, request_id="c") is False
+    assert store.reserve("bad", DAY, request_id="d") is False
+
+
+def test_release_removes_a_reservation() -> None:
+    """予約が作れなかったら印を消す（消さないとその日は誰も送らない）。"""
+    pg = _FakePg()
+    store = DigestDeliveryStore(pg)
+    store.reserve(USER, DAY, request_id="plan")
+    assert store.release(USER, DAY, request_id="plan") is True
+    assert store.claim(USER, DAY, origin="bulk", request_id="r") is True
+
+
+def test_migration_0031_allows_reserved_and_grants_update() -> None:
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[2]
+    ddl = (root / "infra" / "migrations" / "0031_digest_delivery_reserved.sql").read_text(
+        encoding="utf-8"
+    )
+    assert "CHECK (origin IN ('scheduled', 'bulk', 'reserved'))" in ddl
+    assert "GRANT UPDATE ON digest_delivery TO teamagent_app" in ddl

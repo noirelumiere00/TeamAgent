@@ -30,6 +30,7 @@ from typing import Any
 import structlog
 
 from teamagent.adapters.digest_delivery_store import CLAIM_CLAIMED as _CLAIM_CLAIMED
+from teamagent.adapters.digest_delivery_store import CLAIM_RESERVED as _CLAIM_RESERVED
 from teamagent.adapters.digest_delivery_store import CLAIM_TAKEN as _CLAIM_TAKEN
 from teamagent.hmac_durable_state import require_runtime_startup
 from teamagent.hmac_keyring import MAIL_ACTION_MAX_TOKEN_TTL_S
@@ -2073,6 +2074,9 @@ def run_planner(users: list[str]) -> int:
     skipped = 0
     notified = 0
     prefs_store = _preferences_store()
+    # 予約印（migration 0031）。9:30 の一括が「後で個別に送る人」を見送るための唯一の根拠。
+    delivery_store = _delivery_store()
+    default_at = _dt.datetime.combine(day, _dt.time(*_default_send_hhmm()), tzinfo=_JST)
     for email in users:
         request_id = f"digest-plan-{uuid.uuid4().hex[:8]}"
         # 本人が止めた/休み/曜日外の日は予約を作らない（予約が発火すると DM が届く）。
@@ -2097,7 +2101,7 @@ def run_planner(users: list[str]) -> int:
             )
             skipped += 1
             continue
-        if plan.no_timed_event or plan.clamped_to_default:
+        if plan.no_timed_event or plan.clamped_to_default or plan.fire_at == default_at:
             # ⚠️ 既定時刻のままの人は **予約を作らない**（DELTA §1「予定が 1 件も無い日＝
             #   既定時刻」「予約が作れなかった利用者は既定時刻の一括実行に残す」）。
             #   ここで予約を作ると (a) 一括配信が走らない土曜にも DM が出る
@@ -2107,6 +2111,11 @@ def run_planner(users: list[str]) -> int:
             continue
         ref = user_ref(email)
         if not ref:
+            skipped += 1
+            continue
+        # 先に予約印を付ける（付けられなければ予約しない＝9:30 の一括に残す）。
+        # ⚠️ 印だけ残って予約が無い状態はその日 1 通も届かないので、予約に失敗したら印を消す。
+        if delivery_store is None or not delivery_store.reserve(email, day, request_id=request_id):
             skipped += 1
             continue
         ok = scheduler.schedule_digest(
@@ -2119,6 +2128,7 @@ def run_planner(users: list[str]) -> int:
         if ok:
             planned += 1
         else:
+            delivery_store.release(email, day, request_id=request_id)
             skipped += 1
     # ⚠️ 件数のみ。メールアドレス・予定タイトル・時刻の個人分布は出さない。
     summary = {
@@ -2515,6 +2525,8 @@ def _format_admin_report(
     errors = [o for o in outcomes if o.status == "error"]
     not_connected = sum(1 for o in outcomes if o.reason == "not_connected")
     already = sum(1 for o in outcomes if o.reason == "already_delivered")
+    # 最初の予定が遅い日で、あとで個別に送る予約の人（9:30 の一括では送らない・正常）。
+    later = sum(1 for o in outcomes if o.reason == "reserved_later")
     # 配信権（digest_delivery）を DB で確かめられず、送らずに止めた人。「送信済み」とは別に数える
     # （DB 障害の朝は全員がここに入り、誰にも届かない）。
     claim_failed = sum(1 for o in outcomes if o.reason == "claim_failed")
@@ -2524,6 +2536,8 @@ def _format_admin_report(
     )
     if already:
         head += f"・送信済み {already}"
+    if later:
+        head += f"・予定に合わせて後で送る {later}"
     if claim_failed:
         head += f"・送信の確認失敗 {claim_failed}"
     # 本人が DM で止めた/休み/曜日外にした人（件数だけ・誰がどう設定したかは出さない）。
@@ -2701,9 +2715,12 @@ def _process_user(
         if verdict != _CLAIM_CLAIMED:
             # 「別の経路が送った（正常）」と「DB で確かめられず止めた（全員に届かない障害）」を
             # 数え分ける。どちらも送らない（fail-closed）のは同じ。
-            return _done(
-                "skipped", "already_delivered" if verdict == _CLAIM_TAKEN else "claim_failed"
-            )
+            reason = {
+                _CLAIM_TAKEN: "already_delivered",
+                # planner が「後で個別に送る」と予約した人（最初の予定が遅い日）。正常な見送り。
+                _CLAIM_RESERVED: "reserved_later",
+            }.get(verdict, "claim_failed")
+            return _done("skipped", reason)
     ctx = SkillContext(request_id=request_id, metadata={"user_email": email})
     try:
         digest = skill.run(skill_input, ctx)
