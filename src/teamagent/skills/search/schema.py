@@ -251,10 +251,3 @@ class SearchOutput(BaseModel):
     answer: str = Field(description="Claude による要約（引用付き）")
     hits: list[SearchHitOut] = Field(default_factory=list, description="検索ヒット一覧")
     total_cost_usd: float = Field(ge=0.0, description="この検索実行の概算コスト")
-    answer_mode: str | None = Field(
-        default=None,
-        description=(
-            "回答モード（fact=事実確認 / list=一覧 / insight=洞察）。PROMPT_VERSION が v3 以降の"
-            "ときだけ入る（v2d 以前は None）"
-        ),
-    )

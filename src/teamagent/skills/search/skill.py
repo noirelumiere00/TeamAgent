@@ -568,11 +568,6 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
             answer=answer,
             hits=search_hits,
             total_cost_usd=cost_usd,
-            answer_mode=(
-                classify_answer_mode(input.query)
-                if self._answer_modes and input.include_answer
-                else None
-            ),
         )
         total_ms = (time.perf_counter() - run_started) * 1000
         log.info(
@@ -1722,7 +1717,12 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
         )
         sections = [f"# 質問\n{query}\n\n# 参考資料\n{primary_block}"]
         if self._answer_modes:
-            sections.insert(0, MODE_INSTRUCTIONS[classify_answer_mode(query)])
+            # 回答モードを決めるのはここ 1 か所だけ（同期・二段返しの後追いの両方が通る）。
+            # ツール出力（SearchOutput）には載せない＝v2d のツール結果の形を変えないため、
+            # 評価・集計用にはログで残す。
+            mode = classify_answer_mode(query)
+            sections.insert(0, MODE_INSTRUCTIONS[mode])
+            logger.info("search_answer_mode", request_id=request_id, answer_mode=mode)
         # 2段階しきい値の fallback で救出した低信頼 hit がある場合、断定を抑える注意を付す。
         if any((h.metadata or {}).get("is_low_confidence") for h in primary_hits):
             sections.append(

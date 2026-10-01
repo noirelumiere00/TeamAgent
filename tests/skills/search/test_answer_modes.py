@@ -3,7 +3,7 @@
 固定すること:
 - 質問の分類（洞察の合図があるときだけ insight・一覧の合図で list・それ以外は fact）
 - PROMPT_VERSION=v3 のときだけ、要約 LLM への user message に回答モードと資料名が載る
-- v2d（本番既定）・v1 では user message が 1 バイトも変わらない（PROMPT_VERSION で戻せる）
+- v2d（本番既定）・v1 では user message もツール結果の形も変更前と同一（PROMPT_VERSION で戻せる）
 - v3 / clientkarte v2 の system prompt が「受注・失注を断定しない」「必ず抽象化を強制しない」
 - 本番の MCP 経路でカルテの版を KARTE_PROMPT_VERSION で選べる（既定 v1）
 
@@ -37,6 +37,16 @@ from teamagent.skills.search.skill import SearchSkill
         "日立システムズの予算は？",
         "サンプル食品は受注した？",
         "先週の定例の議事録ある？",
+        # 資料名に洞察語が入っているだけの資料探し（審査指摘 3）
+        "SNS戦略資料どこ？",
+        "トレンド傾向レポートを出して",
+        "戦略会議の議事録ある？",
+        # 「全部」を含んでも 1 件を求める質問（審査指摘 4）
+        "全部の中で最新の提案書は？",
+        # 過去の提案書を探しているだけ（生成依頼ではない）
+        "先月提案してた資料どこ？",
+        "過去の提案を出して",
+        "企画書を出して",
     ],
 )
 def test_fact_questions(query: str) -> None:
@@ -49,6 +59,9 @@ def test_fact_questions(query: str) -> None:
         "飲料メーカー向けの提案実績を一覧で",
         "コンビニ業界の提案資料を全部出して",
         "今月決まった案件は何件？",
+        "すべての案件を一覧で",
+        # 10-01 BU1 ヒアリング（杉浦さん）: 複数の施策を並べてほしい質問
+        "ADK経由で受注したショート動画施策を知りたい",
     ],
 )
 def test_list_questions(query: str) -> None:
@@ -64,6 +77,12 @@ def test_list_questions(query: str) -> None:
         "代理店経由の案件の共通点",
         "なぜ失注したのか教えて",
         "飲料メーカー向けの提案の傾向を一覧で",  # 洞察の合図が一覧より優先
+        # 資料を材料に案を作る依頼（10-01 BU1 ヒアリング・望月さんの使い方／審査指摘 2）
+        "サンプル食品向けにコンセプトを考えて",
+        "新商品のPR企画を考えて",
+        "化粧品ブランドに提案して",
+        "施策案を出して",
+        "Z世代向けの切り口を練って",
     ],
 )
 def test_insight_questions(query: str) -> None:
@@ -144,29 +163,60 @@ def _run(prompt_version: str, query: str) -> tuple[str, Any]:
 
 
 def test_v3_fact_question_gets_fact_mode_and_title_header() -> None:
-    text, out = _run("v3", "サンプル食品の最新の提案書どこ？")
+    text, _ = _run("v3", "サンプル食品の最新の提案書どこ？")
     assert text.startswith("以下の社内資料から質問に答えてください。\n\n# 回答モード: 事実確認\n")
     assert (
         "[chunk_id: 7, score: 0.900, 資料名: サンプル食品様_新商品PR施策ご提案.pptx, 更新日: 2026-09-01"
         in text
     )
-    assert out.answer_mode == "fact"
 
 
 def test_v3_insight_question_gets_insight_mode() -> None:
-    text, out = _run("v3", "サンプル食品の提案で刺さった訴求の傾向は？")
+    text, _ = _run("v3", "サンプル食品の提案で刺さった訴求の傾向は？")
     assert "# 回答モード: 洞察" in text
-    assert out.answer_mode == "insight"
+
+
+# 変更前（62049c05）の SearchSkill で同じフェイクを流して取った user message の実物。
+_PRE_V3_USER_MESSAGE = (
+    "以下の社内資料から質問に答えてください。\n\n"
+    "# 質問\nサンプル食品の最新の提案書どこ？\n\n"
+    "# 参考資料\n[chunk_id: 7, score: 0.900, 更新日: 2026-09-01]\n本文"
+)
 
 
 @pytest.mark.parametrize("version", ["v2d", "v1"])
 def test_pre_v3_versions_are_byte_identical(version: str) -> None:
-    """v2d（本番既定）と v1 では回答モードも資料名ヘッダも載らない＝PROMPT_VERSION で戻せる。"""
+    """v2d（本番既定）と v1 では要約 LLM への入力もツール結果の形も変更前と同一。
+
+    部分文字列ではなく全文一致で見る（審査指摘 5）。ツール結果は server.py が
+    ``model_dump()`` をそのまま返すため、キーが 1 つ増えても本番の入力が変わる（審査指摘 1）。
+    """
     text, out = _run(version, "サンプル食品の最新の提案書どこ？")
-    assert "回答モード" not in text
-    assert "資料名:" not in text
-    assert "[chunk_id: 7, score: 0.900, 更新日: 2026-09-01" in text
-    assert out.answer_mode is None
+    assert text == _PRE_V3_USER_MESSAGE
+    assert set(out.model_dump()) == {"answer", "hits", "total_cost_usd"}
+
+
+def test_v3_tool_output_shape_is_unchanged() -> None:
+    """v3 でも回答モードはツール結果に載せない（ログ search_answer_mode で残す）。"""
+    _, out = _run("v3", "サンプル食品の最新の提案書どこ？")
+    assert set(out.model_dump()) == {"answer", "hits", "total_cost_usd"}
+
+
+def test_followup_path_also_gets_mode() -> None:
+    """二段返しの後追い（deliver_followup_answer → _summarize）にも回答モードが載る。"""
+    bedrock = _fake_bedrock()
+    skill = SearchSkill(
+        bedrock=bedrock,
+        pgvector=_pgvector([]),
+        embedder=_FakeEmbedder(),
+        use_new_schema=True,
+        use_cohere_rerank=False,
+        use_client_boost=False,
+        prompt_version="v3",
+    )
+    skill._summarize("ADK経由で受注したショート動画施策を知りたい", [_hit(7, "資料A")], "r")
+    text = bedrock.converse.call_args.kwargs["messages"][0]["content"][0]["text"]
+    assert "# 回答モード: 一覧" in text
 
 
 # ── system prompt の契約 ─────────────────────────────────────────────
