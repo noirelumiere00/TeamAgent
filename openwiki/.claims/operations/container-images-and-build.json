@@ -1,0 +1,130 @@
+{
+  "schemaVersion": 1,
+  "pageVersion": "sha256:d4bff6ba46d0e4d0c87c5bb00626bb85fe2eee06bcc41ea91822afef17bbcddf",
+  "claims": [
+    {
+      "id": "claim_bd2b54c47328431e841acb4010e0402a",
+      "statement": "core イメージのビルダーは media の operations/worker 実装を削除し、playwright・yt_dlp・claude_agent_sdk などが import できないことと node・chromium・ffmpeg などの実行ファイルが無いことを assert し、残っていればビルドを失敗させる。",
+      "evidence": [
+        {
+          "resource": "repo://infra/docker/Dockerfile.teamagent-mcp#L149-L159",
+          "version": "repo-lines-v1:sha256:314a8fbb6b90559143b008522d4423a8c9a3e5cdcb87c435cea61113a7f44ced:eyJzZWxlY3RlZExpbmVDb3VudCI6MTEsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjhjYmVhMmFlNzgxM2YxMjNlNWE1ODI2MjQyMzY2ZjhiNWQ2NTY2NTdmMDhkNDAyYTE4OGU5MDdiODFhNzBiNGYiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjA2MzVlMzIyYjAyM2RjZjhlNWIwNTQ0ZGY3MTczYzM2NzBiZTBmODFiYjgzYzk4ZDE5YjNjOTM3Yjc2OTJjZWYiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjBkNjM3NmJlM2U5ODIzMGRhZWZlYmJmYzY0N2VjZmMyYjQyMjNmYjYxMDQ2MjQ3MDUxOTUzZmY3NGUwZWIwODQiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6Ijk5OGZmMTk5NDZjZTRkNzU1Njg4YjliNTI3Nzg0MGY3NWY2OWUyM2QwZmU4YjBlMGQyYTJlZmNhNmIwZDQ3NzYifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_f496ccdca0b64a86af163dd431c0c9cf",
+      "statement": "media worker イメージの最終段は boto3・botocore・psycopg・slack_sdk・mcp・sentence_transformers などが import できないことと、mcp_gateway と E5 キャッシュが存在しないことをビルド時に検査する。",
+      "evidence": [
+        {
+          "resource": "repo://infra/docker/Dockerfile.teamagent-media-worker#L344-L348",
+          "version": "repo-lines-v1:sha256:896778c1b306baf424c287d44ecefaa908e5bf159d7cad2b96a349be1363320a:eyJzZWxlY3RlZExpbmVDb3VudCI6NSwiZmlyc3RTZWxlY3RlZExpbmVIYXNoIjoiZDNhNTZjNjJkN2MxYjQzZWIyZmEzNGU2ZmU3MmJhOGY1MWJmMWQyMDc1ZmJlOWYxNTdhMjAxZjFjYWFhZGE1NSIsImxhc3RTZWxlY3RlZExpbmVIYXNoIjoiN2FmMjhmNmVkYWIyZTAxMGExYmVlNzc4MDBmMDgwNjI0YjkzZDM2MTZiNzg1YmZiMGM5YTFmYjhmYjIzYTI3MCIsInByZWNlZGluZ0NvbnRleHRMaW5lQ291bnQiOjMsInByZWNlZGluZ0NvbnRleHRIYXNoIjoiZTU3ODI0MDc1N2ZiOTYzMWQxMTAzYmQ4ZGI5MDg2YjljNGM3MTExY2U2MTE3MjdkN2M4NmI2MmRiN2E5YWYwZSIsImZvbGxvd2luZ0NvbnRleHRMaW5lQ291bnQiOjMsImZvbGxvd2luZ0NvbnRleHRIYXNoIjoiMTg0MDZlMDQwMWMyNWQ3OTQ3ODhkMjAzMWQ0NDNiYmRlZTEyMDNhOWRlMjQ5MDkwNzA0ZTFhZDJiNWU1Mzg0YyJ9"
+        }
+      ]
+    },
+    {
+      "id": "claim_47f42c76f9ba45929c273b2b90f63116",
+      "statement": "core イメージ自身の CMD は run_mcp_http_server.py だが、本番 MCP タスクは空の entryPoint と run_mcp_vertex_entrypoint.py の command の組で登録され、メモリは 4096 MiB と runtime-consumers.json に固定されている。",
+      "evidence": [
+        {
+          "resource": "repo://infra/docker/Dockerfile.teamagent-mcp#L290-L294",
+          "version": "repo-lines-v1:sha256:d932e2809cbb7a167a78acf012693b04dd20bd778a913f536cbaf780d94714d2:eyJzZWxlY3RlZExpbmVDb3VudCI6NSwiZmlyc3RTZWxlY3RlZExpbmVIYXNoIjoiOWM2ZmMwODNiZmNmZjZjNWExMDQwY2YyYjVmNmEzZWFkYjU3NTQyZjA5OTE0YjMzZjA0ZmZiMTA4YTM5ZWUwOSIsImxhc3RTZWxlY3RlZExpbmVIYXNoIjoiYTJkMWQ5ZGE2YjlmZGY0ZjBjZDg3MWNhZGMzYmQ0MzI1NmE2MGRiZjg5N2I2YzZlMDdkYjJhNzZjNzg0Mjk1MiIsInByZWNlZGluZ0NvbnRleHRMaW5lQ291bnQiOjMsInByZWNlZGluZ0NvbnRleHRIYXNoIjoiMWIwNmU3ODA5NzA3Mjc4NTUzYTYwZTUxZWQxZDcxNjBiZGRjZGM3N2E1ZDI4MThlOTY3Njc1N2UyNWQzZmU4MyIsImZvbGxvd2luZ0NvbnRleHRMaW5lQ291bnQiOjAsImZvbGxvd2luZ0NvbnRleHRIYXNoIjoiZTNiMGM0NDI5OGZjMWMxNDlhZmJmNGM4OTk2ZmI5MjQyN2FlNDFlNDY0OWI5MzRjYTQ5NTk5MWI3ODUyYjg1NSJ9"
+        },
+        {
+          "resource": "repo://infra/docker/runtime-consumers.json#L4-L21",
+          "version": "repo-lines-v1:sha256:641228cf2f51b64448e35ccbfff692c7c07b4fe8840c782e73fcf8f51d2d7cce:eyJzZWxlY3RlZExpbmVDb3VudCI6MTgsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjhhYzhmMGZlOWU3NzgyNjZiMGU5NDIzNGQ2MDIwOWZkZTc0ZTQ0MjY0Y2RhZmRjZGExZjI4NTkwMzI2Yzg4Y2IiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjFmMGNkYjk3MmE3YmZiN2VkMjQ2ZjlmZjY3MjM4NWU1NWY0OTY4ZmMxMTA0M2RjNWI2ODRkNTFkZmEzMWRiY2IiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImQwMTY1MmUwODJmM2IzNGFiNTQxYTBmNTAxYTkxNjcwNmYzMDkyMTc0MzgyY2EzMDc4MGY3NWFiZGMyMDNlNjAiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjdhYWEyNWQ0NTU5YmY2ZDU2ZTAxOWQ3NDJkZGU1ZmFmZGU5YWVmNGVjMTIwMjhiYTg1NjAxNzI1Mjc0MDIzNmEifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_d44ba1fd80814da080833082c8771621",
+      "statement": "ECR scan ゲートは finding の集合と例外の集合の完全一致を要求し、例外に無い finding（版違いを含む）と、finding が消えたのに残っている stale 例外のどちらでもビルドを拒否する。",
+      "evidence": [
+        {
+          "resource": "repo://infra/codebuild/verify_ecr_scan.py#L321-L354",
+          "version": "repo-lines-v1:sha256:62c6706d05904b20c1c838a66f146a7d5fbcf6002ef790ffe6b22a5dd04dbbd1:eyJzZWxlY3RlZExpbmVDb3VudCI6MzQsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjRhNDhiOWY0NzdkYjkyOTRjZjg0OTI3YWUxNGMxZWQxNTU5OTVhOGE3ZDc5YzNjYjVkNWFiNjJkNmQ1YWZmNGQiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjExMmRkZTcyYzEzN2JiN2FjMWM3MGU5MDg1MTFiZThkYWI2MjhkY2RjYzFlYmE2MzAyNTY0MGE1MjRmYjg2MWMiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImFhZWVhYzhhNTgzYWVlMTcyNTZkYjQxYzIyY2NkNjRkYWVlMGViYTQyM2FmODcxZmI5NDA4ZTUxNDI1MzVmMDIiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjZlZGUzMmI4ZDk0MTM5N2NmNWY3MmU1MTM0MGQzMWRlYzhiNDMzZjM1NjhjNGJkMDU4YWE5NDdlOGE2ZjgzZTIifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_5e29a799d3ca4c7ca84f7199b2007d17",
+      "statement": "ECR scan の例外ファイルは stale_exception_policy が fail 以外だと拒否され、各例外は cve・severity・package・version・owner・reason・expires_on を必須とし、期限切れの例外があるとゲートが失敗する。",
+      "evidence": [
+        {
+          "resource": "repo://infra/codebuild/verify_ecr_scan.py#L92-L148",
+          "version": "repo-lines-v1:sha256:aa5f3fb729f541b65f28f84d31028189b46ed3ecc114770328ad150b6b8b137c:eyJzZWxlY3RlZExpbmVDb3VudCI6NTcsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjQ1YjFiMzBlYjI1OWQ5ZGNlYjA2NGZlNmRiODY4OGNkZjllYzJhMWQ0OWY2ZDU3MGVlZTUyYjFiMjVlYWJjOWMiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjkzMTkwMzUwOThkOTc3YzYxYWZmOTU3Y2QzOGZlMzhmOTgwNzIzZjE3ZmU5MmEwOTA0OTZlNmM5OGI4ZTE2NTciLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImI5ZWUxOTMyODRlODJmYjc2YWY0ZjRmNTgzZTQzZjA1MDdiNWYxMzJiMTY0ZTZkMzUyM2JhZmI5NGMwYzdiMWUiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImRiN2RjMjJmMWNhNzY1NTBmMWZjMmY3ZTU0MDAyNjY2ZDNlZmEyMWI3NmE4ZDg1OGIzMWQ4M2UyNzVlOGYzYWEifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_491849131cd041a68b46d56ab8b0f8f5",
+      "statement": "core・media・openclaw の ECR scan 例外ファイルはどれも例外が空で、現状は全重大度で finding 0 件でないとゲートを通らない。",
+      "evidence": [
+        {
+          "resource": "repo://infra/codebuild/ecr_scan_exceptions_core.json#L1-L5",
+          "version": "repo-lines-v1:sha256:e7d3c009fcdefd39cd58570d117d0e7c1f416f447aa2f891450d87bec2086d30:eyJzZWxlY3RlZExpbmVDb3VudCI6NSwiZmlyc3RTZWxlY3RlZExpbmVIYXNoIjoiYTZmYjA4ZmRhMWFjYjk1N2I2MTE2YmQzNzgxMWExZmU0MWEwMTYxMWMwNjMxZWRiZjc4NmQ2ODg5YTI3YTU1YyIsImxhc3RTZWxlY3RlZExpbmVIYXNoIjoiNDEyY2EzNDVjY2Y3NWJmOWMwODA2YmNlNjk1YmU4ZGU4MDhiNzk5ODQyNTFhN2E1NGQyMDJjZjYxMDFkZDQ1MSIsInByZWNlZGluZ0NvbnRleHRMaW5lQ291bnQiOjAsInByZWNlZGluZ0NvbnRleHRIYXNoIjoiZTNiMGM0NDI5OGZjMWMxNDlhZmJmNGM4OTk2ZmI5MjQyN2FlNDFlNDY0OWI5MzRjYTQ5NTk5MWI3ODUyYjg1NSIsImZvbGxvd2luZ0NvbnRleHRMaW5lQ291bnQiOjAsImZvbGxvd2luZ0NvbnRleHRIYXNoIjoiZTNiMGM0NDI5OGZjMWMxNDlhZmJmNGM4OTk2ZmI5MjQyN2FlNDFlNDY0OWI5MzRjYTQ5NTk5MWI3ODUyYjg1NSJ9"
+        },
+        {
+          "resource": "repo://infra/codebuild/ecr_scan_exceptions_media.json#L1-L5",
+          "version": "repo-lines-v1:sha256:e7d3c009fcdefd39cd58570d117d0e7c1f416f447aa2f891450d87bec2086d30:eyJzZWxlY3RlZExpbmVDb3VudCI6NSwiZmlyc3RTZWxlY3RlZExpbmVIYXNoIjoiYTZmYjA4ZmRhMWFjYjk1N2I2MTE2YmQzNzgxMWExZmU0MWEwMTYxMWMwNjMxZWRiZjc4NmQ2ODg5YTI3YTU1YyIsImxhc3RTZWxlY3RlZExpbmVIYXNoIjoiNDEyY2EzNDVjY2Y3NWJmOWMwODA2YmNlNjk1YmU4ZGU4MDhiNzk5ODQyNTFhN2E1NGQyMDJjZjYxMDFkZDQ1MSIsInByZWNlZGluZ0NvbnRleHRMaW5lQ291bnQiOjAsInByZWNlZGluZ0NvbnRleHRIYXNoIjoiZTNiMGM0NDI5OGZjMWMxNDlhZmJmNGM4OTk2ZmI5MjQyN2FlNDFlNDY0OWI5MzRjYTQ5NTk5MWI3ODUyYjg1NSIsImZvbGxvd2luZ0NvbnRleHRMaW5lQ291bnQiOjAsImZvbGxvd2luZ0NvbnRleHRIYXNoIjoiZTNiMGM0NDI5OGZjMWMxNDlhZmJmNGM4OTk2ZmI5MjQyN2FlNDFlNDY0OWI5MzRjYTQ5NTk5MWI3ODUyYjg1NSJ9"
+        },
+        {
+          "resource": "repo://infra/codebuild/ecr_scan_exceptions_openclaw.json#L1-L5",
+          "version": "repo-lines-v1:sha256:e7d3c009fcdefd39cd58570d117d0e7c1f416f447aa2f891450d87bec2086d30:eyJzZWxlY3RlZExpbmVDb3VudCI6NSwiZmlyc3RTZWxlY3RlZExpbmVIYXNoIjoiYTZmYjA4ZmRhMWFjYjk1N2I2MTE2YmQzNzgxMWExZmU0MWEwMTYxMWMwNjMxZWRiZjc4NmQ2ODg5YTI3YTU1YyIsImxhc3RTZWxlY3RlZExpbmVIYXNoIjoiNDEyY2EzNDVjY2Y3NWJmOWMwODA2YmNlNjk1YmU4ZGU4MDhiNzk5ODQyNTFhN2E1NGQyMDJjZjYxMDFkZDQ1MSIsInByZWNlZGluZ0NvbnRleHRMaW5lQ291bnQiOjAsInByZWNlZGluZ0NvbnRleHRIYXNoIjoiZTNiMGM0NDI5OGZjMWMxNDlhZmJmNGM4OTk2ZmI5MjQyN2FlNDFlNDY0OWI5MzRjYTQ5NTk5MWI3ODUyYjg1NSIsImZvbGxvd2luZ0NvbnRleHRMaW5lQ291bnQiOjAsImZvbGxvd2luZ0NvbnRleHRIYXNoIjoiZTNiMGM0NDI5OGZjMWMxNDlhZmJmNGM4OTk2ZmI5MjQyN2FlNDFlNDY0OWI5MzRjYTQ5NTk5MWI3ODUyYjg1NSJ9"
+        }
+      ]
+    },
+    {
+      "id": "claim_469c81a43adc4abf8371ae05c0e23f24",
+      "statement": "buildspec.yml は同じ canonical コンテキスト tar から core と media を linux/arm64・provenance=mode=max・SBOM 付きでビルドし、candidate-<commit>-core / -media のタグで quarantine リポジトリへ push し、ビルド後に tar の SHA-256 を再確認する。",
+      "evidence": [
+        {
+          "resource": "repo://infra/codebuild/buildspec.yml#L541-L599",
+          "version": "repo-lines-v1:sha256:4a4d5c9e3d953cdcdf178c82180920e11756faa48ee34a7254e3286b1a06d805:eyJzZWxlY3RlZExpbmVDb3VudCI6NTksImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjBjZDgzYTE5ZGFlNzAxNmE5MjNmZGNhMjQ3OTA1OGM1MmE1ZGI0NWM1MjMwYWZlYWFkYzE0ZjBkNWUwYzZhODIiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjNlNTA2NjUyNGIzOGFmM2I3MGQ3NjNiZWNhODJiNGJlMGVjM2E1ZWEzMzAyYmFhYTUwZDA5ZGEzMDg2YWJlNDIiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjIzZGQzOTMzZDM0MzdlZDYxMmE5ODkzMDZlM2I5MjE1ZDhkMTZkZDk2NDBlODFjNzdiMWRlY2IyN2MwM2Y3MjMiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImFlY2MzODhlZWI0YTNjOWJlOWQxOWE2OGQxZDgwNTNhMWFhZDE3Mjc5ZWE2ZTRmZDEzNjdlZDQ4ZGZiODgxOGYifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_bc0c42c17de240178c5bd732321f4015",
+      "statement": "buildspec.yml の post_build は arm64 digest の ECR スキャン完了を待ってから findings を取得し、subject ごとの例外ファイルで verify_ecr_scan.py を実行する。",
+      "evidence": [
+        {
+          "resource": "repo://infra/codebuild/buildspec.yml#L705-L720",
+          "version": "repo-lines-v1:sha256:23e7dd79fff569c8342e98dc04ee795cfbb65181b4e062d1e2617092b2d3ca95:eyJzZWxlY3RlZExpbmVDb3VudCI6MTYsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjQ2MDc0ZDI0OGM2YTUxYmVhMmZmZWNmNGE2NWMxNjhjNGQ0NzQxN2NmMDk0MzdmZjBhMDgwM2NhYzg4ZjhhMWEiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6ImIzOGYxNzJlNjdkYmU4ZTczZTMxMThmMWFlNmYwZjkxMTVkODU1ZWQyMGE1N2U3OWVjMmU5NzkxODgzZTVkNDYiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImQzZmI5MWRiNjNmOGE4ZWYyNjEyNjI1ZmUyN2Q2NDczMTJmMWJiOTFiMGMxMmJkZjY0ZTdlM2QyMTkyNThiY2UiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjI0YmRmNDMwOTk1M2Q5ZmZmNzFmMTNjY2NkNDU2MDYwNGZhNGJiYjM2ZDY4MWQ0MjIyZjBlZDQxN2FkOTZkNGQifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_dd77876cd59f4254989fa8daf7cbf652",
+      "statement": "ECR リポジトリは IMMUTABLE・scan_on_push で、quarantine は 2 日で全イメージを expire し、verified-candidates は rejected- タグだけを expire し、release リポジトリには rollback 証跡を守るため lifecycle policy を付けない。本番の execution role には quarantine / verified-candidates からの pull を明示的に拒否する policy を付ける。",
+      "evidence": [
+        {
+          "resource": "repo://infra/terraform/ecr.tf#L185-L217",
+          "version": "repo-lines-v1:sha256:c224310bb885922a03d14acec8b6795e6e8ff43674ddf05bfeb8f792ebda84b8:eyJzZWxlY3RlZExpbmVDb3VudCI6MzMsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6ImEzZDdiNWE0NDkzMDg5MjkxYTBhOGU2YjFmMTY1OGY4MWY1ZWQzMjBjZTM1YzVhMGQzYjExZWRhNGI1ODAwZDAiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6ImIyMzUyNTg5YzM0ZDNjNjA2ODU5MzFiNmVjYzRkNTA5OTFhN2M1NmM4ZmJhMjg5NDExNDY1NzY5MDI3MmNhYzMiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjFhYTA3N2VmYzQwZTU2NjllYThhNTk1NmRiMzQ1ZjcwMjFmOWE0NzcwYjQ0MzA5YTE2ZTVkYmI0ZDVhMTEyZjkiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjZjMDMxOTUxMTJmMTM4YjllMDNlMDRjNjE1MDI0NWFiZGY4ZjE5YzJjNjIwNTZlN2NjMThiZDk5M2UyZjIwZmEifQ"
+        },
+        {
+          "resource": "repo://infra/terraform/ecr.tf#L272-L302",
+          "version": "repo-lines-v1:sha256:b2f922f4cb663db31245ac4d6975d0ba0d6080488f7959f20629eedd60ddf72b:eyJzZWxlY3RlZExpbmVDb3VudCI6MzEsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6ImJhZmU5NzM3OTM1Y2FiYzEzMTMxY2U3MDRhZjFjNTMxZGEwMDM0OWUxZDM3NGVhNjVmYWE3NTUxZGFkYmIzZDIiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjQxMmNhMzQ1Y2NmNzViZjljMDgwNmJjZTY5NWJlOGRlODA4Yjc5OTg0MjUxYTdhNTRkMjAyY2Y2MTAxZGQ0NTEiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjkyYTJjMGZiNGU0NWVmNDcyYjM3MDk5MGQ4YTJiNWQ1Mzg3MjE5ZmE0YWQzZjcxYjU5YjBjZDEzZjQ3MThmY2MiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjRhNzVkODA1MjcyYTFlNDYzZWI2YjAwY2JmYzA3MmQ4ZjViYTYwZWJmMzVhOGRkYmZjNTAyMmJhYzJmYTAyZjQifQ"
+        },
+        {
+          "resource": "repo://infra/terraform/ecr.tf#L80-L116",
+          "version": "repo-lines-v1:sha256:5a9d98b11aa714a7bd763ce4cb9498b38d4e52909164a1a5df4b30ca6a32205d:eyJzZWxlY3RlZExpbmVDb3VudCI6MzcsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6ImMxOGYxZDlmZDQ2MjUwMjM2NzE2ZmRhMjhiMzE5OWZjZTkyZmZmMGRhMDdiY2NlMTNhZjJhNmJkOWY4MjcyYzUiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjQxMmNhMzQ1Y2NmNzViZjljMDgwNmJjZTY5NWJlOGRlODA4Yjc5OTg0MjUxYTdhNTRkMjAyY2Y2MTAxZGQ0NTEiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImZiNTgwZTk2NGY4M2E0NzNmNDNkNDQzODQ2Mjk0OWQ2OGI1NjAwZmRhNzg3ZjE2Mzc0NWQwMGRlODljYmYzNmEiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjRlYTA0ODI1MjllNTEwOTIxYzFiZmNjZDQ4NTAyMjA4OTQ5NDUyMzI2NzBhMWNiMjUzYjdlMThmZGU4NDI1MTMifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_0dfe7dfda4664c8dbc9257c9152321ad",
+      "statement": "ローカル証跡の Trivy 検証 verify_trivy_pair は、UNKNOWN から CRITICAL までの脆弱性と secret のどれか 1 件でもあれば失敗し、既知の live CVE が残っていても失敗する（文書の C/H/S=0 より厳しい）。",
+      "evidence": [
+        {
+          "resource": "repo://infra/docker/verify_runtime_evidence.py#L339-L362",
+          "version": "repo-lines-v1:sha256:07c1bd0fb58f1070bed4424280100d1727b48e4a1965d70771859d0d45cc6581:eyJzZWxlY3RlZExpbmVDb3VudCI6MjQsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjJiOGZjNTlkOGVjZDQ2ZGE2Y2YwMjNiNmM2ZDlmZmZjMzcwNmMyNjUzZTQyZGJkZTU3Yzk3YWM3ZTFhOWRlMWMiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6ImQyOWI1NDE4OTNhMmJlNjM4ZjMzNDliNDk1OTM0ZmVlZDk2MzRmNzczMDgwYTIzZGFhNTg2YTczZjU4YmZlNGMiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImE0MWE4NWIyNmIzYWFiZWUzNWIwYTYzNjIzNDhjNjMzZmQ3Y2RhYjJhMzc1MTRkOTRmNmYyOGQ3NWMxNjRlNTgiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjZiOThkNWYwZTg4ZTQzZWFkNzg2MzVlZWJjMDdhNmExMzZlMDY2MmZiNGU2MGVkNzBlOGVmYmEwNmU3NGFiZjUifQ"
+        }
+      ]
+    }
+  ],
+  "verification": {
+    "by": "openwiki/0.6.1",
+    "at": "2026-09-29T07:51:05.076Z"
+  }
+}

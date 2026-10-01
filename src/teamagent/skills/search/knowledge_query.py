@@ -12,6 +12,7 @@ filter_industry が担うため、ここでは資料種別だけを扱う。
 from __future__ import annotations
 
 import re
+import unicodedata
 
 from teamagent.ingest.industry_taxonomy import match_industry_keyword
 
@@ -132,6 +133,82 @@ def extract_knowledge_filters(query: str) -> dict[str, str] | None:
             filters["cls_target"] = target
             break
     return filters or None
+
+
+# ── 施策実績（ショート動画DBの案件ごとの実績文書）の意図判定（2026-09-29）─────────────
+# 施策実績の文書（ingest.campaign_aggregate・campaign_aggregate="true"・cls_doc_type=施策実績）
+# には cls_solution が無い。そのため「ショート動画施策の実績」を聞かれると
+# _SOLUTION_KEYWORDS が cls_solution=動画広告 を付け、SQL の AND（キーが無い文書は除外）で
+# 施策実績だけが検索から落ちる。加えて枚数の多い提案 PDF が rerank プールの枠を埋める。
+# 検索側（skill._apply_campaign_floor）はこの判定が True のときだけ施策実績の床を張る。
+
+# 資料そのものを探している語。これがあれば施策実績の床は張らない（提案書を探す人に
+# 実績の集計文書を混ぜない）。
+_MATERIAL_SEEKING_KEYWORDS: tuple[str, ...] = (
+    "提案書",
+    "提案資料",
+    "提案事例",
+    "提案の事例",
+    "提案例",
+    "議事録",
+    "打ち合わせメモ",
+    "価格表",
+    "料金表",
+    "契約書",
+)
+
+# 実績（本数・再生・伸び・結果）を聞いている語。英字は NFKC＋casefold で照合する。
+_CAMPAIGN_RESULTS_KEYWORDS: tuple[str, ...] = (
+    "施策実績",
+    "実績",
+    "再生",
+    "伸び",
+    "バズ",
+    "投稿",
+    "結果",
+    "効果",
+    "施策",
+    "ショート動画",
+    "動画",
+    "TikTok",
+    "リール",
+    "ティックトック",
+)
+
+_CAMPAIGN_DOC_TYPE = "施策実績"
+
+
+def _normalize_for_match(text: str) -> str:
+    """全角英数・大文字小文字の揺れを吸収する（ＴｉｋＴｏｋ / tiktok も拾う）。"""
+    return unicodedata.normalize("NFKC", text).casefold()
+
+
+def is_campaign_results_intent(
+    query: str, *, explicit_doc_type: str | None, has_client: bool
+) -> bool:
+    """施策実績（案件ごとの投稿本数・再生数・上位投稿）を求める聞き方かを判定する。
+
+    判定順:
+      1. 明示の資料種別が「施策実績」以外なら False（明示フィルタを優先する）。
+      2. 資料そのものを探す語（提案書・議事録・価格表 等）があれば False。
+      3. 実績を聞く語（再生・伸び・結果・施策・ショート動画・TikTok 等）があれば True。
+      4. 取引先の指定があり、資料種別の明示が無ければ True（Aico が query を短く書き換えて
+         実績の語が消えた場合への備え。候補に足すだけで順位は rerank が決める）。
+      5. それ以外は False。
+
+    「食品メーカーのショート動画事例」のような境界は True に倒す（実績も候補に入れて
+    rerank に任せる。床は候補を足すだけで、無関係なら上位に出ない）。
+    """
+    if explicit_doc_type and explicit_doc_type != _CAMPAIGN_DOC_TYPE:
+        return False
+    if not query:
+        return has_client and explicit_doc_type is None
+    normalized = _normalize_for_match(query)
+    if any(_normalize_for_match(kw) in normalized for kw in _MATERIAL_SEEKING_KEYWORDS):
+        return False
+    if any(_normalize_for_match(kw) in normalized for kw in _CAMPAIGN_RESULTS_KEYWORDS):
+        return True
+    return has_client and explicit_doc_type is None
 
 
 def extract_query_industry(query: str) -> str | None:

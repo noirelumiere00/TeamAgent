@@ -46,6 +46,7 @@ from teamagent.skills.search.fusion import reciprocal_rank_fusion
 from teamagent.skills.search.knowledge_query import (
     extract_knowledge_filters,
     extract_query_industry,
+    is_campaign_results_intent,
 )
 from teamagent.skills.search.query_planner import QueryPlanner
 from teamagent.skills.search.rerank import sort_by_budget_proximity, sort_by_client_match
@@ -135,6 +136,7 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
         rerank_pool_size: int = 30,
         rerank_return_size: int = 100,
         drive_pool_floor: int = 15,
+        campaign_pool_floor: int = 3,
         min_relevance: float = 0.0,
         min_relevance_fallback: float = 0.0,
         use_client_boost: bool = False,
@@ -216,6 +218,14 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
         # 順位はあくまで rerank が決めるので、無関係な Drive 資料が上位に出ることはない。
         # 0 で無効（＝従来挙動と完全一致）。rerank 無効時はプール概念が無いので発火しない。
         self._drive_pool_floor = drive_pool_floor
+        # 2026-09-29: 施策実績（ショート動画DBの案件ごとの実績文書）のプール下限（リコール床）。
+        # 施策実績の文書は campaign_aggregate="true"・cls_doc_type=施策実績 で cls_solution を
+        # 持たない。「ショート動画施策の実績」を聞くと自動抽出の cls_solution=動画広告 が SQL の
+        # AND で施策実績だけを落とし、しかも fail-open は 0 件のときしか外さない。さらに枚数の
+        # 多い提案 PDF が 30 件の枠を埋めて押し出す。対策は drive floor と同じリコールで、
+        # 実績を聞く意図（is_campaign_results_intent）のときだけ施策実績に限った検索を 1 回
+        # 足す。順位は rerank が決める。0 で無効（＝従来挙動と完全一致）。
+        self._campaign_pool_floor = campaign_pool_floor
         # Sprint 5: 反ハルシネーション閾値。Rerank relevance がこの値未満の hit は
         # 「根拠として弱い」とみなし落とす。全 hit が落ちれば 0 件 = Bot は
         # 「資料に記載がありません」と返し、無い情報を捏造しない。
@@ -927,6 +937,16 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
                         if input.filter_solution:
                             knowledge_filters.pop("cls_solution", None)
                         knowledge_filters = knowledge_filters or None
+                    if knowledge_filters:
+                        # 本検索に実際に載る自動抽出フィルタを 1 行で観測する（明示との衝突で
+                        # 外したキーは含めない）。値は固定語彙（資料種別・施策・予算帯 等）なので
+                        # そのまま出す。クエリ原文は出さない（G8）。
+                        logger.info(
+                            "search_auto_filters",
+                            request_id=ctx.request_id,
+                            keys=list(knowledge_filters.keys()),
+                            values=list(knowledge_filters.values()),
+                        )
                     eff_industry = input.filter_industry or (
                         extract_query_industry(input.query) if self._use_knowledge_filters else None
                     )
@@ -975,6 +995,19 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
                     request_id=ctx.request_id,
                     filter_industry=eff_industry,
                     metadata_filters=pool_metadata_filters,
+                    sticky_filters=sticky,
+                    metadata_contains=mc,
+                    exclude_recurring=excl_recurring,
+                )
+                # 2026-09-29: 施策実績のリコール床。自動抽出の cls_solution（施策実績には無い
+                # キー）の AND と、提案 PDF による枠の占有で施策実績が rerank へ届かない事象への
+                # 対策。drive floor と同じく dedup / rerank の**前**に噛ませる。
+                hits = self._apply_campaign_floor(
+                    conn=conn,
+                    embedding=embedding,
+                    hits=hits,
+                    input=input,
+                    request_id=ctx.request_id,
                     sticky_filters=sticky,
                     metadata_contains=mc,
                     exclude_recurring=excl_recurring,
@@ -1406,6 +1439,100 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
                 pool_before=len(hits),
                 top_score=added[0].score,
             )
+        return list(hits) + added
+
+    def _apply_campaign_floor(
+        self,
+        *,
+        conn: Any,
+        embedding: list[float],
+        hits: list[SearchHit],
+        input: SearchInput,
+        request_id: str,
+        sticky_filters: dict[str, str] | None = None,
+        metadata_contains: dict[str, str] | None = None,
+        exclude_recurring: bool = False,
+    ) -> list[SearchHit]:
+        """実績を聞かれたとき、rerank プールに施策実績が最低 N 件入ることを保証する（リコール床）。
+
+        **なぜ必要か（2026-09-29 の調査）**: 「サラヤのラカントの過去のショート動画施策を教えて。
+        伸びた動画も見たい」のような聞き方で、施策実績の文書（ショート動画DBを案件ごとに
+        1 文書にしたもの・campaign_aggregate="true"・cls_doc_type=施策実績・cls_solution 無し・
+        1 文書 1 チャンク）に検索が届かない。原因は 3 つ重なっている:
+          - knowledge_query._SOLUTION_KEYWORDS が「ショート動画」を cls_solution=動画広告 に写す
+          - pgvector の metadata_filters / sticky は SQL の AND で、キーが無い文書は除外される
+          - _pool_search がフィルタを外すのは 0 件のときだけ（提案 PDF が当たれば外れない）
+        加えて、枚数の多い提案 PDF が最初の 30 件の枠を埋めて施策実績を押し出す。
+
+        **やること**: プール内の campaign_aggregate="true" が床（_campaign_pool_floor）未満で、
+        かつ is_campaign_results_intent が True のときだけ、施策実績に限った dense 検索を
+        **1 回**足して重複を除いて合流する。補助検索の条件:
+          - campaign_aggregate="true" は sticky に載せる（metadata_filters に置くと、該当 0 件の
+            ときに _pool_search の fail-open がこの条件ごと外し、施策実績でない文書を足してしまう）
+          - 明示 sticky は予算（cls_budget / __budget_or_unknown__）だけ残し、cls_doc_type /
+            cls_solution は外す（施策実績は cls_solution を持たず、doc_type も別値のため）
+          - 自動抽出の metadata_filters（cls_solution=動画広告 等）は渡さない
+          - metadata_contains（取引先の OR ILIKE）は保つ（別の取引先の実績を混ぜない）
+          - filter_industry は渡さない（施策実績には industry が無い）
+        順位は後段の rerank が決めるため、無関係な実績が上位に出ることはない。
+
+        **やらないこと**: 床を満たしている・意図が合わないクエリでは 1 クエリも足さない。
+        rerank 無効時はプール概念が無いので発火しない。失敗しても検索本体は継続する（fail-open）。
+        """
+        floor = self._campaign_pool_floor
+        if floor <= 0 or not self._use_cohere_rerank:
+            return hits
+        present = sum(
+            1 for h in hits if str((h.metadata or {}).get("campaign_aggregate") or "") == "true"
+        )
+        if present >= floor:
+            return hits
+        has_client = bool((metadata_contains or {}).get("__client__")) or bool(input.filter_client)
+        if not is_campaign_results_intent(
+            input.query,
+            explicit_doc_type=input.filter_doc_type,
+            has_client=has_client,
+        ):
+            return hits
+        floor_sticky: dict[str, str] = {
+            k: v
+            for k, v in (sticky_filters or {}).items()
+            if k in ("cls_budget", "__budget_or_unknown__")
+        }
+        floor_sticky["campaign_aggregate"] = "true"
+        try:
+            extra = self._pool_search(
+                conn=conn,
+                embedding=embedding,
+                limit=floor,
+                filter_industry=None,
+                strict_industry=input.strict_industry,
+                metadata_filters=None,
+                sticky_filters=floor_sticky,
+                metadata_contains=metadata_contains,
+                request_id=request_id,
+                exclude_recurring=exclude_recurring,
+            )
+            seen = {h.chunk_id for h in hits}
+            added = [h for h in extra if h.chunk_id not in seen]
+        except Exception as exc:  # 補助検索の失敗で検索本体を壊さない（fail-open）
+            logger.warning(
+                "search_campaign_floor_failed",
+                request_id=request_id,
+                error=type(exc).__name__,
+            )
+            return hits
+        # 発火したら added=0 でも出す。HNSW（ef_search）の候補の中で絞るため、件数の少ない
+        # 施策実績は 0 件になりうる。0 件が続くなら hnsw.iterative_scan を検討する（09-29）。
+        logger.info(
+            "search_campaign_floor_applied",
+            request_id=request_id,
+            floor=floor,
+            present=present,
+            added=len(added),
+            pool_before=len(hits),
+            top_score=(added[0].score if added else None),
+        )
         return list(hits) + added
 
     # ── 二段返し（ヒット先出し → 回答後追い）。USE_SEARCH_TWO_STAGE 既定 OFF ──────────

@@ -7,7 +7,7 @@
 レイアウト（上から）:
   B 結論バンド（段階つきの共通点＋根拠つきの指示。スライドと同じ facts・synthesis v3）
   C 上位n本の比較ボード（サムネ＋主要指標の格子・強調は最も見られ保存された1本）
-  D サムネ色比較ボード（検索一覧での目立ち方）
+  D サムネ（一覧の表紙）の比較（タップされる要因・文字は AI の読み取り・色は1行の参考）
   共通の導線（保存・誘導。多数派はコードの集計）
   E AI の読み解き（synthesis v3 の検査を通した仮説・概念・訴求角度だけ）
   F 一貫性マトリクス（テロップ↔キャプ↔映像中身・N本一望）
@@ -36,7 +36,28 @@ from urllib.parse import urlsplit
 from teamagent.skills._html.dads import DADS_CREDIT, dads_style
 from teamagent.skills.search_surface_check.video_digest import PACING_LABEL
 from teamagent.skills.search_surface_check.video_structure import ROLE_LABEL, infer_roles
+from teamagent.skills.video_algorithm.cover_facts import (
+    CLUTTER_LABEL,
+    ELEMENT_LABEL,
+    EXPRESSION_LABEL,
+    FACE_KIND_LABEL,
+    GAZE_LABEL,
+    LEGIBILITY_LABEL,
+    MATCH_LABEL,
+    POSITION_JP,
+    PRODUCT_LABEL,
+    SIZZLE_LABEL,
+    STATUS_LABEL,
+    STYLE_LABEL,
+    CoverFacts,
+    CoverView,
+    code_cover_directives,
+    cover_count_text,
+    cover_line,
+    dist_text,
+)
 from teamagent.skills.video_algorithm.evidence import (
+    RELATION_LABEL,
     TIER_MAJORITY,
     TIER_REQUIRED,
     Roster,
@@ -74,6 +95,7 @@ from teamagent.skills.video_algorithm.slides import (
 )
 from teamagent.skills.video_algorithm.synthesis_checks import (
     code_directives,
+    cover_directive_line,
     deny_hit,
     directive_line,
 )
@@ -250,12 +272,14 @@ def _verdict_band(out: VideoAlgorithmOutput, d: Deck) -> str:
     posting_html = f'<div class="kvrow"><b>投稿設計</b>{_esc(plan)}</div>' if plan else ""
     missing = unanalyzed_ranks(d.ctx.ranks, out.board)
     rest = f"{rank_runs(missing)}は動画を未分析" if missing else f"上位{n}本だけの観測"
+    cover = cover_line(d.ctx.cover) if d.ctx.cover.any_ok else ""
+    cover_html = f'<div class="small mtop">{_esc(cover)}</div>' if cover else ""
     return (
         f"{gate}"
         '<section class="verdict planner">'
         '<div class="vleft"><div class="th">🎬 プランナーの戦略サマリ（上位の観測にもとづく仮説）</div>'
         f'<div class="vbig">{_esc(big)}</div>{sub_html}'
-        f'<div class="chips">{chips}</div>'
+        f'<div class="chips">{chips}</div>{cover_html}'
         f'<div class="muted small mtop">差の要因: 未特定（{_esc(rest)}）。段階の名前（必須条件＝全部・'
         "多数派＝6割以上・事例＝それ未満）はコードが本数から付けたもの。</div>"
         f"{pitch_html}</div>"
@@ -288,6 +312,21 @@ def _scrape_board(
         return ""
     n = len(metas)
     analyzed_ranks = {v.meta.rank for v in out.videos if v.analysis}
+    # 表紙の文字（AI の読み取り）の列は、読めた表紙があるときだけ足す（20 字で切る）。
+    cover_col = any(m.cover_read is not None and m.cover_read.ok for m in metas)
+
+    def cover_cell(m: VideoMeta) -> str:
+        if not cover_col:
+            return ""
+        read = m.cover_read
+        if read is None:
+            return '<td class="sbcap">—</td>'
+        if not read.ok:
+            return (
+                f'<td class="sbcap muted">{_esc(STATUS_LABEL.get(read.status, read.status))}</td>'
+            )
+        text = " ".join(" ".join(t.text.split()) for t in (read.texts or []))
+        return f'<td class="sbcap">{_esc(_head(text, 20)) if text else "文字なし"}</td>'
 
     def row(m: VideoMeta) -> str:
         deep = (
@@ -321,6 +360,7 @@ def _scrape_board(
             f'<td class="sbnum">{m.save_rate():.1f}%</td>'
             f'<td class="sbnum">{_fmt(m.digg_count)}</td>'
             f'<td class="sbnum">{_esc(when)}</td>'
+            f"{cover_cell(m)}"
             f'<td class="sbcap">{_esc(_head(m.desc))}</td>'
             "</tr>"
         )
@@ -333,7 +373,9 @@ def _scrape_board(
         f"{image_legend}）</div>"
         '<div class="sbwrap"><table class="sboard">'
         "<thead><tr><th>#</th><th>サムネ</th><th>アカウント</th><th>フォロワー</th>"
-        "<th>再生</th><th>保存率</th><th>いいね</th><th>投稿日</th><th>キャプション</th></tr></thead>"
+        "<th>再生</th><th>保存率</th><th>いいね</th><th>投稿日</th>"
+        + ("<th>表紙の文字（AI）</th>" if cover_col else "")
+        + "<th>キャプション</th></tr></thead>"
         f"<tbody>{body}</tbody></table></div>"
         '<div class="muted small">※ サムネはTikTok署名URL（時間経過で失効する場合あり）。'
         "営業はこの一覧から提案に載せる動画を選定。</div></section>"
@@ -411,54 +453,229 @@ def _top5_board(out: VideoAlgorithmOutput, d: Deck) -> str:
 
 
 # ===========================================================
-# D サムネ色比較ボード
+# D サムネ（一覧の表紙）の比較（タップされる要因・文字は AI の読み取り）
 # ===========================================================
-def _thumb_board(out: VideoAlgorithmOutput) -> str:
-    vids = [v for v in out.videos if v.analysis and (v.thumb or v.cover_data_uri)]
-    if not vids:
-        return ""
-    c = out.cross
-    consensus = c.thumb_consensus or "サムネ色の比較"
+COVER_TITLE = (
+    "サムネ（一覧の表紙）の比較（検索一覧でタップの要因になりうる作り・文字は AI の読み取り）"
+)
+COVER_COMMON_TITLE = "上位の表紙に共通する作り（タップ率は取れない・順位との関係のみ）"
 
-    def cell(v: AnalyzedVideo) -> str:
-        t = v.thumb
-        shot = (
-            f'<div class="tbshot"><img src="{_esc(v.cover_data_uri)}" alt="#{v.meta.rank}"></div>'
-            if v.cover_data_uri
-            else '<div class="tbshot ph"></div>'
-        )
-        if t is None:
-            return f'<div class="tbcell"><div class="brank">#{v.meta.rank}</div>{shot}<div class="muted small">色データなし</div></div>'
-        sw = "".join(f'<span style="background:{_hex(h)}"></span>' for h in t.swatches[:3]) or ""
-        bri = max(0.0, min(100.0, t.brightness01 * 100))
-        warm_left = max(0.0, min(100.0, (t.warmth + 1) / 2 * 100))
-        near = t.borderline()
-        src = {"cover": "表紙", "frame": "コマで代用"}.get(v.cover_source, "出どころ不明")
-        tone = f"{t.tone_jp()}（境界）" if "暖寒" in near else t.tone_jp()
-        bright = f"{t.brightness01:.2f}（境界）" if "明度" in near else f"{t.brightness01:.2f}"
-        return (
-            f'<div class="tbcell"><div class="brank">#{v.meta.rank}'
-            f'<span class="muted small"> {_esc(src)}</span></div>{shot}'
-            f'<div class="tbsw">{sw}</div>'
-            f'<div class="tbm"><span class="tbl">明度</span><span class="tbar"><i style="left:{bri:.0f}%"></i></span><span class="tbv">{_esc(bright)}</span></div>'
-            f'<div class="tbm"><span class="tbl">暖寒</span><span class="tbar wt"><i style="left:{warm_left:.0f}%"></i></span><span class="tbv">{_esc(tone)}</span></div>'
-            "</div>"
-        )
 
-    cells = "".join(cell(v) for v in vids)
-    framed = [v.meta.rank for v in vids if v.cover_source == "frame"]
-    unknown = [v.meta.rank for v in vids if v.cover_source == ""]
-    notes = []
-    if framed:
-        notes.append(f"{ranks_text(framed)}は表紙を取れず冒頭のコマで代用（表紙の色ではない）")
-    if unknown:
-        notes.append(f"{ranks_text(unknown)}は表紙か冒頭のコマか不明（以前の分析）")
-    notes.append("しきい値から0.03以内は「境界」と表示（区分は断定しない）")
+def _cover_uri(out: VideoAlgorithmOutput, rank: int) -> str:
+    """表紙の画像（分析した動画の埋め込み画像を先に使う。無ければボードの表紙の URL）。"""
+    v = next((v for v in out.videos if v.meta.rank == rank), None)
+    if v is not None and v.cover_data_uri.startswith("data:image/") and v.cover_source == "cover":
+        return v.cover_data_uri
+    meta = next((m for m in out.board if m.rank == rank), None)
+    return _http_image_url(meta.cover_url) if meta is not None else ""
+
+
+def _box_style(box: tuple[int, int, int, int]) -> str:
+    y0, x0, y1, x1 = box
     return (
-        '<section><div class="th big">サムネ色の比較（表紙の色・参考）</div>'
-        f'<div class="tbconsensus"><b>{_esc(consensus)}</b>'
-        f'<span class="muted small">　{_esc("・".join(notes))}</span></div>'
-        f'<div class="tbrow" style="grid-template-columns:repeat({len(vids)},1fr)">{cells}</div></section>'
+        f"top:{y0 / 10:.1f}%;left:{x0 / 10:.1f}%;"
+        f"height:{(y1 - y0) / 10:.1f}%;width:{(x1 - x0) / 10:.1f}%"
+    )
+
+
+def _cover_img(out: VideoAlgorithmOutput, c: CoverFacts) -> str:
+    """表紙の画像に、AI が読んだ文字（実線）と顔（点線）の枠を重ねる（誤読を目で確かめる）。"""
+    uri = _cover_uri(out, c.rank)
+    if not uri:
+        return '<div class="tbshot ph"></div>'
+    boxes = "".join(
+        f'<i class="cvbox" style="{_box_style(t.box)}"></i>'
+        for t in (c.read.texts or [])
+        if t.box is not None and c.ok
+    )
+    face = c.read.face
+    if c.ok and face is not None and face.box is not None and face.kind == "real":
+        boxes += f'<i class="cvbox face" style="{_box_style(face.box)}"></i>'
+    return (
+        f'<div class="cvimg"><img src="{_esc(uri)}" alt="#{c.rank} の表紙" loading="lazy">'
+        f"{boxes}</div>"
+    )
+
+
+def _yn(value: bool | None) -> str:
+    return "不明" if value is None else "あり" if value else "なし"
+
+
+def _cover_marks(c: CoverFacts) -> str:
+    marks: list[str] = [f"検索語「{t}」" for t in c.kw_terms]
+    if c.numbers:
+        marks.append("数字（" + "・".join(raw for _k, raw in c.numbers[:3]) + "）")
+    if c.question:
+        marks.append("問いかけ")
+    if c.effortless:
+        marks.append("手間なし")
+    if c.warning:
+        marks.append("失敗・注意")
+    if c.appeals and "benefit" in c.appeals:
+        marks.append("ベネフィット（AI判定）")
+    return "・".join(marks) or "—"
+
+
+def _brands_text(c: CoverFacts) -> str:
+    if not c.brands:
+        return "—"
+    return "、".join(
+        f"{name}（{'AIの読み取り・未照合' if rel == 'unverified' else RELATION_LABEL.get(rel, rel)}）"
+        for name, rel in c.brands
+    )
+
+
+def _cover_rows(c: CoverFacts) -> list[tuple[str, str]]:
+    """1 枚の表紙の行（項目名, 値）。値は第三者の文字を含むので呼んだ側でエスケープする。"""
+    if not c.ok:
+        return [("読み取り", STATUS_LABEL.get(c.status, c.status))]
+    texts = "／".join(f"「{t.replace(chr(10), ' ')}」" for t in c.texts) or "なし"
+    unreadable = "（読めない文字あり）" if c.read.unreadable_text else ""
+    size = "不明" if c.large_text is None else "タイルで読める大きさ" if c.large_text else "小さい"
+    way = "縦書き・" if c.vertical else "横書き・" if c.vertical is False else "縦横不明・"
+    shape = (
+        f"{way}{size}・{POSITION_JP.get(c.position, '不明')}・{c.lines}行・{c.chars}字"
+        + (f"・字の大きさ{c.line_h_pct:g}%" if c.line_h_pct is not None else "")
+        if c.has_text
+        else "—"
+    )
+    face = FACE_KIND_LABEL.get(c.face_kind, "不明")
+    if c.face_real:
+        face += f"・{EXPRESSION_LABEL.get(c.expression, '不明')}・{GAZE_LABEL.get(c.gaze, '不明')}"
+    sizzle = "・".join(SIZZLE_LABEL.get(x, x) for x in (c.sizzle or ())) or "なし"
+    styles = "・".join(STYLE_LABEL.get(x, x) for x in (c.styles or ())) or "—"
+    opening = MATCH_LABEL.get(c.opening_match, "—") if c.watched else "動画を見ていない"
+    return [
+        ("写っている要素", "・".join(ELEMENT_LABEL.get(e, e) for e in (c.elements or ())) or "—"),
+        ("主役の説明（AI）", c.subject_note or "—"),
+        ("表紙の文字（AIの読み取り）", texts + unreadable),
+        ("大きさ・位置・行数（枠から計算）", shape),
+        ("文字の中身", _cover_marks(c) if c.has_text else "—"),
+        ("顔・表情・視線", face),
+        ("寄り・質感", f"寄り{_yn(c.closeup)}・{sizzle}"),
+        ("商品・商品名", f"{PRODUCT_LABEL.get(c.product, '不明')}・{_brands_text(c)}"),
+        (
+            "背景・読みやすさ・飾り",
+            f"{CLUTTER_LABEL.get(c.clutter, '不明')}・{LEGIBILITY_LABEL.get(c.legibility, '不明')}"
+            f"・{styles}",
+        ),
+        ("冒頭のテロップと（AI同士）", opening),
+        (
+            "キャプション冒頭と（実データ）",
+            f"{MATCH_LABEL.get(c.caption_match, '—')}「{c.caption_head[:20]}」",
+        ),
+        (
+            "向き",
+            {"portrait": "縦", "landscape": "横長", "square": "正方形"}.get(c.orientation, "不明"),
+        ),
+    ]
+
+
+def _cover_chip(f: Feature, n_top: int) -> str:
+    """段階・特徴・本数（母数が上位の本数より少なければ母数の名前と「上位 n 本中 c 本」も）。"""
+    count = cover_count_text(f, n_top).removeprefix(f"{f.tier} ")
+    return (
+        f'<span class="chip"><span class="tname">{_esc(f.tier)}</span><b>{_esc(f.label)}</b>'
+        f"<i>{_esc(count)}</i></span>"
+    )
+
+
+def _cover_gap_html(view: CoverView) -> str:
+    if view.mode != "board" or not view.gap:
+        return f'<div class="muted small">上位とほかの差: {_esc(view.gap_note)}</div>'
+    rows = "".join(
+        f"<tr><td>{_esc(g.label)}</td><td>{g.a}/{g.n}</td><td>{g.b}/{g.m}</td>"
+        f"<td>{_esc(g.mark_text + '（参考）' if g.marked else '—')}</td></tr>"
+        for g in view.gap
+    )
+    return (
+        '<div class="th">上位とほかの表紙（本数・参考・因果ではない）</div>'
+        '<div class="tblwrap"><table class="tbl"><thead><tr><th>項目</th><th>上位</th><th>ほか</th>'
+        f"<th>差の印（多い側）</th></tr></thead><tbody>{rows}</tbody></table></div>"
+        f'<div class="muted small">{_esc(view.gap_note)}。「ほかが多い」の行は指示にしない</div>'
+    )
+
+
+def _cover_empty_note(out: VideoAlgorithmOutput, view: CoverView) -> str:
+    """表紙を 1 枚も読めていないときの 1 行（以前の分析・止めている設定・取り方・失敗の理由）。"""
+    if not view.top:
+        if out.cover_read_mode == "":
+            return "表紙の分析なし（以前の分析）"
+        if out.cover_read_mode == "off":
+            return "表紙の分析は止めている設定です"
+        return "表紙の読み取りを始められませんでした"
+    if all(c.status == "no_cover" for c in view.top):
+        return "表紙の URL が無い取り方のため、表紙を読めていません"
+    counts: dict[str, int] = {}
+    for c in view.top:
+        label = STATUS_LABEL.get(c.status, c.status)
+        counts[label] = counts.get(label, 0) + 1
+    why = "・".join(f"{k}{n}本" for k, n in counts.items())
+    return f"表紙を読めず（上位{view.n_top}本すべて・{why}）"
+
+
+def _cover_board(out: VideoAlgorithmOutput, d: Deck) -> str:
+    """サムネ（一覧の表紙）の比較。色は最後に 1 行の参考。文字は AI の読み取りと明記する。"""
+    view = d.ctx.cover
+    color = out.cross.thumb_consensus
+    # 色は 1 行の参考に縮める。表紙を取れずコマで代用した本は、その色を表紙の色と呼ばない。
+    framed = [
+        v.meta.rank for v in out.videos if v.analysis and v.thumb and v.cover_source == "frame"
+    ]
+    framed_note = f"・{ranks_text(framed)}は表紙を取れず冒頭のコマで代用" if framed else ""
+    color_line = (
+        f'<div class="muted small cvcolor">色（参考{_esc(framed_note)}）: {_esc(color)}</div>'
+        if color
+        else ""
+    )
+    head = f'<section><div class="th big">{_esc(COVER_TITLE)}</div>'
+    if not view.any_ok:
+        return (
+            f'{head}<div class="tbconsensus">{_esc(_cover_empty_note(out, view))}</div>'
+            f"{color_line}</section>"
+        )
+
+    def cell(c: CoverFacts) -> str:
+        rows = "".join(
+            f'<div class="cvrow"><span class="cvlab">{_esc(k)}</span>'
+            f'<span class="cvval">{_esc(v)}</span></div>'
+            for k, v in _cover_rows(c)
+        )
+        return (
+            f'<div class="tbcell cvcell"><div class="brank">#{c.rank}</div>'
+            f"{_cover_img(out, c)}{rows}</div>"
+        )
+
+    cells = "".join(cell(c) for c in view.top)
+    feats = [f for f in view.features if f.tier in (TIER_REQUIRED, TIER_MAJORITY)]
+    chips = "".join(_cover_chip(f, view.n_top) for f in feats[:8]) or (
+        '<span class="muted small">多数派以上の共通点なし</span>'
+    )
+    syn = d.syn
+    directives = (
+        list(syn.cover_directives)
+        if syn is not None
+        else code_cover_directives(view, d.ctx.avoid_terms)
+    )
+    items = "".join(f"<li>{_esc(cover_directive_line(x, view))}</li>" for x in directives[:5]) or (
+        '<li class="muted">多数派以上の特徴が無いため、表紙の指示は出していません</li>'
+    )
+    ok = len(view.top_ok)
+    return (
+        f"{head}"
+        f'<div class="tbconsensus">表紙を読めた {ok}/{view.n_top}本。枠＝AI が読んだ文字（実線）と'
+        "顔（点線）の位置。文字は AI の読み取りで、画像と照合していない</div>"
+        f'<div class="tbrow" style="grid-template-columns:repeat({len(view.top)},minmax(168px,1fr))">'
+        f"{cells}</div>"
+        f'<div class="th mtop">{_esc(COVER_COMMON_TITLE)}</div>'
+        f'<div class="chips">{chips}</div>'
+        f'<div class="muted small mtop">{_esc(dist_text(view.dist))}。段階（必須条件＝読めた全部・'
+        "多数派＝6割以上）はコードが本数から付けたもの（母数は欄ごとに読めた本数）。</div>"
+        f"{_cover_gap_html(view)}"
+        '<div class="th mtop">表紙の作り方（根拠つき・段階と本数はコードが特徴の表から集計。'
+        "AI の提案は根拠の特徴を添え、特徴の無いものは未集計と表示）</div>"
+        f'<ul class="nexts">{items}</ul>'
+        f"{color_line}</section>"
     )
 
 
@@ -1311,6 +1528,16 @@ button:focus-visible,.nscrub:focus-visible,.frm:focus-visible,summary:focus-visi
 .tbar.wt{background:linear-gradient(90deg,var(--color-primitive-blue-800),var(--va-line),var(--va-warn))}
 .tbar>i{position:absolute;top:-4px;width:2px;height:14px;background:var(--va-ink-strong);transform:translateX(-1px)}
 .tbv{width:48px;text-align:right;color:var(--va-sub)}
+/* D サムネ（一覧の表紙） */
+.cvcell{align-items:stretch}
+.cvimg{position:relative;width:100%}
+.cvimg img{display:block;width:100%;height:auto;border-radius:var(--border-radius-4)}
+.cvbox{position:absolute;border:2px solid var(--va-accent);border-radius:2px;pointer-events:none}
+.cvbox.face{border-style:dashed;border-color:var(--va-warn)}
+.cvrow{display:flex;flex-direction:column;gap:0;font-size:14px;line-height:1.5;
+ border-top:1px solid var(--va-line-soft);padding-top:4px;overflow-wrap:anywhere}
+.cvlab{color:var(--va-sub)}.cvval{color:var(--va-ink)}
+.cvcolor{margin-top:16px}
 /* E シンセシス */
 .syn .th{margin-top:32px}.syn .th.big{margin-top:0}
 .concepts{display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:12px}
@@ -1647,7 +1874,7 @@ def render_report(out: VideoAlgorithmOutput, *, generated_at: str = "") -> str:
         else _scrape_board(out)
     )
     overview = (
-        f"{_verdict_band(out, d)}{scrape_board}{_top5_board(out, d)}{_thumb_board(out)}"
+        f"{_verdict_band(out, d)}{scrape_board}{_top5_board(out, d)}{_cover_board(out, d)}"
         f"{_funnel_block(d)}{_synthesis_block(d)}{_matrix_block(out, d)}"
         f"{_stats_block(out.cross.stats)}"
     )

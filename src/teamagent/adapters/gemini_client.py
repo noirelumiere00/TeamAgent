@@ -87,6 +87,27 @@ def _is_rate_limited_vertex(exc: BaseException) -> bool:
     return any(marker in msg for marker in _VERTEX_RATE_LIMIT_MARKERS)
 
 
+# thinking_level を受け付けなかったモデル（同じプロセスの中では付けない）。
+_THINKING_REJECTED: set[str] = set()
+# 画像の解像度の段階（types.MediaResolution の名前）。
+_MEDIA_RESOLUTION = {
+    "low": "MEDIA_RESOLUTION_LOW",
+    "medium": "MEDIA_RESOLUTION_MEDIUM",
+    "high": "MEDIA_RESOLUTION_HIGH",
+}
+
+
+def _is_thinking_rejected(exc: BaseException) -> bool:
+    """thinking の設定をモデルが受け付けない 400 INVALID_ARGUMENT（文面に thinking を含むもの）。
+
+    画像そのものの不備など、thinking と関係のない 400 ではやり直さない。
+    """
+    code = getattr(exc, "code", None) or getattr(exc, "status_code", None)
+    msg = str(exc).lower()
+    invalid = code == 400 or "invalid_argument" in msg or "invalid argument" in msg
+    return invalid and "think" in msg
+
+
 @dataclass(frozen=True)
 class GeminiResponse:
     """Gemini API 呼び出しの返り値。"""
@@ -395,6 +416,73 @@ class GeminiClient:
         ]
         return self._generate_video(parts, request_id, system=system)
 
+    def analyze_image_bytes(
+        self,
+        data: bytes,
+        mime_type: str,
+        prompt: str,
+        request_id: str,
+        *,
+        system: str | None = None,
+        timeout_s: float = 30.0,
+        json_mode: bool = True,
+        thinking_level: str | None = "low",
+        media_resolution: str | None = "high",
+        max_attempts: int = 2,
+        rate_limit_attempts: int = 3,
+    ) -> GeminiResponse:
+        """画像 1 枚を inline で渡す軽い呼び出し（サムネ＝一覧の表紙の読み取り用）。
+
+        動画の入口（analyze_video_bytes）と分けるので、動画の呼び出し回数と費用の数え方は変わらない。
+        動画と違い、1 回の HTTP に上限（timeout_s）を付け、リトライを絞る
+        （通常 2 回・429 は 3 回）。
+        json_mode は response_mime_type=application/json、media_resolution は画像の解像度の段階
+        （既定 high。既定値が変わって小さい文字が黙って読めなくなるのを避ける）。
+        thinking_level をモデルが受け付けない（400 INVALID_ARGUMENT）ときは、thinking を外して
+        1 回だけやり直し、同じプロセスの中ではそのモデルで thinking を付けない。
+        """
+        from google.genai import types
+
+        parts = [
+            types.Part.from_bytes(data=data, mime_type=mime_type),
+            types.Part(text=prompt),
+        ]
+        level = (thinking_level or "").strip().lower() or None
+        if level is not None and self.model_id in _THINKING_REJECTED:
+            level = None
+        try:
+            return self._generate_video(
+                parts,
+                request_id,
+                system=system,
+                timeout_s=timeout_s,
+                json_mode=json_mode,
+                thinking_level=level,
+                media_resolution=media_resolution,
+                max_attempts=max_attempts,
+                rate_limit_attempts=rate_limit_attempts,
+                log_event="gemini_analyze_image",
+            )
+        except RuntimeError as exc:
+            if level is None or not _is_thinking_rejected(exc.__cause__ or exc):
+                raise
+            _THINKING_REJECTED.add(self.model_id)
+            logger.warning(
+                "gemini_thinking_level_rejected", request_id=request_id, model_id=self.model_id
+            )
+            return self._generate_video(
+                parts,
+                request_id,
+                system=system,
+                timeout_s=timeout_s,
+                json_mode=json_mode,
+                thinking_level=None,
+                media_resolution=media_resolution,
+                max_attempts=max_attempts,
+                rate_limit_attempts=rate_limit_attempts,
+                log_event="gemini_analyze_image",
+            )
+
     def generate_text(
         self, prompt: str, request_id: str, *, system: str | None = None
     ) -> GeminiResponse:
@@ -537,15 +625,52 @@ class GeminiClient:
         )
 
     def _generate_video(
-        self, parts: list[Any], request_id: str, *, system: str | None
+        self,
+        parts: list[Any],
+        request_id: str,
+        *,
+        system: str | None,
+        timeout_s: float | None = None,
+        json_mode: bool = False,
+        thinking_level: str | None = None,
+        media_resolution: str | None = None,
+        max_attempts: int | None = None,
+        rate_limit_attempts: int | None = None,
+        log_event: str = "gemini_analyze_video",
     ) -> GeminiResponse:
-        """動画/テキスト part を generate_content に投げ GeminiResponse に整形する共通処理。"""
+        """動画/テキスト/画像 part を generate_content に投げ GeminiResponse に整形する共通処理。
+
+        省略できる引数（timeout_s 以降）がすべて既定のときは、従来の動き（system が無ければ
+        config=None・リトライは env の回数）のまま。
+        """
         from google.genai import types
 
         client = self._ensure_client()
         start = time.perf_counter()
         contents = [types.Content(role="user", parts=parts)]
-        config = types.GenerateContentConfig(system_instruction=system) if system else None
+        config_kwargs: dict[str, Any] = {}
+        if system:
+            config_kwargs["system_instruction"] = system
+        if timeout_s is not None and timeout_s > 0:
+            config_kwargs["http_options"] = types.HttpOptions(timeout=int(timeout_s * 1000))
+        if json_mode:
+            config_kwargs["response_mime_type"] = "application/json"
+        if thinking_level:
+            config_kwargs["thinking_config"] = types.ThinkingConfig(
+                thinking_level=types.ThinkingLevel(thinking_level.upper())
+            )
+        resolution = _MEDIA_RESOLUTION.get((media_resolution or "").strip().lower())
+        if resolution:
+            config_kwargs["media_resolution"] = getattr(types.MediaResolution, resolution)
+        config = types.GenerateContentConfig(**config_kwargs) if config_kwargs else None
+        attempts = (
+            max_attempts if max_attempts is not None else _env_int("GEMINI_RETRY_MAX_ATTEMPTS", 3)
+        )
+        rate_attempts = (
+            rate_limit_attempts
+            if rate_limit_attempts is not None
+            else _env_int("GEMINI_RATE_LIMIT_RETRY_MAX_ATTEMPTS", _RATE_LIMIT_RETRY_ATTEMPTS)
+        )
 
         try:
             # 一過性エラー（429/レート/quota/503/500/timeout）は指数バックオフで自動リトライ。
@@ -558,19 +683,18 @@ class GeminiClient:
                 ),
                 is_retryable=_is_retryable_vertex,
                 policy=RetryPolicy(
-                    max_attempts=_env_int("GEMINI_RETRY_MAX_ATTEMPTS", 3),
+                    max_attempts=attempts,
                     base_delay_s=0.6,
                     max_delay_s=8.0,
                 ),
                 is_rate_limited=_is_rate_limited_vertex,
                 rate_limit_policy=RateLimitPolicy(
-                    max_attempts=_env_int(
-                        "GEMINI_RATE_LIMIT_RETRY_MAX_ATTEMPTS", _RATE_LIMIT_RETRY_ATTEMPTS
-                    ),
+                    max_attempts=rate_attempts,
                     base_delay_s=1.0,
                     max_delay_s=12.0,
                     min_delay_s=0.5,
                 ),
+                attempt_timeout_s=timeout_s,
                 on_retry=lambda n, d, e: logger.warning(
                     "gemini_retry",
                     request_id=request_id,
@@ -601,7 +725,7 @@ class GeminiClient:
         cost_usd = _estimate_cost(self.model_id, input_tokens, output_tokens + thoughts_tokens)
 
         logger.info(
-            "gemini_analyze_video",
+            log_event,
             request_id=request_id,
             model_id=self.model_id,
             input_tokens=input_tokens,

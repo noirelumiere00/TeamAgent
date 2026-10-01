@@ -46,7 +46,6 @@ from teamagent.identity import (
 )
 from teamagent.mcp_gateway import detached_jobs, direct_summary, surface_video_followup
 from teamagent.mcp_gateway.caller_claim import (
-    CALLER_CLAIM_FIELD,
     CallerClaimError,
     CallerClaimVerifier,
     VerifiedCallerClaim,
@@ -189,48 +188,44 @@ def _record_usage(
         )
 
 
+def _strip_schema_titles(node: Any, *, names: bool = False) -> Any:
+    """JSON Schema から ``title``（pydantic が付ける表示名）だけを再帰的に落とす。
+
+    ``names=True`` は「キーが引数名の辞書」（properties・$defs）を表し、キーはそのまま残す
+    （``title`` という名前の引数＝calendar_event など を消さないため）。
+    """
+    if isinstance(node, list):
+        return [_strip_schema_titles(v) for v in node]
+    if not isinstance(node, dict):
+        return node
+    if names:
+        return {k: _strip_schema_titles(v) for k, v in node.items()}
+    out: dict[str, Any] = {}
+    for k, v in node.items():
+        if k == "title" and isinstance(v, str):
+            continue
+        out[k] = _strip_schema_titles(v, names=k in ("properties", "$defs", "definitions"))
+    return out
+
+
 def _augment_schema(schema: dict[str, Any]) -> dict[str, Any]:
-    """入力スキーマに RLS 用の ``_user_context`` を足す（外殻が身元を渡す口）。"""
-    out = dict(schema)
+    """入力スキーマを tools/list 用に整える（``_user_context`` の口を足し、飾りを落とす）。
+
+    2026-09-30: OpenClaw は毎回すべてのツール定義をモデルへ送る。固定部分 127k トークンの
+    約 8 割がツール定義で、特に日本語はツール定義の中だと system prompt の約 5 倍の
+    トークンになる（Bedrock CountTokens で実測）。
+    - ``_user_context`` は宣言を ``{"type": "object"}`` だけにする。値は caller-identity
+      plugin が before_tool_call で丸ごと正しいものに置き換え、欠落も ``{}`` とみなす
+      （caller-identity-plugin/dist/index.js の rawDeclared 分岐）。モデルに中身の説明を
+      見せる意味は無く、34 本で約 2.7 万トークンを使っていた。
+    - pydantic が付ける ``title`` と、最上位の ``description``（入力モデルの docstring＝
+      開発メモ）はモデルの判断材料にならないので落とす（約 0.7 万トークン）。
+      ツールの説明は ToolSpec.description、引数の説明は各 property の description に残る。
+    """
+    out: dict[str, Any] = _strip_schema_titles(dict(schema))
+    out.pop("description", None)
     props = dict(out.get("properties") or {})
-    props[USER_CONTEXT_KEY] = {
-        "type": "object",
-        "description": (
-            "RLS 用の呼び出し元コンテキスト。本番では trusted OpenClaw ingress plugin が"
-            "Slack event由来値とone-use署名claimを注入する。LLM申告値単体は認可に使わない。"
-        ),
-        "properties": {
-            "slack_user_id": {
-                "type": "string",
-                "description": "Slack user_id申告値。署名claimのevent userと一致した時だけ有効。",
-            },
-            "slack_team_id": {
-                "type": "string",
-                "description": "trusted pluginが注入するSlack workspace team_id。",
-            },
-            CALLER_CLAIM_FIELD: {
-                "type": "string",
-                "description": (
-                    "trusted pluginがtool実行直前に注入するone-use署名claim。"
-                    "モデルや利用者が作成してはならない。"
-                ),
-            },
-            # 後方互換（LEGACY=テスト/PoC のみ有効。STRICT では破棄される）。
-            "user_email": {"type": "string"},
-            "user_groups": {"type": "array", "items": {"type": "string"}},
-            "user_role": {"type": "string"},
-            # 配信先ルーティング hint（identity ではない＝RLS/認可には一切使わない）。
-            # チャンネル/スレッド発の依頼で、skill が「そのスレッドに添付」するために使う。
-            "channel_id": {
-                "type": "string",
-                "description": "依頼が発せられた Slack channel_id（配信ルーティング用・任意）。",
-            },
-            "thread_ts": {
-                "type": "string",
-                "description": "親メッセージの ts（スレッド配信用・任意）。",
-            },
-        },
-    }
+    props[USER_CONTEXT_KEY] = {"type": "object"}
     out["properties"] = props
     # ⚠️ ``_user_context`` を **required に入れてはならない**（2026-08-26 本番全ツール障害）。
     #
@@ -417,29 +412,74 @@ def _schedule_async_job_notice(
 ) -> None:
     if tool not in _ASYNC_JOB_TOOLS:
         return
-    job_id = data.get("job_id")
-    if not isinstance(job_id, str) or not job_id:
-        return
-    try:
-        from teamagent.mcp_gateway.async_job_notify import enabled, schedule_completion_notice
+    # tiktok_acquire は1回の実行時間に収まらない要求を複数ジョブへ分けて job_ids で返す。
+    # 先頭の job_id だけ見張ると残りの完了が届かないので、全ジョブに見張りを付ける。
+    job_ids: list[str] = []
+    extra = data.get("job_ids")
+    for candidate in [data.get("job_id"), *(extra if isinstance(extra, list) else [])]:
+        if isinstance(candidate, str) and candidate and candidate not in job_ids:
+            job_ids.append(candidate)
+    for job_id in job_ids:
+        try:
+            from teamagent.mcp_gateway.async_job_notify import (
+                enabled,
+                schedule_completion_notice,
+            )
 
-        if not enabled():
-            return
-        schedule_completion_notice(
-            tool=tool,
-            job_id=job_id,
-            user_context=raw,
-            request_id=ctx.request_id,
-            poll=_build_async_job_poll(tool, job_id, ctx),
-        )
-    except Exception as exc:
-        logger.warning(
-            "async_job_notify_dispatch_failed",
-            tool=tool,
-            job_id=job_id,
-            request_id=ctx.request_id,
-            error=type(exc).__name__,
-        )
+            if not enabled():
+                return
+            schedule_completion_notice(
+                tool=tool,
+                job_id=job_id,
+                user_context=raw,
+                request_id=ctx.request_id,
+                poll=_build_async_job_poll(tool, job_id, ctx),
+            )
+        except Exception as exc:
+            logger.warning(
+                "async_job_notify_dispatch_failed",
+                tool=tool,
+                job_id=job_id,
+                request_id=ctx.request_id,
+                error=type(exc).__name__,
+            )
+
+
+# 例外文としてモデルへ返す上限（字）。2026-09-29 本番: proposal_builder_submit の ValidationError の
+# 全文（推定 約 24k tokens・大量のエラー行）が S3 退避の対象外のままモデルへ返り、Aico の DM が
+# 上限 200k を超えて毎回失敗した。OpenClaw 側の toolResultMaxChars は保存時と回復時にしか効かず、
+# 受け取った直後の同じターンの呼び出しは守らないので、ここで短くする。
+_ERROR_TEXT_MAX_CHARS = 4000
+# pydantic の ValidationError から返す個別エラーの件数（残りは件数だけ）。
+_VALIDATION_ERROR_MAX_ITEMS = 10
+
+
+def _exception_text(e: BaseException) -> str:
+    """例外を ``"<型名>: <内容>"`` の 1 文字列にし、モデルへ返してよい長さに切る。
+
+    pydantic の ValidationError は input_value と URL を落とし、先頭 10 件の「場所: 理由」と
+    総件数だけにする（どの項目を直せばよいかは残す）。それ以外も ``_ERROR_TEXT_MAX_CHARS`` で切る。
+    """
+    from pydantic import ValidationError
+
+    name = type(e).__name__
+    if isinstance(e, ValidationError):
+        items = e.errors(include_url=False, include_input=False, include_context=False)
+        lines = [f"{e.error_count()} validation error(s) for {e.title}"]
+        for item in items[:_VALIDATION_ERROR_MAX_ITEMS]:
+            loc = ".".join(str(part) for part in item.get("loc", ())) or "(root)"
+            lines.append(f"{loc}: {item.get('msg', '')}")
+        rest = len(items) - _VALIDATION_ERROR_MAX_ITEMS
+        if rest > 0:
+            lines.append(f"（ほか {rest} 件）")
+        body = "\n".join(lines)
+    else:
+        body = str(e)
+    text = f"{name}: {body}"
+    if len(text) > _ERROR_TEXT_MAX_CHARS:
+        omitted = len(text) - _ERROR_TEXT_MAX_CHARS
+        text = f"{text[:_ERROR_TEXT_MAX_CHARS]}…（以下 {omitted} 字を省略）"
+    return text
 
 
 def _err(message: str, **extra: Any) -> list[TextContent]:
@@ -921,7 +961,7 @@ async def dispatch_tool(
     try:
         skill_input = spec.input_schema(**skill_args)
     except Exception as e:  # 入力検証エラーは構造化で返す
-        return _err(f"invalid input: {type(e).__name__}: {e}")
+        return _err(f"invalid input: {_exception_text(e)}")
 
     # 二段返し（USE_SEARCH_TWO_STAGE・既定 OFF）を許可してよい面の印。**この境界を通った
     # search tool だけ**が対象で、connect-web(/app)・runtime/slack_bot.py の直呼び・
@@ -1114,7 +1154,7 @@ async def dispatch_tool(
             # 同じ引数の処理中リース（別プロセス・同期経路の実行など）。
             # コード名を出さずに言い換える。
             return _detach_response(detach_query, detached_jobs.error_text(detach_query, e))
-        return _err(f"{type(e).__name__}: {e}", request_id=ctx.request_id)
+        return _err(_exception_text(e), request_id=ctx.request_id)
     finally:
         if _progress is not None:
             await clear_progress(_progress, request_id=ctx.request_id)
@@ -1421,7 +1461,7 @@ async def dispatch_run_agent(
         )
     except Exception as e:
         logger.warning("run_agent_error", error=type(e).__name__, request_id=request_id)
-        return _err(f"{type(e).__name__}: {e}", request_id=request_id)
+        return _err(_exception_text(e), request_id=request_id)
 
     payload: dict[str, Any] = {
         "answer": result.answer,

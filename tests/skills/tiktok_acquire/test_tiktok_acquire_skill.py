@@ -90,12 +90,8 @@ def test_acquire_clamps_via_schema() -> None:
         TikTokAcquireInput(keywords=["x"], videos_per_kw=11)
     with pytest.raises(ValidationError):
         TikTokAcquireInput(keywords=[])  # 1件以上必須
-    with pytest.raises(ValidationError, match="安全な実行時間"):
-        TikTokAcquireInput(
-            keywords=["x", "y"],
-            n_per_kw=30,
-            videos_per_kw=6,
-        )
+    # 1ジョブの実行上限を超える量は入力検証で断らない（skill が組み直して投函する）。
+    TikTokAcquireInput(keywords=["x", "y"], n_per_kw=30, videos_per_kw=6)
 
 
 def test_acquire_submit_failure_returns_failed() -> None:

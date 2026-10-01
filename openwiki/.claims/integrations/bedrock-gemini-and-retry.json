@@ -1,0 +1,158 @@
+{
+  "schemaVersion": 1,
+  "pageVersion": "sha256:e92c00384881ae8a45245b7e62d23cadae70de73b639cf05ce1443df84201e43",
+  "claims": [
+    {
+      "id": "claim_d4a693a25a1f4b79a072219862bbbfa2",
+      "statement": "BedrockClient.from_env は BEDROCK_MODEL_ID が無いとき Haiku 4.5 の JP 推論プロファイルを既定にし、リトライ回数・待ち時間は BEDROCK_MAX_ATTEMPTS / BEDROCK_RETRY_BASE_S / BEDROCK_RETRY_MAX_S（既定 5 回・0.5 秒・20 秒）で上書きできる。Terraform の var.mcp_model_id も validation で JP Haiku 4.5 プロファイルだけを許す。",
+      "evidence": [
+        {
+          "resource": "repo://infra/terraform/variables_fargate.tf#L62-L71",
+          "version": "repo-lines-v1:sha256:4f1158d11fb17138dce8312aa56f17d57f3ccba4777f45ba47724c2c59af6a19:eyJzZWxlY3RlZExpbmVDb3VudCI6MTAsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjgwZGVmMDUxMDk1NmU3Y2ZlMWFlNTI5MTM5MWMyZDNkYjI3Yzc3MGYyNWQ3OTliZTVlNTRmNDdiYmFjN2RiMWYiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjQxMmNhMzQ1Y2NmNzViZjljMDgwNmJjZTY5NWJlOGRlODA4Yjc5OTg0MjUxYTdhNTRkMjAyY2Y2MTAxZGQ0NTEiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjY4NTkxZGZhZTgyZjk0YTY3OTc4NTdiYzhhNWJiNDY2N2QzM2IxZTk5YmQyN2E1N2Y2NGVhMmUwYTFmM2ZhNjAiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImRmYmU1ZjRmYjZjZWFhMjA1OTBmZDAyNDE5NGY3ZjkxZGZmMGU4NjU5ZmRmZTM0M2FkMzNiODYwZjk0NzcyOTEifQ"
+        },
+        {
+          "resource": "repo://src/teamagent/adapters/bedrock_client.py#L285-L300",
+          "version": "repo-lines-v1:sha256:d54147bb3b8f8e5f75b87b9fe786768e1a4c98d6322e6610f31b16656ab6d3fa:eyJzZWxlY3RlZExpbmVDb3VudCI6MTYsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6Ijc0YWUwZDViZDExMjdiMjJkNjMzYzY0OWYxYzEyYTJlZTA1MTQ2ZDc0NGYxYzlkZmM2ZmZkZTFmNmM0YmUxYjUiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjU5MDlhNTNhNjE4ZDAyOGUxZDMwMDBjMGE3YWJjZWVjYmU1ZmIzN2Y0ZTUxMWVmZTQ2NjQzZmFkNmU2Njg3MmYiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjViZTc1NzViNTExYmE0NjFiZDFlMmY0ODhlNGY0YjYyOGRiYzBjZjc1OGM2NmY4NzJmZDNiNzA3ZGRiMjkyMGUiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjkzZTAxMzljYTQ1ODUxZjdkMDg0NTQ3ZmRiMTIzZGM5ODcyN2E1MmY1ZDE0NjMwZmVlOGUwYzdmZGY3MGU5YjEifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_6a9959b6e7c04b8f9baa262e5a8b0411",
+      "statement": "Bedrock のリトライは call_with_retry に一元化されている。botocore の内部リトライは total_max_attempts=1 で無効にし、一過性と判定するのはスロットリング・5xx 系のエラーコード、HTTP 429/500/502/503/504 の ClientError、BotoCoreError だけ。ValidationException などの恒久エラーはリトライしない。",
+      "evidence": [
+        {
+          "resource": "repo://src/teamagent/adapters/bedrock_client.py#L245-L265",
+          "version": "repo-lines-v1:sha256:500823bd263cd9956a9f13380bd61ced0699dca5405203fa64a6d387bcfe0d62:eyJzZWxlY3RlZExpbmVDb3VudCI6MjEsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6Ijk3MTc1MjU0MDlkZWFhOWE2ZTIyMGE2NTE1YWMwYmViOTNjYmM0M2U0ZDkwMGQ5ZGJkNDUzMWJhNTQ2ZmNlODQiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjU5MDlhNTNhNjE4ZDAyOGUxZDMwMDBjMGE3YWJjZWVjYmU1ZmIzN2Y0ZTUxMWVmZTQ2NjQzZmFkNmU2Njg3MmYiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjcxNmM1NWU4MGI0YzE3MDU2MTNhOGYxYWEwOGZhNjE3MzFiZDFlMmY5ZTNkZDYwMWQ0ODFmZTZkMWZmYmVjYjAiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjIzNzk2Yjk2MjI2OWE2ZTZjZjFmMzU5ZmEzOTdiMWFlYjc2M2NlZjcwOWViN2MxOGJiOTVhNzE5ZmVlM2Q5MmEifQ"
+        },
+        {
+          "resource": "repo://src/teamagent/adapters/bedrock_client.py#L42-L74",
+          "version": "repo-lines-v1:sha256:8bd826ef008895638d8d8db2689900988bda0f41af339a1db1fb7fc5c1c78f88:eyJzZWxlY3RlZExpbmVDb3VudCI6MzMsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6ImU1MTFlYjE1ZDMwOTYxYmZhYWQ4MjBiZjY1MmE0MTU2Mzg0MzU4NDU3ZTY2ODMyMTg5MTQ3YTI2ZjgyMjUxYTEiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjM2YjYxMzJmZGU1NzQ3NGJiNDI3MTgyODg1YzQ1YTRhMTU2MTFhY2I1MmZmN2FhZGEzYWYxNDJlY2Q0NTBlOTgiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjQyMmEzNDc1YWU0ZmQ3ZGY3ZmE0OWFhNzY3YzcyMzM5ZTJlMGU2MGY4NzNiZDg4ZTBhYTQxZTFkYTZkMzU0MjIiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImIzZGJlMGQ4YjI3NjA0YWQ1NWI3ODkwMGZmNzdmYWMxNThmMjBhNDY3MDk5NzUyZTFmNjNiNDM0Nzg5NTdhZmQifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_2c477617f0dc41c0a9b3353808c8015f",
+      "statement": "converse(cache_system=True) は system ブロックの末尾に cachePoint を足す。コスト推算は jp./us. 接頭辞つきモデル ID の前方一致の価格表で行い、cache read は入力単価の 0.1 倍、cache write は 1.25 倍、新規入力は inputTokens からキャッシュ分を引いた値で計算する。表に無いモデルは 0.0 になる。",
+      "evidence": [
+        {
+          "resource": "repo://src/teamagent/adapters/bedrock_client.py#L195-L219",
+          "version": "repo-lines-v1:sha256:677785475518e37463a88b2885ba9f0376d9bf155a10ce007007558ff55d3813:eyJzZWxlY3RlZExpbmVDb3VudCI6MjUsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjI0OGRmZmU3NmU1M2YyYmY2ZDg0NDJmNWZmMDBkNWY5Y2U5OWFiYmNmYzhhMjc0ZTExNWIzNzVkNTA1ZTZlOTMiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjllM2FmOGRiNTgyMjJjODRjYzBkNDAzMWZhMTZiMjA3ZTgyNDAzYmJkYjgxYTVlZmQ2NmJkMGIyZDcwOThhMGYiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjBmMGE0N2YxNzA2MzA5YjAyMGU0NGIyYWM4ZmRlZjAwZjA5YjJjOWRkMzliNDc2OTJkZjczYjJmOTdiZWZjZTciLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjQwY2Q3YzllYjM0ODdkN2QzY2RlMGVmM2IwZjg2ZTZkMzUzZTUwY2YxODg2YThlZDFhOTM0YTc4ZmJlYWMzODgifQ"
+        },
+        {
+          "resource": "repo://src/teamagent/adapters/bedrock_client.py#L368-L374",
+          "version": "repo-lines-v1:sha256:729a3ddd4f36bb9581c8a7886f1b8a9606f4c866afbbe31ad1c6ab96f9d2610e:eyJzZWxlY3RlZExpbmVDb3VudCI6NywiZmlyc3RTZWxlY3RlZExpbmVIYXNoIjoiOGNkZmJkNjFmYzUyYWQ4ZjMzM2VhM2RjNzdhZTJhYzA4MWQ3MDY0NmJjZGRhYjA3N2NmOTJjZDFlNjdhMThkMCIsImxhc3RTZWxlY3RlZExpbmVIYXNoIjoiM2Q2ZWU1MmQwNmY2MDljMjhkNWNhMDVmNzgyMDBjZjVkNDc1YWIxNDQzNjU4NjdmMTkyYjI3YTRjMjUwZGQ2MyIsInByZWNlZGluZ0NvbnRleHRMaW5lQ291bnQiOjMsInByZWNlZGluZ0NvbnRleHRIYXNoIjoiMDE2MmVjNzBlNjNmYWQ1MzgxMTFiOTc5Njg0MmE2YzE3N2M2ZDVmOWY2ZWZhNmU3NjMxNDlkZWRjYThhZDQwNCIsImZvbGxvd2luZ0NvbnRleHRMaW5lQ291bnQiOjMsImZvbGxvd2luZ0NvbnRleHRIYXNoIjoiYzBlZjRkMWQ2NjM5MGExNTc1ZWFhMzE5MGUwNDg0MGE0YmQ4ODBlNzAxODZmMDAzMjUzMjhmODA0MjMzMDNjZCJ9"
+        },
+        {
+          "resource": "repo://src/teamagent/adapters/bedrock_client.py#L97-L103",
+          "version": "repo-lines-v1:sha256:7bd717d23482f35b7c043b3ddee9efd797fe79cbcecf17a11a0b495aca718164:eyJzZWxlY3RlZExpbmVDb3VudCI6NywiZmlyc3RTZWxlY3RlZExpbmVIYXNoIjoiNzZhNzFlMDYyZTdjZTRjZDYxY2ViM2FmMzc4NWE0NzkzY2MzMTg1ZDNhYWU0NmVkNmU5OWEyMWM0Yzk5ZjhkMSIsImxhc3RTZWxlY3RlZExpbmVIYXNoIjoiNDEyY2EzNDVjY2Y3NWJmOWMwODA2YmNlNjk1YmU4ZGU4MDhiNzk5ODQyNTFhN2E1NGQyMDJjZjYxMDFkZDQ1MSIsInByZWNlZGluZ0NvbnRleHRMaW5lQ291bnQiOjMsInByZWNlZGluZ0NvbnRleHRIYXNoIjoiNTdjZmQ5NzNlYzc2ZTYxNmZmOTEzZGMwODJlYTRjMzllZDlmODViNzAxMjIxYzM0NDMzY2NhYTY3ZTg5ZGZkMCIsImZvbGxvd2luZ0NvbnRleHRMaW5lQ291bnQiOjMsImZvbGxvd2luZ0NvbnRleHRIYXNoIjoiNzBjZTNmMjRhYjQ3YzJmNWE5ZDMzN2YzNzdlZDg1NzNmYTU2NTg0MDc2NDAyZjFhZjA1NGEzZGVkNjE5NDYyZiJ9"
+        }
+      ]
+    },
+    {
+      "id": "claim_b1504279201f4f9cbc0790bdec803128",
+      "statement": "Bedrock の各呼び出しは cost_usd を含む構造化ログ（bedrock_converse など）を出し、CloudWatch の metric filter `{ $.cost_usd = * }` がキー名で拾って app ロググループでは BedrockCostUSD、mcp ロググループでは McpCostUSD として合算する。",
+      "evidence": [
+        {
+          "resource": "repo://infra/terraform/cloudwatch.tf#L45-L57",
+          "version": "repo-lines-v1:sha256:fa70bd4448634575e2c569b6f7a1a5926df47d2d67bbfe7b4930847eb4971875:eyJzZWxlY3RlZExpbmVDb3VudCI6MTMsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjIyNjI5NjQ3MDRlYzQ4NTIzYTBlODgwNzZkOTkyMmNiYjNiZDJhMjJjOWU3NGNhOWNkNjFiZmVlNTU1NjEwNzkiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjI3ZTU3ODhkNWQ5ZDczZDI0YTgxZGJjMGE1YTc0YmZhODJjOWMzYjNhZjk5ZTUyYWY3OTZlOTBiNDY4YThhM2QiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjQyZGRhYjU5YWQyMWJiMzkwNzlmZDY1NGE3MzBjZjQ2MmVmNGY1MDEwYjVkNjRhYWE4N2U4YWRkMmMzOWYyMTAiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjIzMTQ0OTU5ZDMzZjZhNGNhNmIxMGMzNWQ1MGQyYWViNTljMzRlZmE5MGRjOGZjYTYxZjgyMzQ5NmUxZTkxOTkifQ"
+        },
+        {
+          "resource": "repo://infra/terraform/cloudwatch_fargate.tf#L37-L48",
+          "version": "repo-lines-v1:sha256:29b2550c25817b9ba868ccae8b361591c4b22378c7d7ce91271fb600a22478e5:eyJzZWxlY3RlZExpbmVDb3VudCI6MTIsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjY2ZDQ1MTlkMzgzYjVmMzE5ZTNlMzU1YjE2NDNhMDE3YmRiZmRmNzQwODFhMTMyMzczMWY2NTIwYTE5OTc5ZDAiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjI3ZTU3ODhkNWQ5ZDczZDI0YTgxZGJjMGE1YTc0YmZhODJjOWMzYjNhZjk5ZTUyYWY3OTZlOTBiNDY4YThhM2QiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImZiNTgwZTk2NGY4M2E0NzNmNDNkNDQzODQ2Mjk0OWQ2OGI1NjAwZmRhNzg3ZjE2Mzc0NWQwMGRlODljYmYzNmEiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImE2YTUxNjY0MjA3ZWZjNjY1Njg2MGM5ZGJmOTNlNmEwODY1NmU0ZDc3YzJjM2Y5OWEyODFlY2M1MjYxYjA5YmYifQ"
+        },
+        {
+          "resource": "repo://src/teamagent/adapters/bedrock_client.py#L409-L420",
+          "version": "repo-lines-v1:sha256:621a60059015fd98df03bec65315ac5c2180008a7f55e469d2cf82da5944ff72:eyJzZWxlY3RlZExpbmVDb3VudCI6MTIsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6ImU2ZjRjYmUwZjAxYzg3NGM5NWMyNTZhNjllNTIwNzVhOTI4MjZiYTdhYWMyNDQ2ZDcxNzNjZjJmN2Y4MjhhNDUiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjU5MDlhNTNhNjE4ZDAyOGUxZDMwMDBjMGE3YWJjZWVjYmU1ZmIzN2Y0ZTUxMWVmZTQ2NjQzZmFkNmU2Njg3MmYiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjgxMWIwNzRhZTAxZDQxMDU2YWUzMTViOGZjOTJlMDYzYjExOTBjYWJlOWE2NDIyNDFlYmYxMzk3YmQ3YTRkY2EiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImE5MWEyZjkxMjBhODEwNmQ3ZGJiN2NkN2IzNjYyYWYxN2E2YTA2MzlmYmE0NzEzYTAwYWE3ZjNlNmFiMmUwNmIifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_eabb0d8cd7994813a5f872baa5e6cc1c",
+      "statement": "call_with_retry はフルジッタの指数バックオフで再試行する。RateLimitPolicy を渡すと 429 を別の回数で数え、deadline_s を渡すと経過時間＋次の待ち＋attempt_timeout_s が上限を超える時点で打ち切る。回数を使い切ったら最後の例外をそのまま投げ直す。",
+      "evidence": [
+        {
+          "resource": "repo://src/teamagent/adapters/retry.py#L110-L162",
+          "version": "repo-lines-v1:sha256:11748108519dce54830640a2881503d3f86ee9a2fbe563a4ae86f1cf1973b018:eyJzZWxlY3RlZExpbmVDb3VudCI6NTMsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjJjMjQyYTM3OWZiZjhmN2E3YWY1MDc2NTRkYTg5ZmE2YzkwYjVjZjE2NTA2NTBlNGY0YTVlNDIzNjdhODM0NDEiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjhhYTBiNGQ1ZjIxNjE3ODRlOTA5MzFkNGI4ZDk3ZjIzODYwMDFjMTQ4MGM2ZjkwY2QxZjZhOTc4NWYxYWZmM2EiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImQ1NWYyNGE1M2Y1MGQ1MDQzMDJjY2RlYTcwMTQyZDU5MTEzNDgzMmMyZGJjYWY2ZGU1Nzg0YmM2ZjI5MGY0MDMiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImY3NDYzZDI0OThjNGRiNWEzMjU4MmE0MTljYmZmYmZhZjMwNzM2MTQ3NzNkNDgwMDcwNTkyOTE5MzhhN2NjNzAifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_d697b4c3cb794bfeaf9c182a1b26c4d2",
+      "statement": "Gemini の既定モデルは gemini-3.5-flash、ロケーションは global。resolve_location は gemini-3 系に地域ロケーションが指定されていても global に読み替え、warning を出す。",
+      "evidence": [
+        {
+          "resource": "repo://src/teamagent/adapters/gemini_client.py#L226-L245",
+          "version": "repo-lines-v1:sha256:62781f0fe0730398732cd7357098148c6e8647688b8ea2d88850a669b1bf3377:eyJzZWxlY3RlZExpbmVDb3VudCI6MjAsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6Ijc5MzBiMjNlMjE4OGM4MzljNDAxYzllZjRiYjljY2VkOTc3NjU2ODk2NDYzNWYxMjhkZmQzYTBhMWM1N2Y2M2QiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjYzOWY2YTBlN2FkYjVkOGM3NDNkMjMzMjM0MDI1NzhmMzIwNTAwZDBlZDVjMDlmMzExMjIyNzBlYjkxYTk2ZjYiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjJkZThhZjM5NTliNDRhMWViNDNiNmVmNWI0ZTcwOTIxMjFkNThjYzIxZWZkMmM5ZTEwZTk4NWI2MDI0ZjVmYjkiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImJiMzljMDg4ZjVjZGU4M2ZhNjdhN2NiMmM3ZGZhYWZjOTk2NmI0YzY4ZDY4YWJiMjI4MDBlYjc2OWI4NTVmZjUifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_f739458f24d0490d83914f13cb1399be",
+      "statement": "Google 検索グラウンディング呼び出しは、通常の失敗を既定 2 回、429 を既定 8 回まで再試行し、deadline を timeout_s × 試行回数 + 4 秒にする。コストには thinking tokens を出力として含め、出典 URI が付いた場合は 1 回 0.035 USD を加える。",
+      "evidence": [
+        {
+          "resource": "repo://src/teamagent/adapters/gemini_client.py#L447-L486",
+          "version": "repo-lines-v1:sha256:6a8bcd04dfadd1ac38947148bfd52fa1c978bcfbd6a217871a395ef5dc6980fe:eyJzZWxlY3RlZExpbmVDb3VudCI6NDAsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6ImE4YTIxZWIxMGIxYWNkNzIyMmFkOTk1YzU3YTVmN2FlNTNkYzk4MTE1MTZkMTNkYTQ1Y2I5OTA3ZDYyYjIxODAiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjU1MDMyZTk2NGQwOTMyMzUxZTVkMTg1MjY5MjgxYjE3MWEzYTA5YjA4YjI4NmU2NjFlYTQ3MDMyM2M4MmViNGQiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjUzZTgxZmZlMGQ4YjgzMDQzN2VlZTk3YzZkMWZhYjkyMzYzODE4NTljZTI0YWI3Y2EyYTBhMDkyNDFhMDU2Y2MiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6Ijc4M2M4MzZmNGE3NzI2OWIwY2NlZjFkMmUzNmRhMjQxODk4MGQ0YzY5Nzk2Nzg2MzgyZmQxNDYzNDU1OTQ2ZTMifQ"
+        },
+        {
+          "resource": "repo://src/teamagent/adapters/gemini_client.py#L503-L508",
+          "version": "repo-lines-v1:sha256:d0fe64d10e1871bf061b637f93b16a4c66629b5f9da6ea054b2faa07d6a8a83b:eyJzZWxlY3RlZExpbmVDb3VudCI6NiwiZmlyc3RTZWxlY3RlZExpbmVIYXNoIjoiOTRmNTZmZmY4NWI3NjUwMjNjNDk4YzIxODVlNjUyZWQ0NmFiMGVhNjU3ZmQxNjkxNmNiNjQ0ZTQxZTM0MDk2OSIsImxhc3RTZWxlY3RlZExpbmVIYXNoIjoiNTkwOWE1M2E2MThkMDI4ZTFkMzAwMGMwYTdhYmNlZWNiZTVmYjM3ZjRlNTExZWZlNDY2NDNmYWQ2ZTY2ODcyZiIsInByZWNlZGluZ0NvbnRleHRMaW5lQ291bnQiOjMsInByZWNlZGluZ0NvbnRleHRIYXNoIjoiZGJiYTJkODhhOWViODgzMzViMzdlY2QxYTM5NmNkM2FiZTZmOWZmZmJmNWYwMmY2NTUxN2I4YTlkMzQzOGU3MCIsImZvbGxvd2luZ0NvbnRleHRMaW5lQ291bnQiOjMsImZvbGxvd2luZ0NvbnRleHRIYXNoIjoiOWNiM2MyODdlNDJlOGM2Njc4NGUwN2FjN2RkMzhkMWNmMjVlOGEzYmMyMjVjMDM2MDRkNjJkMmI0ZTdhNDMzOCJ9"
+        }
+      ]
+    },
+    {
+      "id": "claim_addc15129d0b4c439ff89d3d765fa970",
+      "statement": "build_embedder_from_env は埋め込みの唯一の構築点。EMBEDDER_BACKEND（既定 local）と EMBEDDING_COLUMN（既定 embedding）の組み合わせは local⇄embedding と cohere⇄embedding_cohere しか許さず、それ以外は ValueError で起動時に止める。列名は allowlist で検査する。",
+      "evidence": [
+        {
+          "resource": "repo://src/teamagent/adapters/embeddings_client.py#L243-L299",
+          "version": "repo-lines-v1:sha256:5f303c33cca10767b29325b4386972bd260768c514fbc8fccd82223893f6f853:eyJzZWxlY3RlZExpbmVDb3VudCI6NTcsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjhmZGI1ODZlMzVkMzJjNzA3M2JmOGQwOGJlZTY3OWIxZjkzNDEwZWRmZWQwODBkMWY2OGM3MjVmODFjN2ZlZDYiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6ImM2OTU5NGJiYzY4OWMyZGM3MjkyMDFlNzU4ZWJiYzgwNTU3YzJiZjFhZTM1NzgyYjYzZTVmZDJmNjRjMzNhZWYiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjA0MzFkYWFhMzEyNTY1Mzk2ZGQ0NzY0MDhkZTA2OGNmOTI4ZTc5MGEwNjRhZDFiNGVlN2VkYzY0Y2Y2ZGVkOWQiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjowLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImUzYjBjNDQyOThmYzFjMTQ5YWZiZjRjODk5NmZiOTI0MjdhZTQxZTQ2NDliOTM0Y2E0OTU5OTFiNzg1MmI4NTUifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_93ef344937514614afd01bae46cfba77",
+      "statement": "VideoQuotaStore.try_consume は video_usage への条件付き UPSERT 1 文で、判定と加算を原子的に行う。count が上限を超える要求は DB に送る前に拒否し、DB 障害時は allowed=True（used=-1）の fail-open で分析を止めない。",
+      "evidence": [
+        {
+          "resource": "repo://src/teamagent/adapters/quota_store.py#L123-L147",
+          "version": "repo-lines-v1:sha256:d85f285eea148ff11245d96c85e2d9ca2b71dcb7e16677f73d84ae17130fe163:eyJzZWxlY3RlZExpbmVDb3VudCI6MjUsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6ImQxZGRkNzNhZWMxOWY5ZTZmZjZjNDBkYjRmNmQ4MGI0ZDcwNWYzNzEwMGFhODgzMzQ1ODMyNDg5N2ZhMDM2ZTgiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6ImYzYmE5OWQ0ODc1ZDA1NDE0MWE2NjYxYjE5MmM4YTBiZTYxYjEwMjNkMWU1ODE1MDEyMDgyY2QwMTRjYzk1YmEiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImRjM2YxODgzYmZlODc5NmNiNzRhYWRiYWU5YjE2OWFlNjlmMTUwMjdlNGIxOGIwOGIyOTM0NWI2MGJmYzAxYWYiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImZkNDFkYWU1YWY1YjU4NDZhY2FkZDMzZTYyZjU4MTdkNTY5ZjkxN2Q1YzMwNDBhMzdhMmEyYzQwYmNlODc1MzAifQ"
+        },
+        {
+          "resource": "repo://src/teamagent/adapters/quota_store.py#L149-L190",
+          "version": "repo-lines-v1:sha256:fe218985b6592252a2132501a031f0052e9239621ad93b7a25e2f4d5712cdf1b:eyJzZWxlY3RlZExpbmVDb3VudCI6NDIsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6ImI1NjljYjA5MjgwZWUwNzgxOTQ1ZTQ4ZDQwNDFiZDJkZmFhZTY5MWFkMmVhYmY1ZDNjYmEwODQ2YzcyMTZjYWEiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjcwYTU4ZTIyNDQ0NWM4YjlkYTIwZDQzNTJiZTgxY2QzODUwNzFjNWEyYmZmOGQ3MGRiMDRmMGNjMzA4ZDViMGQiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImFhMTY0NTU1MGQzZDNmMjU4MDMxY2NiMjliMzVlMzZjZWY2ZDg4ODQ2Njk5NmRkMzc5MDU2YmYzMzMxNDNlMmMiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6Ijc2ZDAyOTMxYzg4ODc0NmM1ODYzNjBkYmFlOGNjNDhhZDAxY2JmYmIzMjMzZTk4OTFjNTMyZDFiM2YwYzQyNGEifQ"
+        },
+        {
+          "resource": "repo://src/teamagent/adapters/quota_store.py#L30-L37",
+          "version": "repo-lines-v1:sha256:7fc00a3c92e8757a75a6eb1e56a8c95d8618fa5342e83219a408b40b049a52b6:eyJzZWxlY3RlZExpbmVDb3VudCI6OCwiZmlyc3RTZWxlY3RlZExpbmVIYXNoIjoiYmFkM2I1NGQ5OGFhMzA2MTdmNWM5OWQwNzc5N2Y5YjZhZjBkMTAyMDUxOTM2ZjQ5OGU3OWQ0MzQ4MWNjNDI5MyIsImxhc3RTZWxlY3RlZExpbmVIYXNoIjoiYTMwM2VjZGQ0YTRkMTBmMTljNzNmZDQyZmQxMjQzN2ZkMzM1NGE4MjY4MTYwNWRhNTI1NWE5N2EzOTA2OGRiYiIsInByZWNlZGluZ0NvbnRleHRMaW5lQ291bnQiOjMsInByZWNlZGluZ0NvbnRleHRIYXNoIjoiYzQ2MzcwZmM1N2Q3ODFjNTAxMGUzZTNiODMwOTMwZjUwMzhmOWZmNzUyNjhkOTA1ZTJlMTlhY2UxYzA5MTUzYyIsImZvbGxvd2luZ0NvbnRleHRMaW5lQ291bnQiOjMsImZvbGxvd2luZ0NvbnRleHRIYXNoIjoiZDQwY2IyMjQ4ZGRkYmY0ODkwNWM5N2M5OTY0ZDgzODIxMTNmN2MxYjA5Mzg3ODExNDkyZDQ1OWRiZGExZjgyYyJ9"
+        }
+      ]
+    },
+    {
+      "id": "claim_9e153f38884248f891dc6fdbf1b18e95",
+      "statement": "CostGuard は COST_GUARD_TABLE が空なら無効（None）。reserve は DynamoDB の条件付き ADD で概算額を原子的に予約し、上限超過は CostLimitExceededError（fail-close）にする。個人枠の予約に失敗したら全体枠を戻し、DynamoDB の障害は fail-open（予約なしで続行）にする。",
+      "evidence": [
+        {
+          "resource": "repo://src/teamagent/adapters/cost_guard.py#L134-L151",
+          "version": "repo-lines-v1:sha256:50613f31e7a0ea895d1cb359cf0e0cd4f71ac6aa8fabf30eee47ca5d39685121:eyJzZWxlY3RlZExpbmVDb3VudCI6MTgsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjVlYmVlZGY4ZDg4MmYxNWEwYjM1N2VkYzdhNDJjNWMzYmEzN2ViN2EzOTdkZjM4YTU2YTQ0ZDdhY2Y1N2JiOGMiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6Ijk0MTRhNDViNjE5ODQ4NGFjOGM5MWY1ZGM3NDY4YTNmZWYwMTI4OTBhZWExYTg2OTgyN2EyZmFhYzk1ZmUzMGEiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImYyNGRlOGRiYzU4YmIyMmRjNDIzNjhlODY3MWMyNmJhOWQ1NGVhZmEzZWE5OWJkYzM2N2ZlZmFiOTJhMzE2OTEiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjM5MDY0YzJmOTk5YjViZjUxYzQ0ZjJlZTdmNDk4MDBlYmEzNDQwMWMwZDIxYzA5ZWY1NTE0MjZhNjAwNmMxZjIifQ"
+        },
+        {
+          "resource": "repo://src/teamagent/adapters/cost_guard.py#L259-L291",
+          "version": "repo-lines-v1:sha256:1cc913dbaa6560f9764d203bc8499bf5a412942f15fd1a33f6081d14468fdfcc:eyJzZWxlY3RlZExpbmVDb3VudCI6MzMsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6ImNmNWMwNzllNTNhOTQ5NTQxMjc5ZTllNzIxOGMxNDJiOWYyNzliMGFmOTU1NDEzMjUwYzE4MDUzN2FkMmZlMjAiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6Ijk1NWU3ZThlZTg4ZTg0ZDFiNjU5NzBkNmIxMzNhY2ZlMDYwYjgzM2E0ZTQ5ODQ2MTViOTY4ODBjMTcwYWI5NmYiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImM4ZmU0ZDIxZjFlODQ1Zjc4NmUyMGE1ODQ1MTk0YzIzNDFmZWU4ZDIzNzQ5YjZlZjNlM2IwY2UyODdiY2ZkNjYiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjFhOTk3M2UyNWNmZDFjYTc5ODQ3MmMyNTUxMmZjMTU2NDM0ZmM0ZDExMTQ0ZWFiM2U2ZTEwNzdlYzlmMzQxM2EifQ"
+        },
+        {
+          "resource": "repo://src/teamagent/adapters/cost_guard.py#L292-L331",
+          "version": "repo-lines-v1:sha256:5ee9df3feffe2ee8e053e32c681a6fa9da8494c6bef44707b6881addda7c6823:eyJzZWxlY3RlZExpbmVDb3VudCI6NDAsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6ImNjODRlY2ZiNDBlZjU5OTgyNTE4NzVmMWE4OGU2NWFhNjA0YmFiNzkwNjA5YjdmN2FhYmYyMzE2OGNmOWYyNjEiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6ImI0ZjMwYjY1NTY4NTc3YTk4ZmVmOGE2OTBmNThiNGRhOTQ2MmJiMzhmZTE3NWI5YWExMTFlN2RkZDNmMmQ2NjYiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImYwMjI1ZWM0YjVjNjlhODAwNmNkNWVjY2E3MmY2OGI4NzIxMDI5ZWViYjhiOTdlMGY2ZTQ1NGNhYTUzNTVmOWMiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImFiMTk1NTI1YzI0ZGMxNjZjOTdiYTI2MTNkYjI5NDRiMzRhYzY5YWFiMmQxMDI3MGJlNmUwNWMxYjBmNjRiMmQifQ"
+        },
+        {
+          "resource": "repo://src/teamagent/adapters/cost_guard.py#L80-L86",
+          "version": "repo-lines-v1:sha256:f4d50d45c23dac09ab58866db63d834773f41ade10f2faed3967659912212d23:eyJzZWxlY3RlZExpbmVDb3VudCI6NywiZmlyc3RTZWxlY3RlZExpbmVIYXNoIjoiODIwYjQ1M2Y1ZTBjOTJkNWY2YzI1MWE1ZWExOTYwZDcyZjNiZDA3OTU2YWU4NTdkYTIwZTMxYTg4YzU1OTY5ZiIsImxhc3RTZWxlY3RlZExpbmVIYXNoIjoiODZmMjAyOGRiYjFlY2Y0ZTA1Mjg4N2RkMWMxNmFiYmI0MzliNjNhMWUwNjgzZmY1OTBkZGM5MTY4NTA5ZGUxOCIsInByZWNlZGluZ0NvbnRleHRMaW5lQ291bnQiOjMsInByZWNlZGluZ0NvbnRleHRIYXNoIjoiNjA5OWZlOTJkNTRkN2I5OTU0Mjc3ODBlNzhmMmUzOWIzNjI0ZGM2M2IxYzdjZDUzNmE4MDBjZDdhNzNkNDc5NSIsImZvbGxvd2luZ0NvbnRleHRMaW5lQ291bnQiOjMsImZvbGxvd2luZ0NvbnRleHRIYXNoIjoiZTg2ZDU5NmQ3ZTJhOWZjOTIyNDgxMjc2YjcwMmMwMzRiODc3NTk2ZjlkMzRjMzE3Y2Q2ZjY1YmMyZTdjNDVkZiJ9"
+        }
+      ]
+    }
+  ],
+  "verification": {
+    "by": "openwiki/0.6.1",
+    "at": "2026-09-29T07:51:05.076Z"
+  }
+}

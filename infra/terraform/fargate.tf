@@ -676,14 +676,17 @@ resource "aws_ecs_task_definition" "mcp" {
       # per-user OAuth は RdsTokenStore（昨日復旧した connect.newstv.co.jp 経由 token）を使う。
       { name = "USE_MAIL_SUMMARY_TOOL", value = "true" },
       { name = "USE_FOLLOWUP_TOOL", value = "true" },
-      { name = "USE_MAIL_LINK_TOOL", value = "true" },
+      # 2026-09-30 小俣さん裁定: 30 日間呼ばれていないので公開から外す（ツール定義の固定トークンを減らす・#491）。
+      { name = "USE_MAIL_LINK_TOOL", value = "false" },
       # §U-Part3-Step C: 返信下書き生成（gmail.modify drafts.create のみ・送信は人間）。
       # G4' で send/delete は denylist 物理封鎖（mail_reply/skill.py）。
       { name = "USE_MAIL_REPLY_TOOL", value = "true" },
       # 朝ダイジェスト Skill。EventBridge Scheduled Task（平日 9:30 JST）が
       # scripts/run_morning_digest_fargate.py 経由で呼ぶ。mention-capable MCP runtimeでは
       # 自動draft作成を常にfail-closedにし、明示ボタン経由のmail_draftだけを許可する。
-      { name = "USE_MORNING_DIGEST_TOOL", value = "true" },
+      # 2026-09-30 小俣さん裁定: mention 経由の口は 30 日間 0 回なので外す（#491）。定時の朝ダイジェストは
+      # morning-digest の TD（EventBridge）で動くので影響しない。ボタンは mail_draft / schedule_propose を使う。
+      { name = "USE_MORNING_DIGEST_TOOL", value = "false" },
       { name = "DRAFT_ON_DEMAND_ONLY", value = "true" },
       # 朝ダイジェストの「✏️下書きを作成」ボタン押下処理ツール。固定 OpenClaw runtime の
       # Slack interactive handler が署名済み押下 identity/token/message を先に捕捉し、同じ
@@ -700,6 +703,10 @@ resource "aws_ecs_task_definition" "mcp" {
       { name = "USE_CALENDAR_FREEBUSY_TOOL", value = var.use_calendar_freebusy_tool ? "true" : "false" },
       # slack_summary: Slack スレッド要約（read-only・本人 xoxp のみ・bot token 不使用・既定 false）。
       { name = "USE_SLACK_SUMMARY_TOOL", value = var.use_slack_summary_tool ? "true" : "false" },
+      # slack_search: Slack 全体のキーワード検索（read-only・本人 xoxp の search.messages のみ）。
+      # チャンネルでの依頼は公開チャンネルの一致だけ返す。まず TD の env で小俣さんが試験し、
+      # その後 true にする（それまでは false 固定・変数化はしない）。
+      { name = "USE_SLACK_SEARCH_TOOL", value = "false" },
       # attachment_assist: 会話に添付されたファイルの読取・加工（要約/修正案/議事録FMT/集計/英訳）。
       # 読取のみ（テキスト返答だけ・ファイル生成/再配信は P2 の別フラグ）。既定 false。
       # 解禁は 4 点セット: この env / effective-tool-scope.json / 契約テスト / OC イメージ再ビルド。

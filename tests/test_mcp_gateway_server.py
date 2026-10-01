@@ -91,9 +91,38 @@ def test_list_tools_includes_user_context() -> None:
     props = echo.inputSchema["properties"]
     assert "q" in props  # 元スキーマ保持
     assert USER_CONTEXT_KEY in props  # RLS コンテキスト口を付与
-    assert "user_email" in props[USER_CONTEXT_KEY]["properties"]
-    assert "slack_team_id" in props[USER_CONTEXT_KEY]["properties"]
-    assert "caller_claim" in props[USER_CONTEXT_KEY]["properties"]
+    # 2026-09-30: 中身は caller-identity plugin が丸ごと置き換えるので、宣言は最小にする
+    # （34 本で約 2.7 万トークン）。required には入れない（2026-08-26 の全ツール障害）。
+    assert props[USER_CONTEXT_KEY] == {"type": "object"}
+    assert USER_CONTEXT_KEY not in echo.inputSchema.get("required", [])
+
+
+def test_list_tools_strips_titles_and_model_docstring_but_keeps_arg_named_title() -> None:
+    """pydantic の title と最上位の description（docstring）は落とし、引数名の title は残す。"""
+    from pydantic import Field
+
+    class _In(BaseModel):
+        """開発メモ: この docstring はモデルに見せない。"""
+
+        title: str = Field(description="予定の件名")
+        nested: list[dict[str, str]] = Field(default_factory=list, description="入れ子")
+
+    class _TitleSkill(BaseSkill[_In, _EchoOutput]):
+        name: ClassVar[str] = "t"
+        description: ClassVar[str] = "ツールの説明"
+        input_schema: ClassVar[type[BaseModel]] = _In
+        output_schema: ClassVar[type[BaseModel]] = _EchoOutput
+
+        def run(self, input: _In, ctx: SkillContext) -> _EchoOutput:
+            raise NotImplementedError
+
+    schema = list_tool_defs([ToolSpec("t", _TitleSkill.description, _TitleSkill)])[0].inputSchema
+    assert "description" not in schema  # docstring を落とした
+    assert "title" in schema["properties"]  # 引数名の title は残る
+    assert schema["properties"]["title"]["description"] == "予定の件名"  # 引数の説明は残る
+    dumped = json.dumps(schema, ensure_ascii=False)
+    assert '"title": "' not in dumped  # 表示名としての title は 1 つも無い
+    assert "開発メモ" not in dumped
 
 
 async def test_fail_closed_without_user_email() -> None:
@@ -690,3 +719,102 @@ async def test_dispatch_progress_off_no_slack_calls(monkeypatch: pytest.MonkeyPa
     )
     assert out["answer"] == "hits for x"
     assert fake.posted == [] and fake.deleted == []  # OFF なので何も送らない
+
+
+# ── 例外文の長さの上限（2026-09-30・Aico の DM の context overflow） ──────────────────
+# 本番 09-29: proposal_builder_submit の skill.run が ValidationError を投げ、その全文（大量の
+# エラー行と input_value）が S3 退避の対象外のままモデルへ返って、DM が上限 200k を超えた。
+# OpenClaw 側の toolResultMaxChars は受け取った直後の同じターンのモデル呼び出しを守らないので、
+# 最初の 1 回を防げるのはこの層だけ。
+_SECRET_INPUT = "入力本文の目印" * 2000
+
+
+class _WideInput(BaseModel):
+    """フィールドが多い入力（検証エラーが大量に出る形）。"""
+
+    items: list[int]
+
+
+class _NestedValidationSkill(BaseSkill[_EchoInput, _EchoOutput]):
+    name: ClassVar[str] = "nested_validation"
+    description: ClassVar[str] = (
+        "skill.run の中で大量の ValidationError を投げる（本番 09-29 の形）。"
+    )
+    input_schema: ClassVar[type[BaseModel]] = _EchoInput
+    output_schema: ClassVar[type[BaseModel]] = _EchoOutput
+
+    def run(self, input: _EchoInput, ctx: SkillContext) -> _EchoOutput:
+        _WideInput(items=[_SECRET_INPUT] * 50)  # type: ignore[list-item]
+        raise AssertionError("unreachable")
+
+
+class _HugeMessageSkill(BaseSkill[_EchoInput, _EchoOutput]):
+    name: ClassVar[str] = "huge_message"
+    description: ClassVar[str] = "巨大な例外文を投げる。"
+    input_schema: ClassVar[type[BaseModel]] = _EchoInput
+    output_schema: ClassVar[type[BaseModel]] = _EchoOutput
+
+    def run(self, input: _EchoInput, ctx: SkillContext) -> _EchoOutput:
+        raise RuntimeError("x" * 100_000)
+
+
+_LONG_SPECS = {
+    s.name: s
+    for s in [
+        ToolSpec("echo", _EchoSkill.description, _EchoSkill),
+        ToolSpec("nested_validation", _NestedValidationSkill.description, _NestedValidationSkill),
+        ToolSpec("huge_message", _HugeMessageSkill.description, _HugeMessageSkill),
+    ]
+}
+
+
+async def test_skill_validation_error_is_summarized_without_input_values() -> None:
+    """変異: server.py の skill 例外の経路を ``f"{type(e).__name__}: {e}"`` に戻すと赤。"""
+    out = _parse(
+        await dispatch_tool(
+            _LONG_SPECS,
+            "nested_validation",
+            {"q": "x", USER_CONTEXT_KEY: {"user_email": "a@b.co"}},
+            require_rls=True,
+        )
+    )
+    error = out["error"]
+    assert error.startswith("ValidationError: 50 validation error(s) for _WideInput\n")
+    lines = error.split("\n")
+    # 見出し 1 行 + 先頭 10 件 + 残りの件数 1 行。
+    assert len(lines) == 12
+    assert lines[1].startswith("items.0: ")
+    assert lines[-1] == "（ほか 40 件）"
+    assert "入力本文の目印" not in error
+    assert "errors.pydantic.dev" not in error
+    assert len(error) <= mcp_server._ERROR_TEXT_MAX_CHARS
+    assert "request_id" in out
+
+
+async def test_skill_exception_text_is_capped() -> None:
+    out = _parse(
+        await dispatch_tool(
+            _LONG_SPECS,
+            "huge_message",
+            {"q": "x", USER_CONTEXT_KEY: {"user_email": "a@b.co"}},
+            require_rls=True,
+        )
+    )
+    error = out["error"]
+    assert error.startswith("RuntimeError: xxx")
+    omitted = len("RuntimeError: ") + 100_000 - mcp_server._ERROR_TEXT_MAX_CHARS
+    assert error.endswith(f"…（以下 {omitted} 字を省略）")
+    assert len(error) < mcp_server._ERROR_TEXT_MAX_CHARS + 32
+
+
+async def test_invalid_input_does_not_echo_input_value() -> None:
+    """入力検証（spec.input_schema）の失敗も input_value を返さない。"""
+    out = _parse(
+        await dispatch_tool(_LONG_SPECS, "echo", {"q": [_SECRET_INPUT]}, require_rls=False)
+    )
+    error = out["error"]
+    assert error.startswith(
+        "invalid input: ValidationError: 1 validation error(s) for _EchoInput\n"
+    )
+    assert "q: " in error
+    assert "入力本文の目印" not in error

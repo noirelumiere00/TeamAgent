@@ -90,6 +90,70 @@ def test_search_failopen_on_exception() -> None:
     assert reader.search("q", "req") == []
 
 
+# ── search_checked（fail-closed 用・slack_search が使う）──────────────────────
+
+
+def _search_ok(matches: list[dict[str, object]], total: int | None = None) -> dict[str, object]:
+    n = len(matches) if total is None else total
+    return {
+        "ok": True,
+        "messages": {"matches": matches, "paging": {"total": n}, "total": n},
+    }
+
+
+def test_search_checked_maps_channel_flags_and_total() -> None:
+    match = {
+        "channel": {"id": "C9", "name": "sales", "is_private": False, "is_mpim": False},
+        "ts": "9.9",
+        "type": "message",
+        "user": "U3",
+        "username": "yamada",
+        "text": "見積",
+        "permalink": "https://x.slack.com/archives/C9/p99",
+    }
+    client = _client(search_messages=AsyncMock(return_value=_search_ok([match], total=42)))
+    reader = SlackUserReader("xoxp-x", client=client)
+    read = reader.search_checked("見積", "req", count=5)
+    assert read.error == ""
+    assert read.total == 42
+    hit = read.matches[0]
+    assert (hit.channel_id, hit.channel_is_private, hit.channel_is_mpim) == ("C9", False, False)
+    assert hit.channel_is_im is None and hit.channel_is_group is None  # 応答に無い＝判定不能
+    assert (hit.username, hit.match_type) == ("yamada", "message")
+    assert client.search_messages.await_args.kwargs["count"] == 5
+
+
+def test_search_checked_non_bool_flags_become_unknown() -> None:
+    match = {"channel": {"id": "C9", "is_private": "false", "is_mpim": 0}, "ts": "1.1"}
+    client = _client(search_messages=AsyncMock(return_value=_search_ok([match])))
+    hit = SlackUserReader("xoxp-x", client=client).search_checked("q", "req").matches[0]
+    assert hit.channel_is_private is None and hit.channel_is_mpim is None
+
+
+@pytest.mark.parametrize("code", ["invalid_auth", "missing_scope", "ratelimited"])
+def test_search_checked_surfaces_slack_error_code(code: str) -> None:
+    err = SlackApiError(f"failed ({code})", {"ok": False, "error": code})
+    client = _client(search_messages=AsyncMock(side_effect=err))
+    read = SlackUserReader("xoxp-x", client=client).search_checked("q", "req")
+    assert read.error == code and read.matches == ()
+
+
+def test_search_checked_ok_false_and_bad_shape_are_errors_not_zero() -> None:
+    client = _client(search_messages=AsyncMock(return_value={"ok": False, "error": "no_query"}))
+    assert SlackUserReader("xoxp-x", client=client).search_checked("q", "req").error == "no_query"
+    client = _client(search_messages=AsyncMock(return_value={"ok": True}))
+    assert SlackUserReader("xoxp-x", client=client).search_checked("q", "req").error == (
+        "bad_response"
+    )
+
+
+def test_search_checked_empty_query_no_call() -> None:
+    client = _client(search_messages=AsyncMock(return_value=_search_ok([])))
+    reader = SlackUserReader("xoxp-x", client=client)
+    assert reader.search_checked("  ", "req").error == "no_query"
+    client.search_messages.assert_not_awaited()
+
+
 # ── read_thread_checked（fail-closed 用・error code を返す）────────────────────
 # フェイクは本番の失敗モードを再現する: slack_sdk は ok:false で SlackApiError を投げ、
 # .response["error"] に code が入る。

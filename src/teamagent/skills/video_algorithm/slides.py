@@ -9,8 +9,11 @@ report.py の自己完結ダッシュボード（縦長・動画base64埋込）�
 
 流れ（10＋n 枚。n＝動画を見て分析できた本数・サムネだけの縮退は数えない。空のスライドは出さない）:
   S1 表紙 → S2 結論 → S3 検索面の地図 → S4 ブランド露出マップ → S5 上位n本の比較
+  →（サムネ＝一覧の表紙を読めたときだけ＋2 枚: サムネの比較 → サムネの作り方）
   → S6 n本の構成比較 → S7〜 構成分解（1本1枚）→ 共通する構成の型 → クリエイティブ指示／やらないこと
   → 絵コンテ案A（→ 案B）→ 投稿設計と検証
+サムネの 2 枚の kind と CSS は thumb- で始める（資料の 1 枚目の cover と混ぜない）。6〜30 位の表紙は
+外部 URL なので画像を載せず、文字だけで出す。
 
 数字・本数・段階の名前（必須条件／多数派／事例）・区分・PR は事実層（facts / evidence）がコードで
 決める。LLM 由来の文は synthesis v3 の検査を通したもの（CrossSynthesis.version == "v3"）だけを使い、
@@ -45,7 +48,26 @@ from teamagent.skills.search_surface_check.video_structure import (
     grade_video,
     infer_roles,
 )
+from teamagent.skills.video_algorithm.cover_facts import (
+    ELEMENT_LABEL,
+    FACE_KIND_LABEL,
+    GAZE_LABEL,
+    LEGIBILITY_LABEL,
+    MATCH_LABEL,
+    POSITION_JP,
+    PRODUCT_LABEL,
+    SIZZLE_LABEL,
+    STATUS_LABEL,
+    CoverFacts,
+    CoverView,
+    GapRow,
+    code_cover_directives,
+    cover_count_short,
+    cover_line,
+    dist_text,
+)
 from teamagent.skills.video_algorithm.evidence import (
+    COVER_SOURCES,
     MIN_TIER_N,
     TIER_MAJORITY,
     TIER_OBSERVED,
@@ -102,6 +124,8 @@ from teamagent.skills.video_algorithm.synthesis_checks import (
     SYNTHESIS_V3,
     alt_type_line,
     code_directives,
+    cover_directive_count,
+    cover_directive_origin,
     evidence_text,
 )
 from teamagent.skills.video_algorithm.synthesis_input import SynthesisContext
@@ -335,6 +359,25 @@ table.bt tr.others td{{color:var(--mut)}}
 .mb{{display:block;height:6px;background:var(--color-neutral-solid-gray-100);border-radius:3px;
   overflow:hidden}}
 .mb i{{display:block;height:100%;background:var(--line)}}.mb i.mx{{background:var(--accent)}}
+/* サムネ（一覧の表紙）の比較・作り方 */
+.thumb-g{{display:grid;gap:0;border:1px solid var(--line);border-radius:10px;overflow:hidden}}
+.thumb-g>div{{padding:2px 6px;font-size:14px;line-height:20px;border-bottom:1px solid var(--soft);
+  min-width:0}}
+.thumb-g .lab{{background:var(--chip);color:var(--sub);font-weight:700}}
+.thumb-g .hd{{font-weight:800;color:var(--accent2);text-align:center;background:var(--chip)}}
+.thumb-g .cv{{display:flex;justify-content:center;padding:4px}}
+.thumb-g .cv img,.thumb-g .cv .ph{{width:74px;height:130px;object-fit:contain;background:var(--dark);
+  border-radius:4px}}
+.thumb-top{{display:grid;grid-template-columns:minmax(0,1.2fr) minmax(0,1fr);gap:16px}}
+.thumb-top .chips{{max-height:102px;gap:6px}}
+.thumb-top .chip{{padding:4px 12px;font-size:14px;line-height:20px}}
+.thumb-top .chip b{{min-width:40%}}
+.thumb-dirs{{margin-top:6px}}
+.thumb-dirs .drow{{padding:3px 0}}
+.thumb-dirs .drow figure.rf{{width:34px}}
+.thumb-dirs .drow img,.thumb-dirs .drow .ph{{width:34px;height:60px}}
+.thumb-top .box{{padding:8px 12px}}
+.thumb-top table.gap td,.thumb-top table.gap th{{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}}
 /* S6 構成比較・構成分解のバー */
 .legend{{display:flex;flex-wrap:wrap;gap:4px 14px;font-size:14px;line-height:20px;color:var(--sub)}}
 .legend .sw{{display:inline-block;width:12px;height:12px;border-radius:2px;margin-right:4px;
@@ -813,6 +856,9 @@ def _conclusion(d: Deck) -> str:
         + ("・見出しはコードの集計から作成" if by_code else "")
         + "</div>"
     )
+    thumb = cover_line(d.ctx.cover) if d.ctx.cover.any_ok else ""
+    if thumb:
+        note += f'<div class="note c1">{_esc(thumb)}</div>'
     warn = (
         f'<div class="warn">分析できたのは{n}本（極小サンプル）。断定でなく観測仮説として、'
         "テスト投稿での検証を前提にお読みください。</div>"
@@ -1178,13 +1224,260 @@ def _compare(d: Deck) -> str:
     )
     row("締め・CTA", (_esc(_cta_short(f)) for f in facts))
     what = "映る商品＝名簿の商品" if known else "映り込みのカテゴリは未判定"
+    # 表紙を読めていないときの注記は見出しの上の行に足す（下の注記は 1 行で余白が無い）。
+    thumb = _thumb_note(d)
+    kicker = f"上位{n}本の比較" + (f"・{thumb}" if thumb else "")
     return (
-        f'<div class="kicker">上位{n}本の比較</div>'
+        f'<div class="kicker">{_esc(kicker)}</div>'
         f'<h2 class="slide-title one" contenteditable>上位{n}本を同じ項目で並べる</h2>'
         f'<div class="cmpg" style="grid-template-columns:{cols}">{"".join(cells)}</div>'
         f'<div class="note c1">最多＝再生→保存率→シェアで最大（#{d.ctx.best_rank}）・青字＝各行の'
         "最大・PR?＝AI推定のみ（表記なし）・（テロップ）＝最後の10秒のテロップ・"
         f"{_esc(what)}</div>"
+    )
+
+
+def _thumb_note(d: Deck) -> str:
+    """S5 に足す表紙の注記（読めていないとき・以前の分析のとき）。読めていれば空。"""
+    view = d.ctx.cover
+    if view.any_ok:
+        return ""
+    if not view.top:
+        mode = d.out.cover_read_mode
+        if mode == "":
+            return "サムネ（一覧の表紙）の分析なし（以前の分析）"
+        if mode == "off":
+            return "サムネ（一覧の表紙）の分析は止めている設定"
+        return "サムネ（一覧の表紙）の読み取りを始められず"
+    if all(c.status == "no_cover" for c in view.top):
+        return "表紙の URL が無い取り方のため、サムネ（一覧の表紙）を読めず"
+    why = "・".join(dict.fromkeys(STATUS_LABEL.get(c.status, c.status) for c in view.top))
+    return f"サムネ（一覧の表紙）を読めず（上位{view.n_top}本すべて・{why}）"
+
+
+def _thumb_uri(d: Deck, rank: int) -> str:
+    """スライドに載せる表紙（分析した動画の表紙の画像だけ。外部 URL は載せない）。"""
+    v = next((v for v in d.out.videos if v.meta.rank == rank), None)
+    if v is not None and v.cover_source == "cover" and v.cover_data_uri.startswith("data:image/"):
+        return v.cover_data_uri
+    return ""
+
+
+def _thumb_rows(c: CoverFacts) -> list[tuple[str, str, str]]:
+    """(項目名, 値, 行のクラス)。値は第三者の文字を含む（呼んだ側でエスケープ）。"""
+    if not c.ok:
+        note = STATUS_LABEL.get(c.status, c.status)
+        return [(label, note if i == 0 else "—", "c1") for i, label in enumerate(_THUMB_LABELS)]
+    texts = "／".join(f"「{t.replace(chr(10), ' ')}」" for t in c.texts) or "なし"
+    size = "不明" if c.large_text is None else "読める大きさ" if c.large_text else "小さい"
+    way = "縦書き・" if c.vertical else ""
+    shape = (
+        f"{way}{size}・{POSITION_JP.get(c.position, '不明')}・{c.lines}行" if c.has_text else "—"
+    )
+    marks = [f"「{t}」" for t in c.kw_terms]
+    if c.numbers:
+        marks.append("数字")
+    if c.question:
+        marks.append("問い")
+    if c.effortless:
+        marks.append("手間なし")
+    if c.warning:
+        marks.append("注意")
+    face = FACE_KIND_LABEL.get(c.face_kind, "不明")
+    if c.face_real:
+        face += f"・{GAZE_LABEL.get(c.gaze, '不明')}"
+    sizzle = "・".join(SIZZLE_LABEL.get(x, x) for x in (c.sizzle or ()))
+    brands = "・".join(f"{n}{'（未照合）' if r == 'unverified' else ''}" for n, r in c.brands)
+    return [
+        (
+            "写っている要素（AI）",
+            "・".join(ELEMENT_LABEL.get(e, e) for e in (c.elements or ())) or "—",
+            "c1",
+        ),
+        ("表紙の文字（AI読み取り）", texts, "c2"),
+        ("大きさ・位置・行数", shape, "c1"),
+        ("文字の中身", "・".join(marks) or "—", "c1"),
+        ("顔・視線", face, "c1"),
+        (
+            "寄り・質感",
+            ("寄り" if c.closeup else "引き" if c.closeup is False else "不明")
+            + (f"・{sizzle}" if sizzle else ""),
+            "c1",
+        ),
+        (
+            "商品・商品名",
+            f"{PRODUCT_LABEL.get(c.product, '不明')}" + (f"・{brands}" if brands else ""),
+            "c1",
+        ),
+        ("読みやすさ", LEGIBILITY_LABEL.get(c.legibility, "不明"), "c1"),
+        (
+            "冒頭テロップ",
+            MATCH_LABEL.get(c.opening_match, "—") if c.watched else "未分析",
+            "c1",
+        ),
+        (
+            "キャプション冒頭",
+            f"{MATCH_LABEL.get(c.caption_match, '—')}「{c.caption_head[:20]}」",
+            "c2",
+        ),
+    ]
+
+
+_THUMB_LABELS = (
+    "写っている要素（AI）",
+    "表紙の文字（AI読み取り）",
+    "大きさ・位置・行数",
+    "文字の中身",
+    "顔・視線",
+    "寄り・質感",
+    "商品・商品名",
+    "読みやすさ",
+    "冒頭テロップ",
+    "キャプション冒頭",
+)
+
+
+def _thumb_compare(d: Deck) -> str:
+    """サムネ（一覧の表紙）の比較（上位 n 本の格子）。1 本も読めていなければ出さない。"""
+    view = d.ctx.cover
+    if not view.any_ok:
+        return ""
+    covers = list(view.top)
+    n = len(covers)
+    cols = f"150px repeat({n},minmax(0,1fr))"
+    cells: list[str] = ['<div class="lab"></div>']
+    cells += [f'<div class="hd one">#{c.rank}</div>' for c in covers]
+    cells.append('<div class="lab c2">表紙</div>')
+    for c in covers:
+        uri = _thumb_uri(d, c.rank)
+        img = (
+            _uri_img(uri, f"#{c.rank} の表紙")
+            if uri
+            else '<div class="ph">画像なし（動画を分析できず）</div>'
+        )
+        cells.append(f'<div class="cv">{img}</div>')
+    per = [_thumb_rows(c) for c in covers]
+    for i, label in enumerate(_THUMB_LABELS):
+        cls = per[0][i][2] if per else "c1"
+        cells.append(f'<div class="lab {cls}">{_esc(label)}</div>')
+        cells.extend(f'<div class="{row[i][2]}">{_esc(row[i][1])}</div>' for row in per)
+    ok = len(view.top_ok)
+    return (
+        '<div class="kicker">サムネ（一覧の表紙）の比較</div>'
+        f'<h2 class="slide-title one" contenteditable>上位{n}本の表紙を同じ項目で並べる</h2>'
+        f'<div class="thumb-g" style="grid-template-columns:{cols}">{"".join(cells)}</div>'
+        f'<div class="note c2">表紙を読めた {ok}/{n}本・文字と要素は AI が表紙の画像から読んだもの'
+        "（画像と照合していない）・大きさと位置は AI が示した枠からコードが計算・冒頭テロップとの"
+        "一致は AI の読み取り同士・キャプション冒頭（一覧のタイルの下に出る文字）は実データ</div>"
+    )
+
+
+def _thumb_chip(f: Feature, n_top: int) -> str:
+    """特徴・段階・本数（母数が上位の本数より少なければ「上位 n 本中 c 本」も）。"""
+    return (
+        f'<span class="chip"><b class="one">{_esc(f.label)}</b>'
+        f"<i>{_esc(cover_count_short(f, n_top))}</i></span>"
+    )
+
+
+# スライドのチップの順（具体的な言い方と画の要素を先に・「文字がある」だけは出さない）。
+_PLAN_CHIP_ORDER = (
+    "cover:kw:",
+    "cover:number",
+    "cover:text_large",
+    "cover:el:",
+    "cover:face",
+    "cover:own_text",
+    "cover:opening_match",
+    "cover:closeup",
+    "cover:sizzle",
+    "cover:",
+)
+
+
+def _plan_gap_rows(view: CoverView) -> list[GapRow]:
+    """スライドに出す差の行（印のある行 → 差の大きい行・5 行まで）。全部の行はレポートに出す。"""
+    rows = sorted(view.gap, key=lambda g: (not g.marked, -abs(g.top_rate - g.rest_rate)))
+    return rows[:5]
+
+
+def _plan_chips(view: CoverView) -> list[Feature]:
+    out: list[Feature] = []
+    for prefix in _PLAN_CHIP_ORDER:
+        for f in view.features:
+            if f in out or f.id == "cover:text" or not at_least_majority(f.tier):
+                continue
+            if f.id.startswith(prefix):
+                out.append(f)
+    return out[:6]
+
+
+def _thumb_plan(d: Deck) -> str:
+    """サムネ（一覧の表紙）の作り方（共通点・上位とほかの差・根拠つきの指示）。"""
+    view = d.ctx.cover
+    if not view.any_ok:
+        return ""
+    feats = _plan_chips(view)
+    chips = (
+        "".join(_thumb_chip(f, view.n_top) for f in feats)
+        or '<span class="sm mut">多数派以上の共通点なし</span>'
+    )
+    left = (
+        '<div class="box"><div class="h">上位の表紙に共通する作り（タップ率は取れない・順位との関係のみ）</div>'
+        f'<div class="chips">{chips}</div>'
+        f'<div class="note c2">{_esc(dist_text(view.dist))}</div></div>'
+    )
+    if view.mode == "board" and view.gap:
+        rows = "".join(
+            f'<tr><td class="one">{_esc(g.label)}</td><td>{g.a}/{g.n}</td><td>{g.b}/{g.m}</td>'
+            f"<td>{_esc(g.mark_text)}</td></tr>"
+            for g in _plan_gap_rows(view)
+        )
+        right = (
+            '<div class="box"><div class="h one">上位とほかの表紙（参考・因果ではない）</div>'
+            '<table class="gap"><colgroup><col style="width:44%"><col style="width:14%">'
+            '<col style="width:14%"><col style="width:28%"></colgroup>'
+            f"<thead><tr><th>項目</th><th>上位</th><th>ほか</th><th>差の印</th></tr></thead>"
+            f"<tbody>{rows}</tbody></table></div>"
+        )
+    else:
+        right = (
+            '<div class="box"><div class="h">上位とほかの表紙</div>'
+            f'<div class="md c3">{_esc(view.gap_note)}。共通点は上位の中の集計で、'
+            "6〜30位より多いとは言えない</div></div>"
+        )
+    dirs = (
+        list(d.syn.cover_directives)
+        if d.syn is not None
+        else code_cover_directives(view, d.ctx.avoid_terms)
+    )
+    rows_html = ""
+    for item in dirs[:3]:
+        ref = item.refs[0] if item.refs else None
+        uri = _thumb_uri(d, ref.rank) if ref is not None else ""
+        fig = (
+            f'<figure class="rf">{_uri_img(uri, "根拠の表紙")}<figcaption>#{ref.rank}</figcaption>'
+            "</figure>"
+            if ref is not None and uri
+            else ""
+        )
+        who = cover_directive_origin(item, view)
+        tag = cover_directive_count(item, view)
+        cls = "t-maj" if at_least_majority(item.tier) else "t-case"
+        chip = f'<span class="tier {cls}">{_esc(tag)}</span> ' if tag else ""
+        rows_html += (
+            f'<div class="drow">{fig}<div style="min-width:0">'
+            f'<div class="sm one">{chip}<span class="mut">{_esc(who)}</span></div>'
+            f'<div class="dt c2" contenteditable>{_esc(item.text)}</div>'
+            f'<div class="ev c1">根拠 {_esc(_evidence(item.refs) or "—")}</div></div></div>'
+        )
+    if not rows_html:
+        rows_html = '<div class="note">多数派以上の特徴が無いため、表紙の指示は出していません</div>'
+    return (
+        '<div class="kicker">サムネ（一覧の表紙）の作り方</div>'
+        '<h2 class="slide-title one" contenteditable>表紙で決めること（根拠つき）</h2>'
+        f'<div class="thumb-top">{left}{right}</div>'
+        f'<div class="thumb-dirs">{rows_html}</div>'
     )
 
 
@@ -1891,7 +2184,7 @@ def _template(d: Deck) -> str:
 
 def _ref_frame(d: Deck, ref: SynthRef) -> FrameShot | None:
     """根拠の横に添えるコマ（根拠の秒の 0.5 秒前〜2 秒後にあるものだけ。無ければ出さない）。"""
-    if ref.source == "caption":
+    if ref.source == "caption" or ref.source in COVER_SOURCES:
         return None
     sec = ref.found_sec if ref.found_sec is not None else ref.sec
     return quote_frame(d.frames(ref.rank), sec)
@@ -2128,6 +2421,8 @@ def slide_sections(d: Deck) -> list[tuple[str, str, str]]:
         ("surface", _surface(d), ""),
         ("brands", _brands(d), ""),
         ("compare", _compare(d), ""),
+        ("thumb-compare", _thumb_compare(d), ""),
+        ("thumb-plan", _thumb_plan(d), ""),
         ("structure", _structure(d), ""),
     ]
     for v in d.ctx.videos:

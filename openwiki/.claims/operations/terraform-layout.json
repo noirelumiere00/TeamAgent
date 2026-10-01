@@ -1,0 +1,134 @@
+{
+  "schemaVersion": 1,
+  "pageVersion": "sha256:d2e4a25048e61d76f8f0183c586c4c262e739bf6f9de6696a0455fa0d5ee22d0",
+  "claims": [
+    {
+      "id": "claim_f3b9c6ccb7474f5bac44db7a4a2ac354",
+      "statement": "mcp サービスの SG は 8787 番への ingress を openclaw SG からだけ許可し、外からの inbound を持たない。",
+      "evidence": [
+        {
+          "resource": "repo://infra/terraform/fargate.tf#L516-L535",
+          "version": "repo-lines-v1:sha256:97bdb7a20eab395d1e08a71e9f5360b13724bf50983e3aeaeec0cc1a83956393:eyJzZWxlY3RlZExpbmVDb3VudCI6MjAsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjE3MzQ4NWE5NTA4ODZjZWI2Njc0MTQ0YThhOGFjY2M1YjExYWZmM2I3NGM5NGJhNjYyZDkxZDlkOWE2NDk4MjgiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjQxMmNhMzQ1Y2NmNzViZjljMDgwNmJjZTY5NWJlOGRlODA4Yjc5OTg0MjUxYTdhNTRkMjAyY2Y2MTAxZGQ0NTEiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6Ijg2NmM0ZjY5ZWI5Y2FjYWZjNDY4YWNhMmJjYTRkMDJlNGY1MzBiYjRiZGQ0ZmZmNDA0NzYzYTUzNjc4ZDk5ZWMiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImEwMzYyM2RiZjE5NGRlMTMzNjY2YjYwNTM1ZGU2NDJlMDhiMmU2NDk3NmNmZjRmZjllZTYxNDUyZWM3NTJmYzcifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_09ab894835094c87b860a7e7b3cfe711",
+      "statement": "openclaw サービスは deployment_maximum_percent=100・minimum_healthy_percent=0 で、EFS の状態ディレクトリへの書き手を常に 1 つに保つ（入れ替え中は一瞬 0 台になる）。",
+      "evidence": [
+        {
+          "resource": "repo://infra/terraform/fargate.tf#L1157-L1172",
+          "version": "repo-lines-v1:sha256:5cd4613ceacca047cb5c6bfa32a3914e21d92ee8b11975c4ae74e1e4c07f9e42:eyJzZWxlY3RlZExpbmVDb3VudCI6MTYsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjBiZWMzOWYxYzQyZWIxZmFjZWIwYmNiNzkxMTY5NzI0MGNlMTJkMzUyNmFjNjQ5NTg4YjE3ZWY4MTZkYmMxNjciLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjI3ZTU3ODhkNWQ5ZDczZDI0YTgxZGJjMGE1YTc0YmZhODJjOWMzYjNhZjk5ZTUyYWY3OTZlOTBiNDY4YThhM2QiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImZiNTgwZTk2NGY4M2E0NzNmNDNkNDQzODQ2Mjk0OWQ2OGI1NjAwZmRhNzg3ZjE2Mzc0NWQwMGRlODljYmYzNmEiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImM0NjhmZjQ2ZTQ2NGI3MzNmMDZlN2I4OWUzOGNjOTA4Zjc1ZWNjOWFhZjcxZjY0NzI5OGE5NzQ2NWQzZTA3ODIifQ"
+        },
+        {
+          "resource": "repo://infra/terraform/openclaw_state.tf#L1-L8",
+          "version": "repo-lines-v1:sha256:d15581b34851d5d6368f597af187e0d02958e5e774f5357f52cdf2c86a98adb9:eyJzZWxlY3RlZExpbmVDb3VudCI6OCwiZmlyc3RTZWxlY3RlZExpbmVIYXNoIjoiMjcwODczZWExY2QyZDNlZTAxY2RmOThmZmVjZDFhOTc5NjBkYTQ0NGY5MjQ5YTM5ZmQ5ZDEzODgzZjE4NzE3MCIsImxhc3RTZWxlY3RlZExpbmVIYXNoIjoiMDFiYTQ3MTljODBiNmZlOTExYjA5MWE3YzA1MTI0YjY0ZWVlY2U5NjRlMDljMDU4ZWY4Zjk4MDVkYWNhNTQ2YiIsInByZWNlZGluZ0NvbnRleHRMaW5lQ291bnQiOjAsInByZWNlZGluZ0NvbnRleHRIYXNoIjoiZTNiMGM0NDI5OGZjMWMxNDlhZmJmNGM4OTk2ZmI5MjQyN2FlNDFlNDY0OWI5MzRjYTQ5NTk5MWI3ODUyYjg1NSIsImZvbGxvd2luZ0NvbnRleHRMaW5lQ291bnQiOjMsImZvbGxvd2luZ0NvbnRleHRIYXNoIjoiNTlkYzQ4ZmMwOWU5OTgyM2RhMWQ3OThjNzA2NTdhNjc3NWI1ODNjOWQ4OTcxMmFlMTFlMTZlMTRjZTU0MzYzNyJ9"
+        }
+      ]
+    },
+    {
+      "id": "claim_4a1dc82ae06c45278aa2d123714a2bde",
+      "statement": "morning_digest の既定スケジュールは cron(30 0 ? * MON-FRI *)（平日 9:30 JST）、planner は cron(0 19 ? * SUN-THU *)（月〜金 4:00 JST）で、planner の rule は enable_reminders と morning_digest_personalized が両方 true のときだけ ENABLED になる。",
+      "evidence": [
+        {
+          "resource": "repo://infra/terraform/morning_digest_schedule.tf#L125-L135",
+          "version": "repo-lines-v1:sha256:c1db44ed289c86aa78e322c9a4411eccd6239b02c204fc63f20d3e0232f78e96:eyJzZWxlY3RlZExpbmVDb3VudCI6MTEsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjhiZWU0ZDQ1ZjEwNzQ1ZDIzNjlkNzAxOWFkNzRkY2EzMTdjNTZiZDBmYTNiYjA4Mjc5YjBjNjE2OTNlMzM4NDgiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjQxMmNhMzQ1Y2NmNzViZjljMDgwNmJjZTY5NWJlOGRlODA4Yjc5OTg0MjUxYTdhNTRkMjAyY2Y2MTAxZGQ0NTEiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjY4NTkxZGZhZTgyZjk0YTY3OTc4NTdiYzhhNWJiNDY2N2QzM2IxZTk5YmQyN2E1N2Y2NGVhMmUwYTFmM2ZhNjAiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjMxMTVjMjI5Zjk4MjhiOGRjNmViMzQyODkwNzc3MzFmNWM5NDk1YTViZjliYzllMWQ5YzA2Yjg3Mjc4M2JiMWMifQ"
+        },
+        {
+          "resource": "repo://infra/terraform/morning_digest_schedule.tf#L608-L618",
+          "version": "repo-lines-v1:sha256:adfe0bb3efec71c9921e678d9df42384ee3991379d01c05a9520041417762a1c:eyJzZWxlY3RlZExpbmVDb3VudCI6MTEsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjMwOGJiMmNlNzFkOTU0MTAwY2Y2MGU2NWI0OWI3NTNiMmNlNTJiNjcxZWIyYmQxOTcyNmQxMzAzN2IyZGYyMzYiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjQxMmNhMzQ1Y2NmNzViZjljMDgwNmJjZTY5NWJlOGRlODA4Yjc5OTg0MjUxYTdhNTRkMjAyY2Y2MTAxZGQ0NTEiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjVjYzJhMzRlYjc1NDY4OTU0MDFiYjQwYTc0MDFmYjBiODRiOWE3NWVjMzkxNGY4ZTllMmQ1MDRhYzNmODViZDIiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjBiZjhiYjkxNmVkNWM4YTY3NjU3NTU4YzQyYjM0YzhhZGM0YjY2MTZlN2NjMTk3YzRhODllZWMyNWI1NDgzMDAifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_319b2fc7e591497487c44c4de570508e",
+      "statement": "ingest-dispatch Lambda は同時実行 1 に制限され、RUNNING のタスクが上限時間内なら起動を見送る。上限を超えたタスクは StopTask してから起動し直し、DescribeTasks が全タスクを返さなければ例外にして二重起動を防ぐ。",
+      "evidence": [
+        {
+          "resource": "repo://infra/terraform/ingest_schedule.tf#L370-L384",
+          "version": "repo-lines-v1:sha256:398e6ff5a29bdea86412316047d1fa8b80d0324c1961f9a566eb7de46ceef923:eyJzZWxlY3RlZExpbmVDb3VudCI6MTUsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6ImQ0NzYxZWZlYmExNTRlNDE1Nzg4ODAyZjZhZGJjYTE5NGRiYjY0ZThmZmIxYTUzYTFjNTZjNzg3ZmY4ZTEwMzQiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6ImMzMmY0OTU5MzI1MzVmMTkwZTNkOGRhMjMyN2FhYjRkNTg5ZWZlZDVlY2E1MzBhNzUyNmVjN2JiOWEwMzAzNmIiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjNmYTljNDM3Mjc5NzlhZGJiMWYzZWE5MzhhNmFjNTQ5MzcyZTlkYzdkZmI2ZGQxZTc2OTQxNDg3YjU1Nzg3YTAiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjE2MTJiMDgwOTg0YmMxOGZiNGNiNTFhMjk3NmE4MDk3MjFkMGU0ODJjZmNmM2YwN2Y2NWJiMzI3ZDI3OWYzNGEifQ"
+        },
+        {
+          "resource": "repo://infra/terraform/lambda/ingest_dispatch/handler.py#L98-L181",
+          "version": "repo-lines-v1:sha256:028db522ec941371383465891e9c2ffb14790f591e36a8e26891500e08296d02:eyJzZWxlY3RlZExpbmVDb3VudCI6ODQsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6ImEyOTlkOTVjOGRiZGIyOWQ3MmU4Zjg3ZGZjNGQxNTM3NjExNGZiNDJiOGYzOTI1MGZjOTZhM2Q4OTQ5OTFlNmQiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjQ4OTNmNDBlMzc4MWViODk2YzgyZDA0NmEwODA2N2ExMWUzNWNkZjJmMWRmYWYyNmZlYTkwYjhkYjY2NzY0MTMiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjgzNmZiNjM5NzYyNzI4MzQwOTJkZGM3YTU1ZDU2MTdmOTU4OGZkM2IxNzQ4ZjA2NDY2MTAyNjhkMjA3ZTg2MGMiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjlmNWI0ODkzODlhZjk4NWEwMDA0NTlkYzA3MzZhZTIxMmE5YmY2NjRmMjYwMTY2MTIwNTBjMTRlYWVlOTNjMmMifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_e0de5d13a195466d80554f621b9be7a6",
+      "statement": "x-dispatch Lambda は DynamoDB の job が done のときだけ SQS メッセージを ack する。queued なら SQS messageId から作った clientToken で RunTask し、メッセージは失敗として返して残す。",
+      "evidence": [
+        {
+          "resource": "repo://infra/terraform/lambda/x_dispatch/handler.py#L77-L133",
+          "version": "repo-lines-v1:sha256:d0a80c79174b184bb5f288ff24c6cf4af0b45c102123d339ab9d77c49f810fe3:eyJzZWxlY3RlZExpbmVDb3VudCI6NTcsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6ImFiMWIwMmRiMjI1NjA5MjhhNzRhYzYyNzhmOWYyYTdiZjAxZWZkNDlkNmY3NDUwNDc3ZmFmYTkzMTkwNDMzZGEiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjliZTk5OTE2NzEyYTBmNzExMzk3OGY0YmJiNDBjMDU1MzEyOWQ0MzVhOTBlMDRkOTNiM2IxZjEyMDNjZTZlMmUiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjdmZjU4ODlhZTg3YWU2MWE0NmUyNGMwNjE4MWMzY2VhNDI3YWUwOGJkNDRjM2RhMTc5NjVhNTg3YmI3OWJiZmMiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjowLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImUzYjBjNDQyOThmYzFjMTQ5YWZiZjRjODk5NmZiOTI0MjdhZTQxZTQ2NDliOTM0Y2E0OTU5OTFiNzg1MmI4NTUifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_609cd281cdab431d98d07aeda2637094",
+      "statement": "ingest・morning_digest・canary の rule 状態変数は runtime_guard_live と一致しなければならず、live の値は選んだ migration の to.rule_states と一致しなければならない。そのため rule の点灯・消灯は変数の既定値ではなく migration manifest で決まる。",
+      "evidence": [
+        {
+          "resource": "repo://infra/terraform/runtime_guard.tf#L511-L516",
+          "version": "repo-lines-v1:sha256:d7ca5e98639996ed5aa3d4a8a1046cc1de2ebdc39808fbe401c8b184bbbf3461:eyJzZWxlY3RlZExpbmVDb3VudCI6NiwiZmlyc3RTZWxlY3RlZExpbmVIYXNoIjoiMzkwM2FiNjFjZWQxYmY4MDZhOGUyMzIyY2ZjMDhlOTAwZjMyMDZlYmMwNjcxYThhZDkwNmVhODE3NTNhMTI4MCIsImxhc3RTZWxlY3RlZExpbmVIYXNoIjoiZTY3ZjVmNGMxY2EyNGE2ZWZmZmI0YjhmZDRjODJiMGNkMDM1Y2VhNjZiODQ4NmJkOGY5MWIzZWI4N2EzYmRlMyIsInByZWNlZGluZ0NvbnRleHRMaW5lQ291bnQiOjMsInByZWNlZGluZ0NvbnRleHRIYXNoIjoiNGJhZTZjYTBmNWM5ZTA0ZWExZDQyODZhZmQ1ODM1MTQxM2JhZjAwMGI2ZGU5MDYxMDVmZTFkYmYzZWE0YmNhNyIsImZvbGxvd2luZ0NvbnRleHRMaW5lQ291bnQiOjMsImZvbGxvd2luZ0NvbnRleHRIYXNoIjoiNWE0MzJjNmIyMjM1Y2ZiMWJlYWZkMDY0MzkxYzBkNjBkNGZmYmExNTY2YmZjNWU5ZTJhMTIwM2EzOWM4Y2U5YiJ9"
+        },
+        {
+          "resource": "repo://infra/terraform/runtime_guard.tf#L594-L596",
+          "version": "repo-lines-v1:sha256:6ef97912a3dfaf69a3624b2f2f16c2b672a61dd9fea6c2cceabfe1951198c31d:eyJzZWxlY3RlZExpbmVDb3VudCI6MywiZmlyc3RTZWxlY3RlZExpbmVIYXNoIjoiOTU4YzAyNGE3NTM0OWI5MGM5NGQ3ZWE3ZTg0N2EwYmU0N2YwNjJiNzJkNWI1NjZjMmU5YThhMzYyYWY1NTNjOCIsImxhc3RTZWxlY3RlZExpbmVIYXNoIjoiOWFlMDlhM2Y2ZmU2MjAwNDUzYTNkYzQ5ZjcwMWUwODY0NjdkODA5OWU2ZmMxMjgxNTQwM2U3NTlhZWJiNDRjYyIsInByZWNlZGluZ0NvbnRleHRMaW5lQ291bnQiOjMsInByZWNlZGluZ0NvbnRleHRIYXNoIjoiNmU4MWE1MThlOWIzOGIyNTg1N2ZiMWY4MzIzMjQ0ZDFkMjEzNzdkMmI1MDk4Yjc2MDg0MmZmYTM2Mzk2ZTMwYiIsImZvbGxvd2luZ0NvbnRleHRMaW5lQ291bnQiOjMsImZvbGxvd2luZ0NvbnRleHRIYXNoIjoiNzdhZGRiNGJiYTdiOTA1NmQ5YjQ5NDJkNTMzNjY5ZDI1ZTRlYjlhYjRjY2Y5ZDRhMmIxYjMwN2M1MDg4M2U5NCJ9"
+        }
+      ]
+    },
+    {
+      "id": "claim_5310e3bb951645169a0baa1871f8cf35",
+      "statement": "mcp タスク定義の precondition により、enable_scrape_tools は media worker が無いと使えず、use_web_research_tool は enable_scrape_tools が無いと使えない。",
+      "evidence": [
+        {
+          "resource": "repo://infra/terraform/fargate.tf#L922-L944",
+          "version": "repo-lines-v1:sha256:418e1674dc68fc71ebb04ce1c065a7242df7c6e7dd0bb95deb9c0eaff0d3fe16:eyJzZWxlY3RlZExpbmVDb3VudCI6MjMsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6ImEzMDMyOTM1ZGE2MmRlNzc5OWJiZjFkMWQzZmI3YzFkZTlkMmU5MDA0MTNiZjhmNzE4NjQ2Mzk4NmViOGZmNmIiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjQ4OTNmNDBlMzc4MWViODk2YzgyZDA0NmEwODA2N2ExMWUzNWNkZjJmMWRmYWYyNmZlYTkwYjhkYjY2NzY0MTMiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImZjOTRmZGZhNzQ2MmJmYzM4ZmQ3YzRjNmEwZjNjZWVjMWRhM2YxMmYwYzI2ZjM4ZThiNTY0MjBiMjZkZTdlYjciLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjQxM2JjN2Y5ZTY0ZTdjNmM1MjY2YWNjMWU3ZGE4ZTY4N2YzNzNmYWE0MzczYzg2MDk2NjNkNTEyMDRlYzlkOGUifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_cfc85394b3064f1480e3d60600b7434d",
+      "statement": "RDS インスタンスは environment 名に関係なく deletion_protection=true で、バックアップ保持 7 日・IAM DB 認証有効。parameter group で rds.force_ssl=1 を設定している。",
+      "evidence": [
+        {
+          "resource": "repo://infra/terraform/rds.tf#L100-L128",
+          "version": "repo-lines-v1:sha256:373bda56862964862c7861b2484f14bc2db064a098334974dc33442953ba54f1:eyJzZWxlY3RlZExpbmVDb3VudCI6MjksImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6ImIyODMyNmY2NTNiMTg5ODc5YTViMzJlOWM2NzcwOTQ1YWUwOWM3MWRjMzg4NWU2MjFkOWI2NmUyNzE3ZTEyN2UiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjQxMmNhMzQ1Y2NmNzViZjljMDgwNmJjZTY5NWJlOGRlODA4Yjc5OTg0MjUxYTdhNTRkMjAyY2Y2MTAxZGQ0NTEiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6Ijc1MGNhYmU4MDQ3NzE3M2ExYjBmOTBjZTQyMjgxNzg2MTQwMTIzNzk1MWU4OWRiNDVjMzk4MjYyOGQwYThmOWYiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6Ijk1MWM5NTMxMjlmZjM3ZTU0NTEyZjgyNGZjMjliMWJhYzc1ODAxNzgyN2M3ZDU0NTM3NTFkM2FjYzA3YjM1ZTUifQ"
+        },
+        {
+          "resource": "repo://infra/terraform/rds.tf#L39-L46",
+          "version": "repo-lines-v1:sha256:bbd3a38e43d5a07fbae8df1c7202b459354375b8c619e2add9551c59ba7ae8d5:eyJzZWxlY3RlZExpbmVDb3VudCI6OCwiZmlyc3RTZWxlY3RlZExpbmVIYXNoIjoiZTU3OTc0MjllZWYyNmU0NTU2MzRiZDc5NTMzNDg5M2QyNjdmMmYwNDBjMTQ4YTg5MWE5MDZhYzQ4YzExY2M3YSIsImxhc3RTZWxlY3RlZExpbmVIYXNoIjoiNDEyY2EzNDVjY2Y3NWJmOWMwODA2YmNlNjk1YmU4ZGU4MDhiNzk5ODQyNTFhN2E1NGQyMDJjZjYxMDFkZDQ1MSIsInByZWNlZGluZ0NvbnRleHRMaW5lQ291bnQiOjMsInByZWNlZGluZ0NvbnRleHRIYXNoIjoiNTY5MGU4NTJjNzcxNWYzNGZhN2U5MTExMzRmMzBiN2U0NTEyYmM3NzE3ZWYyMmEyMTIwZTU3MDViOTMyZDA4MyIsImZvbGxvd2luZ0NvbnRleHRMaW5lQ291bnQiOjMsImZvbGxvd2luZ0NvbnRleHRIYXNoIjoiOTM2MzkwZDcyYTg4YTA5ZmZlYTQ4NWNlOWZiMDk0NjJiOGQyNzJjZTA5ZmVjNDM2YWJiZWQ4OTJhNWY3MTcyMCJ9"
+        }
+      ]
+    },
+    {
+      "id": "claim_3ec58d26d97b40f78c35cf002870a3c7",
+      "statement": "reminders-notify Lambda は kind=digest の予約で morning-digest タスクを 1 人分だけ起動し、RunTask の failures があれば例外にして SQS 再試行・DLQ に任せる。DM 以外のチャンネルへのリマインドは投稿せずスキップする。DIGEST_* env は enable_reminders・enable_morning_digest・morning_digest_personalized がすべて true のときだけ入る。",
+      "evidence": [
+        {
+          "resource": "repo://infra/terraform/lambda/reminder_notify/handler.py#L134-L162",
+          "version": "repo-lines-v1:sha256:f65750c6ddba7e8695e6ca450fc73271dceb3693059564d739858753707def75:eyJzZWxlY3RlZExpbmVDb3VudCI6MjksImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjVlMGZkNjYwNzRhMzNlYjM2YzBlNDI4YjQxYjlkYTUxNjBmZmI2ZjRmZmFhMzE5MjM0YjdlYWQ3OWI4MmNiN2QiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6ImY2YWQwNTJjNDRiOTUzZjBkODMyODZhMmRkZGVjMjE4NWU3ZjE4OWRiMGU0ZjUwMmM2ZjA2ZjM0NzU4NDU0YTQiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImU0YzY1MTdjYmU1NDcxZThjMzBjMDM2MjM4ZjQyYmUzYWVhNThiMTVjYzcxNWE2MmU3YWQyNjBkOGI5Y2IxZTMiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjQ3ZDRjZmJjNGY3NWNkYWJhYTQzNDU5ZTJkN2Q5Y2EzMzFkMmEzNzRlY2YwNDZhM2M5NDEwYTFjNzFiNzUzYzAifQ"
+        },
+        {
+          "resource": "repo://infra/terraform/reminders.tf#L170-L174",
+          "version": "repo-lines-v1:sha256:9dcec197f32492a1b34b82b9af3cd60cb38a571996b43d66f829232c671f34e7:eyJzZWxlY3RlZExpbmVDb3VudCI6NSwiZmlyc3RTZWxlY3RlZExpbmVIYXNoIjoiMDBiMzgzYjE1NDNiOTFhZGU3MjUyYzA5NmNmMGU0NDkwMTA4NDk3NzMwZWE2Y2QxMDIzYWNmMDJmMjdmZjRmZCIsImxhc3RTZWxlY3RlZExpbmVIYXNoIjoiMmVlMmM0MTU2ZGUyMDI1YzU1NDc3ZjgxY2Y1YThlMTlhOTY3ZTlmNmFiYTk0ZTZlMmQwZjExNDcxYzRiOWRjZiIsInByZWNlZGluZ0NvbnRleHRMaW5lQ291bnQiOjMsInByZWNlZGluZ0NvbnRleHRIYXNoIjoiYzQzZDg3NGM3ODc0MzRhZTJlNTI3ODUyNDFlNzgwZjk0NWYxYmRiZmQ0M2ZlODg2MWM0YWUyODEwNmY2MzIzNSIsImZvbGxvd2luZ0NvbnRleHRMaW5lQ291bnQiOjMsImZvbGxvd2luZ0NvbnRleHRIYXNoIjoiZDY1Mzk5OTQxNWQxYWI5MGYxN2JlMmQwZjEzN2VkYjhlOWNhMTU3Y2ZkZDk0ZDIyZmQ4OTFkOWVmNDZjMjZjMiJ9"
+        }
+      ]
+    },
+    {
+      "id": "claim_21059f6fcf0a49c3a11dfe953751422b",
+      "statement": "canary のアラームは 2 本立てで、失敗回数を数える canary-unhealthy はデータ欠測を notBreaching にし、生存確認の canary-heartbeat-missing は欠測を breaching にする。後者は enable_canary_health と canary_rule_enabled が両方 true のときだけ作られる。",
+      "evidence": [
+        {
+          "resource": "repo://infra/terraform/canary_schedule.tf#L92-L134",
+          "version": "repo-lines-v1:sha256:d2e9afc4fb2edee7bef3583ddc61892270e05968e2bba70de90b49a713ef64ad:eyJzZWxlY3RlZExpbmVDb3VudCI6NDMsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjVkM2Q4NDQxODUxYzQ5NTUzOGJmOTcxYTFkYTgxMTY1MWI4YzkwOThlOGQyM2ZiZGNmOGM2Y2NiM2VlZmI5MGEiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjQxMmNhMzQ1Y2NmNzViZjljMDgwNmJjZTY5NWJlOGRlODA4Yjc5OTg0MjUxYTdhNTRkMjAyY2Y2MTAxZGQ0NTEiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImZiNTgwZTk2NGY4M2E0NzNmNDNkNDQzODQ2Mjk0OWQ2OGI1NjAwZmRhNzg3ZjE2Mzc0NWQwMGRlODljYmYzNmEiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjI1NjY0MGMwZGNhMDhmMDkxNDA3NTU0NTk1NzJhMzQ0NWE5Y2E4OGZjNDU4ZTFhZjg2NDhlNjc4ZTg0N2VhY2QifQ"
+        }
+      ]
+    }
+  ],
+  "verification": {
+    "by": "openwiki/0.6.1",
+    "at": "2026-09-29T07:51:05.076Z"
+  }
+}

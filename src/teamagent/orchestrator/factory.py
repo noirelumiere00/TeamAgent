@@ -70,6 +70,11 @@ def resolve_search_skill_config() -> dict[str, Any]:
         # 届かない事象への対策（2026-08-27 本番実測: gdrive 最上位 78 位）。プール内の
         # gdrive がこの件数未満のときだけ gdrive 限定検索を 1 回足す。0 で無効。
         "drive_pool_floor": _envint("SEARCH_DRIVE_POOL_FLOOR", 15),
+        # 施策実績（ショート動画DBの案件ごとの実績文書）のリコール床（2026-09-29）。
+        # 施策実績は cls_solution を持たず、自動抽出の cls_solution=動画広告 の AND と
+        # 提案 PDF による枠の占有で rerank へ届かない。実績を聞く意図のときだけ、プール内の
+        # 施策実績がこの件数未満なら施策実績限定の検索を 1 回足す。0 で無効。
+        "campaign_pool_floor": _envint("SEARCH_CAMPAIGN_POOL_FLOOR", 3),
         "min_relevance": _envfloat("SEARCH_MIN_RELEVANCE", 0.0),
         # 2段階しきい値の fallback（既定 0.0 = 無効＝従来挙動）。
         "min_relevance_fallback": _envfloat("SEARCH_MIN_RELEVANCE_FALLBACK", 0.0),
@@ -500,6 +505,22 @@ def build_production_tools() -> list[ToolSpec]:
             )
         )
 
+    # Slack 全体のキーワード検索ツール（「Slack で〜を探して」）。検索は **依頼者本人の xoxp のみ**
+    # （search.messages・bot token は経路に一切登場しない）。チャンネルからの依頼には公開
+    # チャンネルの一致だけを返し、非公開・DM の一致は件数だけ出す。**既定 OFF**。
+    if _envflag("USE_SLACK_SEARCH_TOOL"):
+        from teamagent.skills.slack_search.skill import SlackSearchSkill
+
+        search_slack_store = _build_slack_store()
+        specs.append(
+            ToolSpec(
+                SlackSearchSkill.name,
+                SlackSearchSkill.description,
+                SlackSearchSkill,
+                factory=lambda: SlackSearchSkill(slack_store=search_slack_store),
+            )
+        )
+
     # 会話に添付されたファイルの読取・加工（要約/修正案/議事録FMT/集計/英訳）。**既定 OFF**。
     # 読むのは署名済み claim 由来の会話（channel_id/thread_ts）に添付されたファイルだけで、
     # file_id/URL/channel を入力に持たない＝会話外は構造的に読めない。テキスト返答のみ
@@ -629,7 +650,10 @@ def build_production_tools() -> list[ToolSpec]:
             )
         )
 
-    # TikTok取得ツール（30本/KW・上位N本は動画本体DL→S3）。**既定 OFF**（USE_TIKTOK_ACQUIRE=1）。
+    # TikTok取得ツール（既定10本/KW・最大30本、上位N本は動画本体DL→S3）。**既定 OFF**
+    # （USE_TIKTOK_ACQUIRE=1）。1ジョブの実行上限（870秒見積り）を超える要求は断らず、
+    # 動画なし→指標だけの取得・動画あり→KWごとのジョブ分割へ組み直す
+    # （skills/tiktok_acquire/plan.py）。
     # video_algorithm/tiktok_search が bot プロセス内でスクレイプするのと違い、submit は SQS 投函
     # のみ（RunTask/PassRole 非保有）で、実取得は使い捨て Fargate に隔離（A′トポロジ）。
     # env: TIKTOK_TASK_QUEUE / TIKTOK_JOBS_TABLE / TIKTOK_S3_BUCKET（tiktok_acquire.tf）。

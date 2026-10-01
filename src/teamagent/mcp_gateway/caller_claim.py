@@ -30,6 +30,15 @@ CALLER_CLAIM_SECRET_ENV = "TEAMAGENT_CALLER_CLAIM_SECRET"
 CALLER_CLAIM_REPLAY_TABLE_ENV = "TEAMAGENT_CALLER_CLAIM_REPLAY_TABLE"
 SLACK_TEAM_ID_ENV = "SLACK_TEAM_ID"
 USER_CONTEXT_KEY = "_user_context"
+# 消費した nonce を覚えておく最短の期間（claim の exp とは別）。朝ダイジェストのボタンの押下は
+# 押下の指紋から決まる固定の nonce で届く（caller-identity plugin の actionNonceBytes）ので、
+# 同じボタンの value（mcp の HMAC トークン・最長 24h＝hmac_keyring.MAIL_ACTION_MAX_TOKEN_TTL_S）が
+# 有効な間は、同じ nonce が何度でも届きうる。claim の exp（最長 60 秒）で行を失効させると、
+# DynamoDB の TTL 削除（時刻は保証されない）の後に同じ押下がもう一度通り、下書き・仮予定が
+# もう一つできる。よってトークンの最長寿命＋余裕（時計のずれ・plugin の台帳 24h＋10 分）まで
+# 保持する。
+# 保持期限を過ぎて同じ押下が届いても、トークン自体が失効しているのでツールは何もしない。
+CALLER_CLAIM_REPLAY_RETENTION_SECONDS = 24 * 60 * 60 + 60 * 60
 
 _B64URL_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 _DYNAMODB_TABLE_RE = re.compile(r"^[A-Za-z0-9_.-]{3,255}$")
@@ -69,11 +78,20 @@ class CallerClaimReplayStore(Protocol):
     """Atomically reject a nonce that was already consumed by any MCP task."""
 
     async def consume(self, nonce: str, *, expires_at: int, now: int) -> None:
-        """Record one nonce or raise ``CallerClaimError`` without granting access."""
+        """Record one nonce or raise ``CallerClaimError`` without granting access.
+
+        ``expires_at`` is the retention deadline chosen by the verifier (at least
+        ``CALLER_CLAIM_REPLAY_RETENTION_SECONDS`` after consumption), not the claim ``exp``.
+        """
 
 
 class InMemoryCallerClaimReplayStore:
-    """Process-local replay store for tests and non-production construction."""
+    """Process-local replay store for tests and non-production construction.
+
+    Consumed nonces are retained for ``CALLER_CLAIM_REPLAY_RETENTION_SECONDS`` (25h), so a
+    long-lived process fails closed ("at capacity") after ``max_entries`` claims in that window.
+    Production always uses ``DynamoDbCallerClaimReplayStore`` (``CallerClaimVerifier.from_env``).
+    """
 
     def __init__(self, *, max_entries: int = 10_000) -> None:
         if max_entries < 1:
@@ -105,8 +123,10 @@ class DynamoDbCallerClaimReplayStore:
 
     ``attribute_not_exists(nonce)`` is the authorization linearization point:
     rolling ECS tasks cannot both accept the same claim.  Any DynamoDB error is
-    fail-closed; TTL cleanup is only storage hygiene and is not relied on for
-    security.
+    fail-closed.  ``expires_at`` (the table's TTL attribute) is the verifier's
+    retention deadline, so TTL deletion can only remove a row after every token
+    that could replay its fixed button nonce has expired; the deletion delay is
+    storage hygiene and is not relied on for security.
     """
 
     def __init__(
@@ -445,9 +465,10 @@ class CallerClaimVerifier:
         if not hmac.compare_digest(actual_arguments_sha256, arguments_sha256):
             raise CallerClaimError("caller claim request binding does not match")
 
+        # 保持期限は claim の exp ではなく、消費した時刻＋保持期間（ボタンのトークンより長い）。
         await self._replay_store.consume(
             nonce,
-            expires_at=expires_at,
+            expires_at=max(expires_at, now + CALLER_CLAIM_REPLAY_RETENTION_SECONDS),
             now=now,
         )
 

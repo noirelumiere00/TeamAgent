@@ -34,6 +34,7 @@ from teamagent.adapters.digest_delivery_store import CLAIM_TAKEN as _CLAIM_TAKEN
 from teamagent.hmac_durable_state import require_runtime_startup
 from teamagent.hmac_keyring import MAIL_ACTION_MAX_TOKEN_TTL_S
 from teamagent.skills._shared import slack_handoff as _handoff
+from teamagent.skills._shared.grapheme_cut import truncate_graphemes
 from teamagent.skills._shared.mail_connection import (
     FETCH_NEEDS_RECONNECT,
     FETCH_OK,
@@ -265,9 +266,12 @@ _LINK_BARE_RE = re.compile(r"<https?://[^>]+>")
 
 
 def _truncate(s: str, limit: int) -> str:
-    """limit 超過時は末尾を「…」に置き換える（1件=1行原則のための単純字数切詰）。"""
+    """limit 超過時は末尾を「…」に置き換える（1件=1行原則のための単純字数切詰）。
+
+    切り口は絵文字（🇯🇵・ZWJ 連結など）を割らない（片割れを「…」の前に残さない）。
+    """
     s = s or ""
-    return s if len(s) <= limit else s[: max(0, limit - 1)] + "…"
+    return s if len(s) <= limit else truncate_graphemes(s, max(0, limit - 1)) + "…"
 
 
 def _resolve_mention(user_id: str, names: dict[str, str] | None) -> str:

@@ -18,12 +18,14 @@ from typing import Annotated, Any, Literal
 
 import structlog
 from pydantic import (
+    AliasChoices,
     BaseModel,
     BeforeValidator,
     Field,
     SerializerFunctionWrapHandler,
     field_validator,
     model_serializer,
+    model_validator,
 )
 
 logger = structlog.get_logger(__name__)
@@ -208,6 +210,284 @@ class ThumbColor(BaseModel):
         return near
 
 
+# ── サムネ（一覧の表紙）の読み取り ────────────────────────────────────────────
+# 表紙の画像を Gemini が 1 回だけ見て、タップの要因になりうる要素を JSON で返す（cover_read.py）。
+# 本数・段階・差・指示の土台はコード（cover_facts.py）が決める。AI の値は壊れていることがあるので、
+# どの欄も例外にせず「unknown（分からない）」へ倒す。unknown の欄は、その欄の母数から外す
+# （「無い」と数えない）。rank・group・status・reason・version・via・img_w・img_h は
+# コードだけが書く。
+
+COVER_STATUSES: tuple[str, ...] = (
+    "ok",  # 読めた
+    "no_cover",  # 表紙の URL が無い（acquire_job_id の経路など）
+    "skipped",  # 画像投稿（尺 0）
+    "fetch_failed",  # 取得できない（署名 URL の失効 403 など）
+    "read_failed",  # AI が読めない（JSON 崩れ・例外・必須の欄の欠け）
+    "timeout",  # 締め切りまでに読めない
+)
+CoverStatus = Literal["ok", "no_cover", "skipped", "fetch_failed", "read_failed", "timeout"]
+# 写っている要素（1 つに決めさせず、写っているものを全部挙げさせる）。
+COVER_ELEMENTS: tuple[str, ...] = (
+    "person",  # 人
+    "product",  # 商品・パッケージ
+    "result",  # 完成品・仕上がり
+    "process",  # 工程・使っている途中
+    "before_after",  # 使用前後・比較
+    "text_main",  # 文字が主（画より文字が目立つ）
+    "scene",  # 場所・景色
+)
+COVER_SIZZLE: tuple[str, ...] = (
+    "steam",  # 湯気
+    "gloss",  # 照り・つや
+    "cross_section",  # 断面
+    "pour",  # 注ぐ・垂れる・とろみ
+    "foam",  # 泡
+    "skin",  # 肌の質感
+    "hair",  # 髪の質感
+    "texture",  # そのほかの質感（布・素材）
+)
+COVER_APPEALS: tuple[str, ...] = (
+    "benefit",  # ベネフィット（得られること）
+    "how_to",  # やり方
+    "target",  # 誰向けか
+    "time_saving",  # 時短
+    "ranking",  # ランキング・何選
+    "reaction",  # 驚き・感想
+)
+COVER_TEXT_STYLES: tuple[str, ...] = ("outline", "box", "shadow", "plain")
+COVER_FACE_KINDS: tuple[str, ...] = ("real", "illustration", "in_media", "none")
+COVER_EXPRESSIONS: tuple[str, ...] = ("smile", "surprise", "serious", "other", "none")
+COVER_GAZES: tuple[str, ...] = ("camera", "subject", "away", "none")
+COVER_ACTIONS: tuple[str, ...] = ("eating", "using", "showing", "pointing", "none")
+COVER_TEXT_MAX = 60
+COVER_NOTE_MAX = 30
+COVER_BRAND_MAX = 30
+COVER_TEXT_BLOCKS = 4
+COVER_TEXT_LINES = 6
+_COVER_CTRL_RE = re.compile(r"[\x00-\x09\x0b-\x1f\x7f]")
+
+
+def _enum_token(value: Any) -> str:
+    if not isinstance(value, str):
+        return ""
+    return unicodedata.normalize("NFKC", value).strip().lower().replace("-", "_").replace(" ", "_")
+
+
+def _enum_or_unknown(allowed: tuple[str, ...]) -> Any:
+    def read(value: Any) -> str:
+        token = _enum_token(value)
+        return token if token in allowed else "unknown"
+
+    return BeforeValidator(read)
+
+
+def _enum_list_or_none(allowed: tuple[str, ...]) -> Any:
+    """知らない要素だけ捨てる。リストでないもの（欄の欠け・壊れ）は None＝分からない。"""
+
+    def read(value: Any) -> list[str] | None:
+        if value is None:
+            return None
+        if isinstance(value, str):
+            value = [x for x in re.split(r"[,、/|\s]+", value) if x]
+        if not isinstance(value, (list, tuple)):
+            return None
+        out: list[str] = []
+        for item in value:
+            token = _enum_token(item)
+            if token in allowed and token not in out:
+                out.append(token)
+        return out
+
+    return BeforeValidator(read)
+
+
+def _tri_bool(value: Any) -> bool | None:
+    """真偽の 3 値（True／False／None＝分からない）。"""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)) and value in (0, 1):
+        return bool(value)
+    token = _enum_token(value)
+    if token in ("true", "yes", "あり"):
+        return True
+    if token in ("false", "no", "なし"):
+        return False
+    return None
+
+
+def _cover_line_text(value: Any) -> str:
+    """表紙の文字（AI の読み取り）。改行（行の区切り）は残し、制御文字と空行を除く。"""
+    if not isinstance(value, str):
+        return ""
+    text = _COVER_CTRL_RE.sub(" ", value.replace("\\n", "\n").replace("\r", "\n"))
+    lines = [" ".join(line.split()) for line in text.split("\n")]
+    joined = "\n".join(line for line in lines if line)[: COVER_TEXT_MAX * 2]
+    kept: list[str] = []
+    budget = COVER_TEXT_MAX
+    for line in joined.split("\n")[:COVER_TEXT_LINES]:
+        if budget <= 0:
+            break
+        kept.append(line[:budget])
+        budget -= len(line)
+    return "\n".join(kept)
+
+
+def _short_text(limit: int) -> Any:
+    def read(value: Any) -> str:
+        if not isinstance(value, str):
+            return ""
+        return " ".join(_COVER_CTRL_RE.sub(" ", value).split())[:limit]
+
+    return BeforeValidator(read)
+
+
+def _box_2d(value: Any) -> tuple[int, int, int, int] | None:
+    """[ymin, xmin, ymax, xmax]（0〜1000 に正規化した座標・Gemini の box_2d の形）。
+
+    壊れていれば None。
+    """
+    if isinstance(value, dict):
+        value = [value.get(k) for k in ("ymin", "xmin", "ymax", "xmax")]
+    if not isinstance(value, (list, tuple)) or len(value) != 4:
+        return None
+    nums: list[float] = []
+    for item in value:
+        if isinstance(item, bool) or not isinstance(item, (int, float)):
+            return None
+        try:
+            num = float(item)  # 桁の大きな整数は OverflowError（壊れた枠＝None・例外にしない）
+        except (OverflowError, ValueError):
+            return None
+        if not math.isfinite(num):
+            return None
+        nums.append(min(1000.0, max(0.0, num)))
+    y0, x0, y1, x1 = nums
+    if y1 <= y0 or x1 <= x0:
+        return None
+    return (round(y0), round(x0), round(y1), round(x1))
+
+
+_Box = Annotated[tuple[int, int, int, int] | None, BeforeValidator(_box_2d)]
+
+
+class CoverText(BaseModel):
+    """表紙の文字の 1 ブロック（AI の読み取り）。
+
+    大きさ・位置・行数は box と改行からコードが計算する。
+    """
+
+    text: Annotated[str, BeforeValidator(_cover_line_text)] = ""
+    box: _Box = Field(default=None, validation_alias=AliasChoices("box_2d", "box"))
+    style: Annotated[list[str] | None, _enum_list_or_none(COVER_TEXT_STYLES)] = None
+    # 縦書きか（None＝分からない）。縦書きの枠の高さは列の長さなので、字の大きさは枠の幅÷列の数
+    # で測る（09-29 本番 #5「市販の／カレールーは／卒業！」は縦書きで、高さ÷行で 3 倍に出た）。
+    # 分からないときは字の大きさを測らない（母数から外す）。
+    vertical: Annotated[bool | None, BeforeValidator(_tri_bool)] = None
+
+
+class CoverFace(BaseModel):
+    """顔。実写の人（real）だけを「顔あり」に数える（イラスト・画面やパッケージの中の顔は別）。"""
+
+    kind: Annotated[str, _enum_or_unknown(COVER_FACE_KINDS)] = "unknown"
+    expression: Annotated[str, _enum_or_unknown(COVER_EXPRESSIONS)] = "unknown"
+    gaze: Annotated[str, _enum_or_unknown(COVER_GAZES)] = "unknown"
+    box: _Box = Field(default=None, validation_alias=AliasChoices("box_2d", "box"))
+
+    @model_validator(mode="before")
+    @classmethod
+    def _present_to_kind(cls, data: Any) -> Any:
+        if isinstance(data, dict) and "kind" not in data and "present" in data:
+            present = _tri_bool(data.get("present"))
+            data = {**data, "kind": "real" if present else "none" if present is False else ""}
+        return data
+
+
+def _cover_texts(value: Any) -> list[Any] | None:
+    if value is None:
+        return None
+    if isinstance(value, (str, dict)):
+        value = [value]
+    if not isinstance(value, list):
+        return None
+    return [{"text": v} if isinstance(v, str) else v for v in value if isinstance(v, (str, dict))]
+
+
+def _cover_face(value: Any) -> Any:
+    if isinstance(value, (dict, BaseModel)):
+        return value
+    flag = _tri_bool(value)
+    if flag is False or _enum_token(value) == "none":
+        return {"kind": "none", "expression": "none", "gaze": "none"}
+    return None
+
+
+def _brand_texts(value: Any) -> list[str]:
+    if isinstance(value, str):
+        value = [value]
+    if not isinstance(value, list):
+        return []
+    out: list[str] = []
+    for item in value:
+        if isinstance(item, str):
+            text = " ".join(_COVER_CTRL_RE.sub(" ", item).split())[:COVER_BRAND_MAX]
+            if text and text not in out:
+                out.append(text)
+    return out[:3]
+
+
+# コードだけが書く欄（AI の JSON に書かれていても捨てる）。
+COVER_CODE_ONLY: tuple[str, ...] = (
+    "rank",
+    "group",
+    "status",
+    "reason",
+    "version",
+    "via",
+    "img_w",
+    "img_h",
+)
+# 読み取りが成り立つのに要る欄（無ければ read_failed。空の JSON を「全部無い」と数えない）。
+COVER_REQUIRED_KEYS: tuple[str, ...] = ("elements", "texts", "face")
+
+
+class CoverRead(BaseModel):
+    """サムネ（一覧の表紙）1 枚の読み取り。None の欄は「分からない」（その欄の母数から外す）。"""
+
+    rank: int = 0
+    group: Literal["top", "rest"] = "top"  # top＝表示順の上位 n 本・rest＝6〜30 位など
+    status: CoverStatus = "read_failed"  # 既定は ok にしない（コードが読めたときだけ ok にする）
+    reason: str = ""
+    version: str = ""
+    via: str = ""  # 取得の経路（media／local／injected）
+    img_w: int = 0  # 読み取りに渡した画像の幅・高さ（読めなければ 0）
+    img_h: int = 0
+    elements: Annotated[list[str] | None, _enum_list_or_none(COVER_ELEMENTS)] = None
+    subject_note: Annotated[str, _short_text(COVER_NOTE_MAX)] = ""
+    texts: Annotated[list[CoverText] | None, BeforeValidator(_cover_texts)] = None
+    unreadable_text: Annotated[bool | None, BeforeValidator(_tri_bool)] = None
+    face: Annotated[CoverFace | None, BeforeValidator(_cover_face)] = None
+    action: Annotated[str, _enum_or_unknown(COVER_ACTIONS)] = "unknown"
+    closeup: Annotated[bool | None, BeforeValidator(_tri_bool)] = None
+    sizzle: Annotated[list[str] | None, _enum_list_or_none(COVER_SIZZLE)] = None
+    product: Annotated[str, _enum_or_unknown(("hero", "visible", "none"))] = "unknown"
+    brand_text: Annotated[list[str], BeforeValidator(_brand_texts)] = Field(default_factory=list)
+    clutter: Annotated[str, _enum_or_unknown(("simple", "moderate", "busy"))] = "unknown"
+    legibility: Annotated[str, _enum_or_unknown(("good", "ok", "poor", "none"))] = "unknown"
+    appeals: Annotated[list[str] | None, _enum_list_or_none(COVER_APPEALS)] = None
+
+    @model_validator(mode="after")
+    def _tidy(self) -> CoverRead:
+        if self.texts is not None:
+            self.texts = [t for t in self.texts if t.text][:COVER_TEXT_BLOCKS]
+            if not self.texts and self.legibility not in ("none", "unknown"):
+                self.legibility = "none"
+        return self
+
+    @property
+    def ok(self) -> bool:
+        return self.status == "ok"
+
+
 class VideoVSEOAnalysis(BaseModel):
     """1 動画の VSEO 観点マルチモーダル分析（Gemini 構造化出力）。"""
 
@@ -303,6 +583,17 @@ class VideoMeta(BaseModel):
     create_time: int = 0
     hashtags: list[str] = Field(default_factory=list)
     music_title: str = ""
+    # サムネ（一覧の表紙）の読み取り。置き場所は上位ボード（out.board）の各行だけ（唯一の正）。
+    # videos[].meta には載せない（skill が写しから外す）。None は「読んでいない」で、
+    # 出力にも出さない。
+    cover_read: CoverRead | None = None
+
+    @model_serializer(mode="wrap")
+    def _omit_missing_cover(self, handler: SerializerFunctionWrapHandler) -> Any:
+        data = handler(self)
+        if isinstance(data, dict) and data.get("cover_read") is None:
+            data.pop("cover_read", None)
+        return data
 
     @field_validator("engagement_rate")
     @classmethod
@@ -504,7 +795,18 @@ class WinHypothesis(BaseModel):
 # LLM の出力は壊れていることがあるので、型が合わない値は例外にせず既定値へ倒す（1 項目の
 # 誤りで synthesis 全体を捨てないため）。
 
-DIRECTIVE_KINDS: tuple[str, ...] = ("フック", "構成", "テロップ", "撮影", "音", "商品", "投稿")
+# 「表紙」は cover_directives だけの種類（directives に書かれたら検査で空にする）。
+DIRECTIVE_KINDS: tuple[str, ...] = (
+    "フック",
+    "構成",
+    "テロップ",
+    "撮影",
+    "音",
+    "商品",
+    "投稿",
+    "表紙",
+)
+COVER_KIND = "表紙"
 _TIMECODE_TEXT_RE = re.compile(r"^\s*(\d{1,2}):([0-5]\d(?:\.\d+)?)\s*$")
 _RANK_TEXT_RE = re.compile(r"^\s*(?:#|＃|rank\s*)?(\d{1,3})\s*(?:位)?\s*$", re.IGNORECASE)
 
@@ -596,8 +898,19 @@ class SynthRef(BaseModel):
     rank: _Rank = 0
     sec: _Sec = None
     quote: _Text = ""
-    source: _Text = ""  # コードだけ: telop/scene/hook/brand/caption（照合に合格した場所）
+    # 引用の場所を明示する欄。"cover" はサムネ（一覧の表紙）の文字か説明（AI の読み取り）。
+    # 空は従来どおり（sec が None ならキャプション）。空のときは出力に出さない。
+    on: _Text = ""
+    # コードだけ: telop/scene/hook/brand/caption/cover_text/cover_note（照合に合格した場所）
+    source: _Text = ""
     found_sec: _Sec = None  # コードだけ: 見つかった秒（キャプションは None）
+
+    @model_serializer(mode="wrap")
+    def _omit_empty_on(self, handler: SerializerFunctionWrapHandler) -> Any:
+        data = handler(self)
+        if isinstance(data, dict) and not data.get("on"):
+            data.pop("on", None)
+        return data
 
 
 _Refs = Annotated[list[SynthRef], BeforeValidator(_dict_items)]
@@ -637,6 +950,16 @@ class Directive(BaseModel):
     ] = "llm"
     tier: _Text = ""  # コードだけ: 必須条件／多数派／事例
     ranks: _RankList = Field(default_factory=list)  # コードだけ: 照合に合格した順位
+    # cover_directives だけ: 根拠にした表紙の特徴の表の id（例 cover:sizzle）。段階・本数・順位は
+    # この特徴からコードが取る（引用した本数では決めない）。空は「未集計」。空なら出力に出さない。
+    feature: _Text = ""
+
+    @model_serializer(mode="wrap")
+    def _omit_empty_feature(self, handler: SerializerFunctionWrapHandler) -> Any:
+        data = handler(self)
+        if isinstance(data, dict) and not data.get("feature"):
+            data.pop("feature", None)
+        return data
 
 
 class AvoidItem(BaseModel):
@@ -712,12 +1035,14 @@ SYNTHESIS_V3_FIELDS: tuple[str, ...] = (
     "board_angles",
     "hypotheses",
     "posting",
+    "cover_directives",
 )
 # コードだけが書く欄（LLM の JSON に書かれていても parse で捨てる）。キー: 欄のパス。
 CODE_ONLY_TOP: tuple[str, ...] = ("version", "grounding_mode", "grounding_dropped")
 CODE_ONLY_ITEM: dict[str, tuple[str, ...]] = {
     "summary_lines": ("type_line_by_code", "best_rank"),
     "directives": ("origin", "tier", "ranks"),
+    "cover_directives": ("origin", "tier", "ranks"),
     "avoid": ("origin", "reason", "ranks"),
     "storyboards": ("target_sec", "basis_note"),
     "cuts": ("start_sec", "end_sec", "stage"),
@@ -774,6 +1099,10 @@ class CrossSynthesis(BaseModel):
         default_factory=list
     )
     posting: Annotated[PostingPlan | None, BeforeValidator(_object_or_none)] = None
+    # サムネ（一覧の表紙）の作り方の指示（kind は「表紙」に固定・refs は on="cover"）。
+    cover_directives: Annotated[list[Directive], BeforeValidator(_dict_items)] = Field(
+        default_factory=list
+    )
 
     @model_serializer(mode="wrap")
     def _omit_empty_v3(self, handler: SerializerFunctionWrapHandler) -> Any:
@@ -801,6 +1130,8 @@ class CrossAnalysis(BaseModel):
     dominant_brightness: Literal["dark", "dim", "medium", "bright", "very_bright"] = "medium"
     thumb_consensus: str = ""  # サムネ色の横断1文（検索一覧での目立ち方）
     thumb_agree: bool = False  # サムネ色が過半数一致しているか（提案に使えるか）
+    # サムネ（一覧の表紙）の共通点の 1 行（コードの名前と本数だけ・第三者の文字は入れない）。
+    cover_line: str = ""
     stats: StatsAnalysis | None = None
     synthesis: CrossSynthesis | None = None  # Gemini 横断シンセシス（解釈層）
     summary: str = ""
@@ -929,3 +1260,6 @@ class VideoAlgorithmOutput(BaseModel):
     avoid_terms: list[str] = Field(default_factory=list)
     # 検索結果を取得した日時（JST・ISO 8601）。順位は「この時点」の値。旧キャッシュは None。
     generated_at: str | None = None
+    # サムネ（一覧の表紙）の読み取りの範囲。""＝以前の分析（読み取りが無い）・off＝止めている設定・
+    # top＝表示順の上位 n 本・board＝6〜30 位も読んだ。
+    cover_read_mode: Literal["", "off", "top", "board"] = ""

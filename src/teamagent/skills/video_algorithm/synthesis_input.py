@@ -32,8 +32,30 @@ from teamagent.skills.search_surface_check.display import fmt_count
 from teamagent.skills.search_surface_check.video_digest import HOOK_LABEL
 from teamagent.skills.search_surface_check.video_notes import structure_payload
 from teamagent.skills.search_surface_check.video_structure import scene_rows
+from teamagent.skills.video_algorithm.cover_facts import (
+    CLUTTER_LABEL,
+    ELEMENT_LABEL,
+    EMPTY_VIEW,
+    EXPRESSION_LABEL,
+    FACE_KIND_LABEL,
+    GAZE_LABEL,
+    LEGIBILITY_LABEL,
+    MATCH_LABEL,
+    NUMBER_KIND_LABEL,
+    POSITION_JP,
+    PRODUCT_LABEL,
+    SIZZLE_LABEL,
+    STATUS_LABEL,
+    STYLE_LABEL,
+    CoverFacts,
+    CoverView,
+    code_cover_directives,
+    cover_view,
+    dist_text,
+)
 from teamagent.skills.video_algorithm.evidence import (
     KW_LAYER_LABEL,
+    RELATION_LABEL,
     Roster,
     at_least_majority,
     norm,
@@ -162,6 +184,8 @@ class SynthesisContext:
     framing: bool
     cuts: tuple[CutSlot, ...]
     stats: StatsAnalysis | None = None
+    # サムネ（一覧の表紙）の読み取りのまとめ（上位ボードの cover_read から・無ければ空）。
+    cover: CoverView = EMPTY_VIEW
 
     @classmethod
     def build(
@@ -203,6 +227,7 @@ class SynthesisContext:
             framing=has_framing(watched),
             cuts=cut_plan(band.duration.median if band.duration else 0.0),
             stats=stats,
+            cover=cover_view(board_t, list(videos), query, roster),
         )
 
     @property
@@ -237,6 +262,11 @@ class SynthesisContext:
 
     def feature(self, fid: str) -> Feature | None:
         return next((f for f in self.features if f.id == fid), None)
+
+    @property
+    def cover_n(self) -> int:
+        """表紙を読めた本数（上位の群）。0 なら表紙の指示を出さない。"""
+        return len(self.cover.top_ok)
 
     def code_directive_features(self) -> list[tuple[Feature, str, str]]:
         """コードが事実から作る指示に使う特徴（多数派以上だけ・固定の順）と、その文・種類。"""
@@ -537,6 +567,107 @@ def _corr_lines(ctx: SynthesisContext) -> list[str]:
     ]
 
 
+# ── サムネ（一覧の表紙）───────────────────────────────────────────────
+
+COVER_SECTION_HEAD = "# サムネ（一覧の表紙）の個票"
+
+
+def _label(table: dict[str, str], value: str) -> str:
+    return table.get(value, "不明")
+
+
+def cover_card(c: CoverFacts) -> dict[str, Any]:
+    """1 枚の表紙の個票（AI の読み取りと、コードの判定を分けて書く）。"""
+    if not c.ok:
+        return {"順位": c.rank, "表紙": f"分析なし（{STATUS_LABEL.get(c.status, c.status)}）"}
+    return {
+        "順位": c.rank,
+        "群": "上位" if c.group == "top" else "ほか",
+        "AIの読み取り": {
+            "写っている要素": [ELEMENT_LABEL.get(e, e) for e in (c.elements or ())],
+            "主役の説明": c.subject_note,
+            "表紙の文字": [t.replace("\n", "／") for t in c.texts],
+            "読めない文字": "あり" if c.read.unreadable_text else "なし",
+            "顔": _label(FACE_KIND_LABEL, c.face_kind),
+            "表情": _label(EXPRESSION_LABEL, c.expression),
+            "視線": _label(GAZE_LABEL, c.gaze),
+            "寄り": "あり" if c.closeup else "なし" if c.closeup is False else "不明",
+            "質感の見せ場": [SIZZLE_LABEL.get(x, x) for x in (c.sizzle or ())],
+            "商品": _label(PRODUCT_LABEL, c.product),
+            "背景": _label(CLUTTER_LABEL, c.clutter),
+            "読みやすさ": _label(LEGIBILITY_LABEL, c.legibility),
+            "文字の飾り": [STYLE_LABEL.get(x, x) for x in (c.styles or ())],
+        },
+        "コードの判定": {
+            "大きい文字": c.main_flat,
+            "行数": c.lines,
+            "位置": POSITION_JP.get(c.position, "不明"),
+            "一覧のタイルで読める大きさ": (
+                "不明" if c.large_text is None else "はい" if c.large_text else "いいえ"
+            ),
+            "検索語": list(c.kw_terms),
+            "単位つきの数字": [f"{NUMBER_KIND_LABEL.get(k, k)}:{raw}" for k, raw in c.numbers],
+            "問いかけ": "はい" if c.question else "いいえ",
+            "手間の少なさ": "はい" if c.effortless else "いいえ",
+            "失敗や注意": "はい" if c.warning else "いいえ",
+            "商品名（照合済みの区分）": [
+                f"{name}（{'未照合' if rel == 'unverified' else RELATION_LABEL.get(rel, rel)}）"
+                for name, rel in c.brands
+            ],
+            "冒頭のテロップとの一致（AI同士）": MATCH_LABEL.get(c.opening_match, "—"),
+            "キャプション冒頭との一致（実データ）": MATCH_LABEL.get(c.caption_match, "—"),
+        },
+    }
+
+
+def _cover_feature_lines(view: CoverView) -> list[str]:
+    lines: list[str] = []
+    for f in view.features:
+        who = "全部" if f.count == f.n else ranks_text(f.ranks)
+        lines.append(f"- {f.id}｜{f.label}｜{f.count}/{f.n}（{who}）｜{f.tier}")
+    return lines
+
+
+def _cover_gap_lines(view: CoverView) -> list[str]:
+    if view.mode != "board" or not view.gap:
+        return [f"- {view.gap_note}"]
+    lines = [f"- {view.gap_note}"]
+    for g in view.gap:
+        mark = f"｜差が大きい（参考・{g.mark_text}）" if g.marked else ""
+        lines.append(f"- {g.id}｜{g.label}｜上位 {g.a}/{g.n}・ほか {g.b}/{g.m}{mark}")
+    return lines
+
+
+def cover_prompt_block(ctx: SynthesisContext) -> str:
+    """表紙の節（無ければ空）。数字の照合は、この節だけを cover_directives に使う。"""
+    view = ctx.cover
+    if not view.top:
+        return ""
+    ok = len(view.top_ok)
+    code = code_cover_directives(view, ctx.avoid_terms)
+    sections: list[list[str]] = [
+        [
+            f"{COVER_SECTION_HEAD}（AI が表紙の画像だけから読んだもの・上位{view.n_top}本中"
+            f"{ok}本を読めた。1行に1本の JSON。表紙の文字と主役の説明は cover_directives の refs の"
+            "引用元）",
+            *(json.dumps(cover_card(c), ensure_ascii=False) for c in (*view.top, *view.rest)),
+        ],
+        [
+            "# 表紙の特徴の表（母数は欄ごとの読めた本数・段階はコードの集計。cover_directives の"
+            " feature にはこの id を1つ入れる。段階と本数はその特徴の集計から付く）",
+            "id｜特徴｜本数｜該当｜段階",
+            *_cover_feature_lines(view),
+        ],
+        [f"# 表紙の文字の分布（上位）: {dist_text(view.dist)}"],
+        [f"# 上位{view.n_top}本とほかの表紙（本数・参考・因果ではない）", *_cover_gap_lines(view)],
+        [
+            "# コードが入れる表紙の指示（重ねて書かない）: "
+            + ("、".join(f"{d.text}（{d.tier}）" for d in code) or "なし")
+        ],
+    ]
+    return "\n\n".join("\n".join(x) for x in sections if x)
+
+
 def render_prompt(ctx: SynthesisContext) -> str:
     """Gemini に渡す本文（system は synthesis.md v3）。照合の入力もこの本文だけ。"""
     terms = "・".join(f"「{t}」" for t in query_terms(ctx.query)) or f"「{ctx.query}」"
@@ -582,8 +713,9 @@ def render_prompt(ctx: SynthesisContext) -> str:
             f"# 上位{len(ctx.board)}本の一覧（メタだけ。{_unwatched_text(ctx)}）",
             *_board_lines(ctx),
         ],
+        [cover_prompt_block(ctx)] if ctx.cover.top else ["# サムネ（一覧の表紙）: 分析なし"],
         [
-            "システム指示の規則（R1〜R16）に従い、所見を2-3行書いたあと JSON ブロックを1つ"
+            "システム指示の規則（R1〜R17）に従い、所見を2-3行書いたあと JSON ブロックを1つ"
             "出力してください。"
         ],
     ]
@@ -592,14 +724,32 @@ def render_prompt(ctx: SynthesisContext) -> str:
 
 @dataclass(frozen=True)
 class Grounders:
-    """数字の照合: 本文全体と、1 本ずつ（その動画の個票だけ）。"""
+    """数字の照合: 本文全体（表紙の節を除く）と、1 本ずつ（その動画の個票だけ）と、表紙の節だけ。"""
 
     all: NumberGrounder
     per_video: dict[int, NumberGrounder]
+    cover: NumberGrounder | None = None
 
 
 def build_grounders(ctx: SynthesisContext, prompt: str) -> Grounders:
-    """照合の入力は Gemini に渡した本文だけ（system は入れない。例文の数字を通さないため）。"""
+    """照合の入力は Gemini に渡した本文だけ（system は入れない。例文の数字を通さないため）。
+
+    表紙の節（AI が表紙から読んだ文字の数字）は、本文全体の照合から外し、cover_directives の
+    照合にだけ使う（表紙の文字の数字で、動画の欄の数字が通らないようにする）。
+    """
+    block = cover_prompt_block(ctx)
+    body = prompt.replace(block, "") if block else prompt
+    cover = (
+        NumberGrounder.from_inputs(
+            block,
+            ctx.query,
+            valid_ranks=[c.rank for c in (*ctx.cover.top, *ctx.cover.rest)],
+            rounding=True,
+            strict_suffixes=STRICT_SUFFIXES,
+        )
+        if block
+        else None
+    )
     per_video = {
         rank: NumberGrounder.from_inputs(
             card_json(card),
@@ -612,9 +762,10 @@ def build_grounders(ctx: SynthesisContext, prompt: str) -> Grounders:
     }
     return Grounders(
         all=NumberGrounder.from_inputs(
-            prompt, valid_ranks=ctx.ranks, rounding=True, strict_suffixes=STRICT_SUFFIXES
+            body, valid_ranks=ctx.ranks, rounding=True, strict_suffixes=STRICT_SUFFIXES
         ),
         per_video=per_video,
+        cover=cover,
     )
 
 
@@ -626,6 +777,7 @@ def match_text(term: str, text: str) -> bool:
 __all__ = [
     "CODE_DIRECTIVE_FEATURES",
     "CORR_MIN_N",
+    "COVER_SECTION_HEAD",
     "DESC_MAX",
     "STRICT_SUFFIXES",
     "UNSPECIFIED_CLIENT",
@@ -635,6 +787,8 @@ __all__ = [
     "build_grounders",
     "card_json",
     "cards",
+    "cover_card",
+    "cover_prompt_block",
     "cut_plan",
     "has_framing",
     "low_performer",
