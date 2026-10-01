@@ -686,6 +686,10 @@ class _DeliveryPg:
             )
         self.rowcount = 0 if (self.taken or params is None) else 1
 
+    def fetchone(self) -> Any:
+        # claim が取れなかったときの「誰が持っているか」照会（0031）。別経路が送った行。
+        return ("scheduled",) if self.taken else None
+
     def commit(self) -> None:
         return None
 
