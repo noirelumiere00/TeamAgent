@@ -327,6 +327,11 @@ class MorningDigestSkill(BaseSkill[MorningDigestInput, MorningDigestOutput]):
         self._internal_domain = (
             env_str("DIGEST_INTERNAL_DOMAIN", "vectorinc.co.jp").strip().lower().lstrip("@")
         )
+        # 朝の自動下書きから社内（DIGEST_INTERNAL_DOMAIN）の差出人を外す（2026-10-01・
+        # BU1 ヒアリング「社内向けのメールへの返信は不要では？」「自分で下書き管理しているのと
+        # バッティング」）。外すのは朝の自動生成だけで、一覧の「✏️ 下書きを作成」ボタンは残す
+        # （必要な人は押せば作れる）。既定 ON。env で従来挙動（社内も自動生成）に戻せる。
+        self._draft_skip_internal = env_bool("MORNING_DIGEST_DRAFT_SKIP_INTERNAL", True)
         # 冪等性: 既存下書きのあるスレッドへの二重作成を防ぐ（毎日運用で必須）。
         self._dedupe_drafts = env_bool("MORNING_DIGEST_DEDUPE_DRAFTS", True)
         # オンデマンド下書き: True なら朝は生成せず、要返信メールのボタン押下で生成する。
@@ -1144,7 +1149,13 @@ class MorningDigestSkill(BaseSkill[MorningDigestInput, MorningDigestOutput]):
                 continue
             if i >= len(raw_msgs):
                 continue
-            if not _is_addressed_to(getattr(raw_msgs[i], "headers", {}) or {}, requester):
+            headers = getattr(raw_msgs[i], "headers", {}) or {}
+            if not _is_addressed_to(headers, requester):
+                continue
+            if self._draft_skip_internal and _is_internal_sender(
+                headers.get("From", ""), self._internal_domain
+            ):
+                # 社内の差出人は朝の自動下書きを作らない（ボタン押下での作成は従来どおり可）。
                 continue
             targets.append((i, raw_msgs[i]))
         if not targets:
@@ -1461,6 +1472,18 @@ def _sender_priority(
             if a.partition("@")[2] == internal_domain:
                 return "internal"
     return "external"
+
+
+def _is_internal_sender(from_header: str, internal_domain: str) -> bool:
+    """差出人が社内ドメインか（VIP 指定の有無に関係なく、ドメインだけで判定する）。
+
+    _sender_priority は VIP を先に返すため、社内の VIP は "vip" になり社内と判定できない。
+    朝の自動下書きを社内で止める判定は、表示ラベルとは独立にドメインだけを見る。
+    """
+    if not internal_domain:
+        return False
+    addrs = [a.strip().lower() for _, a in getaddresses([from_header or ""]) if a]
+    return bool(addrs) and all(a.partition("@")[2] == internal_domain for a in addrs)
 
 
 def _sender_label_ja(priority: str) -> str:
