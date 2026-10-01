@@ -57,6 +57,7 @@ from teamagent.skills._shared.connect_intent import (
     ConnectIntent,
     detect_connect_intent_in_args,
 )
+from teamagent.skills._shared.private_surface import is_private_surface
 from teamagent.skills.base import ASYNC_JOB_POLL_METADATA_KEY, SkillContext
 
 # 二段返しの契約定数だけを持つ軽量モジュール（boto3/psycopg を引かない）。
@@ -896,6 +897,23 @@ def _complete_detached(
         logger.warning("usage_event_schedule_failed", request_id=request_id, error="LoopClosed")
 
 
+#: 本人の受信メール・下書き・ダイジェストを読む道具（本人 DM でだけ動かす）。
+#: 足すときはここに名前を追加する（tests/mcp_gateway/test_dm_only_tools.py が一覧を固定）。
+DM_ONLY_TOOLS: frozenset[str] = frozenset(
+    {
+        "mail_summary",
+        "mail_followup",
+        "mail_reply",
+        "mail_to_internal_context",
+        "morning_digest",
+    }
+)
+DM_ONLY_MESSAGE = (
+    "メールの中身は、ほかの人の目に触れないよう Aico との DM でだけお出ししています。"
+    "DM でもう一度お声がけください。"
+)
+
+
 async def dispatch_tool(
     by_name: dict[str, ToolSpec],
     name: str,
@@ -957,6 +975,24 @@ async def dispatch_tool(
         skill_args=skill_args,
         slack_user_id=usage_user_id,
     )
+
+    # ── 出力面ガード（10-01 監査候補②・deny-by-default）: 本人のメールを読む道具は、
+    # 署名済み claim の会話が本人 DM（D 始まり）で、身元が検証済みのときだけ動かす。
+    # チャンネルに第三者が置いた指示文でモデルが呼ばされても、受信メールの要約・件名・
+    # 相手がスレッドへ出ない（スレッドの記録にも残らない＝候補③も塞ぐ）。Gmail には触らない。
+    if name in DM_ONLY_TOOLS and not is_private_surface(
+        verified_caller.channel_id if verified_caller is not None else None,
+        metadata.get("identity_verified") is True,
+    ):
+        logger.info("dm_only_tool_rejected", tool=name)
+        return [
+            TextContent(
+                type="text",
+                text=json.dumps(
+                    {"error": "dm_only", "message": DM_ONLY_MESSAGE}, ensure_ascii=False
+                ),
+            )
+        ]
 
     try:
         skill_input = spec.input_schema(**skill_args)

@@ -72,10 +72,12 @@ def _gdrive_mock() -> MagicMock:
 def _ctx(
     email: str | None = "u@vectorinc.co.jp",
     *,
-    channel_id: str | None = None,
+    channel_id: str | None = "D0SELF",
     thread_ts: str | None = None,
+    verified: bool = True,
 ) -> SkillContext:
-    md: dict[str, str] = {}
+    """既定は本番の DM 依頼の形（署名済み claim の channel が D 始まり・身元検証済み）。"""
+    md: dict[str, object] = {"identity_verified": verified}
     if email:
         md["user_email"] = email
     if channel_id:
@@ -102,44 +104,44 @@ def test_delivers_file_to_dm_happy_path() -> None:
     assert out.delivered_count == 1
     assert "DM にお送りしました" in out.note
     assert out.references[0].delivered is True
-    # channel 無し → DM 解決 → upload まで通った
-    slack.lookup_user_id_by_email.assert_awaited_once()
-    slack.open_dm.assert_awaited_once()
-    slack.upload_file.assert_awaited_once()
+    # 本人 DM で頼まれた → その DM へそのまま添付（email → user_id 解決は使わない）
+    slack.lookup_user_id_by_email.assert_not_awaited()
+    assert slack.upload_file.await_args.args[0] == "D0SELF"
     # 要約が最初の添付の initial_comment に乗る
     assert slack.upload_file.await_args.kwargs.get("initial_comment") == "要約です"
 
 
-def test_delivers_file_to_channel_thread() -> None:
-    hits = [_hit(source_type="gdrive", source_uri="gdrive://F1", title="提案.pdf")]
+def test_channel_request_goes_to_dm_and_reveals_nothing_in_channel() -> None:
+    """チャンネルで頼まれても、実ファイルと要約は本人 DM へ。その場には件数 1 行だけ。
+
+    変異: 出力面ガードを外すと C123 へ添付され、answer/references（資料名・要約）が
+    チャンネル向けの返答に載って赤。
+    """
+    hits = [_hit(source_type="gdrive", source_uri="gdrive://F1", title="価格表_社外秘.pdf")]
     slack = _slack_mock()
     skill = KnowledgeDeliverSkill(search=_search_mock(hits), slack=slack, gdrive=_gdrive_mock())
     out = skill.run(
-        KnowledgeDeliverInput(query="提案資料出して"),
+        KnowledgeDeliverInput(query="価格表出して"),
         _ctx(channel_id="C123", thread_ts="111.222"),
     )
     assert out.delivered_count == 1
-    assert "このスレッド" in out.note
-    # チャンネル直添付＝DM 解決は使わない
-    slack.lookup_user_id_by_email.assert_not_awaited()
-    slack.open_dm.assert_not_awaited()
-    # そのチャンネル/スレッドに upload
-    assert slack.upload_file.await_args.args[0] == "C123"
-    assert slack.upload_file.await_args.kwargs.get("thread_ts") == "111.222"
+    assert slack.upload_file.await_args.args[0] == "D1"  # 本人 DM を開いて送る
+    assert all(c.args[0] != "C123" for c in slack.upload_file.await_args_list)
+    assert out.answer == "" and out.references == []
+    assert "DM にお送りしました" in out.note and "価格表" not in out.note
 
 
-def test_channel_upload_failure_falls_back_to_dm() -> None:
-    hits = [_hit(source_type="gdrive", source_uri="gdrive://F1", title="提案.pdf")]
-    slack = MagicMock()
-    slack.lookup_user_id_by_email = AsyncMock(return_value="U1")
-    slack.open_dm = AsyncMock(return_value="D1")
-    # 1回目=channel への upload 失敗 / 2回目=DM への upload 成功
-    slack.upload_file = AsyncMock(side_effect=[False, True])
+@pytest.mark.parametrize(("channel", "verified"), [("G123", True), ("D0SELF", False), (None, True)])
+def test_non_dm_or_unverified_surfaces_are_treated_as_shared(
+    channel: str | None, verified: bool
+) -> None:
+    """グループ DM・身元未検証・会話不明は、共有面として扱う（deny-by-default）。"""
+    hits = [_hit(source_type="gdrive", source_uri="gdrive://F1", title="a.pdf")]
+    slack = _slack_mock()
     skill = KnowledgeDeliverSkill(search=_search_mock(hits), slack=slack, gdrive=_gdrive_mock())
-    out = skill.run(KnowledgeDeliverInput(query="x"), _ctx(channel_id="C123", thread_ts="1.2"))
-    assert out.delivered_count == 1
-    assert "DM" in out.note  # channel 失敗 → DM フォールバック
-    slack.open_dm.assert_awaited_once()
+    out = skill.run(KnowledgeDeliverInput(query="x"), _ctx(channel_id=channel, verified=verified))
+    assert out.answer == "" and out.references == []
+    slack.lookup_user_id_by_email.assert_awaited_once()  # channel は使わず email から DM
 
 
 def test_dedup_same_file_id() -> None:
@@ -255,20 +257,30 @@ def test_no_channel_no_email_skips_delivery() -> None:
     hits = [_hit(source_type="gdrive", source_uri="gdrive://F1", title="a.pdf")]
     slack = _slack_mock()
     skill = KnowledgeDeliverSkill(search=_search_mock(hits), slack=slack, gdrive=_gdrive_mock())
-    out = skill.run(KnowledgeDeliverInput(query="x"), _ctx(email=None))
+    out = skill.run(KnowledgeDeliverInput(query="x"), _ctx(email=None, channel_id=None))
     assert out.delivered_count == 0
-    assert "配信先が分からず" in out.note
     slack.lookup_user_id_by_email.assert_not_awaited()
-    assert out.answer == "要約です"  # 要約は返る（fail-open）
+    slack.upload_file.assert_not_awaited()
+    # 会話が分からない＝共有面扱い。要約もその場には返さず DM へ誘導する。
+    assert out.answer == "" and "DM でもう一度" in out.note
+
+
+def test_dm_request_without_email_still_delivers_to_that_dm() -> None:
+    hits = [_hit(source_type="gdrive", source_uri="gdrive://F1", title="a.pdf")]
+    slack = _slack_mock()
+    skill = KnowledgeDeliverSkill(search=_search_mock(hits), slack=slack, gdrive=_gdrive_mock())
+    out = skill.run(KnowledgeDeliverInput(query="x"), _ctx(email=None))
+    assert out.delivered_count == 1 and out.answer == "要約です"
 
 
 def test_dm_resolution_failure_is_failopen() -> None:
+    """チャンネル依頼で本人 DM が開けない → 何も添付せず、その場にも何も出さない。"""
     hits = [_hit(source_type="gdrive", source_uri="gdrive://F1", title="a.pdf")]
     slack = _slack_mock(user_id=None)  # email→user_id 解決失敗
     skill = KnowledgeDeliverSkill(search=_search_mock(hits), slack=slack, gdrive=_gdrive_mock())
-    out = skill.run(KnowledgeDeliverInput(query="x"), _ctx())
+    out = skill.run(KnowledgeDeliverInput(query="x"), _ctx(channel_id="C123"))
     assert out.delivered_count == 0
-    assert "失敗" in out.note
+    assert "DM でもう一度" in out.note and out.answer == ""
     slack.upload_file.assert_not_awaited()
 
 
