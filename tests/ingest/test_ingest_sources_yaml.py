@@ -53,7 +53,11 @@ def test_gdrive_folders_are_the_two_real_ones() -> None:
 def test_existing_sections_unchanged() -> None:
     """既存の Slack / Sheets / crawl 設定を変更していない（v2 は純加算）。"""
     sources = load_ingest_sources(REAL_YAML, skip_placeholder=True)
-    assert len(sources.slack_channels) == 2
+    # 2026-10-01: #proj-01案件決定-同行依頼（C08MH3MG02F）を純加算で 3 ch。既存 2 ch は設定ごと不変。
+    by_id = {c.channel_id: c for c in sources.slack_channels}
+    assert set(by_id) == {"C091ZSVTKF1", "C0A1207GYHZ", "C08MH3MG02F"}
+    assert (by_id["C091ZSVTKF1"].include_files, by_id["C091ZSVTKF1"].oldest_days) == (True, 180)
+    assert (by_id["C0A1207GYHZ"].include_files, by_id["C0A1207GYHZ"].oldest_days) == (True, 365)
     assert len(sources.gsheets) == 2
     assert sources.shared_drives_crawl is not None
     # 2026-08-17 裁定: 横断クロール停止（ナレッジ実体は 14Wfp6… 配下でカバー済み）

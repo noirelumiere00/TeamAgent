@@ -39,6 +39,24 @@ slack_channels:
       use_case: "顧客温度感・案件温度感の蓄積"
       priority: "high"        # 取り込み優先度
 
+  # ---- 案件決定（案件検索 v3 の「案件の現在地」）----
+  # 2026-10-01 小俣さん依頼で追加。channel_id / 公開チャンネルであることは slack_search_channels で確認済。
+  # 中身: 新規案件決定の定型投稿（クライアント名／商材・代理店・Salesforce の商談 URL・予算・撮影日・
+  # 納品月・KPI・掲載媒体）と、同行依頼・撮影日の連絡・オーガニック投稿の URL 共有。
+  # ACL は既存どおりチャンネルメンバーの email（約 55 名）。⚠️ 取り込みは bot token で読むため、
+  # Aico の bot をこのチャンネルに招待しないと 1 件も取れない（10-01 時点で未参加）。
+  - channel_id: "C08MH3MG02F"
+    channel_name: "#proj-01案件決定-同行依頼"
+    description: |
+      新規案件が決まったときの定型投稿（案件決定ワークフロー）と同行依頼のチャネル。
+      案件ごとにクライアント名／商材・代理店・Salesforce の商談 URL・予算・撮影日・納品月が並ぶ。
+    include_files: false      # 本文だけ（添付の契約・見積類は取り込まない）
+    oldest_days: 365          # 過去 1 年の案件決定
+    extra_metadata:
+      topic: "案件決定"
+      use_case: "案件の現在地（案件検索 v3）"
+      priority: "high"
+
 gdrive_folders:
   # ---- ナレッジ共有 Drive フォルダ ----
   - folder_id: "12FMLe9XG24wlPrBCHOQ_vcr4uELtMN1E"
