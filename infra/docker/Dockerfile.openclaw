@@ -2,8 +2,13 @@
 # OpenClaw gateway for ECS/Fargate (linux/arm64 only).
 #
 # The official image is used only as a content source. The runtime is a pinned
-# Chainguard (Wolfi) Node 26 image: no shell, package manager, curl, npm, or
-# compiler. Secrets are injected by ECS at runtime, never as build args.
+# Chainguard (Wolfi) Node 26 image: no shell, apk, curl, or compiler. It does
+# ship the npm CLI (Wolfi package npm-12 under /usr/lib/node_modules/npm), which
+# the runtime never executes but the ECR vulnerability gate still scans: CVEs in
+# npm's bundled dependencies (brace-expansion, ip-address, ...) block releases
+# until this base is bumped (2026-09-16 #424, 2026-10-01). The npm-free
+# node:latest-slim tracks an older major (25.x), so it is not a drop-in swap.
+# Secrets are injected by ECS at runtime, never as build args.
 
 ARG OPENCLAW_VERSION=2026.7.1
 ARG OPENCLAW_ARM64_DIGEST=sha256:38b611f494cb32e15aaf456d54c6b6be55db9098c90632aed0bfad4a70009707
