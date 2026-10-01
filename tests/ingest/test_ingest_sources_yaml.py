@@ -37,17 +37,37 @@ def test_no_placeholder_gdrive_entries() -> None:
         assert "REPLACE_WITH_" not in str(f["folder_id"]), f["folder_name"]
 
 
-def test_gdrive_folders_are_the_two_real_ones() -> None:
-    """gdrive_folders は実 ID の 2 フォルダのみ（撤去前後で loader 結果が不変＝挙動差分ゼロ）。
+def test_gdrive_folders_is_only_the_short_video_root() -> None:
+    """gdrive_folders は「ショート動画資料全般」(14Wfp6…) の 1 つだけ。
 
     14Wfp6… は 01〜08 の親で include_subfolders: true。再帰 walk が全カテゴリをカバーする。
+    2026-10-01: ナレッジ共有の自動格納フォルダ（12FMLe…）は小俣さん依頼で取り込み対象から外した。
     """
     sources = load_ingest_sources(REAL_YAML, skip_placeholder=True)
     folder_ids = [f.folder_id for f in sources.gdrive_folders]
-    assert "12FMLe9XG24wlPrBCHOQ_vcr4uELtMN1E" in folder_ids  # ナレッジ共有 - 添付ファイル
-    assert "14Wfp6GVCwaJROGhmEbd-r4_CfUymjwDL" in folder_ids  # ショート動画資料全般
-    assert not any("REPLACE_WITH_" in fid for fid in folder_ids)
-    assert len(sources.gdrive_folders) == 2
+    assert folder_ids == ["14Wfp6GVCwaJROGhmEbd-r4_CfUymjwDL"]  # ショート動画資料全般
+
+
+def test_knowledge_autofile_folder_is_excluded_from_parent_walk() -> None:
+    """12FMLe…（現名「ナレッジ共有（ナレッジ共有Slackから自動格納）」）は 14Wfp6… の子フォルダ。
+
+    エントリを消すだけでは親の再帰 walk で取り込まれ続けるため、フォルダ名の除外 regex で
+    配下ごと skip する。上書きしたので既定の 3 パターン（99_・一次倉庫・検索対象外）も残すこと。
+    """
+    import re
+
+    sources = load_ingest_sources(REAL_YAML, skip_placeholder=True)
+    pattern = sources.gdrive_exclude_folder_name_re
+    assert pattern is not None
+    for excluded in (
+        "ナレッジ共有（ナレッジ共有Slackから自動格納）",
+        "99_一次倉庫",
+        "一次倉庫",
+        "検索対象外",
+    ):
+        assert re.search(pattern, excluded), excluded
+    for kept in ("ショート動画資料全般", "01_提案書", "20251225_小林製薬株式会社_漢方ナイトミン"):
+        assert not re.search(pattern, kept), kept
 
 
 def test_existing_sections_unchanged() -> None:

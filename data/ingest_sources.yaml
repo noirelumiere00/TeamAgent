@@ -58,15 +58,11 @@ slack_channels:
       priority: "high"
 
 gdrive_folders:
-  # ---- ナレッジ共有 Drive フォルダ ----
-  - folder_id: "12FMLe9XG24wlPrBCHOQ_vcr4uELtMN1E"
-    folder_name: "ナレッジ共有 - 添付ファイル"
-    description: "#proj-ナレッジ共有 で共有された添付資料の保管先"
-    include_subfolders: true
-    mime_type_filter: null    # PDF / Doc / Sheet すべて
-    extra_metadata:
-      topic: "提案ナレッジ"
-      source_chain: "slack -> drive"  # Slack → Drive の関係性
+  # ---- ナレッジ共有 Drive フォルダ（12FMLe…）は 2026-10-01 に取り込み対象から外した ----
+  # 小俣さん依頼（「いらないかも・消して」）。このフォルダ（現名「ナレッジ共有（ナレッジ共有Slack
+  # から自動格納）」）は下の "ショート動画資料全般"(14Wfp6…) の**子フォルダ**なので、エントリを
+  # 消すだけでは親の再帰 walk で取り込まれ続ける。末尾の gdrive_exclude_folder_name_re に
+  # フォルダ名を足して、親経由でも配下ごと skip する。既存の取り込み済み文書の削除は DB 側で別途。
 
   # ---- ショート動画資料全般 (Day 7 = 2026-05-27 追加、最重要) ----
   # 営業との合意で「命名ルール付きで全資料をここに集約」する運用に決定。
@@ -302,8 +298,9 @@ gdrive_rulebook_root_folder_id: "REPLACE_WITH_KNOWLEDGE_ROOT"
 # （skipped_folder ログで観測可能）。省略時はコード側の既定
 #   ^\s*99[_＿]|一次倉庫|検索対象外
 # が使われる（99_一次倉庫＝検索対象外の運用ルールをコードで保証）。
-# 上書きしたい場合のみ、下の行のコメントを外して編集する:
-# gdrive_exclude_folder_name_re: "^\\s*99[_＿]|一次倉庫|検索対象外"
+# 上書きしたい場合のみ、下の行を編集する（上書きすると既定は使われないので、既定の 3 つも残す）。
+# 2026-10-01: ナレッジ共有の自動格納フォルダ（ショート動画資料全般の子・12FMLe…）を除外に追加。
+gdrive_exclude_folder_name_re: "^\\s*99[_＿]|一次倉庫|検索対象外|ナレッジ共有Slackから自動格納"
 
 # ============================================================
 # Adapter ↔ source_type マッピング
