@@ -474,6 +474,21 @@ def build_production_tools() -> list[ToolSpec]:
             )
         )
 
+    # 朝ダイジェストの本人ごとの設定（「Slack の欄はいらない」「来週まで止めて」）を DM で
+    # 見る/変える/戻すツール。触るのは本人の digest_preferences 行だけ（DM 限定・外部送信ゼロ）。
+    # 毎朝の配信が MORNING_DIGEST_PREFERENCES=true のときにこの行を読む。**既定 OFF**。
+    if _envflag("USE_DIGEST_SETTINGS_TOOL"):
+        from teamagent.skills.digest_settings.skill import DigestSettingsSkill
+
+        specs.append(
+            ToolSpec(
+                DigestSettingsSkill.name,
+                DigestSettingsSkill.description,
+                DigestSettingsSkill,
+                factory=lambda: DigestSettingsSkill(),
+            )
+        )
+
     # 自由文の空き時間照会ツール（「空いてる？」「◯分どこに入る？」）。read-only＝
     # freebusy 読み取りのみで書込 API は一切呼ばない。**既定 OFF**。
     if _envflag("USE_CALENDAR_FREEBUSY_TOOL"):

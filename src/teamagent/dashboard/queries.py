@@ -89,6 +89,7 @@ _WORK_TYPE_TOOLS: dict[str, tuple[str, ...]] = {
 #   - operation_log: Slack 会話を CRM 転記用に構造化＝整える
 #   - mail_constraints / workspace_search: 本人の受信箱・予定を引く秘書業務＝秘書
 #   - digest_ack: 朝ダイジェストの「確認済み」ボタン押下＝morning_digest の別入口＝秘書
+#   - digest_settings: 朝ダイジェストの本人ごとの設定＝morning_digest の設定口＝秘書
 #   - search_surface_check_video: 検索上位チェックの 2 段目（上位の動画の中身）。
 #     mcp が usage_events に別の skill 名で記録する（factory 登録のツールではない）＝調べる
 _SIBLING_WORK_TYPE_TOOLS: dict[str, tuple[str, ...]] = {
@@ -112,6 +113,7 @@ _SIBLING_WORK_TYPE_TOOLS: dict[str, tuple[str, ...]] = {
         "mail_constraints",
         "workspace_search",
         "digest_ack",
+        "digest_settings",
     ),
 }
 

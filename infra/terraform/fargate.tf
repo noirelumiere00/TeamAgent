@@ -703,6 +703,10 @@ resource "aws_ecs_task_definition" "mcp" {
       { name = "USE_CALENDAR_FREEBUSY_TOOL", value = var.use_calendar_freebusy_tool ? "true" : "false" },
       # slack_summary: Slack スレッド要約（read-only・本人 xoxp のみ・bot token 不使用・既定 false）。
       { name = "USE_SLACK_SUMMARY_TOOL", value = var.use_slack_summary_tool ? "true" : "false" },
+      # digest_settings: 朝のサマリーの本人ごとの設定を DM で見る/変える（本人の digest_preferences 行
+      # だけ・DM 限定）。migration 0030 の本番適用と、朝の配信側 MORNING_DIGEST_PREFERENCES=true が
+      # 前提。まず TD の env で小俣さんが試験し、その後 true にする（それまでは false 固定）。
+      { name = "USE_DIGEST_SETTINGS_TOOL", value = "false" },
       # slack_search: Slack 全体のキーワード検索（read-only・本人 xoxp の search.messages のみ）。
       # チャンネルでの依頼は公開チャンネルの一致だけ返す。まず TD の env で小俣さんが試験し、
       # その後 true にする（それまでは false 固定・変数化はしない）。

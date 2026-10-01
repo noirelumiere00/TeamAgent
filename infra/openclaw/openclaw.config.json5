@@ -287,6 +287,9 @@
             // 翌朝以降のダイジェストから隠す。触るのは本人の digest_ack 行だけで、Gmail も
             // Calendar も Slack API も呼ばない（外部送信ゼロ）。USE_DIGEST_ACK_TOOL=1・既定OFF。
             "digest_ack",
+            // digest_settings: 朝のサマリーの本人ごとの設定（止める/休む/曜日/欄/件数/下書き/直前リマインド）。
+            // DM 限定・触るのは本人の digest_preferences 行だけ（USE_DIGEST_SETTINGS_TOOL=1・既定OFF）。
+            "digest_settings",
             // calendar_freebusy: 「空いてる？」「◯分どこに入る？」の自由文空き時間照会。
             // read-only＝freebusy 読み取りのみ・書込APIなし（USE_CALENDAR_FREEBUSY_TOOL=1・既定OFF）。
             "calendar_freebusy",
