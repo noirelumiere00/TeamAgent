@@ -1,13 +1,15 @@
 # syntax=docker/dockerfile:1.7@sha256:a57df69d0ea827fb7266491f2813635de6f17269be881f696fbfdf2d83dda33e
 # OpenClaw gateway for ECS/Fargate (linux/arm64 only).
 #
-# The official image is used only as a content source. The runtime is a pinned
-# Chainguard (Wolfi) Node 26 image: no shell, apk, curl, or compiler. It does
-# ship the npm CLI (Wolfi package npm-12 under /usr/lib/node_modules/npm), which
-# the runtime never executes but the ECR vulnerability gate still scans: CVEs in
-# npm's bundled dependencies (brace-expansion, ip-address, ...) block releases
-# until this base is bumped (2026-09-16 #424, 2026-10-01). The npm-free
-# node:latest-slim tracks an older major (25.x), so it is not a drop-in swap.
+# The official image is used only as a content source. The runtime filesystem is
+# a pinned Chainguard (Wolfi) Node 26 image minus the npm CLI: no apk, curl, or
+# compiler. The base ships npm (Wolfi package npm-12) and node-gyp, which the
+# runtime never executes but the ECR vulnerability gate scans: CVEs in npm's
+# bundled dependencies blocked releases (2026-09-16 #424, 2026-10-01 #503).
+# The runtime-rootfs stage removes both packages as `apk del` would and the
+# final stage starts FROM scratch, so no lower layer still carries them. The
+# npm-free node:latest-slim tracks an older major (25.x), so it is not a
+# drop-in swap. Note: this base also ships busybox (/bin/sh).
 # Secrets are injected by ECS at runtime, never as build args.
 
 ARG OPENCLAW_VERSION=2026.7.1
@@ -171,7 +173,20 @@ RUN set -eux; \
     rm -rf /tmp/teamagent-openclaw; \
     chmod -R a-w /opt/teamagent
 
-FROM cgr.dev/chainguard/node:latest@${RUNTIME_ARM64_DIGEST} AS runtime
+FROM cgr.dev/chainguard/node:latest@${RUNTIME_ARM64_DIGEST} AS runtime-base
+
+# Copy the pinned runtime base as plain files and drop npm-12 and node-gyp from
+# both the filesystem and the package database (see the script header).
+# The upstream image only provides node and a shell for this step; nothing from
+# it enters /rootfs.
+FROM upstream-templates AS runtime-rootfs
+USER root
+COPY --from=runtime-base / /rootfs/
+COPY infra/openclaw/strip-runtime-npm.mjs /tmp/strip-runtime-npm.mjs
+RUN node /tmp/strip-runtime-npm.mjs /rootfs && rm -f /tmp/strip-runtime-npm.mjs
+
+FROM scratch AS runtime
+COPY --from=runtime-rootfs /rootfs/ /
 
 ARG OPENCLAW_VERSION=2026.7.1
 ARG OPENCLAW_ARM64_DIGEST=sha256:38b611f494cb32e15aaf456d54c6b6be55db9098c90632aed0bfad4a70009707
@@ -208,7 +223,10 @@ COPY --chown=65532:65532 --chmod=0555 infra/openclaw/gateway-runtime.mjs /opt/te
 COPY --chown=65532:65532 --chmod=0555 infra/openclaw/rollout-task-canary.mjs /opt/teamagent/rollout-task-canary.mjs
 COPY --chown=65532:65532 --chmod=0444 infra/openclaw/effective-tool-scope.json /opt/teamagent/effective-tool-scope.json
 
+# FROM scratch inherits no config: SSL_CERT_FILE is carried over from the base
+# (NPM_CONFIG_UPDATE_NOTIFIER is dropped with npm).
 ENV NODE_ENV=production \
+    SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt \
     PATH=/usr/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/sbin:/bin \
     HOME=/tmp/teamagent-openclaw/home \
     TMPDIR=/tmp \
