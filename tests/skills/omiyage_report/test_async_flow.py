@@ -8,6 +8,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -21,6 +22,10 @@ from teamagent.adapters.tiktok_scraper import (
 )
 from teamagent.media.contracts import TIKTOK_N_PER_KW_MAX
 from teamagent.skills.base import SkillContext
+from teamagent.skills.omiyage_report.compose import (
+    build_all_failed_message,
+    build_build_failed_message,
+)
 from teamagent.skills.omiyage_report.contract import DeckPlan
 from teamagent.skills.omiyage_report.fmt.contract import validate_deck_content
 from teamagent.skills.omiyage_report.fmt.editable import EDIT_MARKER
@@ -181,7 +186,16 @@ class _RecordingUploader:
 @dataclass
 class _FakeSlack:
     fail_channel_upload: bool = False
+    fail_channel_post: bool = False
     uploads: list[dict[str, Any]] = field(default_factory=list)
+    posts: list[dict[str, Any]] = field(default_factory=list)
+
+    async def post_message(
+        self, channel: str, text: str, request_id: str, thread_ts: str | None = None
+    ) -> Any:
+        self.posts.append({"channel": channel, "text": text, "thread_ts": thread_ts})
+        ok = not (self.fail_channel_post and channel == "C123")
+        return SimpleNamespace(channel=channel, ts="1.0" if ok else "", ok=ok)
 
     async def upload_file(
         self,
@@ -375,6 +389,14 @@ def test_all_axes_failed_marks_job_failed_with_choices() -> None:
     assert "検索語・競合名を変えて" in failed.message
     assert builder.calls == []
     assert slack.uploads == []
+    # 失敗は自分から依頼元スレッドへ 1 通だけ知らせる（利用者が聞くまで気づけない、を防ぐ）
+    assert slack.posts == [
+        {
+            "channel": "C123",
+            "text": ":warning: " + build_all_failed_message(),
+            "thread_ts": "123.456",
+        }
+    ]
 
 
 def test_thread_upload_failure_falls_back_to_dm() -> None:
@@ -425,3 +447,35 @@ def test_status_input_schema_rejects_non_omiyage_job_ids() -> None:
         OmiyageReportStatusInput(job_id="pb_" + "a" * 32)
     with pytest.raises(ValueError):
         OmiyageReportStatusInput(job_id="omy_INVALID")
+
+
+class _FailingDeckBuilder(_FakeDeckBuilder):
+    def __call__(self, deck_plan_json: str, out_dir: str, request_id: str) -> tuple[str, str]:
+        raise RuntimeError("missing glyphs (fail-fast, no fallback rendering): gothic: U+D55C(한)")
+
+
+@pytest.mark.parametrize("fail_thread_post", [False, True])
+def test_build_failure_is_announced_and_status_says_it_failed(fail_thread_post: bool) -> None:
+    """2026-10-02 JTB PR × HIS PR: 組み立てで落ちても何も届かず、「状況は？」に Aico が失敗を
+    伝えないまま再依頼した。失敗を自分から知らせ、照会でも失敗を先に言う。"""
+    store = ProposalJobStore(table_name="", memory={})
+    launcher = _GateThreadLauncher(released=True)
+    slack = _FakeSlack(fail_channel_post=fail_thread_post)
+    skill, _searcher, _builder, slack = _build(store=store, launcher=launcher, slack=slack)
+    skill._deck_builder = _FailingDeckBuilder()  # type: ignore[attr-defined]
+    status = OmiyageReportStatusSkill(store=store)
+
+    accepted = skill.run(_input(), _ctx())
+    assert launcher.finished.wait(timeout=10)
+
+    out = status.run(OmiyageReportStatusInput(job_id=accepted.job_id), _ctx())
+    assert out.status == "failed"
+    assert out.error_code == "OMIYAGE_BUILD_FAILED"
+    assert out.message.startswith("お土産資料は作成に失敗しました")
+    assert "資料の組み立てで止まりました" in out.message
+    expected = [{"channel": "C123", "thread_ts": "123.456"}]
+    if fail_thread_post:
+        expected.append({"channel": "D999", "thread_ts": None})  # スレッドに出せなければ本人 DM
+    assert [{"channel": p["channel"], "thread_ts": p["thread_ts"]} for p in slack.posts] == expected
+    assert all(p["text"] == ":warning: " + build_build_failed_message() for p in slack.posts)
+    assert slack.uploads == []
