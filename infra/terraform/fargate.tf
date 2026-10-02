@@ -705,12 +705,14 @@ resource "aws_ecs_task_definition" "mcp" {
       { name = "USE_SLACK_SUMMARY_TOOL", value = var.use_slack_summary_tool ? "true" : "false" },
       # digest_settings: 朝のサマリーの本人ごとの設定を DM で見る/変える（本人の digest_preferences 行
       # だけ・DM 限定）。migration 0030 の本番適用と、朝の配信側 MORNING_DIGEST_PREFERENCES=true が
-      # 前提。まず TD の env で小俣さんが試験し、その後 true にする（それまでは false 固定）。
-      { name = "USE_DIGEST_SETTINGS_TOOL", value = "false" },
+      # 前提。TD の env で小俣さんが試験し、10-01 の mcp 便 r42 から本番 true（CLI の TD 差し替え）。
+      # ここを本番の実態に合わせる（false のまま apply すると機能が消える）。
+      { name = "USE_DIGEST_SETTINGS_TOOL", value = "true" },
       # slack_search: Slack 全体のキーワード検索（read-only・本人 xoxp の search.messages のみ）。
       # チャンネルでの依頼は公開チャンネルの一致だけ返す。まず TD の env で小俣さんが試験し、
-      # その後 true にする（それまでは false 固定・変数化はしない）。
-      { name = "USE_SLACK_SEARCH_TOOL", value = "false" },
+      # 10-01 の mcp 便 r42 から本番 true（CLI の TD 差し替え）。ここを本番の実態に合わせる
+      # （false のまま apply すると機能が消える・変数化はしない）。
+      { name = "USE_SLACK_SEARCH_TOOL", value = "true" },
       # attachment_assist: 会話に添付されたファイルの読取・加工（要約/修正案/議事録FMT/集計/英訳）。
       # 読取のみ（テキスト返答だけ・ファイル生成/再配信は P2 の別フラグ）。既定 false。
       # 解禁は 4 点セット: この env / effective-tool-scope.json / 契約テスト / OC イメージ再ビルド。
