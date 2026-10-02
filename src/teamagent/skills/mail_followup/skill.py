@@ -9,7 +9,8 @@
   G1 本人受信箱限定: ctx.metadata.user_email→TokenStore。LLM/呼出側に受信箱を選ばせない。
   G2 連携必須（オプトイン）: TokenStore に本人トークンが無ければ fail-closed。
   G3 生データを返さない: 件名は scrub_value でマスク＋短縮、From はマスク、messageId はハッシュ。
-  G4 readonly 最小スコープ（gmail.readonly）。書込メソッドは呼ばない（drafts/labels なし）。
+  G4 読み取り専用: 連携スコープは gmail.modify だが readonly クライアント（書込メソッドは
+     adapter で封鎖）だけを使う。書込メソッドは呼ばない（drafts/labels なし）。
   G5 クエリ限定: 期間・受信トレイ・件数上限で必ず絞る。顧客名ありは client_name でも絞る。
      顧客名なしの一覧トリアージ（下記）は **本人の受信トレイ全体**を見るが、期間
      （既定 14 日・最大 90）・母数（messages.list を 300 件までページング）・
@@ -19,9 +20,9 @@
   G6 N/A（本文を読まず LLM に渡さないため、インジェクション面が存在しない）。
   G7 監査ログ: who(masked)/when/件数のみ。件名・本文・PII は出さない。
 
-⚠️ 正直ラベリング（重要）: gmail.readonly の users.threads.get(format='metadata') で
+⚠️ 正直ラベリング（重要）: 読み取りの users.threads.get(format='metadata') で
 スレッド末尾を確認し、本人の返信が最後のスレッドは候補から除外する。本文取得・下書き作成・
-ラベル変更は行わず、OAuth スコープも gmail.readonly から拡大しない。
+ラベル変更は行わない（readonly クライアントが messages.modify を adapter で封鎖）。
 
 ⚠️ 顧客名が無いとき（2026-08-21 ユーザー裁定）: 「どちらのお客様ですか？」と**聞き返さない**。
 受信箱全体を **メタデータだけ**で走査し、返信が止まっている候補を数件提示して選ばせる
@@ -89,7 +90,7 @@ _MS_PER_DAY = 86_400_000
 
 _HONEST_NOTE = (
     "※ スレッドの最新メッセージをメタデータで確認し、あなたの返信が最後のものは除外して"
-    "います（gmail.readonly のみ・本文は読みません）。"
+    "います（読み取りのみ・本文は読みません）。"
 )
 
 _MISCONFIG_MSG = "TokenStore が未設定です（mail_followup は本人連携前提）"
@@ -694,7 +695,7 @@ class MailFollowupSkill(BaseSkill[MailFollowupInput, MailFollowupOutput]):
             if not thread_id:
                 # list_messages は thread_id を返す契約。欠損時は末尾を判定できないため除外する。
                 continue
-            # users.threads.get は gmail.readonly 域内。format='metadata' のみを使い、
+            # users.threads.get は読み取り。format='metadata' のみを使い、
             # 本文取得・書き込み・OAuth スコープ拡大は行わない（G4/G6）。
             thread = gmail.get_thread(
                 thread_id,
