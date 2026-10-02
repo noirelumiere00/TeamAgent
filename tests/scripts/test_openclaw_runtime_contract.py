@@ -195,6 +195,37 @@ def test_release_runtime_and_plugin_pins_are_aligned() -> None:
         assert plugin["integrity"].startswith("sha512-")
 
 
+# runtime ベース（plugins-lock.runtime.linuxArm64Digest）ごとの /usr/bin/node 実測 sha256。
+# ベースを上げたら新ベースの /usr/bin/node を実測し、この表と OpenClaw 契約の binary_probes を
+# **同じ PR で**更新する。#503（10-01）は digest だけ上げて契約を追随させず、OC 便が image-attestor の
+# "actual-image binary hash mismatch: /usr/bin/node" で停止した（09-17 #424→#425 と同型の漏れ）。
+NODE_BINARY_SHA256_BY_RUNTIME_DIGEST = {
+    # cgr.dev/chainguard/node:latest 2026-10-01 世代・node v26.10.0
+    "sha256:3de92bf84c6d7b43b0016be75bdbdde0d34e034288fefd6c1581bf44835fe107": (
+        "1292962947b360b29891cf72be247ad19aeeeb5c3470cc2c0ef737d6f07e30ec"
+    ),
+}
+
+
+def test_bundle_contract_node_probe_matches_runtime_base() -> None:
+    lock = json.loads(LOCK.read_text())
+    contract = json.loads(
+        (ROOT / "infra/codebuild/openclaw_bundle_contract.json").read_text(encoding="utf-8")
+    )
+    digest = lock["runtime"]["linuxArm64Digest"]
+    assert digest in NODE_BINARY_SHA256_BY_RUNTIME_DIGEST, (
+        "runtime ベースを上げたら /usr/bin/node を実測し、"
+        "NODE_BINARY_SHA256_BY_RUNTIME_DIGEST と OpenClaw 契約の node probe を同じ PR で更新する"
+    )
+    probes = [
+        probe
+        for subject in contract["bundle"]["subjects"]
+        for probe in subject["binary_probes"]
+        if probe["path"] == "/usr/bin/node"
+    ]
+    assert [probe["sha256"] for probe in probes] == [NODE_BINARY_SHA256_BY_RUNTIME_DIGEST[digest]]
+
+
 def test_dockerfile_uses_exact_arm64_children_and_chainguard_final() -> None:
     lock = json.loads(LOCK.read_text())
     dockerfile = DOCKERFILE.read_text()

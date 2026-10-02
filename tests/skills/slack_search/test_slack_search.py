@@ -671,3 +671,23 @@ def test_registered_with_short_description() -> None:
 
 def test_relay_fields_hide_raw_list_from_the_agent() -> None:
     assert SlackSearchSkill.mcp_relay_fields == ("message", "error", "match_count", "hidden_count")
+
+
+def test_channel_name_requests_route_to_slack_search() -> None:
+    """「#〇〇 も見て」（リンク無し・チャンネル名だけ）は slack_search の in:#名前 で探す（2026-10-02）。
+
+    DM 実機で「ADK経由で受注した〜。#proj-01案件決定-同行依頼 も見て」に対し、Aico は
+    リンク必須の slack_summary を呼んで no_target になり「チャンネル ID が確定していない」と
+    利用者にリンクを求めた（2 回とも）。ツール説明（mcp）と SOUL（OpenClaw）の両方で振り先を固定する。
+    """
+    from pathlib import Path
+
+    from teamagent.skills.slack_summary.skill import SlackSummarySkill
+
+    assert "「#〇〇 も見て」" in SlackSearchSkill.description
+    assert "in:#名前（ID は求めない）" in SlackSearchSkill.description
+    assert "slack_search（query に in:#チャンネル名）" in SlackSummarySkill.description
+    soul = (Path(__file__).resolve().parents[3] / "infra/openclaw/SOUL.md").read_text(
+        encoding="utf-8"
+    )
+    assert "チャンネル名だけなら `query` に `in:#名前 検索語`（ID やリンクを求めない）" in soul

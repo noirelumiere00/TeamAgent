@@ -420,3 +420,7 @@ class MorningDigestOutput(BaseModel):
     draft_limit: int = Field(
         default=0, ge=0, description="朝の自動作成の上限件数（auto のときの説明文に出す）"
     )
+    draft_skip_internal: bool = Field(
+        default=False,
+        description="朝の自動作成から社内だけのやり取りを外したか（auto のときの説明文に出す）",
+    )

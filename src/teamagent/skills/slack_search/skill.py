@@ -121,10 +121,10 @@ class SlackSearchSkill(BaseSkill[SlackSearchInput, SlackSearchOutput]):
 
     name: ClassVar[str] = "slack_search"
     description: ClassVar[str] = (
-        "「Slack で〜を探して」「誰かが〜と言っていた」等に、Slack 全体をキーワード検索して"
-        "一致したメッセージをリンクつきで返す読み取り専用ツール。"
-        "チャンネルでの依頼には公開チャンネルの一致だけを返す。"
-        "スレッドやチャンネルの要約は slack_summary。" + USER_CONTEXT_RULE
+        "「Slack で〜を探して」「誰かが〜と言っていた」「#〇〇 も見て」等に、Slack 全体を"
+        "キーワード検索して一致をリンクつきで返す読み取り専用ツール。チャンネル名だけなら"
+        " query に in:#名前（ID は求めない）。チャンネルでの依頼は公開チャンネルだけ。"
+        "いまいる場所の要約は slack_summary。" + USER_CONTEXT_RULE
     )
     input_schema: ClassVar[type[BaseModel]] = SlackSearchInput
     output_schema: ClassVar[type[BaseModel]] = SlackSearchOutput

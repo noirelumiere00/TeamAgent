@@ -327,6 +327,23 @@ class MorningDigestSkill(BaseSkill[MorningDigestInput, MorningDigestOutput]):
         self._internal_domain = (
             env_str("DIGEST_INTERNAL_DOMAIN", "vectorinc.co.jp").strip().lower().lstrip("@")
         )
+        # 朝の自動下書きから「社内だけのやり取り」を外す（2026-10-01・BU1 ヒアリング
+        # 「社内向けのメールへの返信は不要では？」「自分で下書き管理しているのとバッティング」）。
+        # 外すのは朝の自動生成だけで、一覧の「✏️ 下書きを作成」ボタンは残す（押せば作れる）。
+        # 社内だけ＝最新メッセージの From/To/Cc のうち本人以外が全員、社内ドメインのとき。
+        # 社外の人が 1 人でも入っていれば（顧客スレッドに同僚が全員返信した等）従来どおり作る。
+        # 既定 ON。env MORNING_DIGEST_DRAFT_SKIP_INTERNAL=false で従来挙動に戻せる。
+        self._draft_skip_internal = env_bool("MORNING_DIGEST_DRAFT_SKIP_INTERNAL", True)
+        # 社内とみなすドメイン（カンマ区切り）。グループ会社（NewsTV）も同じ Slack で案件を
+        # 動かしているので既定に含める。表示ラベル用の DIGEST_INTERNAL_DOMAIN（単一）とは別。
+        self._draft_internal_domains = frozenset(
+            d.strip().lower().lstrip("@")
+            for d in env_str(
+                "MORNING_DIGEST_DRAFT_INTERNAL_DOMAINS",
+                f"{self._internal_domain},newstv.co.jp" if self._internal_domain else "",
+            ).split(",")
+            if d.strip()
+        )
         # 冪等性: 既存下書きのあるスレッドへの二重作成を防ぐ（毎日運用で必須）。
         self._dedupe_drafts = env_bool("MORNING_DIGEST_DEDUPE_DRAFTS", True)
         # オンデマンド下書き: True なら朝は生成せず、要返信メールのボタン押下で生成する。
@@ -487,6 +504,7 @@ class MorningDigestSkill(BaseSkill[MorningDigestInput, MorningDigestOutput]):
         else:
             out.draft_mode = "auto"
             out.draft_limit = input.max_drafts
+            out.draft_skip_internal = self._draft_skip_internal
         try:
             if self._draft_on_demand_only:
                 self._mark_existing_drafts(token, raw_msgs, out.mail_digest, ctx)
@@ -1134,6 +1152,7 @@ class MorningDigestSkill(BaseSkill[MorningDigestInput, MorningDigestOutput]):
         # 作成数が max_drafts に満たない取りこぼしになる。候補は全部集める
         # （全体は digest 規模＝max_threads で有界）。
         targets: list[tuple[int, Any]] = []
+        skipped_internal = 0
         for i, item in enumerate(digest_items):
             if item.importance not in self._draft_importances:
                 continue
@@ -1144,9 +1163,23 @@ class MorningDigestSkill(BaseSkill[MorningDigestInput, MorningDigestOutput]):
                 continue
             if i >= len(raw_msgs):
                 continue
-            if not _is_addressed_to(getattr(raw_msgs[i], "headers", {}) or {}, requester):
+            headers = getattr(raw_msgs[i], "headers", {}) or {}
+            if not _is_addressed_to(headers, requester):
+                continue
+            if self._draft_skip_internal and _is_internal_only(
+                headers, requester, self._draft_internal_domains
+            ):
+                # 社内だけのやり取りは朝の自動下書きを作らない（ボタン押下での作成は従来どおり可）。
+                skipped_internal += 1
                 continue
             targets.append((i, raw_msgs[i]))
+        if skipped_internal:
+            logger.info(
+                "morning_digest_auto_draft_skipped_internal",
+                request_id=ctx.request_id,
+                skipped=skipped_internal,
+                targets=len(targets),
+            )
         if not targets:
             return (0, 0.0)
 
@@ -1461,6 +1494,28 @@ def _sender_priority(
             if a.partition("@")[2] == internal_domain:
                 return "internal"
     return "external"
+
+
+def _is_internal_only(
+    headers: dict[str, str], requester: str, internal_domains: frozenset[str]
+) -> bool:
+    """最新メッセージの From/To/Cc のうち、本人以外が全員社内ドメインか。
+
+    社外の人が 1 人でも入っていれば False（顧客スレッドに同僚が全員返信した場合などは、
+    本人が顧客へ返す下書きが要るので外さない）。本人以外が誰もいない・ドメイン未設定も False。
+    ドメインは完全一致（サブドメインは社内扱いしない）。VIP 指定の有無とは独立。
+    """
+    if not internal_domains:
+        return False
+    req = requester.strip().lower()
+    others = [
+        email.strip().lower()
+        for field in ("From", "To", "Cc")
+        if headers.get(field)
+        for email in extract_thread_participants({field: headers[field]})
+        if email.strip().lower() != req
+    ]
+    return bool(others) and all(e.partition("@")[2] in internal_domains for e in others)
 
 
 def _sender_label_ja(priority: str) -> str:

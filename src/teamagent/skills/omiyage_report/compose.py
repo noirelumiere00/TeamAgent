@@ -135,6 +135,28 @@ def build_all_failed_message() -> str:
     )
 
 
+def build_build_failed_message() -> str:
+    """組み立てで止まったとき（取得・分析は済んでいる）。失敗を先に言い、やり直しの所要を添える。
+
+    2026-10-02: 旧文言「生成に失敗しました。同じ内容で再依頼いただければ再実行します。」を
+    受けた Aico が、失敗を伝えずに「再依頼を受け付けました」と新しいジョブを出した。
+    """
+    return (
+        "お土産資料は作成に失敗しました（TikTok の取得と動画分析は終わりましたが、"
+        "資料の組み立てで止まりました）。もう一度作る場合は最初からやり直し（約 45 分）になります。"
+    )
+
+
+def build_job_failed_notice(error_code: str) -> str:
+    """失敗したことを依頼元へ自分から知らせる 1 通（成功時のファイル添付と同じ宛先）。"""
+    head = (
+        build_all_failed_message()
+        if error_code == "OMIYAGE_SEARCH_FAILED"
+        else build_build_failed_message()
+    )
+    return f":warning: {head}"
+
+
 def build_delivery_failed_note() -> str:
     return (
         "資料の生成は完了しましたが、Slackへの添付に失敗しました。"
@@ -145,7 +167,9 @@ def build_delivery_failed_note() -> str:
 __all__ = [
     "build_all_failed_message",
     "build_analysis_note",
+    "build_build_failed_message",
     "build_delivery_failed_note",
+    "build_job_failed_notice",
     "build_next_step",
     "build_partial_message",
     "build_summary_lines",

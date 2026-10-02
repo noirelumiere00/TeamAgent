@@ -5,30 +5,30 @@
   "adoptions": [
     {
       "old_address": "aws_s3_object.mcp_source_publisher_buildspec",
-      "new_address": "aws_s3_object.mcp_source_publisher_buildspec_generation[\"6c2609cd440d1509bd964c07d68c6a6e4bd079bd50fbd750a61a91d045cd2426\"]",
+      "new_address": "aws_s3_object.mcp_source_publisher_buildspec_generation[\"86b32ced5f8c50cede40665220af9868eab46043118171d369c26232f87708c9\"]",
       "resource_type": "aws_s3_object",
       "bucket": "teamagent-dev-image-release-evidence",
-      "key": "codebuild-buildspecs/teamagent-dev-mcp-source-publisher/6c2609cd440d1509bd964c07d68c6a6e4bd079bd50fbd750a61a91d045cd2426.yml",
-      "import_id": "teamagent-dev-image-release-evidence/codebuild-buildspecs/teamagent-dev-mcp-source-publisher/6c2609cd440d1509bd964c07d68c6a6e4bd079bd50fbd750a61a91d045cd2426.yml",
-      "expected_content_sha256": "6c2609cd440d1509bd964c07d68c6a6e4bd079bd50fbd750a61a91d045cd2426"
+      "key": "codebuild-buildspecs/teamagent-dev-mcp-source-publisher/86b32ced5f8c50cede40665220af9868eab46043118171d369c26232f87708c9.yml",
+      "import_id": "teamagent-dev-image-release-evidence/codebuild-buildspecs/teamagent-dev-mcp-source-publisher/86b32ced5f8c50cede40665220af9868eab46043118171d369c26232f87708c9.yml",
+      "expected_content_sha256": "86b32ced5f8c50cede40665220af9868eab46043118171d369c26232f87708c9"
     },
     {
       "old_address": "aws_s3_object.image_attestor_buildspec",
-      "new_address": "aws_s3_object.image_attestor_buildspec_generation[\"3340ad65a4edb94a7d1d0682320adc9947d0fedc2798c922be1ed9aefc5c15b2\"]",
+      "new_address": "aws_s3_object.image_attestor_buildspec_generation[\"14342adba554fd1de41a14ca2e0f1b93cad7aaf244a3bfc6575d999f6e23a97f\"]",
       "resource_type": "aws_s3_object",
       "bucket": "teamagent-dev-image-release-evidence",
-      "key": "codebuild-buildspecs/teamagent-dev-image-attestor/3340ad65a4edb94a7d1d0682320adc9947d0fedc2798c922be1ed9aefc5c15b2.yml",
-      "import_id": "teamagent-dev-image-release-evidence/codebuild-buildspecs/teamagent-dev-image-attestor/3340ad65a4edb94a7d1d0682320adc9947d0fedc2798c922be1ed9aefc5c15b2.yml",
-      "expected_content_sha256": "3340ad65a4edb94a7d1d0682320adc9947d0fedc2798c922be1ed9aefc5c15b2"
+      "key": "codebuild-buildspecs/teamagent-dev-image-attestor/14342adba554fd1de41a14ca2e0f1b93cad7aaf244a3bfc6575d999f6e23a97f.yml",
+      "import_id": "teamagent-dev-image-release-evidence/codebuild-buildspecs/teamagent-dev-image-attestor/14342adba554fd1de41a14ca2e0f1b93cad7aaf244a3bfc6575d999f6e23a97f.yml",
+      "expected_content_sha256": "14342adba554fd1de41a14ca2e0f1b93cad7aaf244a3bfc6575d999f6e23a97f"
     },
     {
       "old_address": "aws_s3_object.image_promoter_buildspec",
-      "new_address": "aws_s3_object.image_promoter_buildspec_generation[\"8657832ab464e59d99314994b1b7458707a0444c8bd4f4a01e8f2f5a523f3fbc\"]",
+      "new_address": "aws_s3_object.image_promoter_buildspec_generation[\"adf9a204d30070839f5cf556773271f56d73ecf082bae72b809fd5932ca6880d\"]",
       "resource_type": "aws_s3_object",
       "bucket": "teamagent-dev-image-release-evidence",
-      "key": "codebuild-buildspecs/teamagent-dev-image-promoter/8657832ab464e59d99314994b1b7458707a0444c8bd4f4a01e8f2f5a523f3fbc.yml",
-      "import_id": "teamagent-dev-image-release-evidence/codebuild-buildspecs/teamagent-dev-image-promoter/8657832ab464e59d99314994b1b7458707a0444c8bd4f4a01e8f2f5a523f3fbc.yml",
-      "expected_content_sha256": "8657832ab464e59d99314994b1b7458707a0444c8bd4f4a01e8f2f5a523f3fbc"
+      "key": "codebuild-buildspecs/teamagent-dev-image-promoter/adf9a204d30070839f5cf556773271f56d73ecf082bae72b809fd5932ca6880d.yml",
+      "import_id": "teamagent-dev-image-release-evidence/codebuild-buildspecs/teamagent-dev-image-promoter/adf9a204d30070839f5cf556773271f56d73ecf082bae72b809fd5932ca6880d.yml",
+      "expected_content_sha256": "adf9a204d30070839f5cf556773271f56d73ecf082bae72b809fd5932ca6880d"
     },
     {
       "old_address": "aws_s3_object.approval_publisher_resolved_source_buildspec",
