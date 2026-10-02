@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import os
 import re
+from collections.abc import Mapping
+from typing import Any
 from urllib.parse import urlsplit
 
 _SLACK_WORKSPACE_RE = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?$")
@@ -91,7 +93,33 @@ def source_link(source_uri: str) -> str | None:
     return None
 
 
+def hit_doc_url(meta: Mapping[str, Any]) -> str | None:
+    """検索ヒットの metadata から資料の開けるURL（Drive view 等）を1本組み立てる。
+
+    drive_url / source_uri を http はそのまま、`gdrive://FILE_ID` は Drive view URL へ整形。
+    `slack://` は SLACK_WORKSPACE 設定時だけ Slack permalink へ整形する。
+    search の各ヒットの ``url`` と、他 Skill が retrieve_hits から組む参照の URL を
+    同じ規則にするための 1 か所（開けなければ None＝URL を推測しない）。
+    """
+    for v in (meta.get("drive_url"), meta.get("source_uri")):
+        if not v:
+            continue
+        s = str(v).strip()
+        if s.startswith(("http://", "https://")):
+            return s
+        if s.startswith("gdrive://"):
+            fid = s[len("gdrive://") :].split("/")[0].split("?")[0]
+            if fid:
+                return f"https://drive.google.com/file/d/{fid}/view"
+        if s.startswith("slack://"):
+            permalink = slack_thread_permalink(s)
+            if permalink:
+                return permalink
+    return None
+
+
 __all__ = [
+    "hit_doc_url",
     "slack_permalink",
     "slack_thread_permalink",
     "slack_workspace_domain",

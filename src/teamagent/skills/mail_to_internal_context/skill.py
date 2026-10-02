@@ -17,7 +17,8 @@
   G7 監査ログ: who(masked)/when/件数のみ。本文・件名・PII・生 From は出さない。
 
 3 層分離: 本ファイルは Skill 層。googleapiclient / boto3 / Slack は触らず adapters/ 経由。
-slack:// → permalink の変換は runtime 層の責務（本 Skill は生 source_uri を返す）。
+source_uri は生のまま返し、開けるリンクは url に決定論で付ける（search の url と同じ規則・
+_shared/source_url.hit_doc_url）。MCP（Aico）経路は runtime の整形を通らないため。
 """
 
 from __future__ import annotations
@@ -41,6 +42,7 @@ from teamagent.skills._shared.mail_connection import (
     NOT_CONNECTED_MESSAGE,
     REAUTH_NEEDED_MESSAGE,
 )
+from teamagent.skills._shared.source_url import hit_doc_url
 from teamagent.skills._shared.timefmt import jst_display_or_none, jst_iso_or_none
 from teamagent.skills._shared.user_context import USER_CONTEXT_RULE
 from teamagent.skills.base import BaseSkill, SkillContext, register
@@ -264,6 +266,9 @@ class MailToInternalContextSkill(BaseSkill[MailInternalContextInput, MailInterna
                     title=str(title)[:200],
                     source_uri=(str(meta["source_uri"]) if meta.get("source_uri") else None),
                     drive_url=(str(meta["drive_url"]) if meta.get("drive_url") else None),
+                    # MCP（Aico）経路は runtime の整形を通らないので、開けるリンクをここで
+                    # 決定論で付ける（slack:// は SLACK_WORKSPACE があるときだけ permalink）。
+                    url=hit_doc_url(meta),
                     snippet=str(scrub_value(getattr(h, "content", "") or ""))[:240],
                     # pgvector dense score は cosine [-1,1]。弱一致は負になり得るため 0-1 に丸める
                     # （schema は ge=0/le=1。丸めないと no-match 時に ValidationError で全損する）。

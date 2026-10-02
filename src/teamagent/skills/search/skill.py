@@ -36,7 +36,7 @@ from teamagent.skills._shared.next_step import (
     suggestions_enabled,
     tool_enabled,
 )
-from teamagent.skills._shared.source_url import slack_thread_permalink
+from teamagent.skills._shared.source_url import hit_doc_url
 from teamagent.skills.base import BaseSkill, SkillContext, register
 from teamagent.skills.search.aggregation import extract_aggregation_filter
 from teamagent.skills.search.answer_mode import MODE_INSTRUCTIONS, classify_answer_mode
@@ -1838,24 +1838,9 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
     def _doc_url(meta: dict[str, Any]) -> str | None:
         """SearchHit の metadata から資料の開けるURL（Drive view 等）を1本組み立てる。
 
-        drive_url / source_uri を http はそのまま、`gdrive://FILE_ID` は Drive view URL へ整形。
-        `slack://` は SLACK_WORKSPACE 設定時だけ Slack permalink へ整形する。
+        規則は _shared/source_url.hit_doc_url に一本化（mail_to_internal_context と共用）。
         """
-        for v in (meta.get("drive_url"), meta.get("source_uri")):
-            if not v:
-                continue
-            s = str(v).strip()
-            if s.startswith(("http://", "https://")):
-                return s
-            if s.startswith("gdrive://"):
-                fid = s[len("gdrive://") :].split("/")[0].split("?")[0]
-                if fid:
-                    return f"https://drive.google.com/file/d/{fid}/view"
-            if s.startswith("slack://"):
-                permalink = slack_thread_permalink(s)
-                if permalink:
-                    return permalink
-        return None
+        return hit_doc_url(meta)
 
     # 管理シート行の本文に載る資料ファイル名（拡張子つき）。行の title はシート名
     # （例「サンマルクカフェ 祇園辻利コラボ」）で実ファイル名ではないため、本文から拾う。
