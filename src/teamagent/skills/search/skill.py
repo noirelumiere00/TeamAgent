@@ -312,6 +312,16 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
         # **既定 ON**だが、exclude 系が両方 OFF のときは経路自体に入らないので無影響。
         # SEARCH_EXCLUSION_RESCUE=0/false/no で明示的に無効化できる（安全側 gating）。
         self._exclusion_rescue = self._envflag("SEARCH_EXCLUSION_RESCUE", default="true")
+        # 質問文から自動推定した分類フィルタ（「受注」→ cls_phase 等）で、分類の付いていない
+        # 文書まで消さない（2026-10-02）。分類は LLM 任せで、Bedrock の費用上限・失敗・
+        # 新規取り込み直後には付かない。厳密一致のままだと「未分類＝条件に当てはまらない」と
+        # 扱われ、取り込んだばかりのチャンネル（#proj-01案件決定-同行依頼 の 65 件）が
+        # 検索に一度も出なかった。未分類は「不明」として通し、別の値が付いた文書だけ外す。
+        # ユーザー明示の sticky は従来どおり厳密。**既定 ON**。
+        # SEARCH_AUTO_FILTERS_ALLOW_UNCLASSIFIED=0/false/no で従来の厳密一致に戻る。
+        self._auto_filters_allow_unclassified = self._envflag(
+            "SEARCH_AUTO_FILTERS_ALLOW_UNCLASSIFIED", default="true"
+        )
         # 予算近接ソート（sort_budget_near 指定時に取得後 Python で1段並べ替え）。
         # env 読み取りは __init__ で1回（factory 無改修・_build_search_skill はモジュール関数で
         # self を持たないため）。**既定 OFF・後方互換**：無効なら sort 段を一切呼ばない（恒等）。
@@ -651,6 +661,8 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
             request_id=request_id,
             strict_industry=strict_industry,
             metadata_filters=metadata_filters,
+            # metadata_filters は自動推定の分類フィルタだけが来る（明示は sticky_filters）。
+            metadata_filters_allow_missing=self._auto_filters_allow_unclassified,
             sticky_filters=sticky_filters,
             metadata_contains=metadata_contains,
             exclude_boilerplate=self._exclude_boilerplate,
@@ -951,6 +963,7 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
                             request_id=ctx.request_id,
                             keys=list(knowledge_filters.keys()),
                             values=list(knowledge_filters.values()),
+                            allow_unclassified=self._auto_filters_allow_unclassified,
                         )
                     eff_industry = input.filter_industry or (
                         extract_query_industry(input.query) if self._use_knowledge_filters else None

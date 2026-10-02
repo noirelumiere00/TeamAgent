@@ -204,6 +204,9 @@ class _SqlLikePg:
             elif meta.get("industry") is not None and meta.get("industry") != industry:
                 return False
         for key, value in (call["metadata_filters"] or {}).items():
+            # 本物の SQL と同じ: soft なら「指定値 OR キー無し（未分類）」。
+            if call["metadata_filters_allow_missing"] and meta.get(key) is None:
+                continue
             if meta.get(key) != value:
                 return False
         for key, value in (call["sticky_filters"] or {}).items():
@@ -239,6 +242,7 @@ class _SqlLikePg:
         *,
         strict_industry: bool = False,
         metadata_filters: dict[str, str] | None = None,
+        metadata_filters_allow_missing: bool = False,
         sticky_filters: dict[str, str] | None = None,
         metadata_contains: dict[str, str] | None = None,
         exclude_boilerplate: bool = False,
@@ -253,6 +257,7 @@ class _SqlLikePg:
             "filter_industry": filter_industry,
             "strict_industry": strict_industry,
             "metadata_filters": dict(metadata_filters) if metadata_filters else None,
+            "metadata_filters_allow_missing": metadata_filters_allow_missing,
             "sticky_filters": dict(sticky_filters) if sticky_filters else None,
             "metadata_contains": dict(metadata_contains) if metadata_contains else None,
             "exclude_boilerplate": exclude_boilerplate,
@@ -817,7 +822,8 @@ def test_auto_filters_log_only_when_filters_and_without_query() -> None:
     events = [e for e in logs if e.get("event") == "search_auto_filters"]
     assert [e["request_id"] for e in events] == ["req-af-1"]  # フィルタが無いときは出さない
     e = events[0]
-    assert set(e) - {"event", "log_level"} == {"request_id", "keys", "values"}
+    assert set(e) - {"event", "log_level"} == {"request_id", "keys", "values", "allow_unclassified"}
+    assert e["allow_unclassified"] is True  # 既定 ON（固定語彙の真偽値だけ・クエリ原文は出さない）
     assert e["keys"] == ["cls_doc_type", "cls_solution"]
     assert e["values"] == ["提案書", "動画広告"]
     assert query not in repr(e) and "サラヤ" not in repr(e)
