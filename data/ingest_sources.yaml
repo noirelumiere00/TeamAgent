@@ -57,6 +57,22 @@ slack_channels:
       use_case: "案件の現在地（案件検索 v3）"
       priority: "high"
 
+# 名前の頭で channel をまとめて取り込む（2026-10-02・BU1 意見箱「fp連携チャンネルも読み取ってほしい」）。
+# 取り込みのたびに conversations.list で探すので、同じ頭の channel が増えても yaml は触らない。
+# ⚠️ 読めるのは Aico（bot）が参加している channel だけ。未参加の public channel は
+# ingest ログの ingest_slack_prefix_not_member に名前が出る（招待すれば次回から入る）。
+# private channel は Aico が招待されていないと一覧にも出ない。
+# channel_id で上に書いた channel は二重に取り込まない（明示の設定が優先）。
+slack_channel_prefixes:
+  - name_prefix: "fp連携"
+    description: |
+      名前が「fp連携」で始まる案件ごとの連携チャンネル（パートナーとの制作のやり取り）。
+    include_files: false
+    oldest_days: 365
+    max_channels: 200
+    extra_metadata:
+      topic: "fp連携"
+
 gdrive_folders:
   # ---- ナレッジ共有 Drive フォルダ（12FMLe…）は 2026-10-01 に取り込み対象から外した ----
   # 小俣さん依頼（「いらないかも・消して」）。このフォルダ（現名「ナレッジ共有（ナレッジ共有Slack
