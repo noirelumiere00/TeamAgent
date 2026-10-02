@@ -60,11 +60,13 @@ def test_button_issuance_is_not_affected() -> None:
     import inspect
 
     allowed = {"__init__", "_create_drafts"}
+    # 末尾の説明文へ「外したか」を渡すこの 1 行だけは、他のメソッドにあってよい（判定には使わない）。
+    footer_feed = "out.draft_skip_internal = self._draft_skip_internal"
     users = {
         name
         for name, fn in inspect.getmembers(MorningDigestSkill, predicate=inspect.isfunction)
         if any(
-            token in inspect.getsource(fn)
+            token in inspect.getsource(fn).replace(footer_feed, "")
             for token in ("_draft_skip_internal", "_is_internal_only")
         )
     }
@@ -181,3 +183,11 @@ def test_only_internal_senders_never_touches_gmail(monkeypatch: pytest.MonkeyPat
         SkillContext(request_id="r", metadata={"user_email": ME}),
     )
     assert (created, cost) == (0, 0.0)
+
+
+def test_footer_flag_follows_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """末尾の説明文に使う draft_skip_internal は env と一致する（env の読み方は skill の 1 か所）。"""
+    monkeypatch.delenv("MORNING_DIGEST_DRAFT_SKIP_INTERNAL", raising=False)
+    assert MorningDigestSkill(token_store=None)._draft_skip_internal is True
+    monkeypatch.setenv("MORNING_DIGEST_DRAFT_SKIP_INTERNAL", "false")
+    assert MorningDigestSkill(token_store=None)._draft_skip_internal is False

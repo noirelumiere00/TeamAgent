@@ -504,6 +504,7 @@ class MorningDigestSkill(BaseSkill[MorningDigestInput, MorningDigestOutput]):
         else:
             out.draft_mode = "auto"
             out.draft_limit = input.max_drafts
+            out.draft_skip_internal = self._draft_skip_internal
         try:
             if self._draft_on_demand_only:
                 self._mark_existing_drafts(token, raw_msgs, out.mail_digest, ctx)
