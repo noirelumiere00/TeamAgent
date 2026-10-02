@@ -18,10 +18,12 @@ operations automatically.
   `teamagent-dev-raw-files`, `teamagent-tfstate-718959508629`, and
   `teamagent-tflock` must already exist exactly. The bootstrap adopts none of
   them and fails if they are absent or ambiguous.
-- The root credentials visible to the CLI must be an explicit
+- The bootstrap-principal credentials visible to the CLI must be an explicit
   `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` / `AWS_SESSION_TOKEN`
-  temporary set authenticated with MFA. Profile or long-term fallback is
-  rejected. No root or IAM-user access key is created by this workflow.
+  temporary set authenticated with MFA — a `get-session-token` session for the
+  configured bootstrap principal, an IAM administrator user such as `AIIAdev`.
+  Profile or long-term fallback is rejected. No root or IAM-user access key is
+  created by this workflow.
 - Prepare a parent directory owned by the operator and not writable by group
   or other users. The requested artifact directory itself must not exist.
 - The tfvars file must be a regular, non-symlink `0600` file owned by the
@@ -71,7 +73,7 @@ Expected private artifacts include:
 The receipt includes the reviewed contract/seed/tfvars hashes, the
 materialized source-tree SHA-256, and executable paths, versions, sizes, and
 SHA-256 values. It also records the exact CloudFormation stack ID and hashed
-root/session identifiers. Repository cleanliness, fixed branch/origin/commit,
+principal/session identifiers. Repository cleanliness, fixed branch/origin/commit,
 tracked bytes/modes, input hashes, plan bytes, and executable bytes are
 rechecked at each mutation boundary.
 
@@ -94,7 +96,7 @@ Success requires all of the following:
 - seed CloudFormation stack, role, and deny policy deleted.
 
 Archive the entire `0700` directory under the approved audit retention policy.
-The receipt hashes the root `UserId` and assumed-role ID rather than storing
+The receipt hashes the bootstrap-principal `UserId` and assumed-role ID rather than storing
 those identifiers in clear text.
 
 ## PENDING or absent CodeConnections
@@ -189,8 +191,9 @@ manually. `FAILED_REVIEWED_RETRY_ALLOWED` is emitted only after a consistent
 read proves that no ledger row exists and retirement proves the stack, role,
 and deny policy absent; even then, start from a fresh review.
 
-For any durable row, run the idempotent recovery command against the original
-private artifact directory:
+For any durable row, using an MFA-authenticated bootstrap-principal
+session, run the idempotent recovery command against the original private
+artifact directory:
 
 ```bash
 bash infra/deploy/bootstrap_provenance_iam.sh reconcile-retire \
