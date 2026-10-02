@@ -37,6 +37,23 @@ class SlackChannelSpec:
 
 
 @dataclass(frozen=True)
+class SlackChannelPrefixSpec:
+    """slack_channel_prefixes[] の 1 件（名前の頭が一致する channel をまとめて取り込む）。
+
+    実行のたびに conversations.list で探すので、同じ頭の channel が増えても yaml を触らずに
+    取り込まれる。読めるのは Aico（bot）が参加している channel だけで、参加していない
+    public channel は ingest_slack_prefix_not_member に名前を出す（招待の手がかり）。
+    """
+
+    name_prefix: str  # "#" なし。NFKC＋小文字で比べる（ｆｐ／FP も同じ扱い）
+    description: str
+    include_files: bool = False
+    oldest_days: int | None = 90
+    max_channels: int = 200  # 一致が多すぎるときの上限（超えた分は取り込まず WARNING）
+    extra_metadata: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
 class GDriveFolderSpec:
     """gdrive_folders[] の 1 件。"""
 
@@ -122,6 +139,7 @@ class IngestSources:
     #   pipeline が gdrive kind 実行冒頭で NN_ フォルダのカバレッジ検査を行う）。
     gdrive_exclude_folder_name_re: str | None = None
     gdrive_rulebook_root_folder_id: str | None = None
+    slack_channel_prefixes: tuple[SlackChannelPrefixSpec, ...] = ()
 
 
 # -----------------------------------------------------------
@@ -176,6 +194,9 @@ def load_ingest_sources(
     slack_channels = _parse_slack_channels(
         raw.get("slack_channels", []) or [], skip_placeholder=skip_placeholder
     )
+    slack_channel_prefixes = _parse_slack_channel_prefixes(
+        raw.get("slack_channel_prefixes", []) or []
+    )
     gdrive_folders = _parse_gdrive_folders(
         raw.get("gdrive_folders", []) or [], skip_placeholder=skip_placeholder
     )
@@ -191,6 +212,7 @@ def load_ingest_sources(
         sha256=hashlib.sha256(raw_bytes).hexdigest()[:12],
         version=version,
         slack_channels=len(slack_channels),
+        slack_channel_prefixes=[p.name_prefix for p in slack_channel_prefixes],
         gdrive_folders=len(gdrive_folders),
         gsheets=len(gsheets),
         shared_drives_crawl_enabled=shared_crawl is not None and shared_crawl.enabled,
@@ -205,7 +227,38 @@ def load_ingest_sources(
         shared_drives_crawl=shared_crawl,
         gdrive_exclude_folder_name_re=exclude_folder_name_re,
         gdrive_rulebook_root_folder_id=rulebook_root,
+        slack_channel_prefixes=slack_channel_prefixes,
     )
+
+
+def _parse_slack_channel_prefixes(
+    raw: list[dict[str, Any]],
+) -> tuple[SlackChannelPrefixSpec, ...]:
+    """``slack_channel_prefixes:`` をパースする。
+
+    頭が空・"#" 付き・上限が 1 未満は設定ミスとして止める。
+    """
+    out: list[SlackChannelPrefixSpec] = []
+    for item in raw:
+        prefix = str(item.get("name_prefix", "")).strip()
+        if not prefix or prefix.startswith("#"):
+            raise ValueError(
+                f"slack_channel_prefixes の name_prefix が不正: {prefix!r}（# なしで書く）"
+            )
+        max_channels = int(item.get("max_channels", 200))
+        if max_channels < 1:
+            raise ValueError(f"slack_channel_prefixes の max_channels が不正: {max_channels}")
+        out.append(
+            SlackChannelPrefixSpec(
+                name_prefix=prefix,
+                description=str(item.get("description", "")),
+                include_files=bool(item.get("include_files", False)),
+                oldest_days=item.get("oldest_days") if item.get("oldest_days") is not None else 90,
+                max_channels=max_channels,
+                extra_metadata=dict(item.get("extra_metadata", {}) or {}),
+            )
+        )
+    return tuple(out)
 
 
 def _parse_exclude_folder_name_re(raw: Any) -> str | None:

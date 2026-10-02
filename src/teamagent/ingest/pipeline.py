@@ -22,6 +22,7 @@ import hashlib
 import os
 import re
 import time
+import unicodedata
 import uuid
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
@@ -52,6 +53,7 @@ from teamagent.ingest.loader import (
     GSheetSpec,
     IngestSources,
     SharedDriveCrawlSpec,
+    SlackChannelPrefixSpec,
     SlackChannelSpec,
 )
 from teamagent.ingest.ops_alert import IngestOpsAlerter
@@ -1524,6 +1526,118 @@ def _resolve_member_emails(
     # 解決済 email だけ取り出して dedup
     emails = {_USER_EMAIL_CACHE.get(uid) for uid in user_ids}
     return sorted(e for e in emails if e)
+
+
+_PREFIX_LIST_TYPES = ("public_channel", "private_channel")
+_PREFIX_LIST_MAX_PAGES = 50
+
+
+def _norm_channel_name(name: str) -> str:
+    return unicodedata.normalize("NFKC", name).lower()
+
+
+def _expand_slack_channel_prefixes(
+    prefixes: tuple[SlackChannelPrefixSpec, ...],
+    explicit: tuple[SlackChannelSpec, ...],
+    *,
+    request_id: str,
+    client: Any = None,
+) -> tuple[SlackChannelSpec, ...]:
+    """``slack_channel_prefixes`` を、いま一致する channel の SlackChannelSpec に展開する。
+
+    - Aico（bot）が参加している channel だけを返す（参加していないと履歴を読めない）。
+      一致したのに未参加の public channel は ingest_slack_prefix_not_member に名前を出す
+    - yaml に channel_id で書いてある channel は返さない（明示の設定を優先・二重取り込みしない）
+    - 一覧の取得に失敗したら、その種類（public / private）を飛ばして続ける。明示の channel の
+      取り込みまで止めない
+    """
+    if not prefixes:
+        return ()
+    if client is None:
+        from teamagent.adapters.slack_channel_ingest_client import SlackChannelIngestClient
+
+        try:
+            client = SlackChannelIngestClient.from_env()
+        except Exception as exc:  # token 未設定でも明示の channel は続ける
+            logger.warning(
+                "ingest_slack_prefix_list_failed",
+                request_id=request_id,
+                types="client",
+                error=f"{type(exc).__name__}: {exc}"[:300],
+            )
+            return ()
+    seen: dict[str, Any] = {}
+    for types in _PREFIX_LIST_TYPES:
+        cursor: str | None = None
+        try:
+            for _ in range(_PREFIX_LIST_MAX_PAGES):
+                page, cursor = client.list_conversations(request_id, types=types, cursor=cursor)
+                for conv in page:
+                    seen.setdefault(conv.channel_id, conv)
+                if not cursor:
+                    break
+        except Exception as exc:  # missing_scope 等。明示の channel は続ける
+            logger.warning(
+                "ingest_slack_prefix_list_failed",
+                request_id=request_id,
+                types=types,
+                error=f"{type(exc).__name__}: {exc}"[:300],
+            )
+    explicit_ids = {spec.channel_id for spec in explicit}
+    out: list[SlackChannelSpec] = []
+    taken: set[str] = set()
+    for prefix in prefixes:
+        head = _norm_channel_name(prefix.name_prefix)
+        matched = sorted(
+            (c for c in seen.values() if _norm_channel_name(c.name).startswith(head)),
+            key=lambda c: c.name,
+        )
+        members = [c for c in matched if c.is_member and c.channel_id not in explicit_ids]
+        not_member = [c.name for c in matched if not c.is_member]
+        if not_member:
+            logger.warning(
+                "ingest_slack_prefix_not_member",
+                request_id=request_id,
+                name_prefix=prefix.name_prefix,
+                channels=not_member[:50],
+                count=len(not_member),
+                hint="Aico をこの channel に招待すると次回の取り込みから入る",
+            )
+        if len(members) > prefix.max_channels:
+            logger.warning(
+                "ingest_slack_prefix_truncated",
+                request_id=request_id,
+                name_prefix=prefix.name_prefix,
+                matched=len(members),
+                max_channels=prefix.max_channels,
+            )
+            members = members[: prefix.max_channels]
+        for conv in members:
+            if conv.channel_id in taken:
+                continue
+            taken.add(conv.channel_id)
+            out.append(
+                SlackChannelSpec(
+                    channel_id=conv.channel_id,
+                    channel_name=f"#{conv.name}",
+                    description=prefix.description,
+                    include_files=prefix.include_files,
+                    oldest_days=prefix.oldest_days,
+                    extra_metadata={**prefix.extra_metadata, "channel_prefix": prefix.name_prefix},
+                )
+            )
+        ingest_n = sum(
+            1 for spec in out if spec.extra_metadata.get("channel_prefix") == prefix.name_prefix
+        )
+        logger.info(
+            "ingest_slack_prefix_expanded",
+            request_id=request_id,
+            name_prefix=prefix.name_prefix,
+            matched=len(matched),
+            ingest=ingest_n,
+            not_member=len(not_member),
+        )
+    return tuple(out)
 
 
 def _ingest_slack_channel(
@@ -4748,9 +4862,14 @@ class IngestRunner:
             _check_rulebook_root(sources, request_id=request_id)
 
         if "slack" in kinds:
+            slack_specs = sources.slack_channels + _expand_slack_channel_prefixes(
+                sources.slack_channel_prefixes,
+                sources.slack_channels,
+                request_id=request_id,
+            )
             result.by_kind["slack"] = self._run_kind(
                 "slack",
-                sources.slack_channels,
+                slack_specs,
                 _ingest_slack_channel,
                 request_id=request_id,
                 extra_kwargs={"unchanged_collector": unchanged_collector},
