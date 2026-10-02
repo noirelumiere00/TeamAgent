@@ -679,6 +679,9 @@ async def test_same_request_within_24h_reuses_the_result_without_quota_or_gemini
     monkeypatch: pytest.MonkeyPatch, slack: _FakeSlack, usage: list[dict[str, Any]]
 ) -> None:
     skill, gem = await _first_full_run(monkeypatch, slack)
+    # 本番の順は「追記の投稿 → 使い回し用に覚える → usage 記録」。2 段目の usage が載る前に
+    # 数えると、遅い runner で後から 1 件増えて 3 == 2 になる（2026-10-02 の 3.13 で発生）。
+    await _eventually(lambda: any(u["skill"] == surface_video_followup.USAGE_SKILL for u in usage))
     first_blocks = slack.posts[0]["blocks"]
     calls_before, usage_before = len(gem.calls), len(usage)
 
