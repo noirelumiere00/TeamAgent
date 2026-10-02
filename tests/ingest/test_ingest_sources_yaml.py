@@ -78,7 +78,7 @@ def test_existing_sections_unchanged() -> None:
     assert set(by_id) == {"C091ZSVTKF1", "C0A1207GYHZ", "C08MH3MG02F"}
     assert (by_id["C091ZSVTKF1"].include_files, by_id["C091ZSVTKF1"].oldest_days) == (True, 180)
     assert (by_id["C0A1207GYHZ"].include_files, by_id["C0A1207GYHZ"].oldest_days) == (True, 365)
-    assert len(sources.gsheets) == 2
+    assert len(sources.gsheets) == 3  # 2026-10-02 案件決定v2 を純加算（既存 2 シートは不変）
     assert sources.shared_drives_crawl is not None
     # 2026-08-17 裁定: 横断クロール停止（ナレッジ実体は 14Wfp6… 配下でカバー済み）
     assert sources.shared_drives_crawl.enabled is False
@@ -102,7 +102,7 @@ def test_knowledge_sheet_does_not_ingest_filerecord_tab() -> None:
     tabs_by_gid = {t.gid: t.tab_name for t in knowledge.tabs}
     assert tabs_by_gid == {278789217: "フォーム回答 1"}  # ファイル記録(1962561294)は入れない
     assert knowledge.row_unit is True
-    assert len(sources.gsheets) == 2
+    assert len(sources.gsheets) == 3  # 2026-10-02 案件決定v2 を純加算（既存 2 シートは不変）
 
 
 def test_rulebook_root_folder_id_global_key() -> None:

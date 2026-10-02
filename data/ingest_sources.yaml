@@ -150,6 +150,25 @@ gsheets:
       structure: "form-response"
       use_case: "顧客温度感の経時追跡 + 検索"
 
+  # ---- 案件決定v2（#proj-01案件決定-同行依頼 の台帳）2026-10-02 追加 ----
+  # 案件が決まったときの同行依頼 1 件 = 1 行（撮影日・クライアント／商材・種別・開始/終了日・
+  # 案件ID・映プロ担当 等。2026-10-02 時点 1,088 行）。BU1 ヒアリングの「受注した施策を知りたい」
+  # （杉浦さん）に、チャンネルの投稿より構造化された形で答えられる。
+  # gid は Drive 連携から取れないため auto（取り込み時にタブ名から実 gid を引く・引けなければ skip）。
+  - sheet_id: "1UNicjhmAPYzlY4TBTgTn92dqRkVYPqAmYh1c3oxcsYU"
+    sheet_name: "案件決定v2"
+    description: |
+      #proj-01案件決定-同行依頼 の投稿を GAS がフォーム形式で台帳化したもの。
+      行単位で 1 案件（同じクライアントでも撮影日ごとに別行）。
+    tabs:
+      - gid: auto
+        tab_name: "フォーム形式の回答"
+    row_unit: true
+    extra_metadata:
+      topic: "案件決定"
+      structure: "form-response"
+      use_case: "決まった案件（同行依頼）の一覧・検索"
+
   # ---- 📍ショート動画施策事例集（マスター表）2026-09-11 追加・B-10 ----
   # アポ前 事例ブリーフィング（pre_meeting_brief）が引く **唯一の母集団**。
   #

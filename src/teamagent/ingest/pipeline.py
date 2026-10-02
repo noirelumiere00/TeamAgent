@@ -16,6 +16,7 @@ Usage (CLI):
 
 from __future__ import annotations
 
+import dataclasses
 import datetime as _dt
 import hashlib
 import os
@@ -46,6 +47,7 @@ from teamagent.ingest.gsheet_classification_overrides import (
     apply_gsheet_industry_override,
 )
 from teamagent.ingest.loader import (
+    GID_BY_TITLE,
     GDriveFolderSpec,
     GSheetSpec,
     IngestSources,
@@ -4174,8 +4176,21 @@ def _ingest_gsheet(
             sheet_id=spec.sheet_id,
         )
         _gid_to_title = {}
+    _title_to_gid = {title: gid for gid, title in _gid_to_title.items()}
 
     for tab in spec.tabs:
+        if tab.gid == GID_BY_TITLE:
+            # yaml の gid: auto。タブ名から実 gid を引く。external_id / リンクが gid ベース
+            # なので、引けないときは推測せずタブごと飛ばす（誤った gid は後から直せない）。
+            resolved_gid = _title_to_gid.get(tab.tab_name)
+            if resolved_gid is None:
+                logger.error(
+                    "gsheet_tab_gid_unresolved",
+                    sheet_id=spec.sheet_id,
+                    tab_name=tab.tab_name,
+                )
+                continue
+            tab = dataclasses.replace(tab, gid=resolved_gid)
         tab_title = _gid_to_title.get(tab.gid) or tab.tab_name
         if tab_title != tab.tab_name:
             logger.info(
