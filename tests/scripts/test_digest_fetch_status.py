@@ -166,6 +166,7 @@ def _digest(
     tokens: bool = False,
     draft_mode: str = "on_demand",
     draft_limit: int = 0,
+    draft_skip_internal: bool = False,
 ) -> MorningDigestOutput:
     return MorningDigestOutput(
         user_email_masked="o***@vectorinc.co.jp",
@@ -182,6 +183,7 @@ def _digest(
         mail_threads_failed=threads_failed,
         draft_mode=draft_mode,  # type: ignore[arg-type]
         draft_limit=draft_limit,
+        draft_skip_internal=draft_skip_internal,
     )
 
 
@@ -450,6 +452,11 @@ def test_footer_matches_how_drafts_are_really_made(renderer: str) -> None:
         "（最大 5 件・日程の打診は除く）。送信はしません（送るかはご自身で）。_"
     )
     assert "ボタンを押した時に生成" not in auto
+    # 社内だけのやり取りを外したときは、除外の一文にも書く（#504）。
+    skip = _footer(
+        RENDERERS[renderer](_digest(draft_mode="auto", draft_limit=5, draft_skip_internal=True))[1]
+    )
+    assert "（最大 5 件・社内だけのやり取りと日程の打診は除く）" in skip
     on_demand = _footer(RENDERERS[renderer](_digest(draft_mode="on_demand"))[1])
     assert on_demand == OLD_FOOTER
     off = _footer(RENDERERS[renderer](_digest(draft_mode="off"))[1])

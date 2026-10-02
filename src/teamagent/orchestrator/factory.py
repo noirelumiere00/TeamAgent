@@ -118,6 +118,11 @@ def build_search_skill_from_env() -> Any:
 _build_search_skill = build_search_skill_from_env
 
 
+def karte_prompt_version_from_env() -> str:
+    """clientkarte の system prompt の版（env ``KARTE_PROMPT_VERSION``・既定 v1）。"""
+    return os.environ.get("KARTE_PROMPT_VERSION", "v1").strip() or "v1"
+
+
 def build_production_tools() -> list[ToolSpec]:
     """本番 Skill を ToolSpec 群へ束ねる（Phase 1-2: search + clientkarte + proposal_draft/review）.
 
@@ -140,7 +145,15 @@ def build_production_tools() -> list[ToolSpec]:
         _research_persister = ResearchPersister(pgvector=search.pgvector, embedder=search.embedder)
     specs = [
         ToolSpec(SearchSkill.name, SearchSkill.description, SearchSkill, factory=lambda: search),
-        ToolSpec(ClientKarteSkill.name, ClientKarteSkill.description, ClientKarteSkill),
+        # 案件検索 v3 PR 1（2026-10-01）: カルテのプロンプトの版を env で選べるようにする。
+        # 旧 runtime/slack_bot.py は KARTE_PROMPT_VERSION を読んでいたが、本番の MCP 経路は
+        # 引数なし生成で常に v1 だった（戻し先の v1 は既定のまま）。
+        ToolSpec(
+            ClientKarteSkill.name,
+            ClientKarteSkill.description,
+            ClientKarteSkill,
+            factory=lambda: ClientKarteSkill(prompt_version=karte_prompt_version_from_env()),
+        ),
         ToolSpec(
             ProposalDraftSkill.name,
             ProposalDraftSkill.description,

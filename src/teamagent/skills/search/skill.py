@@ -39,6 +39,7 @@ from teamagent.skills._shared.next_step import (
 from teamagent.skills._shared.source_url import slack_thread_permalink
 from teamagent.skills.base import BaseSkill, SkillContext, register
 from teamagent.skills.search.aggregation import extract_aggregation_filter
+from teamagent.skills.search.answer_mode import MODE_INSTRUCTIONS, classify_answer_mode
 from teamagent.skills.search.client_match import normalize_filter_client
 from teamagent.skills.search.dates import extract_title_date, resolve_date_basis
 from teamagent.skills.search.dedup import cap_per_document, collapse_near_duplicates
@@ -263,6 +264,10 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
         # PROMPT_VERSION 環境変数 (v1 / v2 / v2c) で切替可能。
         # v2c は v2 の compact 版 (104→41行)、output token 削減でレイテンシ 46s→目標 20s 以下。
         self._prompt_version = prompt_version
+        # 案件検索 v3 PR 1（2026-10-01）: v3 以降は質問を「事実確認 / 一覧 / 洞察」に分けて
+        # 回答モードを user message で渡し、参考資料ヘッダに資料名を載せる。v2d 以前は
+        # 1 バイトも変えない（PROMPT_VERSION を v2d へ戻せば完全に元どおり）。
+        self._answer_modes = prompt_version.startswith("v3")
         # Day 8 Sprint 4-D: Bedrock Converse の max_tokens 制限。
         # SEARCH_MAX_TOKENS env で runtime 制御、v2c と組合せて latency を半減狙い。
         self._summary_max_tokens = summary_max_tokens
@@ -307,6 +312,16 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
         # **既定 ON**だが、exclude 系が両方 OFF のときは経路自体に入らないので無影響。
         # SEARCH_EXCLUSION_RESCUE=0/false/no で明示的に無効化できる（安全側 gating）。
         self._exclusion_rescue = self._envflag("SEARCH_EXCLUSION_RESCUE", default="true")
+        # 質問文から自動推定した分類フィルタ（「受注」→ cls_phase 等）で、分類の付いていない
+        # 文書まで消さない（2026-10-02）。分類は LLM 任せで、Bedrock の費用上限・失敗・
+        # 新規取り込み直後には付かない。厳密一致のままだと「未分類＝条件に当てはまらない」と
+        # 扱われ、取り込んだばかりのチャンネル（#proj-01案件決定-同行依頼 の 65 件）が
+        # 検索に一度も出なかった。未分類は「不明」として通し、別の値が付いた文書だけ外す。
+        # ユーザー明示の sticky は従来どおり厳密。**既定 ON**。
+        # SEARCH_AUTO_FILTERS_ALLOW_UNCLASSIFIED=0/false/no で従来の厳密一致に戻る。
+        self._auto_filters_allow_unclassified = self._envflag(
+            "SEARCH_AUTO_FILTERS_ALLOW_UNCLASSIFIED", default="true"
+        )
         # 予算近接ソート（sort_budget_near 指定時に取得後 Python で1段並べ替え）。
         # env 読み取りは __init__ で1回（factory 無改修・_build_search_skill はモジュール関数で
         # self を持たないため）。**既定 OFF・後方互換**：無効なら sort 段を一切呼ばない（恒等）。
@@ -646,6 +661,8 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
             request_id=request_id,
             strict_industry=strict_industry,
             metadata_filters=metadata_filters,
+            # metadata_filters は自動推定の分類フィルタだけが来る（明示は sticky_filters）。
+            metadata_filters_allow_missing=self._auto_filters_allow_unclassified,
             sticky_filters=sticky_filters,
             metadata_contains=metadata_contains,
             exclude_boilerplate=self._exclude_boilerplate,
@@ -946,6 +963,7 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
                             request_id=ctx.request_id,
                             keys=list(knowledge_filters.keys()),
                             values=list(knowledge_filters.values()),
+                            allow_unclassified=self._auto_filters_allow_unclassified,
                         )
                     eff_industry = input.filter_industry or (
                         extract_query_industry(input.query) if self._use_knowledge_filters else None
@@ -1705,11 +1723,19 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
         primary_block = "\n\n".join(
             f"[chunk_id: {h.chunk_id}, score: {h.score:.3f}"
             + ("（関連度低・参考）" if (h.metadata or {}).get("is_low_confidence") else "")
+            + (self._title_header(h) if self._answer_modes else "")
             + self._date_header(h)
             + f"]\n{h.content}"
             for h in primary_hits
         )
         sections = [f"# 質問\n{query}\n\n# 参考資料\n{primary_block}"]
+        if self._answer_modes:
+            # 回答モードを決めるのはここ 1 か所だけ（同期・二段返しの後追いの両方が通る）。
+            # ツール出力（SearchOutput）には載せない＝v2d のツール結果の形を変えないため、
+            # 評価・集計用にはログで残す。
+            mode = classify_answer_mode(query)
+            sections.insert(0, MODE_INSTRUCTIONS[mode])
+            logger.info("search_answer_mode", request_id=request_id, answer_mode=mode)
         # 2段階しきい値の fallback で救出した低信頼 hit がある場合、断定を抑える注意を付す。
         if any((h.metadata or {}).get("is_low_confidence") for h in primary_hits):
             sections.append(
@@ -1754,6 +1780,18 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
             if found:
                 return found
         return None
+
+    @staticmethod
+    def _title_header(hit: SearchHit) -> str:
+        """要約 LLM に渡す chunk ヘッダの資料名部分（v3 以降・無ければ空文字）。
+
+        v2d まではヘッダに資料名が無く、モデルは本文から資料名を推測するしかなかった
+        （見直し報告 R1「資料名が要約に渡らない」）。v3 の system prompt は
+        「資料に触れるときはヘッダの資料名で示す」契約なので、ここで渡す。
+        """
+        meta = hit.metadata or {}
+        title = meta.get("title") or meta.get("file_name")
+        return f", 資料名: {title}" if title else ""
 
     @staticmethod
     def _date_header(hit: SearchHit) -> str:
