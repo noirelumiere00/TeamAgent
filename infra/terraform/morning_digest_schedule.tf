@@ -609,8 +609,9 @@ resource "aws_ecs_task_definition" "morning_digest" {
       { name = "MORNING_DIGEST_COMPACT", value = var.morning_digest_compact ? "true" : "false" },
       # 本人ごとの設定（digest_preferences・migration 0030）を読んで、止める/休む/曜日/欄/件数/
       # 下書き/直前リマインドを本人ごとに変える（既定OFF）。設定を書く digest_settings tool とセット。
-      # OFF の間は表を 1 度も読まない＝今までどおりの配信。
-      { name = "MORNING_DIGEST_PREFERENCES", value = "false" },
+      # OFF の間は表を 1 度も読まない＝今までどおりの配信。10-01 から本番 true（CLI の TD 差し替え）。
+      # ここを本番の実態に合わせる（false のまま apply すると本人設定が効かなくなる）。
+      { name = "MORNING_DIGEST_PREFERENCES", value = "true" },
       # 📅カレンダー登録ボタン（v0.3 Task3・既定OFF）。押下先 calendar_event tool の有効化とセットで ON。
       { name = "MORNING_DIGEST_CALENDAR_BUTTON", value = var.morning_digest_calendar_button ? "true" : "false" },
       # 🗓日程候補提案ボタン（v0.3 Task4・既定OFF）。押下先 schedule_propose tool の有効化とセットで ON。
