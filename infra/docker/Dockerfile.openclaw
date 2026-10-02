@@ -2,14 +2,15 @@
 # OpenClaw gateway for ECS/Fargate (linux/arm64 only).
 #
 # The official image is used only as a content source. The runtime filesystem is
-# a pinned Chainguard (Wolfi) Node 26 image minus the npm CLI: no apk, curl, or
-# compiler. The base ships npm (Wolfi package npm-12) and node-gyp, which the
-# runtime never executes but the ECR vulnerability gate scans: CVEs in npm's
-# bundled dependencies blocked releases (2026-09-16 #424, 2026-10-01 #503).
-# The runtime-rootfs stage removes both packages as `apk del` would and the
-# final stage starts FROM scratch, so no lower layer still carries them. The
-# npm-free node:latest-slim tracks an older major (25.x), so it is not a
-# drop-in swap. Note: this base also ships busybox (/bin/sh).
+# a pinned Chainguard (Wolfi) Node 26 image minus npm, node-gyp, and busybox:
+# no shell, apk, curl, or compiler. The base ships npm (Wolfi package npm-12),
+# which the runtime never executes but the ECR vulnerability gate scans (CVEs in
+# npm's bundled dependencies blocked releases 2026-09-16 #424 and 2026-10-01
+# #503), and busybox (/bin/sh plus applets), which the gateway never needs.
+# The runtime-rootfs stage removes these packages as `apk del` would (see
+# strip-runtime-packages.mjs) and the final stage starts FROM scratch, so no
+# lower layer still carries them. The npm-free node:latest-slim tracks an older
+# major (25.x), so it is not a drop-in swap.
 # Secrets are injected by ECS at runtime, never as build args.
 
 ARG OPENCLAW_VERSION=2026.7.1
@@ -175,15 +176,16 @@ RUN set -eux; \
 
 FROM cgr.dev/chainguard/node:latest@${RUNTIME_ARM64_DIGEST} AS runtime-base
 
-# Copy the pinned runtime base as plain files and drop npm-12 and node-gyp from
-# both the filesystem and the package database (see the script header).
+# Copy the pinned runtime base as plain files and drop npm-12, node-gyp, and
+# busybox from both the filesystem and the package database (see the script
+# header).
 # The upstream image only provides node and a shell for this step; nothing from
 # it enters /rootfs.
 FROM upstream-templates AS runtime-rootfs
 USER root
 COPY --from=runtime-base / /rootfs/
-COPY infra/openclaw/strip-runtime-npm.mjs /tmp/strip-runtime-npm.mjs
-RUN node /tmp/strip-runtime-npm.mjs /rootfs && rm -f /tmp/strip-runtime-npm.mjs
+COPY infra/openclaw/strip-runtime-packages.mjs /tmp/strip-runtime-packages.mjs
+RUN node /tmp/strip-runtime-packages.mjs /rootfs && rm -f /tmp/strip-runtime-packages.mjs
 
 FROM scratch AS runtime
 COPY --from=runtime-rootfs /rootfs/ /

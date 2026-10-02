@@ -252,7 +252,7 @@ def test_dockerfile_uses_exact_arm64_children_and_chainguard_final() -> None:
     # unpruned so the workspace templates the runtime reads can be copied from
     # it; the pruning stage deletes /app/src.
     # runtime-base is the pinned Chainguard node image; runtime-rootfs copies it
-    # as files and removes npm-12/node-gyp (strip-runtime-npm.mjs); the final
+    # as files and removes npm-12/node-gyp/busybox (strip-runtime-packages.mjs); the final
     # stage starts FROM scratch so no lower layer still carries npm.
     assert from_lines == [
         "ghcr.io/openclaw/openclaw:${OPENCLAW_VERSION}@${OPENCLAW_ARM64_DIGEST} AS upstream-templates",
@@ -265,7 +265,7 @@ def test_dockerfile_uses_exact_arm64_children_and_chainguard_final() -> None:
     # The only rootfs source of the final stage is the stripped copy of the base.
     assert runtime_stage.startswith("COPY --from=runtime-rootfs /rootfs/ /\n")
     assert "COPY --from=runtime-base / /rootfs/" in dockerfile
-    assert "RUN node /tmp/strip-runtime-npm.mjs /rootfs" in dockerfile
+    assert "RUN node /tmp/strip-runtime-packages.mjs /rootfs" in dockerfile
     assert "SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt" in runtime_stage
     # Every workspace template directory the runtime resolves must ship, or the
     # gateway starts healthy and then fails on the first message.
