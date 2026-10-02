@@ -1195,9 +1195,11 @@ def _footer_text(digest: Any) -> str:
         return head + "_"
     limit = int(getattr(digest, "draft_limit", 0) or 0)
     cap = f"最大 {limit} 件・" if limit > 0 else ""
+    # 社内だけのやり取りを外したときは除外にも書く（10-01 BU1 ヒアリング・#504）。
+    internal = "社内だけのやり取りと" if getattr(digest, "draft_skip_internal", False) else ""
     return head + (
         f"重要で本人宛てのメールには、Aico が返信の下書きを Gmail に作っておきます"
-        f"（{cap}日程の打診は除く）。送信はしません（送るかはご自身で）。_"
+        f"（{cap}{internal}日程の打診は除く）。送信はしません（送るかはご自身で）。_"
     )
 
 
