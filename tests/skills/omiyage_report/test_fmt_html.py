@@ -145,3 +145,21 @@ def test_deck_meta_texts_land_on_cover(golden_html: str) -> None:
     for text in _meta_texts(make_deck_content()):
         assert text in golden_html
     assert "CONFIDENTIAL" in golden_html
+
+
+def test_unrenderable_chars_do_not_fail_the_whole_deck() -> None:
+    """2026-10-02「JTB PR × HIS PR」: 投稿のアカウント名・要約に書体に無い文字が 1 つ入るだけで
+    FmtFontError でデッキ全体が止まり、取得と動画分析（約 30 分）が 2 回続けて無駄になった。
+
+    描ける形に寄せられる文字は寄せ（𝐁→B・™→TM・İ→I）、寄せられない文字（ハングル）は落として
+    デッキは完成させる。豆腐（代替字形）は出さない＝ゲートは通ったまま。
+    """
+    raw = make_deck_content()
+    cards = raw["slides"][7]["data"]["cards"]
+    cards[0]["account_name"] = "𝐁𝐞𝐧𝐜𝐡 𝐏𝐑 club™"
+    cards[1]["account_name"] = "서울 여행 Seoul"
+    cards[2]["content_summary"] = "İstanbul の旅行 PR"
+    html = render_fmt_deck(raw, generated_on="2026-10-02").html
+    assert "Bench PR clubTM" in html
+    assert "Seoul" in html and "서울" not in html
+    assert "Istanbul の旅行 PR" in html
