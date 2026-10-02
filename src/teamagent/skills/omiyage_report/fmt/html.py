@@ -16,6 +16,8 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 
+import structlog
+
 from teamagent.skills.omiyage_report.fmt.contract import (
     AData,
     BData,
@@ -29,8 +31,14 @@ from teamagent.skills.omiyage_report.fmt.contract import (
     RankingCard,
     Slide,
 )
-from teamagent.skills.omiyage_report.fmt.fonts import FontRole, build_embedded_fonts
+from teamagent.skills.omiyage_report.fmt.fonts import (
+    FontRole,
+    build_embedded_fonts,
+    make_renderable,
+)
 from teamagent.skills.omiyage_report.fmt.spec import FmtDeckSpec
+
+logger = structlog.get_logger(__name__)
 
 # 絵文字・装飾記号の除去（矢印・約物は残す）。元データは改変しない=表示時のみ。
 _EMOJI = re.compile(
@@ -76,9 +84,14 @@ class _Sink:
     chars: dict[FontRole, set[str]] = field(
         default_factory=lambda: {"mincho": set(), "gothic": set(), "latin": set()}
     )
+    # 埋め込みフォントの所在（build() が描画前に入れる）。None は同梱の既定。
+    base_dir: Path | None = None
+    # 描けないため落とした文字の数（デッキ単位の観測用・build() がログに出す）。
+    dropped: int = 0
 
     def take(self, role: FontRole, text: str) -> str:
-        cleaned = strip_display_symbols(text)
+        cleaned, dropped = make_renderable(strip_display_symbols(text), role, self.base_dir)
+        self.dropped += dropped
         self.chars[role].update(cleaned)
         return _html.escape(cleaned, quote=True)
 
@@ -520,10 +533,13 @@ class _DeckHtmlBuilder:
         )
 
     def build(self, *, font_dir: Path | None = None) -> str:
+        self._sink.base_dir = font_dir
         slides_html = "".join(
             self._render_slide(slide, page_no)
             for page_no, slide in enumerate(self._content.slides, start=1)
         )
+        if self._sink.dropped:
+            logger.info("omiyage_fmt_unrenderable_chars_dropped", dropped=self._sink.dropped)
         embedded = build_embedded_fonts(dict(self._sink.chars), base_dir=font_dir)
         style = _build_stylesheet(self._spec, embedded.families, self._accent_a)
         title = _html.escape(strip_display_symbols(self._content.deck_meta.cover_title))

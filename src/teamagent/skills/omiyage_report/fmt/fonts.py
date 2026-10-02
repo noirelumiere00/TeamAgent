@@ -12,8 +12,11 @@ from __future__ import annotations
 
 import base64
 import io
+import re
+import unicodedata
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
+from functools import lru_cache
 from pathlib import Path
 from typing import Literal
 
@@ -77,6 +80,66 @@ STACK_ROLES: dict[FontRole, tuple[FontRole, ...]] = {
 
 def font_dir() -> Path:
     return _ASSET_FONT_DIR
+
+
+@lru_cache(maxsize=8)
+def _stack_coverage_cached(stack_role: FontRole, base: str) -> frozenset[int]:
+    from fontTools.ttLib import TTFont
+
+    covered: set[int] = set()
+    members = STACK_ROLES[stack_role]
+    for face in _FACES:
+        if face.role not in members or face.css_weight not in BEN1_WEIGHTS[face.role]:
+            continue
+        with TTFont(str(_face_path(Path(base), face)), lazy=True) as font:
+            covered.update(font.getBestCmap().keys())
+    return frozenset(covered)
+
+
+def stack_coverage(stack_role: FontRole, base_dir: Path | None = None) -> frozenset[int]:
+    """役割スタックの埋め込みフォント（BEN1_WEIGHTS の face だけ）で描ける codepoint の和集合。
+
+    build_embedded_fonts のゲートと同じ範囲（同じ face・同じ和集合）で数える。フル書体の cmap を
+    1 回だけ読む（lru_cache）。
+    """
+    return _stack_coverage_cached(stack_role, str(base_dir or font_dir()))
+
+
+def make_renderable(
+    text: str, stack_role: FontRole, base_dir: Path | None = None
+) -> tuple[str, int]:
+    """埋め込みフォントで描けない文字を、描ける形へ寄せるか落とす。戻り値は (文字列, 落とした数)。
+
+    TikTok の投稿文・アカウント名には、装飾用の数学英字（𝐁𝐨𝐥𝐝）・™・ハングル等が普通に入る。
+    1 文字でも描けないと build_embedded_fonts が FmtFontError で**デッキ全体**を止め、取得と
+    動画分析（約 30 分）が無駄になる（2026-10-02「JTB PR × HIS PR」で 2 回続けて失敗）。
+    描けない文字は NFKC で描ける形（𝐁→B・™→TM）か、結合記号を外した基底文字（İ→I）に
+    できればそれを使い、できなければ落とす（ハングル等は落ちる・件数はログに出す）。
+    豆腐（代替字形）は出さない＝ゲートの「代替字形での続行禁止」は守ったまま、デッキは完成させる。
+    """
+    covered = stack_coverage(stack_role, base_dir)
+    out: list[str] = []
+    dropped = 0
+    for ch in text:
+        if ch.isspace() or ord(ch) < 0x20 or ord(ch) in covered:
+            out.append(ch)
+            continue
+        for candidate in (
+            unicodedata.normalize("NFKC", ch),
+            # アクセント付きで書体に無いもの（İ 等）は、結合記号を外した基底文字（I）へ。
+            "".join(
+                c for c in unicodedata.normalize("NFKD", ch) if unicodedata.category(c) != "Mn"
+            ),
+        ):
+            if candidate and all(c.isspace() or ord(c) in covered for c in candidate):
+                out.append(candidate)
+                break
+        else:
+            dropped += 1
+    if not dropped:
+        return "".join(out), 0
+    # 落とした跡の空白の重なりを 1 つに（「ジム  PR」→「ジム PR」）。前後の空白も整える。
+    return re.sub(r"[ \u3000]{2,}", " ", "".join(out)).strip(), dropped
 
 
 def _needed_codepoints(text: str) -> set[int]:
