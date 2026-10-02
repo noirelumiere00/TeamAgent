@@ -105,7 +105,9 @@ locals {
     # 解決不能になるため media-apk.lock と契約 artifact.apk-lock.sha256 を追随させた再レンダリング（apply_apklock.sh）。
     # 2026-10-02 publish 世代（apk ロック追随）。Alpine 上流の入替（font-noto 2026.09.01-r0→2026.10.01-r0）で段 3 の media ビルドが
     # 解決不能になるため media-apk.lock と契約 artifact.apk-lock.sha256 を追随させた再レンダリング（apply_apklock.sh）。
-    "86b32ced5f8c50cede40665220af9868eab46043118171d369c26232f87708c9" = {
+    # 2026-10-02 publish 世代（pcre2 の CVE 対応）。r43 段 3 の media が ECR 脆弱性ゲート（pcre2 10.47-r1・CVE 8 件）で
+    # 止まったため pcre2=10.49-r0 を明示 pin し、media-apk.lock と契約 artifact.apk-lock.sha256 を追随させた再レンダリング（apply_apklock.sh）。
+    "8687830a10534318a1ccf21676527fab25a54bf0ed10bc9d39d0233565216e69" = {
       content_type                  = "text/yaml"
       object_lock_retain_until_date = "2099-12-31T00:00:00Z"
     }
@@ -172,7 +174,9 @@ locals {
     # /usr/bin/node が b6c4b27f… → 12929629… に動いたため契約の base64 を差し替えた再レンダリング。
     # 2026-10-02 publish 世代（apk ロック追随）。Alpine 上流の入替（font-noto 2026.09.01-r0→2026.10.01-r0）で段 3 の media ビルドが
     # 解決不能になるため media-apk.lock と契約 artifact.apk-lock.sha256 を追随させた再レンダリング（apply_apklock.sh）。
-    "14342adba554fd1de41a14ca2e0f1b93cad7aaf244a3bfc6575d999f6e23a97f" = {
+    # 2026-10-02 publish 世代（pcre2 の CVE 対応）。r43 段 3 の media が ECR 脆弱性ゲート（pcre2 10.47-r1・CVE 8 件）で
+    # 止まったため pcre2=10.49-r0 を明示 pin し、media-apk.lock と契約 artifact.apk-lock.sha256 を追随させた再レンダリング（apply_apklock.sh）。
+    "9c247af8f9828e4c94aad628312b3e3ce8c44012477551bc5154be167aac3223" = {
       content_type                  = "text/yaml"
       object_lock_retain_until_date = "2099-12-31T00:00:00Z"
     }
@@ -237,7 +241,9 @@ locals {
     # 解決不能になるため media-apk.lock と契約 artifact.apk-lock.sha256 を追随させた再レンダリング（apply_apklock.sh）。
     # 2026-10-02 publish 世代（apk ロック追随）。Alpine 上流の入替（font-noto 2026.09.01-r0→2026.10.01-r0）で段 3 の media ビルドが
     # 解決不能になるため media-apk.lock と契約 artifact.apk-lock.sha256 を追随させた再レンダリング（apply_apklock.sh）。
-    "adf9a204d30070839f5cf556773271f56d73ecf082bae72b809fd5932ca6880d" = {
+    # 2026-10-02 publish 世代（pcre2 の CVE 対応）。r43 段 3 の media が ECR 脆弱性ゲート（pcre2 10.47-r1・CVE 8 件）で
+    # 止まったため pcre2=10.49-r0 を明示 pin し、media-apk.lock と契約 artifact.apk-lock.sha256 を追随させた再レンダリング（apply_apklock.sh）。
+    "21f41917b2e4ab43f1cd6f5168fc6212a08be5e8e9238ffd4ed2c8004a442f17" = {
       content_type                  = "text/yaml"
       object_lock_retain_until_date = "2099-12-31T00:00:00Z"
     }
@@ -436,18 +442,18 @@ removed {
 }
 
 import {
-  to = aws_s3_object.mcp_source_publisher_buildspec_generation["86b32ced5f8c50cede40665220af9868eab46043118171d369c26232f87708c9"]
-  id = "teamagent-dev-image-release-evidence/codebuild-buildspecs/teamagent-dev-mcp-source-publisher/86b32ced5f8c50cede40665220af9868eab46043118171d369c26232f87708c9.yml"
+  to = aws_s3_object.mcp_source_publisher_buildspec_generation["8687830a10534318a1ccf21676527fab25a54bf0ed10bc9d39d0233565216e69"]
+  id = "teamagent-dev-image-release-evidence/codebuild-buildspecs/teamagent-dev-mcp-source-publisher/8687830a10534318a1ccf21676527fab25a54bf0ed10bc9d39d0233565216e69.yml"
 }
 
 import {
-  to = aws_s3_object.image_attestor_buildspec_generation["14342adba554fd1de41a14ca2e0f1b93cad7aaf244a3bfc6575d999f6e23a97f"]
-  id = "teamagent-dev-image-release-evidence/codebuild-buildspecs/teamagent-dev-image-attestor/14342adba554fd1de41a14ca2e0f1b93cad7aaf244a3bfc6575d999f6e23a97f.yml"
+  to = aws_s3_object.image_attestor_buildspec_generation["9c247af8f9828e4c94aad628312b3e3ce8c44012477551bc5154be167aac3223"]
+  id = "teamagent-dev-image-release-evidence/codebuild-buildspecs/teamagent-dev-image-attestor/9c247af8f9828e4c94aad628312b3e3ce8c44012477551bc5154be167aac3223.yml"
 }
 
 import {
-  to = aws_s3_object.image_promoter_buildspec_generation["adf9a204d30070839f5cf556773271f56d73ecf082bae72b809fd5932ca6880d"]
-  id = "teamagent-dev-image-release-evidence/codebuild-buildspecs/teamagent-dev-image-promoter/adf9a204d30070839f5cf556773271f56d73ecf082bae72b809fd5932ca6880d.yml"
+  to = aws_s3_object.image_promoter_buildspec_generation["21f41917b2e4ab43f1cd6f5168fc6212a08be5e8e9238ffd4ed2c8004a442f17"]
+  id = "teamagent-dev-image-release-evidence/codebuild-buildspecs/teamagent-dev-image-promoter/21f41917b2e4ab43f1cd6f5168fc6212a08be5e8e9238ffd4ed2c8004a442f17.yml"
 }
 
 import {

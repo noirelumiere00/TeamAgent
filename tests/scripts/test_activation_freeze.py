@@ -246,6 +246,8 @@ def test_unlock_matches_the_committed_declaration() -> None:
         assert "3.14.8-r0" in unlock["reason"]
         assert "font-noto 2026.09.01-r0" in unlock["reason"]
         assert "2026.10.01-r0" in unlock["reason"]
+        assert "pcre2 10.47-r1" in unlock["reason"]
+        assert "10.49-r0" in unlock["reason"]
         assert "human gate 2026-10-02" in unlock["gate"]
         previous = unlock["previous_scope_20261002_openclaw"]
         assert previous["scope_paths"] == ["infra/codebuild/openclaw_bundle_contract.json"]
