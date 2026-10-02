@@ -166,7 +166,9 @@ locals {
     # media-apk.lock と契約 artifact.apk-lock.sha256 を追随させた再レンダリング（apply_apklock.sh）。
     # 2026-10-01 publish 世代（apk ロック追随）。Alpine 上流の入替（libcrypto3 3.5.8-r0→3.5.9-r0・libssl3 3.5.8-r0→3.5.9-r0・python3 3.14.7-r0→3.14.8-r0）で段 3 の media ビルドが
     # 解決不能になるため media-apk.lock と契約 artifact.apk-lock.sha256 を追随させた再レンダリング（apply_apklock.sh）。
-    "3340ad65a4edb94a7d1d0682320adc9947d0fedc2798c922be1ed9aefc5c15b2" = {
+    # 2026-10-01 publish 世代（OpenClaw 契約の node probe 追随）。#503 の runtime ベース 10-01 世代で
+    # /usr/bin/node が b6c4b27f… → 12929629… に動いたため契約の base64 を差し替えた再レンダリング。
+    "e2fea17faa275fb59bcad9b5e57e0cb8d2b4e5c0fce68741a403204dfe8490c9" = {
       content_type                  = "text/yaml"
       object_lock_retain_until_date = "2099-12-31T00:00:00Z"
     }
@@ -433,8 +435,8 @@ import {
 }
 
 import {
-  to = aws_s3_object.image_attestor_buildspec_generation["3340ad65a4edb94a7d1d0682320adc9947d0fedc2798c922be1ed9aefc5c15b2"]
-  id = "teamagent-dev-image-release-evidence/codebuild-buildspecs/teamagent-dev-image-attestor/3340ad65a4edb94a7d1d0682320adc9947d0fedc2798c922be1ed9aefc5c15b2.yml"
+  to = aws_s3_object.image_attestor_buildspec_generation["e2fea17faa275fb59bcad9b5e57e0cb8d2b4e5c0fce68741a403204dfe8490c9"]
+  id = "teamagent-dev-image-release-evidence/codebuild-buildspecs/teamagent-dev-image-attestor/e2fea17faa275fb59bcad9b5e57e0cb8d2b4e5c0fce68741a403204dfe8490c9.yml"
 }
 
 import {
