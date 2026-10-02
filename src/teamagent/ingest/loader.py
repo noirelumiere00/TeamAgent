@@ -61,6 +61,11 @@ class GSheetsTabSpec:
     tab_name: str
 
 
+# yaml で ``gid: auto`` と書いたタブの印。取り込み時に tab_name から実 gid を引く
+# （pipeline._ingest_gsheet）。引けなければそのタブは取り込まない（推測の gid は使わない）。
+GID_BY_TITLE = -1
+
+
 @dataclass(frozen=True)
 class GSheetSpec:
     """gsheets[] の 1 件。"""
@@ -421,6 +426,13 @@ def _parse_gsheet_tab(raw: dict[str, Any]) -> GSheetsTabSpec | None:
     として丸ごと取り込まれ、事例として朝の DM に出る。
     """
     gid_env = str(raw.get("gid_env", "") or "").strip() or None
+    if str(raw.get("gid", "")).strip().lower() == "auto":
+        # gid が手元で分からないシート（Drive 連携では gid が取れない）用。tab_name 必須。
+        tab_name = str(raw.get("tab_name", "") or "").strip()
+        if not tab_name or gid_env:
+            logger.error("ingest_sources_invalid_gid_auto", tab_name=tab_name or None)
+            return None
+        return GSheetsTabSpec(gid=GID_BY_TITLE, tab_name=tab_name)
     gid = int(raw.get("gid", 0))
     if gid_env:
         resolved = _resolve_env_id(gid_env)
