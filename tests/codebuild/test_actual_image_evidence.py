@@ -5,6 +5,9 @@ import base64
 import hashlib
 import importlib.util
 import json
+import os
+import shutil
+import subprocess
 import sys
 from pathlib import Path
 from typing import Any
@@ -621,3 +624,76 @@ def test_actual_image_verifier_scans_before_signing_and_never_accepts_indexes() 
     assert "application/vnd.in-toto+json" in body
     assert "unset TRIVY_DB_REPOSITORY TRIVY_JAVA_DB_REPOSITORY" in body
     assert 'TRIVY_DB_REPOSITORY="public.ecr.aws/aquasecurity/trivy-db:2"' in body
+
+
+def test_openclaw_actual_image_verifier_fails_closed_without_skills_contract(
+    tmp_path: Path,
+) -> None:
+    contract = tmp_path / "openclaw-contract-without-skills.json"
+    _write_json(
+        contract,
+        {
+            "release": {"ready": True, "blocked_reason": ""},
+            "bundle": {"subjects": []},
+        },
+    )
+    contract_sha256 = hashlib.sha256(contract.read_bytes()).hexdigest()
+    command_path = tmp_path / "bin"
+    command_path.mkdir()
+    for command in ("awk", "jq", "sha256sum"):
+        executable = shutil.which(command)
+        assert executable is not None
+        (command_path / command).symlink_to(executable)
+
+    completed = subprocess.run(
+        [
+            "/bin/bash",
+            str(VERIFY_SCRIPT),
+            "--pipeline",
+            "openclaw",
+            "--channel",
+            "verified-candidate",
+            "--subject",
+            "core",
+            "--quarantine-repository",
+            "teamagent-openclaw-quarantine",
+            "--candidate-repository",
+            "teamagent-openclaw-verified-candidates",
+            "--release-repository",
+            "teamagent-openclaw",
+            "--commit",
+            COMMIT,
+            "--contract",
+            str(contract),
+            "--contract-sha256",
+            contract_sha256,
+            "--image-digest",
+            DIGEST,
+            "--signing-key-arn",
+            KEY_ARN,
+            "--output",
+            str(tmp_path / "subject.json"),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        env={**os.environ, "PATH": str(command_path)},
+    )
+
+    assert completed.returncode == 1
+    assert "OpenClaw contract bundle.skills is missing or malformed" in completed.stderr
+
+
+def test_openclaw_actual_image_verifier_checks_symlink_safe_skill_entry_allowlist(
+) -> None:
+    body = VERIFY_SCRIPT.read_text(encoding="utf-8")
+
+    contract_guard = body.index("OpenClaw contract bundle.skills is missing or malformed")
+    container_create = body.index('docker create --name "$CONTAINER_NAME"')
+    skills_copy = body.index('docker cp -L "$CONTAINER_NAME:$SKILLS_ROOT"')
+    allowlist_gate = body.index("actual-image skill allowlist violation")
+    scan = body.index("trivy image")
+
+    assert contract_guard < container_create < skills_copy < allowlist_gate < scan
+    assert 'SKILLS_ROOT="$(jq -er \'.root\'' in body
+    assert "actual = {entry.name for entry in os.scandir(root)}" in body

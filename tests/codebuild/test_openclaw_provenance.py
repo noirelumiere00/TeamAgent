@@ -127,10 +127,34 @@ def test_active_contract_is_fail_closed_and_names_all_three_repository_stages() 
         "attest": "infra/codebuild/verify_actual_image.sh",
         "promote": "infra/codebuild/image-promoter-buildspec.yml",
     }
+    assert contract["bundle"]["skills"] == {"root": "/app/skills", "allowed": []}
     for subject in contract["bundle"]["subjects"]:
         assert subject["quarantine_repository"].endswith("-quarantine")
         assert subject["candidate_repository"].endswith("-verified-candidates")
         assert not subject["release_repository"].endswith(("-quarantine", "-verified-candidates"))
+
+
+def test_contract_requires_exact_empty_skills_allowlist() -> None:
+    value = json.loads(ACTIVE_CONTRACT.read_text(encoding="utf-8"))
+
+    missing = copy.deepcopy(value)
+    missing["bundle"].pop("skills")
+    with pytest.raises(provenance.ContractError, match=r"missing=.*skills"):
+        provenance.validate_contract(missing)
+
+    invalid_skills = [
+        ({"root": "/tmp/skills", "allowed": []}, r"skills\.root must be /app/skills"),
+        ({"root": "/app/skills", "allowed": ["clawhub"]}, r"allowed must be an empty array"),
+        (
+            {"root": "/app/skills", "allowed": [], "unexpected": True},
+            r"bundle\.skills schema mismatch",
+        ),
+    ]
+    for skills, error in invalid_skills:
+        mutated = copy.deepcopy(value)
+        mutated["bundle"]["skills"] = skills
+        with pytest.raises(provenance.ContractError, match=error):
+            provenance.validate_contract(mutated)
 
 
 def test_ready_contract_requires_binary_hashes_and_signed_sbom_provenance() -> None:

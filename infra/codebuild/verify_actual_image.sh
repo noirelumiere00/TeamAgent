@@ -22,6 +22,7 @@ APPROVAL_EVIDENCE_JSON=""
 IMAGE_DIGEST=""
 SIGNING_KEY_ARN=""
 OUTPUT=""
+OPENCLAW_SKILLS_CONTRACT=""
 
 die() {
   echo "FATAL: $*" >&2
@@ -93,6 +94,30 @@ fi
 [ -f "$CONTRACT" ] || die "contract is missing"
 [ "$(sha256sum "$CONTRACT" | awk '{print $1}')" = "$CONTRACT_SHA256" ] \
   || die "contract bytes do not match the expected SHA-256"
+if [ "$PIPELINE" = "openclaw" ]; then
+  OPENCLAW_SKILLS_CONTRACT="$(
+    jq -cer '
+      .bundle.skills as $skills |
+      if ($skills | type) != "object" then
+        error("bundle.skills must be an object")
+      elif ($skills | keys | sort) != ["allowed", "root"] then
+        error("bundle.skills has unexpected or missing fields")
+      elif $skills.root != "/app/skills" then
+        error("bundle.skills.root must be /app/skills")
+      elif ($skills.allowed | type) != "array" then
+        error("bundle.skills.allowed must be an array")
+      elif (all($skills.allowed[]; type == "string") | not) then
+        error("bundle.skills.allowed entries must be strings")
+      elif any($skills.allowed[]; length == 0 or . == "." or . == ".." or contains("/")) then
+        error("bundle.skills.allowed contains an unsafe entry name")
+      elif ($skills.allowed | unique | length) != ($skills.allowed | length) then
+        error("bundle.skills.allowed contains duplicates")
+      else
+        $skills
+      end
+    ' "$CONTRACT"
+  )" || die "OpenClaw contract bundle.skills is missing or malformed"
+fi
 if [ "$PIPELINE" = "mcp" ]; then
   EXPECTED_RUNTIME_CONTRACT_SHA256="$(
     jq -er '
@@ -236,6 +261,32 @@ unset DUPLICATE_BINARY_PATH
 
 docker pull "$IMAGE" >/dev/null
 docker create --name "$CONTAINER_NAME" "$IMAGE" >/dev/null
+if [ "$PIPELINE" = "openclaw" ]; then
+  SKILLS_ROOT="$(jq -er '.root' <<<"$OPENCLAW_SKILLS_CONTRACT")"
+  LOCAL_SKILLS_ROOT="$TMP_DIR/openclaw-skills-root"
+  # -L follows the source when /app/skills (or an entry below it) is a symlink.
+  # Without it docker cp can leave a dangling link and falsely inspect host state.
+  docker cp -L "$CONTAINER_NAME:$SKILLS_ROOT" "$LOCAL_SKILLS_ROOT" >/dev/null \
+    || die "actual-image skills root is missing or unreadable: $SKILLS_ROOT"
+  python3 - "$LOCAL_SKILLS_ROOT" "$OPENCLAW_SKILLS_CONTRACT" <<'PY'
+import json
+import os
+import sys
+
+root, serialized_contract = sys.argv[1:]
+skills_contract = json.loads(serialized_contract)
+allowed = set(skills_contract["allowed"])
+try:
+    actual = {entry.name for entry in os.scandir(root)}
+except OSError as exc:
+    raise SystemExit(f"FATAL: actual-image skills root is not a directory: {root}") from exc
+unexpected = sorted(actual - allowed)
+if unexpected:
+    rendered = json.dumps(unexpected, ensure_ascii=True, separators=(",", ":"))
+    raise SystemExit(f"FATAL: actual-image skill allowlist violation: {rendered}")
+PY
+  rm -rf -- "$LOCAL_SKILLS_ROOT"
+fi
 while IFS=$'\t' read -r BINARY_PATH EXPECTED_BINARY_SHA256; do
   [[ "$BINARY_PATH" =~ ^/[A-Za-z0-9][A-Za-z0-9_./+-]{0,511}$ ]] \
     && [[ "$BINARY_PATH" != *"/../"* ]] \

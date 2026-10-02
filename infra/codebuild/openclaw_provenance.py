@@ -177,6 +177,7 @@ def validate_contract(value: Any, *, label: str = "OpenClaw bundle contract") ->
             "interfaces",
             "contract_oci_label",
             "arm64_subject_media_type",
+            "skills",
             "subjects",
             "required_referrers",
             "signature_artifact_type",
@@ -229,6 +230,14 @@ def validate_contract(value: Any, *, label: str = "OpenClaw bundle contract") ->
         raise ContractError(f"{label} contract OCI label is not fixed")
     if bundle["arm64_subject_media_type"] != "application/vnd.oci.image.manifest.v1+json":
         raise ContractError(f"{label} arm64 subject must be a single OCI image manifest")
+    skills = bundle["skills"]
+    if not isinstance(skills, dict):
+        raise ContractError(f"{label} bundle.skills must be an object")
+    _exact_keys(skills, {"root", "allowed"}, label=f"{label} bundle.skills")
+    if skills["root"] != "/app/skills":
+        raise ContractError(f"{label} bundle.skills.root must be /app/skills")
+    if not isinstance(skills["allowed"], list) or skills["allowed"]:
+        raise ContractError(f"{label} bundle.skills.allowed must be an empty array")
     subjects = bundle["subjects"]
     if not isinstance(subjects, list) or len(subjects) != len(_EXPECTED_BUNDLE_SUBJECTS):
         raise ContractError(
@@ -378,6 +387,7 @@ def validate_contract(value: Any, *, label: str = "OpenClaw bundle contract") ->
             "interfaces": dict(bundle["interfaces"]),
             "contract_oci_label": bundle["contract_oci_label"],
             "arm64_subject_media_type": bundle["arm64_subject_media_type"],
+            "skills": {"root": "/app/skills", "allowed": []},
             "subjects": normalized_subjects,
             "required_referrers": normalized_referrers,
             "signature_artifact_type": signature_type,
