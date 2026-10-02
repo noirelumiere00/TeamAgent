@@ -233,29 +233,23 @@ def test_unlock_matches_the_committed_declaration() -> None:
     unlock = _freeze_doc()["unlock"]
     if unlock["active"]:
         assert unlock["scope_paths"] == [
-            "infra/codebuild/openclaw_bundle_contract.json",
-        ]
-        assert "actual-image binary hash mismatch: /usr/bin/node" in unlock["reason"]
-        assert "b6c4b27f… → 12929629…" in unlock["reason"]
-        assert "human gate 2026-10-01" in unlock["gate"]
-        # 退避した直前の宣言（core_media 契約の apk 追随）も中身ごと封印したまま残す
-        previous = unlock["previous_scope_20261001"]
-        assert previous["scope_paths"] == [
             "infra/codebuild/teamagent_core_media_release_contract.json",
         ]
-        for marker in (
-            "CVE-2026-85091",
-            "tr -d +",
-            "ca-certificates 20260611-r0",
-            "libexpat 2.8.4-r0",
-            "ada-libs-3.3.0-r2",
-            "libcrypto3 3.5.8-r0",
-            "libssl3 3.5.8-r0",
-            "python3 3.14.7-r0",
-            "3.14.8-r0",
-        ):
-            assert marker in previous["reason"]
-        assert "human gate 2026-10-01" in previous["gate"]
+        assert "CVE-2026-85091" in unlock["reason"]
+        assert "tr -d +" in unlock["reason"]
+        assert "ca-certificates 20260611-r0" in unlock["reason"]
+        assert "libexpat 2.8.4-r0" in unlock["reason"]
+        assert "ada-libs-3.3.0-r2" in unlock["reason"]
+        assert "libcrypto3 3.5.8-r0" in unlock["reason"]
+        assert "libssl3 3.5.8-r0" in unlock["reason"]
+        assert "python3 3.14.7-r0" in unlock["reason"]
+        assert "3.14.8-r0" in unlock["reason"]
+        assert "font-noto 2026.09.01-r0" in unlock["reason"]
+        assert "2026.10.01-r0" in unlock["reason"]
+        assert "human gate 2026-10-02" in unlock["gate"]
+        previous = unlock["previous_scope_20261002_openclaw"]
+        assert previous["scope_paths"] == ["infra/codebuild/openclaw_bundle_contract.json"]
+        assert "actual-image binary hash mismatch: /usr/bin/node" in previous["reason"]
     else:
         assert unlock["scope_paths"] == []
         assert unlock["reason"] is None

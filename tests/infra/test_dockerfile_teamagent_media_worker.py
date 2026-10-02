@@ -36,7 +36,8 @@ UV_DIGEST = "9941e2d8e06ff884d328905091eac0a6bc1e40e5ce12e6dd0de4ef4ee26baac4"
 # 手元の apk 段ビルド実測で lock との差はこの 1 行のみ（240 行不変）。
 # 2026-09-30: Alpine 上流への追随（削除: ada-libs-3.3.0-r1 / 追加: ada-libs-3.3.0-r2）。apk 段の実ビルドで lock 差分 -1 +1（240→240 行）。
 # 2026-10-01: Alpine 上流への追随（libcrypto3 3.5.8-r0→3.5.9-r0・libssl3 3.5.8-r0→3.5.9-r0・python3 3.14.7-r0→3.14.8-r0）。apk 段の実ビルドで lock 差分 -6 +6（240→240 行）。
-APK_LOCK_SHA256 = "76d53640cb35a49e30e9fcf44a171a224f8b26fa97fbfb8ca53abd6acf4a7648"
+# 2026-10-02: Alpine 上流への追随（font-noto 2026.09.01-r0→2026.10.01-r0）。apk 段の実ビルドで lock 差分 -5 +5（240→240 行）。
+APK_LOCK_SHA256 = "035f527d38716d9888f3e5e93bea422e265329d451ce132b5ea2d6428bb512bc"
 CHROMIUM_PATH = "/usr/lib/chromium/chromium"
 
 
