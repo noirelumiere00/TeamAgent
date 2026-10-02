@@ -439,7 +439,7 @@ class ProposalBuilderStatusInput(_StrictModel):
 class ProposalBuilderCaseReference(_StrictModel):
     """生成物へ採用したRAG事例のトレース情報。"""
 
-    source: Literal["report_rag", "general_news-tv"]
+    source: Literal["report_rag", "general_news-tv", "case_record"]
     title: str
     url: str | None = None
 
