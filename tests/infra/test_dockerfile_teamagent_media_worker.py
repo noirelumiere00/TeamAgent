@@ -37,7 +37,8 @@ UV_DIGEST = "9941e2d8e06ff884d328905091eac0a6bc1e40e5ce12e6dd0de4ef4ee26baac4"
 # 2026-09-30: Alpine 上流への追随（削除: ada-libs-3.3.0-r1 / 追加: ada-libs-3.3.0-r2）。apk 段の実ビルドで lock 差分 -1 +1（240→240 行）。
 # 2026-10-01: Alpine 上流への追随（libcrypto3 3.5.8-r0→3.5.9-r0・libssl3 3.5.8-r0→3.5.9-r0・python3 3.14.7-r0→3.14.8-r0）。apk 段の実ビルドで lock 差分 -6 +6（240→240 行）。
 # 2026-10-02: Alpine 上流への追随（font-noto 2026.09.01-r0→2026.10.01-r0）。apk 段の実ビルドで lock 差分 -5 +5（240→240 行）。
-APK_LOCK_SHA256 = "035f527d38716d9888f3e5e93bea422e265329d451ce132b5ea2d6428bb512bc"
+# 2026-10-02: Alpine 上流への追随（pcre2 10.47-r1→10.49-r0）。apk 段の実ビルドで lock 差分 -1 +1（240→240 行）。
+APK_LOCK_SHA256 = "56df7d0d669fc169e21b916981580405cff88fda7cc1a9e68ef778a1797e77d3"
 CHROMIUM_PATH = "/usr/lib/chromium/chromium"
 
 
@@ -143,6 +144,8 @@ def test_base_bundled_cve_packages_are_pinned_to_the_fixed_versions() -> None:
         "LIBCRYPTO3_PACKAGE_VERSION": ("libcrypto3", "3.5.9-r0"),
         # 2026-09-24: 2.8.4-r0 が上流索引から消え 2.8.5-r0 へ（Alpine secdb: CVE-2026-93990 の修正版）。
         "LIBEXPAT_PACKAGE_VERSION": ("libexpat", "2.8.5-r0"),
+        # 2026-10-02 便 r43 段3: base(v3.24)同梱の pcre2 10.47-r1 に公開済み CVE 8 件（HIGH 4）。secdb v3.24 main で 10.48-r0 が 7 件・10.49-r0 が CVE-2026-103111 を fixed。glib 等の依存で外せないため修正版を明示 pin。
+        "PCRE2_PACKAGE_VERSION": ("pcre2", "10.49-r0"),
         "LIBSSL3_PACKAGE_VERSION": ("libssl3", "3.5.9-r0"),
     }
     lock = APK_LOCK.read_text(encoding="utf-8").splitlines()
