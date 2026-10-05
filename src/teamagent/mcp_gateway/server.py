@@ -1577,6 +1577,10 @@ def build_server(
 
         install_sdk_warning_filter()
     server: Server = Server("teamagent")
+    # M7: mcp 全体の同時実行の上限（既定 OFF＝None＝素通り）。本人メモは上限の外（軽い経路）。
+    from teamagent.mcp_gateway import capacity
+
+    request_gate = capacity.gate_from_env()
 
     @server.list_tools()
     async def _list() -> list[Tool]:
@@ -1597,6 +1601,18 @@ def build_server(
                 company_shared_groups=company_shared_groups,
                 caller_claim_verifier=caller_claim_verifier,
             )
+        if request_gate is not None:
+            from teamagent.runtime.request_gate import GateTimeoutError, QueueFullError
+
+            try:
+                return await request_gate.submit(_dispatch, name, arguments)
+            except QueueFullError:
+                return capacity.overloaded(name, "queue_full", request_gate)
+            except GateTimeoutError:
+                return capacity.overloaded(name, "timeout", request_gate)
+        return await _dispatch(name, arguments)
+
+    async def _dispatch(name: str, arguments: dict[str, Any]) -> list[TextContent]:
         # L2: run_agent は specs に無い特別 tool。有効時のみ専用ディスパッチへ。
         if enable_orchestrator and name == RUN_AGENT_TOOL_NAME:
             return await dispatch_run_agent(
