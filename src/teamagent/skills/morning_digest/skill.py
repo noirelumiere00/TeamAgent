@@ -985,6 +985,9 @@ class MorningDigestSkill(BaseSkill[MorningDigestInput, MorningDigestOutput]):
                         str(getattr(ev, "location", "") or ""), 120
                     ),
                     meeting_url=str(getattr(ev, "meeting_url", "") or "")[:600],
+                    personal_block=_calwin.is_personal_block(
+                        getattr(ev, "attendees", None), getattr(ev, "meeting_url", "")
+                    ),
                     attendee_domains=list(sig.attendee_domains)[:10],
                     attendee_list_available=sig.attendee_list_available,
                     # ⚠️ 判定用の予定名も **派生値として写す**（display から作り直さない）。
