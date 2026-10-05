@@ -112,7 +112,8 @@ CREATE TABLE IF NOT EXISTS public.personal_memory_audit (
                             OR (actor_email <> '' AND position('@' IN actor_email) > 0)),
   profile_sha16 TEXT NOT NULL CHECK (profile_sha16 ~ '^[0-9a-f]{16}$'),
   action        TEXT NOT NULL CHECK (action IN ('notice_ack', 'learn_applied', 'forget', 'freeze',
-                                                'resume', 'erase_all', 'admin_view', 'retire_delete')),
+                                                'resume', 'erase_all', 'admin_view', 'retire_delete',
+                                                'retire_freeze')),
   item_count    INTEGER NOT NULL CHECK (item_count >= 0),
   reason_code   TEXT NOT NULL CHECK (reason_code ~ '^[a-z][a-z0-9_]{0,39}$'),
   CHECK ((actor_kind = 'admin') = (actor_email IS NOT NULL))
@@ -248,6 +249,12 @@ BEGIN
   END IF;
   SELECT count(*) INTO v_count FROM public.personal_memory_entries e
    WHERE e.team_id = p_team_id AND e.slack_user_id = p_slack_user_id;
+  -- 本人メモの無い人（profile も項目も無い）は何もしない。監査も書かない（毎朝の掃除で埋もれさせない）
+  IF v_count = 0 AND NOT EXISTS (
+       SELECT 1 FROM public.personal_memory_profiles p
+        WHERE p.team_id = p_team_id AND p.slack_user_id = p_slack_user_id) THEN
+    RETURN 0;
+  END IF;
   INSERT INTO public.personal_memory_audit
     (actor_kind, actor_email, profile_sha16, action, item_count, reason_code)
   VALUES ('retire', NULL,
@@ -261,11 +268,57 @@ BEGIN
 END
 $fn$;
 
+-- 退職・ゲスト化の確認に使う対象の一覧（team_id と U… だけ。本文・email・件数は返さない）。
+-- 退職の判定は保存した U… で users.info を直接引く（email の逆引きは無効化された人で失敗しうる）。
+CREATE OR REPLACE FUNCTION public.personal_memory_retire_candidates()
+RETURNS TABLE (team_id text, slack_user_id text)
+LANGUAGE sql SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $fn$
+  SELECT p.team_id, p.slack_user_id FROM public.personal_memory_profiles p
+   ORDER BY p.team_id, p.slack_user_id;
+$fn$;
+
+-- ゲスト化（Slack の is_restricted / is_ultra_restricted）は消さずに凍結だけ。既に凍結なら何もしない。
+CREATE OR REPLACE FUNCTION public.personal_memory_retire_freeze(
+    p_team_id text, p_slack_user_id text, p_reason_code text)
+RETURNS boolean
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $fn$
+DECLARE
+  v_count integer;
+BEGIN
+  IF p_team_id IS NULL OR p_team_id !~ '^T[A-Z0-9]{8,}$'
+     OR p_slack_user_id IS NULL OR p_slack_user_id !~ '^U[A-Z0-9]{8,}$' THEN
+    RAISE EXCEPTION 'pm_bad_principal' USING ERRCODE = '22023';
+  END IF;
+  IF p_reason_code IS NULL OR p_reason_code !~ '^[a-z][a-z0-9_]{0,39}$' THEN
+    RAISE EXCEPTION 'pm_bad_reason' USING ERRCODE = '22023';
+  END IF;
+  UPDATE public.personal_memory_profiles p
+     SET state = 'frozen', updated_at = now()
+   WHERE p.team_id = p_team_id AND p.slack_user_id = p_slack_user_id AND p.state <> 'frozen';
+  IF NOT FOUND THEN
+    RETURN false;
+  END IF;
+  SELECT count(*) INTO v_count FROM public.personal_memory_entries e
+   WHERE e.team_id = p_team_id AND e.slack_user_id = p_slack_user_id;
+  INSERT INTO public.personal_memory_audit
+    (actor_kind, actor_email, profile_sha16, action, item_count, reason_code)
+  VALUES ('retire', NULL,
+          left(encode(sha256(convert_to(p_team_id || ':' || p_slack_user_id, 'UTF8')), 'hex'), 16),
+          'retire_freeze', v_count, p_reason_code);
+  RETURN true;
+END
+$fn$;
+
 REVOKE ALL ON FUNCTION public.personal_memory_admin_view(text, text, text, text) FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.personal_memory_retire_delete(text, text, text) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION public.personal_memory_admin_view(text, text, text, text)
   TO personal_memory_admin_reader;
 GRANT EXECUTE ON FUNCTION public.personal_memory_retire_delete(text, text, text)
+  TO personal_memory_retirer;
+REVOKE ALL ON FUNCTION public.personal_memory_retire_candidates() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.personal_memory_retire_freeze(text, text, text) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION public.personal_memory_retire_candidates() TO personal_memory_retirer;
+GRANT EXECUTE ON FUNCTION public.personal_memory_retire_freeze(text, text, text)
   TO personal_memory_retirer;
 
 -- 6) 所有者を定義者ロールへ移す
@@ -278,6 +331,8 @@ ALTER TABLE public.personal_memory_entries  OWNER TO personal_memory_definer;
 ALTER TABLE public.personal_memory_audit    OWNER TO personal_memory_definer;
 ALTER FUNCTION public.personal_memory_admin_view(text, text, text, text) OWNER TO personal_memory_definer;
 ALTER FUNCTION public.personal_memory_retire_delete(text, text, text) OWNER TO personal_memory_definer;
+ALTER FUNCTION public.personal_memory_retire_candidates() OWNER TO personal_memory_definer;
+ALTER FUNCTION public.personal_memory_retire_freeze(text, text, text) OWNER TO personal_memory_definer;
 REVOKE CREATE ON SCHEMA public FROM personal_memory_definer;
 REVOKE personal_memory_definer FROM CURRENT_USER;
 

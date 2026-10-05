@@ -5165,7 +5165,100 @@ def create_app(
             )
         return HTMLResponse(render_usage_admin(data))
 
+    pm_admin_holder: dict[str, Any] = {}
+
+    @app.get("/admin/memory", response_class=HTMLResponse)
+    def personal_memory_admin(request: Request) -> Response:
+        """本人メモの管理者閲覧（M6・設計 §10b.6）。本人メモ専用の allowlist のちょうど 1 名だけ。
+
+        - 管理者でなければページの存在を秘匿する（/admin と同じ 404）。
+        - 閲覧は DB 関数 1 本（監査 INSERT → 行を返す）。失敗したら 503 で何も表示しない。
+        - 対象は Slack の U…（team は SLACK_TEAM_ID）。email からの逆引きはしない。
+        - 本文・対象の ID はログに出さない。キャッシュさせない。
+        """
+        from teamagent.adapters.personal_memory_admin import (
+            PersonalMemoryAdmin,
+            PersonalMemoryAdminError,
+            is_admin,
+            valid_principal,
+        )
+
+        email = _search_email(request)
+        if email is None:
+            return RedirectResponse("/search/login?next=/admin/memory", status_code=303)
+        if not is_admin(email):
+            raise HTTPException(status_code=404)
+        headers = {"Cache-Control": "no-store", "X-Robots-Tag": "noindex"}
+        target = (request.query_params.get("user") or "").strip().upper()[:32]
+        team = os.environ.get("SLACK_TEAM_ID", "").strip()
+        if not target:
+            return HTMLResponse(
+                render_memory_admin(rows=None, target="", error=""), headers=headers
+            )
+        if not valid_principal(team, target):
+            return HTMLResponse(
+                render_memory_admin(
+                    rows=None, target="", error="Slack のユーザー ID（U…）を入れてください。"
+                ),
+                status_code=400,
+                headers=headers,
+            )
+        admin = pm_admin_holder.get("admin")
+        if admin is None:
+            admin = pm_admin_holder.setdefault("admin", PersonalMemoryAdmin())
+        try:
+            rows = admin.view(admin_email=email, team_id=team, slack_user_id=target)
+        except PersonalMemoryAdminError as exc:
+            logger.warning("personal_memory_admin_page_failed", code=exc.code)
+            return HTMLResponse(
+                _page(
+                    "本人メモ",
+                    "いま表示できません。閲覧の記録に失敗したため、何も表示していません。",
+                    accent="#e0a040",
+                ),
+                status_code=503,
+                headers=headers,
+            )
+        return HTMLResponse(
+            render_memory_admin(rows=rows, target=target, error=""), headers=headers
+        )
+
     return app
+
+
+def render_memory_admin(*, rows: list[Any] | None, target: str, error: str) -> str:
+    """本人メモの管理者閲覧ページ（入力欄＋表）。値はすべてエスケープする。"""
+    form = (
+        '<form method="get" action="/admin/memory">'
+        '<label>Slack のユーザー ID <input name="user" pattern="U[A-Z0-9]{8,}" required '
+        f'value="{html.escape(target)}"></label> <button type="submit">見る</button></form>'
+        '<p class="note">見るたびに記録され、本人も閲覧された回数を確認できます。</p>'
+    )
+    parts = [f'<p class="err">{html.escape(error)}</p>'] if error else []
+    if rows is not None:
+        if rows:
+            kinds = {"user": "好み・やり方", "memory": "仕事の前提"}
+            body = "".join(
+                f"<tr><td>{r.no}</td><td>{kinds.get(r.target, '')}</td>"
+                f"<td>{html.escape(r.content)}</td></tr>"
+                for r in rows
+            )
+            parts.append(
+                f"<p>{html.escape(target)} の本人メモ（{len(rows)} 件）</p>"
+                "<table><tr><th>#</th><th>種類</th><th>内容</th></tr>" + body + "</table>"
+            )
+        else:
+            parts.append(f"<p>{html.escape(target)} の本人メモはありません。</p>")
+    return (
+        '<!doctype html><html lang="ja"><head><meta charset="utf-8">'
+        '<meta name="viewport" content="width=device-width, initial-scale=1">'
+        "<title>本人メモ（管理者）</title><style>"
+        "body{background:#0f1420;color:#e8edf7;font-family:-apple-system,'Hiragino Sans',"
+        "'Noto Sans JP',sans-serif;padding:32px}table{border-collapse:collapse;margin-top:12px}"
+        "td,th{border:1px solid #283450;padding:6px 10px;text-align:left}"
+        ".note{color:#93a1bd}.err{color:#f08080}</style></head><body>"
+        "<h1>本人メモ（管理者閲覧）</h1>" + form + "".join(parts) + "</body></html>"
+    )
 
 
 __all__ = ["create_app"]

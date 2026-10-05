@@ -276,6 +276,8 @@ def test_self_audit_insert_rules(seeded: PmDb) -> None:
 def test_function_execute_privileges(seeded: PmDb) -> None:
     view = "public.personal_memory_admin_view(text,text,text,text)"
     retire = "public.personal_memory_retire_delete(text,text,text)"
+    candidates = "public.personal_memory_retire_candidates()"
+    freeze = "public.personal_memory_retire_freeze(text,text,text)"
     with _connect(seeded) as conn, conn.cursor() as cur:
         expected = {
             ("public", view): False,
@@ -288,6 +290,17 @@ def test_function_execute_privileges(seeded: PmDb) -> None:
             ("personal_memory_retirer", view): False,
             (seeded.migrator, view): False,  # INHERIT FALSE なので master のままでは実行できない
             (seeded.migrator, retire): False,
+            # 退職・ゲスト化の確認（M6）: 退職削除のロールだけ
+            ("public", candidates): False,
+            ("public", freeze): False,
+            ("personal_memory_retirer", candidates): True,
+            ("personal_memory_retirer", freeze): True,
+            ("personal_memory_admin_reader", candidates): False,
+            ("personal_memory_admin_reader", freeze): False,
+            ("personal_memory_app", candidates): False,
+            ("teamagent_app", candidates): False,
+            (seeded.migrator, candidates): False,
+            (seeded.migrator, freeze): False,
         }
         for (role, fn), want in expected.items():
             cur.execute("SELECT has_function_privilege(%s, %s, 'EXECUTE')", (role, fn))
@@ -297,7 +310,12 @@ def test_function_execute_privileges(seeded: PmDb) -> None:
             "FROM pg_proc p WHERE p.proname LIKE 'personal_memory_%' ORDER BY p.proname"
         )
         rows = cur.fetchall()
-    assert [r[0] for r in rows] == ["personal_memory_admin_view", "personal_memory_retire_delete"]
+    assert [r[0] for r in rows] == [
+        "personal_memory_admin_view",
+        "personal_memory_retire_candidates",
+        "personal_memory_retire_delete",
+        "personal_memory_retire_freeze",
+    ]
     assert all(r[1] is True and r[2] == "personal_memory_definer" for r in rows)
     assert all(r[3] == ["search_path=pg_catalog, pg_temp"] for r in rows)
 
@@ -399,6 +417,65 @@ def test_retire_delete_removes_profile_and_entries(env: PmDb) -> None:
         assert cur.fetchall() == [("retire", "retire_delete", 3)]
 
 
+def test_retire_delete_of_someone_without_memos_is_silent(env: PmDb) -> None:
+    """本人メモの無い人の削除は 0 件・監査も書かない（毎朝の掃除で監査を埋もれさせない）。"""
+    import psycopg
+
+    user = "U0NOMEMO01"
+    with _connect(env) as conn, conn.cursor() as cur:
+        cur.execute("SET ROLE personal_memory_retirer")
+        cur.execute(
+            "SELECT public.personal_memory_retire_delete(%s, %s, %s)",
+            (_TEAM, user, "slack_deleted"),
+        )
+        assert cur.fetchone()[0] == 0
+        conn.commit()
+    with psycopg.connect(env.admin_dsn) as su, su.cursor() as cur:
+        cur.execute(
+            "SELECT count(*) FROM personal_memory_audit WHERE profile_sha16 = %s",
+            (_sha16(f"{_TEAM}:{user}"),),
+        )
+        assert cur.fetchone()[0] == 0
+
+
+def test_retire_candidates_and_guest_freeze(env: PmDb) -> None:
+    """退職の確認対象は team と U… だけ。ゲスト化は凍結のみ（消さない）・2 回目は何もしない。"""
+    import psycopg
+
+    user = "U0GUEST001"
+    _seed(env, user, ["返事は短め", "資料は表で"])
+    with _connect(env) as conn, conn.cursor() as cur:
+        cur.execute("SET ROLE personal_memory_retirer")
+        cur.execute("SELECT * FROM public.personal_memory_retire_candidates()")
+        rows = cur.fetchall()
+        assert (_TEAM, user) in rows
+        assert all(len(r) == 2 for r in rows)  # 本文・email・件数は返さない
+        cur.execute(
+            "SELECT public.personal_memory_retire_freeze(%s, %s, %s)",
+            (_TEAM, user, "slack_guest"),
+        )
+        assert cur.fetchone()[0] is True
+        cur.execute(
+            "SELECT public.personal_memory_retire_freeze(%s, %s, %s)",
+            (_TEAM, user, "slack_guest"),
+        )
+        assert cur.fetchone()[0] is False
+        conn.commit()
+    with psycopg.connect(env.admin_dsn) as su, su.cursor() as cur:
+        cur.execute("SELECT state FROM personal_memory_profiles WHERE slack_user_id = %s", (user,))
+        assert cur.fetchone()[0] == "frozen"
+        cur.execute(
+            "SELECT count(*) FROM personal_memory_entries WHERE slack_user_id = %s", (user,)
+        )
+        assert cur.fetchone()[0] == 2  # 消さない
+        cur.execute(
+            "SELECT actor_kind, action, item_count FROM personal_memory_audit "
+            "WHERE profile_sha16 = %s",
+            (_sha16(f"{_TEAM}:{user}"),),
+        )
+        assert ("retire", "retire_freeze", 2) in cur.fetchall()
+
+
 def test_migration_avoids_on_conflict_and_returning() -> None:
     text = _MIGRATION.read_text(encoding="utf-8").upper()
     # コメント以外の SQL に ON CONFLICT / RETURNING が無いこと（0024 の地雷）
@@ -406,3 +483,87 @@ def test_migration_avoids_on_conflict_and_returning() -> None:
     assert "ON CONFLICT" not in body
     assert "RETURNING " not in body.replace("RETURNS TABLE", "").replace("RETURNS INTEGER", "")
     assert "OR CURRENT_SETTING('APP.USER_ROLE'" not in body
+
+
+# ── M6: 管理者閲覧と退職・ゲスト化の掃除（adapters/personal_memory_admin.py を実 DB で）──────
+
+
+def _admin_adapter(env: PmDb) -> Any:
+    from contextlib import contextmanager
+
+    import psycopg
+
+    from teamagent.adapters.personal_memory_admin import PersonalMemoryAdmin
+
+    @contextmanager
+    def factory(role: str) -> Any:
+        # 本番の PgVectorClient.connection(app_role=…) と同じく SET ROLE してから使う
+        with psycopg.connect(env.migrator_dsn) as conn:
+            with conn.cursor() as cur:
+                cur.execute(f"SET ROLE {role}")
+            yield conn
+            conn.commit()
+
+    return PersonalMemoryAdmin(connection_factory=factory)
+
+
+def test_admin_adapter_views_with_audit_and_rejects_non_admin(
+    env: PmDb, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import psycopg
+
+    from teamagent.adapters.personal_memory_admin import PersonalMemoryAdminError
+
+    user = "U0ADMINV01"
+    _seed(env, user, ["返事は結論から", "資料は表で"])
+    admin = _admin_adapter(env)
+    monkeypatch.setenv("PERSONAL_MEMORY_ADMIN_EMAILS", "owner@vectorinc.co.jp")
+    with pytest.raises(PersonalMemoryAdminError) as denied:
+        admin.view(admin_email="other@vectorinc.co.jp", team_id=_TEAM, slack_user_id=user)
+    assert denied.value.code == "not_admin"
+    rows = admin.view(admin_email="Owner@vectorinc.co.jp", team_id=_TEAM, slack_user_id=user)
+    assert [r.content for r in rows] == ["返事は結論から", "資料は表で"]
+    with psycopg.connect(env.admin_dsn) as su, su.cursor() as cur:
+        cur.execute(
+            "SELECT actor_kind, actor_email, action, item_count FROM personal_memory_audit "
+            "WHERE profile_sha16 = %s",
+            (_sha16(f"{_TEAM}:{user}"),),
+        )
+        audits = cur.fetchall()
+    # 拒否した 1 回は DB に触れない＝監査も 1 件だけ
+    assert audits == [("admin", "owner@vectorinc.co.jp", "admin_view", 2)]
+
+
+def test_sweep_deletes_only_confirmed_retirees_and_freezes_guests(env: PmDb) -> None:
+    import psycopg
+
+    from teamagent.adapters.personal_memory_admin import sweep_retired
+
+    gone, guest, flaky, active = "U0SWGONE01", "U0SWGUEST1", "U0SWFLAKY1", "U0SWACTIV1"
+    for user in (gone, guest, flaky, active):
+        _seed(env, user, ["返事は短め"])
+
+    class _Slack:
+        def users_info(self, *, user: str) -> dict[str, Any]:
+            if user == flaky:
+                raise TimeoutError("slack down")  # API の失敗は退職と見なさない
+            if user == gone:
+                return {"ok": True, "user": {"id": user, "deleted": True}}
+            if user == guest:
+                return {"ok": True, "user": {"id": user, "deleted": False, "is_restricted": True}}
+            if user.startswith("U0SW"):
+                return {"ok": True, "user": {"id": user, "deleted": False}}
+            return {"ok": False, "error": "user_not_found"}
+
+    result = sweep_retired(_admin_adapter(env), _Slack())
+    assert result.deleted == 1 and result.frozen == 1 and result.unknown >= 1
+    with psycopg.connect(env.admin_dsn) as su, su.cursor() as cur:
+        cur.execute(
+            "SELECT slack_user_id, state FROM personal_memory_profiles "
+            "WHERE slack_user_id = ANY(%s) ORDER BY slack_user_id",
+            ([gone, guest, flaky, active],),
+        )
+        states = dict(cur.fetchall())
+    assert gone not in states
+    assert states[guest] == "frozen"
+    assert states[flaky] == "active" and states[active] == "active"
