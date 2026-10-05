@@ -1,8 +1,9 @@
 """取得の前の確認（10-05 小俣さん裁定: KW・分析本数・競合を聞いてから作る）。
 
 対象は「検索上位と動画の中身を 1 通で届ける」人（2 段目＝mcp_gateway/surface_video_followup の
-対象と同じ: ``USE_SURFACE_VIDEO_FOLLOWUP`` が ON・``SURFACE_VIDEO_FOLLOWUP_ALLOWED_EMAILS`` に
-載っている・本人確認済みの DM）。それ以外は今までどおり確認なしで作る。
+対象と同じ: ``USE_SURFACE_VIDEO_FOLLOWUP`` と ``SURFACE_VIDEO_ONE_SHOT`` が ON・
+``SURFACE_VIDEO_FOLLOWUP_ALLOWED_EMAILS`` に載っている・本人確認済みの DM）。
+それ以外は今までどおり確認なしで作る。
 
 確認は取得（3 KW 以上なら tiktok_acquire）の**前**に返す。依頼者が答えてから
 ``confirmed=true`` で呼び直す（SOUL）。KW・本数・競合をすべて依頼文で指定済みなら、Aico が
@@ -22,6 +23,7 @@ from teamagent.skills.search_surface_check.schema import SearchSurfaceCheckInput
 # 一致はテストで固定する。
 FOLLOWUP_ENABLED_ENV = "USE_SURFACE_VIDEO_FOLLOWUP"
 FOLLOWUP_ALLOWED_EMAILS_ENV = "SURFACE_VIDEO_FOLLOWUP_ALLOWED_EMAILS"
+ONE_SHOT_ENV = "SURFACE_VIDEO_ONE_SHOT"
 
 DEFAULT_VIDEOS = 5
 # 動画 1 本あたりの目安（3 並列で取得・分析＋まとめ）。5 本で約 10 分・10 本で約 20 分
@@ -30,12 +32,14 @@ MINUTES_PER_VIDEO = 2
 
 
 def _truthy(raw: str | None) -> bool:
-    return (raw or "").strip().lower() in {"1", "true", "yes", "on"}
+    return (raw or "").strip().lower() in {"1", "true", "yes"}
 
 
 def one_shot_enabled(user_email: str | None) -> bool:
     """この人は「検索上位＋動画の中身を 1 通」の対象か（空の allowlist は誰も対象にしない）。"""
-    if not _truthy(os.environ.get(FOLLOWUP_ENABLED_ENV)):
+    if not (
+        _truthy(os.environ.get(FOLLOWUP_ENABLED_ENV)) and _truthy(os.environ.get(ONE_SHOT_ENV))
+    ):
         return False
     allowed = {
         e.strip().lower()
@@ -91,6 +95,7 @@ __all__ = [
     "DEFAULT_VIDEOS",
     "FOLLOWUP_ALLOWED_EMAILS_ENV",
     "FOLLOWUP_ENABLED_ENV",
+    "ONE_SHOT_ENV",
     "build_confirm_message",
     "confirm_required",
     "estimate_minutes",

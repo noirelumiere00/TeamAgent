@@ -67,6 +67,9 @@ USAGE_SKILL = "search_surface_check_video"
 ENABLED_ENV = "USE_SURFACE_VIDEO_FOLLOWUP"
 ALLOWED_EMAILS_ENV = "SURFACE_VIDEO_FOLLOWUP_ALLOWED_EMAILS"
 MAX_VIDEOS_ENV = "SURFACE_VIDEO_FOLLOWUP_MAX_VIDEOS"
+# 1 通で届ける（全部そろってから・取得の前に確認）。
+# 既定 OFF＝今の 2 段構え（先に検索上位・後で追記）。
+ONE_SHOT_ENV = "SURFACE_VIDEO_ONE_SHOT"
 
 DEFAULT_MAX_VIDEOS = 5
 MIN_MAX_VIDEOS = 1
@@ -106,6 +109,7 @@ class FollowupPolicy:
     enabled: bool = False
     allowed_emails: frozenset[str] = frozenset()
     max_videos: int = DEFAULT_MAX_VIDEOS
+    one_shot: bool = False
 
     @classmethod
     def from_env(cls) -> FollowupPolicy:
@@ -117,6 +121,7 @@ class FollowupPolicy:
                 if e.strip()
             ),
             max_videos=_max_videos_from_env(),
+            one_shot=_truthy(os.environ.get(ONE_SHOT_ENV)),
         )
 
 
@@ -356,6 +361,24 @@ def one_shot_failed_note(keyword: str) -> str:
     return f"上位の動画の中身「{keyword}」は分析できませんでした（検索上位の結果だけお届けします）"
 
 
+def _plain_reason(detail: str) -> str:
+    """失敗の文から理由の 1 行を取り出す（見出し・概算の行を除き、Markdown の太字を外す）。
+
+    形は 3 つ: failure_text「「KW」上位の動画の中身: 理由」・上限 0（見出し＋理由）・
+    全滅（見出し＋理由＋概算）。
+    """
+    for line in detail.split("\n"):
+        text = line.strip().replace("**", "")
+        if not text or text.startswith("_概算"):
+            continue
+        if "上位の動画の中身: " in text:
+            return text.split("上位の動画の中身: ", 1)[1][:300]
+        if "動画の中身「" in text and text.endswith("TikTok"):
+            continue  # 見出し行
+        return text[:300]
+    return ""
+
+
 def one_shot_interrupted_text(stage1: Any, keyword: str) -> str:
     """再デプロイの中断文。検索上位の結果は失わずに届ける（動画の中身だけ依頼し直し）。"""
     return (
@@ -404,7 +427,9 @@ def one_shot_payload(
         else str(getattr(result, "slack_text", "") or one_shot_failed_note(keyword))
     )
     text = surface_text + "\n\n" + detail
-    note = one_shot_failed_note(keyword)
+    # Block Kit で出すときは blocks しか読まれないので、理由（利用者向けの文）も注記に入れる。
+    reason = _plain_reason(detail)
+    note = one_shot_failed_note(keyword) + (f"。{reason}" if reason else "")
     marked = stage1.model_copy(update={"followup_note": note})
     rich = render_or_none(
         lambda: surface_message(marked, skill_input),
@@ -572,6 +597,8 @@ def _maybe_schedule(
     from teamagent.skills.search_surface_check.skill import SearchSurfaceCheckSkill
     from teamagent.skills.search_surface_check.summary import (
         FOLLOWUP_QUOTA_EXHAUSTED_LINE,
+        followup_notice_line,
+        followup_reused_line,
     )
     from teamagent.skills.search_surface_check.video_digest import (
         followup_label,
@@ -599,7 +626,7 @@ def _maybe_schedule(
         return "no_videos"
     keyword = followup_label(output, videos)
     # 1 通で届けるときの 1 段目の結果（予告の行を足す前の写し）。始められたときだけ使う。
-    stage1 = output.model_copy(deep=True)
+    stage1 = output.model_copy(deep=True) if policy.one_shot else None
     slack_user_id = str(verified_caller.slack_user_id)
     cache_key = reuse_key(slack_user_id, keyword, [p.url for p in videos])
     cached = CACHE.get(cache_key)
@@ -613,7 +640,10 @@ def _maybe_schedule(
             skill_input=skill_input,
             keyword=keyword,
         )
-        _defer(output, one_shot_wait_text(keyword, len(videos), queued=False, reused=True))
+        if stage1 is not None:
+            _defer(output, one_shot_wait_text(keyword, len(videos), queued=False, reused=True))
+        else:
+            _add_line(output, followup_reused_line(len(videos)))
         logger.info("surface_video_followup_decision", request_id=ctx.request_id, reason="reused")
         return "reused"
     quota_state, remaining = quota_gate(ctx)
@@ -665,7 +695,11 @@ def _maybe_schedule(
             stage1=stage1,
             skill_input=skill_input,
         ),
-        interrupted_message=one_shot_interrupted_text(stage1, keyword),
+        interrupted_message=(
+            one_shot_interrupted_text(stage1, keyword)
+            if stage1 is not None
+            else interrupted_text(keyword)
+        ),
         priority=detached_jobs.PRIORITY_AUTO,
     )
     line: str | None
@@ -681,8 +715,11 @@ def _maybe_schedule(
         else:
             if detach_state == detached_jobs.DETACH_DONE:
                 job.deliver_in_background()
-            line = None
-            _defer(output, one_shot_wait_text(keyword, len(videos), queued=will_wait))
+            if stage1 is not None:
+                line = None
+                _defer(output, one_shot_wait_text(keyword, len(videos), queued=will_wait))
+            else:
+                line = followup_notice_line(len(videos)) + (_QUEUED_SUFFIX if will_wait else "")
     else:
         line = None  # closing（終了処理中）
     if line:
@@ -762,6 +799,7 @@ __all__ = [
     "CACHE",
     "ENABLED_ENV",
     "MAX_VIDEOS_ENV",
+    "ONE_SHOT_ENV",
     "REUSED_PREFIX",
     "REUSE_POST_DELAY_S",
     "REUSE_TTL_S",
