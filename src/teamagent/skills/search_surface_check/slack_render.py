@@ -76,6 +76,7 @@ from teamagent.skills.search_surface_check.schema import (
     SurfaceVideoFollowupOutput,
     VideoDigest,
 )
+from teamagent.skills.search_surface_check.summary import competitor_parts
 from teamagent.skills.search_surface_check.video_digest import (
     PACING_LABEL,
     duration_of,
@@ -248,6 +249,20 @@ def _client_parts(
     return title, lines, note
 
 
+def _competitor_text(
+    surface: KwSurface, input: SearchSurfaceCheckInput | None, posts: dict[int, SurfacePost]
+) -> str | None:
+    """競合の 1 行（アカウントごとの面内順位・投稿への文字リンク）。指定が無ければ None。"""
+    if input is None:
+        return None
+    parts = competitor_parts(surface, input.competitor_accounts)
+    if not parts:
+        return None
+    return "• 競合: " + "／".join(
+        f"{esc(_handle(h))} " + (_rank_links(r, posts) if r else "上位に無し") for h, r in parts
+    )
+
+
 def _client_blocks(
     surface: KwSurface, input: SearchSurfaceCheckInput | None, posts: dict[int, SurfacePost]
 ) -> list[Block]:
@@ -402,6 +417,9 @@ def _single_head(
         conclusion,
         *_client_blocks(surface, input, posts),
     ]
+    competitor = _competitor_text(surface, input, posts)
+    if competitor:
+        blocks.append(section(competitor))
     facts = surface.facts
     if facts is not None:
         blocks += [
@@ -426,6 +444,9 @@ def _compact_section(
     client = _client_parts(surface, input, posts)
     if client is not None:
         lines.extend(client[1])
+    competitor = _competitor_text(surface, input, posts)
+    if competitor:
+        lines.append(competitor)
     facts = surface.facts
     if facts is not None and facts.categories:
         cats = sorted(facts.categories, key=lambda x: (-x.play_share, -x.count))[:4]
@@ -748,10 +769,13 @@ def _followup_lead(result: SurfaceVideoFollowupOutput, *, reused: bool) -> list[
     return [REUSED_TEXT_PREFIX if reused else "", head]
 
 
-def followup_message(
-    result: SurfaceVideoFollowupOutput, *, reused: bool = False
-) -> RichMessage | None:
-    """2 段目の追記（Block Kit）。分析できた結果（status=ok）だけ。ほかは None（文字だけ）。"""
+def _followup_body(
+    result: SurfaceVideoFollowupOutput, *, reused: bool, continued: bool = True
+) -> tuple[list[Block], list[Block], list[str]] | None:
+    """2 段目の本文 blocks・要点の行に入れた blocks・注記（概算を除く）。描けなければ None。
+
+    ``continued``=False は 1 通で届けるとき（検索上位と同じ投稿なので「続き」と書かない）。
+    """
     d = result.digest
     if result.status != "ok" or d is None or not result.videos:
         return None
@@ -759,7 +783,7 @@ def followup_message(
     by_rank = {r.rank: r for r in rows}
     when = measured_at(result.measured_epoch)
     about = ["TikTok"]
-    if when:
+    if when and continued:
         # 1 段目の集計の時刻（この追記を出した時刻ではない）。取り方は 1 段目の注記のとおり。
         about.append(f"{when} の検索上位チェックの続き")
     about.append(f"動画を見て分析 {d.watched}本")
@@ -790,9 +814,6 @@ def followup_message(
             + "\n".join(lines)
         ),
     ]
-    report = link_url(result.report_url) if result.report_url else None
-    if result.report_url and report is None:
-        raise ValueError("report url is not linkable")
     notes: list[str] = []
     if d.reserved < d.requested:
         notes.append(
@@ -800,6 +821,21 @@ def followup_message(
             "（リセットは来月1日・JST）"
         )
     notes.append(FOLLOWUP_CAVEAT)
+    return [b for b in head if b], in_lead, notes
+
+
+def followup_message(
+    result: SurfaceVideoFollowupOutput, *, reused: bool = False
+) -> RichMessage | None:
+    """2 段目の追記（Block Kit）。分析できた結果（status=ok）だけ。ほかは None（文字だけ）。"""
+    parts = _followup_body(result, reused=reused)
+    if parts is None:
+        return None
+    head, in_lead, notes = parts
+    rows = result.videos
+    report = link_url(result.report_url) if result.report_url else None
+    if result.report_url and report is None:
+        raise ValueError("report url is not linkable")
     notes.append(
         "概算 $0.0000（前回の分析を使い回しました）"
         if reused
@@ -814,12 +850,72 @@ def followup_message(
         else section(f":page_facing_up: {REPORT_FAILED}"),
         context(*notes),
     ]
-    blocks = assemble([b for b in head if b], tail)
+    blocks = assemble(head, tail)
     body = [b for b in blocks[: len(blocks) - len(tail)] if not any(b is x for x in in_lead)]
     urls = [(f"{r.rank}位", u) for r in rows if (u := post_url(r.url))]
     text = message_text(
         _followup_lead(result, reused=reused), body, blocks[len(blocks) - len(tail) :], urls=urls
     )
+    return RichMessage(text=text, blocks=blocks)
+
+
+def one_shot_message(
+    out: SearchSurfaceCheckOutput,
+    input: SearchSurfaceCheckInput | None,
+    result: SurfaceVideoFollowupOutput,
+    *,
+    reused: bool = False,
+) -> RichMessage | None:
+    """検索上位と動画の中身を 1 通で（全部そろってから・10-05 小俣さん裁定）。
+
+    動画の中身が描けない（分析できなかった等）・面が無いときは None（呼び出し側が検索上位だけの
+    投稿に戻す）。上限（50 blocks・合計字数）を超える分は後ろから削り「ほかはレポート」を置く
+    （レポートのリンクは必ず残す）。
+    """
+    parts = _followup_body(result, reused=reused, continued=False)
+    if not out.surfaces or parts is None:
+        return None
+    f_head, f_lead, notes = parts
+    final = out.model_copy(
+        update={"report_url": result.report_url or out.report_url, "followup_note": ""}
+    )
+    if len(final.surfaces) == 1:
+        s_head, s_lead = _single_head(final, final.surfaces[0], input)
+    else:
+        s_head, s_lead = _compact_head(final, input)
+    report = link_url(final.report_url) if final.report_url else None
+    if final.report_url and report is None:
+        raise ValueError("report url is not linkable")
+    total = sum(len(s.posts) for s in final.surfaces)
+    notes = [*_missing_lines(final, input), *notes]
+    if final.warnings:
+        notes.append(
+            "注意: " + " / ".join(esc(sanitize_llm_text(w, max_len=120)) for w in final.warnings)
+        )
+    cost = final.total_cost_usd + (0.0 if reused else result.total_cost_usd)
+    notes.append(
+        f"概算 ${cost:.4f}" + ("（動画の中身は前回の分析を使い回しました）" if reused else "")
+    )
+    tail: list[Block] = [
+        section(
+            f":page_facing_up: {link(report, 'レポートを開く')}"
+            f" （全{total}本の一覧と上位{len(result.videos)}本の動画の中身つき・7日有効）"
+        )
+        if report
+        else section(f":page_facing_up: {REPORT_FAILED}"),
+        context(*notes),
+    ]
+    blocks = assemble([*s_head, divider(), *f_head], tail)
+    in_lead = [*s_lead, *f_lead]
+    body = [b for b in blocks[: len(blocks) - len(tail)] if not any(b is x for x in in_lead)]
+    first = sorted(final.surfaces[0].posts, key=lambda p: p.rank)[:_TOP_URLS_IN_TEXT]
+    urls = [(f"{p.rank}位", u) for p in first if (u := post_url(p.url))]
+    lead = [
+        REUSED_TEXT_PREFIX if reused else "",
+        _surface_lead(final),
+        *_followup_lead(result, reused=False)[1:],
+    ]
+    text = message_text(lead, body, blocks[len(blocks) - len(tail) :], urls=urls)
     return RichMessage(text=text, blocks=blocks)
 
 
@@ -832,5 +928,6 @@ __all__ = [
     "REUSED_TEXT_PREFIX",
     "followup_message",
     "followup_rows",
+    "one_shot_message",
     "surface_message",
 ]

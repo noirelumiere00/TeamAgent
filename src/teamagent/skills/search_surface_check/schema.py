@@ -58,6 +58,22 @@ class SearchSurfaceCheckInput(BaseModel):
         description="IG面の取得方式（未指定=環境既定。search=検索面/hashtag=タグ面）",
     )
     analyze: bool = Field(default=True, description="Bedrockでの勢力図分類を行うか")
+    competitor_accounts: list[str] = Field(
+        default_factory=list,
+        max_length=5,
+        description="比較する競合のアカウント（@handle・最大5）。面に出ている順位を数える",
+    )
+    max_videos: Literal[5, 10] | None = Field(
+        default=None,
+        description="動画の中身を分析する本数（5 か 10。未指定=5）。全 KW の上位から選ぶ",
+    )
+    confirmed: bool = Field(
+        default=False,
+        description=(
+            "依頼者が KW・分析本数・競合の確認に答えた後なら true。false だと（対象の人には）"
+            "取得の前に確認文だけを返す"
+        ),
+    )
 
 
 class SurfacePost(BaseModel):
@@ -81,6 +97,14 @@ class SurfacePost(BaseModel):
     thumb_url: str = ""
     category: CategoryLabel = "unknown"
     is_client: bool = False
+    is_competitor: bool = Field(default=False, description="比較する競合のアカウントの投稿")
+    kw_ranks: list[str] = Field(
+        default_factory=list,
+        description=(
+            "全 KW から選んだ動画の、KW ごとの表示順位（例「KW 2位」）。"
+            "動画分析の対象に選んだときだけ入る"
+        ),
+    )
     mentions_client: bool = Field(
         default=False,
         description="本文・タグにクライアント名が出る（クライアント以外の投稿を含む）",
@@ -185,11 +209,18 @@ class KwSurface(BaseModel):
     client_ranks: list[int] = Field(
         default_factory=list, description="クライアント投稿の面内順位（空=面に出ていない）"
     )
+    competitor_ranks: list[int] = Field(
+        default_factory=list, description="競合アカウントの投稿の面内順位（空=面に出ていない）"
+    )
     facts: SurfaceFacts | None = None
     conclusion: SurfaceConclusion | None = None
 
 
 class SearchSurfaceCheckOutput(BaseModel):
+    status: Literal["ok", "needs_input"] = Field(
+        default="ok",
+        description="needs_input=取得の前の確認（slack_summary の確認文をそのまま返す）",
+    )
     keywords: list[str] = Field(default_factory=list)
     surfaces: list[KwSurface] = Field(default_factory=list)
     comparison_summary: str = Field(
@@ -208,6 +239,13 @@ class SearchSurfaceCheckOutput(BaseModel):
         description=(
             "2 段目（動画の中身）の予告など、mcp が slack_summary に足した 1 行。"
             "直接投稿の Block Kit で同じ行を出すために持つ（Aico へは返さない）"
+        ),
+    )
+    deferred: bool = Field(
+        default=False,
+        description=(
+            "検索上位と動画の中身を全部そろえてから 1 通で届けるため、この応答では結果を出さない"
+            "（slack_summary は作成中の 1 行。mcp が後で投稿する・Aico へは返さない）"
         ),
     )
     tiktok_source: Literal["", "direct", "acquire_job"] = Field(
