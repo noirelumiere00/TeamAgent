@@ -112,6 +112,10 @@ def test_confirm_required_only_for_the_pilot_in_dm(on: None, monkeypatch: Any) -
     inp = SearchSurfaceCheckInput(keywords=["A"])
     assert confirm.confirm_required(inp, _meta())
     assert not confirm.confirm_required(inp.model_copy(update={"confirmed": True}), _meta())
+    # 取得ジョブを持ってきた呼び出しは確認の後（confirmed の付け忘れで確認を繰り返さない）
+    assert not confirm.confirm_required(
+        inp.model_copy(update={"acquire_job_id": "tk_0123456789ab"}), _meta()
+    )
     assert not confirm.confirm_required(inp, _meta(channel="C0123"))
     assert not confirm.confirm_required(inp, _meta(verified=False))
     assert not confirm.confirm_required(inp, {**_meta(), "user_email": "x@vectorinc.co.jp"})

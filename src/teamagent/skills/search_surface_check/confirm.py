@@ -51,7 +51,9 @@ def one_shot_enabled(user_email: str | None) -> bool:
 
 def confirm_required(input: SearchSurfaceCheckInput, metadata: dict[str, Any]) -> bool:
     """取得の前に確認文を返すか。確認済み（confirmed）・対象外・DM 以外は返さない。"""
-    if input.confirmed:
+    if input.confirmed or input.acquire_job_id:
+        # 取得ジョブを持ってきた＝確認の後（SOUL の順序: 確認 → tiktok_acquire → 本ツール）。
+        # confirmed の付け忘れで確認が繰り返されないようにする。
         return False
     if not one_shot_enabled(str(metadata.get("user_email") or "")):
         return False

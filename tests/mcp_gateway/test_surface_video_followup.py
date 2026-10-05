@@ -1072,19 +1072,6 @@ async def test_confirmed_request_runs(monkeypatch: pytest.MonkeyPatch, slack: _F
     await _eventually(lambda: detached_jobs.REGISTRY.active_count() == 0)
 
 
-async def test_no_confirm_outside_dm_or_without_the_switch(
-    monkeypatch: pytest.MonkeyPatch, slack: _FakeSlack
-) -> None:
-    _confirm_env(monkeypatch)
-    skill, _g, _d = _skill()
-    out = await _call(_spec(skill), claim=_claim(channel="C0123456789", thread_ts="1.2"))
-    assert out["status"] == "ok"
-    monkeypatch.setenv(confirm.ONE_SHOT_ENV, "")
-    skill2, _g2, _d2 = _skill()
-    out2 = await _call(_spec(skill2), claim=_claim(channel=DM))
-    assert out2["status"] == "ok"
-
-
 def test_failure_reason_is_extracted_from_each_failure_text() -> None:
     from teamagent.skills.search_surface_check.video_render import (
         build_all_failed_text,
