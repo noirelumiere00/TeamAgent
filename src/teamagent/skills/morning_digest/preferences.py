@@ -9,7 +9,8 @@ JSON）。DB は「object であること」しか縛らないので、項目の
   - 配信: 止める / 日付まで休止 / 送る曜日（平日のうち）
   - 欄: 要返信・未確認メール・Slack 返信漏れ・予定・事例ブリーフ の表示/非表示と件数
   - 返信の下書きを自動で作るか
-  - 予定の直前リマインド: 止める / 何分前 / 予定名に特定の語を含むものは送らない
+  - 予定の直前リマインド: 止める / 何分前 / 予定名に特定の語を含むものは送らない /
+    ゲストも会議リンクも無い予定（本人が入れたタスク枠）にも送るか（未設定は全体の既定）
 
 ⚠️ 読めない・壊れているときは **既定（＝今までどおりの配信）** に倒す（fail-open）。
    止めたはずの人に 1 通届くのは「うるさい」で済むが、設定表の障害で誰にも届かないのは
@@ -19,6 +20,7 @@ JSON）。DB は「object であること」しか縛らないので、項目の
 from __future__ import annotations
 
 import datetime as _dt
+import os
 import unicodedata
 from typing import Any, Final, Protocol
 
@@ -57,6 +59,16 @@ MAX_PAUSE_DAYS: Final[int] = 180
 MAX_SKIP_KEYWORDS: Final[int] = 10
 MAX_SKIP_KEYWORD_LEN: Final[int] = 20
 
+#: ゲストも会議リンクも無い予定（タスク枠）にもリマインドを送るかの全体の既定。
+#: 未設定・不正値は "true"＝今までどおり全部送る。本人の設定（reminder_personal_blocks）が優先。
+PERSONAL_BLOCKS_DEFAULT_ENV: Final[str] = "MORNING_DIGEST_REMIND_PERSONAL_BLOCKS"
+
+
+def personal_blocks_default() -> bool:
+    raw = os.environ.get(PERSONAL_BLOCKS_DEFAULT_ENV, "true").strip().lower()
+    return raw not in {"0", "false", "no", "off"}
+
+
 #: 配信しない理由（配信側のログ・管理者 DM の集計に出す。個人の設定内容は出さない）。
 SKIP_OFF: Final[str] = "pref_off"
 SKIP_PAUSED: Final[str] = "pref_paused"
@@ -83,6 +95,8 @@ class DigestPreferences(BaseModel):
     reminders: bool = True
     reminder_lead_minutes: int | None = Field(default=None, ge=1, le=60)
     reminder_skip_keywords: tuple[str, ...] = ()
+    # None＝全体の既定（MORNING_DIGEST_REMIND_PERSONAL_BLOCKS）に従う。
+    reminder_personal_blocks: bool | None = None
 
     @field_validator("weekdays")
     @classmethod
@@ -149,9 +163,17 @@ class DigestPreferences(BaseModel):
             return SKIP_WEEKDAY
         return None
 
-    def reminder_allowed(self, title: str) -> bool:
+    def remind_personal_blocks(self) -> bool:
+        """タスク枠（ゲストも会議リンクも無い予定）にもリマインドを送るか。"""
+        if self.reminder_personal_blocks is not None:
+            return self.reminder_personal_blocks
+        return personal_blocks_default()
+
+    def reminder_allowed(self, title: str, *, personal_block: bool = False) -> bool:
         """この予定に直前リマインドを送ってよいか。"""
         if not self.reminders:
+            return False
+        if personal_block and not self.remind_personal_blocks():
             return False
         name = normalize_keyword(title)
         return not any(normalize_keyword(k) in name for k in self.reminder_skip_keywords)
@@ -233,6 +255,8 @@ def describe(prefs: DigestPreferences, today: _dt.date, *, default_lead_minutes:
         if prefs.reminder_skip_keywords:
             words = "・".join(f"「{w}」" for w in prefs.reminder_skip_keywords)
             reminder += f"（予定名に {words} を含む予定は送りません）"
+        if not prefs.remind_personal_blocks():
+            reminder += "。ゲストも会議リンクも無い予定（タスク枠）には送りません"
     else:
         reminder = "止めています"
 

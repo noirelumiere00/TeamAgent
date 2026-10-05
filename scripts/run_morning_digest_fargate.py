@@ -1679,9 +1679,11 @@ def _early_notice(digest: Any) -> bool:
     day = _digest_date(digest)
     starts = [
         str(getattr(ev, "start_at", "") or "")
-        # 終日は「最初の予定」の計算から除外（planner と同じ扱い）。
+        # 終日とタスク枠は「最初の予定」の計算から除外（planner と同じ扱い）。
         for ev in (getattr(digest, "calendar_events", []) or [])
-        if not bool(getattr(ev, "all_day", False)) and "T" in str(getattr(ev, "start_at", "") or "")
+        if not bool(getattr(ev, "all_day", False))
+        and "T" in str(getattr(ev, "start_at", "") or "")
+        and not bool(getattr(ev, "personal_block", False))
     ]
     plan = compute_send_time(day, first_timed_start(starts, day), default_hhmm=_default_send_hhmm())
     return plan.clamped_to_floor
@@ -1761,7 +1763,9 @@ def _schedule_event_reminders(
         raw_title = str(
             getattr(ev, "summary_display", "") or getattr(ev, "summary_scrubbed", "") or ""
         )
-        if not prefs.reminder_allowed(raw_title):
+        if not prefs.reminder_allowed(
+            raw_title, personal_block=bool(getattr(ev, "personal_block", False))
+        ):
             continue
         fire_at = start - _dt.timedelta(minutes=lead_min)
         if fire_at <= now + _dt.timedelta(minutes=1):
@@ -1950,7 +1954,11 @@ def _read_only_calendar(token_store: Any, email: str) -> Any | None:
 
 
 def _plan_send_time(calendar: Any, day: _dt.date, request_id: str) -> Any:
-    """当日の最初の「時刻つき」予定から送信時刻を決める（終日は除外）。"""
+    """当日の最初の「時刻つき」会議から送信時刻を決める（終日とタスク枠は除外）。
+
+    タスク枠（ゲストも会議リンクも無い予定）は数えない。カレンダーに作業を入れている人は
+    朝 7:00 の「メール処理」で 6:30 に起こされることになるため（10-05 小俣さん指摘）。
+    """
     from teamagent.skills.morning_digest.send_window import compute_send_time, first_timed_start
 
     window_start = _dt.datetime.combine(day, _dt.time.min, tzinfo=_JST)
@@ -1965,7 +1973,11 @@ def _plan_send_time(calendar: Any, day: _dt.date, request_id: str) -> Any:
         str(getattr(ev, "start", "") or "")
         # ⚠️ 終日予定は「最初の予定」の計算から除外（終日だけの日は予定なし扱い）。
         for ev in events
-        if not bool(getattr(ev, "all_day", False)) and "T" in str(getattr(ev, "start", "") or "")
+        if not bool(getattr(ev, "all_day", False))
+        and "T" in str(getattr(ev, "start", "") or "")
+        and not _calwin.is_personal_block(
+            getattr(ev, "attendees", None), getattr(ev, "meeting_url", "")
+        )
     ]
     return compute_send_time(day, first_timed_start(starts, day), default_hhmm=_default_send_hhmm())
 

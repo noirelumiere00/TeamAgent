@@ -66,6 +66,7 @@ _FIELD_LABELS: dict[str, str] = {
     "reminders": "直前リマインド",
     "reminder_lead_minutes": "リマインドの時間",
     "reminder_skip_keywords": "リマインドしない予定",
+    "reminder_personal_blocks": "タスク枠へのリマインド",
 }
 
 _LIMIT_FIELDS: dict[str, str] = {
@@ -150,6 +151,8 @@ def _apply(
         data["auto_drafts"] = req.auto_drafts
     if req.reminders is not None:
         data["reminders"] = req.reminders
+    if req.reminder_personal_blocks is not None:
+        data["reminder_personal_blocks"] = req.reminder_personal_blocks
     if req.reminder_lead_minutes is not None:
         lead = min(60, max(1, int(req.reminder_lead_minutes)))
         if lead != req.reminder_lead_minutes:

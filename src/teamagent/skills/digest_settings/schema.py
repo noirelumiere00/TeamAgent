@@ -65,6 +65,13 @@ class DigestSettingsInput(BaseModel):
     reminder_lead_minutes: int | None = Field(
         default=None, description="Minutes before the event to remind (1-60)."
     )
+    reminder_personal_blocks: bool | None = Field(
+        default=None,
+        description=(
+            "Remind for events with no guests and no meeting link (tasks the user put on "
+            "the calendar). false for タスクの通知を止めて."
+        ),
+    )
     reminder_skip_add: list[str] | None = Field(
         default=None,
         max_length=MAX_SKIP_KEYWORDS,

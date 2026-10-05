@@ -132,6 +132,20 @@ def overlaps_window(
     return start < window_end and end > window_start
 
 
+def is_personal_block(attendees: object, meeting_url: object) -> bool:
+    """ゲストも会議リンクも無い予定＝本人が自分で入れた作業枠（タスク）か。
+
+    Google はゲストのいない予定に ``attendees`` を返さない（主催者だけの予定は空）。
+    招待された予定はゲスト一覧が非表示でも本人＋主催者が入る＝空にならない。会議リンク
+    （Meet / Zoom 等）があれば相手がいる前提で会議として扱う。場所は判定に使わない
+    （会議室を押さえた一人作業もあり、場所だけでは会議と言えない）。
+    """
+    if attendees is None:  # 参加者が分からない＝会議扱い（リマインドを黙って消さない）
+        return False
+    has_guests = bool(attendees) if not isinstance(attendees, str) else bool(attendees.strip())
+    return not has_guests and not str(meeting_url or "").strip()
+
+
 def weekday_ja(day: _dt.date) -> str:
     """曜日の 1 文字（"月"〜"日"）。日付表示も曜日照合もここを唯一の真実源にする。"""
     return _WEEKDAY_JA[day.weekday()]

@@ -163,6 +163,13 @@ class CalendarEventItem(BaseModel):
     meeting_url: str = Field(
         default="", max_length=600, description="会議リンク（Meet/Zoom等・本人DM表示用）"
     )
+    personal_block: bool = Field(
+        default=False,
+        description=(
+            "ゲストも会議リンクも無い＝本人が入れた作業枠（タスク）か（calendar_window."
+            "is_personal_block）。既定 False＝会議扱い（判らない予定のリマインドを黙って消さない）"
+        ),
+    )
     # --- 事例ブリーフ用の派生値（pre_meeting_brief/signals.build_signal_input の出力）---
     # ⚠️ **生 description のフィールドは作らない**。ここに載せるのは「クライアント行が
     #    あったか」「そこから読めた企業名/代理店」だけ。最大 4000 字の自由文を全消費者へ
