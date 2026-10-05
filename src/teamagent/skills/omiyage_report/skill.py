@@ -830,15 +830,34 @@ class OmiyageReportSubmitSkill(BaseSkill[OmiyageReportSubmitInput, OmiyageReport
     # execution
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _name_query(name: str, input: OmiyageReportSubmitInput) -> str:
+        """ブランド名・競合名で検索する語。英字 4 文字以下は商材の語を 1 つ添える。
+
+        10-05 実測: 「HIS」単体の TikTok 検索は英語の his を含む無関係な動画ばかりで、
+        関係の無い動画を外すと 0 本になった（HIS の資料のブランド検索が N/A）。短い英字の名前は
+        一般語と区別できないため、商材カテゴリ（無ければ 1 つ目の一般KW）を添えて検索する。
+        """
+        compact = name.strip()
+        if compact.isascii() and len(re.sub(r"[^A-Za-z0-9]", "", compact)) <= 4:
+            hint = (input.category or (input.keywords[0] if input.keywords else "")).strip()
+            if hint and hint not in compact:
+                return f"{compact} {hint}"
+        return compact
+
     def _axis_plan(self, input: OmiyageReportSubmitInput) -> list[tuple[AxisRole, str, str]]:
         plan: list[tuple[AxisRole, str, str]] = [
             ("general", f"一般KW「{kw}」検索", kw) for kw in input.keywords
         ]
-        plan.append(("brand", f"ブランド名「{input.brand}」検索", input.brand))
-        plan.extend(
-            ("competitor", f"競合「{competitor}」検索", competitor)
-            for competitor in input.competitors
-        )
+
+        def label(prefix: str, name: str, query: str) -> str:
+            return f"{prefix}「{name}」検索" + ("" if query == name else f"（「{query}」で検索）")
+
+        brand_q = self._name_query(input.brand, input)
+        plan.append(("brand", label("ブランド名", input.brand, brand_q), brand_q))
+        for competitor in input.competitors:
+            q = self._name_query(competitor, input)
+            plan.append(("competitor", label("競合", competitor, q), q))
         return plan
 
     def _filter_unrelated(
