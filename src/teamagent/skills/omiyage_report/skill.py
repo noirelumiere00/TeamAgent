@@ -483,6 +483,8 @@ class OmiyageReportSubmitSkill(BaseSkill[OmiyageReportSubmitInput, OmiyageReport
         "（露出シェア/キーワード登場率/#PR比較）→PPTX生成→依頼元スレッド添付まで"
         "バックグラウンドで進める。不足時は status=needs_input で不足リストと補完候補・"
         "回答欄を返す（ジョブは作らない）ので、営業の回答で埋めて再submitする。"
+        "一般KWを『おまかせ』『任せる』と言われたら聞き返さず、商材カテゴリと依頼文から"
+        "ブランド名を含まない一般KWを3語選んで再submitする（選んだ語は受付文に出る）。"
         "同時実行の上限に達している時は status=busy（順番待ち・ジョブは作らない）を返す。"
         "message に『順番待ち N 番目・目安あと約 M 分』が入っているのでそのまま営業へ伝え、"
         "retry_after_seconds（≈M分）を置いてから同じ入力でそのまま再submitする。"
