@@ -107,7 +107,9 @@ locals {
     # 解決不能になるため media-apk.lock と契約 artifact.apk-lock.sha256 を追随させた再レンダリング（apply_apklock.sh）。
     # 2026-10-02 publish 世代（pcre2 の CVE 対応）。r43 段 3 の media が ECR 脆弱性ゲート（pcre2 10.47-r1・CVE 8 件）で
     # 止まったため pcre2=10.49-r0 を明示 pin し、media-apk.lock と契約 artifact.apk-lock.sha256 を追随させた再レンダリング（apply_apklock.sh）。
-    "8687830a10534318a1ccf21676527fab25a54bf0ed10bc9d39d0233565216e69" = {
+    # 2026-10-05 publish 世代（apk lock 再生成）。実ビルドで lock 差分 -3 +4（240→241 行）、削除: ffmpeg-libavdevice-8.1.2-r1、ffmpeg-libavfilter-8.1.2-r1、ffmpeg-libswscale-8.1.2-r1 / 追加: ffmpeg-libavdevice-8.1.2-r3、ffmpeg-libavfilter-8.1.2-r3、ffmpeg-libswscale-8.1.2-r3、ほか 1 行 を検出したため
+    # media-apk.lock と契約 artifact.apk-lock.sha256 を追随させた再レンダリング（apply_apklock.sh）。
+    "2aedc43efae5da6a879867be85685f2cae90fe55072417969ca335ffaf791d5b" = {
       content_type                  = "text/yaml"
       object_lock_retain_until_date = "2099-12-31T00:00:00Z"
     }
@@ -176,7 +178,9 @@ locals {
     # 解決不能になるため media-apk.lock と契約 artifact.apk-lock.sha256 を追随させた再レンダリング（apply_apklock.sh）。
     # 2026-10-02 publish 世代（pcre2 の CVE 対応）。r43 段 3 の media が ECR 脆弱性ゲート（pcre2 10.47-r1・CVE 8 件）で
     # 止まったため pcre2=10.49-r0 を明示 pin し、media-apk.lock と契約 artifact.apk-lock.sha256 を追随させた再レンダリング（apply_apklock.sh）。
-    "9c247af8f9828e4c94aad628312b3e3ce8c44012477551bc5154be167aac3223" = {
+    # 2026-10-05 publish 世代（apk lock 再生成）。実ビルドで lock 差分 -3 +4（240→241 行）、削除: ffmpeg-libavdevice-8.1.2-r1、ffmpeg-libavfilter-8.1.2-r1、ffmpeg-libswscale-8.1.2-r1 / 追加: ffmpeg-libavdevice-8.1.2-r3、ffmpeg-libavfilter-8.1.2-r3、ffmpeg-libswscale-8.1.2-r3、ほか 1 行 を検出したため
+    # media-apk.lock と契約 artifact.apk-lock.sha256 を追随させた再レンダリング（apply_apklock.sh）。
+    "377a4ca8917d0e2928cf026287e20225fd5cc6dd93619f3fa51539ebd0dfefde" = {
       content_type                  = "text/yaml"
       object_lock_retain_until_date = "2099-12-31T00:00:00Z"
     }
@@ -243,7 +247,9 @@ locals {
     # 解決不能になるため media-apk.lock と契約 artifact.apk-lock.sha256 を追随させた再レンダリング（apply_apklock.sh）。
     # 2026-10-02 publish 世代（pcre2 の CVE 対応）。r43 段 3 の media が ECR 脆弱性ゲート（pcre2 10.47-r1・CVE 8 件）で
     # 止まったため pcre2=10.49-r0 を明示 pin し、media-apk.lock と契約 artifact.apk-lock.sha256 を追随させた再レンダリング（apply_apklock.sh）。
-    "21f41917b2e4ab43f1cd6f5168fc6212a08be5e8e9238ffd4ed2c8004a442f17" = {
+    # 2026-10-05 publish 世代（apk lock 再生成）。実ビルドで lock 差分 -3 +4（240→241 行）、削除: ffmpeg-libavdevice-8.1.2-r1、ffmpeg-libavfilter-8.1.2-r1、ffmpeg-libswscale-8.1.2-r1 / 追加: ffmpeg-libavdevice-8.1.2-r3、ffmpeg-libavfilter-8.1.2-r3、ffmpeg-libswscale-8.1.2-r3、ほか 1 行 を検出したため
+    # media-apk.lock と契約 artifact.apk-lock.sha256 を追随させた再レンダリング（apply_apklock.sh）。
+    "cdef6f7664e5237d6153042518b6b6a4955c4df11544146ae4715b8ff5212d29" = {
       content_type                  = "text/yaml"
       object_lock_retain_until_date = "2099-12-31T00:00:00Z"
     }
@@ -442,18 +448,18 @@ removed {
 }
 
 import {
-  to = aws_s3_object.mcp_source_publisher_buildspec_generation["8687830a10534318a1ccf21676527fab25a54bf0ed10bc9d39d0233565216e69"]
-  id = "teamagent-dev-image-release-evidence/codebuild-buildspecs/teamagent-dev-mcp-source-publisher/8687830a10534318a1ccf21676527fab25a54bf0ed10bc9d39d0233565216e69.yml"
+  to = aws_s3_object.mcp_source_publisher_buildspec_generation["2aedc43efae5da6a879867be85685f2cae90fe55072417969ca335ffaf791d5b"]
+  id = "teamagent-dev-image-release-evidence/codebuild-buildspecs/teamagent-dev-mcp-source-publisher/2aedc43efae5da6a879867be85685f2cae90fe55072417969ca335ffaf791d5b.yml"
 }
 
 import {
-  to = aws_s3_object.image_attestor_buildspec_generation["9c247af8f9828e4c94aad628312b3e3ce8c44012477551bc5154be167aac3223"]
-  id = "teamagent-dev-image-release-evidence/codebuild-buildspecs/teamagent-dev-image-attestor/9c247af8f9828e4c94aad628312b3e3ce8c44012477551bc5154be167aac3223.yml"
+  to = aws_s3_object.image_attestor_buildspec_generation["377a4ca8917d0e2928cf026287e20225fd5cc6dd93619f3fa51539ebd0dfefde"]
+  id = "teamagent-dev-image-release-evidence/codebuild-buildspecs/teamagent-dev-image-attestor/377a4ca8917d0e2928cf026287e20225fd5cc6dd93619f3fa51539ebd0dfefde.yml"
 }
 
 import {
-  to = aws_s3_object.image_promoter_buildspec_generation["21f41917b2e4ab43f1cd6f5168fc6212a08be5e8e9238ffd4ed2c8004a442f17"]
-  id = "teamagent-dev-image-release-evidence/codebuild-buildspecs/teamagent-dev-image-promoter/21f41917b2e4ab43f1cd6f5168fc6212a08be5e8e9238ffd4ed2c8004a442f17.yml"
+  to = aws_s3_object.image_promoter_buildspec_generation["cdef6f7664e5237d6153042518b6b6a4955c4df11544146ae4715b8ff5212d29"]
+  id = "teamagent-dev-image-release-evidence/codebuild-buildspecs/teamagent-dev-image-promoter/cdef6f7664e5237d6153042518b6b6a4955c4df11544146ae4715b8ff5212d29.yml"
 }
 
 import {
