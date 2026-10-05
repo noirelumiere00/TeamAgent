@@ -13,10 +13,10 @@ PYPROJECT = ROOT / "pyproject.toml"
 LOCK = ROOT / "uv.lock"
 TEXT = DOCKERFILE.read_text(encoding="utf-8")
 
-PYTHON_BUILDER_DIGEST = "951031ead2458c44bb8546f20494bcdbf69b5add30968bddb85558faf296e7e0"
-PYTHON_RUNTIME_DIGEST = "1f8890b2fb67a125e64836cff9f77565ba3c1309fd05e088373d33a1c14dbdc5"
+PYTHON_BUILDER_DIGEST = "a38e1716f8e5858c7647ec467613cd8cf289e1db90e5d5d74776a10a5213ebde"
+PYTHON_RUNTIME_DIGEST = "348247389f6aae35cbe588efff26ff0f53f65ce8612eaca7ba21c743c22bc225"
 UV_DIGEST = "9941e2d8e06ff884d328905091eac0a6bc1e40e5ce12e6dd0de4ef4ee26baac4"
-PYTHON_BINARY_SHA256 = "025d8125ab49b3d37b45ecafbb54fe199c5fd33ecad6595434820bec7bdca5be"
+PYTHON_BINARY_SHA256 = "2796fb308e5e3ca82656e6744db8c8cc9d96c73358fc5e60001a6e1ba746016a"
 UV_BINARY_SHA256 = "f32f61ced7feb20342032cdac4d0825cebbda61911554f5de5231ec72821812e"
 TORCH_WHEEL_SHA256 = "ca021f9eb2f8345c83fa03e3a04587308afb8df71bd472670b3ece00df58621c"
 E5_MODEL_REVISION = "3d7cfbdacd47fdda877c5cd8a79fbcc4f2a574f3"
@@ -44,7 +44,7 @@ def test_core_uses_exact_arm64_child_digests_and_binary_hashes() -> None:
     assert f"ARG UV_ARM64_DIGEST=sha256:{UV_DIGEST}" in TEXT
     assert f"ARG PYTHON_BINARY_SHA256={PYTHON_BINARY_SHA256}" in TEXT
     assert f"ARG UV_BINARY_SHA256={UV_BINARY_SHA256}" in TEXT
-    assert "ARG PYTHON_VERSION=3.14.7" in TEXT
+    assert "ARG PYTHON_VERSION=3.14.8" in TEXT
     assert "cgr.dev/chainguard/python:latest-dev@${PYTHON_BUILDER_ARM64_DIGEST}" in TEXT
     assert "cgr.dev/chainguard/python:latest@${PYTHON_RUNTIME_ARM64_DIGEST}" in TEXT
     assert "ghcr.io/astral-sh/uv:latest@${UV_ARM64_DIGEST}" in TEXT

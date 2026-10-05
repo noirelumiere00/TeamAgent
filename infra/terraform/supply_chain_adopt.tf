@@ -109,7 +109,9 @@ locals {
     # 止まったため pcre2=10.49-r0 を明示 pin し、media-apk.lock と契約 artifact.apk-lock.sha256 を追随させた再レンダリング（apply_apklock.sh）。
     # 2026-10-05 publish 世代（apk lock 再生成）。実ビルドで lock 差分 -3 +4（240→241 行）、削除: ffmpeg-libavdevice-8.1.2-r1、ffmpeg-libavfilter-8.1.2-r1、ffmpeg-libswscale-8.1.2-r1 / 追加: ffmpeg-libavdevice-8.1.2-r3、ffmpeg-libavfilter-8.1.2-r3、ffmpeg-libswscale-8.1.2-r3、ほか 1 行 を検出したため
     # media-apk.lock と契約 artifact.apk-lock.sha256 を追随させた再レンダリング（apply_apklock.sh）。
-    "2aedc43efae5da6a879867be85685f2cae90fe55072417969ca335ffaf791d5b" = {
+    # 2026-10-05 publish 世代（Chainguard python ベースのバンプ）。r44 段4 の Trivy が core の py3-pip-wheel 26.2.1-r1（HIGH 2）で停止したため
+    # ベースを上げ python 3.14.7→3.14.8。runtime 契約と release 契約の両方が動いた再レンダリング（apply_mcp_base_bump.py）。
+    "789b61fc498376bf719978add807ca132652cf3a11b1114f13ac3a4f1a064b76" = {
       content_type                  = "text/yaml"
       object_lock_retain_until_date = "2099-12-31T00:00:00Z"
     }
@@ -180,7 +182,9 @@ locals {
     # 止まったため pcre2=10.49-r0 を明示 pin し、media-apk.lock と契約 artifact.apk-lock.sha256 を追随させた再レンダリング（apply_apklock.sh）。
     # 2026-10-05 publish 世代（apk lock 再生成）。実ビルドで lock 差分 -3 +4（240→241 行）、削除: ffmpeg-libavdevice-8.1.2-r1、ffmpeg-libavfilter-8.1.2-r1、ffmpeg-libswscale-8.1.2-r1 / 追加: ffmpeg-libavdevice-8.1.2-r3、ffmpeg-libavfilter-8.1.2-r3、ffmpeg-libswscale-8.1.2-r3、ほか 1 行 を検出したため
     # media-apk.lock と契約 artifact.apk-lock.sha256 を追随させた再レンダリング（apply_apklock.sh）。
-    "377a4ca8917d0e2928cf026287e20225fd5cc6dd93619f3fa51539ebd0dfefde" = {
+    # 2026-10-05 publish 世代（Chainguard python ベースのバンプ）。r44 段4 の Trivy が core の py3-pip-wheel 26.2.1-r1（HIGH 2）で停止したため
+    # ベースを上げ python 3.14.7→3.14.8。runtime 契約と release 契約の両方が動いた再レンダリング（apply_mcp_base_bump.py）。
+    "00bdc1203ac12b83af5d07fb19b5b65a1c7e1da4ae31f6d5839c08bf6199b0ff" = {
       content_type                  = "text/yaml"
       object_lock_retain_until_date = "2099-12-31T00:00:00Z"
     }
@@ -249,7 +253,9 @@ locals {
     # 止まったため pcre2=10.49-r0 を明示 pin し、media-apk.lock と契約 artifact.apk-lock.sha256 を追随させた再レンダリング（apply_apklock.sh）。
     # 2026-10-05 publish 世代（apk lock 再生成）。実ビルドで lock 差分 -3 +4（240→241 行）、削除: ffmpeg-libavdevice-8.1.2-r1、ffmpeg-libavfilter-8.1.2-r1、ffmpeg-libswscale-8.1.2-r1 / 追加: ffmpeg-libavdevice-8.1.2-r3、ffmpeg-libavfilter-8.1.2-r3、ffmpeg-libswscale-8.1.2-r3、ほか 1 行 を検出したため
     # media-apk.lock と契約 artifact.apk-lock.sha256 を追随させた再レンダリング（apply_apklock.sh）。
-    "cdef6f7664e5237d6153042518b6b6a4955c4df11544146ae4715b8ff5212d29" = {
+    # 2026-10-05 publish 世代（Chainguard python ベースのバンプ）。r44 段4 の Trivy が core の py3-pip-wheel 26.2.1-r1（HIGH 2）で停止したため
+    # ベースを上げ python 3.14.7→3.14.8。runtime 契約と release 契約の両方が動いた再レンダリング（apply_mcp_base_bump.py）。
+    "a6c0fbaa7c117ad86bc5e5505ae0d72f02ab9ab5fb2284d81c57fd801ff33d2a" = {
       content_type                  = "text/yaml"
       object_lock_retain_until_date = "2099-12-31T00:00:00Z"
     }
@@ -448,18 +454,18 @@ removed {
 }
 
 import {
-  to = aws_s3_object.mcp_source_publisher_buildspec_generation["2aedc43efae5da6a879867be85685f2cae90fe55072417969ca335ffaf791d5b"]
-  id = "teamagent-dev-image-release-evidence/codebuild-buildspecs/teamagent-dev-mcp-source-publisher/2aedc43efae5da6a879867be85685f2cae90fe55072417969ca335ffaf791d5b.yml"
+  to = aws_s3_object.mcp_source_publisher_buildspec_generation["789b61fc498376bf719978add807ca132652cf3a11b1114f13ac3a4f1a064b76"]
+  id = "teamagent-dev-image-release-evidence/codebuild-buildspecs/teamagent-dev-mcp-source-publisher/789b61fc498376bf719978add807ca132652cf3a11b1114f13ac3a4f1a064b76.yml"
 }
 
 import {
-  to = aws_s3_object.image_attestor_buildspec_generation["377a4ca8917d0e2928cf026287e20225fd5cc6dd93619f3fa51539ebd0dfefde"]
-  id = "teamagent-dev-image-release-evidence/codebuild-buildspecs/teamagent-dev-image-attestor/377a4ca8917d0e2928cf026287e20225fd5cc6dd93619f3fa51539ebd0dfefde.yml"
+  to = aws_s3_object.image_attestor_buildspec_generation["00bdc1203ac12b83af5d07fb19b5b65a1c7e1da4ae31f6d5839c08bf6199b0ff"]
+  id = "teamagent-dev-image-release-evidence/codebuild-buildspecs/teamagent-dev-image-attestor/00bdc1203ac12b83af5d07fb19b5b65a1c7e1da4ae31f6d5839c08bf6199b0ff.yml"
 }
 
 import {
-  to = aws_s3_object.image_promoter_buildspec_generation["cdef6f7664e5237d6153042518b6b6a4955c4df11544146ae4715b8ff5212d29"]
-  id = "teamagent-dev-image-release-evidence/codebuild-buildspecs/teamagent-dev-image-promoter/cdef6f7664e5237d6153042518b6b6a4955c4df11544146ae4715b8ff5212d29.yml"
+  to = aws_s3_object.image_promoter_buildspec_generation["a6c0fbaa7c117ad86bc5e5505ae0d72f02ab9ab5fb2284d81c57fd801ff33d2a"]
+  id = "teamagent-dev-image-release-evidence/codebuild-buildspecs/teamagent-dev-image-promoter/a6c0fbaa7c117ad86bc5e5505ae0d72f02ab9ab5fb2284d81c57fd801ff33d2a.yml"
 }
 
 import {

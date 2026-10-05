@@ -17,7 +17,7 @@ from pathlib import Path
 
 EXPECTED_BAKED_APP_HTML_SHA256 = "716ac25a96516efd6443277c903102d514f3f86729f8706baea41ee48f0ecdeb"
 EXPECTED_E5_REVISION = "3d7cfbdacd47fdda877c5cd8a79fbcc4f2a574f3"
-EXPECTED_PYTHON_SHA256 = "0d036a463b218cff354adfb9c09a969a9a659698fa376bd3b55fe5bc002e7af8"
+EXPECTED_PYTHON_SHA256 = "2796fb308e5e3ca82656e6744db8c8cc9d96c73358fc5e60001a6e1ba746016a"
 
 
 def _sha256(path: Path) -> str:
@@ -122,7 +122,7 @@ def main() -> None:
     assert os.environ["USER"] == os.environ["LOGNAME"] == "teamagent"
     assert pwd.getpwuid(10001).pw_name == "teamagent"
     assert os.environ["TEAMAGENT_RUNTIME_KIND"] == "core"
-    assert sys.version.startswith("3.14.7 ")
+    assert sys.version.startswith("3.14.8 ")
     assert _sha256(Path("/usr/bin/python3.14")) == EXPECTED_PYTHON_SHA256
     assert (
         _sha256(Path("/app/src/teamagent/connect_web/static/app.html"))
