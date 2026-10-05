@@ -15,6 +15,7 @@ import asyncio
 import json
 import threading
 import time
+import uuid
 from collections.abc import Callable
 from typing import Any, ClassVar
 
@@ -23,11 +24,12 @@ from pydantic import BaseModel
 
 from teamagent.adapters.slack_client import SlackPostResult
 from teamagent.identity import ResolvedIdentity
-from teamagent.mcp_gateway import detached_jobs, server, surface_video_followup
+from teamagent.mcp_gateway import detached_jobs, direct_summary, server, surface_video_followup
 from teamagent.mcp_gateway.caller_claim import VerifiedCallerClaim
 from teamagent.mcp_gateway.server import USER_CONTEXT_KEY, dispatch_tool
 from teamagent.orchestrator.tools import ToolSpec
 from teamagent.skills.base import BaseSkill, SkillContext
+from teamagent.skills.search_surface_check import confirm
 from teamagent.skills.search_surface_check.schema import SearchSurfaceCheckInput, VideoDigest
 from teamagent.skills.search_surface_check.skill import SearchSurfaceCheckSkill
 from teamagent.skills.search_surface_check.slack_render import REUSED_NOTE
@@ -53,6 +55,7 @@ DM = "D0123456789"
 CHANNEL = "C0123456789"
 TOOL = "search_surface_check"
 RELAY_KEYS = {
+    "status",
     "slack_summary",
     "report_url",
     "warnings",
@@ -881,3 +884,217 @@ async def test_followup_is_queued_with_the_automatic_priority(
     assert seen == [detached_jobs.PRIORITY_AUTO]
     detached_jobs.REGISTRY.interrupt_all()
     gate.set()
+
+
+# ── 1 通で届ける（SURFACE_VIDEO_ONE_SHOT・10-05 小俣さん裁定）と取得の前の確認 ──────────────
+# - 始められたら Aico への応答は「作成中」の 1 行だけ（結果・レポートの URL は出さない）。完了時に
+#   検索上位と動画の中身を 1 通で投稿し、レポートは動画の章つきの最新版を指す
+# - 動画の分析が失敗・中断しても、検索上位の結果は必ず届く（本番の失敗の形＝ジョブが例外を投げる）
+# - 直接投稿が ON でも、作成中の 1 行は文字だけ（結果の blocks を先に出さない）
+# - 確認（needs_input）のときは取得も 2 段目も直接投稿もしない。confirmed=true なら進む
+
+
+def _one_shot(monkeypatch: pytest.MonkeyPatch, *, direct: bool = False) -> None:
+    # 前のテストの裏のジョブが遅れて終わると、差し替え済みの CACHE に同じ鍵（同じ人・KW・URL）で
+    # 結果を書き込み、このテストが「使い回し」に入ってしまう（CI で実測）。鍵にテストごとの印を付ける。
+    nonce = uuid.uuid4().hex
+    original_key = surface_video_followup.reuse_key
+    monkeypatch.setattr(
+        surface_video_followup,
+        "reuse_key",
+        lambda user, kw, urls: original_key(user, kw, urls) + "\x1f" + nonce,
+    )
+    monkeypatch.setattr(
+        surface_video_followup,
+        "load_policy",
+        lambda: surface_video_followup.FollowupPolicy(
+            enabled=True, allowed_emails=frozenset({ME}), one_shot=True
+        ),
+    )
+    if direct:
+        monkeypatch.setattr(
+            direct_summary,
+            "load_policy",
+            lambda: direct_summary.DirectPolicy(enabled=True, allowed_emails=frozenset({ME})),
+        )
+
+
+def _confirm_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv(confirm.FOLLOWUP_ENABLED_ENV, "1")
+    monkeypatch.setenv(confirm.ONE_SHOT_ENV, "1")
+    monkeypatch.setenv(confirm.FOLLOWUP_ALLOWED_EMAILS_ENV, ME)
+
+
+async def test_one_shot_replies_with_a_wait_line_then_posts_everything_once(
+    monkeypatch: pytest.MonkeyPatch, slack: _FakeSlack, usage: list[dict[str, Any]]
+) -> None:
+    _one_shot(monkeypatch)
+    gate = threading.Event()
+    skill, _gem, _dl = _skill(downloader=FakeDownloader(gate=gate))
+    out = await _call(_spec(skill))
+
+    assert "1 通でお届けします" in out["slack_summary"]
+    assert "上位5本" in out["slack_summary"]
+    assert out.get("report_url") is None  # 動画の章の無いレポートを先に渡さない
+    assert "deferred" not in out  # Aico へは返さない欄
+    assert detached_jobs.REGISTRY.active_count() == 1
+    assert slack.posts == []
+
+    gate.set()
+    await _eventually(lambda: len(slack.posts) == 1)
+    await asyncio.sleep(0.05)
+    assert len(slack.posts) == 1  # 1 通だけ
+    post = slack.posts[0]
+    body = _blocks_text(post["blocks"])
+    assert post["blocks"][0]["text"]["text"] == f"検索上位チェック「{KEYWORD}」"
+    assert f"上位5本の動画の中身「{KEYWORD}」" in body
+    assert "検索上位チェックの続き" not in body  # 同じ投稿なので「続き」と書かない
+    # レポートは動画の章つき（2 回目に発行した方）だけを指す
+    assert "<https://s3.example/surface-2|レポートを開く>" in body
+    assert "surface-1" not in post["text"] and "surface-1" not in body
+    assert "全15本の一覧と上位5本の動画の中身つき" in body
+    await _eventually(lambda: detached_jobs.REGISTRY.active_count() == 0)
+
+
+async def test_one_shot_failure_still_delivers_the_surface_results(
+    monkeypatch: pytest.MonkeyPatch, slack: _FakeSlack, usage: list[dict[str, Any]]
+) -> None:
+    """本番の失敗の形（取得ジョブが例外を投げる）でも、検索上位の結果は 1 通で届く。"""
+    _one_shot(monkeypatch)
+
+    class _BrokenEngine:
+        @staticmethod
+        def reserve_video_quota(ctx: SkillContext, count: int) -> int:
+            return count
+
+        def analyze_videos(self, metas: list[Any], **kw: Any) -> list[Any]:
+            raise RuntimeError("MEDIA_ACQUIRE_JOB_FAILED: boom")
+
+    skill, _g, _d = _skill(engine=_BrokenEngine())
+    out = await _call(_spec(skill))
+    assert "1 通でお届けします" in out["slack_summary"]
+    await _eventually(lambda: len(slack.posts) == 1)
+    post = slack.posts[0]
+    body = _blocks_text(post["blocks"])
+    assert post["blocks"][0]["text"]["text"] == f"検索上位チェック「{KEYWORD}」"
+    assert "は分析できず、検索上位だけお届けします。動画の取得・変換で一時的な不具合" in body
+    assert ":hourglass" not in body
+    assert "<https://s3.example/surface-1|レポートを開く>" in body  # 1 段目のレポートは残す
+    assert "動画の取得・変換で一時的な不具合" in post["text"]
+    assert "MEDIA_" not in post["text"] and "MEDIA_" not in body
+    await _eventually(lambda: any(u.get("status") == "error" for u in usage))
+
+
+async def test_one_shot_redeploy_notice_carries_the_surface_results(
+    monkeypatch: pytest.MonkeyPatch, slack: _FakeSlack, usage: list[dict[str, Any]]
+) -> None:
+    _one_shot(monkeypatch)
+    gate = threading.Event()
+    dl = FakeDownloader(gate=gate)
+    skill, _g, _d = _skill(downloader=dl)
+    await _call(_spec(skill))
+    await asyncio.to_thread(dl.started.wait, 5)
+
+    assert await detached_jobs.notify_interrupted() == 1
+    assert len(slack.posts) == 1
+    text = slack.posts[0]["text"]
+    assert text.startswith(f"*検索上位チェック*「{KEYWORD}」")
+    assert "https://s3.example/surface-1" in text
+    assert "システム更新で中断されました" in text
+    gate.set()  # 中断を知らせた後に完了しても 2 通目は出さない
+    await _eventually(lambda: any(u["skill"] == surface_video_followup.USAGE_SKILL for u in usage))
+    await asyncio.sleep(0.05)
+    assert len(slack.posts) == 1
+
+
+async def test_one_shot_direct_post_shows_only_the_wait_line_first(
+    monkeypatch: pytest.MonkeyPatch, slack: _FakeSlack, usage: list[dict[str, Any]]
+) -> None:
+    _one_shot(monkeypatch, direct=True)
+    gate = threading.Event()
+    skill, _g, _d = _skill(downloader=FakeDownloader(gate=gate))
+    out = await _call(_spec(skill))
+    assert out["status"] == "posted"
+    assert len(slack.posts) == 1
+    first = slack.posts[0]
+    assert first["blocks"] is None and "1 通でお届けします" in first["text"]
+    assert "s3.example" not in first["text"]
+
+    gate.set()
+    await _eventually(lambda: len(slack.posts) == 2)
+    assert f"上位5本の動画の中身「{KEYWORD}」" in _blocks_text(slack.posts[1]["blocks"])
+    await _eventually(lambda: detached_jobs.REGISTRY.active_count() == 0)
+
+
+async def test_one_shot_off_keeps_the_two_stage_flow(
+    monkeypatch: pytest.MonkeyPatch, slack: _FakeSlack
+) -> None:
+    """SURFACE_VIDEO_ONE_SHOT が OFF なら今の 2 段構え（1 段目に予告・後で追記）のまま。"""
+    monkeypatch.setattr(
+        surface_video_followup,
+        "load_policy",
+        lambda: surface_video_followup.FollowupPolicy(enabled=True, allowed_emails=frozenset({ME})),
+    )
+    gate = threading.Event()
+    skill, _g, _d = _skill(downloader=FakeDownloader(gate=gate))
+    out = await _call(_spec(skill))
+    assert "終わったらこの会話に追記します" in out["slack_summary"]
+    assert out["report_url"] == "https://s3.example/surface-1"
+    gate.set()
+    await _eventually(lambda: detached_jobs.REGISTRY.active_count() == 0)
+
+
+# ── 取得の前の確認 ─────────────────────────────────────────────────
+
+
+async def test_confirm_comes_before_any_fetch_and_posts_nothing(
+    monkeypatch: pytest.MonkeyPatch, slack: _FakeSlack
+) -> None:
+    _confirm_env(monkeypatch)
+    _one_shot(monkeypatch, direct=True)
+    calls: list[str] = []
+    skill, gem, dl = _skill()
+    skill._tiktok_source_factory = lambda job_id, audit_hash: calls.append(job_id)  # type: ignore[assignment,func-returns-value]
+    # 3 KW・acquire_job_id 無し: 確認が「先に tiktok_acquire を」の案内より前に返る
+    out = await _call(
+        _spec(skill),
+        args={"keywords": ["a", "b", "c"], "platforms": ["tiktok"], "max_videos": 10},
+    )
+    assert out["status"] == "needs_input"
+    assert "この内容で検索上位チェックを作ります" in out["slack_summary"]
+    assert "キーワード: a／b／c" in out["slack_summary"]
+    assert "10本" in out["slack_summary"] and "比較する競合: なし" in out["slack_summary"]
+    assert "tiktok_acquire" not in out["slack_summary"]
+    await asyncio.sleep(0.05)
+    assert calls == [] and gem.calls == [] and dl.urls == []
+    assert slack.posts == []  # 直接投稿もしない（Aico が確認文を返す）
+    assert detached_jobs.REGISTRY.active_count() == 0
+
+
+async def test_confirmed_request_runs(monkeypatch: pytest.MonkeyPatch, slack: _FakeSlack) -> None:
+    _confirm_env(monkeypatch)
+    _one_shot(monkeypatch)
+    gate = threading.Event()
+    skill, _g, _d = _skill(downloader=FakeDownloader(gate=gate))
+    out = await _call(_spec(skill), args={**ARGS, "confirmed": True})
+    assert out["status"] == "ok" and "1 通でお届けします" in out["slack_summary"]
+    assert detached_jobs.REGISTRY.active_count() == 1
+    gate.set()
+    await _eventually(lambda: detached_jobs.REGISTRY.active_count() == 0)
+
+
+def test_failure_reason_is_extracted_from_each_failure_text() -> None:
+    from teamagent.skills.search_surface_check.video_render import (
+        build_all_failed_text,
+        build_quota_exhausted_text,
+    )
+
+    reason = surface_video_followup._plain_reason
+    err = surface_video_followup.failure_text(KEYWORD, RuntimeError("MEDIA_ACQUIRE_JOB_FAILED: x"))
+    assert reason(err).startswith("動画の取得・変換で一時的な不具合")
+    quota = reason(build_quota_exhausted_text(KEYWORD))
+    assert quota and "TikTok" not in quota and "**" not in quota
+    failed = reason(
+        build_all_failed_text(KEYWORD, videos=[], reserved=0, quota_on=False, total_cost_usd=0.0)
+    )
+    assert failed and "概算" not in failed and "TikTok" not in failed

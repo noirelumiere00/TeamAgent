@@ -1199,7 +1199,9 @@ async def dispatch_tool(
     # ── 検索上位チェックの 2 段目（USE_SURFACE_VIDEO_FOLLOWUP 既定OFF＝素通り）──────────
     # 対象なら上位の動画の中身の分析を裏で登録し、slack_summary に予告を 1 行足す（fail-open）。
     # 対象のときは月間上限の残りを DB から読むので、event loop を塞がないよう thread で呼ぶ。
-    if name == surface_video_followup.TOOL:
+    # 取得の前の確認（status=needs_input）は 2 段目も直接投稿もしない（確認文を Aico が返す）。
+    needs_input = getattr(output, "status", None) == "needs_input"
+    if name == surface_video_followup.TOOL and not needs_input:
         await asyncio.to_thread(
             surface_video_followup.maybe_schedule,
             skill=skill,
@@ -1252,7 +1254,7 @@ async def dispatch_tool(
     # 対象なら slack_summary を mcp が依頼元の DM へ直接出し、Aico には「投稿済み」だけを返す
     # （Aico に文面を組み直させない・URL を落とさせない）。届かなければ今までどおり返す。
     # usage 記録の後に置く（費用の記録は投稿の成否に関係なく残す）。
-    if name in direct_summary.DIRECT_TOOLS and isinstance(data, dict):
+    if name in direct_summary.DIRECT_TOOLS and isinstance(data, dict) and not needs_input:
         direct_destination, direct_reason = direct_summary.decide(
             direct_summary.load_policy(),
             tool=name,

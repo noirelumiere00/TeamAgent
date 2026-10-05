@@ -263,6 +263,9 @@ def _facts(video: AnalyzedVideo, post: SurfacePost | None) -> str:
     items.append(("フォロワー", fmt_count(meta.follower_count) if meta.follower_count else "—"))
     if post is not None:
         items.append(("タイプ", category_label(post.category)))
+    if post is not None and post.kw_ranks:
+        # 全 KW から選んだ動画は「N位」が総合順位。KW ごとの表示順位をここで見せる。
+        items.append(("出ている検索", "・".join(post.kw_ranks)))
     return (
         "<dl class='vfacts'>"
         + "".join(f"<div><dt>{_esc(k)}</dt><dd>{_esc(v)}</dd></div>" for k, v in items)

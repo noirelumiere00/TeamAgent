@@ -197,6 +197,27 @@ def _client_line(surface: KwSurface, input: SearchSurfaceCheckInput) -> str | No
     return "- クライアント: " + "／".join(parts) if parts else None
 
 
+def competitor_parts(surface: KwSurface, accounts: list[str]) -> list[tuple[str, list[int]]]:
+    """競合のアカウントごとの（@handle, 面内順位）。指定の順・面に出ていなければ空の順位。"""
+    found: dict[str, list[int]] = {}
+    for p in sorted(surface.posts, key=lambda x: x.rank):
+        if p.is_competitor:
+            found.setdefault(p.author.strip().lstrip("@").lower(), []).append(p.rank)
+    parts: list[tuple[str, list[int]]] = []
+    for raw in dict.fromkeys(a.strip().lstrip("@") for a in accounts if a.strip()):
+        parts.append((raw, found.get(raw.lower(), [])))
+    return parts
+
+
+def _competitor_line(surface: KwSurface, input: SearchSurfaceCheckInput) -> str | None:
+    parts = competitor_parts(surface, input.competitor_accounts)
+    if not parts:
+        return None
+    return "- 競合: " + "／".join(
+        f"@{slack_safe(h)} " + (fmt_ranks(r) if r else "上位に無し") for h, r in parts
+    )
+
+
 def _conclusion_lines(surface: KwSurface) -> list[str]:
     c = surface.conclusion
     if c is None:
@@ -256,6 +277,9 @@ def build_slack_summary(
             if surface.facts is None:
                 lines.append("**上位の顔ぶれ**")
             lines.append(client)
+        competitor = _competitor_line(surface, input)
+        if competitor:
+            lines.append(competitor)
         top_n = _TOP_COMPACT if compact else _TOP_FULL
         if surface.posts:
             unit = "再生・保存率・投稿時期" if surface.platform == "tiktok" else "再生・出現回数"

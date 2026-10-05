@@ -51,6 +51,7 @@ from teamagent.skills._shared.grounding import DropLedger
 from teamagent.skills._shared.rollout import ROLLOUT_DENIED_MESSAGE, rollout_allowed
 from teamagent.skills.base import BaseSkill, SkillContext, register
 from teamagent.skills.search_surface_check.conclusion import conclude, rule_conclusion
+from teamagent.skills.search_surface_check.confirm import build_confirm_message, confirm_required
 from teamagent.skills.search_surface_check.display import JST
 from teamagent.skills.search_surface_check.insights import compute_facts, is_pr_post, mentions
 from teamagent.skills.search_surface_check.persist_body import (
@@ -74,6 +75,7 @@ from teamagent.skills.search_surface_check.summary import build_slack_summary
 from teamagent.skills.search_surface_check.video_digest import (
     conclude_digest,
     digest_videos,
+    followup_label,
     post_to_meta,
     rule_digest_conclusion,
 )
@@ -188,8 +190,10 @@ class SearchSurfaceCheckSkill(BaseSkill[SearchSurfaceCheckInput, SearchSurfaceCh
         "検索KW群のTikTok/Instagramの検索面（誰のどんな投稿が上位に出るか）を取得し、"
         "面の勢力図（ニュース/グルメ/一般/公式/インフルエンサーの割合）とクライアント動画の"
         "在圏判定つきの媒体比較レポート(HTML署名URL)を作る。"
-        "TikTok面は3KW以上なら必ず先に tiktok_acquire(videos_per_kw=0) を実行し、"
-        "acquire_job_id を渡すこと（1〜2KWの即席チェックのみ直接取得可）。"
+        "KW数に関係なく、まず本ツールを confirmed なしで呼ぶ。status=needs_input なら確認文を"
+        "そのまま返して答えを待ち、答えたら confirmed=true・max_videos・competitor_accounts を"
+        "付けて進める。そのうえで TikTok面が3KW以上なら tiktok_acquire(videos_per_kw=0) を"
+        "実行して acquire_job_id を渡して呼び直す（1〜2KWの即席チェックのみ直接取得可）。"
         "動画の中身分析は video_algorithm、X(Twitter)の声集めは x_voice_search。"
     )
     input_schema: ClassVar[type[BaseModel]] = SearchSurfaceCheckInput
@@ -198,6 +202,7 @@ class SearchSurfaceCheckSkill(BaseSkill[SearchSurfaceCheckInput, SearchSurfaceCh
     # slack_summary に全部入っているので、上位の生データ（surfaces）は Aico に渡さない。
     # 投稿の URL は slack_summary の上位 N 本の行に Markdown リンクで入っている。
     mcp_relay_fields: ClassVar[tuple[str, ...] | None] = (
+        "status",
         "slack_summary",
         "report_url",
         "warnings",
@@ -488,15 +493,12 @@ class SearchSurfaceCheckSkill(BaseSkill[SearchSurfaceCheckInput, SearchSurfaceCh
             return posts, 0.0
 
     def _mark_client(
-        self, posts: list[SurfacePost], client_accounts: list[str]
+        self, posts: list[SurfacePost], client_accounts: list[str], *, field: str = "is_client"
     ) -> list[SurfacePost]:
         handles = {_normalize_handle(a) for a in client_accounts if a.strip()}
         if not handles:
             return posts
-        return [
-            p.model_copy(update={"is_client": _normalize_handle(p.author) in handles})
-            for p in posts
-        ]
+        return [p.model_copy(update={field: _normalize_handle(p.author) in handles}) for p in posts]
 
     @staticmethod
     def _ratio(posts: list[SurfacePost]) -> dict[str, float]:
@@ -518,6 +520,14 @@ class SearchSurfaceCheckSkill(BaseSkill[SearchSurfaceCheckInput, SearchSurfaceCh
         if not rollout_allowed(_ALLOWLIST_ENV, user):
             return SearchSurfaceCheckOutput(
                 keywords=input.keywords, slack_summary=ROLLOUT_DENIED_MESSAGE
+            )
+        # 取得の前の確認（対象の人だけ）。3 KW 以上の tiktok_acquire より前に返す（SOUL の順序）。
+        if confirm_required(input, dict(ctx.metadata or {})):
+            log.info("surface_confirm_requested", keywords=len(input.keywords))
+            return SearchSurfaceCheckOutput(
+                status="needs_input",
+                keywords=input.keywords,
+                slack_summary=build_confirm_message(input),
             )
         warnings: list[str] = []
         total_cost = 0.0
@@ -616,6 +626,7 @@ class SearchSurfaceCheckSkill(BaseSkill[SearchSurfaceCheckInput, SearchSurfaceCh
         now_epoch = int(self._clock())
         for (kw, platform), posts in classified.items():
             posts = self._mark_client(posts, input.client_accounts)
+            posts = self._mark_client(posts, input.competitor_accounts, field="is_competitor")
             posts = [
                 p.model_copy(
                     update={
@@ -632,6 +643,7 @@ class SearchSurfaceCheckSkill(BaseSkill[SearchSurfaceCheckInput, SearchSurfaceCh
                     posts=posts,
                     category_ratio=self._ratio(posts) if input.analyze else {},
                     client_ranks=[p.rank for p in posts if p.is_client],
+                    competitor_ranks=[p.rank for p in posts if p.is_competitor],
                     facts=(
                         compute_facts(
                             posts, keyword=kw, client_name=input.client_name, now_epoch=now_epoch
@@ -773,6 +785,19 @@ class SearchSurfaceCheckSkill(BaseSkill[SearchSurfaceCheckInput, SearchSurfaceCh
 
     # ---- 2 段目: 上位の動画の中身 ---------------------------------------------------
 
+    @staticmethod
+    def _chapter_anchor(
+        out: SearchSurfaceCheckOutput, videos: list[SurfacePost]
+    ) -> tuple[str, str]:
+        """動画の中身の章を差し込む面。
+
+        全 KW から選んだら最後の TikTok 面の後、1 KW ならその面の後。
+        """
+        tiktok = [s.keyword for s in out.surfaces if s.platform == "tiktok" and s.posts]
+        if videos and any(v.kw_ranks for v in videos) and tiktok:
+            return (tiktok[-1], "tiktok")
+        return (videos[0].keyword if videos else (tiktok[0] if tiktok else ""), "tiktok")
+
     def run_video_followup(
         self,
         out: SearchSurfaceCheckOutput,
@@ -791,7 +816,7 @@ class SearchSurfaceCheckSkill(BaseSkill[SearchSurfaceCheckInput, SearchSurfaceCh
         """
         log = ctx.bind_logger(self.name)
         started = time.monotonic()
-        keyword = videos[0].keyword if videos else (out.keywords[0] if out.keywords else "")
+        keyword = followup_label(out, videos)
         if not videos:
             return SurfaceVideoFollowupOutput(keyword=keyword, status="no_videos")
         engine = self._get_video_engine()
@@ -805,20 +830,30 @@ class SearchSurfaceCheckSkill(BaseSkill[SearchSurfaceCheckInput, SearchSurfaceCh
                 slack_text=build_quota_exhausted_text(keyword),
             )
         chosen = videos[:reserved]
-        analyzed: list[AnalyzedVideo] = engine.analyze_videos(
-            [post_to_meta(p) for p in chosen],
-            query=keyword,
-            client_name=input.client_name,
-            request_id=ctx.request_id,
-            user_email=str(ctx.metadata.get("user_email") or ""),
-            # 構成表のコマ（場面ごと・幅 180px）と表紙は作る。Web プレビュー動画（1 本最大 6MB）は
-            # 使わないので作らない。場面ごとの役割・テロップ・発話・狙いはプロンプトの追記で頼む。
-            media_extras=True,
-            scene_frames=True,
-            frame_width=SCENE_FRAME_WIDTH,
-            preview=False,
-            system_addendum=load_prompt("search_surface_check", "v1", "scene_detail"),
-        )
+        # 「テロップ・発話に KW があるか」は検索 KW を基準に見る。全 KW から選んだときは、動画ごとに
+        # 一番上に出ている KW（post.keyword）でまとめて分析する（1 KW なら 1 回＝今と同じ）。
+        # KW ごとの呼び出しは順に回す（並列数は analyze_videos の中の 3 本のまま・429 対策）。
+        groups: dict[str, list[SurfacePost]] = {}
+        for post in chosen:
+            groups.setdefault(post.keyword, []).append(post)
+        analyzed: list[AnalyzedVideo] = []
+        for group_kw, group in groups.items():
+            analyzed += engine.analyze_videos(
+                [post_to_meta(p) for p in group],
+                query=group_kw,
+                client_name=input.client_name,
+                request_id=ctx.request_id,
+                user_email=str(ctx.metadata.get("user_email") or ""),
+                # 構成表のコマ（場面ごと・幅 180px）と表紙は作る。Web プレビュー動画（1 本最大
+                # 6MB）は使わないので作らない。場面ごとの役割・テロップ・発話・狙いはプロンプトの
+                # 追記で頼む。
+                media_extras=True,
+                scene_frames=True,
+                frame_width=SCENE_FRAME_WIDTH,
+                preview=False,
+                system_addendum=load_prompt("search_surface_check", "v1", "scene_detail"),
+            )
+        analyzed.sort(key=lambda v: v.meta.rank)
         cost = sum(float(v.cost_usd or 0.0) for v in analyzed)
         digest = digest_videos(analyzed, keyword=keyword, requested=requested, reserved=reserved)
         if digest.watched == 0 and not digest.cover_only_ranks:
@@ -865,7 +900,7 @@ class SearchSurfaceCheckSkill(BaseSkill[SearchSurfaceCheckInput, SearchSurfaceCh
                 client_name=input.client_name,
                 measured_epoch=out.measured_epoch or int(self._clock()),
                 missing=self._missing(input, out),
-                after_sections={(keyword, "tiktok"): chapter},
+                after_sections={self._chapter_anchor(out, videos): chapter},
                 extra_css=CHAPTER_CSS,
             )
             report_url = self._publish_html(
@@ -905,6 +940,7 @@ class SearchSurfaceCheckSkill(BaseSkill[SearchSurfaceCheckInput, SearchSurfaceCh
             # 直接投稿の Block Kit（slack_render.followup_message）が 1 本 1 行に使う。
             videos=followup_rows(analyzed),
             measured_epoch=out.measured_epoch,
+            across_keywords=any(v.kw_ranks for v in videos),
         )
 
     @staticmethod
