@@ -38,7 +38,8 @@ UV_DIGEST = "9941e2d8e06ff884d328905091eac0a6bc1e40e5ce12e6dd0de4ef4ee26baac4"
 # 2026-10-01: Alpine 上流への追随（libcrypto3 3.5.8-r0→3.5.9-r0・libssl3 3.5.8-r0→3.5.9-r0・python3 3.14.7-r0→3.14.8-r0）。apk 段の実ビルドで lock 差分 -6 +6（240→240 行）。
 # 2026-10-02: Alpine 上流への追随（font-noto 2026.09.01-r0→2026.10.01-r0）。apk 段の実ビルドで lock 差分 -5 +5（240→240 行）。
 # 2026-10-02: Alpine 上流への追随（pcre2 10.47-r1→10.49-r0）。apk 段の実ビルドで lock 差分 -1 +1（240→240 行）。
-APK_LOCK_SHA256 = "56df7d0d669fc169e21b916981580405cff88fda7cc1a9e68ef778a1797e77d3"
+# 2026-10-05: Alpine 上流への追随（削除: ffmpeg-libavdevice-8.1.2-r1、ffmpeg-libavfilter-8.1.2-r1、ffmpeg-libswscale-8.1.2-r1 / 追加: ffmpeg-libavdevice-8.1.2-r3、ffmpeg-libavfilter-8.1.2-r3、ffmpeg-libswscale-8.1.2-r3、ほか 1 行）。apk 段の実ビルドで lock 差分 -3 +4（240→241 行）。
+APK_LOCK_SHA256 = "5c3ddddbcdf80a0c5ddf90eab62050ff487a063f803ec607e06098107578c0b7"
 CHROMIUM_PATH = "/usr/lib/chromium/chromium"
 
 
@@ -108,7 +109,7 @@ def test_media_chromium_path_matches_the_measured_binary_everywhere() -> None:
 
 def test_apk_inventory_is_exact_and_hash_pinned() -> None:
     assert (
-        len(APK_LOCK.read_text(encoding="utf-8").splitlines()) == 240
+        len(APK_LOCK.read_text(encoding="utf-8").splitlines()) == 241
     )  # 2026-08-17 edge 依存グラフ変更で expat/gdbm が再び依存から脱落（実ビルド diff で確定）
     assert _sha256(APK_LOCK) == APK_LOCK_SHA256
     assert f"ARG MEDIA_APK_LOCK_SHA256={APK_LOCK_SHA256}" in TEXT
