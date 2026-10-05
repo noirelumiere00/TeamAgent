@@ -190,10 +190,10 @@ class SearchSurfaceCheckSkill(BaseSkill[SearchSurfaceCheckInput, SearchSurfaceCh
         "検索KW群のTikTok/Instagramの検索面（誰のどんな投稿が上位に出るか）を取得し、"
         "面の勢力図（ニュース/グルメ/一般/公式/インフルエンサーの割合）とクライアント動画の"
         "在圏判定つきの媒体比較レポート(HTML署名URL)を作る。"
-        "まず本ツールを呼び、status=needs_input なら確認文をそのまま返して答えを待つ"
-        "（答えたら confirmed=true・max_videos・competitor_accounts で呼び直す）。"
-        "TikTok面は3KW以上なら必ず先に tiktok_acquire(videos_per_kw=0) を実行し、"
-        "acquire_job_id を渡すこと（1〜2KWの即席チェックのみ直接取得可）。"
+        "KW数に関係なく、まず本ツールを confirmed なしで呼ぶ。status=needs_input なら確認文を"
+        "そのまま返して答えを待ち、答えたら confirmed=true・max_videos・competitor_accounts を"
+        "付けて進める。そのうえで TikTok面が3KW以上なら tiktok_acquire(videos_per_kw=0) を"
+        "実行して acquire_job_id を渡して呼び直す（1〜2KWの即席チェックのみ直接取得可）。"
         "動画の中身分析は video_algorithm、X(Twitter)の声集めは x_voice_search。"
     )
     input_schema: ClassVar[type[BaseModel]] = SearchSurfaceCheckInput

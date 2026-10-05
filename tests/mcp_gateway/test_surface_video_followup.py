@@ -967,7 +967,8 @@ async def test_one_shot_failure_still_delivers_the_surface_results(
     post = slack.posts[0]
     body = _blocks_text(post["blocks"])
     assert post["blocks"][0]["text"]["text"] == f"検索上位チェック「{KEYWORD}」"
-    assert "検索上位の結果だけお届けします" in body
+    assert "は分析できず、検索上位だけお届けします。動画の取得・変換で一時的な不具合" in body
+    assert ":hourglass" not in body
     assert "<https://s3.example/surface-1|レポートを開く>" in body  # 1 段目のレポートは残す
     assert "動画の取得・変換で一時的な不具合" in post["text"]
     assert "MEDIA_" not in post["text"] and "MEDIA_" not in body

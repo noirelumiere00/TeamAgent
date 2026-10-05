@@ -264,3 +264,35 @@ def test_videos_are_analyzed_with_their_own_keyword() -> None:
     # 総合 1 位（両 KW に出る video/1・一番上は HIS 1 位）と 2 位（video/3・JTB 1 位）、3 位（video/2）
     assert engine.calls == [("HIS", [1, 3]), ("JTB", [2])]
     assert result.keyword == "HIS・JTB"
+
+
+def test_one_shot_message_keeps_every_surface_and_the_report_with_four_surfaces() -> None:
+    """2 KW × TikTok/IG（4 面）＋10 本でも、面の節とレポートのリンクは残る（削るのは後ろから）。"""
+    from teamagent.skills._shared.slack_blocks import MAX_BLOCKS, MAX_TOTAL_TEXT, text_size
+    from teamagent.skills.search_surface_check.slack_render import one_shot_message
+    from tests.skills.search_surface_check.test_video_followup import (
+        _first_stage,
+        _followup,
+        _input,
+        _skill,
+    )
+
+    skill, *_ = _skill()
+    out = _first_stage(skill)
+    base = out.surfaces[0]
+    surfaces = [
+        base.model_copy(update={"keyword": kw, "platform": pf})
+        for kw in ("HIS 海外旅行", "JTB 国内旅行")
+        for pf in ("tiktok", "instagram")
+    ]
+    four = out.model_copy(
+        update={"surfaces": surfaces, "keywords": ["HIS 海外旅行", "JTB 国内旅行"]}
+    )
+    result = _followup(skill, out, max_videos=10)
+    rich = one_shot_message(four, _input(), result)
+    assert rich is not None
+    assert len(rich.blocks) <= MAX_BLOCKS and text_size(rich.blocks) <= MAX_TOTAL_TEXT
+    body = "\n".join(b.get("text", {}).get("text", "") for b in rich.blocks if "text" in b)
+    for kw in ("HIS 海外旅行", "JTB 国内旅行"):
+        assert body.count(f"「{kw}」") >= 2  # TikTok と Instagram の節
+    assert f"<{result.report_url}|レポートを開く>" in body

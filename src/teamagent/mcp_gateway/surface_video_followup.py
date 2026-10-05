@@ -358,7 +358,8 @@ def _defer(output: Any, text: str) -> None:
 
 
 def one_shot_failed_note(keyword: str) -> str:
-    return f"上位の動画の中身「{keyword}」は分析できませんでした（検索上位の結果だけお届けします）"
+    # 注意書きは 120 字で切られるので短く（後ろに理由が続く）。
+    return f"動画の中身「{keyword}」は分析できず、検索上位だけお届けします"
 
 
 def _plain_reason(detail: str) -> str:
@@ -430,7 +431,8 @@ def one_shot_payload(
     # Block Kit で出すときは blocks しか読まれないので、理由（利用者向けの文）も注記に入れる。
     reason = _plain_reason(detail)
     note = one_shot_failed_note(keyword) + (f"。{reason}" if reason else "")
-    marked = stage1.model_copy(update={"followup_note": note})
+    # 「作成中」の印（砂時計）が付く followup_note ではなく、注意書きとして出す。
+    marked = stage1.model_copy(update={"warnings": [*stage1.warnings, note]})
     rich = render_or_none(
         lambda: surface_message(marked, skill_input),
         request_id=request_id,
