@@ -161,10 +161,15 @@ async def test_context_cut_by_whole_items() -> None:
     assert text.endswith(texts.CONTEXT_FOOTER)
 
 
-def test_build_notice_requires_both_values() -> None:
+def test_build_notice_requires_retention_and_contact_is_optional() -> None:
     assert texts.build_notice("", "") is None
     assert texts.build_notice("〇〇", "総務部") is None
-    assert texts.build_notice("30 日", "") is None
+    assert texts.build_notice("30 日", "〇〇") is None
+    # 問い合わせ先は任意（10-05 裁定「なしでOK」）: 空なら行ごと省く
+    no_contact = texts.build_notice("削除のご依頼まで", "")
+    assert no_contact is not None
+    assert "保持期間: 削除のご依頼まで" in no_contact
+    assert "お問い合わせ" not in no_contact and "{" not in no_contact
     notice = texts.build_notice("30 日", "総務部 aico-admin")
     assert notice is not None
     assert "〇〇" not in notice

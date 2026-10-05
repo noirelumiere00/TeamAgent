@@ -55,22 +55,25 @@ v1 では管理者の小俣さんだけが内容を見ることができます�
 システムのバックアップに最長 7 日、AI の呼出し記録に最低 60 日残り、\
 この 2 つは削除のご依頼でも消えません。\
 Aico との会話記録にも保持期間中は残ります（保持期間: {retention}）。\
-退職したときは本人メモを自動で消します。
-
-お問い合わせ: {contact}"""
+退職したときは本人メモを自動で消します。{contact_line}"""
 
 
 def build_notice(retention: str | None = None, contact: str | None = None) -> str | None:
-    """告知文。保持期間と問い合わせ先が決まっていなければ None（未確定のまま送らない）。"""
+    """告知文。保持期間が決まっていなければ None（未確定のまま送らない）。
+
+    問い合わせ先は任意（2026-10-05 小俣さん裁定「なしでOK」）。空なら「お問い合わせ」の行ごと省く。
+    どちらも「〇〇」（文案の仮置き）が残っていれば None。
+    """
     retention = (
         retention if retention is not None else os.environ.get(NOTICE_RETENTION_ENV, "")
     ).strip()
     contact = (contact if contact is not None else os.environ.get(NOTICE_CONTACT_ENV, "")).strip()
-    if not retention or not contact or "〇〇" in retention or "〇〇" in contact:
+    if not retention or "〇〇" in retention or "〇〇" in contact:
         return None
     if len(retention) > 60 or len(contact) > 120:
         return None
-    return _NOTICE_TEMPLATE.format(retention=retention, contact=contact)
+    contact_line = f"\n\nお問い合わせ: {contact}" if contact else ""
+    return _NOTICE_TEMPLATE.format(retention=retention, contact_line=contact_line)
 
 
 # --- 返信前に差し込む枠 ---------------------------------------------------------------------
