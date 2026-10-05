@@ -1411,6 +1411,84 @@ class PgVectorClient:
         )
         return hits
 
+    def search_topic_by_terms(
+        self,
+        conn: psycopg.Connection[dict[str, Any]],
+        embedding: list[float],
+        *,
+        topic: str,
+        terms: list[str],
+        limit: int = 5,
+        embedding_col: str = "embedding",
+        request_id: str | None = None,
+    ) -> list[SearchHit]:
+        """topic の文書のうち、本文か題名に terms のどれかを含むチャンク（意味の近い順）。
+
+        10-05: 「ADK経由で受注した〜」で、#proj-01 の案件決定投稿（本文に「代理店：ADK」）が
+        意味の近さだけでは候補に入らない。代理店名・社名のような固有名は文字で探す。
+        RLS は conn 側で設定済み前提（本人が見られる文書だけ）。メタデータは文書の metadata を
+        そのまま載せる（channel_name・client_name 等を後段の表示がそのまま使える）。
+        """
+        clean = [t.strip() for t in terms if t and t.strip()]
+        if not clean or not topic or embedding_col not in ("embedding", "embedding_ctx"):
+            return []
+        patterns = [f"%{self._escape_like(t)}%" for t in clean]
+        sql = f"""
+            SELECT
+                abs(hashtext(c.id::text)::bigint) AS chunk_id,
+                COALESCE(c.contextualized, c.content) AS content,
+                1 - (c.{embedding_col} <=> %s::vector) AS score,
+                c.page_num,
+                d.source_uri,
+                d.source_type::text AS source_type,
+                d.title,
+                d.metadata AS doc_metadata,
+                to_char(d.modified_at AT TIME ZONE 'Asia/Tokyo', 'YYYY-MM-DD') AS updated_at
+            FROM chunks c
+            JOIN documents d ON d.id = c.document_id
+            WHERE d.metadata->>'topic' = %s
+              AND (c.content ILIKE ANY(%s) OR d.title ILIKE ANY(%s))
+            ORDER BY c.{embedding_col} <=> %s::vector
+            LIMIT %s
+        """  # nosec B608 — embedding_col は上の許可リストで縛っている
+        params: list[Any] = [embedding, topic, patterns, patterns, embedding, limit]
+        with conn.cursor() as cur:
+            cur.execute(sql, params)
+            rows = cur.fetchall()
+        hits: list[SearchHit] = []
+        for r in rows:
+            meta: dict[str, Any] = {
+                k: v for k, v in dict(r.get("doc_metadata") or {}).items() if isinstance(k, str)
+            }
+            meta.update(
+                {
+                    "source_uri": r.get("source_uri"),
+                    "source_type": r.get("source_type"),
+                    "title": r.get("title"),
+                }
+            )
+            if r.get("page_num") is not None:
+                meta["page_num"] = r["page_num"]
+            if r.get("updated_at"):
+                meta["updated_at"] = str(r["updated_at"])
+                meta["date_basis"] = "modified_at"
+            hits.append(
+                SearchHit(
+                    chunk_id=int(r["chunk_id"]),
+                    content=str(r["content"]),
+                    score=max(0.0, min(1.0, float(r["score"]))),
+                    metadata=meta,
+                )
+            )
+        logger.info(
+            "pgvector_search_topic_by_terms",
+            request_id=request_id,
+            topic=topic,
+            terms=len(clean),
+            hit_count=len(hits),
+        )
+        return hits
+
     def resolve_file_urls_by_titles(
         self,
         conn: psycopg.Connection[dict[str, Any]],

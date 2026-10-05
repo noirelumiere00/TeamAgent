@@ -138,6 +138,7 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
         rerank_return_size: int = 100,
         drive_pool_floor: int = 15,
         campaign_pool_floor: int = 3,
+        deal_pool_floor: int = 5,
         min_relevance: float = 0.0,
         min_relevance_fallback: float = 0.0,
         use_client_boost: bool = False,
@@ -227,6 +228,12 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
         # 実績を聞く意図（is_campaign_results_intent）のときだけ施策実績に限った検索を 1 回
         # 足す。順位は rerank が決める。0 で無効（＝従来挙動と完全一致）。
         self._campaign_pool_floor = campaign_pool_floor
+        # 2026-10-05: 案件決定（#proj-01 の新規案件投稿・案件決定 V2 シート＝topic「案件決定」）の
+        # リコール床。「ADK経由で受注した〜」に「#proj-01 も見て」と添えないと届かなかった
+        # （小俣さん: 言われなくても自動で検索対象に入れる）。受注・案件決定・代理店経由などを
+        # 聞かれたときだけ、案件決定に限った dense 検索と、質問の固有名（ADK 等）を本文に含む
+        # 案件決定の文字検索を 1 回ずつ足す。順位は rerank が決める。0 で無効。
+        self._deal_pool_floor = deal_pool_floor
         # Sprint 5: 反ハルシネーション閾値。Rerank relevance がこの値未満の hit は
         # 「根拠として弱い」とみなし落とす。全 hit が落ちれば 0 件 = Bot は
         # 「資料に記載がありません」と返し、無い情報を捏造しない。
@@ -1030,6 +1037,14 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
                     metadata_contains=mc,
                     exclude_recurring=excl_recurring,
                 )
+                # 2026-10-05: 案件決定のリコール床（受注・代理店経由などを聞かれたとき）。
+                hits = self._apply_deal_floor(
+                    conn=conn,
+                    embedding=embedding,
+                    hits=hits,
+                    input=input,
+                    request_id=ctx.request_id,
+                )
                 # M1 資料の被り対策。**プール段階（rerank の前）**に噛ませる。
                 # 旧実装は rerank→top_k 後段に置いていたため、最良 doc が 2 chunk に圧縮され
                 # 最終件数が top_k 未満に痩せていた。rerank 前に畳む/cap することで、rerank は
@@ -1550,6 +1565,80 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
             added=len(added),
             pool_before=len(hits),
             top_score=(added[0].score if added else None),
+        )
+        return list(hits) + added
+
+    def _apply_deal_floor(
+        self,
+        *,
+        conn: Any,
+        embedding: list[float],
+        hits: list[SearchHit],
+        input: SearchInput,
+        request_id: str,
+    ) -> list[SearchHit]:
+        """決まった案件を聞かれたとき、案件決定（topic=案件決定）を rerank プールへ足す。
+
+        **なぜ必要か（10-05）**: 「ADK経由で受注したショート動画施策を知りたい」に、
+        #proj-01 の案件決定投稿（本文に「代理店：ADK」）が候補に入らず、利用者が
+        「#proj-01案件決定-同行依頼 も見て」と添える必要があった。投稿は定型文で長く、意味の
+        近さでは提案書や営業 FB に負ける。代理店名・社名は意味ではなく文字で当たる。
+
+        **やること**（is_deal_intent が True のときだけ・1 回ずつ）:
+          1. 案件決定に限った dense 検索（sticky topic=案件決定。自動の分類フィルタ・取引先の
+             ILIKE・業種は渡さない＝案件決定の投稿はそれらを持たないことがある）
+          2. 質問の固有名（英字・カタカナの社名。一般語は除く）を本文か題名に含む案件決定
+        どちらも足すだけで、順位は後段の rerank が決める。失敗しても検索本体は続ける。
+        """
+        from teamagent.skills.search.knowledge_query import deal_query_terms, is_deal_intent
+
+        floor = self._deal_pool_floor
+        if floor <= 0 or not self._use_cohere_rerank or not is_deal_intent(input.query):
+            return hits
+        added: list[SearchHit] = []
+        seen = {h.chunk_id for h in hits}
+        terms = deal_query_terms(input.query)
+        try:
+            dense = self._pgvector.search_similar_new_schema(
+                conn=conn,
+                embedding=embedding,
+                limit=floor,
+                request_id=request_id,
+                sticky_filters={"topic": "案件決定"},
+                exclude_boilerplate=self._exclude_boilerplate,
+                embedding_col=self._embedding_column,
+            )
+            lexical = (
+                self._pgvector.search_topic_by_terms(
+                    conn,
+                    embedding,
+                    topic="案件決定",
+                    terms=terms,
+                    limit=floor,
+                    embedding_col=self._embedding_column,
+                    request_id=request_id,
+                )
+                if terms
+                else []
+            )
+        except Exception as exc:  # 補助検索の失敗で検索本体を壊さない（fail-open）
+            logger.warning(
+                "search_deal_floor_failed", request_id=request_id, error=type(exc).__name__
+            )
+            return hits
+        for h in [*lexical, *dense]:
+            if h.chunk_id in seen:
+                continue
+            seen.add(h.chunk_id)
+            added.append(h)
+        logger.info(
+            "search_deal_floor_applied",
+            request_id=request_id,
+            terms=len(terms),
+            lexical=len(lexical),
+            dense=len(dense),
+            added=len(added),
+            pool_before=len(hits),
         )
         return list(hits) + added
 
