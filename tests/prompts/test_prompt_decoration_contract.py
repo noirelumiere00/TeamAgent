@@ -115,6 +115,7 @@ PY_HUMAN_FACING_PROMPTS = (
     ("teamagent.skills.slack_summary.skill", "_SYSTEM_PROMPT"),
     ("teamagent.skills.slack_search.skill", "_SYSTEM_PROMPT"),
     ("teamagent.skills.web_research.prompts", "SYSTEM_PROMPT"),
+    ("teamagent.skills.meeting_prep.compose", "SYSTEM_PROMPT"),
 )
 
 # .py 側の対象外（理由は .md と同じ基準）。

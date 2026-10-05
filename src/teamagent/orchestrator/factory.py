@@ -183,6 +183,22 @@ def build_production_tools() -> list[ToolSpec]:
             )
         )
 
+    # 社外商談の準備レポート（v1＝DM でのオンデマンド・10-05）。今日の社外商談 1 件について
+    # 公開情報（web_research）・金庫（共有 search・CRM の代わり）・相手とのメール（metadata のみ）を
+    # 集めて出典つきで短く整理する。**既定 OFF**（USE_MEETING_PREP_TOOL=1）。
+    # DM 限定（DM_ONLY_TOOLS）。段階公開は MEETING_PREP_ALLOWED_EMAILS（空＝全員）。
+    if _envflag("USE_MEETING_PREP_TOOL"):
+        from teamagent.skills.meeting_prep.skill import MeetingPrepSkill
+
+        specs.append(
+            ToolSpec(
+                MeetingPrepSkill.name,
+                MeetingPrepSkill.description,
+                MeetingPrepSkill,
+                factory=lambda: MeetingPrepSkill(search=search),
+            )
+        )
+
     # recommend: 新規案件概要 → 類似の過去 提案書/議事録/営業FB をベクトル近傍で3カテゴリ提示。
     # **既定 OFF**（USE_RECOMMEND_SKILL=1 で opt-in）。SearchSkill.retrieve_hits を再利用するため
     # 共有 search を注入（埋め込み二重ロード回避）。Bedrock 要約はせず近傍提示のみ＝DB/Bedrock

@@ -319,6 +319,13 @@
       "terraformGate": "use_web_research_tool",
       "defaultEnabledByTerraform": false,
       "enabledBy": { "kind": "envAllTrue", "names": ["USE_WEB_RESEARCH_TOOL"] }
+    },
+    {
+      "name": "meeting_prep",
+      "effect": "meeting-prep-read-mail-vault-web",
+      "terraformGate": "USE_MEETING_PREP_TOOL=false",
+      "defaultEnabledByTerraform": false,
+      "enabledBy": { "kind": "envAllTrue", "names": ["USE_MEETING_PREP_TOOL"] }
     }
   ]
 }

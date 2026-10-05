@@ -308,6 +308,9 @@
             // web_research: 公開Webの市場リサーチ（Gemini Google検索グラウンディング・read-only）。
             // 社内資料・案件・顧客名の照会は絶対に回さない（USE_WEB_RESEARCH_TOOL=1・既定OFF）。
             "web_research",
+            // meeting_prep: 今日の社外商談 1 件の準備レポート（公開情報・金庫・相手とのメールを出典つきで）。
+            // DM 限定（USE_MEETING_PREP_TOOL=1・既定OFF）。
+            "meeting_prep",
             // morning_digest は EventBridge Scheduled Taskに加えてmention-capable MCPにもincludeされる。
             // MCP taskはDRAFT_ON_DEMAND_ONLY=trueを必須化し、mentionからの自動Gmail draftを拒否する。
             // USE_MORNING_DIGEST_TOOL=1 が必要。
