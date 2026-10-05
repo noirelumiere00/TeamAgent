@@ -15,6 +15,7 @@ import asyncio
 import json
 import threading
 import time
+import uuid
 from collections.abc import Callable
 from typing import Any, ClassVar
 
@@ -894,6 +895,15 @@ async def test_followup_is_queued_with_the_automatic_priority(
 
 
 def _one_shot(monkeypatch: pytest.MonkeyPatch, *, direct: bool = False) -> None:
+    # 前のテストの裏のジョブが遅れて終わると、差し替え済みの CACHE に同じ鍵（同じ人・KW・URL）で
+    # 結果を書き込み、このテストが「使い回し」に入ってしまう（CI で実測）。鍵にテストごとの印を付ける。
+    nonce = uuid.uuid4().hex
+    original_key = surface_video_followup.reuse_key
+    monkeypatch.setattr(
+        surface_video_followup,
+        "reuse_key",
+        lambda user, kw, urls: original_key(user, kw, urls) + "\x1f" + nonce,
+    )
     monkeypatch.setattr(
         surface_video_followup,
         "load_policy",
