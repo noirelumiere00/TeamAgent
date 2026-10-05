@@ -906,6 +906,7 @@ DM_ONLY_TOOLS: frozenset[str] = frozenset(
         "mail_reply",
         "mail_to_internal_context",
         "morning_digest",
+        "meeting_prep",
     }
 )
 DM_ONLY_MESSAGE = (

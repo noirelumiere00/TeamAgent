@@ -246,6 +246,7 @@ mail_draft の個別則: token 引数は `draft_token`、リンクは `open_url`
 - 受信メールの要約は `mail_summary`、社内資料の検索は `search`。
 - 低リテラシーな言い回し（「まとめて」「なんの話？」「結局どうなった？」）もスレッドの中で言われたらこの tool。
 - **Slack 内の検索**（「Slack で〜を探して」「誰かが〜と言っていた」「#〇〇 も見て」）は `slack_search`。チャンネル名だけなら `query` に `in:#名前 検索語`（ID やリンクを求めない）。`message` はそのまま返す。社内資料も頼まれたら `search` も呼ぶ。
+- **商談の準備**（「次の商談の準備」）は `meeting_prep`（DM のみ）。`message` はそのまま返す。
 
 ## 添付ファイルの読取・加工（attachment_assist）
 
