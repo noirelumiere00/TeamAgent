@@ -226,3 +226,41 @@ def test_across_keywords_note_says_ranks_are_combined() -> None:
     assert plain is not None and combined is not None
     assert "全キーワードの総合" not in plain.text
     assert "全キーワードの総合" in combined.text
+
+
+def test_videos_are_analyzed_with_their_own_keyword() -> None:
+    """全 KW から選んだら、テロップ・発話の KW 判定の基準（query）を動画ごとの KW にする。
+
+    変異: query を「HIS・JTB」の 1 回呼びに戻すと、呼び出しが 1 回になり赤。
+    """
+    from teamagent.skills.base import SkillContext
+    from teamagent.skills.video_algorithm.schema import AnalyzedVideo
+
+    class _Engine:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, list[int]]] = []
+
+        @staticmethod
+        def reserve_video_quota(ctx: SkillContext, count: int) -> int:
+            return count
+
+        def analyze_videos(self, metas: list[Any], *, query: str, **kw: Any) -> list[Any]:
+            self.calls.append((query, [m.rank for m in metas]))
+            return [AnalyzedVideo(meta=m, error="analysis failed") for m in metas]
+
+    out = _out(
+        ("HIS", [_post("HIS", 1, 1), _post("HIS", 2, 2)]),
+        ("JTB", [_post("JTB", 1, 3), _post("JTB", 2, 1)]),
+    )
+    videos = select_followup_videos(out, 3)
+    engine = _Engine()
+    skill = SearchSurfaceCheckSkill(video_engine=engine, publisher=lambda *a, **k: None)
+    result = skill.run_video_followup(
+        out,
+        SearchSurfaceCheckInput(keywords=["HIS", "JTB"], platforms=["tiktok"]),
+        SkillContext(request_id="r", metadata={"user_email": "s-komata@vectorinc.co.jp"}),
+        videos=videos,
+    )
+    # 総合 1 位（両 KW に出る video/1・一番上は HIS 1 位）と 2 位（video/3・JTB 1 位）、3 位（video/2）
+    assert engine.calls == [("HIS", [1, 3]), ("JTB", [2])]
+    assert result.keyword == "HIS・JTB"

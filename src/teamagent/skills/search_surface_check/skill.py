@@ -830,20 +830,30 @@ class SearchSurfaceCheckSkill(BaseSkill[SearchSurfaceCheckInput, SearchSurfaceCh
                 slack_text=build_quota_exhausted_text(keyword),
             )
         chosen = videos[:reserved]
-        analyzed: list[AnalyzedVideo] = engine.analyze_videos(
-            [post_to_meta(p) for p in chosen],
-            query=keyword,
-            client_name=input.client_name,
-            request_id=ctx.request_id,
-            user_email=str(ctx.metadata.get("user_email") or ""),
-            # 構成表のコマ（場面ごと・幅 180px）と表紙は作る。Web プレビュー動画（1 本最大 6MB）は
-            # 使わないので作らない。場面ごとの役割・テロップ・発話・狙いはプロンプトの追記で頼む。
-            media_extras=True,
-            scene_frames=True,
-            frame_width=SCENE_FRAME_WIDTH,
-            preview=False,
-            system_addendum=load_prompt("search_surface_check", "v1", "scene_detail"),
-        )
+        # 「テロップ・発話に KW があるか」は検索 KW を基準に見る。全 KW から選んだときは、動画ごとに
+        # 一番上に出ている KW（post.keyword）でまとめて分析する（1 KW なら 1 回＝今と同じ）。
+        # KW ごとの呼び出しは順に回す（並列数は analyze_videos の中の 3 本のまま・429 対策）。
+        groups: dict[str, list[SurfacePost]] = {}
+        for post in chosen:
+            groups.setdefault(post.keyword, []).append(post)
+        analyzed: list[AnalyzedVideo] = []
+        for group_kw, group in groups.items():
+            analyzed += engine.analyze_videos(
+                [post_to_meta(p) for p in group],
+                query=group_kw,
+                client_name=input.client_name,
+                request_id=ctx.request_id,
+                user_email=str(ctx.metadata.get("user_email") or ""),
+                # 構成表のコマ（場面ごと・幅 180px）と表紙は作る。Web プレビュー動画（1 本最大
+                # 6MB）は使わないので作らない。場面ごとの役割・テロップ・発話・狙いはプロンプトの
+                # 追記で頼む。
+                media_extras=True,
+                scene_frames=True,
+                frame_width=SCENE_FRAME_WIDTH,
+                preview=False,
+                system_addendum=load_prompt("search_surface_check", "v1", "scene_detail"),
+            )
+        analyzed.sort(key=lambda v: v.meta.rank)
         cost = sum(float(v.cost_usd or 0.0) for v in analyzed)
         digest = digest_videos(analyzed, keyword=keyword, requested=requested, reserved=reserved)
         if digest.watched == 0 and not digest.cover_only_ranks:
