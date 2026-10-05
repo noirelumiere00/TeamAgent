@@ -181,3 +181,27 @@ def test_competitor_ranks_reach_the_summary_and_blocks() -> None:
     assert rich is not None
     body = "\n".join(b.get("text", {}).get("text", "") for b in rich.blocks)
     assert "• 競合: @GONOSARA <" in body and "@nobody_here 上位に無し" in body
+
+
+def test_one_shot_message_fits_slack_limits_with_ten_videos() -> None:
+    from teamagent.skills._shared.slack_blocks import MAX_BLOCKS, MAX_TOTAL_TEXT, text_size
+    from teamagent.skills.search_surface_check.slack_render import one_shot_message
+    from tests.skills.search_surface_check.test_video_followup import (
+        _first_stage,
+        _followup,
+        _input,
+        _skill,
+    )
+
+    skill, *_ = _skill()
+    out = _first_stage(skill)
+    result = _followup(skill, out, max_videos=10)
+    assert result.status == "ok" and len(result.videos) == 10
+    rich = one_shot_message(out, _input(), result)
+    assert rich is not None
+    assert len(rich.blocks) <= MAX_BLOCKS and text_size(rich.blocks) <= MAX_TOTAL_TEXT
+    body = "\n".join(b.get("text", {}).get("text", "") for b in rich.blocks if "text" in b)
+    assert "上位10本の動画の中身" in body
+    assert result.report_url and result.report_url in rich.text  # 最新のレポートだけ
+    assert out.report_url not in rich.text
+    assert "検索上位チェックの続き" not in body

@@ -614,6 +614,8 @@ resource "aws_ecs_task_definition" "mcp" {
       { name = "USE_SURFACE_VIDEO_FOLLOWUP", value = var.use_surface_video_followup },
       { name = "SURFACE_VIDEO_FOLLOWUP_ALLOWED_EMAILS", value = var.surface_video_followup_allowed_emails },
       { name = "SURFACE_VIDEO_FOLLOWUP_MAX_VIDEOS", value = var.surface_video_followup_max_videos },
+      # 2026-10-05: 全部そろえてから 1 通・全 KW の動画・取得前の確認（既定 OFF＝上の 2 段構え）。
+      { name = "SURFACE_VIDEO_ONE_SHOT", value = var.surface_video_one_shot },
       # 2026-09-28: 検索上位チェックの結果を mcp が DM へ直接投稿（既定 OFF・mcp_gateway/direct_summary.py）。
       # Aico が文面を組み直して URL を落とすのを止める。ON にしても allowlist が空なら誰にも適用しない。
       { name = "USE_DIRECT_SUMMARY_POST", value = var.use_direct_summary_post },
