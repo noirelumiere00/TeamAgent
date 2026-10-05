@@ -244,6 +244,10 @@ def test_unlock_matches_the_committed_declaration() -> None:
             "infra/codebuild/teamagent_core_media_release_contract.json",
         ]
         assert "pcre2 10.47-r1" in previous["reason"]
+        assert "ffmpeg-libavdevice-8.1.2-r3" in previous["reason"]
+        oc_previous = unlock["previous_scope_20261002_openclaw"]
+        assert oc_previous["scope_paths"] == ["infra/codebuild/openclaw_bundle_contract.json"]
+        assert "actual-image binary hash mismatch: /usr/bin/node" in oc_previous["reason"]
     else:
         assert unlock["scope_paths"] == []
         assert unlock["reason"] is None
