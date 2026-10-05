@@ -205,3 +205,20 @@ def test_one_shot_message_fits_slack_limits_with_ten_videos() -> None:
     assert result.report_url and result.report_url in rich.text  # 最新のレポートだけ
     assert out.report_url not in rich.text
     assert "検索上位チェックの続き" not in body
+
+
+def test_across_keywords_note_says_ranks_are_combined() -> None:
+    from teamagent.skills.search_surface_check.slack_render import followup_message
+    from tests.skills.search_surface_check.test_video_followup import (
+        _first_stage,
+        _followup,
+        _skill,
+    )
+
+    skill, *_ = _skill()
+    result = _followup(skill, _first_stage(skill))
+    plain = followup_message(result)
+    combined = followup_message(result.model_copy(update={"across_keywords": True}))
+    assert plain is not None and combined is not None
+    assert "全キーワードの総合" not in plain.text
+    assert "全キーワードの総合" in combined.text

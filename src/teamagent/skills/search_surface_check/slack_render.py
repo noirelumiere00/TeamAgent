@@ -787,6 +787,8 @@ def _followup_body(
         # 1 段目の集計の時刻（この追記を出した時刻ではない）。取り方は 1 段目の注記のとおり。
         about.append(f"{when} の検索上位チェックの続き")
     about.append(f"動画を見て分析 {d.watched}本")
+    if result.across_keywords:
+        about.append("順位は全キーワードの総合（複数のキーワードに出る動画が先・各順位はレポート）")
     if d.cover_only_ranks:
         about.append(f"{fmt_ranks(d.cover_only_ranks)}はサムネだけの分析のため集計外")
     if d.failed_ranks:

@@ -930,6 +930,7 @@ class SearchSurfaceCheckSkill(BaseSkill[SearchSurfaceCheckInput, SearchSurfaceCh
             # 直接投稿の Block Kit（slack_render.followup_message）が 1 本 1 行に使う。
             videos=followup_rows(analyzed),
             measured_epoch=out.measured_epoch,
+            across_keywords=any(v.kw_ranks for v in videos),
         )
 
     @staticmethod

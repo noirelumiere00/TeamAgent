@@ -348,3 +348,7 @@ class SurfaceVideoFollowupOutput(BaseModel):
     measured_epoch: int = Field(
         default=0, description="1 段目の実測の時刻（同じ検索回の続きと示す）"
     )
+    across_keywords: bool = Field(
+        default=False,
+        description="全 KW から選んだ（N位＝総合順位。KW ごとの表示順位はレポートに）",
+    )
