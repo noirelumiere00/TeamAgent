@@ -13,7 +13,7 @@
   },
   "source_runtime_contract": {
     "path": "infra/codebuild/teamagent_runtime_contract.json",
-    "sha256": "1cba7a3050b09b817c4f73b97017649998f939baea8bf06208e2c1bd0122e1b4"
+    "sha256": "d2c455279ce5fdd18c8a4bb828ccd75bb3df86a2bc9b0ccfdcc73cdb95369e06"
   },
   "app_html": {
     "bucket": "teamagent-dev-raw-files",
@@ -81,7 +81,7 @@
         {
           "key": "binary.python.sha256",
           "path": "/usr/bin/python3.14",
-          "sha256": "025d8125ab49b3d37b45ecafbb54fe199c5fd33ecad6595434820bec7bdca5be"
+          "sha256": "2796fb308e5e3ca82656e6744db8c8cc9d96c73358fc5e60001a6e1ba746016a"
         }
       ],
       "source_assertions": []
