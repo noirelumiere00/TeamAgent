@@ -713,6 +713,9 @@ resource "aws_ecs_task_definition" "mcp" {
       # 10-01 の mcp 便 r42 から本番 true（CLI の TD 差し替え）。ここを本番の実態に合わせる
       # （false のまま apply すると機能が消える・変数化はしない）。
       { name = "USE_SLACK_SEARCH_TOOL", value = "true" },
+      # 社外商談の準備レポート（meeting_prep・v1＝DM でのオンデマンド・10-05）。まず小俣さんだけで試す。
+      { name = "USE_MEETING_PREP_TOOL", value = "true" },
+      { name = "MEETING_PREP_ALLOWED_EMAILS", value = "s-komata@vectorinc.co.jp" },
       # attachment_assist: 会話に添付されたファイルの読取・加工（要約/修正案/議事録FMT/集計/英訳）。
       # 読取のみ（テキスト返答だけ・ファイル生成/再配信は P2 の別フラグ）。既定 false。
       # 解禁は 4 点セット: この env / effective-tool-scope.json / 契約テスト / OC イメージ再ビルド。
