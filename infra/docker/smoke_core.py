@@ -122,7 +122,7 @@ def main() -> None:
     assert os.environ["USER"] == os.environ["LOGNAME"] == "teamagent"
     assert pwd.getpwuid(10001).pw_name == "teamagent"
     assert os.environ["TEAMAGENT_RUNTIME_KIND"] == "core"
-    assert sys.version.startswith("3.14.8 ")
+    assert sys.version.split()[0].rstrip("+") == "3.14.8"
     assert _sha256(Path("/usr/bin/python3.14")) == EXPECTED_PYTHON_SHA256
     assert (
         _sha256(Path("/app/src/teamagent/connect_web/static/app.html"))
