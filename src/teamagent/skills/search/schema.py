@@ -194,6 +194,14 @@ class SearchHitOut(BaseModel):
         default=None,
         description="案件名/取引先（ナレッジ自動分類 cls_project）",
     )
+    entities: list[str] | None = Field(
+        default=None,
+        description=(
+            "資料に出る取引先/代理店/ブランド/コラボ名（自動分類 cls_entities）。"
+            "knowledge_deliver が『名指しの取引先の資料か』を判定するための内部フィールド"
+        ),
+        exclude=True,
+    )
     industry: str | None = Field(
         default=None,
         description=(
@@ -319,6 +327,14 @@ class SearchOutput(BaseModel):
     suggested_next: str | None = Field(
         default=None,
         description="次の一手（既存ツールを 1 つだけ・提案のみ）。無ければ出さない",
+    )
+    query_client: str | None = Field(
+        default=None,
+        description=(
+            "利用者が名指しした既知の取引先（明示 filter_client か、既知語彙への語境界つき一致。"
+            "自社名は除く）。knowledge_deliver が添付候補を絞るための内部フィールド"
+        ),
+        exclude=True,
     )
 
     @model_serializer(mode="wrap")

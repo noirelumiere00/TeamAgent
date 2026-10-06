@@ -52,7 +52,11 @@ from teamagent.skills.search.campaign_files import (
     links_footer,
     scope_by_industry,
 )
-from teamagent.skills.search.client_match import normalize_filter_client
+from teamagent.skills.search.client_match import (
+    hit_entities,
+    hit_is_about_client,
+    normalize_filter_client,
+)
 from teamagent.skills.search.composite import (
     MCP_SURFACE_CTX_KEY,
     SlackItem,
@@ -407,6 +411,9 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
         # cls_entities は「実際に登場する取引先・ブランド」を LLM が列挙したタグで競合を
         # 除外しないため、沈黙し過ぎたときに entities 判定だけ切れるようにしておく。
         self._client_guard_entities = self._envflag("SEARCH_CLIENT_GUARD_ENTITIES", default="true")
+        # 名指しの取引先があるとき、要約に渡すヒットをその取引先の資料に絞る（別取引先の数字・
+        # 施策を根拠のように混ぜない・2026-10-06 本番事故）。読む範囲は同じなので既定 ON。
+        self._summary_client_scope = self._envflag("SEARCH_SUMMARY_CLIENT_SCOPE", default="true")
         # クライアント語彙キャッシュの TTL（秒・既定 10 分）。
         self._client_vocab_ttl_s = self._envfloat("SEARCH_CLIENT_VOCAB_TTL_S", 600.0)
         # 施策実績（ショート動画DBの案件集計）に同じ施策の Drive 資料（レポート・提案書）と
@@ -601,6 +608,19 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
                     terms=0,
                 )
 
+        # 2-b''. 名指しの取引先があれば、要約に渡すヒットをその取引先の資料に絞る。
+        #        1 件も当たらなければ絞らない（該当なしの判定は judge_found の client_mismatch）。
+        if found and self._summary_client_scope and (asked := self._asked_client(probe)):
+            scoped = self._scope_to_client(summary_hits, asked)
+            if scoped and len(scoped) < len(summary_hits):
+                log.info(
+                    "search_summary_client_scope",  # 件数だけ（取引先名は出さない）
+                    request_id=ctx.request_id,
+                    kept=len(scoped),
+                    dropped=len(summary_hits) - len(scoped),
+                )
+                summary_hits = scoped
+
         # 2-c. 複合検索: 並行して投げた Slack 検索を回収する（失敗・時間切れは状態だけ持つ）。
         slack_lookup: SlackLookup | None = None
         if slack_pending is not None:
@@ -733,6 +753,8 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
                     channel_type=(str(meta["channel_type"]) if meta.get("channel_type") else None),
                     title=(str(meta["title"]) if meta.get("title") else None),
                     project=(str(meta["cls_project"]) if meta.get("cls_project") else None),
+                    # 取引先判定の口（search の警告と同じ SEARCH_CLIENT_GUARD_ENTITIES で切る）。
+                    entities=(hit_entities(h) or None) if self._client_guard_entities else None,
                     industry=(
                         str(meta.get("cls_industry") or meta.get("campaign_industry"))
                         if (meta.get("cls_industry") or meta.get("campaign_industry"))
@@ -760,6 +782,7 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
             slack_hits=([item.hit for item in slack_items] if slack_lookup is not None else None),
             slack_status=slack_lookup.status if slack_lookup is not None else None,
             suggested_next=suggested_next,
+            query_client=self._asked_client(probe),
         )
         total_ms = (time.perf_counter() - run_started) * 1000
         log.info(
@@ -894,6 +917,18 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
             return answer
         footer = links_footer(hits, answer)
         return f"{answer}\n\n{footer}" if footer else answer
+
+    def _scope_to_client(self, hits: list[SearchHit], asked: str) -> list[SearchHit]:
+        """``asked`` の資料と言えるヒットだけ（hit_is_about_client・別名込み・本文は見ない）。"""
+        asked_aliases = sorted(aliases(asked))
+        return [
+            h
+            for h in hits
+            if hit_is_about_client(
+                h, asked, aliases=asked_aliases, use_entities=self._client_guard_entities
+            )
+            is not None
+        ]
 
     @staticmethod
     def _asked_client(probe: dict[str, str] | None) -> str | None:
