@@ -554,6 +554,18 @@ class _TextBudget:
         parts.append(text)
         self.used_chars = projected
 
+    def charge(self, text: str) -> None:
+        """本文を保持せず文字数だけ数える（shape 単位抽出用・上限は append と共通）。"""
+        _report_progress(self.progress_callback)
+        if not text:
+            return
+        projected = self.used_chars + len(text)
+        if projected > self.max_chars:
+            raise _OfficeTextLimitExceededError(
+                f"Office extracted text exceeded {self.max_chars} characters"
+            )
+        self.used_chars = projected
+
 
 def _normalize_text(text: str) -> str:
     """NUL バイト除去 + 連続空白を 1 スペースに圧縮（pdf_extract.py と同じ流儀）."""
@@ -835,6 +847,151 @@ def extract_pptx_pages(
     return out
 
 
+_SHAPE_LINE_WS_RE = re.compile(r"[ \t\r\f\v　]+")
+
+
+def _shape_lines(raw: str) -> str:
+    """1 shape 分の文字列を「行は保つ・行内の空白は 1 個」に整える（NUL も落とす）。"""
+    lines = []
+    for line in raw.replace("\x00", "").split("\n"):
+        cleaned = _SHAPE_LINE_WS_RE.sub(" ", line).strip()
+        if cleaned:
+            lines.append(cleaned)
+    return "\n".join(lines)
+
+
+def _paragraph_text(paragraph: ElementTree.Element) -> str:
+    """``a:p`` 1 段落 → 文字列。run 同士は **区切りなし** で繋ぎ、``a:br`` は改行にする。
+
+    日本語の表題は 1 語が複数 run に割れていることが多い（「青葉レ」+「コード様」）。
+    ``extract_pptx_pages`` のように run ごとに空白を挟むと社名の途中に空白が入るので、
+    事例単位の切り出し（表題の照合）ではこちらを使う。
+    """
+    out: list[str] = []
+    text_tag = f"{{{_DRAWING_NS}}}t"
+    break_tag = f"{{{_DRAWING_NS}}}br"
+    for element in paragraph.iter():
+        if element.tag == text_tag and element.text:
+            out.append(element.text)
+        elif element.tag == break_tag:
+            out.append("\n")
+    return "".join(out)
+
+
+def _shape_text(element: ElementTree.Element, *, budget: _TextBudget) -> str:
+    """``p:sp`` の本文（段落ごとに改行）。"""
+    paragraphs = [_paragraph_text(p) for p in element.findall("./p:txBody/a:p", _NS)]
+    text = _shape_lines("\n".join(paragraphs))
+    budget.charge(text)
+    return text
+
+
+def _table_text(table: ElementTree.Element, *, budget: _TextBudget) -> str:
+    """``a:tbl`` → 「セル | セル」を行ごとに改行（表全体で 1 shape 扱い）。"""
+    rows: list[str] = []
+    for row in table.findall("./a:tr", _NS):
+        _report_progress(budget.progress_callback)
+        cells = []
+        for cell in row.findall("./a:tc", _NS):
+            cell_text = " ".join(
+                _shape_lines(_paragraph_text(p)).replace("\n", " ")
+                for p in cell.findall("./a:txBody/a:p", _NS)
+            ).strip()
+            cells.append(cell_text)
+        if any(cells):
+            rows.append(" | ".join(cells))
+    text = "\n".join(rows)
+    budget.charge(text)
+    return text
+
+
+def _collect_slide_shapes(
+    parent: ElementTree.Element,
+    out: list[str],
+    *,
+    budget: _TextBudget,
+) -> None:
+    """shape tree を **並び順のまま** 走査し、shape ごとの文字列を集める（group は再帰）。"""
+    shape_tag = f"{{{_PRESENTATION_NS}}}sp"
+    group_tag = f"{{{_PRESENTATION_NS}}}grpSp"
+    graphic_tag = f"{{{_PRESENTATION_NS}}}graphicFrame"
+    for child in list(parent):
+        _report_progress(budget.progress_callback)
+        if child.tag == shape_tag:
+            text = _shape_text(child, budget=budget)
+            if text:
+                out.append(text)
+        elif child.tag == group_tag:
+            _collect_slide_shapes(child, out, budget=budget)
+        elif child.tag == graphic_tag:
+            table = child.find(".//a:tbl", _NS)
+            if table is not None:
+                text = _table_text(table, budget=budget)
+                if text:
+                    out.append(text)
+
+
+def extract_pptx_slide_shapes(
+    data: bytes,
+    *,
+    expected_size: int | None = None,
+    expected_md5: str | None = None,
+    max_chars: int = MAX_OFFICE_EXTRACTED_CHARACTERS,
+    progress_callback: Callable[[], None] | None = None,
+) -> list[tuple[int, tuple[str, ...]]]:
+    """pptx → スライドごとの **shape 単位** の文字列（事例集 deck の切り出し用・2026-10-06）。
+
+    ``extract_office_pages`` と同じ有界検証（``_validate_office_payload``：サイズ・MD5・
+    ZIP 構造・圧縮率・XML 量・DTD 拒否）を先に通し、同じ bounded parser で読む。違いは:
+
+    - 空スライドも ``(番号, ())`` で返す（番号＝実際の並び順。欠番を作らない）
+    - スライドの文字列を 1 本に潰さず、shape ごとのタプルで返す（表題 shape の完全一致で
+      事例の表題を拾うため。shape をまたいで正規表現を当てると本文中の「◯◯様」を誤爆する）
+    - 段落内の run は区切りなしで繋ぐ（日本語の社名を割らない）。表は 1 shape にまとめる
+
+    例外: 上限超過・破損は ``OfficePayloadError``（category で分類）。黙って空を返さない。
+    """
+    _validate_office_payload(
+        data,
+        mime_type=PPTX_MIME,
+        expected_size=expected_size,
+        expected_md5=expected_md5,
+        progress_callback=progress_callback,
+    )
+    budget = _TextBudget(max_chars, progress_callback)
+    out: list[tuple[int, tuple[str, ...]]] = []
+    try:
+        with zipfile.ZipFile(BytesIO(data)) as package:
+            for index, slide_path in enumerate(
+                _ordered_slide_parts(package, progress_callback=progress_callback),
+                start=1,
+            ):
+                _report_progress(progress_callback)
+                slide = _xml_root(package, slide_path, progress_callback=progress_callback)
+                shape_tree = slide.find("./p:cSld/p:spTree", _NS)
+                shapes: list[str] = []
+                if shape_tree is not None:
+                    _collect_slide_shapes(shape_tree, shapes, budget=budget)
+                out.append((index, tuple(shapes)))
+    except _OfficeProgressCallbackError as exc:
+        raise exc.cause from exc
+    except _OfficeTextLimitExceededError as exc:
+        raise OfficePayloadError(
+            "unsafe_content_volume",
+            mime_type=PPTX_MIME,
+            actual_bytes=len(data),
+            expected_bytes=expected_size,
+        ) from exc
+    except (ElementTree.ParseError, OSError, RuntimeError, ValueError, zipfile.BadZipFile) as exc:
+        raise OfficePayloadError(
+            "corrupt_zip",
+            mime_type=PPTX_MIME,
+            actual_bytes=len(data),
+            expected_bytes=expected_size,
+        ) from exc
+    return out
+
+
 def _collect_sheet_cells(
     ws: object,
     sheet_index: int,
@@ -1013,5 +1170,6 @@ __all__ = [
     "extract_docx_text",
     "extract_office_pages",
     "extract_pptx_pages",
+    "extract_pptx_slide_shapes",
     "extract_xlsx_pages",
 ]

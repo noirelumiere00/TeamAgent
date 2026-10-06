@@ -123,3 +123,22 @@ def test_no_99_warehouse_entry() -> None:
     for f in raw["gdrive_folders"]:
         assert not str(f["folder_name"]).startswith("99"), f["folder_name"]
         assert "一次倉庫" not in str(f["folder_name"]), f["folder_name"]
+
+
+def test_case_corpus_deck_entry_is_the_ng_pptx_only() -> None:
+    """事例集 PPTX（2026-10-06）: 1 ファイルだけを事例単位で入れ、フォルダは gdrive に足さない。
+
+    フォルダ「…★クライアント展開NG」を gdrive_folders に足すと、同じ Drive ファイルの
+    ファイル単位文書ができ、別 spec からの UPSERT で NG 印が消える経路になる（gsheets の
+    事例集エントリの注記）。対外利用可否は ng・注記は定型句。
+    """
+    sources = load_ingest_sources(REAL_YAML, skip_placeholder=True)
+    (deck,) = sources.case_corpus_decks
+    assert deck.file_id == "1H0wd8fAZt2xFJS84A4ByrMx6rhxk1gIk"
+    assert deck.folder_id == "1fraqGng3mWr_5akXhM6q8XEYFPg2xEAp"
+    assert "展開NG" in deck.folder_name
+    assert deck.folder_id not in {f.folder_id for f in sources.gdrive_folders}
+    assert deck.extra_metadata["case_external_use"] == "ng"
+    assert deck.extra_metadata["case_external_use_note"]
+    assert "case_corpus" not in deck.extra_metadata  # 印はコードが必ず付ける（yaml で外せない）
+    assert 3 <= deck.min_cases <= 11  # 2026-10-06 時点の実 deck は 11 事例

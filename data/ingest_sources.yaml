@@ -187,10 +187,18 @@ gsheets:
       use_case: "決まった案件（同行依頼）の一覧・検索"
 
   # ---- 📍ショート動画施策事例集（マスター表）2026-09-11 追加・B-10 ----
-  # アポ前 事例ブリーフィング（pre_meeting_brief）が引く **唯一の母集団**。
+  # アポ前 事例ブリーフィング（pre_meeting_brief）の母集団の **1 つ**（2026-10-06 改）。
   #
-  # ⚠️ sheet_id は 2026-09-11 時点で未確定（ユーザーが Drive 上で探索中）。実 ID が
-  # 分かるまで yaml にはプレースホルダを置き、実運用では env で後入れする。
+  # ⚠️ 2026-10-06: このマスター表は **実在しない**（提案者の上條さんが示した事例の正本は
+  # Drive の事例集 PPTX だった）。母集団は
+  # 下の case_corpus_decks（事例集 PPTX）と、ショート動画データベースの案件文書
+  # （campaign_aggregate が case_corpus を付ける）の 2 本になった。
+  # このエントリは **残す**: env 未設定なら loader が落とすので取り込みには影響せず、
+  # 将来マスター表（担当者列・対外利用可否列を人が書く表）を作ったときの受け口になる
+  # （PPTX にもデータベースにも無い「営業担当」「対外利用可否」を持てるのはこの経路だけ）。
+  # 消すと env 後入れ・gid 必須・重複 sheet_id 拒否を固定しているテスト群も消すことになる。
+  #
+  # sheet_id は未確定のままなので、yaml にはプレースホルダを置き、実運用では env で後入れする。
   # **2 つとも必須**（どちらか欠けるとこのエントリは読み込まれない）:
   #     CASE_CORPUS_SHEET_ID=<spreadsheet id>
   #     CASE_CORPUS_SHEET_GID=<マスター表タブの gid>
@@ -225,12 +233,9 @@ gsheets:
   # v1 の対外利用可否の真実源はこのマスター表の列だけ（計画 §4 論点 2 の推奨 B）。
   # pptx フォルダ取込は C-11（Drive parents 実測 + 2 spec 跨ぎ 0 件の確認が前提）。
   #
-  # ⚠️ 母集団の選択はユーザー裁定待ち（2026-09-11）。実見メモ
-  # Artifacts/aico-inputs-20260911/case_corpus_columns_20260911.md は「専用の事例集
-  # スプレッドシートは不要。取り込み済みのナレッジ共有フォーム回答（上の 1 件目）が
-  # そのまま母集団に使える」と結論しており、本エントリと正面衝突している。
-  # メモ案を採る場合は **このエントリを消して上の 1 件目に case_corpus を足す**
-  # （同一 sheet_id の 2 重エントリにしない＝上の重複 sheet_id 注記のとおり）。
+  # （2026-09-11 の「母集団はユーザー裁定待ち／ナレッジ共有フォーム回答を使うメモ案」の注記は
+  #  10-06 に削除。ユーザー裁定は「事例集 PPTX＋金庫の施策実績で拾う」で確定した。ナレッジ
+  #  共有フォーム回答に case_corpus を足す案は採らない。）
   - sheet_id: "REPLACE_WITH_CASE_CORPUS_SHEET_ID"
     sheet_id_env: "CASE_CORPUS_SHEET_ID"
     sheet_name: "📍ショート動画施策事例集"
@@ -284,6 +289,38 @@ gsheets:
       campaign_aggregate: "true"
       topic: "施策実績"
       structure: "campaign-aggregate"
+
+# ============================================================
+# 事例集 PPTX（事例単位で取り込む）2026-10-06 追加
+# ============================================================
+# アポ前 事例ブリーフィング（pre_meeting_brief）の母集団（case_corpus='true'）を、提案者の
+# 上條さんが示した正本の PPTX から作る。1 事例 = 1 document（source_type='other'）。
+# - 切り方: 「全体結果ハイライト」を含むスライドが事例の始まり（直前の区切りスライドも含める）。
+#   表題「<会社>様：<ブランド>様」から client_name（社名の正規化）と case_brand を取る。
+#   詳細は src/teamagent/ingest/case_deck.py。
+# - gdrive kind の run で一緒に走る（本番の INGEST_SOURCES を変えずに動く）。
+# - **フォルダ（20260708_各社成功事例集★クライアント展開NG）は gdrive_folders に足さない**
+#   （上の gsheets 事例集の注記どおり。ファイル単位の文書を別に作ると NG 印が消える経路が
+#   できる）。ここで指定した 1 ファイルだけを事例単位で入れ、検索（DM の「◯◯の事例ある？」）
+#   にもこの事例文書が出る。deck まるごとの文書は作らない（同じ内容が二重に当たるため）。
+# - 対外利用可否: フォルダ名が「クライアント展開NG」なので全事例 ng（名前シグナルでも ng に
+#   なるが、注記の文言は下の case_external_use_note を出す）。
+# - min_cases 未満しか切り出せない run は何も書かない（既存の事例文書を残す・warning）。
+# - ACL は Drive の permissions をそのまま写す（gdrive 経路と同じ）。2026-10-06 時点は
+#   共有ドライブのメンバー個人＋グループ 2 つ（ドメイン全体共有ではない）。
+case_corpus_decks:
+  - file_id: "1H0wd8fAZt2xFJS84A4ByrMx6rhxk1gIk"
+    folder_id: "1fraqGng3mWr_5akXhM6q8XEYFPg2xEAp"
+    folder_name: "20260708_各社成功事例集★クライアント展開NG"
+    name: "ショート動画事例集（PPTX）"
+    description: |
+      ショート動画施策の成功事例集（44.8MB・11 事例・2026-10-06 時点）。事例ごとに表題 →
+      成果ハイライト（①②③）→ 全体結果ハイライト → 施策結果の表 … と続く。
+    min_cases: 5
+    extra_metadata:
+      topic: "ショート動画事例集"
+      case_external_use: "ng"
+      case_external_use_note: "クライアント展開NG（社内のみ）"
 
 shared_drives_crawl:
   # 2026-08-17 ユーザー裁定: 全共有ドライブ横断は停止する。

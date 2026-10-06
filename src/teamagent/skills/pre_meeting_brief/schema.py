@@ -57,6 +57,11 @@ class CaseRef(BaseModel):
         default="", max_length=60, description="注記の表示文言（スクラブ済み）"
     )
     source_title: str = Field(default="", max_length=120, description="出典資料名（出典節用）")
+    source_label: str = Field(
+        default="",
+        max_length=60,
+        description="出典の種類（render.CASE_SOURCE_LABELS の定数のみ・データ由来の文字列は不可）",
+    )
     source_uri: str = Field(
         default="",
         max_length=600,

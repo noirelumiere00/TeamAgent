@@ -800,6 +800,8 @@ def test_case_rows_become_documents_with_case_metadata(
     assert (docs_n, chunks_n) == (1, 1)
     md = repo.upsert_calls[0]["metadata"]
     assert md["case_corpus"] == "true"
+    # 出典の種類（pre_meeting_brief の出典ラベル。deck / campaign_db と並ぶ・2026-10-06）
+    assert md["case_source"] == "sheet"
     assert md["case_effect"] == "TTO80本でネガ情報比率を改善"
     assert md["case_product"] == "ジャングリア沖縄"
     assert md["case_owner"] == "清水"

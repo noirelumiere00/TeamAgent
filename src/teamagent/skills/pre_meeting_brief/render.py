@@ -20,7 +20,11 @@
       ※「北都リゾート」自体の実施事例はDrive上で確認できず（観光・テーマパークで近い実績）。
 
     — 出典 —
-    • 📍ショート動画施策事例集（マスター表・営業担当列より）
+    • 📍ショート動画事例集（PPTX）
+
+出典節の先頭には **実際に描いた事例の出典の種類**（``CASE_SOURCE_LABELS``）を並べる。
+2026-10-06 まで先頭に固定で出していた「📍ショート動画施策事例集（マスター表・営業担当列より）」
+は実在しないシートの名前だったので廃止した（母集団は事例集 PPTX とショート動画データベース）。
 """
 
 from __future__ import annotations
@@ -35,7 +39,12 @@ from teamagent.util.grapheme_cut import truncate_graphemes
 # 社外 MTG が 0 件の日の 1 行（節ごと消さない＝「予定が無い日」と区別できるようにする）。
 NO_EXTERNAL_LINE = "📌 本日は社外MTGなし"
 SOURCES_HEADER = "— 出典 —"
-MASTER_SHEET_SOURCE = "📍ショート動画施策事例集（マスター表・営業担当列より）"
+#: 出典の種類（documents.metadata.case_source）→ 出典節の 1 行。コード定数なので harden しない。
+CASE_SOURCE_LABELS: dict[str, str] = {
+    "deck": "📍ショート動画事例集（PPTX）",
+    "campaign_db": "📍ショート動画データベース",
+    "sheet": "📍ショート動画施策事例集（マスター表）",
+}
 # 送信時刻が下限 06:00 に張り付いた日に冒頭へ添える 1 行（DELTA §1）。
 EARLY_NOTICE_LINE = "⏰ 最初の予定が近いため、通常より短い間隔でお送りしています"
 
@@ -105,8 +114,12 @@ def _case_line(case: Any, *, multi_client: bool) -> str:
         paren = f"（{industry}）" if industry else ""
     effect = harden(getattr(case, "effect_display", ""), _MAX_EFFECT)
     effect_part = f"— {effect}" if effect else "— （効果は資料内・リンク参照）"
-    owner = harden(getattr(case, "owner_display", ""), 24) or "未登録"
-    line = f"└ {head}{company}{product_part}{paren} {effect_part} 社内担当: {owner}"
+    # ⚠️ 担当者が空なら **欄ごと出さない**。事例集 PPTX もショート動画データベースも担当者を
+    #   持たないので、旧実装のように取込アカウント（owner_email）で埋めると全事例に同じ人が
+    #   「社内担当」として並ぶ（誤情報）。「未登録」を全行に付けるのも同じく雑音になる。
+    owner = harden(getattr(case, "owner_display", ""), 24)
+    owner_part = f" 社内担当: {owner}" if owner else ""
+    line = f"└ {head}{company}{product_part}{paren} {effect_part}{owner_part}"
     note = harden(getattr(case, "external_use_note", ""), _MAX_NOTE)
     if note:
         line += f"  {note}"
@@ -163,11 +176,11 @@ def render_brief_lines(output: Any, day: _dt.date, *, early_notice: bool = False
         lines.append("")
         lines.append(f"…ほか {hidden} 件（表示上限）")
 
-    # ⚠️ harden は **データ由来の行だけ** に掛ける。コード定数（MASTER_SHEET_SOURCE）へ
+    # ⚠️ harden は **データ由来の行だけ** に掛ける。コード定数（CASE_SOURCE_LABELS）へ
     #   掛けると NFKC がリテラルの全角括弧まで半角化し、DELTA §3 の実物例と字面がズレる。
+    labels = frozenset(CASE_SOURCE_LABELS.values())
     sources = [
-        s if s == MASTER_SHEET_SOURCE else harden(s, 120)
-        for s in (getattr(output, "source_lines", []) or [])
+        s if s in labels else harden(s, 120) for s in (getattr(output, "source_lines", []) or [])
     ]
     sources = [s for s in sources if s]
     if sources:
@@ -178,8 +191,8 @@ def render_brief_lines(output: Any, day: _dt.date, *, early_notice: bool = False
 
 
 __all__ = [
+    "CASE_SOURCE_LABELS",
     "EARLY_NOTICE_LINE",
-    "MASTER_SHEET_SOURCE",
     "NO_EXTERNAL_LINE",
     "SOURCES_HEADER",
     "harden",

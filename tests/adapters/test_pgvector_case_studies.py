@@ -154,3 +154,37 @@ def test_industry_lookup_binds_the_name() -> None:
     _client().get_industry_for_client(conn, "花王")  # type: ignore[arg-type]
     assert conn.params[0] == {"name": "花王"}
     assert "花王" not in conn.sql[0]  # 文字列連結していない
+
+
+def test_brand_is_an_extra_match_key_in_stage1_and_2_only() -> None:
+    """事例集 deck のブランド（case_brand）でも段1/2 で当たる。母集団は広げない。
+
+    変異: 段1 の ``OR case_brand`` を消すと「【社外】<ブランド>様」の MTG で事例が出ない。
+    """
+    client = _client()
+    conn = _Conn()
+    client.list_case_studies(conn, client_name="北斗シスターズ", stage=1)  # type: ignore[arg-type]
+    sql = conn.sql[0]
+    assert "d.metadata->>'case_brand' = %(client)s" in sql
+    assert "d.metadata->>'case_corpus' = 'true'" in sql
+    # OR は括弧の中（母集団の AND を崩さない）
+    assert "AND (d.metadata->>'client_name' = %(client)s" in sql
+
+    conn = _Conn()
+    client.list_case_studies(conn, client_name="北斗シスターズ", stage=2)  # type: ignore[arg-type]
+    sql = conn.sql[0]
+    assert "d.metadata->>'case_brand' ILIKE %(client_like)s ESCAPE '\\'" in sql
+    assert "AND (d.metadata->>'client_name' ILIKE" in sql
+
+    for stage, kwargs in ((3, {"industry": "食品", "product": "x"}), (4, {"industry": "食品"})):
+        conn = _Conn()
+        client.list_case_studies(conn, stage=stage, **kwargs)  # type: ignore[arg-type]
+        assert "case_brand' =" not in conn.sql[0]
+        assert "case_brand' ILIKE" not in conn.sql[0]
+
+
+def test_projection_carries_case_source_for_the_source_label() -> None:
+    conn = _Conn()
+    _client().list_case_studies(conn, client_name="花王", stage=1)  # type: ignore[arg-type]
+    assert "d.metadata->>'case_source'" in conn.sql[0]
+    assert "AS case_source" in conn.sql[0]

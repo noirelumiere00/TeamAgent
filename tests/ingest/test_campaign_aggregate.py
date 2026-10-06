@@ -19,10 +19,15 @@ from unittest.mock import MagicMock
 import pytest
 
 from teamagent.ingest.campaign_aggregate import (
+    CampaignAggregate,
+    CampaignVideo,
     account_external_id,
+    account_metadata,
     aggregate_accounts,
     aggregate_campaigns,
     build_post_date_index,
+    campaign_case_effect,
+    campaign_case_metadata,
     campaign_external_id,
     campaign_metadata,
     campaign_title,
@@ -378,3 +383,86 @@ def test_real_yaml_short_video_db_entry_resolves_from_env(
     assert spec.extra_metadata.get("campaign_aggregate") == "true"
     assert [t.gid for t in spec.tabs] == [GID]
     assert spec.tabs[0].tab_name == "データベース"
+
+
+# ── 事例ブリーフの母集団への印（2026-10-06）────────────────────────────
+# 社名は架空。SQL の母集団（case_corpus='true'）は広げず、案件文書にだけ取込時に印を付ける。
+
+
+def _video(plays: str, posted_on: str = "") -> CampaignVideo:
+    return CampaignVideo(
+        url=f"https://t/v/{plays}",
+        account="acct",
+        text="",
+        plays=to_number(plays),
+        likes=None,
+        shares=None,
+        comments=None,
+        saves=None,
+        cost=None,
+        impressions=None,
+        ctr=None,
+        ad_name="",
+        advertiser="株式会社みらい製菓",
+        campaign="新作グミ",
+        posted_on=posted_on,
+    )
+
+
+def test_campaign_case_metadata_marks_case_corpus_with_normalized_client() -> None:
+    """変異: ``case_corpus`` を消す / client_name を広告主名の生値に戻すと赤。"""
+    agg = CampaignAggregate(
+        advertiser="株式会社みらい製菓",
+        campaign="新作グミ",
+        videos=(_video("1,000", "2026-01-05"), _video("40,000", "2026-02-01"), _video("500")),
+    )
+    meta = campaign_case_metadata(agg)
+    assert meta == {
+        "case_corpus": "true",
+        "case_source": "campaign_db",
+        # pre_meeting_brief の normalize_company と同じ正規化（「みらい製菓様」の MTG から段1で当たる）
+        "client_name": "みらい製菓",
+        "case_company": "株式会社みらい製菓",
+        "case_product": "新作グミ",
+        "case_effect": "投稿 3 本・合計 41,500 回再生（最大 40,000 回）・期間 2026-01-05〜2026-02-01",
+        # 対外利用可否の列は無い＝要確認（PR #420 の ExternalUse と同じ 3 値語彙）
+        "case_external_use": "unknown",
+    }
+    assert "case_owner" not in meta  # 担当者の列は無い＝付けない（取込アカウントで埋めない）
+    assert campaign_metadata(agg)["case_corpus"] == "true"
+    assert campaign_metadata(agg)["cls_project"] == "株式会社みらい製菓"  # 既存キーは不変
+
+
+def test_campaign_case_effect_omits_unknown_parts() -> None:
+    agg = CampaignAggregate(advertiser="みなと銀行", campaign="秋", videos=(_video("n/a"),))
+    assert campaign_case_effect(agg) == "投稿 1 本"
+    assert len(campaign_case_effect(agg)) <= 160
+
+
+def test_account_documents_are_not_case_corpus() -> None:
+    """投稿アカウント実績（事例ではない）には印を付けない。"""
+    for acc in aggregate_accounts(HEADERS, ROWS):
+        meta = account_metadata(acc)
+        assert "case_corpus" not in meta
+        assert "client_name" not in meta
+
+
+def test_pipeline_marks_only_campaign_documents_as_cases(monkeypatch: pytest.MonkeyPatch) -> None:
+    """毎晩全件 upsert される経路で、案件文書だけに印が付く（誤りは毎晩伝播するので固定）。"""
+    from teamagent.skills.pre_meeting_brief.classify import normalize_company
+
+    _install_fake_sheets(monkeypatch)
+    repo = _FakeRepository()
+    _run(_spec(aggregate=True), repo)
+    campaigns = [c for c in repo.upsert_calls if ":campaign:" in c["external_id"]]
+    accounts = [c for c in repo.upsert_calls if ":account:" in c["external_id"]]
+    assert campaigns and accounts
+    for doc in campaigns:
+        md = doc["metadata"]
+        assert md["case_corpus"] == "true"
+        assert md["case_source"] == "campaign_db"
+        assert md["client_name"] == normalize_company(md["advertiser"])
+        assert md["case_product"] == md["campaign"]
+        assert md["case_effect"].startswith(f"投稿 {md['video_count']} 本")
+    for doc in accounts:
+        assert "case_corpus" not in doc["metadata"]

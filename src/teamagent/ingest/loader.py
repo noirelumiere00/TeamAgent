@@ -104,6 +104,25 @@ class GSheetSpec:
 
 
 @dataclass(frozen=True)
+class CaseDeckSpec:
+    """case_corpus_decks[] の 1 件（事例集 PPTX を事例単位で取り込む・2026-10-06）。
+
+    ``gdrive_folders`` と違い **1 ファイルだけ** を対象にする。フォルダは Drive の一覧 API
+    でファイルの size / md5 / 更新日 / URL を引くためだけに使い、フォルダ配下の他の資料は
+    取り込まない（事例集のフォルダが「クライアント展開NG」でも通常の資料と混ざらない）。
+    """
+
+    file_id: str
+    folder_id: str
+    folder_name: str
+    name: str  # 表示名（documents.title の後半・本文の「出典」）
+    description: str = ""
+    # これ未満しか事例を切り出せなかった run は **何も書かない**（既存の事例文書を残す）。
+    min_cases: int = 3
+    extra_metadata: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
 class SharedDriveCrawlSpec:
     """共有ドライブ全自動 crawl の設定（Day 7, 2026-05-27 追加）。
 
@@ -144,6 +163,8 @@ class IngestSources:
     gdrive_exclude_folder_name_re: str | None = None
     gdrive_rulebook_root_folder_id: str | None = None
     slack_channel_prefixes: tuple[SlackChannelPrefixSpec, ...] = ()
+    # 事例集 PPTX（2026-10-06）。gdrive kind の run で一緒に走る（pipeline.IngestRunner.run）。
+    case_corpus_decks: tuple[CaseDeckSpec, ...] = ()
 
 
 # -----------------------------------------------------------
@@ -205,6 +226,9 @@ def load_ingest_sources(
         raw.get("gdrive_folders", []) or [], skip_placeholder=skip_placeholder
     )
     gsheets = _parse_gsheets(raw.get("gsheets", []) or [], skip_placeholder=skip_placeholder)
+    case_decks = _parse_case_corpus_decks(
+        raw.get("case_corpus_decks", []) or [], skip_placeholder=skip_placeholder
+    )
     shared_crawl = _parse_shared_drives_crawl(raw.get("shared_drives_crawl"))
     exclude_folder_name_re = _parse_exclude_folder_name_re(raw.get("gdrive_exclude_folder_name_re"))
     rulebook_root = _parse_rulebook_root_folder_id(raw.get("gdrive_rulebook_root_folder_id"))
@@ -219,6 +243,7 @@ def load_ingest_sources(
         slack_channel_prefixes=[p.name_prefix for p in slack_channel_prefixes],
         gdrive_folders=len(gdrive_folders),
         gsheets=len(gsheets),
+        case_corpus_decks=len(case_decks),
         shared_drives_crawl_enabled=shared_crawl is not None and shared_crawl.enabled,
         gdrive_exclude_folder_name_re=exclude_folder_name_re,
         gdrive_rulebook_root_folder_id=rulebook_root,
@@ -232,7 +257,56 @@ def load_ingest_sources(
         gdrive_exclude_folder_name_re=exclude_folder_name_re,
         gdrive_rulebook_root_folder_id=rulebook_root,
         slack_channel_prefixes=slack_channel_prefixes,
+        case_corpus_decks=case_decks,
     )
+
+
+def _parse_case_corpus_decks(
+    raw: list[dict[str, Any]], *, skip_placeholder: bool
+) -> tuple[CaseDeckSpec, ...]:
+    """``case_corpus_decks:`` をパースする。
+
+    file_id / folder_id のどちらかがプレースホルダならそのエントリだけ落とす（strict では
+    raise）。空・同じ file_id の重複・min_cases < 1 は設定ミスとして止める（同じ file を
+    2 回書くと、後に書いた方の extra_metadata が黙って勝つため）。
+    """
+    out: list[CaseDeckSpec] = []
+    seen: set[str] = set()
+    for item in raw:
+        file_id = str(item.get("file_id", "") or "").strip()
+        folder_id = str(item.get("folder_id", "") or "").strip()
+        if _is_placeholder(file_id) or _is_placeholder(folder_id):
+            if skip_placeholder:
+                logger.warning(
+                    "ingest_sources_skip_placeholder",
+                    section="case_corpus_decks",
+                    file_id=file_id,
+                )
+                continue
+            raise ValueError(f"case_corpus_decks entry has placeholder id: {file_id!r}")
+        if not file_id or not folder_id:
+            raise ValueError("case_corpus_decks には file_id と folder_id の両方が必要です")
+        if file_id in seen:
+            raise ValueError(f"case_corpus_decks に同じ file_id が 2 回あります: {file_id}")
+        seen.add(file_id)
+        min_cases = int(item.get("min_cases", 3))
+        if min_cases < 1:
+            raise ValueError(f"case_corpus_decks の min_cases が不正: {min_cases}")
+        name = str(item.get("name", "") or "").strip()
+        if not name:
+            raise ValueError(f"case_corpus_decks の name が空です: {file_id}")
+        out.append(
+            CaseDeckSpec(
+                file_id=file_id,
+                folder_id=folder_id,
+                folder_name=str(item.get("folder_name", "") or ""),
+                name=name,
+                description=str(item.get("description", "") or ""),
+                min_cases=min_cases,
+                extra_metadata=dict(item.get("extra_metadata", {}) or {}),
+            )
+        )
+    return tuple(out)
 
 
 def _parse_slack_channel_prefixes(
