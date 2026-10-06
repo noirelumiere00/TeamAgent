@@ -4125,7 +4125,8 @@ def test_exemption_closes_at_the_code_sunset(
 ) -> None:
     # Wall-clock literals on purpose: sliding the sunset constant must turn this
     # red.  2026-09-16: sunset slid 2026-09-15 -> 2026-10-15 (human gate, r24 blocked;
-    # drill path still NO-GO), literals moved with it.  The approval itself is dated just before the sunset so that it is
+    # drill path still NO-GO), literals moved with it.  2026-10-06: slid again
+    # 2026-10-15 -> 2026-11-15 (human gate 2026-09-24, drill still NO-GO).  The approval itself is dated just before the sunset so that it is
     # still live at that instant -- otherwise "approval is expired" would fire
     # first and the test would pass for the wrong reason.
     with pytest.raises(EVIDENCE.EvidenceError, match="forced rollback state mismatch"):
@@ -4134,10 +4135,10 @@ def test_exemption_closes_at_the_code_sunset(
             monkeypatch,
             operation="build",
             gate=_pinned_exemption_gate(),
-            now=dt.datetime(2026, 10, 15, 0, 0, tzinfo=dt.UTC),
-            approved_at="2026-10-14T23:30:00Z",
-            observed_at="2026-10-14T23:00:00Z",
-            expires_at="2026-10-15T00:30:00Z",
+            now=dt.datetime(2026, 11, 15, 0, 0, tzinfo=dt.UTC),
+            approved_at="2026-11-14T23:30:00Z",
+            observed_at="2026-11-14T23:00:00Z",
+            expires_at="2026-11-15T00:30:00Z",
             retention_until="2036-12-01T00:00:00+00:00",
         )
 

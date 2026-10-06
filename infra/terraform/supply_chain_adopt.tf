@@ -111,7 +111,8 @@ locals {
     # media-apk.lock と契約 artifact.apk-lock.sha256 を追随させた再レンダリング（apply_apklock.sh）。
     # 2026-10-05 publish 世代（Chainguard python ベースのバンプ）。r44 段4 の Trivy が core の py3-pip-wheel 26.2.1-r1（HIGH 2）で停止したため
     # ベースを上げ python 3.14.7→3.14.8。runtime 契約と release 契約の両方が動いた再レンダリング（apply_mcp_base_bump.py）。
-    "789b61fc498376bf719978add807ca132652cf3a11b1114f13ac3a4f1a064b76" = {
+    # 2026-10-06 publish 世代（初回リリース免除の延長 2026-10-15→2026-11-15・campaign expiry 2026-10-22→2026-11-22）。release_evidence.py だけが動いた再レンダリング（apply_release_exemption_extend.py）。
+    "2bab59f8232e62a5d85e29b6bd25a39db702ffbba7a44c50d6a9a1487d991dd2" = {
       content_type                  = "text/yaml"
       object_lock_retain_until_date = "2099-12-31T00:00:00Z"
     }
@@ -184,7 +185,8 @@ locals {
     # media-apk.lock と契約 artifact.apk-lock.sha256 を追随させた再レンダリング（apply_apklock.sh）。
     # 2026-10-05 publish 世代（Chainguard python ベースのバンプ）。r44 段4 の Trivy が core の py3-pip-wheel 26.2.1-r1（HIGH 2）で停止したため
     # ベースを上げ python 3.14.7→3.14.8。runtime 契約と release 契約の両方が動いた再レンダリング（apply_mcp_base_bump.py）。
-    "00bdc1203ac12b83af5d07fb19b5b65a1c7e1da4ae31f6d5839c08bf6199b0ff" = {
+    # 2026-10-06 publish 世代（初回リリース免除の延長 2026-10-15→2026-11-15・campaign expiry 2026-10-22→2026-11-22）。release_evidence.py だけが動いた再レンダリング（apply_release_exemption_extend.py）。
+    "27f147f0ce6e0bfb1a63d67d75b316af50d80afebe1db1228d86f4f1c086d5a6" = {
       content_type                  = "text/yaml"
       object_lock_retain_until_date = "2099-12-31T00:00:00Z"
     }
@@ -255,7 +257,8 @@ locals {
     # media-apk.lock と契約 artifact.apk-lock.sha256 を追随させた再レンダリング（apply_apklock.sh）。
     # 2026-10-05 publish 世代（Chainguard python ベースのバンプ）。r44 段4 の Trivy が core の py3-pip-wheel 26.2.1-r1（HIGH 2）で停止したため
     # ベースを上げ python 3.14.7→3.14.8。runtime 契約と release 契約の両方が動いた再レンダリング（apply_mcp_base_bump.py）。
-    "a6c0fbaa7c117ad86bc5e5505ae0d72f02ab9ab5fb2284d81c57fd801ff33d2a" = {
+    # 2026-10-06 publish 世代（初回リリース免除の延長 2026-10-15→2026-11-15・campaign expiry 2026-10-22→2026-11-22）。release_evidence.py だけが動いた再レンダリング（apply_release_exemption_extend.py）。
+    "7981b9a43b31743f9720ac6efc63190fe338f04e7f992af05cae60d5dea310e4" = {
       content_type                  = "text/yaml"
       object_lock_retain_until_date = "2099-12-31T00:00:00Z"
     }
@@ -454,18 +457,18 @@ removed {
 }
 
 import {
-  to = aws_s3_object.mcp_source_publisher_buildspec_generation["789b61fc498376bf719978add807ca132652cf3a11b1114f13ac3a4f1a064b76"]
-  id = "teamagent-dev-image-release-evidence/codebuild-buildspecs/teamagent-dev-mcp-source-publisher/789b61fc498376bf719978add807ca132652cf3a11b1114f13ac3a4f1a064b76.yml"
+  to = aws_s3_object.mcp_source_publisher_buildspec_generation["2bab59f8232e62a5d85e29b6bd25a39db702ffbba7a44c50d6a9a1487d991dd2"]
+  id = "teamagent-dev-image-release-evidence/codebuild-buildspecs/teamagent-dev-mcp-source-publisher/2bab59f8232e62a5d85e29b6bd25a39db702ffbba7a44c50d6a9a1487d991dd2.yml"
 }
 
 import {
-  to = aws_s3_object.image_attestor_buildspec_generation["00bdc1203ac12b83af5d07fb19b5b65a1c7e1da4ae31f6d5839c08bf6199b0ff"]
-  id = "teamagent-dev-image-release-evidence/codebuild-buildspecs/teamagent-dev-image-attestor/00bdc1203ac12b83af5d07fb19b5b65a1c7e1da4ae31f6d5839c08bf6199b0ff.yml"
+  to = aws_s3_object.image_attestor_buildspec_generation["27f147f0ce6e0bfb1a63d67d75b316af50d80afebe1db1228d86f4f1c086d5a6"]
+  id = "teamagent-dev-image-release-evidence/codebuild-buildspecs/teamagent-dev-image-attestor/27f147f0ce6e0bfb1a63d67d75b316af50d80afebe1db1228d86f4f1c086d5a6.yml"
 }
 
 import {
-  to = aws_s3_object.image_promoter_buildspec_generation["a6c0fbaa7c117ad86bc5e5505ae0d72f02ab9ab5fb2284d81c57fd801ff33d2a"]
-  id = "teamagent-dev-image-release-evidence/codebuild-buildspecs/teamagent-dev-image-promoter/a6c0fbaa7c117ad86bc5e5505ae0d72f02ab9ab5fb2284d81c57fd801ff33d2a.yml"
+  to = aws_s3_object.image_promoter_buildspec_generation["7981b9a43b31743f9720ac6efc63190fe338f04e7f992af05cae60d5dea310e4"]
+  id = "teamagent-dev-image-release-evidence/codebuild-buildspecs/teamagent-dev-image-promoter/7981b9a43b31743f9720ac6efc63190fe338f04e7f992af05cae60d5dea310e4.yml"
 }
 
 import {
