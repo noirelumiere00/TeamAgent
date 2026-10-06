@@ -261,6 +261,25 @@ def test_banner_and_handlers_when_enabled(e2e: tuple[dict[str, Any], _Store]) ->
     assert {"answer_feedback_up", "answer_feedback_down"} <= set(report["interactive"])
 
 
+def test_allowlist_limits_buttons_to_listed_askers(e2e: tuple[dict[str, Any], _Store]) -> None:
+    report, _ = e2e
+    allowlist = report["allowlist"]
+    assert allowlist["outside"] == 0  # 一覧に無い人（A）の返信には付かない
+    assert len(allowlist["posts"]) == 1  # 一覧の人（B・小文字と空白で書いても）には付く
+    assert allowlist["posts"][0]["body"]["channel"] == "D" + USER_B[1:]
+    assert {"answer_feedback_up", "answer_feedback_down"} <= set(allowlist["interactive"])
+    assert "answer_feedback=list:2" in allowlist["banner"]
+
+
+@pytest.mark.parametrize("flag", [f"{USER_A},bad-id", "0", f"{USER_A},,{USER_B}", "yes"])
+def test_invalid_flag_is_off(e2e: tuple[dict[str, Any], _Store], flag: str) -> None:
+    report, _ = e2e
+    result = report["invalidFlags"][flag]
+    assert result["posts"] == 0
+    assert result["interactive"] == []
+    assert "answer_feedback=off" in result["banner"]
+
+
 def test_plugin_and_mcp_share_the_token_contract() -> None:
     """plugin の定数（鍵ラベル・TTL・予約 ID・ツール名）が mcp 側の正本と一致する。"""
     source = CALLER_PLUGIN.read_text(encoding="utf-8")

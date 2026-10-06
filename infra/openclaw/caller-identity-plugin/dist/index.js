@@ -350,7 +350,11 @@ export function isReservedMemoryInvocation(value) {
 // メッセージを同じスレッド／DM へ投稿する。押下は Socket Mode でこの plugin に届き、mcp の隠しツール
 // answer_feedback_record を予約 ID（aico-fb-<32hex>・run_id == tool_call_id）と署名済み claim で直接呼んで
 // search_feedback へ記録する。押した後はメッセージを「ありがとうございます（👍 を記録しました）」に置き換える。
-// 既定 OFF（TEAMAGENT_ANSWER_FEEDBACK=1 かつ mcp の bearer と bot token があるときだけ動く）。
+// 既定 OFF。TEAMAGENT_ANSWER_FEEDBACK の値で対象者を決める（mcp の bearer と bot token も必須）:
+//   "1"                         … 全員の返信に付ける
+//   "U0123ABCD,U0456EFGH"       … その Slack ユーザー（質問した人）の返信にだけ付ける（試行用）
+//   空・"0"・それ以外の形（1 つでも不正な ID を含む）… OFF（fail-closed）
+// ID は前後の空白を落として大文字に正規化して比べる。
 //
 // 返信そのものに blocks を足さない理由（2026-10-06 確認）: 上流 openclaw@2026.7.1 の reply_payload_sending は
 // payload を丸ごと structuredClone して次へ渡す（hook-runner-global:292-310）が、ReplyPayload の型に blocks 欄は
@@ -397,6 +401,19 @@ const ANSWER_FEEDBACK_TOKEN_RE = /^([A-Za-z0-9_-]{1,1977})\.([A-Za-z0-9_-]{22})$
 const ANSWER_FEEDBACK_PAYLOAD_FIELDS = ["a", "e", "q", "t", "typ", "u", "v"];
 const ANSWER_ID_RE = /^[0-9a-f]{16}$/u;
 const FEEDBACK_CONTROL_RE = /[\u0000-\u001f\u007f]+/gu;
+
+// TEAMAGENT_ANSWER_FEEDBACK の解釈。返り値 {enabled, allowlist}。allowlist が null なら全員。
+// 不正な値は OFF に倒す（試行の範囲を黙って全員へ広げない）。
+export function parseAnswerFeedbackSetting(value) {
+  const raw = typeof value === "string" ? value.trim() : "";
+  if (raw === "1") return {enabled: true, allowlist: null};
+  if (!raw || raw === "0") return {enabled: false, allowlist: null};
+  const ids = raw.split(",").map(part => part.trim().toUpperCase());
+  if (ids.length === 0 || ids.some(id => !SLACK_USER_RE.test(id))) {
+    return {enabled: false, allowlist: null};
+  }
+  return {enabled: true, allowlist: new Set(ids)};
+}
 
 // モデル経路で回答評価のツール・予約 ID を名乗る呼び出しは拒否する（mcp 側の予約 ID 検査と二重化）。
 export function isAnswerFeedbackToolName(value) {
@@ -2226,8 +2243,11 @@ export function createCallerIdentityPlugin({
     mcpBearer !== null &&
     typeof fetchFn === "function";
   // 回答評価ボタン（AF）。flag と mcp の bearer と bot token と fetch がそろったときだけ。
+  // flag が ID の一覧なら、その人（質問した人）の返信にだけ付ける（parseAnswerFeedbackSetting）。
+  const answerFeedbackSetting = parseAnswerFeedbackSetting(env[ANSWER_FEEDBACK_ENV]);
+  const answerFeedbackAllowlist = answerFeedbackSetting.allowlist;
   const answerFeedbackEnabled =
-    String(env[ANSWER_FEEDBACK_ENV] ?? "").trim() === "1" &&
+    answerFeedbackSetting.enabled &&
     mcpBearer !== null &&
     slackBotToken !== null &&
     typeof fetchFn === "function";
@@ -4537,7 +4557,8 @@ export function createCallerIdentityPlugin({
     if (
       answerFeedbackEnabled &&
       tool === ANSWER_FEEDBACK_SEARCH_TOOL &&
-      trusted.ingressKind === "message"
+      trusted.ingressKind === "message" &&
+      answerFeedbackTargets(trusted.senderId)
     ) {
       rememberSearchRun(eventRunId, trusted, params, nowMs);
     }
@@ -5030,6 +5051,12 @@ export function createCallerIdentityPlugin({
   }
 
   // ── (AF) 回答評価ボタン ──────────────────────────────────────────────────────────
+  // 試行の対象者か（質問した人＝受信の送信者で決める。allowlist が null なら全員）。
+  function answerFeedbackTargets(senderId) {
+    if (answerFeedbackAllowlist === null) return true;
+    return typeof senderId === "string" && answerFeedbackAllowlist.has(senderId.toUpperCase());
+  }
+
   // search を呼んだ run の記録。検索語は最初の search のもの（利用者の質問に最も近い）を使う。
   function rememberSearchRun(runId, ingress, params, nowMs) {
     const existing = searchByRun.get(runId);
@@ -5517,7 +5544,13 @@ export function createCallerIdentityPlugin({
           ` slack_bot_token=${slackBotToken === null ? "no" : "yes"}` +
           ` button_direct=${buttonDirect ? "yes" : "no"}` +
           ` personal_memory=${personalMemoryEnabled ? "on" : "off"}` +
-          ` answer_feedback=${answerFeedbackEnabled ? "on" : "off"}`,
+          ` answer_feedback=${
+            !answerFeedbackEnabled
+              ? "off"
+              : answerFeedbackAllowlist === null
+                ? "on"
+                : `list:${answerFeedbackAllowlist.size}`
+          }`,
       );
     },
   };

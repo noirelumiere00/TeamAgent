@@ -12,7 +12,7 @@ let tsCounter = 0;
 const nextTs = () => `17844239${String(10 + tsCounter++).padStart(2, "0")}.000100`;
 const dmFor = user => `D${user.slice(1)}`;
 
-function makePlugin({ enabled = true, slackFail = {} } = {}) {
+function makePlugin({ enabled = true, flag = "1", slackFail = {} } = {}) {
   const handlers = new Map();
   const interactive = new Map();
   const logs = [];
@@ -53,7 +53,7 @@ function makePlugin({ enabled = true, slackFail = {} } = {}) {
       TEAMAGENT_MCP_BEARER: input.bearer,
       TEAMAGENT_MCP_URL: input.mcpUrl,
       SLACK_BOT_TOKEN: input.botToken,
-      ...(enabled ? { TEAMAGENT_ANSWER_FEEDBACK: "1" } : {}),
+      ...(enabled ? { TEAMAGENT_ANSWER_FEEDBACK: flag } : {}),
     },
     now: () => input.nowMs,
     fetchFn,
@@ -330,7 +330,37 @@ const B = input.userB;
   report.postFailure = { delivered: turn.delivered, logs: p.logs.filter(line => line.includes("answer feedback")) };
 }
 
-// 11. バナー
+// 11. 試行の対象者を絞る: ID の一覧（小文字・空白は正規化）なら、その人の返信にだけ付ける
+{
+  const p = makePlugin({ flag: ` ${B.toLowerCase()} , U0CCCCCCCCC` });
+  await dmTurn(p, A, { tools: [["teamagent__search", { query: "対象外の人" }]] });
+  const outside = feedbackPosts(p).length;
+  await dmTurn(p, B, { tools: [["teamagent__search", { query: "対象の人" }]] });
+  const posts = feedbackPosts(p);
+  report.allowlist = {
+    outside,
+    posts,
+    interactive: [...p.interactive.keys()],
+    banner: p.logs.find(line => line.includes("registered hooks=")) ?? null,
+  };
+}
+
+// 12. 不正な値・"0" は OFF（試行の範囲を黙って全員へ広げない）
+{
+  const results = {};
+  for (const flag of [`${A},bad-id`, "0", `${A},,${B}`, "yes"]) {
+    const p = makePlugin({ flag });
+    await dmTurn(p, A, { tools: [["teamagent__search", { query: "x" }]] });
+    results[flag] = {
+      posts: feedbackPosts(p).length,
+      interactive: [...p.interactive.keys()].filter(key => key.startsWith("answer_feedback")),
+      banner: p.logs.find(line => line.includes("registered hooks=")) ?? null,
+    };
+  }
+  report.invalidFlags = results;
+}
+
+// 13. バナー
 {
   const p = makePlugin();
   report.banner = p.logs.find(line => line.includes("registered hooks=")) ?? null;
