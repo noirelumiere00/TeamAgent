@@ -232,22 +232,15 @@ def test_unlock_matches_the_committed_declaration() -> None:
     """
     unlock = _freeze_doc()["unlock"]
     if unlock["active"]:
-        assert unlock["scope_paths"] == [
+        assert unlock["scope_paths"] == ["infra/codebuild/release_evidence.py"]
+        assert "2026-11-15T00:00:00Z" in unlock["reason"]
+        assert "human gate 2026-09-24" in unlock["gate"]
+        previous = unlock["previous_scope_20261006_base_bump"]
+        assert previous["scope_paths"] == [
             "infra/codebuild/teamagent_runtime_contract.json",
             "infra/codebuild/teamagent_core_media_release_contract.json",
         ]
-        assert "py3-pip-wheel 26.2.1-r1" in unlock["reason"]
-        assert "python 3.14.7→3.14.8" in unlock["reason"]
-        assert "human gate 2026-10-05" in unlock["gate"]
-        previous = unlock["previous_scope_20261005_core_media"]
-        assert previous["scope_paths"] == [
-            "infra/codebuild/teamagent_core_media_release_contract.json",
-        ]
-        assert "pcre2 10.47-r1" in previous["reason"]
-        assert "ffmpeg-libavdevice-8.1.2-r3" in previous["reason"]
-        oc_previous = unlock["previous_scope_20261002_openclaw"]
-        assert oc_previous["scope_paths"] == ["infra/codebuild/openclaw_bundle_contract.json"]
-        assert "actual-image binary hash mismatch: /usr/bin/node" in oc_previous["reason"]
+        assert "py3-pip-wheel 26.2.1-r1" in previous["reason"]
     else:
         assert unlock["scope_paths"] == []
         assert unlock["reason"] is None

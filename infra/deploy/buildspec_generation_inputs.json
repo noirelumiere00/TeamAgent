@@ -1,13 +1,13 @@
 {
   "schema_version": 1,
   "description": "PR2-A0.3 activation manifest の generation input 束縛。buildspec 世代の content-addressed key へ影響する入力を Generation Baseline 時点の git blob へ固定する。1 つでも変化したら STALE MANIFEST（adopt へ進まず manifest を再生成する）。検証: infra/deploy/verify_generation_inputs.py",
-  "generation_baseline": "8169a5e8809e315b36bb1b30aa0b8a7e6b56cc45",
+  "generation_baseline": "0810b2557332ee30e51d514c2a00415549df2e64",
   "inputs": {
     "infra/codebuild/mcp-source-publisher-buildspec.yml": "9cdb0123e96a8f79a0886d40c29efb4fa30dac15",
     "infra/codebuild/image-attestor-buildspec.yml": "d9b2573bd11f57914941be000b996d2afbc2ea32",
     "infra/codebuild/image-promoter-buildspec.yml": "adaf16dd1ebd090007f1ba9e16dc667f28a7406b",
     "infra/codebuild/source_provenance.py": "61884d2f820c8484f1bbd76f6a12ce8887a801ad",
-    "infra/codebuild/release_evidence.py": "407238d934184c3c8100b977979b3c98cc7def38",
+    "infra/codebuild/release_evidence.py": "cc88819c2401e365c6920ae64dfc4f8721c50893",
     "infra/codebuild/teamagent_bundle_provenance.py": "fb379e6999566de8f6588c20f141c71ff414dda8",
     "infra/codebuild/teamagent_schema_versions.py": "1e100f61fa15c4ae6eb4bcc4f054de849149d8cb",
     "infra/codebuild/teamagent_release_approval.py": "fd8f442f68f75bafdd6a239a378547050658d404",
@@ -39,9 +39,9 @@
     "evaluated_at": "2026-08-21T07:15:42Z"
   },
   "expected_generation_sha256": {
-    "teamagent-dev-mcp-source-publisher": "789b61fc498376bf719978add807ca132652cf3a11b1114f13ac3a4f1a064b76",
-    "teamagent-dev-image-attestor": "00bdc1203ac12b83af5d07fb19b5b65a1c7e1da4ae31f6d5839c08bf6199b0ff",
-    "teamagent-dev-image-promoter": "a6c0fbaa7c117ad86bc5e5505ae0d72f02ab9ab5fb2284d81c57fd801ff33d2a",
+    "teamagent-dev-mcp-source-publisher": "2bab59f8232e62a5d85e29b6bd25a39db702ffbba7a44c50d6a9a1487d991dd2",
+    "teamagent-dev-image-attestor": "27f147f0ce6e0bfb1a63d67d75b316af50d80afebe1db1228d86f4f1c086d5a6",
+    "teamagent-dev-image-promoter": "7981b9a43b31743f9720ac6efc63190fe338f04e7f992af05cae60d5dea310e4",
     "teamagent-dev-approval-publisher": "33e2a64353969f75e941a9524fcd76919c2dfcc7d192aabb67ecc09c9921ddf4"
   }
 }
