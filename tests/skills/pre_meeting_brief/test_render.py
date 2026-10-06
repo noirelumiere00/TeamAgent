@@ -5,8 +5,8 @@ from __future__ import annotations
 import datetime as _dt
 
 from teamagent.skills.pre_meeting_brief.render import (
+    CASE_SOURCE_LABELS,
     EARLY_NOTICE_LINE,
-    MASTER_SHEET_SOURCE,
     NO_EXTERNAL_LINE,
     SOURCES_HEADER,
     render_brief_lines,
@@ -72,7 +72,7 @@ def test_full_example_matches_delta_format() -> None:
         _out(
             items=[item],
             external_count=1,
-            source_lines=[MASTER_SHEET_SOURCE, "260706_事業本部ショート動画事例_v2.pptx"],
+            source_lines=[CASE_SOURCE_LABELS["deck"], "260706_事業本部ショート動画事例_v2.pptx"],
         ),
         DAY,
     )
@@ -90,9 +90,10 @@ def test_full_example_matches_delta_format() -> None:
     assert SOURCES_HEADER in text
     # ⚠️ 無害化（NFKC）はデータ由来の行だけに掛ける。コード定数の全角括弧は
     # 半角化しない＝DELTA §3 の実物例と字面が一致する。
-    # 変異: render の source 行で定数も harden に通すと「(マスター表…)」になり赤。
-    assert f"• {MASTER_SHEET_SOURCE}" in text
-    assert "（マスター表・営業担当列より）" in text
+    # 変異: render の source 行で定数も harden に通すと「(PPTX)」になり赤。
+    assert "• 📍ショート動画事例集（PPTX）" in text
+    # 実在しないシート名（2026-10-06 まで固定で出していた）は出さない。
+    assert "マスター表・営業担当列より" not in text
 
 
 def test_multi_client_uses_group_prefix() -> None:
@@ -150,7 +151,10 @@ def test_missing_effect_falls_back_to_fixed_text() -> None:
     )
     text = "\n".join(render_brief_lines(_out(items=[item]), DAY))
     assert "（効果は資料内・リンク参照）" in text
-    assert "社内担当: 未登録" in text
+    # 担当者が空なら欄ごと出さない（「未登録」を全行に並べない・取込アカウントで埋めない）。
+    # 変異: owner_part を「社内担当: 未登録」固定へ戻すと赤。
+    assert "社内担当" not in text
+    assert "未登録" not in text
 
 
 def test_uncertain_verdict_is_marked() -> None:

@@ -956,6 +956,8 @@ class PgVectorClient:
                 d.metadata->>'case_owner'           AS case_owner,
                 d.metadata->>'case_external_use'    AS case_external_use,
                 d.metadata->>'case_external_use_note' AS case_external_use_note,
+                d.metadata->>'case_source'          AS case_source,
+                d.metadata->>'case_brand'           AS case_brand,
                 COALESCE(d.metadata->>'case_industry',
                          d.metadata->>'cls_industry') AS case_industry,
                 to_char(d.modified_at AT TIME ZONE 'Asia/Tokyo', 'YYYY-MM-DD') AS updated_at
@@ -1022,10 +1024,16 @@ class PgVectorClient:
         """事例集から 1 段ぶんの候補を返す（段は呼び出し側が 1→2→3→4 と進める）。
 
         段の意味:
-          1. 完全一致（``client_name`` 等価）— **長さを問わず採用**（「花王」は 2 文字）
-          2. 部分一致（ILIKE・``%`` ``_`` ``\\`` はエスケープ）— 最小長は呼び出し側が担保
+          1. 完全一致（``client_name`` または ``case_brand`` 等価）— **長さを問わず採用**
+             （「花王」は 2 文字）
+          2. 部分一致（同じ 2 キーに ILIKE・``%`` ``_`` ``\\`` はエスケープ）
+             — 最小長は呼び出し側が担保
           3. 同業種 AND 商材一致
           4. 同業種のみ
+
+        ``case_brand`` は事例集 deck の表題のブランド（「◯◯様：<ブランド>様」・2026-10-06）。
+        予定にブランド名で書かれた社外 MTG（「【社外】<ブランド>様」）でも当たるようにする。
+        **母集団（case_corpus='true'）は広げない**（照合キーが 1 本増えるだけ）。
 
         段3/4 は ``industry`` が None なら **呼ばれても空を返す**（業種を推測しない）。
         """
@@ -1040,12 +1048,18 @@ class PgVectorClient:
         if stage == 1:
             if not client_name.strip():
                 return []
-            where = " AND d.metadata->>'client_name' = %(client)s"
+            where = (
+                " AND (d.metadata->>'client_name' = %(client)s"
+                " OR d.metadata->>'case_brand' = %(client)s)"
+            )
             params["client"] = client_name.strip()
         elif stage == 2:
             if not client_name.strip():
                 return []
-            where = " AND d.metadata->>'client_name' ILIKE %(client_like)s ESCAPE '\\'"
+            where = (
+                " AND (d.metadata->>'client_name' ILIKE %(client_like)s ESCAPE '\\'"
+                " OR d.metadata->>'case_brand' ILIKE %(client_like)s ESCAPE '\\')"
+            )
             params["client_like"] = f"%{self._escape_like(client_name.strip())}%"
         elif stage == 3:
             if not industry or not product:

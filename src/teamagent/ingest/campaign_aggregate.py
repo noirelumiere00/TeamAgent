@@ -415,17 +415,68 @@ def format_campaign_document(agg: CampaignAggregate) -> str:
     return "\n".join(lines)
 
 
+#: documents.metadata.case_source の値（pre_meeting_brief が出典ラベルを選ぶキー）。
+CASE_SOURCE_CAMPAIGN_DB = "campaign_db"
+#: case_effect の上限（pre_meeting_brief の effect_display と同じ）。
+CASE_EFFECT_MAX_CHARS = 160
+
+
+def campaign_case_effect(agg: CampaignAggregate) -> str:
+    """事例ブリーフの 1 行: 「投稿 N 本・合計 X 回再生（最大 Y 回）・期間 A〜B」。
+
+    分からない値の部分は **出さない**（「合計 不明 回再生」のような行を朝の DM に載せない）。
+    """
+    parts = [f"投稿 {agg.video_count} 本"]
+    total = agg.total("plays")
+    if total is not None:
+        peak = agg.maximum("plays")
+        play = f"合計 {_fmt_int(total)} 回再生"
+        if peak is not None:
+            play += f"（最大 {_fmt_int(peak)} 回）"
+        parts.append(play)
+    if agg.period:
+        parts.append(f"期間 {agg.period[0]}〜{agg.period[1]}")
+    return "・".join(parts)[:CASE_EFFECT_MAX_CHARS]
+
+
+def campaign_case_metadata(agg: CampaignAggregate) -> dict[str, str]:
+    """案件文書を事例ブリーフの母集団（``case_corpus='true'``）にも入れるための metadata。
+
+    2026-10-06: 母集団の SQL（``case_corpus='true'`` 固定）は広げず、取り込み時点でここが
+    印を付ける。**投稿アカウント実績（account_metadata）には付けない**（事例ではない）。
+    ``client_name`` は pre_meeting_brief の ``normalize_company`` で正規化する（段1 の完全一致は
+    MTG 側の正規化と同じ関数でしか当たらない。「株式会社◯◯」でも「◯◯様」から引ける）。
+    担当者はこの表に無いので **付けない**。対外利用可否も無いので明示的に ``unknown``
+    （3 値 ok / ng / unknown は PR #420 の cases/schema.py ExternalUse と同じ語彙。空＝要確認）。
+    毎晩全件 upsert されるので、ここを誤ると誤りも毎晩全件に伝播する（テストで固定）。
+    """
+    from teamagent.skills.pre_meeting_brief.classify import normalize_company
+
+    client = normalize_company(agg.advertiser) or agg.advertiser.strip()
+    return {
+        "case_corpus": "true",
+        "case_source": CASE_SOURCE_CAMPAIGN_DB,
+        "client_name": client,
+        "case_company": agg.advertiser,
+        "case_product": agg.campaign,
+        "case_effect": campaign_case_effect(agg),
+        "case_external_use": "unknown",
+    }
+
+
 def campaign_metadata(agg: CampaignAggregate) -> dict[str, str]:
     """documents.metadata に載せる集計値（すべて文字列・JSONB の既存規約に合わせる）。
 
     ``cls_doc_type`` / ``cls_project`` を決定論的に付ける（取込時の LLM 分類は使わない。
     案件文書は広告主名が案件の真実源で、検索側のクライアント一致ガードがこれを引く）。
+    事例ブリーフ用の印（``campaign_case_metadata``）もここで一緒に付ける。
     """
 
     def _s(value: float | None) -> str:
         return "" if value is None else f"{value:.4f}".rstrip("0").rstrip(".")
 
     return {
+        **campaign_case_metadata(agg),
         "campaign_aggregate": "true",
         "advertiser": agg.advertiser,
         "campaign": agg.campaign,
@@ -505,6 +556,7 @@ def account_metadata(agg: AccountAggregate) -> dict[str, str]:
 __all__ = [
     "ADVERTISER_COL",
     "CAMPAIGN_COL",
+    "CASE_SOURCE_CAMPAIGN_DB",
     "POST_DATE_TAB_NAME",
     "REQUIRED_COLUMNS",
     "AccountAggregate",
@@ -516,6 +568,8 @@ __all__ = [
     "aggregate_accounts",
     "aggregate_campaigns",
     "build_post_date_index",
+    "campaign_case_effect",
+    "campaign_case_metadata",
     "campaign_external_id",
     "campaign_metadata",
     "campaign_title",

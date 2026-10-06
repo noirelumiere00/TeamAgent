@@ -1718,6 +1718,60 @@ class IngestRepository:
                 return int(cur.rowcount or 0)
 
     # -------------------------------------------------------
+    # 事例集 deck の退役（2026-10-06・pipeline._retire_missing_deck_cases）
+    # -------------------------------------------------------
+    def list_case_deck_external_ids(self, source_type: str, file_id: str) -> list[str]:
+        """事例集 deck（file_id）から作った **現役の** 事例文書の external_id を返す。
+
+        external_id は ``<file_id>:case:<hash>``。``LIKE`` だと file_id の ``_`` が
+        ワイルドカードになるので、接頭辞は ``left()`` の完全一致で比べる。SELECT のみ。
+        """
+        prefix = f"{_strip_nul(file_id) or ''}:case:"
+        sql = """
+            SELECT external_id
+            FROM documents
+            WHERE source_type = %s::document_source_type
+              AND left(external_id, %s) = %s
+              AND metadata->>'case_corpus' = 'true'
+        """
+        with self._ops_connection() as conn:
+            with conn.cursor(row_factory=dict_row) as cur:
+                cur.execute(sql, (source_type, len(prefix), prefix))
+                rows = cur.fetchall()
+        return [str(r["external_id"]) for r in rows]
+
+    def retire_case_documents(
+        self,
+        source_type: str,
+        external_ids: list[str],
+        *,
+        retired_at_iso: str,
+    ) -> int:
+        """事例文書を母集団（``case_corpus='true'``）から外す。行・chunk は消さない。
+
+        ``case_corpus`` を "false" にして ``case_retired_at`` を付けるだけ（soft）。同じ事例が
+        deck に戻れば次の取り込みの upsert（metadata 全置換）で "true" に戻る。
+        戻り値: UPDATE した行数。
+        """
+        ids = [stripped for e in external_ids if (stripped := _strip_nul(e))]
+        if not ids:
+            return 0
+        import json
+
+        patch = json.dumps({"case_corpus": "false", "case_retired_at": retired_at_iso})
+        sql = """
+            UPDATE documents
+            SET metadata = COALESCE(metadata, '{}'::jsonb) || %s::jsonb
+            WHERE source_type = %s::document_source_type
+              AND external_id = ANY(%s)
+              AND metadata->>'case_corpus' = 'true'
+        """
+        with self._ops_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(sql, (patch, source_type, ids))
+                return int(cur.rowcount or 0)
+
+    # -------------------------------------------------------
     # 内部
     # -------------------------------------------------------
     @staticmethod

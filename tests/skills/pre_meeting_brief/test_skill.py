@@ -143,11 +143,19 @@ class _FakePg:
         self.stage_calls.append(stage)
         rows = self._visible(conn)
         if stage == 1:
-            return [r for r in rows if r["case_client"] == client_name][:limit]
+            # SQL と同じく client_name か case_brand の等価（2026-10-06・事例集 deck のブランド）
+            return [
+                r for r in rows if client_name in (r["case_client"], r.get("case_brand") or None)
+            ][:limit]
         if stage == 2:
             # ILIKE のエスケープを再現: % _ \ はリテラル扱い
             needle = re.escape(client_name)
-            return [r for r in rows if re.search(needle, r["case_client"])][:limit]
+            return [
+                r
+                for r in rows
+                if re.search(needle, r["case_client"])
+                or re.search(needle, r.get("case_brand") or "")
+            ][:limit]
         if stage == 3:
             if not industry or not product:
                 return []
@@ -619,3 +627,121 @@ def test_url_only_agency_is_discarded_entirely() -> None:
     (detail,) = extract_events([raw], want_description=True)
     sig = build_signal_input(detail)
     assert sig.agency_hint == ""
+
+
+# ── 事例集 PPTX / ショート動画データベース由来の行（2026-10-06）──────────
+#: 取込アカウント。担当者列の無いソースで「社内担当」に化けてはいけない値。
+INGEST_ACCOUNT = "torikomi-runner@vectorinc.co.jp"
+
+DECK_ROW: dict[str, Any] = {
+    "title": "事例 青葉レコード（北斗シスターズ）｜架空の事例集",
+    "source_uri": "https://drive.google.com/file/d/deck/view",
+    "owner_email": INGEST_ACCOUNT,
+    "case_client": "青葉レコード",
+    "case_brand": "北斗シスターズ",
+    "case_product": "北斗シスターズ",
+    "case_effect": "UGC風動画で話題化：380%達成",
+    "case_owner": None,
+    "case_external_use": "ng",
+    "case_external_use_note": "クライアント展開NG（社内のみ）",
+    "case_industry": None,
+    "case_source": "deck",
+    "updated_at": "2026-07-29",
+    "acl_groups": ["vectorinc.co.jp"],
+    "case_corpus": "true",
+}
+
+CAMPAIGN_ROW: dict[str, Any] = {
+    "title": "施策実績 東光製作所 新卒採用ショート",
+    "source_uri": "https://docs.google.com/spreadsheets/d/db/edit#gid=1",
+    "owner_email": INGEST_ACCOUNT,
+    "case_client": "東光製作所",
+    "case_brand": None,
+    "case_product": "新卒採用ショート",
+    "case_effect": "投稿 12 本・合計 120,000 回再生（最大 40,000 回）・期間 2026-01-05〜2026-02-01",
+    "case_owner": None,
+    "case_external_use": "unknown",
+    "case_external_use_note": None,
+    "case_industry": None,
+    "case_source": "campaign_db",
+    "updated_at": "2026-09-30",
+    "acl_groups": ["vectorinc.co.jp"],
+    "case_corpus": "true",
+}
+
+
+def _run_for(rows: list[dict[str, Any]], title: str) -> Any:
+    item = _event_item(summary_display=title, summary_scrubbed=title)
+    return PreMeetingBriefSkill(pg=_FakePg(rows), events=[item]).run(PreMeetingBriefInput(), _ctx())
+
+
+def test_owner_is_never_filled_from_the_ingest_account() -> None:
+    """担当者の無いソース（PPTX / データベース）で取込アカウント名を「社内担当」に出さない。
+
+    変異: ``_to_case`` に owner_email の local part へのフォールバックを戻すと赤
+    （全事例に同じ取込アカウントが担当者として並ぶ）。
+    """
+    from teamagent.skills.pre_meeting_brief.render import render_brief_lines
+
+    out = _run_for([DECK_ROW, CAMPAIGN_ROW], "【社外】東光製作所様 打合せ")
+    case = out.items[0].cases[0]
+    assert case.owner_display == ""
+    text = "\n".join(render_brief_lines(out, _dt_date()))
+    assert "torikomi" not in text
+    assert "社内担当" not in text
+
+
+def _dt_date() -> Any:
+    import datetime as _dt
+
+    return _dt.date(2026, 9, 11)
+
+
+def test_empty_external_use_falls_to_needs_check_not_ok() -> None:
+    """対外利用可否が空 / unknown の事例は「資料で確認」側に倒れる（OK 扱いにならない）。
+
+    変異: ``external_use()`` が空を ok に倒す／``ng_note`` が unknown で空を返すと赤。
+    """
+    for value in ("", None, "unknown"):
+        row = dict(CAMPAIGN_ROW, case_external_use=value)
+        case = _run_for([row], "【社外】東光製作所様 打合せ").items[0].cases[0]
+        assert case.external_use == "unknown", value
+        # harden（NFKC）後の字面。⚠ は付けない（全件 ⚠ の狼少年化を避ける既存仕様）。
+        assert case.external_use_note == "(対外利用可否は資料で確認)", value
+
+
+def test_deck_case_is_marked_ng_with_the_fixed_reason() -> None:
+    case = _run_for([DECK_ROW], "【社外】青葉レコード様 定例").items[0].cases[0]
+    assert case.external_use == "ng"
+    assert case.external_use_note == "⚠クライアント展開NG(社内のみ)"
+
+
+def test_source_lines_lead_with_the_real_source_kinds() -> None:
+    """出典節の先頭は実際に描いた事例の出典の種類。実在しないシート名を出さない。
+
+    変異: ``_fill_cases`` に旧 MASTER_SHEET_SOURCE の固定挿入を戻すと赤。
+    """
+    out = _run_for([DECK_ROW], "【社外】青葉レコード様 定例")
+    assert out.source_lines[0] == "📍ショート動画事例集（PPTX）"
+    assert not any("マスター表" in s for s in out.source_lines)
+    out = _run_for([CAMPAIGN_ROW], "【社外】東光製作所様 打合せ")
+    assert out.source_lines[0] == "📍ショート動画データベース"
+    assert out.source_lines[1] == "施策実績 東光製作所 新卒採用ショート"
+
+
+def test_unknown_case_source_adds_no_label_line() -> None:
+    row = dict(CAMPAIGN_ROW, case_source="somewhere")
+    out = _run_for([row], "【社外】東光製作所様 打合せ")
+    assert out.source_lines == ["施策実績 東光製作所 新卒採用ショート"]
+
+
+def test_brand_name_in_the_meeting_hits_the_deck_case_at_stage1() -> None:
+    """予定にブランド名で書かれた MTG（「【社外】北斗シスターズ様」）でも段1で当たる。"""
+    pg = _FakePg([DECK_ROW])
+    item = _event_item(summary_display="【社外】北斗シスターズ様 打合せ")
+    out = PreMeetingBriefSkill(pg=pg, events=[item]).run(PreMeetingBriefInput(), _ctx())
+    (case,) = out.items[0].cases
+    assert case.company_display == "青葉レコード"
+    assert case.match_stage == 1
+    assert case.same_client is True
+    assert pg.stage_calls == [1]

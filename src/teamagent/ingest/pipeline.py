@@ -49,6 +49,7 @@ from teamagent.ingest.gsheet_classification_overrides import (
 )
 from teamagent.ingest.loader import (
     GID_BY_TITLE,
+    CaseDeckSpec,
     GDriveFolderSpec,
     GSheetSpec,
     IngestSources,
@@ -492,6 +493,7 @@ def _load_stored_case_metadata(
     external_ids: list[str],
     *,
     request_id: str,
+    source_type: str = "gsheets",
 ) -> dict[str, dict[str, str]]:
     """事例集 corpus の保存済み対外利用可否を一括で読む（**fail-closed**）。
 
@@ -508,7 +510,7 @@ def _load_stored_case_metadata(
             "repository has no get_document_metadata_values; refusing to ingest case corpus"
         )
     try:
-        rows = lookup("gsheets", external_ids, _CASE_STICKY_METADATA_KEYS)
+        rows = lookup(source_type, external_ids, _CASE_STICKY_METADATA_KEYS)
     except Exception as exc:  # 理由は問わず fail-closed
         raise CaseCorpusStickyLookupError(str(exc)) from exc
     return {str(k): dict(v) for k, v in dict(rows).items()}
@@ -530,7 +532,9 @@ def _disable_corpus_scan_timeouts(conn: Any) -> None:
 
 def _spec_source_id(spec: Any) -> str | None:
     """source spec から connector_state の source_id に使う識別子を引く（無ければ None）。"""
-    for attr in ("channel_id", "folder_id", "sheet_id"):
+    # file_id は事例集 deck（CaseDeckSpec）。folder_id より先に見る（deck はフォルダも持つが、
+    # 監視・warning の単位はファイル）。
+    for attr in ("channel_id", "file_id", "folder_id", "sheet_id"):
         value = getattr(spec, attr, None)
         if value:
             return str(value)
@@ -4494,6 +4498,8 @@ def _ingest_gsheet(
                     )
                 raw_external_use = case_fields.pop("case_external_use_source", "")
                 case_doc_metadata[CASE_CORPUS_METADATA_KEY] = "true"
+                # 出典の種類（pre_meeting_brief の出典節ラベル。deck / campaign_db と並ぶ 3 つ目）。
+                case_doc_metadata["case_source"] = "sheet"
                 case_doc_metadata.update(case_fields)
                 # 企業名 → client_name は ナレッジ共有と同じ導出器をそのまま使う
                 # （derive_knowledge_client_name は **変更しない**＝既存 ingest へ影響ゼロ）。
@@ -4830,6 +4836,318 @@ def _check_rulebook_root(
 # -----------------------------------------------------------
 # IngestRunner（orchestrator）
 # -----------------------------------------------------------
+# -----------------------------------------------------------
+# 事例集 PPTX（case_corpus_decks）— 2026-10-06
+# -----------------------------------------------------------
+#: 事例集 deck から作る事例文書の source_type。``gdrive`` にしない理由:
+#:   - external_id が「<file_id>:case:<hash>」で Drive の fileId ではない。gdrive にすると
+#:     scripts/sync_gdrive_acl.py が permissions.list を fileId として引けず「到達不能」と
+#:     みなし owner-only ACL へ隔離する／INGEST_MARK_STALE が未観測として stale を付ける。
+#:   - 同じ Drive ファイルの「ファイル単位の文書」と UNIQUE(source_type, external_id) を
+#:     共有しない（事例集フォルダは「クライアント展開NG」。ファイル単位でも取り込むと
+#:     別 spec からの UPSERT で NG 印が消える経路ができる＝yaml の注記どおり足さない）。
+CASE_DECK_SOURCE_TYPE = "other"
+#: documents.metadata.case_source の値（pre_meeting_brief が出典ラベルを選ぶキー）。
+CASE_SOURCE_DECK = "deck"
+_CASE_DECK_KIND = "case_decks"
+
+
+class CaseDeckIngestError(RuntimeError):
+    """事例集 deck を読めなかった（既存の事例文書には触らずに source を失敗にする）。"""
+
+
+def _find_case_deck_file(client: Any, spec: CaseDeckSpec, request_id: str) -> Any | None:
+    """yaml の folder を Drive の一覧 API で引き、file_id が一致する 1 件を返す。"""
+    from teamagent.ingest.office_extract import PPTX_MIME
+
+    files = _list_all_gdrive_files(client, spec.folder_id, request_id, PPTX_MIME)
+    return next((f for f in files if getattr(f, "id", None) == spec.file_id), None)
+
+
+def _ingest_case_deck(
+    spec: CaseDeckSpec,
+    *,
+    embedder: _EmbedderProto,
+    repository: IngestRepository,
+    owner_email: str,
+    dry_run: bool,
+    request_id: str,
+    warning_collector: _IngestWarningCollector | None = None,
+    client: Any | None = None,
+    **_unused: Any,
+) -> tuple[int, int]:
+    """事例集 PPTX 1 本を **1 事例 = 1 document** で取り込む。
+
+    fail-closed（既存の事例文書を消さない・書き換えない）:
+      - ファイルが見つからない / 抽出上限超過・破損 → ``CaseDeckIngestError``（source 失敗）
+      - 切り出せた事例が ``min_cases`` 未満 → warning を出して **何も書かない**
+      - 対外利用可否の前回値が読めない → 事例集ごと見送る（ng の降格を書かない）
+    退役（deck から消えた事例の ``case_corpus`` を "false" にする）は、表題が全件読めて
+    かつ退役が既存の半数以下の run だけ。消すのではなく母集団から外すだけ（再登場で戻る）。
+    """
+    from teamagent.adapters.gdrive_client import GDriveClient
+    from teamagent.ingest.case_deck import (
+        assign_external_ids,
+        case_title,
+        format_case_pages,
+        split_case_deck,
+    )
+    from teamagent.ingest.form_mappings import (
+        CASE_EXTERNAL_USE_NG,
+        resolve_case_external_use,
+        scrub_case_external_use_note,
+    )
+    from teamagent.ingest.office_extract import (
+        MAX_OFFICE_COMPRESSED_BYTES,
+        OfficePayloadError,
+        extract_pptx_slide_shapes,
+    )
+
+    def _warn(reason: str, count: int = 1) -> None:
+        if warning_collector is not None:
+            warning_collector.add_count(_CASE_DECK_KIND, spec.file_id, reason, count)
+
+    file_ref = _external_id_ref(spec.file_id)
+    drive = client if client is not None else GDriveClient.from_env(readonly=True)
+    f = _find_case_deck_file(drive, spec, request_id)
+    if f is None:
+        logger.error("ingest_case_deck_file_not_found", request_id=request_id, file_ref=file_ref)
+        raise CaseDeckIngestError("case deck file was not found in the configured folder")
+    size = getattr(f, "size", None)
+    if size is not None and int(size) > MAX_OFFICE_COMPRESSED_BYTES:
+        # 黙って 0 件にしない（上限超過は source 失敗として #ops に出す）。
+        logger.error(
+            "ingest_case_deck_over_size_limit",
+            request_id=request_id,
+            file_ref=file_ref,
+            size=int(size),
+            limit=MAX_OFFICE_COMPRESSED_BYTES,
+        )
+        raise CaseDeckIngestError("case deck exceeds MAX_OFFICE_COMPRESSED_BYTES")
+    data = drive.download_file_bytes(f.id, request_id)
+    try:
+        slides = extract_pptx_slide_shapes(
+            data,
+            expected_size=size,
+            expected_md5=getattr(f, "md5_checksum", None),
+        )
+    except OfficePayloadError as exc:
+        logger.error(
+            "ingest_case_deck_extract_failed",
+            request_id=request_id,
+            file_ref=file_ref,
+            category=exc.category,
+            actual_bytes=exc.actual_bytes,
+            expected_bytes=exc.expected_bytes,
+        )
+        raise CaseDeckIngestError(f"case deck extract failed: {exc.category}") from exc
+
+    split = split_case_deck(slides)
+    # 件数のみ（社名・本文は出さない）。
+    logger.info(
+        "ingest_case_deck_split",
+        request_id=request_id,
+        file_ref=file_ref,
+        slides=split.slide_count,
+        start_slides=split.start_slides,
+        cases=len(split.cases),
+        unmatched_titles=split.unmatched_titles,
+    )
+    if split.unmatched_titles:
+        _warn("case_deck_title_unmatched", split.unmatched_titles)
+    if len(split.cases) < spec.min_cases:
+        logger.warning(
+            "ingest_case_deck_too_few_cases",
+            request_id=request_id,
+            file_ref=file_ref,
+            cases=len(split.cases),
+            min_cases=spec.min_cases,
+            slides=split.slide_count,
+            kept_existing=True,
+        )
+        _warn("case_deck_too_few_cases")
+        return 0, 0
+
+    external_ids, duplicates = assign_external_ids(spec.file_id, split.cases)
+    if duplicates:
+        logger.warning(
+            "ingest_case_deck_duplicate_case_key",
+            request_id=request_id,
+            file_ref=file_ref,
+            duplicates=duplicates,
+        )
+        _warn("case_deck_duplicate_case_key", duplicates)
+
+    try:
+        stored = _load_stored_case_metadata(
+            repository,
+            external_ids,
+            request_id=request_id,
+            source_type=CASE_DECK_SOURCE_TYPE,
+        )
+    except CaseCorpusStickyLookupError as exc:
+        logger.error(
+            "ingest_case_deck_sticky_lookup_failed",
+            request_id=request_id,
+            file_ref=file_ref,
+            error_type=type(exc.__cause__ or exc).__name__,
+        )
+        raise
+
+    file_owner_email, acl_emails, acl_groups = _resolve_drive_file_acl(
+        drive, f.id, request_id, owner_email
+    )
+    if not acl_groups and set(acl_emails) <= {owner_email}:
+        # permissions が取れない／空。既存 gdrive 経路と同じく owner だけに絞る（広げない）。
+        logger.warning("ingest_case_deck_acl_owner_only", request_id=request_id, file_ref=file_ref)
+        _warn("case_deck_acl_owner_only")
+
+    file_name = str(getattr(f, "name", "") or "")
+    deck_name = file_name.rsplit(".", 1)[0] if file_name.lower().endswith(".pptx") else file_name
+    deck_name = deck_name or spec.name
+    base_metadata = {str(k): str(v) for k, v in (spec.extra_metadata or {}).items()}
+    yaml_use = base_metadata.pop("case_external_use", "")
+    yaml_note = base_metadata.pop("case_external_use_note", "")
+    source_uri = getattr(f, "web_view_link", None) or f"gdrive://{f.id}"
+
+    docs_n = 0
+    chunks_n = 0
+    for case, external_id in zip(split.cases, external_ids, strict=True):
+        previous = stored.get(external_id, {})
+        use = resolve_case_external_use(
+            column_value=yaml_use,
+            names=(spec.folder_name, file_name),
+            previous=previous.get("case_external_use"),
+            previous_note=previous.get("case_external_use_note"),
+        )
+        note = use.note
+        if use.value == CASE_EXTERNAL_USE_NG and yaml_note:
+            # 名前シグナル（フォルダ名そのもの）より yaml の定型の理由句を出す。
+            note = scrub_case_external_use_note(yaml_note) or note
+        pages = format_case_pages(
+            case,
+            deck_name=deck_name,
+            external_use_note=(note or "") if use.value == CASE_EXTERNAL_USE_NG else "",
+        )
+        chunks = _embed_page_chunks(_bounded_chunk_pages(pages), embedder=embedder)
+        metadata: dict[str, Any] = {
+            **base_metadata,
+            "mime_type": getattr(f, "mime_type", ""),
+            "size": size,
+            "md5_checksum": getattr(f, "md5_checksum", None),
+            "drive_file_id": spec.file_id,
+            "drive_folder_id": spec.folder_id,
+            "drive_folder_name": spec.folder_name,
+            "deck_name": spec.name,
+            CASE_CORPUS_METADATA_KEY: "true",
+            "case_source": CASE_SOURCE_DECK,
+            "client_name": case.client_name,
+            "case_company": case.company,
+            "case_product": case.product,
+            "case_effect": case.effect,
+            "case_external_use": use.value,
+            "case_slide_from": str(case.slide_from),
+            "case_slide_to": str(case.slide_to),
+            "cls_doc_type": "事例",
+        }
+        if case.brand:
+            metadata["case_brand"] = case.brand_key or case.brand
+            metadata["case_brand_display"] = case.brand
+        if note and use.value == CASE_EXTERNAL_USE_NG:
+            metadata["case_external_use_note"] = note
+        doc = DocumentUpsert(
+            source_type=CASE_DECK_SOURCE_TYPE,
+            external_id=external_id,
+            source_uri=source_uri,
+            title=case_title(case, deck_name),
+            owner_email=file_owner_email,
+            acl_emails=acl_emails,
+            acl_groups=acl_groups,
+            metadata=metadata,
+            modified_at=getattr(f, "modified_time", None),
+        )
+        if not dry_run:
+            repository.upsert_document_with_chunks(doc, chunks, request_id=request_id)
+        docs_n += 1
+        chunks_n += len(chunks)
+
+    retired = _retire_missing_deck_cases(
+        repository,
+        spec,
+        keep=set(external_ids),
+        unmatched_titles=split.unmatched_titles,
+        dry_run=dry_run,
+        request_id=request_id,
+        warn=_warn,
+    )
+    logger.info(
+        "ingest_case_deck_done",
+        request_id=request_id,
+        file_ref=file_ref,
+        documents=docs_n,
+        chunks=chunks_n,
+        retired=retired,
+        acl_emails=len(acl_emails),
+        acl_groups=len(acl_groups),
+        dry_run=dry_run,
+    )
+    return docs_n, chunks_n
+
+
+def _retire_missing_deck_cases(
+    repository: IngestRepository,
+    spec: CaseDeckSpec,
+    *,
+    keep: set[str],
+    unmatched_titles: int,
+    dry_run: bool,
+    request_id: str,
+    warn: Callable[..., None],
+) -> int:
+    """deck から消えた事例を母集団から外す（``case_corpus`` を "false" に・行は消さない）。
+
+    見送る条件（どれか 1 つで何もしない＝既存を残す）:
+      - 表題が読めず落とした事例がある（その事例が既存のどれか分からない）
+      - 退役が既存の半数を超える（切り出しの退行を疑う）
+      - repository に API が無い（テストのフェイク等）/ dry-run
+    """
+    lister = getattr(repository, "list_case_deck_external_ids", None)
+    retirer = getattr(repository, "retire_case_documents", None)
+    if dry_run or not callable(lister) or not callable(retirer):
+        return 0
+    existing = [str(e) for e in lister(CASE_DECK_SOURCE_TYPE, spec.file_id)]
+    missing = sorted(e for e in existing if e not in keep)
+    if not missing:
+        return 0
+    if unmatched_titles:
+        logger.warning(
+            "ingest_case_deck_retire_skipped",
+            request_id=request_id,
+            reason="title_unmatched",
+            candidates=len(missing),
+        )
+        return 0
+    if len(missing) > 1 and len(missing) * 2 > len(existing):
+        logger.warning(
+            "ingest_case_deck_retire_skipped",
+            request_id=request_id,
+            reason="mass_retire",
+            candidates=len(missing),
+            existing=len(existing),
+        )
+        warn("case_deck_mass_retire_skipped")
+        return 0
+    retired = int(
+        retirer(
+            CASE_DECK_SOURCE_TYPE,
+            missing,
+            retired_at_iso=_dt.datetime.now(_dt.UTC).isoformat(),
+        )
+    )
+    logger.info("ingest_case_deck_retired", request_id=request_id, retired=retired)
+    return retired
+
+
 class IngestRunner:
     """ingest_sources.yaml に基づく 3 source 取り込みのオーケストレータ。"""
 
@@ -4928,6 +5246,17 @@ class IngestRunner:
                 _ingest_gsheet,
                 request_id=request_id,
                 extra_kwargs={"unchanged_collector": unchanged_collector},
+            )
+        if ("gdrive" in kinds or _CASE_DECK_KIND in kinds) and sources.case_corpus_decks:
+            # 事例集 PPTX（2026-10-06）。本番の INGEST_SOURCES（slack,gdrive,gsheets,…）に
+            # 新しい kind を足さずに走るよう gdrive の run に同乗させる。集計は別の kind に分け、
+            # gdrive の stale 判定（観測完全性ガード）や Drive の観測集合には混ぜない。
+            result.by_kind[_CASE_DECK_KIND] = self._run_kind(
+                _CASE_DECK_KIND,
+                sources.case_corpus_decks,
+                _ingest_case_deck,
+                request_id=request_id,
+                extra_kwargs={"warning_collector": warning_collector},
             )
         if "shared_drives" in kinds:
             # 共有ドライブ全自動 crawl: spec が 0 or 1 件（yaml の単一 toggle）

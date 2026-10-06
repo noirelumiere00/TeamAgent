@@ -36,7 +36,7 @@ from teamagent.skills.pre_meeting_brief.classify import (
     ng_note,
     normalize_company,
 )
-from teamagent.skills.pre_meeting_brief.render import MASTER_SHEET_SOURCE, harden
+from teamagent.skills.pre_meeting_brief.render import CASE_SOURCE_LABELS, harden
 from teamagent.skills.pre_meeting_brief.schema import (
     CaseRef,
     PreMeetingBriefInput,
@@ -231,8 +231,10 @@ class PreMeetingBriefSkill(BaseSkill[PreMeetingBriefInput, PreMeetingBriefOutput
                 return
             for sig, verdict in targets:
                 out.items.append(self._build_item(conn, pg, sig, verdict, input, ctx, sources))
-        if out.items:
-            sources.insert(0, MASTER_SHEET_SOURCE)
+        # 出典節の先頭は「実際に描いた事例の出典の種類」（事例集 PPTX / ショート動画データベース）。
+        # 実在しないシート名を固定で先頭に出していた旧実装（MASTER_SHEET_SOURCE）は廃止。
+        labels = [c.source_label for item in out.items for c in item.cases if c.source_label]
+        sources[:0] = labels
         seen: list[str] = []
         for src in sources:
             if src and src not in seen:
@@ -338,14 +340,18 @@ class PreMeetingBriefSkill(BaseSkill[PreMeetingBriefInput, PreMeetingBriefOutput
         return (rows, False, 4 if rows else 0)
 
     def _to_case(self, row: dict[str, Any], *, client: str, group: str, stage: int) -> CaseRef:
-        """マスター表の構造化列だけから 1 件を組む（pptx の chunk 本文を使わない）。"""
+        """金庫の構造化 metadata だけから 1 件を組む（pptx の chunk 本文を使わない）。"""
         company = str(row.get("case_client") or row.get("title") or "")
+        # ⚠️ 担当者は ``case_owner`` だけ。``owner_email``（＝取込を走らせたアカウント）で
+        #   埋めない: 事例集 PPTX もショート動画データベースも担当者列を持たないので、埋めると
+        #   **全事例に取込アカウントの名前が「社内担当」として並ぶ**（2026-10-06 修正）。
         owner = str(row.get("case_owner") or "").strip()
-        if not owner:
-            email = str(row.get("owner_email") or "")
-            owner = email.split("@", 1)[0] if "@" in email else ""
         use = external_use(row.get("case_external_use"))
-        same = normalize_company(company) == normalize_company(client) and bool(client)
+        key = normalize_company(client)
+        same = bool(key) and key in {
+            normalize_company(company),
+            normalize_company(str(row.get("case_brand") or "")),
+        }
         return CaseRef(
             company_display=harden(company, 60),
             company_scrubbed=str(scrub_value(company))[:60],
@@ -360,6 +366,8 @@ class PreMeetingBriefSkill(BaseSkill[PreMeetingBriefInput, PreMeetingBriefOutput
                 ng_note(use, str(row.get("case_external_use_note") or "")), 60
             ),
             source_title=harden(row.get("title"), 120),
+            # 出典の種類はコード定数だけ（未知の case_source は空＝出典節に種類行を出さない）。
+            source_label=CASE_SOURCE_LABELS.get(str(row.get("case_source") or ""), ""),
             # URL は source_uri の実値のみ（文字列連結で作らない）。
             source_uri=str(row.get("source_uri") or "")[:600],
             match_stage=stage,
