@@ -426,7 +426,8 @@ def test_explicit_filter_industry_match_delivers() -> None:
 # ── note 文言（適用フィルタ表示・0件緩和提案）──────────────────────────────
 def test_note_shows_applied_filters_on_delivery() -> None:
     # 配信成功 note に「電通 × 提案書 で」のような適用フィルタが出る。
-    hits = [_hit(source_type="gdrive", source_uri="gdrive://F1", title="a.pdf")]
+    # 取引先を名指しした依頼では、その取引先の資料（cls_project 等で判定）だけを添付する。
+    hits = [_hit(source_type="gdrive", source_uri="gdrive://F1", title="a.pdf", project="電通")]
     skill = KnowledgeDeliverSkill(
         search=_search_mock(hits), slack=_slack_mock(), gdrive=_gdrive_mock()
     )

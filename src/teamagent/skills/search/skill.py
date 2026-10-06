@@ -52,7 +52,7 @@ from teamagent.skills.search.campaign_files import (
     links_footer,
     scope_by_industry,
 )
-from teamagent.skills.search.client_match import normalize_filter_client
+from teamagent.skills.search.client_match import hit_entities, normalize_filter_client
 from teamagent.skills.search.composite import (
     MCP_SURFACE_CTX_KEY,
     SlackItem,
@@ -733,6 +733,8 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
                     channel_type=(str(meta["channel_type"]) if meta.get("channel_type") else None),
                     title=(str(meta["title"]) if meta.get("title") else None),
                     project=(str(meta["cls_project"]) if meta.get("cls_project") else None),
+                    # 取引先判定の口（search の警告と同じ SEARCH_CLIENT_GUARD_ENTITIES で切る）。
+                    entities=(hit_entities(h) or None) if self._client_guard_entities else None,
                     industry=(
                         str(meta.get("cls_industry") or meta.get("campaign_industry"))
                         if (meta.get("cls_industry") or meta.get("campaign_industry"))
@@ -760,6 +762,7 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
             slack_hits=([item.hit for item in slack_items] if slack_lookup is not None else None),
             slack_status=slack_lookup.status if slack_lookup is not None else None,
             suggested_next=suggested_next,
+            query_client=self._asked_client(probe),
         )
         total_ms = (time.perf_counter() - run_started) * 1000
         log.info(
