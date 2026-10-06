@@ -213,6 +213,41 @@ const report = {};
   report.inject = { first: first.out, second: second.out, mcpCalls: p.mcpCalls };
 }
 
+// 4b. 新しい会話の 1 通目（FM）と両立: bare reset 文なら本人メモ（system 側）と 1 通目の戻し
+//     （appendContext）が 1 つの結果に両方入る。片方が他方を上書きしない
+{
+  const p = makePlugin();
+  receiveDm(p, input.userA, "トレンダーズ");
+  const out =
+    (await p.handlers.get("before_prompt_build")(
+      { prompt: input.bareResetPrompt, messages: [] },
+      dmCtx(input.userA, input.dmA),
+    )) ?? null;
+  report.firstMessage = { out, mcpCalls: p.mcpCalls };
+}
+
+// 4c. 1 通目の戻しが想定外の形で投げても（ここでは prompt の読み出しで例外）、本人メモは届く
+{
+  const p = makePlugin();
+  receiveDm(p, input.userA, "トレンダーズ");
+  const throwingEvent = {
+    messages: [],
+    get prompt() {
+      throw new Error("unexpected event shape");
+    },
+  };
+  let out = null;
+  let threw = false;
+  try {
+    out =
+      (await p.handlers.get("before_prompt_build")(throwingEvent, dmCtx(input.userA, input.dmA))) ??
+      null;
+  } catch {
+    threw = true;
+  }
+  report.firstMessageError = { out, threw };
+}
+
 // 5. コマンド（全文一致）はモデルを通さず本人メモの返事で答える。どのコマンドでもキャッシュは捨てる
 {
   const p = makePlugin();

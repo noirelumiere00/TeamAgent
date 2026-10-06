@@ -47,6 +47,7 @@ from tests.caller_claim_testkit import (
 )
 from tests.mcp_gateway.test_personal_memory_gate import _EchoSkill
 from tests.test_openclaw_button_direct import _closed_port, _load_http_server_module, _Uvicorn
+from tests.test_openclaw_first_message_restore import BARE_SESSION_RESET_PROMPT_BASE
 
 ROOT = Path(__file__).resolve().parents[1]
 CALLER_PLUGIN = ROOT / "infra/openclaw/caller-identity-plugin/dist/index.js"
@@ -142,6 +143,7 @@ def _run_probe(mcp_url: str) -> dict[str, Any]:
                     "dmSlow": DM_SLOW,
                     "channel": CHANNEL,
                     "nowMs": TEST_NOW * 1000,
+                    "bareResetPrompt": BARE_SESSION_RESET_PROMPT_BASE,
                 }
             ),
         },
@@ -221,6 +223,30 @@ def test_memo_goes_only_to_the_system_side_and_is_cached(
     assert second == first
     contexts = [c for c in report["inject"]["mcpCalls"] if c["name"] == "personal_memory_context"]
     assert len(contexts) == 1  # 60 秒以内の 2 回目は mcp を呼ばない
+
+
+def test_memo_and_first_message_restore_are_merged_into_one_result(
+    e2e: tuple[dict[str, Any], _Memory],
+) -> None:
+    """新しい会話の 1 通目（bare reset 文）でも本人メモは system 側に入り、1 通目は利用者側に戻る。"""
+    report, _ = e2e
+    out = report["firstMessage"]["out"]
+    assert set(out) == {"appendSystemContext", "appendContext"}
+    assert MEMO_MARK in out["appendSystemContext"]
+    assert "トレンダーズ" not in out["appendSystemContext"]
+    assert "<<<\nトレンダーズ\n>>>" in out["appendContext"]
+    assert MEMO_MARK not in out["appendContext"]
+
+
+def test_first_message_restore_failure_does_not_drop_the_memo(
+    e2e: tuple[dict[str, Any], _Memory],
+) -> None:
+    """1 通目の戻しが投げても before_prompt_build 全体は落ちず、本人メモは system 側に入る。"""
+    report, _ = e2e
+    result = report["firstMessageError"]
+    assert result["threw"] is False
+    assert set(result["out"]) == {"appendSystemContext"}
+    assert MEMO_MARK in result["out"]["appendSystemContext"]
 
 
 def test_commands_are_answered_without_the_model_and_drop_the_cache(
