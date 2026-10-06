@@ -89,6 +89,26 @@ class _FakeCursor:
                     }
                 ]
             )
+        elif "FROM search_feedback" in sql:
+            if self._pg.feedback_denied:
+                # 本番の失敗の形: dashboard ロールに search_feedback の SELECT が無い。
+                raise PermissionError("permission denied for table search_feedback")
+            if "COUNT(*) FILTER" in sql:
+                self._rows = [
+                    {"up": 0 if self._pg.empty else 3, "down": 0 if self._pg.empty else 1}
+                ]
+            else:
+                self._rows = (
+                    []
+                    if self._pg.empty
+                    else [
+                        {
+                            "created_at": datetime(2026, 10, 6, 1, 0, tzinfo=UTC),
+                            "who": _OWNER,
+                            "query": "<b>JAL</b> の過去提案",
+                        }
+                    ]
+                )
         elif "GROUP BY who" in sql:
             self._rows = (
                 []
@@ -113,8 +133,9 @@ class _FakeConn:
 
 
 class _FakePg:
-    def __init__(self, *, empty: bool = False) -> None:
+    def __init__(self, *, empty: bool = False, feedback_denied: bool = False) -> None:
         self.empty = empty
+        self.feedback_denied = feedback_denied
         self.connection_kwargs: list[dict[str, Any]] = []
         self.executed: list[tuple[str, Any]] = []
         self.question_who: list[Any] = []
@@ -350,3 +371,35 @@ def test_admin_query_string_is_redacted_in_uvicorn_access_log() -> None:
     assert "redact_admin_user" in cfg["loggers"]["uvicorn.access"].get("filters", [])
     # 既存の短縮リンク秘匿は残っている。
     assert "redact_shortlink" in cfg["loggers"]["uvicorn.access"].get("filters", [])
+
+
+def test_admin_renders_answer_feedback_summary(monkeypatch: pytest.MonkeyPatch) -> None:
+    """回答評価（直近30日の 👍/👎 と 👎 の質問一覧）を read-only ロールで読んで出す。"""
+    monkeypatch.delenv("CONNECT_ADMIN_EMAILS", raising=False)
+    client, pg = _client()
+    response = client.get("/admin", cookies=_cookies(_OWNER))
+    assert response.status_code == 200
+    assert "回答の評価（Slack・直近30日）" in response.text
+    assert '<div class="label">👍 役に立った</div><div class="value">3</div>' in response.text
+    assert '<div class="label">👎 いまいち</div><div class="value">1</div>' in response.text
+    assert "&lt;b&gt;JAL&lt;/b&gt; の過去提案" in response.text
+    assert "<b>JAL</b>" not in response.text
+    assert "2026-10-06 10:00:00 JST" in response.text
+    feedback_sql = [(sql, params) for sql, params in pg.executed if "FROM search_feedback" in sql]
+    assert len(feedback_sql) == 2
+    assert all(params == {"days": 30, "limit": 50} for _, params in feedback_sql)
+    assert all("slack-%%" in sql for sql, _ in feedback_sql)
+    assert {"app_role": "teamagent_dashboard", "user_role": "admin"} in pg.connection_kwargs
+
+
+def test_admin_feedback_permission_denied_does_not_break_page(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """dashboard ロールに SELECT が無い環境（GRANT 前の本番）でも他の集計は出る。"""
+    monkeypatch.delenv("CONNECT_ADMIN_EMAILS", raising=False)
+    client, _ = _client(_FakePg(feedback_denied=True))
+    response = client.get("/admin", cookies=_cookies(_OWNER))
+    assert response.status_code == 200
+    assert "評価データはまだ表示できません。" in response.text
+    assert "answer_feedback_summary は現在表示できません（PermissionError）。" in response.text
+    assert "作業の内訳（直近7日）" in response.text
