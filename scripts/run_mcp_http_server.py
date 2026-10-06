@@ -134,6 +134,9 @@ def build_app(*, bearer: str, path: str) -> Starlette:
 
     @contextlib.asynccontextmanager
     async def lifespan(_app: Starlette) -> AsyncIterator[None]:
+        from teamagent.mcp_gateway.async_job_notify import start_recovery
+
+        start_recovery()
         try:
             async with session_manager.run():
                 logger.info("mcp_http_started", path=path)

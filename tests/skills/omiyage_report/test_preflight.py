@@ -141,7 +141,7 @@ def test_accepted_message_states_computed_duration_not_seconds() -> None:
     assert message.startswith("お土産資料（対象: エムキュア / 競合: ラサーナ / 一般KW: ヘアケア）")
     assert "の作成を受け付けました。" in message
     assert "目安 約 40 分（TikTok 取得 3 軸＋動画分析 最大 25 本）。" in message
-    assert "途中経過は『まだ？』で確認できます。" in message
+    assert "途中経過は『まだ？』で確認できます。" not in message
     assert "完成したPPTXは依頼元のスレッド（DM ならこの DM）へ添付します。" in message
     assert "10〜30" not in message
     assert "秒後" not in message

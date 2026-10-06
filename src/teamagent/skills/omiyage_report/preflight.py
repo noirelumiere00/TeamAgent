@@ -258,7 +258,7 @@ def build_accepted_message(
     所要は依頼内容と環境から算出した ``estimate`` を「目安 約 M 分」と言い切る
     （固定の「10〜30 分」は実測 41 分と食い違っていた）。retry_after_seconds は
     status 再照会の間隔であって完成予定ではないので、秒単位の見込みはここに書かない。
-    ツール名は出さない（進み具合は『まだ？』で聞けばよい）。
+    ツール名は出さず、完了・失敗の自動配信を案内する。
     """
 
     return (
@@ -266,7 +266,6 @@ def build_accepted_message(
         f"一般KW: {'、'.join(input.keywords)}）の作成を受け付けました。"
         f"目安 約 {estimate.rounded_minutes} 分"
         f"（TikTok 取得 {estimate.axes} 軸＋動画分析 最大 {estimate.analysis_videos} 本）。"
-        "途中経過は『まだ？』で確認できます。"
         "完成したPPTXは依頼元のスレッド（DM ならこの DM）へ添付します。"
     )
 
@@ -290,7 +289,6 @@ def build_deduplicated_message(input: OmiyageReportSubmitInput, existing_status:
     return (
         f"同じ内容の{subject}はすでに受け付けて作成中です。二重には作りません。"
         "完成したPPTXは最初に受け付けた依頼の行き先へ添付します。"
-        "途中経過は『まだ？』で確認できます。"
     )
 
 
@@ -307,5 +305,4 @@ def build_busy_message(*, running: int, position: int, wait_minutes: int) -> str
         f"いまお土産資料を{running}件作成中のため、この依頼は順番待ち {position} 番目です"
         f"（順番が来るまで目安あと約 {wait} 分・まだ着手していません）。"
         f"約 {wait} 分後に同じ内容でもう一度お申し付けください。"
-        "作成中のぶんの進み具合は『まだ？』で確認できます。"
     )

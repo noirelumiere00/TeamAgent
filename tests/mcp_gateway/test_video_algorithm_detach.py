@@ -194,6 +194,7 @@ def slack(monkeypatch: pytest.MonkeyPatch) -> _FakeSlack:
 @pytest.fixture(autouse=True)
 def _isolated(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, Any]]:
     """登録簿をテストごとに作り直し、usage 記録は数えるだけにする。"""
+    monkeypatch.setenv("USE_LONG_JOB_NOTIFY", "0")
     for name in (
         detached_jobs.ENABLED_ENV,
         detached_jobs.AFTER_ENV,

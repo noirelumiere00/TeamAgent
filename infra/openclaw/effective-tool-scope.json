@@ -118,6 +118,13 @@
       "enabledBy": { "kind": "envAllTrue", "names": ["USE_VIDEO_TOOLS"] }
     },
     {
+      "name": "video_algorithm_status",
+      "effect": "caller-job-status-read",
+      "terraformGate": "enable_scrape_tools",
+      "defaultEnabledByTerraform": false,
+      "enabledBy": { "kind": "envAllTrue", "names": ["USE_VIDEO_TOOLS"] }
+    },
+    {
       "name": "video_approval",
       "effect": "drive-read-analysis",
       "terraformGate": "not-wired-in-authoritative-task",

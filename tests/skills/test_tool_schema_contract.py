@@ -82,9 +82,9 @@ SEARCH_TERM_DEBT: dict[Key, str] = {
 # 捏造すると大きな音で失敗する（存在しない job/token は即エラー）。自由文字列のままでよい。
 OPAQUE_TOKEN_OK: dict[Key, str] = {
     ("schedule_propose", "schedule_token"): "HMAC 署名トークン。同上",
-    ("proposal_builder_status", "job_id"): "存在しない job_id は not found",
-    ("tiktok_acquire_status", "job_id"): "同上",
-    ("x_buzz_measure_status", "job_id"): "同上",
+    # proposal_builder_status / tiktok_acquire_status の job_id は P4（2026-10-06）で任意
+    # （省略時は本人の直近ジョブ）になり、必須の自由文ではなくなった。
+    ("x_buzz_measure_status", "job_id"): "存在しない job_id は not found",
 }
 
 # 「利用者の言葉そのもの」が正解の自由文。依頼文を渡すのが正しい挙動＝ハザードではない。

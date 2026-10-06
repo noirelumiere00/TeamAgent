@@ -467,7 +467,7 @@ def test_deck_build_failure_marks_job_failed_without_delivery() -> None:
     assert failed.message.startswith("お土産資料は作成に失敗しました")  # 失敗を先に言う
     assert "もう一度作る場合" in failed.message  # 黙って消えない（次の一手の提示）
     assert slack.uploads == []  # 失敗時に中途半端なファイルを配らない
-    assert [p["text"] for p in slack.posts] == [":warning: " + failed.message]  # 自分から知らせる
+    assert slack.posts == []  # 未署名の申告値からは投稿しない
 
 
 def test_total_delivery_failure_is_done_with_disclosure() -> None:

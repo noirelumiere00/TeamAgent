@@ -26,6 +26,7 @@ import asyncio
 import functools
 import json
 import os
+import threading
 import time
 import uuid
 from collections.abc import Callable
@@ -92,7 +93,7 @@ OAUTH_CONNECT_TOOL_NAME = "oauth_connect"
 
 # submit 応答を返した後も MCP process 内で完了を待つ対象。SQS/DynamoDB/worker の契約は
 # 変えず、それぞれの status skill を通常どおり呼んで利用者向けサマリへ整形する。
-_ASYNC_JOB_TOOLS = frozenset({"tiktok_acquire", "proposal_builder_submit"})
+_ASYNC_JOB_TOOLS = frozenset({"tiktok_acquire", "proposal_builder_submit", "omiyage_report_submit"})
 
 # usage_events 記録器は本番 MCP プロセス内で 1 つだけ遅延生成する。初期化失敗時の None も
 # キャッシュし、env 不足等を各 tool 呼び出しで繰り返さない（利用者処理は常に fail-open）。
@@ -347,14 +348,15 @@ def _format_tiktok_completion(output: Any) -> str:
     failed = output.status == "failed"
     lines = [
         "❌ TikTok取得に失敗しました。" if failed else "✅ TikTok取得が完了しました。",
-        f"job_id: `{output.job_id}`",
     ]
-    if output.message:
-        lines.append(output.message)
-    if output.error_code:
-        lines.append(f"error_code: `{output.error_code}`")
+    if failed:
+        from teamagent.skills._shared.long_jobs import failure_reason
+
+        return "❌ TikTok取得に失敗しました。" + failure_reason(output.error_code)
     if output.counts:
-        counts = "、".join(f"{key}={value}" for key, value in output.counts.items())
+        counts = "、".join(
+            f"{str(key)[:32]}={str(value)[:64]}" for key, value in list(output.counts.items())[:10]
+        )
         lines.append(f"件数: {counts}")
     if output.videos:
         downloaded = sum(1 for video in output.videos if video.get("downloaded"))
@@ -368,13 +370,14 @@ def _format_proposal_completion(output: Any) -> str:
     failed = output.status == "failed"
     lines = [
         "❌ 提案書生成に失敗しました。" if failed else "✅ 提案書生成が完了しました。",
-        f"job_id: `{output.job_id}`",
     ]
+    if failed:
+        from teamagent.skills._shared.long_jobs import failure_reason
+
+        return "❌ 提案書生成に失敗しました。" + failure_reason(output.error_code)
     result_message = output.result_message or output.message
     if result_message:
-        lines.append(result_message)
-    if output.error_code:
-        lines.append(f"error_code: `{output.error_code}`")
+        lines.append(result_message[:1000])
     if output.proposal_status:
         lines.append(f"結果: {output.proposal_status}")
     if output.filled_count is not None and output.skipped_count is not None:
@@ -401,19 +404,65 @@ def _build_async_job_poll(
 
     def _poll() -> tuple[str, str]:
         nonlocal status_skill
+        if tool == "video_algorithm":
+            from teamagent.skills.video_algorithm.schema import VideoAlgorithmStatusInput
+            from teamagent.skills.video_algorithm.skill import VideoAlgorithmStatusSkill
+
+            output = VideoAlgorithmStatusSkill().run(
+                VideoAlgorithmStatusInput(job_id=job_id), poll_ctx
+            )
+            return output.status, output.message
+
         if tool == "tiktok_acquire":
             from teamagent.skills.tiktok_acquire.schema import TikTokAcquireStatusInput
             from teamagent.skills.tiktok_acquire.skill import TikTokAcquireStatusSkill
 
             status_skill = status_skill or TikTokAcquireStatusSkill()
             output = status_skill.run(TikTokAcquireStatusInput(job_id=job_id), poll_ctx)
-            return output.status, _format_tiktok_completion(output)
+            state = output.status
+            if state == "done" and not output.posts_json_url:
+                return "unknown", "取得結果の共有リンクを確認できません。"
+            return state, _format_tiktok_completion(output)
+
+        if tool == "omiyage_report_submit":
+            from teamagent.skills.omiyage_report.schema import OmiyageReportStatusInput
+            from teamagent.skills.omiyage_report.skill import OmiyageReportStatusSkill
+
+            status_skill = status_skill or OmiyageReportStatusSkill()
+            output = status_skill.run(OmiyageReportStatusInput(job_id=job_id), poll_ctx)
+            if output.status == "failed":
+                from teamagent.skills._shared.long_jobs import failure_reason
+
+                reason = {
+                    "OMIYAGE_SEARCH_FAILED": "TikTok検索がすべて失敗しました。",
+                    "OMIYAGE_BUILD_FAILED": "資料の組み立てで止まりました。",
+                }.get(output.error_code, failure_reason(output.error_code))
+                text = "お土産資料は作成に失敗しました。" + reason
+            else:
+                from teamagent.skills._shared.long_jobs import origin
+
+                target = origin(poll_ctx)
+                if not output.slack_delivered and not (target is not None and target.pending):
+                    return "failed", "資料は生成・保存できましたが、結果の配信が中断されました。"
+                text = "\n".join([output.result_message, *output.summary_lines, output.next_step])
+            return output.status, text
 
         from teamagent.skills.proposal_builder.schema import ProposalBuilderStatusInput
         from teamagent.skills.proposal_builder.skill import ProposalBuilderStatusSkill
 
         status_skill = status_skill or ProposalBuilderStatusSkill()
         output = status_skill.run(ProposalBuilderStatusInput(job_id=job_id), poll_ctx)
+        from teamagent.skills._shared.long_jobs import origin
+
+        target = origin(poll_ctx)
+        if (
+            output.status == "done"
+            and output.proposal_status == "ready"
+            and not output.slack_delivered
+            and not output.pptx_url
+            and not (target is not None and target.pending)
+        ):
+            return "failed", "資料は生成・保存できましたが、結果の配信が中断されました。"
         return output.status, _format_proposal_completion(output)
 
     return _poll
@@ -434,30 +483,44 @@ def _schedule_async_job_notice(
     for candidate in [data.get("job_id"), *(extra if isinstance(extra, list) else [])]:
         if isinstance(candidate, str) and candidate and candidate not in job_ids:
             job_ids.append(candidate)
-    for job_id in job_ids:
-        try:
-            from teamagent.mcp_gateway.async_job_notify import (
-                enabled,
-                schedule_completion_notice,
-            )
+    from teamagent.mcp_gateway.async_job_notify import schedule_completion_notice
+    from teamagent.skills._shared.long_jobs import origin, remember_latest
 
-            if not enabled():
-                return
-            schedule_completion_notice(
-                tool=tool,
-                job_id=job_id,
-                user_context=raw,
-                request_id=ctx.request_id,
-                poll=_build_async_job_poll(tool, job_id, ctx),
-            )
-        except Exception as exc:
-            logger.warning(
-                "async_job_notify_dispatch_failed",
-                tool=tool,
-                job_id=job_id,
-                request_id=ctx.request_id,
-                error=type(exc).__name__,
-            )
+    target = origin(ctx)
+    if target is None or not job_ids or data.get("status") not in {"queued", "running", "done"}:
+        return
+    try:
+        remember_latest(ctx, tool, "|".join(job_ids))
+        if data.get("deduplicated"):
+            return
+        polls = [_build_async_job_poll(tool, job_id, ctx) for job_id in job_ids]
+
+        def poll_all() -> tuple[str, str]:
+            results = [poll() for poll in polls]
+            if any(status not in {"queued", "running", "done", "failed"} for status, _ in results):
+                return "unknown", "作業の状態を確認できません。"
+            if any(status in {"queued", "running"} for status, _ in results):
+                state = "running" if any(status == "running" for status, _ in results) else "queued"
+                return state, "処理中です。"
+            state = "failed" if any(status == "failed" for status, _ in results) else "done"
+            return state, "\n\n".join(text for _, text in results)
+
+        schedule_completion_notice(
+            tool=tool,
+            job_id="|".join(job_ids),
+            origin=target,
+            request_id=ctx.request_id,
+            poll=poll_all,
+            ctx=ctx,
+        )
+    except Exception as exc:
+        logger.warning(
+            "async_job_notify_dispatch_failed",
+            tool=tool,
+            request_id=ctx.request_id,
+            error=type(exc).__name__,
+        )
+        data["message"] = "作業は受け付けましたが、自動配信の準備を確認できませんでした。"
 
 
 # 例外文としてモデルへ返す上限（字）。2026-09-29 本番: proposal_builder_submit の ValidationError の
@@ -826,6 +889,8 @@ def _complete_detached(
     usage_user_id: str | None,
     skill_args: dict[str, Any],
     fallback_user_id: str | None = None,
+    job_origin: Any = None,
+    job_id: str = "",
 ) -> None:
     """切り離したジョブの完了処理（ジョブの thread で走る）: 投稿 → cleanup_output → usage 記録。"""
     if isinstance(error, detached_jobs.DetachInterruptedError):
@@ -860,13 +925,26 @@ def _complete_detached(
                 if error is None
                 else None
             )
-            delivered = detached_jobs.post_to_origin(
-                text,
-                destination,
-                request_id=request_id,
-                fallback_user_id=fallback_user_id,
-                rich=rich,
-            )
+            if job_origin is not None:
+                from teamagent.mcp_gateway.async_job_notify import publish_notice
+
+                delivered = publish_notice(
+                    text,
+                    origin=job_origin,
+                    request_id=request_id,
+                    job_id=job_id,
+                    rich=rich,
+                    completed=error is None,
+                )
+            else:
+                delivered = detached_jobs.post_to_origin(
+                    text,
+                    destination,
+                    request_id=request_id,
+                    fallback_user_id=fallback_user_id,
+                    rich=rich,
+                )
+
     finally:
         if result is not None:
             try:
@@ -1021,6 +1099,24 @@ async def dispatch_tool(
     if name == SEARCH_TOOL_NAME:
         metadata[TWO_STAGE_CTX_KEY] = True
 
+    from teamagent.skills._shared.long_jobs import _OWNER_KEY, ORIGIN_KEY, Origin, enabled
+
+    # 生の申告値を必ず消し、署名検証結果だけから共通ジョブの身元・宛先を作る。
+    metadata.pop(ORIGIN_KEY, None)
+    metadata.pop(_OWNER_KEY, None)
+    if verified_caller is not None:
+        metadata[_OWNER_KEY] = (
+            verified_caller.slack_team_id + "\x1f" + verified_caller.slack_user_id
+        )
+        destination = detached_jobs.destination_from_claim(verified_caller)
+        if enabled() and destination is not None:
+            metadata[ORIGIN_KEY] = Origin(
+                destination.channel_id,
+                destination.thread_ts,
+                verified_caller.slack_user_id,
+                deferred=name in _ASYNC_JOB_TOOLS,
+            )
+
     ctx = SkillContext(user_id=metadata.get("user_email"), metadata=metadata)
 
     # ── video_algorithm の切り離し（USE_VIDEO_ALGORITHM_DETACH 既定OFF＝以下は素通り）─────
@@ -1080,6 +1176,52 @@ async def dispatch_tool(
         and detach_key is not None
         and verified_caller is not None
     ):
+        from teamagent.adapters.proposal_job_store import ProposalJobStore
+        from teamagent.skills._shared.long_jobs import origin, owner_key, remember_latest
+
+        video_job_id = f"va_{ctx.request_id}"
+        video_store = ProposalJobStore()
+        video_origin = origin(ctx)
+        if video_origin is not None:
+            video_store.create_job(
+                video_job_id,
+                {"kind": "video_algorithm", "owner": owner_key(ctx, "video_algorithm")},
+            )
+
+        def run_video() -> Any:
+            if video_origin is None:
+                return skill.run(skill_input, ctx)
+            if not video_store.mark_running(video_job_id):
+                raise RuntimeError("VIDEO_ALGORITHM_STATE_WRITE_FAILED")
+            heartbeat_stop = threading.Event()
+
+            def heartbeat() -> None:
+                while not heartbeat_stop.wait(30):
+                    try:
+                        if not video_store.heartbeat(video_job_id):
+                            return
+                    except Exception as exc:
+                        logger.warning("video_job_heartbeat_failed", error=type(exc).__name__)
+
+            heartbeat_thread = threading.Thread(target=heartbeat, daemon=True)
+            heartbeat_thread.start()
+            try:
+                result = skill.run(skill_input, ctx)
+                text = detached_jobs.completion_text(result, detach_query)
+                if not video_store.mark_done(video_job_id, json.dumps({"message": text})):
+                    raise RuntimeError("VIDEO_ALGORITHM_STATE_WRITE_FAILED")
+                return result
+            except Exception as exc:
+                video_store.mark_failed(
+                    video_job_id,
+                    "VIDEO_ALGORITHM_FAILED",
+                    error_summary=detached_jobs.user_message_for_error(exc),
+                )
+                raise
+            finally:
+                heartbeat_stop.set()
+                heartbeat_thread.join(timeout=1)
+
         detached_job, start_state = detached_jobs.REGISTRY.start(
             key=detach_key,
             max_background=detach_policy.max_background,
@@ -1088,7 +1230,7 @@ async def dispatch_tool(
             query=detach_query,
             request_id=ctx.request_id,
             destination=detach_destination,
-            target=functools.partial(skill.run, skill_input, ctx),
+            target=run_video,
             on_detached_done=functools.partial(
                 _complete_detached,
                 loop=asyncio.get_running_loop(),
@@ -1103,6 +1245,8 @@ async def dispatch_tool(
                 usage_user_id=usage_user_id,
                 skill_args=skill_args,
                 fallback_user_id=verified_caller.slack_user_id,
+                job_origin=video_origin,
+                job_id=video_job_id,
             ),
         )
         if start_state == "duplicate" and detached_job is not None:
@@ -1136,6 +1280,9 @@ async def dispatch_tool(
             return _detach_response(
                 detach_query, detached_jobs.busy_text(detach_query), status="busy"
             )
+        if video_origin is not None and start_state not in {"duplicate", "closing", "full"}:
+            remember_latest(ctx, "video_algorithm", video_job_id)
+
     try:
         if detached_job is not None and detach_policy is not None:
             wait_state = await _wait_or_detach(detached_job, detach_policy.detach_after_s)
@@ -1150,6 +1297,25 @@ async def dispatch_tool(
                     status="interrupted",
                 )
             if wait_state == detached_jobs.DETACH_DETACHED:
+                if video_origin is not None:
+                    from teamagent.mcp_gateway.async_job_notify import schedule_completion_notice
+                    from teamagent.skills.video_algorithm.schema import VideoAlgorithmStatusInput
+                    from teamagent.skills.video_algorithm.skill import VideoAlgorithmStatusSkill
+
+                    def video_poll() -> tuple[str, str]:
+                        status = VideoAlgorithmStatusSkill().run(
+                            VideoAlgorithmStatusInput(job_id=video_job_id), ctx
+                        )
+                        return status.status, status.message
+
+                    schedule_completion_notice(
+                        tool=name,
+                        job_id=video_job_id,
+                        origin=video_origin,
+                        request_id=ctx.request_id,
+                        poll=video_poll,
+                        ctx=ctx,
+                    )
                 queued = detached_job.queued
                 logger.info(
                     "video_algorithm_detached",
@@ -1850,6 +2016,9 @@ def build_production_server() -> Server:
 
 async def _amain() -> None:
     server = build_production_server()
+    from teamagent.mcp_gateway.async_job_notify import start_recovery
+
+    start_recovery()
     async with stdio_server() as (read_stream, write_stream):
         await server.run(read_stream, write_stream, server.create_initialization_options())
 

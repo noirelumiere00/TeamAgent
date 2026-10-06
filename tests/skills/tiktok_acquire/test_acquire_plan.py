@@ -26,6 +26,7 @@ from teamagent.media.contracts import (
     TikTokClientConfig,
     tiktok_search_timeout_seconds,
 )
+from teamagent.skills._shared.long_jobs import ORIGIN_KEY, Origin
 from teamagent.skills.base import SkillContext
 from teamagent.skills.tiktok_acquire.plan import (
     MAX_JOBS_PER_REQUEST,
@@ -261,7 +262,7 @@ def test_default_three_keyword_call_is_queued_as_three_jobs() -> None:
         assert request.operation.artifact_mode == "full"
     assert out.adjustments and "3件の取得に分けて" in out.message
     for job_id in out.job_ids:
-        assert job_id in out.message
+        assert job_id not in out.message
 
 
 def test_surface_check_recipe_call_is_queued_as_one_metadata_only_job() -> None:
@@ -300,7 +301,8 @@ def test_request_that_fits_keeps_the_legacy_job_id() -> None:
     ).hexdigest()
     assert out.job_id == new_job_id(legacy_fingerprint)
     assert out.adjustments == []
-    assert out.message == f"取得を開始しました(KW1件・数分かかります)。job_id={out.job_id}"
+    assert "40〜50分" in out.message
+    assert "job_id" not in out.message
 
 
 def test_partial_submit_failure_keeps_the_jobs_that_were_queued() -> None:
@@ -330,9 +332,13 @@ def test_completion_notice_is_scheduled_for_every_split_job(
 
     server._schedule_async_job_notice(
         "tiktok_acquire",
-        {"job_id": "tk_000000000001", "job_ids": ["tk_000000000001", "tk_000000000002"]},
+        {
+            "status": "queued",
+            "job_id": "tk_000000000001",
+            "job_ids": ["tk_000000000001", "tk_000000000002"],
+        },
         {"channel_id": "C123"},
-        _ctx(),
+        SkillContext(metadata={ORIGIN_KEY: Origin("D12345678", None, "U12345678")}),
     )
 
-    assert scheduled == ["tk_000000000001", "tk_000000000002"]
+    assert scheduled == ["tk_000000000001|tk_000000000002"]

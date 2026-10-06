@@ -259,6 +259,7 @@ def build_production_tools() -> list[ToolSpec]:
         from teamagent.skills.video.skill import VideoAnalysisSkill
         from teamagent.skills.video_algorithm.skill import (
             VideoAlgorithmSkill,
+            VideoAlgorithmStatusSkill,
             prompt_version_from_env,
         )
 
@@ -272,6 +273,14 @@ def build_production_tools() -> list[ToolSpec]:
                 VideoAlgorithmSkill.description,
                 VideoAlgorithmSkill,
                 factory=lambda: VideoAlgorithmSkill(prompt_version=prompt_version_from_env()),
+            )
+        )
+
+        specs.append(
+            ToolSpec(
+                VideoAlgorithmStatusSkill.name,
+                VideoAlgorithmStatusSkill.description,
+                VideoAlgorithmStatusSkill,
             )
         )
 

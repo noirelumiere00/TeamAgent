@@ -13,7 +13,7 @@ proposal_builder の job を照会・破壊できない（逆方向は proposal_
   → 動画解析（DL→フレーム→視覚AIでクラスタ分類+テロップ読取・並列/コスト上限つき）
   → 決定論集計（metrics）→ 契約準拠の計測JSON（deck_plan: deck_meta + slide_plan）
   → 計測JSON+監査JSONをS3へ保存 → レンダラ（計測JSONだけを入力に描く）で PPTX 化
-  → 依頼元スレッドへ添付（失敗時は本人DMへフォールバック）→ mark_done。
+  → mark_done を確認 → 共通通知で依頼元スレッドへ添付。
   一部の検索・解析が失敗しても部分結果で作成し、資料と結果メッセージで開示する（場面4）。
 """
 
@@ -39,15 +39,17 @@ from typing import Any, ClassVar, Literal
 from pydantic import BaseModel
 
 from teamagent.adapters.proposal_job_store import ProposalJobStore
+from teamagent.adapters.retry import retry_long_job_once as retry_once
 from teamagent.adapters.tiktok_scraper import TikTokScrapeError, TikTokSearchResult
 from teamagent.media.contracts import TIKTOK_N_PER_KW_MAX
+from teamagent.skills._shared.long_jobs import enabled as long_jobs_enabled
+from teamagent.skills._shared.long_jobs import failure_reason, latest_job, origin
 from teamagent.skills.base import BaseSkill, SkillContext, register
 from teamagent.skills.omiyage_report.compose import (
     build_all_failed_message,
     build_analysis_note,
     build_build_failed_message,
     build_delivery_failed_note,
-    build_job_failed_notice,
     build_next_step,
     build_partial_message,
     build_summary_lines,
@@ -509,8 +511,8 @@ class OmiyageReportSubmitSkill(BaseSkill[OmiyageReportSubmitInput, OmiyageReport
         "進行確認は omiyage_report_status。queued/running中は再submitしない。"
         "所要目安（約M分・依頼内容から算出）は message に書いてあるので、営業へは message を"
         "そのまま伝える（ツール名や見込み時間を自分で作らない）。queued時の retry_after_seconds は"
-        "status再照会の間隔であって完成予定ではない。スレッドで『まだ？』と聞かれたら"
-        "同じjob_idでstatusを照会する。"
+        "status再照会の間隔であって完成予定ではない。『まだ？』には"
+        "番号省略でstatusを照会する。"
     )
     input_schema: ClassVar[type[BaseModel]] = OmiyageReportSubmitInput
     output_schema: ClassVar[type[BaseModel]] = OmiyageReportSubmitOutput
@@ -891,9 +893,6 @@ class OmiyageReportSubmitSkill(BaseSkill[OmiyageReportSubmitInput, OmiyageReport
                     job_id=job_id,
                     error_type=type(write_exc).__name__,
                 )
-            # 失敗は自分から知らせる（2026-10-02: 失敗しても何も届かず、利用者が 1 時間後に
-            # 「状況は？」と聞くまで気づけなかった）。宛先は成功時の添付と同じ順。
-            self._notify_failure(job_id, error_code, ctx, log)
         finally:
             heartbeat_stop.set()
             if heartbeat_thread is not None:
@@ -1009,14 +1008,18 @@ class OmiyageReportSubmitSkill(BaseSkill[OmiyageReportSubmitInput, OmiyageReport
     ) -> list[AxisData]:
         axes: list[AxisData] = []
         for role, label, query in self._axis_plan(input):
-            try:
-                result = self._searcher(
+
+            def search(query: str = query) -> TikTokSearchResult:
+                return self._searcher(
                     query,
                     search_type="keyword",
                     max_videos=self._search_depth,
                     request_id=ctx.request_id,
                     timeout_s=self._search_timeout_seconds,
                 )
+
+            try:
+                result = retry_once(search)
             except TikTokScrapeError as exc:
                 code = _safe_failure_code(exc)
                 log.warning(
@@ -1239,7 +1242,9 @@ class OmiyageReportSubmitSkill(BaseSkill[OmiyageReportSubmitInput, OmiyageReport
         try:
             # レンダラ境界: 計測JSON（契約 DeckPlan）だけを渡し、画像モード（正）+
             # 編集用（併走）の2ファイルを受け取る
-            image_path, editable_path = self._deck_builder(plan_json, workdir, ctx.request_id)
+            image_path, editable_path = retry_once(
+                lambda: self._deck_builder(plan_json, workdir, ctx.request_id)
+            )
             filename = Path(image_path).name
             disclosures: list[str] = []
             if failed_labels:
@@ -1272,7 +1277,11 @@ class OmiyageReportSubmitSkill(BaseSkill[OmiyageReportSubmitInput, OmiyageReport
             if analysis_note:
                 message += " " + analysis_note
         else:
-            message = build_delivery_failed_note()
+            message = (
+                "お土産資料の生成は完了しました。"
+                if (target := origin(ctx)) is not None and target.pending
+                else build_delivery_failed_note()
+            )
 
         return OmiyageReportResult(
             status=status,
@@ -1300,48 +1309,6 @@ class OmiyageReportSubmitSkill(BaseSkill[OmiyageReportSubmitInput, OmiyageReport
             audit_s3_uri=audit_uri,
         )
 
-    def _notify_failure(self, job_id: str, error_code: str, ctx: SkillContext, log: Any) -> None:
-        """失敗の知らせを依頼元スレッド → 本人 DM の順で 1 通だけ送る（例外は握る）。"""
-        try:
-            notice = build_job_failed_notice(error_code)
-            target = asyncio.run(self._post_failure_notice(notice, ctx))
-        except Exception as exc:
-            log.warning(
-                "omiyage_report_failure_notice_failed",
-                job_id=job_id,
-                error_type=type(exc).__name__,
-            )
-            return
-        log.info("omiyage_report_failure_notified", job_id=job_id, target=target)
-
-    async def _post_failure_notice(
-        self, text: str, ctx: SkillContext
-    ) -> Literal["thread", "dm", "none"]:
-        slack = self._slack
-        if slack is None:
-            from teamagent.adapters.slack_client import SlackClient
-
-            slack = SlackClient.from_env()
-            self._slack = slack
-        channel = ctx.metadata.get("channel_id")
-        channel = channel if isinstance(channel, str) and channel else None
-        thread_ts = ctx.metadata.get("thread_ts")
-        thread_ts = thread_ts if isinstance(thread_ts, str) and thread_ts else None
-        if channel:
-            posted = await slack.post_message(channel, text, ctx.request_id, thread_ts=thread_ts)
-            if getattr(posted, "ok", False):
-                return "thread"
-        requester = ctx.metadata.get("user_email")
-        requester = requester.strip() if isinstance(requester, str) and requester.strip() else None
-        if requester:
-            user_id = await slack.lookup_user_id_by_email(requester, ctx.request_id)
-            dm = await slack.open_dm(user_id, ctx.request_id) if user_id else None
-            if dm:
-                posted = await slack.post_message(dm, text, ctx.request_id)
-                if getattr(posted, "ok", False):
-                    return "dm"
-        return "none"
-
     async def _deliver(
         self,
         *,
@@ -1357,6 +1324,8 @@ class OmiyageReportSubmitSkill(BaseSkill[OmiyageReportSubmitInput, OmiyageReport
         コメントは先頭ファイルにだけ付け、同じスレッドへ続けて添付する。
         全ファイル成功のときのみ配達成功として扱う。
         """
+        if long_jobs_enabled() and origin(ctx) is None:
+            return False, "none"
         slack = self._slack
         if slack is None:
             from teamagent.adapters.slack_client import SlackClient
@@ -1372,6 +1341,13 @@ class OmiyageReportSubmitSkill(BaseSkill[OmiyageReportSubmitInput, OmiyageReport
             self._slack = slack
 
         files: list[tuple[str, str]] = [(path, title), *(extra_files or [])]
+        target = origin(ctx)
+        if target is not None and target.deferred:
+            for index, (file_path, file_title) in enumerate(files):
+                target.defer(
+                    slack, file_path, file_title, comment if index == 0 else "", ctx.request_id
+                )
+            return False, "none"
 
         async def upload_all(target: str, thread_ts: str | None) -> bool:
             for index, (file_path, file_title) in enumerate(files):
@@ -1391,8 +1367,16 @@ class OmiyageReportSubmitSkill(BaseSkill[OmiyageReportSubmitInput, OmiyageReport
         channel = channel if isinstance(channel, str) and channel else None
         thread_ts = ctx.metadata.get("thread_ts")
         thread_ts = thread_ts if isinstance(thread_ts, str) and thread_ts else None
+        if target is not None:
+            channel, thread_ts = target.channel_id, target.thread_ts
         if channel and await upload_all(channel, thread_ts):
             return True, "thread"
+
+        if target is not None:
+            dm = await slack.open_dm(target.user_id, ctx.request_id)
+            if dm and await upload_all(dm, None):
+                return True, "dm"
+            return False, "none"
 
         requester = ctx.metadata.get("user_email")
         requester = requester.strip() if isinstance(requester, str) and requester.strip() else None
@@ -1413,7 +1397,7 @@ class OmiyageReportStatusSkill(BaseSkill[OmiyageReportStatusInput, OmiyageReport
     description: ClassVar[str] = (
         "omiyage_report_submitが返したjob_id（omy_...）のqueued/running/done/failedを照会する。"
         "doneなら要点3行・次の一手・スレッド添付済みフラグ・検索軸ごとの取得状況を返す。"
-        "running中は再submitせず、retry_after_seconds後に同じjob_idを再照会する。"
+        "番号省略時は本人の直近を照会する。実行中は再submitしない。"
     )
     input_schema: ClassVar[type[BaseModel]] = OmiyageReportStatusInput
     output_schema: ClassVar[type[BaseModel]] = OmiyageReportStatusOutput
@@ -1447,6 +1431,15 @@ class OmiyageReportStatusSkill(BaseSkill[OmiyageReportStatusInput, OmiyageReport
         input: OmiyageReportStatusInput,
         ctx: SkillContext,
     ) -> OmiyageReportStatusOutput:
+        if not input.job_id:
+            job_id = latest_job(ctx, "omiyage_report_submit")
+            if not job_id:
+                return OmiyageReportStatusOutput(
+                    job_id="",
+                    status="failed",
+                    message="この会話で確認できる直近の作業がありません。",
+                )
+            input = input.model_copy(update={"job_id": job_id})
         log = ctx.bind_logger(self.name)
         row = self._store.get_job(input.job_id)
         if row is None:
@@ -1508,11 +1501,12 @@ class OmiyageReportStatusSkill(BaseSkill[OmiyageReportStatusInput, OmiyageReport
         if status == "failed":
             error_code = row.get("error_code")
             code = error_code if isinstance(error_code, str) else "JOB_STATE_INVALID"
-            message = (
-                build_all_failed_message()
-                if code == _OMIYAGE_SEARCH_FAILED
-                else build_build_failed_message()
-            )
+            if code == _OMIYAGE_SEARCH_FAILED:
+                message = build_all_failed_message()
+            elif code == _OMIYAGE_BUILD_FAILED:
+                message = build_build_failed_message()
+            else:
+                message = "お土産資料の作成に失敗しました。" + failure_reason(code)
             return OmiyageReportStatusOutput(
                 job_id=input.job_id,
                 status="failed",

@@ -174,7 +174,7 @@ def test_failed_status_without_summary_keeps_generic_message() -> None:
     assert failed.status == "failed"
     assert failed.error_code == "MCP_RESTARTED"
     assert failed.error_summary is None
-    assert failed.message == "提案書生成に失敗しました。error_codeを確認してください。"
+    assert failed.message == "提案書生成に失敗しました。資料の組み立てで止まりました。"
 
 
 def test_thread_start_failure_is_persisted() -> None:

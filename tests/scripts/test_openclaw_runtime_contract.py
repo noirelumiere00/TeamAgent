@@ -1649,7 +1649,7 @@ def test_effective_tool_scope_matches_config_and_deployment_gates() -> None:
     excluded = config["mcp"]["servers"]["teamagent"]["toolFilter"]["exclude"]
     inventory_names = [tool["name"] for tool in scope["tools"]]
     assert scope["schemaVersion"] == 2
-    assert len(inventory_names) == len(set(inventory_names)) == 41
+    assert len(inventory_names) == len(set(inventory_names)) == 42
     assert set(inventory_names) == set(included)
     assert {
         "chitchat",

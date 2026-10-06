@@ -17,6 +17,7 @@ from pydantic import BaseModel
 
 from teamagent.adapters.tiktok_s3_source import media_audit_principal_hash
 from teamagent.adapters.tiktok_task_store import TikTokTaskStore, new_job_id
+from teamagent.skills._shared.long_jobs import latest_job
 from teamagent.skills.base import (
     ASYNC_JOB_POLL_METADATA_KEY,
     BaseSkill,
@@ -44,6 +45,9 @@ logger = structlog.get_logger(__name__)
 
 
 def _audit_principal_hash(ctx: SkillContext) -> str:
+    recovered = ctx.metadata.get("_long_job_principal_hash")
+    if ctx.metadata.get(ASYNC_JOB_POLL_METADATA_KEY) and isinstance(recovered, str):
+        return recovered
     requested_by = ctx.metadata.get("user_email") or ctx.user_id or "unknown"
     return media_audit_principal_hash(requested_by)
 
@@ -163,6 +167,8 @@ class TikTokAcquireSkill(BaseSkill[TikTokAcquireInput, TikTokAcquireOutput]):
                 "request_fingerprint": request_fingerprint,
             }
             ok = self._store.submit(spec)
+            if not ok:
+                ok = self._store.submit(spec) if _retry_enabled() else False
             log.info(
                 "tiktok_acquire_submitted",
                 job_id=job_id,
@@ -209,21 +215,21 @@ class TikTokAcquireSkill(BaseSkill[TikTokAcquireInput, TikTokAcquireOutput]):
         )
 
 
+def _retry_enabled() -> bool:
+    import os
+
+    return os.environ.get("USE_LONG_JOB_RETRY", "1").strip().lower() in {"1", "true", "yes"}
+
+
 def _queued_message(
     keyword_count: int,
     submitted: list[TikTokAcquireJob],
     adjustments: list[str],
 ) -> str:
-    if len(submitted) == 1:
-        message = (
-            f"取得を開始しました(KW{keyword_count}件・数分かかります)。job_id={submitted[0].job_id}"
-        )
-    else:
-        per_job = "、".join(f"{job.job_id}（{'・'.join(job.keywords)}）" for job in submitted)
-        message = (
-            f"取得を開始しました(KW{keyword_count}件を{len(submitted)}件の取得に分けて並行・"
-            f"数分かかります)。job_id={per_job}。結果は job_id ごとに照会してください。"
-        )
+    message = (
+        f"取得を受け付けました（KW{keyword_count}件・{len(submitted)}件を並行実行）。"
+        "実測の目安は40〜50分です。完了・失敗をこの会話にお届けします。"
+    )
     if adjustments:
         message += " " + " ".join(adjustments)
     return message
@@ -235,7 +241,7 @@ class TikTokAcquireStatusSkill(BaseSkill[TikTokAcquireStatusInput, TikTokAcquire
 
     name: ClassVar[str] = "tiktok_acquire_status"
     description: ClassVar[str] = (
-        "tiktok_acquire が返した job_id の取得結果をポーリング照会する（tiktok_acquire専用の"
+        "tiktok_acquire の取得状態を照会する。番号省略時は本人の直近（専用の"
         "後工程で、単独の入口にはしない）。doneならposts/サムネ/動画(mp4)を署名URLとS3キーで"
         "返す（url=人向け / s3_key=機械処理用）。"
     )
@@ -286,6 +292,36 @@ class TikTokAcquireStatusSkill(BaseSkill[TikTokAcquireStatusInput, TikTokAcquire
             return out
 
     def run(self, input: TikTokAcquireStatusInput, ctx: SkillContext) -> TikTokAcquireStatusOutput:
+        if not input.job_id:
+            job_id = latest_job(ctx, "tiktok_acquire")
+            if not job_id:
+                return TikTokAcquireStatusOutput(
+                    job_id="",
+                    status="unknown",
+                    message="この会話で確認できる直近の作業がありません。",
+                )
+            job_ids = job_id.split("|")
+            if len(job_ids) > 1:
+                results = [
+                    self.run(TikTokAcquireStatusInput(job_id=value), ctx) for value in job_ids
+                ]
+                states = [result.status for result in results]
+                if any(state not in {"queued", "running", "done", "failed"} for state in states):
+                    state, message = "unknown", "一部の取得状態を確認できません。"
+                elif any(state in {"queued", "running"} for state in states):
+                    state = "running" if "running" in states else "queued"
+                    message = f"取得は継続中です（完了 {states.count('done')}/{len(states)}件）。"
+                elif "failed" in states:
+                    state, message = "failed", "一部の取得に失敗しました。"
+                else:
+                    state, message = "done", "ご依頼の取得はすべて完了しました。"
+                return TikTokAcquireStatusOutput(
+                    job_id=job_ids[0],
+                    status=state,
+                    message=message,
+                    job_results=[result.model_dump() for result in results],
+                )
+            input = input.model_copy(update={"job_id": job_id})
         log = ctx.bind_logger(self.name)
         st = self._store.get_status(
             input.job_id,
@@ -309,12 +345,10 @@ class TikTokAcquireStatusSkill(BaseSkill[TikTokAcquireStatusInput, TikTokAcquire
             apify_count = counts.get("videos_apify") if isinstance(counts, dict) else None
             if isinstance(apify_count, int) and apify_count > 0:
                 done_msg += f"（worker が落とせなかった {apify_count} 本は Apify で補完）"
-        fail_msg = (
-            f"失敗しました: {st.get('error_code') or ''} {st.get('stop_reason') or ''}".strip()
-        )
+        fail_msg = "取得先の応答または処理中の問題で取得に失敗しました。"
         msg = {
             "queued": "順番待ちです。少し待って再度照会してください。",
-            "running": "取得中です(数分)。",
+            "running": "取得処理が実行中です。",
             "done": done_msg,
             "failed": fail_msg,
         }.get(status, "状態不明です。")

@@ -93,7 +93,7 @@ def test_accepts_up_to_the_limit_then_returns_busy_without_creating_a_job() -> N
     assert "順番待ち 1 番目" in third.message
     # 利用者向け文にツール名は出さない（『まだ？』で聞けばよい）
     assert "omiyage_" not in third.message
-    assert "『まだ？』" in third.message
+    assert "『まだ？』" not in third.message
     # 3 本目はジョブを作っていない＝台帳は 2 行のまま。
     assert len(memory) == 2
     assert len(launcher.targets) == 2

@@ -279,7 +279,7 @@
             //   動画解析(Bedrock課金)→PPTX 2通を依頼元スレッドへ添付。statusで照会）。
             //   USE_OMIYAGE_REPORT_TOOLS=1（tf: enable_omiyage_report・media worker必須）が必要。
             "omiyage_report_submit", "omiyage_report_status",
-            "tiktok_search", "video_analysis", "video_algorithm",
+            "tiktok_search", "video_analysis", "video_algorithm", "video_algorithm_status",
             // ③動画チェック: 自社編集者の納品動画をオリエンと照合し合否/誤植/尺の一次FB。
             //   現在は scope enabledBy=never。解禁4点セットは (1) tf task env 配線、
             //   (2) scope enabledBy 更新、(3) contract test 更新、(4) OCイメージ再ビルド。

@@ -21,12 +21,15 @@ from pydantic import BaseModel
 from teamagent.adapters.bedrock_client import BedrockClient
 from teamagent.adapters.media_job import MediaJobClient
 from teamagent.adapters.proposal_job_store import ProposalJobStore, new_proposal_job_id
+from teamagent.adapters.retry import retry_long_job_once as retry_once
 from teamagent.adapters.tiktok_scraper import (
     TikTokScrapeError,
     TikTokSearchResult,
     TikTokVideo,
     search_tiktok,
 )
+from teamagent.skills._shared.long_jobs import enabled as long_jobs_enabled
+from teamagent.skills._shared.long_jobs import latest_job, origin
 from teamagent.skills._shared.text_safety import sanitize_llm_text
 from teamagent.skills.base import BaseSkill, SkillContext, register
 from teamagent.skills.proposal_builder.research import (
@@ -1000,7 +1003,7 @@ class ProposalBuilderSkill(BaseSkill[ProposalBuilderInput, ProposalBuilderOutput
 
         deck_output: ProposalDeckOutput | None = None
         try:
-            deck_output = self._deck.run(deck_input, ctx)
+            deck_output = retry_once(lambda: self._deck.run(deck_input, ctx))
             issues = [f"{issue.code}:{issue.path}" for issue in sanitized.issues]
             if rag_failed:
                 issues.append("case_rag_unavailable")
@@ -1064,9 +1067,16 @@ class ProposalBuilderSkill(BaseSkill[ProposalBuilderInput, ProposalBuilderOutput
                         "proposal_builder_slack_delivery_failed",
                         error_type=type(exc).__name__,
                     )
-                if not slack_delivered:
+                if not slack_delivered and not (
+                    (target := origin(ctx)) is not None and target.pending
+                ):
                     warnings.append("Slackファイル添付に失敗")
-            if status == "ready" and not slack_delivered and not pptx_url:
+            if (
+                status == "ready"
+                and not slack_delivered
+                and not pptx_url
+                and not ((target := origin(ctx)) is not None and target.pending)
+            ):
                 raise RuntimeError(
                     "ready proposal has neither Slack delivery nor a published fallback URL"
                 )
@@ -1145,6 +1155,8 @@ class ProposalBuilderSkill(BaseSkill[ProposalBuilderInput, ProposalBuilderOutput
         comment: str,
         ctx: SkillContext,
     ) -> tuple[bool, Literal["thread", "dm", "none"]]:
+        if long_jobs_enabled() and origin(ctx) is None:
+            return False, "none"
         slack = self._slack
         if slack is None:
             from teamagent.adapters.slack_client import SlackClient
@@ -1159,10 +1171,17 @@ class ProposalBuilderSkill(BaseSkill[ProposalBuilderInput, ProposalBuilderOutput
             )
             self._slack = slack
 
+        target = origin(ctx)
+        if target is not None and target.deferred:
+            target.defer(slack, path, title, comment, ctx.request_id)
+            return False, "none"
+
         channel = ctx.metadata.get("channel_id")
         channel = channel if isinstance(channel, str) and channel else None
         thread_ts = ctx.metadata.get("thread_ts")
         thread_ts = thread_ts if isinstance(thread_ts, str) and thread_ts else None
+        if target is not None:
+            channel, thread_ts = target.channel_id, target.thread_ts
         if channel:
             ok = await slack.upload_file(
                 channel,
@@ -1175,6 +1194,21 @@ class ProposalBuilderSkill(BaseSkill[ProposalBuilderInput, ProposalBuilderOutput
             )
             if ok:
                 return True, "thread"
+
+        if target is not None:
+            dm = await slack.open_dm(target.user_id, ctx.request_id)
+            if dm:
+                ok = await slack.upload_file(
+                    dm,
+                    path,
+                    ctx.request_id,
+                    title=title,
+                    filename=title,
+                    initial_comment=comment,
+                )
+                if ok:
+                    return True, "dm"
+            return False, "none"
 
         requester = ctx.metadata.get("user_email")
         requester = requester.strip() if isinstance(requester, str) and requester.strip() else None
@@ -1301,7 +1335,7 @@ class ProposalBuilderSubmitSkill(
             job_id=job_id,
             status="queued",
             retry_after_seconds=self._retry_after_seconds,
-            message="提案書生成を受け付けました。完了までstatusを照会してください。",
+            message="提案書生成を受け付けました。実測の目安は40〜50分です。完了・失敗をこの会話にお届けします。",
         )
 
     def _run_background(
@@ -1444,7 +1478,7 @@ class ProposalBuilderStatusSkill(
     description: ClassVar[str] = (
         "proposal_builder_submitが返したjob_idのqueued/running/done/failedを照会する。"
         "doneならPPTX URL、Slack添付済みフラグ、ready/draft等の安全な結果サマリを返す。"
-        "running中は再submitせず、retry_after_seconds後に同じjob_idを再照会する。"
+        "番号省略時は本人の直近を照会する。実行中は再submitしない。"
     )
     input_schema: ClassVar[type[BaseModel]] = ProposalBuilderStatusInput
     output_schema: ClassVar[type[BaseModel]] = ProposalBuilderStatusOutput
@@ -1483,6 +1517,15 @@ class ProposalBuilderStatusSkill(
         input: ProposalBuilderStatusInput,
         ctx: SkillContext,
     ) -> ProposalBuilderStatusOutput:
+        if not input.job_id:
+            job_id = latest_job(ctx, "proposal_builder_submit")
+            if not job_id:
+                return ProposalBuilderStatusOutput(
+                    job_id="",
+                    status="failed",
+                    message="この会話で確認できる直近の作業がありません。",
+                )
+            input = input.model_copy(update={"job_id": job_id})
         log = ctx.bind_logger(self.name)
         if not input.job_id.startswith("pb_"):
             # 同じ job store に omiyage_report 等の異種 job（omy_...）が同居する。
@@ -1557,7 +1600,7 @@ class ProposalBuilderStatusSkill(
             message = (
                 f"提案書生成に失敗しました。理由: {error_summary}"
                 if error_summary
-                else "提案書生成に失敗しました。error_codeを確認してください。"
+                else "提案書生成に失敗しました。資料の組み立てで止まりました。"
             )
             return ProposalBuilderStatusOutput(
                 job_id=input.job_id,

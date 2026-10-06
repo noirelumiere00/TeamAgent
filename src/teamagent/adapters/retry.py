@@ -162,4 +162,39 @@ def call_with_retry(
             sleep(delay)
 
 
-__all__ = ["RateLimitPolicy", "RetryPolicy", "backoff_cap", "call_with_retry"]
+__all__ = [
+    "RateLimitPolicy",
+    "RetryPolicy",
+    "backoff_cap",
+    "call_with_retry",
+    "is_transient_job_error",
+    "retry_long_job_once",
+]
+
+
+def is_transient_job_error(exc: BaseException) -> bool:
+    """一時的な通信の失敗か（やり直して直りうるものだけ）。
+
+    取得 API・生成の失敗（入力不備・予算超過・取得元のエラー）はやり直しても同じ結果で、
+    課金だけが 2 倍になるので対象にしない。
+    """
+    if isinstance(exc, (TimeoutError, ConnectionError)):
+        return True
+    from teamagent.adapters.media_job import _is_transient_network_error
+
+    return _is_transient_network_error(exc)
+
+
+def retry_long_job_once(fn: Callable[[], T]) -> T:
+    """読み取り・ローカル生成のジョブ段階を、一時的な通信の失敗のときだけ一度やり直す。
+
+    公開・投稿は対象外。USE_LONG_JOB_RETRY=0 でやり直さない。
+    """
+    import os
+
+    enabled = os.environ.get("USE_LONG_JOB_RETRY", "1").strip().lower() in {"1", "true", "yes"}
+    return call_with_retry(
+        fn,
+        is_retryable=is_transient_job_error,
+        policy=RetryPolicy(max_attempts=2 if enabled else 1, base_delay_s=0, max_delay_s=0),
+    )

@@ -326,6 +326,28 @@ class ProposalJobStore:
             result_json=result_json,
         )
 
+    def mark_delivered(self, job_id: str) -> bool:
+        """保存済み結果の配信記録だけを更新する（生成や terminal 状態は変更しない）。"""
+        row = self.get_job(job_id)
+        if row is None or row.get("status") != "done":
+            return False
+        raw = row.get("result_json")
+        result = json.loads(raw) if isinstance(raw, str) else None
+        if not isinstance(result, dict) or "slack_delivered" not in result:
+            return False
+        result["slack_delivered"] = True
+        result["delivery_target"] = "thread"
+        result["message"] = str(result.get("message") or "") + " この会話へ添付しました。"
+        serialized = json.dumps(result, ensure_ascii=False)
+        if len(serialized.encode("utf-8")) > _MAX_RESULT_BYTES:
+            return False
+        return self._transition(
+            job_id,
+            expected_statuses=("done",),
+            next_status="done",
+            result_json=serialized,
+        )
+
     def mark_failed(
         self,
         job_id: str,

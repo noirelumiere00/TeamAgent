@@ -22,10 +22,6 @@ from teamagent.adapters.tiktok_scraper import (
 )
 from teamagent.media.contracts import TIKTOK_N_PER_KW_MAX
 from teamagent.skills.base import SkillContext
-from teamagent.skills.omiyage_report.compose import (
-    build_all_failed_message,
-    build_build_failed_message,
-)
 from teamagent.skills.omiyage_report.contract import DeckPlan
 from teamagent.skills.omiyage_report.fmt.contract import validate_deck_content
 from teamagent.skills.omiyage_report.fmt.editable import EDIT_MARKER
@@ -389,14 +385,8 @@ def test_all_axes_failed_marks_job_failed_with_choices() -> None:
     assert "検索語・競合名を変えて" in failed.message
     assert builder.calls == []
     assert slack.uploads == []
-    # 失敗は自分から依頼元スレッドへ 1 通だけ知らせる（利用者が聞くまで気づけない、を防ぐ）
-    assert slack.posts == [
-        {
-            "channel": "C123",
-            "text": ":warning: " + build_all_failed_message(),
-            "thread_ts": "123.456",
-        }
-    ]
+    # 未署名の SkillContext からは自動投稿しない（署名済み通知の受け入れテストは gateway）。
+    assert slack.posts == []
 
 
 def test_thread_upload_failure_falls_back_to_dm() -> None:
@@ -473,9 +463,113 @@ def test_build_failure_is_announced_and_status_says_it_failed(fail_thread_post: 
     assert out.error_code == "OMIYAGE_BUILD_FAILED"
     assert out.message.startswith("お土産資料は作成に失敗しました")
     assert "資料の組み立てで止まりました" in out.message
-    expected = [{"channel": "C123", "thread_ts": "123.456"}]
-    if fail_thread_post:
-        expected.append({"channel": "D999", "thread_ts": None})  # スレッドに出せなければ本人 DM
-    assert [{"channel": p["channel"], "thread_ts": p["thread_ts"]} for p in slack.posts] == expected
-    assert all(p["text"] == ":warning: " + build_build_failed_message() for p in slack.posts)
+    assert slack.posts == []  # 未署名の申告値を宛先にしない
     assert slack.uploads == []
+
+
+def test_result_is_saved_before_the_single_completion_delivery(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("USE_LONG_JOB_NOTIFY", "1")
+    from teamagent.mcp_gateway import async_job_notify as notify
+    from teamagent.skills._shared.long_jobs import ORIGIN_KEY, Origin
+
+    store = ProposalJobStore(table_name="", memory={})
+    launcher = _GateThreadLauncher(released=True)
+    skill, _, _, slack = _build(store=store, launcher=launcher)
+    context = _ctx()
+    target = Origin("C123", "123.456", "U123")
+    context.metadata[ORIGIN_KEY] = target
+    monkeypatch.setattr(notify, "ProposalJobStore", lambda: store)
+    accepted = skill.run(_input(), context)
+    assert launcher.finished.wait(timeout=10)
+    row = store.get_job(accepted.job_id)
+    assert row is not None and row["status"] == "done"
+    assert slack.uploads == []  # 保存前には添付・完了文を出さない
+
+    original_upload = slack.upload_file
+
+    async def upload(*args: Any, **kwargs: Any) -> bool:
+        assert store.get_job(accepted.job_id)["status"] == "done"
+        assert Path(args[1]).is_file()  # 元の一時ディレクトリ削除後も配信まで保持
+        return await original_upload(*args, **kwargs)
+
+    slack.upload_file = upload  # type: ignore[method-assign]
+    assert notify.publish_notice(
+        "完了", origin=target, request_id=context.request_id, job_id=accepted.job_id
+    )
+    assert len(slack.uploads) == 2
+    assert slack.uploads[0]["initial_comment"]
+    assert slack.uploads[1]["initial_comment"] is None
+    assert all(item["thread_ts"] == "123.456" for item in slack.uploads)
+    assert slack.posts == []  # 完了だけの二通目を出さない
+    delivered = OmiyageReportStatusSkill(store=store).run(
+        OmiyageReportStatusInput(job_id=accepted.job_id), context
+    )
+    assert delivered.slack_delivered and "この会話へ添付しました" in delivered.result_message
+
+
+def test_deterministic_build_failure_is_not_retried_and_notifies_without_codes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("USE_LONG_JOB_NOTIFY", "1")
+    from teamagent.mcp_gateway import async_job_notify as notify
+    from teamagent.mcp_gateway import detached_jobs, server
+    from teamagent.skills._shared.long_jobs import ORIGIN_KEY, Origin
+
+    store = ProposalJobStore(table_name="", memory={})
+    launcher = _GateThreadLauncher(released=True)
+    skill, _, _, slack = _build(store=store, launcher=launcher)
+    calls: list[str] = []
+
+    def fail(plan: str, out_dir: str, request_id: str) -> tuple[str, str]:
+        calls.append(plan)
+        raise RuntimeError("missing glyph U+D55C private diagnostic")
+
+    skill._deck_builder = fail
+    context = _ctx()
+    target = Origin("C123", "123.456", "U123")
+    context.metadata[ORIGIN_KEY] = target
+    monkeypatch.setattr(notify, "ProposalJobStore", lambda: store)
+    posted: list[str] = []
+    monkeypatch.setattr(
+        detached_jobs, "post_to_origin", lambda text, *args, **kwargs: posted.append(text) or True
+    )
+    accepted = skill.run(_input(), context)
+    assert launcher.finished.wait(timeout=10)
+    assert len(calls) == 1  # 書体に無い字はやり直しても同じ（一時的な通信の失敗ではない）
+    status = OmiyageReportStatusSkill(store=store)
+    import teamagent.skills.omiyage_report.skill as module
+
+    monkeypatch.setattr(module, "OmiyageReportStatusSkill", lambda: status)
+    state, text = server._build_async_job_poll("omiyage_report_submit", accepted.job_id, context)()
+    assert state == "failed"
+    notify.publish_notice(
+        text, origin=target, request_id=context.request_id, job_id=accepted.job_id, completed=False
+    )
+    assert len(posted) == 1 and "作成に失敗" in posted[0]
+    assert "U+D55C" not in posted[0] and "診断" not in posted[0]
+    assert slack.uploads == []
+
+
+@pytest.mark.asyncio
+async def test_synchronous_delivery_is_not_deferred_and_uses_only_signed_destination(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from teamagent.skills._shared.long_jobs import ORIGIN_KEY, Origin
+
+    monkeypatch.setenv("USE_LONG_JOB_NOTIFY", "1")
+    skill, _, _, slack = _build(
+        store=ProposalJobStore(table_name="", memory={}),
+        launcher=_GateThreadLauncher(released=True),
+    )
+    context = _ctx()
+    context.metadata[ORIGIN_KEY] = Origin("D12345678", None, "U12345678", deferred=False)
+    context.metadata["channel_id"] = "Cattacker"
+    context.metadata["thread_ts"] = "999.999"
+    path = tmp_path / "report.pptx"
+    path.write_bytes(b"report")
+    delivered, _ = await skill._deliver(path=str(path), title="資料", comment="結果", ctx=context)
+    assert delivered and len(slack.uploads) == 1
+    assert slack.uploads[0]["channel"] == "D12345678" and slack.uploads[0]["thread_ts"] is None

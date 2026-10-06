@@ -1,44 +1,21 @@
-"""video_algorithm を「同じツールのまま切り離す（detach）」仕組み。
+"""動画分析を専用 thread で継続し、署名済みの依頼元へ結果を届ける。
 
-フラグは USE_VIDEO_ALGORITHM_DETACH（既定 OFF）。
+USE_LONG_JOB_NOTIFY は既定 ON。読む範囲・既存の同時実行数は変えない。
+旧 USE_VIDEO_ALGORITHM_DETACH の明示値と rollout 設定は優先する。
+共通通知による自動切り離しは本人確認済み caller の DM または依頼元スレッドだけ。
+VIDEO_ALGORITHM_DETACH_AFTER_S（既定30秒）以内の完了は同期で返す。
+キャンセルは実行へ伝えず、保存済み結果を完了文と同じ一通で届ける。
 
-背景（2026-09-25 本番実測）: 動画分析は 5 本で 9 分前後かかる。OpenClaw は約 6 分（360 秒）で
-その実行を打ち切るため、mcp が 555 秒かけて完走しても結果の戻り先が無く、
-利用者には何も届かなかった。
+二重依頼は検証済み Slack ID と正規化 query で抑止。実行上限は既定2、
+待ち行列は10。利用者が依頼した分析を自動の二段目より先に実行する。
+SIGTERM は受付を閉じ、待機中の分析を開始せず中断通知を送る。
+登録簿は検索上位チェックの二段目とも共有する。
 
-仕組み:
-- gateway（``server.dispatch_tool``）が video_algorithm だけを専用の daemon thread で始める。
-- ``VIDEO_ALGORITHM_DETACH_AFTER_S``（既定 30 秒）以内に終われば、今までどおり同期で返す
-  （キャッシュヒット・入力エラー・処理中リースの競合はここで返る）。
-- 超えたら受付の payload（``status=running``）を返し、ジョブは走らせ続ける。完了したら
-  **署名検証済み claim** の channel_id・thread_ts へ mcp が ``slack_summary`` を直接投稿する。
-- OpenClaw 側の打ち切り（CancelledError）もジョブには伝えない（shield 相当）。完了時に同じく届ける。
-- 二重依頼は、プロセス内の登録簿（キー＝検証済み slack_user_id＋正規化した query）で止める。
-- 再デプロイ時は、処理中ジョブの宛先へ「システム更新で中断」を送る（``notify_interrupted``）。
-
-段階公開のための env（どれも TD の env で変えられる）:
-- ``USE_VIDEO_ALGORITHM_DETACH``: 既定 OFF＝今と完全に同じ（同期のまま）。
-- ``VIDEO_ALGORITHM_DETACH_ALLOWED_EMAILS``: カンマ区切り。**空なら誰にも適用しない**
-  （``skills/_shared/rollout.py`` の「空＝全員許可」とは逆。
-  第 1 段階は小俣さん本人だけを入れる想定）。
-- ``VIDEO_ALGORITHM_DETACH_DM_ONLY``: 既定 1＝1 対 1 DM（D…）だけ。
-- ``VIDEO_ALGORITHM_DETACH_AFTER_S``: 既定 30・5〜240 に丸める。
-- ``VIDEO_ALGORITHM_MAX_BACKGROUND``: 既定 2（全利用者の合計）。超えた分は**順番待ち**にする
-  （同期には戻さない。戻すと 360 秒の打ち切りが再発する）。受付文は「順番待ちです」で返し、
-  ジョブの thread の中で空きを待ってから skill.run を始める（待っている間は quota を使わない）。
-  待ち行列も ``DEFAULT_MAX_QUEUED``（10）件で満杯なら、quota を使う前に「混み合っています」と返す。
-
-終了処理（SIGTERM）: 初回の ``notify_interrupted`` で登録簿に closing の印を立てる。以降の
-新しい依頼・切り離しは受付文の代わりに中断文を返し、順番待ちのジョブは始めずに終える。
-登録簿の項目は実行開始から ``STALE_AFTER_S``（45 分）を超えたら、次の依頼時に掃除して枠を返す。
-
-利用者向けの文には内部語（job_id・error_code・S3 URL・ツール名）を出さない（SOUL.md の禁止語）。
-
-登録簿（``REGISTRY``）は検索上位チェックの 2 段目（``surface_video_followup.py``）も使う。
-同時実行の上限・待ち行列・終了処理の中断通知を共有し、中断文はジョブごとに登録時に渡せる
-（``interrupted_message``。無ければ動画分析の中断文）。待ち行列は優先度つきで、利用者が明示的に
-頼んだ動画分析（``PRIORITY_EXPLICIT``・既定）を、自動の 2 段目（``PRIORITY_AUTO``）より先に
-始める（同じ優先度は来た順）。
+旧 env: USE_VIDEO_ALGORITHM_DETACH（明示値優先）、
+VIDEO_ALGORITHM_DETACH_ALLOWED_EMAILS（旧明示モードでは空は誰も許可しない）、
+VIDEO_ALGORITHM_DETACH_DM_ONLY（旧明示モードの既定1）、
+VIDEO_ALGORITHM_DETACH_AFTER_S（5〜240秒）、VIDEO_ALGORITHM_MAX_BACKGROUND（既定2）。
+利用者向け文に内部の番号・コードを出さず、投稿には既存 bot token 経路だけを使う。
 """
 
 from __future__ import annotations
@@ -139,9 +116,12 @@ class DetachPolicy:
 
     @classmethod
     def from_env(cls) -> DetachPolicy:
+        from teamagent.skills._shared.long_jobs import enabled as notify_enabled
+
+        automatic = notify_enabled() and ENABLED_ENV not in os.environ
         dm_raw = os.environ.get(DM_ONLY_ENV)
         return cls(
-            enabled=_truthy(os.environ.get(ENABLED_ENV)),
+            enabled=automatic or _truthy(os.environ.get(ENABLED_ENV)),
             detach_after_s=_float_env(
                 AFTER_ENV,
                 DEFAULT_DETACH_AFTER_S,
@@ -150,11 +130,11 @@ class DetachPolicy:
             ),
             allowed_emails=frozenset(
                 e.strip().lower()
-                for e in os.environ.get(ALLOWED_EMAILS_ENV, "").split(",")
+                for e in os.environ.get(ALLOWED_EMAILS_ENV, "*" if automatic else "").split(",")
                 if e.strip()
             ),
             # 未設定・空は既定 1（DM だけ）。明示の 0/false/no のときだけ外す。
-            dm_only=True
+            dm_only=not automatic
             if dm_raw is None or not dm_raw.strip()
             else dm_raw.strip().lower() not in {"0", "false", "no"},
             max_background=_int_env(
@@ -794,6 +774,11 @@ class DetachedJobRegistry:
         with self._lock:
             return self._closing
 
+    def has_request(self, request_id: str) -> bool:
+        """同じプロセス内で実行・順番待ちが続いている証拠（再起動との区別用）。"""
+        with self._cond:
+            return any(job.request_id == request_id for job in self._jobs.values())
+
     def get(self, key: str) -> DetachedJob | None:
         with self._lock:
             self._sweep_stale_locked()
@@ -928,6 +913,17 @@ class DetachedJobRegistry:
 REGISTRY = DetachedJobRegistry()
 
 
+# skills 側（動画分析の状態照会）へ「このプロセスで生きているか」を渡す（skills は
+# mcp_gateway を import しない決まりなので、こちらから登録する）。
+def _register_liveness_probe() -> None:
+    from teamagent.skills._shared.long_jobs import set_liveness_probe
+
+    set_liveness_probe(REGISTRY.has_request)
+
+
+_register_liveness_probe()
+
+
 async def notify_interrupted(
     *,
     budget_s: float = DEFAULT_INTERRUPT_BUDGET_S,
@@ -937,20 +933,50 @@ async def notify_interrupted(
 
     何度呼んでも 1 回だけ送る。
     """
+    from teamagent.mcp_gateway.async_job_notify import notify_interrupted as notify_other_jobs
+
+    started = time.monotonic()
+    background_count = await notify_other_jobs(budget_s=min(budget_s, 10.0))
+    budget_s = max(0.01, budget_s - (time.monotonic() - started))
     reg = registry or REGISTRY
     jobs = reg.interrupt_all()
     if not jobs:
-        return 0
+        return background_count
     logger.warning("video_algorithm_detach_interrupted", count=len(jobs))
 
     async def _one(job: DetachedJob) -> None:
         try:
-            ok = await _post_once(
-                job.interrupted_notice(),
-                job.destination,
-                request_id=job.request_id,
-                timeout_s=_INTERRUPT_POST_TIMEOUT_S,
-            )
+            handled = False
+            if job.tool == "video_algorithm":
+                from teamagent.adapters.proposal_job_store import ProposalJobStore
+                from teamagent.skills._shared.long_jobs import Origin
+                from teamagent.skills._shared.long_jobs import enabled as notify_enabled
+
+                if notify_enabled():
+                    from teamagent.mcp_gateway.async_job_notify import publish_notice
+
+                    ProposalJobStore().mark_failed(
+                        f"va_{job.request_id}",
+                        "MCP_RESTARTED",
+                        error_summary="システム更新で動画分析が中断されました。",
+                    )
+                    # 登録簿の宛先も検証済み claim 由来。復旧監視と同じ終端の錠を使う。
+                    ok = await asyncio.to_thread(
+                        publish_notice,
+                        job.interrupted_notice(),
+                        origin=Origin(job.destination.channel_id, job.destination.thread_ts, ""),
+                        request_id=job.request_id,
+                        job_id=f"va_{job.request_id}",
+                        completed=False,
+                    )
+                    handled = True
+            if not handled:
+                ok = await _post_once(
+                    job.interrupted_notice(),
+                    job.destination,
+                    request_id=job.request_id,
+                    timeout_s=_INTERRUPT_POST_TIMEOUT_S,
+                )
             logger.info(
                 "video_algorithm_detach_interrupt_notified", request_id=job.request_id, ok=ok
             )
@@ -965,7 +991,7 @@ async def notify_interrupted(
         await asyncio.wait_for(asyncio.gather(*(_one(job) for job in jobs)), timeout=budget_s)
     except TimeoutError:
         logger.warning("video_algorithm_detach_interrupt_budget_exceeded", count=len(jobs))
-    return len(jobs)
+    return len(jobs) + background_count
 
 
 __all__ = [
