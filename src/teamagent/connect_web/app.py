@@ -5114,6 +5114,7 @@ def create_app(
             "notes": [],
             "work_types_7d": [],
             "work_types_30d": [],
+            "feedback": {},
             "filter_user": filter_user,
         }
         successful: set[str] = set()
@@ -5133,6 +5134,9 @@ def create_app(
                 ("users", "user_breakdown", (), {}),
                 ("errors", "error_list", (50,), {}),
                 ("questions", "recent_questions", (200,), {"who": filter_user or None}),
+                # 回答評価（search_feedback）。dashboard ロールに同表の SELECT が無い環境では
+                # この 1 件だけが失敗して notes に出る（他の集計は巻き込まない）。
+                ("feedback", "answer_feedback_summary", (30,), {}),
             )
             for target, function_name, args, kwargs in query_specs:
                 try:

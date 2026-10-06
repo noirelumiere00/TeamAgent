@@ -350,6 +350,23 @@ class CallerClaimVerifier:
             replay_store=replay_store,
         )
 
+    def now(self) -> int:
+        """claim の検証と同じ時計の現在時刻（epoch 秒）。用途別トークンの期限判定に使う。"""
+
+        return int(self._clock())
+
+    def derive_purpose_key(self, label: bytes) -> bytes:
+        """claim 秘密から用途別の鍵を導く（HMAC-SHA256(secret, label)）。
+
+        plugin と mcp が共有する秘密を、claim 以外の署名物（回答評価ボタンのトークン等）にも
+        使うための鍵分離。claim の署名は秘密そのもので payload を署名するので、用途ラベルで
+        導いた鍵の署名とは交わらない。秘密そのものは外へ出さない。
+        """
+
+        if not isinstance(label, bytes) or not label:
+            raise CallerClaimError("purpose key label is required")
+        return hmac.new(self._secret, label, hashlib.sha256).digest()
+
     async def verify(
         self,
         *,

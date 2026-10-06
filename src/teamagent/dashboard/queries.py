@@ -1,4 +1,4 @@
-"""管理画面の read-only 集計クエリ（usage_events / runtime_metrics / oauth_tokens）。
+"""管理画面の read-only 集計クエリ（usage_events / runtime_metrics / oauth_tokens / 回答評価）。
 
 すべて ``PgVectorClient.connection(app_role='teamagent_dashboard', user_role='admin')``
 経由で SELECT する（migration 0007/0008 の RLS が admin GUC のみ可視を担保、
@@ -399,6 +399,65 @@ def recent_questions(
         }
         for row in rows
     ]
+
+
+# Aico（Slack）の回答評価ボタンの行。plugin → mcp の answer_feedback_record が
+# search_session_id = 'slack-<回答ID>' で書く（Web UI /search の行はフロント生成の UUID）。
+# 同じ人が同じ回答を二度押したら (user, answer_id) ごとに最新の 1 行だけを数える
+# （app ロールは INSERT-only なので上書きは追記で表している・migration 0022）。
+_ANSWER_FEEDBACK_LATEST_CTE = """
+        WITH latest AS (
+            SELECT DISTINCT ON (lower(user_email), answer_id)
+                   user_email, query, rating, created_at
+            FROM search_feedback
+            WHERE target_type = 'answer'
+              AND search_session_id LIKE 'slack-%%'
+              AND answer_id IS NOT NULL
+              AND created_at >= now() - make_interval(days => %(days)s)
+            ORDER BY lower(user_email), answer_id, created_at DESC, id DESC
+        )
+"""
+
+
+def answer_feedback_summary(conn: Any, days: int = 30, *, limit: int = 50) -> dict[str, Any]:
+    """直近 ``days`` 日の Aico 回答評価（👍/👎 の件数と 👎 の質問一覧）を返す。
+
+    ``search_feedback`` を読むので、接続ロール（teamagent_dashboard）に同表の SELECT が要る。
+    値はすべてプレースホルダ（days・limit）。回答本文は保存していないので返さない。
+    """
+    params: dict[str, Any] = {"days": int(days), "limit": int(limit)}
+    counts = _select_conn(
+        conn,
+        _ANSWER_FEEDBACK_LATEST_CTE
+        + """
+        SELECT COUNT(*) FILTER (WHERE rating = 1) AS up,
+               COUNT(*) FILTER (WHERE rating = -1) AS down
+        FROM latest
+        """,  # nosec B608  # 連結するのは定数の CTE だけ・days は placeholder（下で bind）
+        params,
+    )
+    downs = _select_conn(
+        conn,
+        _ANSWER_FEEDBACK_LATEST_CTE
+        + """
+        SELECT created_at, user_email AS who, query
+        FROM latest
+        WHERE rating = -1
+        ORDER BY created_at DESC
+        LIMIT %(limit)s
+        """,  # nosec B608  # 連結するのは定数の CTE だけ・days/limit は placeholder（下で bind）
+        params,
+    )
+    head = counts[0] if counts else {}
+    return {
+        "days": int(days),
+        "up": int(head.get("up") or 0),
+        "down": int(head.get("down") or 0),
+        "downs": [
+            {"created_at": row["created_at"], "who": str(row["who"]), "query": str(row["query"])}
+            for row in downs
+        ],
+    }
 
 
 class DashboardQueries:

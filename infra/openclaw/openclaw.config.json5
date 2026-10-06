@@ -33,6 +33,13 @@
       //   installToolResultContextGuard＝窓×0.5×2 字で、この値とは連動しない）。
       //   最初の 1 回の overflow を防ぐのは MCP 側のエラー文の短縮（server.py）。
       contextLimits: { toolResultMaxChars: 20000 },
+      // §time（2026-10-06）: ゲートウェイは UTC で動く（TZ 無し）ため、受け取ったメッセージの時刻（envelope）も
+      //   system prompt の「Current Date & Time」の時間帯も UTC になり、モデルが日本時間の昼に「朝の時間帯ですね」と
+      //   言っていた。上流 2026.7.1 docs/concepts/timezone.md: userTimezone は system prompt の時間帯、
+      //   envelopeTimezone "user" はメッセージの時刻をその時間帯で付ける（時計の値は envelope にだけ入る）。
+      //   ⚠️ 会話の区切り（session.reset.atHour）はゲートウェイの時計（setHours）で数えるので、この設定では変わらない。
+      userTimezone: "Asia/Tokyo",
+      envelopeTimezone: "user",
       // §O: cacheRetention の明示パラメータは Bedrock 公式 doc に記載なし(unverified)のため
       // 削除して既定挙動に。★prompt caching チューニングは P1 実測後に再評価（§D）。
     },
@@ -151,6 +158,19 @@
     //   日本語の「新しい会話」を使う。一致は本文全体の完全一致か「合言葉＋空白＋続き」だけ
     //   （上流 initSessionStateAttemptLocked）。
     resetTriggers: ["/new", "/reset", "新しい会話"],
+    // §session-mix（2026-10-06・上司の重要事項「会話を続けると前の内容が混ざる」）:
+    //   上流 2026.7.1 の既定は mode "daily"・atHour 4 だが、時刻はゲートウェイの現地時刻
+    //   （reset-Bw63W6T_.js:8-11 の setHours）で、OC タスクに TZ が無い＝UTC。つまり区切りは
+    //   日本時間 13:00 で、前日の午後の会話が翌朝の最初の質問に付いていた（DM は直前 2 往復を毎回送る）。
+    //   利用ログ（8/14〜10/6）では、前の質問から 1 時間超あいた質問が 39%・日をまたいだ質問が 31%。
+    //   - atHour 19（UTC）= 日本時間 04:00。TZ を足したら 4 に戻すこと（テストで TZ 無しを固定）。
+    //   - idleMinutes 60: 最後のやり取りから 1 時間あいたら新しい会話（daily と同時に効き、先に来た方。
+    //     reset-Bw63W6T_.js:43-44）。お土産など 40 分の待ちの後の「さっきの資料」には間に合う長さ。
+    //   - スレッド（チャンネルの返信スレッド）は話題ごとに分かれているので、4 時間まで続ける。
+    reset: { mode: "daily", atHour: 19, idleMinutes: 60 },
+    resetByType: {
+      thread: { mode: "daily", atHour: 19, idleMinutes: 240 },
+    },
   },
 
   // ── L0 コンテキスト直近N件制限（v0.3 Task10・§2.1 FinOps F1） ─────────────────

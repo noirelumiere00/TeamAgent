@@ -2,6 +2,7 @@ import {
   createHash,
   createHmac,
   randomBytes,
+  timingSafeEqual,
 } from "node:crypto";
 
 const PLUGIN_ID = "teamagent-caller-identity";
@@ -342,6 +343,124 @@ export function isPersonalMemoryToolName(value) {
 }
 export function isReservedMemoryInvocation(value) {
   return typeof value === "string" && value.trim().toLowerCase().startsWith(PM_INVOCATION_PREFIX);
+}
+
+// ── (AF) 回答評価ボタン（2026-10-06・上司の重要事項「回答に良い／悪いの評価を付ける」）──────────
+// 資料検索（search）を使った返信だけに、返信の直後に「この回答は役に立ちましたか？ 👍 / 👎」の小さな
+// メッセージを同じスレッド／DM へ投稿する。押下は Socket Mode でこの plugin に届き、mcp の隠しツール
+// answer_feedback_record を予約 ID（aico-fb-<32hex>・run_id == tool_call_id）と署名済み claim で直接呼んで
+// search_feedback へ記録する。押した後はメッセージを「ありがとうございます（👍 を記録しました）」に置き換える。
+// 既定 OFF。TEAMAGENT_ANSWER_FEEDBACK の値で対象者を決める（mcp の bearer と bot token も必須）:
+//   "1"                         … 全員の返信に付ける
+//   "U0123ABCD,U0456EFGH"       … その Slack ユーザー（質問した人）の返信にだけ付ける（試行用）
+//   空・"0"・それ以外の形（1 つでも不正な ID を含む）… OFF（fail-closed）
+// ID は前後の空白を落として大文字に正規化して比べる。
+//
+// 返信そのものに blocks を足さない理由（2026-10-06 確認）: 上流 openclaw@2026.7.1 の reply_payload_sending は
+// payload を丸ごと structuredClone して次へ渡す（hook-runner-global:292-310）が、ReplyPayload の型に blocks 欄は
+// 無く（types-C5Sz_b28.d.ts:9-49・presentation / interactive / channelData のみ）、Slack の送信側
+// （@openclaw/slack・別パッケージ）が任意の blocks を Slack へ渡すかは実物で確かめられていない。
+// 確かめられない経路に載せず、この plugin が既に使っている chat.postMessage（保証経路・ボタン直接実行と同じ）で
+// 返信の直後に別の 1 通として出す。
+//
+// ボタンの value は質問の情報を直接は載せず、この plugin が鋳造する署名トークンにする:
+//   base64url(JSON {v:1, typ:"afb", q:検索語(≤300字), a:回答ID(16hex), u:質問者 U…, t:team, e:失効}) "."
+//   base64url(HMAC-SHA256(key, payload_segment) の先頭 16 バイト)
+//   key = HMAC-SHA256(TEAMAGENT_CALLER_CLAIM_SECRET, ANSWER_FEEDBACK_KEY_LABEL)（claim の署名とは鍵を分ける）
+// mcp 側（src/teamagent/mcp_gateway/answer_feedback.py）が同じ鍵で検証し、押した人＝質問した人・期限・team を確かめる。
+const ANSWER_FEEDBACK_ENV = "TEAMAGENT_ANSWER_FEEDBACK";
+export const ANSWER_FEEDBACK_TOOL = "answer_feedback_record";
+// この tool を使った run の返信にだけ評価ボタンを付ける（mcp の SEARCH_TOOL_NAME と同じ）。
+export const ANSWER_FEEDBACK_SEARCH_TOOL = "search";
+export const AF_INVOCATION_PREFIX = "aico-fb-";
+// mcp の answer_feedback.KEY_LABEL と同じ値（変えるときは両方）。
+export const ANSWER_FEEDBACK_KEY_LABEL = "teamagent-answer-feedback-key-v1";
+// 評価は後から押されることがあるので 7 日（mcp の TOKEN_TTL_S と同じ）。
+export const ANSWER_FEEDBACK_TOKEN_TTL_S = 7 * 24 * 60 * 60;
+export const ANSWER_FEEDBACK_QUERY_MAX = 300;
+// action_id（＝上流の namespace）ごとの評価値。
+export const ANSWER_FEEDBACK_ACTIONS = Object.freeze({
+  answer_feedback_up: 1,
+  answer_feedback_down: -1,
+});
+// 返信（OpenClaw が配信する）より後に届くよう、評価の投稿は少し待つ。上流は reply_payload_sending の
+// 直後に配信するので、通常は数百ミリ秒で返信が先に着く。
+const ANSWER_FEEDBACK_POST_DELAY_MS = 2_500;
+const ANSWER_FEEDBACK_MCP_TIMEOUT_MS = 15_000;
+const MCP_FEEDBACK_CLIENT_NAME = "teamagent-caller-identity-feedback";
+export const ANSWER_FEEDBACK_PROMPT_TEXT = "この回答は役に立ちましたか？";
+export const ANSWER_FEEDBACK_THANKS_TEXT = Object.freeze({
+  "1": "ありがとうございます（👍 を記録しました）",
+  "-1": "ありがとうございます（👎 を記録しました）",
+});
+export const ANSWER_FEEDBACK_NOT_OWNER_TEXT = "この評価ボタンは質問した方だけが押せます。";
+export const ANSWER_FEEDBACK_STALE_TEXT = "この評価ボタンは使えなくなっています（7 日を過ぎました）。";
+export const ANSWER_FEEDBACK_FAILED_TEXT =
+  "評価を記録できませんでした。時間をおいてもう一度押してください。";
+const ANSWER_FEEDBACK_TOKEN_RE = /^([A-Za-z0-9_-]{1,1977})\.([A-Za-z0-9_-]{22})$/u;
+const ANSWER_FEEDBACK_PAYLOAD_FIELDS = ["a", "e", "q", "t", "typ", "u", "v"];
+const ANSWER_ID_RE = /^[0-9a-f]{16}$/u;
+const FEEDBACK_CONTROL_RE = /[\u0000-\u001f\u007f]+/gu;
+
+// TEAMAGENT_ANSWER_FEEDBACK の解釈。返り値 {enabled, allowlist}。allowlist が null なら全員。
+// 不正な値は OFF に倒す（試行の範囲を黙って全員へ広げない）。
+export function parseAnswerFeedbackSetting(value) {
+  const raw = typeof value === "string" ? value.trim() : "";
+  if (raw === "1") return {enabled: true, allowlist: null};
+  if (!raw || raw === "0") return {enabled: false, allowlist: null};
+  const ids = raw.split(",").map(part => part.trim().toUpperCase());
+  if (ids.length === 0 || ids.some(id => !SLACK_USER_RE.test(id))) {
+    return {enabled: false, allowlist: null};
+  }
+  return {enabled: true, allowlist: new Set(ids)};
+}
+
+// モデル経路で回答評価のツール・予約 ID を名乗る呼び出しは拒否する（mcp 側の予約 ID 検査と二重化）。
+export function isAnswerFeedbackToolName(value) {
+  return typeof value === "string" && /answer_feedback/iu.test(value);
+}
+export function isReservedFeedbackInvocation(value) {
+  return typeof value === "string" && value.trim().toLowerCase().startsWith(AF_INVOCATION_PREFIX);
+}
+
+// search の query 引数をボタンのトークンに載せる形にする（制御文字を空白へ・前後の空白を落とす・300 字まで）。
+export function normalizeFeedbackQuery(value) {
+  if (typeof value !== "string") return null;
+  const cleaned = value.replace(FEEDBACK_CONTROL_RE, " ").trim();
+  if (!cleaned) return null;
+  return [...cleaned].slice(0, ANSWER_FEEDBACK_QUERY_MAX).join("").trim() || null;
+}
+
+// 評価メッセージの blocks（押す前）。value は両ボタンとも同じトークン（評価値は action_id で決まる）。
+export function buildAnswerFeedbackBlocks(token) {
+  return [
+    {type: "context", elements: [{type: "mrkdwn", text: ANSWER_FEEDBACK_PROMPT_TEXT}]},
+    {
+      type: "actions",
+      block_id: "aico_answer_feedback",
+      elements: [
+        {
+          type: "button",
+          action_id: "answer_feedback_up",
+          text: {type: "plain_text", text: "👍 役に立った", emoji: true},
+          value: token,
+        },
+        {
+          type: "button",
+          action_id: "answer_feedback_down",
+          text: {type: "plain_text", text: "👎 いまいち", emoji: true},
+          value: token,
+        },
+      ],
+    },
+  ];
+}
+
+// 押した後の blocks（ボタンを消し、記録した値だけを残す）。
+export function buildAnswerFeedbackThanksBlocks(rating) {
+  return [
+    {type: "context", elements: [{type: "mrkdwn", text: ANSWER_FEEDBACK_THANKS_TEXT[String(rating)]}]},
+  ];
 }
 
 // 本番でどのフックを登録要求するかの**期待値**（単一正本）。
@@ -2123,6 +2242,23 @@ export function createCallerIdentityPlugin({
     String(env[PERSONAL_MEMORY_ENV] ?? "").trim() === "1" &&
     mcpBearer !== null &&
     typeof fetchFn === "function";
+  // 回答評価ボタン（AF）。flag と mcp の bearer と bot token と fetch がそろったときだけ。
+  // flag が ID の一覧なら、その人（質問した人）の返信にだけ付ける（parseAnswerFeedbackSetting）。
+  const answerFeedbackSetting = parseAnswerFeedbackSetting(env[ANSWER_FEEDBACK_ENV]);
+  const answerFeedbackAllowlist = answerFeedbackSetting.allowlist;
+  const answerFeedbackEnabled =
+    answerFeedbackSetting.enabled &&
+    mcpBearer !== null &&
+    slackBotToken !== null &&
+    typeof fetchFn === "function";
+  // 評価トークンの鍵（claim 秘密から用途ラベルで導く・mcp の derive_purpose_key と同じ）。
+  const answerFeedbackKey = createHmac("sha256", secret)
+    .update(ANSWER_FEEDBACK_KEY_LABEL, "utf8")
+    .digest();
+  // run → {query, ingress, updatedAtMs, scheduled}。search を呼んだ run だけを覚える（検索語は
+  // トークンに載せるためだけに持ち、ログには出さない）。agent_end では消さない（返信の配信＝
+  // reply_payload_sending は agent_end の後に走る）。TTL と上限は pruneConnectGuardState に相乗り。
+  const searchByRun = new Map();
   // 送信者 → { text, atMs }。差し込み文だけ（発話本文は持たない）。コマンドで即時に捨てる。
   const memoContextBySender = new Map();
   // 送信者 → 告知を投稿した時刻（告知済みの記録が mcp に届くまでの二重投稿防止）。
@@ -2201,6 +2337,7 @@ export function createCallerIdentityPlugin({
       connectRevisionsByRun,
       connectFallbackByRun,
       videoRevisionsByRun,
+      searchByRun,
     ]) {
       for (const [runId, entry] of ledger) {
         if (nowMs - entry.updatedAtMs > INBOUND_CONTEXT_TTL_MS) {
@@ -4122,6 +4259,14 @@ export function createCallerIdentityPlugin({
       emitPluginLog(logger, "warn", "before_tool_call blocked personal_memory_reserved");
       return { block: true, blockReason: "このツールは使えません。" };
     }
+    // 回答評価のツール・予約 ID も同じ（押下からの直接呼出しだけ・flag に関係なく常に拒否）。
+    if (
+      [observedToolName, contextToolName].some(isAnswerFeedbackToolName) ||
+      [event?.toolCallId, ctx?.toolCallId].some(isReservedFeedbackInvocation)
+    ) {
+      emitPluginLog(logger, "warn", "before_tool_call blocked answer_feedback_reserved");
+      return { block: true, blockReason: "このツールは使えません。" };
+    }
     // 拒否ログに載せる「形」だけの手掛かり。値（user id / channel id / ts）は出さない。
     const shape = () =>
       idShape({
@@ -4407,6 +4552,15 @@ export function createCallerIdentityPlugin({
     toolCallsByRun.set(eventRunId, { count: priorToolCalls + 1, updatedAtMs: nowMs });
     if (trusted.ingressKind === "action") {
       trusted.actionToolCallId = eventToolCallId;
+    }
+    // 回答評価: 署名できた search 呼び出しの run を覚える（この run の返信にだけボタンを付ける）。
+    if (
+      answerFeedbackEnabled &&
+      tool === ANSWER_FEEDBACK_SEARCH_TOOL &&
+      trusted.ingressKind === "message" &&
+      answerFeedbackTargets(trusted.senderId)
+    ) {
+      rememberSearchRun(eventRunId, trusted, params, nowMs);
     }
     return { params: reconcileReturnedParams(event?.params, signed.params, unwrapDepth, logger) };
   }
@@ -4896,6 +5050,358 @@ export function createCallerIdentityPlugin({
     };
   }
 
+  // ── (AF) 回答評価ボタン ──────────────────────────────────────────────────────────
+  // 試行の対象者か（質問した人＝受信の送信者で決める。allowlist が null なら全員）。
+  function answerFeedbackTargets(senderId) {
+    if (answerFeedbackAllowlist === null) return true;
+    return typeof senderId === "string" && answerFeedbackAllowlist.has(senderId.toUpperCase());
+  }
+
+  // search を呼んだ run の記録。検索語は最初の search のもの（利用者の質問に最も近い）を使う。
+  function rememberSearchRun(runId, ingress, params, nowMs) {
+    const existing = searchByRun.get(runId);
+    const query = existing?.query ?? normalizeFeedbackQuery(params?.query);
+    searchByRun.delete(runId);
+    searchByRun.set(runId, {
+      query,
+      ingress,
+      updatedAtMs: nowMs,
+      scheduled: existing?.scheduled ?? false,
+    });
+  }
+
+  // 回答 ID（run ごとに決まる 16hex）。同じ回答への二度押しは集計でこの ID ごとに最後の 1 票になる。
+  function answerIdFor(runId) {
+    return createHash("sha256").update(`aico-answer-v1:${runId}`, "utf8").digest("hex").slice(0, 16);
+  }
+
+  function signAnswerFeedbackSegment(payloadSegment) {
+    return createHmac("sha256", answerFeedbackKey)
+      .update(payloadSegment, "ascii")
+      .digest()
+      .subarray(0, 16);
+  }
+
+  function mintAnswerFeedbackToken({runId, query, senderId, teamId, nowMs}) {
+    const payload = {
+      v: 1,
+      typ: "afb",
+      q: query,
+      a: answerIdFor(runId),
+      u: senderId,
+      t: teamId,
+      e: Math.floor(nowMs / 1000) + ANSWER_FEEDBACK_TOKEN_TTL_S,
+    };
+    const segment = base64url(JSON.stringify(payload));
+    return `${segment}.${signAnswerFeedbackSegment(segment).toString("base64url")}`;
+  }
+
+  // 押下の value を検証する（署名・形・期限・team）。返り値 {ok, reason, owner}。
+  // 押した人＝質問した人かは呼び出し側が owner と比べる（mcp でも同じ検査をする）。
+  function readAnswerFeedbackToken(value, nowMs) {
+    const match = typeof value === "string" ? ANSWER_FEEDBACK_TOKEN_RE.exec(value) : null;
+    if (!match) return {ok: false, reason: "shape"};
+    const expected = signAnswerFeedbackSegment(match[1]);
+    const actual = Buffer.from(match[2], "base64url");
+    if (actual.length !== expected.length || !timingSafeEqual(actual, expected)) {
+      return {ok: false, reason: "signature"};
+    }
+    let payload;
+    try {
+      payload = JSON.parse(Buffer.from(match[1], "base64url").toString("utf8"));
+    } catch {
+      return {ok: false, reason: "json"};
+    }
+    if (
+      !isPlainObject(payload) ||
+      Object.keys(payload).toSorted().join(",") !== ANSWER_FEEDBACK_PAYLOAD_FIELDS.join(",") ||
+      payload.v !== 1 ||
+      payload.typ !== "afb" ||
+      !Number.isSafeInteger(payload.e) ||
+      typeof payload.q !== "string" ||
+      !payload.q.trim() ||
+      typeof payload.a !== "string" ||
+      !ANSWER_ID_RE.test(payload.a) ||
+      normalizeSlackId(payload.u, SLACK_USER_RE) !== payload.u ||
+      payload.t !== expectedTeamId
+    ) {
+      return {ok: false, reason: "fields"};
+    }
+    if (payload.e <= Math.floor(nowMs / 1000)) return {ok: false, reason: "expired"};
+    return {ok: true, reason: "ok", owner: payload.u};
+  }
+
+  // reply_payload_sending の後段。search を呼んだ run の最終返信が実際に配信される（cancel されない）
+  // ときだけ、評価メッセージの投稿を 1 回だけ予約する（分割 payload の 2 通目以降は何もしない）。
+  function maybeScheduleAnswerFeedback(event, ctx, result, logger) {
+    if (!answerFeedbackEnabled) return;
+    if (result?.cancel === true) return;
+    const runId = canonicalInvocationId(event?.runId);
+    if (!runId || runId !== canonicalInvocationId(ctx?.runId)) return;
+    const entry = searchByRun.get(runId);
+    if (!entry || entry.scheduled) return;
+    if (event?.kind !== undefined && event.kind !== "final") return;
+    const payload = result?.payload ?? event?.payload;
+    if (
+      !payload ||
+      typeof payload !== "object" ||
+      typeof payload.text !== "string" ||
+      !payload.text.trim() ||
+      payload.isError === true ||
+      payload.isReasoning === true ||
+      payload.isCommentary === true
+    ) {
+      return;
+    }
+    entry.scheduled = true;
+    if (entry.query === null) {
+      emitPluginLog(logger, "warn", `answer feedback skipped runId=${runId} reason=no_query`);
+      return;
+    }
+    const task = postAnswerFeedback(runId, entry, logger).catch(error => {
+      emitPluginLog(
+        logger,
+        "warn",
+        `answer feedback crashed runId=${runId} reason=${connectPathReason(error)}`,
+      );
+    });
+    onBackgroundTask(task);
+  }
+
+  async function postAnswerFeedback(runId, entry, logger) {
+    await sleepFn(ANSWER_FEEDBACK_POST_DELAY_MS);
+    const {ingress} = entry;
+    let channel;
+    try {
+      channel = await resolveCanonicalChannel(ingress);
+    } catch (error) {
+      emitPluginLog(
+        logger,
+        "warn",
+        `answer feedback outcome=post_failed runId=${runId} reason=${connectPathReason(error)}`,
+      );
+      return;
+    }
+    // チャンネル・グループの返信は受信メッセージのスレッドに付く（openclaw.config.json5 の
+    // replyToModeByChatType: channel/group=all）。DM は返信もスレッド無し（direct=off）。
+    const isDm = SLACK_DM_CHANNEL_RE.test(channel);
+    const threadTs = isDm
+      ? canonicalSlackTimestamp(ingress.threadTs)
+      : (canonicalSlackTimestamp(ingress.threadTs) ?? canonicalSlackTimestamp(ingress.messageId));
+    if (!isDm && threadTs === null) {
+      // チャンネルの本流には出さない（返信と離れた場所に評価だけが浮く）。
+      emitPluginLog(logger, "warn", `answer feedback skipped runId=${runId} reason=no_thread`);
+      return;
+    }
+    const token = mintAnswerFeedbackToken({
+      runId,
+      query: entry.query,
+      senderId: ingress.senderId,
+      teamId: ingress.teamId,
+      nowMs: now(),
+    });
+    try {
+      await callSlackApi({
+        fetchFn,
+        botToken: slackBotToken,
+        method: "chat.postMessage",
+        body: {
+          channel,
+          text: ANSWER_FEEDBACK_PROMPT_TEXT,
+          blocks: buildAnswerFeedbackBlocks(token),
+          unfurl_links: false,
+          unfurl_media: false,
+          ...(threadTs === null ? {} : {thread_ts: threadTs}),
+        },
+        timeoutMs: SLACK_API_TIMEOUT_MS,
+        sleepFn,
+        retryOnTimeout: false,
+      });
+    } catch (error) {
+      emitPluginLog(
+        logger,
+        "warn",
+        `answer feedback outcome=post_failed runId=${runId} reason=${connectPathReason(error)}`,
+      );
+      return;
+    }
+    emitPluginLog(logger, "info", `answer feedback outcome=posted runId=${runId}`);
+  }
+
+  // 押下の捕捉（interactive handler）。押下そのものの同一性は朝ダイジェストのボタンと同じ条件で確かめ、
+  // value（署名トークン）を検証してから mcp へ渡す。handler は待たせず {handled:true} を返す
+  // （上流は押下を受けた時点で Slack へ ack 済み）。
+  function handleAnswerFeedbackAction(ctx, actionId, logger) {
+    try {
+      const rating = ANSWER_FEEDBACK_ACTIONS[actionId];
+      const interaction = assertPlainObject(ctx?.interaction, "Slack interactive payload");
+      const senderId = normalizeSlackId(ctx?.senderId, SLACK_USER_RE);
+      const channelId = normalizeSlackId(ctx?.conversationId, SLACK_CHANNEL_RE);
+      const messageTs = canonicalSlackTimestamp(interaction.messageTs);
+      const contextThread = optionalSlackTimestamp(ctx?.threadId);
+      const interactionThread = optionalSlackTimestamp(interaction.threadTs);
+      const rawValue = typeof interaction.value === "string" ? interaction.value : null;
+      const triggerId = nonBlank(interaction.triggerId, 512);
+      const interactionId = nonBlank(ctx?.interactionId, 2048);
+      const expectedInteractionId =
+        senderId && channelId && messageTs && triggerId && rawValue !== null
+          ? [senderId, channelId, messageTs, triggerId, actionId, rawValue].join(":")
+          : null;
+      if (
+        (rating !== 1 && rating !== -1) ||
+        ctx?.channel !== "slack" ||
+        ctx?.auth?.isAuthorizedSender !== true ||
+        interaction.kind !== "button" ||
+        interaction.actionId !== actionId ||
+        interaction.namespace !== actionId ||
+        rawValue === null ||
+        interaction.payload !== rawValue ||
+        interaction.data !== `${actionId}:${rawValue}` ||
+        !senderId ||
+        !channelId ||
+        !messageTs ||
+        !contextThread.valid ||
+        !interactionThread.valid ||
+        !expectedInteractionId ||
+        interactionId !== expectedInteractionId
+      ) {
+        emitPluginLog(logger, "warn", `answer feedback press rejected reason=identity action=${actionId}`);
+        return {handled: true};
+      }
+      const press = {
+        actionId,
+        rating,
+        senderId,
+        channelId,
+        messageTs,
+        threadTs: interactionThread.value ?? contextThread.value,
+        token: rawValue,
+        replyEphemeral: ephemeralReplier(ctx),
+      };
+      const checked = readAnswerFeedbackToken(rawValue, now());
+      if (!checked.ok || checked.owner !== senderId) {
+        const text = !checked.ok
+          ? checked.reason === "expired"
+            ? ANSWER_FEEDBACK_STALE_TEXT
+            : ANSWER_FEEDBACK_FAILED_TEXT
+          : ANSWER_FEEDBACK_NOT_OWNER_TEXT;
+        const reason = checked.ok ? "not_owner" : `token_${checked.reason}`;
+        onBackgroundTask(
+          sendButtonEphemeral(press, text).then(notice =>
+            emitPluginLog(
+              logger,
+              "warn",
+              `answer feedback press rejected reason=${reason} notice=${notice}`,
+            ),
+          ),
+        );
+        return {handled: true};
+      }
+      const task = recordAnswerFeedback(press, logger).catch(error => {
+        emitPluginLog(
+          logger,
+          "warn",
+          `answer feedback press crashed reason=${connectPathReason(error)}`,
+        );
+      });
+      onBackgroundTask(task);
+      return {handled: true};
+    } catch {
+      emitPluginLog(logger, "warn", `answer feedback press rejected reason=malformed action=${actionId}`);
+      return {handled: true};
+    }
+  }
+
+  // mcp の answer_feedback_record を直接呼び、成功したら評価メッセージを置き換える。
+  async function recordAnswerFeedback(press, logger) {
+    const invocationId = `${AF_INVOCATION_PREFIX}${randomBytesFn(16).toString("hex")}`;
+    const nowMs = now();
+    let outcome = "failed";
+    let code = "none";
+    try {
+      const signed = mintCallerClaim({
+        trusted: {
+          senderId: press.senderId,
+          teamId: expectedTeamId,
+          channelId: press.channelId,
+          threadTs: press.threadTs,
+          messageId: press.messageTs,
+          sessionSha256: createHash("sha256")
+            .update(`teamagent-answer-feedback-v1:${press.channelId}:${press.messageTs}`, "utf8")
+            .digest("hex"),
+        },
+        runId: invocationId,
+        toolCallId: invocationId,
+        tool: ANSWER_FEEDBACK_TOOL,
+        params: {feedback_token: press.token, rating: press.rating, [USER_CONTEXT_KEY]: {}},
+        nowMs,
+        nonceBytes: randomBytesFn(16),
+      });
+      const result = await callMcpTool({
+        fetchFn,
+        mcpUrl,
+        bearer: mcpBearer,
+        name: ANSWER_FEEDBACK_TOOL,
+        toolArguments: signed.params,
+        timeoutMs: ANSWER_FEEDBACK_MCP_TIMEOUT_MS,
+        clientName: MCP_FEEDBACK_CLIENT_NAME,
+      });
+      const first = Array.isArray(result?.content)
+        ? result.content.find(item => item?.type === "text" && typeof item.text === "string")
+        : null;
+      const data = first ? JSON.parse(first.text) : null;
+      if (data?.ok === true && data.rating === press.rating) {
+        outcome = "recorded";
+      } else if (typeof data?.code === "string" && /^AFB_[A-Z_]{1,40}$/u.test(data.code)) {
+        code = data.code;
+      } else {
+        code = "unexpected_result";
+      }
+    } catch (error) {
+      code = connectPathReason(error);
+    }
+    if (outcome !== "recorded") {
+      const text =
+        code === "AFB_NOT_OWNER"
+          ? ANSWER_FEEDBACK_NOT_OWNER_TEXT
+          : code === "AFB_TOKEN_EXPIRED"
+            ? ANSWER_FEEDBACK_STALE_TEXT
+            : ANSWER_FEEDBACK_FAILED_TEXT;
+      const notice = await sendButtonEphemeral(press, text);
+      emitPluginLog(
+        logger,
+        "warn",
+        `answer feedback press outcome=failed code=${code} notice=${notice}`,
+      );
+      return;
+    }
+    const thanks = ANSWER_FEEDBACK_THANKS_TEXT[String(press.rating)];
+    let shown = "updated";
+    try {
+      await callSlackApi({
+        fetchFn,
+        botToken: slackBotToken,
+        method: "chat.update",
+        body: {
+          channel: press.channelId,
+          ts: press.messageTs,
+          text: thanks,
+          blocks: buildAnswerFeedbackThanksBlocks(press.rating),
+        },
+        timeoutMs: SLACK_API_TIMEOUT_MS,
+        sleepFn,
+      });
+    } catch (error) {
+      // 置き換えられなくても記録は済んでいる。押した本人にだけ同じお礼を出す。
+      shown = `update_failed_${connectPathReason(error)}_${await sendButtonEphemeral(press, thanks)}`;
+    }
+    emitPluginLog(
+      logger,
+      "info",
+      `answer feedback press outcome=recorded rating=${press.rating} shown=${shown}`,
+    );
+  }
+
   // agent_end。署名の門が使う台帳（ingressByRun / consumedInvocations）と層2 の run 記録を
   // 掃除する。ここで **消してはいけない**もの（2026-09-07 本番実測 TD:46）:
   //   - connectIngressByRun … 抑止（reply_payload_sending）が agent_end の **後** に読む。
@@ -4934,6 +5440,16 @@ export function createCallerIdentityPlugin({
           namespace: actionId,
           handler: ctx => rememberSlackButtonAction(ctx, actionId, api.logger),
         });
+      }
+      // 回答評価ボタン（flag ON のときだけ。OFF ならボタンも出さないので受け口も作らない）。
+      if (answerFeedbackEnabled) {
+        for (const actionId of Object.keys(ANSWER_FEEDBACK_ACTIONS)) {
+          api.registerInteractiveHandler({
+            channel: "slack",
+            namespace: actionId,
+            handler: ctx => handleAnswerFeedbackAction(ctx, actionId, api.logger),
+          });
+        }
       }
       // ── 「本番でどのフックが実際に呼ばれるか」を必ず観測できるようにする（2026-09-04） ──
       // 事故の教訓: 層1（before_agent_reply）が発火しているのかどうかを 2 便かけて判別
@@ -5004,9 +5520,12 @@ export function createCallerIdentityPlugin({
           guardConnectUrlFabrication(event, ctx, api.logger) ??
           guardVideoZeroTool(event, ctx, api.logger),
       );
-      observe("reply_payload_sending", (event, ctx) =>
-        replaceExhaustedConnectReply(event, ctx, api.logger),
-      );
+      observe("reply_payload_sending", (event, ctx) => {
+        const result = replaceExhaustedConnectReply(event, ctx, api.logger);
+        // 返信の中身は変えない。配信される search の返信の後に評価メッセージを予約するだけ。
+        maybeScheduleAnswerFeedback(event, ctx, result, api.logger);
+        return result;
+      });
       observe("agent_end", (event, ctx) => {
         releaseAgentRun(event, ctx);
       });
@@ -5024,7 +5543,14 @@ export function createCallerIdentityPlugin({
           ` mcp_bearer=${mcpBearer === null ? "no" : "yes"}` +
           ` slack_bot_token=${slackBotToken === null ? "no" : "yes"}` +
           ` button_direct=${buttonDirect ? "yes" : "no"}` +
-          ` personal_memory=${personalMemoryEnabled ? "on" : "off"}`,
+          ` personal_memory=${personalMemoryEnabled ? "on" : "off"}` +
+          ` answer_feedback=${
+            !answerFeedbackEnabled
+              ? "off"
+              : answerFeedbackAllowlist === null
+                ? "on"
+                : `list:${answerFeedbackAllowlist.size}`
+          }`,
       );
     },
   };

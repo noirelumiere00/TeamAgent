@@ -369,6 +369,45 @@ def render_errors(rows: list[dict[str, Any]], *, email: str | None = None) -> st
     return _page("エラー一覧", body, email=email)
 
 
+def _answer_feedback_block(feedback: dict[str, Any] | None) -> str:
+    """Aico の回答評価（直近30日の 👍/👎 と 👎 の質問一覧）。読めなかったときは案内だけ。"""
+    if not feedback:
+        return (
+            '<div class="card"><h2>回答の評価（Slack・直近30日）</h2>'
+            '<p class="note">評価データはまだ表示できません。</p></div>'
+        )
+    rows = [
+        '<tr><td class="muted">'
+        + _e(_jst(row.get("created_at")))
+        + " JST</td><td>"
+        + _e(row.get("who"))
+        + '</td><td class="question">'
+        + _e(row.get("query"))
+        + "</td></tr>"
+        for row in feedback.get("downs", [])
+    ]
+    table = (
+        "<table><tr><th>時刻</th><th>誰が</th><th>検索語</th></tr>" + "".join(rows) + "</table>"
+        if rows
+        else '<p class="note">👎 はまだありません。</p>'
+    )
+    return (
+        '<div class="card"><h2>回答の評価（Slack・直近'
+        + _e(feedback.get("days", 30))
+        + "日）</h2>"
+        + '<div class="kpis"><div class="kpi"><div class="label">👍 役に立った</div>'
+        '<div class="value">'
+        + _e(feedback.get("up", 0))
+        + '</div></div><div class="kpi"><div class="label">👎 いまいち</div>'
+        '<div class="value">'
+        + _e(feedback.get("down", 0))
+        + "</div></div></div><h3>👎 が付いた質問</h3>"
+        + table
+        + '<p class="note">資料検索を使った回答だけに付くボタンの集計です。同じ人が同じ回答を'
+        "押し直したときは最後の評価だけを数えます。回答本文は保存していません。</p></div>"
+    )
+
+
 def render_usage_admin(data: dict[str, Any]) -> str:
     """connect-web の小俣さん限定利用状況ページを描画する。"""
     metrics = data.get("kpis", {})
@@ -484,6 +523,7 @@ def render_usage_admin(data: dict[str, Any]) -> str:
         + _work_type_block(data.get("work_types_30d", []), title="作業の内訳（直近30日）")
         + "</div>"
         + questions
+        + _answer_feedback_block(data.get("feedback"))
         + '<div class="grid2">'
         + _skill_block(data.get("skills", []))
         + _user_block(data.get("users", []), drilldown=True)

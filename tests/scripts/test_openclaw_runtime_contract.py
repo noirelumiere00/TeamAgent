@@ -462,18 +462,43 @@ def test_dm_context_overflow_guards_are_pinned() -> None:
     assert config["agents"]["defaults"]["contextLimits"] == {"toolResultMaxChars": 20000}
     # 指定すると上流の既定（/new・/reset）を置き換えるので、既定の 2 つも残す。
     # 日本語の合言葉は plugin の案内文（CONTEXT_OVERFLOW_REPLY_TEXT）と同じ語であること。
-    assert config["session"] == {
-        "dmScope": "per-channel-peer",
-        "resetTriggers": ["/new", "/reset", "新しい会話"],
-    }
+    assert config["session"]["dmScope"] == "per-channel-peer"
+    assert config["session"]["resetTriggers"] == ["/new", "/reset", "新しい会話"]
     plugin = (ROOT / "infra/openclaw/caller-identity-plugin/dist/index.js").read_text()
     assert 'export const CONTEXT_OVERFLOW_RESET_PHRASE = "新しい会話";' in plugin
     # 段2 まで入れない（入れるなら設計を更新してからこの assert を外す）。
     # reserveTokensFloor は要約が効かない現状で遅延と費用を増やすだけ、contextPruning は既定 off。
     assert "compaction" not in config["agents"]["defaults"]
     assert "contextPruning" not in config["agents"]["defaults"]
-    # 日次区切り（resetByType / reset）は overflow 対策ではないので、この変更では触らない。
-    assert "reset" not in config["session"] and "resetByType" not in config["session"]
+    # 日次区切り（reset / resetByType）は test_session_reset_policy_is_pinned で固定する。
+    assert set(config["session"]) == {"dmScope", "resetTriggers", "reset", "resetByType"}
+
+
+def test_session_reset_policy_is_pinned() -> None:
+    """会話の区切り（2026-10-06・上司の重要事項「会話を続けると前の内容が混ざる」）。
+
+    本番の失敗: 上流の既定（daily・atHour 4）はゲートウェイの現地時刻で、OC タスクに TZ が無い＝UTC
+    なので区切りは日本時間 13:00。前日の午後の会話が翌朝の最初の質問に付いていた。
+    変異: idleMinutes を外す・atHour を 4 に戻す・thread の上書きを外す・OC タスクに TZ を足すと赤。
+    """
+    config = _load_reviewed_json5(CONFIG)
+    session = config["session"]
+    assert session["reset"] == {"mode": "daily", "atHour": 19, "idleMinutes": 60}
+    assert session["resetByType"] == {"thread": {"mode": "daily", "atHour": 19, "idleMinutes": 240}}
+    # atHour 19 は「ゲートウェイが UTC」のときだけ日本時間 04:00。TZ を足すなら atHour を直す。
+    for tf in sorted((ROOT / "infra/terraform").glob("*.tf")):
+        assert not re.search(r'name\s*=\s*"TZ"', tf.read_text()), tf.name
+
+
+def test_model_sees_japan_time() -> None:
+    """モデルに見える時刻を日本時間に（2026-10-06・「朝の時間帯ですね」の取り違え）。
+
+    ゲートウェイは UTC なので、指定しないと envelope の時刻も system prompt の時間帯も UTC になる。
+    変異: userTimezone を外す・envelopeTimezone を local に戻すと赤。
+    """
+    defaults = _load_reviewed_json5(CONFIG)["agents"]["defaults"]
+    assert defaults["userTimezone"] == "Asia/Tokyo"
+    assert defaults["envelopeTimezone"] == "user"
 
 
 def _plugin_module_value(expression: str) -> Any:
@@ -941,6 +966,7 @@ def test_entrypoint_is_readonly_secret_safe_and_environment_allowlisted() -> Non
         "TEAMAGENT_CALLER_IDENTITY_TRACE",
         "CONNECT_ADMIN_NAME",
         "TEAMAGENT_PERSONAL_MEMORY",
+        "TEAMAGENT_ANSWER_FEEDBACK",
     }
     # 秘密値の受け皿にしない（allowlist の意味が消える）。
     assert diagnostic.isdisjoint(passthrough)
