@@ -522,7 +522,8 @@ def test_admin_adapter_views_with_audit_and_rejects_non_admin(
         admin.view(admin_email="other@vectorinc.co.jp", team_id=_TEAM, slack_user_id=user)
     assert denied.value.code == "not_admin"
     rows = admin.view(admin_email="Owner@vectorinc.co.jp", team_id=_TEAM, slack_user_id=user)
-    assert [r.content for r in rows] == ["返事は結論から", "資料は表で"]
+    # 仕込みは 1 トランザクション＝created_at が同点なので、並びは entry_id（乱数）次第
+    assert sorted(r.content for r in rows) == ["資料は表で", "返事は結論から"]
     with psycopg.connect(env.admin_dsn) as su, su.cursor() as cur:
         cur.execute(
             "SELECT actor_kind, actor_email, action, item_count FROM personal_memory_audit "
