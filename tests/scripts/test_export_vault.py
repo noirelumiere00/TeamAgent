@@ -638,6 +638,59 @@ def test_plan_vault_rejects_conflicting_ownership_for_same_source() -> None:
         )
 
 
+def test_plan_vault_keeps_distinct_ids_sharing_one_sheet_uri_apart() -> None:
+    """1 シートから広告主×案件ごとに作る文書（campaign_aggregate）は source_uri を共有する。
+
+    再現する本番の失敗（10-06）: ショート動画データベースの 233 文書が同じ URL を持ち、
+    URL 一致の再利用で「same source URI has conflicting client ownership」で export が止まり、
+    /app を 9/16 以降作り直せなかった。安定 ID（external_id）が違えば別の資料として扱う。
+    同じ広告主の 2 案件も 1 note に潰さない。
+    """
+    uri = "https://docs.google.com/spreadsheets/d/DB1/edit#gid=9"
+
+    def agg(advertiser: str, campaign: str, key: str) -> dict[str, Any]:
+        return _doc(
+            f"施策実績 {advertiser} {campaign}",
+            uri=uri,
+            source_type="gsheets",
+            external_id=f"DB1:9:campaign:{key}",
+            client_name=None,
+            cls_project=advertiser,
+        )
+
+    clients = {
+        "架空食品": {
+            "timeline": [],
+            "documents": [agg("架空食品", "お茶", "a1"), agg("架空食品", "グミ", "a2")],
+        },
+        "架空電機": {"timeline": [], "documents": [agg("架空電機", "掃除機", "b1")]},
+    }
+    files = plan_vault(clients)
+    doc_notes = sorted(p for p in files if p.startswith("docs/"))
+    assert len(doc_notes) == 3
+    bodies = {p: files[p] for p in doc_notes}
+    assert sum('project: "架空電機"' in b for b in bodies.values()) == 1
+    assert sum('project: "架空食品"' in b for b in bodies.values()) == 2
+    assert files["clients/架空食品.md"].count("[[docs/") == 2
+    # 入力順に依存しない
+    assert plan_vault(dict(reversed(list(clients.items())))) == files
+
+
+def test_plan_vault_same_uri_without_ids_still_rejects_conflicting_ownership() -> None:
+    """安定 ID が片方でも無ければ、従来どおり URL 一致は同一資料＝食い違いは停止。"""
+    with_id = _doc(
+        "共通資料", uri="gdrive://MIXED", external_id="F-1", client_name="A社", cls_project="X"
+    )
+    without_id = _doc("共通資料", uri="gdrive://MIXED", client_name="B社", cls_project="X")
+    with pytest.raises(ValueError, match="conflicting client ownership"):
+        plan_vault(
+            {
+                "A社": {"timeline": [], "documents": [with_id]},
+                "B社": {"timeline": [], "documents": [without_id]},
+            }
+        )
+
+
 def test_plan_vault_research_docs_get_collision_proof_filenames() -> None:
     """施策研究ノートは同一タイトルでも external_id 由来ハッシュで一意名になり、
     別owner/別研究が /app から消えない（P1・#214-2/3）。
