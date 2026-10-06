@@ -244,6 +244,47 @@ def _envfloat(name: str, default: float) -> float:
         return default
 
 
+def _fetch_channel_history(client: Any, spec: Any, *, request_id: str) -> Any:
+    """チャンネルの履歴を取る。history_pages=1 は従来どおり 1 ページ（oldest も渡さない）。"""
+    pages = int(getattr(spec, "history_pages", 1) or 1)
+    if pages <= 1:
+        return client.list_channel_history(
+            channel_id=spec.channel_id, request_id=request_id, limit=100
+        )
+    from teamagent.adapters.slack_channel_ingest_client import HistoryBatch
+
+    oldest = None
+    if spec.oldest_days:
+        oldest = time.time() - int(spec.oldest_days) * 86400
+    messages: list[Any] = []
+    cursor: str | None = None
+    fetched = 0
+    has_more = False
+    for _ in range(pages):
+        batch = client.list_channel_history(
+            channel_id=spec.channel_id,
+            request_id=request_id,
+            limit=100,
+            oldest=oldest,
+            cursor=cursor,
+        )
+        fetched += 1
+        messages.extend(batch.messages)
+        has_more = bool(batch.has_more)
+        cursor = batch.next_cursor
+        if not cursor or not has_more:
+            break
+    logger.info(
+        "ingest_slack_history_paged",
+        request_id=request_id,
+        channel_id=spec.channel_id,
+        pages=fetched,
+        messages=len(messages),
+        truncated=bool(cursor and has_more),
+    )
+    return HistoryBatch(messages=tuple(messages), next_cursor=cursor, has_more=has_more)
+
+
 def _differential_enabled(*, dry_run: bool) -> bool:
     """差分取り込み（``INGEST_DIFFERENTIAL``・既定 OFF）が有効か。
 
@@ -1706,12 +1747,10 @@ def _ingest_slack_channel(
         )
         return 0, 0
 
-    # 2) 1 ページのみ取得（増分取り込みは Sprint 4 で cursor / oldest 永続化）
-    batch = client.list_channel_history(
-        channel_id=spec.channel_id,
-        request_id=request_id,
-        limit=100,
-    )
+    # 2) 履歴を取得。既定は 1 ページ（最新 100 件）。history_pages ≥ 2 のチャンネルは
+    #    oldest_days より新しい投稿だけをページを辿って最大 history_pages まで読む
+    #    （10-06: #proj-01 の案件決定が最新 100 件より前のものを拾えていなかった）。
+    batch = _fetch_channel_history(client, spec, request_id=request_id)
 
     # 差分取り込み（INGEST_DIFFERENTIAL・既定 OFF）: この channel の候補 thread の
     # 保存済み content hash を 1 クエリで先読みする（fail-open＝失敗時は全件再処理）。
