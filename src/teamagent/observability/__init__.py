@@ -9,7 +9,14 @@ from teamagent.observability.sentry import (
     capture_skill_exception,
     init_sentry,
     redact_secrets,
+    redact_secrets_and_pii,
     scrub_value,
 )
 
-__all__ = ["capture_skill_exception", "init_sentry", "redact_secrets", "scrub_value"]
+__all__ = [
+    "capture_skill_exception",
+    "init_sentry",
+    "redact_secrets",
+    "redact_secrets_and_pii",
+    "scrub_value",
+]
