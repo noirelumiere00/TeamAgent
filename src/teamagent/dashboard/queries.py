@@ -46,6 +46,7 @@ _WORK_TYPE_TOOLS: dict[str, tuple[str, ...]] = {
         "tiktok_search",
         "tiktok_comment_mining",
         "video_algorithm",
+        "video_algorithm_status",
         "video_analysis",
     ),
     WORK_TYPE_CREATE: (
