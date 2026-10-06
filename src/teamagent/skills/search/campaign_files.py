@@ -33,6 +33,7 @@ from teamagent.adapters.pgvector_client import SearchHit
 from teamagent.ingest.industry_taxonomy import normalize_industry
 from teamagent.skills._shared.source_url import hit_doc_url
 from teamagent.skills.search.client_match import normalize_filter_client
+from teamagent.util.grapheme_cut import truncate_graphemes
 
 #: 1 つの施策に添える資料の上限。
 MAX_FILES_PER_CAMPAIGN = 2
@@ -50,6 +51,8 @@ _KIND_OTHER = "資料"
 _TITLE_PREFIX = "施策実績 "
 _SEP_RE = re.compile(r"[\s　_\-‐‑–—－−・/／|｜()（）\[\]【】「」『』.,，、。:：#＃]+")
 _FOOTER_MAX = 3
+#: 添える資料名の表示上限（ツール結果の字数予算・OC のツール結果上限 2 万字の内側に収める）。
+TITLE_CHARS = 60
 
 
 def is_campaign_hit(hit: SearchHit) -> bool:
@@ -152,13 +155,16 @@ def pick_related_files(
             continue
         seen.add(uri)
         kind = file_kind(title, str(row.get("cls_doc_type") or "") or None)
+        shown = truncate_graphemes(title, TITLE_CHARS)
+        if len(shown) < len(title):
+            shown += "…"
         priority = 0 if kind in (_KIND_REPORT, _KIND_PROPOSAL) else 1
         scored.append(
             (
                 priority,
                 -similarity,
                 str(row.get("updated_at") or ""),
-                {"title": title, "url": url, "source_uri": uri, "kind": kind},
+                {"title": shown, "url": url, "source_uri": uri, "kind": kind},
             )
         )
     # 新しさは降順にしたいので、優先度・重なりで並べた後に安定ソートで日付を先に効かせる。

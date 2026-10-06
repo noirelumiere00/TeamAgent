@@ -425,6 +425,12 @@ def test_file_kind_and_priority() -> None:
     assert [p["source_uri"] for p in picked] == ["gdrive://C", "gdrive://B"]
 
 
+def test_long_titles_are_capped_for_the_payload_budget() -> None:
+    rows = [{"title": "むぎ茶ボトル_レポート_" + "長" * 100, "source_uri": "gdrive://Z"}]
+    picked = pick_related_files("むぎ茶ボトル", rows)
+    assert len(picked[0]["title"]) == 61 and picked[0]["title"].endswith("…")
+
+
 def test_campaign_key_falls_back_to_title() -> None:
     hit = SearchHit(
         1,

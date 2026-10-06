@@ -35,7 +35,13 @@ from teamagent.skills.search.composite import (
     slack_query_terms,
 )
 from teamagent.skills.search.not_found import NOT_FOUND_HEAD
-from teamagent.skills.search.schema import SearchHitOut, SearchInput, SearchOutput, SlackHitOut
+from teamagent.skills.search.schema import (
+    RelatedFileOut,
+    SearchHitOut,
+    SearchInput,
+    SearchOutput,
+    SlackHitOut,
+)
 from teamagent.skills.search.skill import SearchSkill
 from teamagent.skills.search.two_stage import TWO_STAGE_CTX_KEY, TWO_STAGE_ENV
 from tests.skills.slack_search.test_slack_search import (
@@ -546,8 +552,18 @@ def test_typical_combined_payload_stays_under_offload_threshold() -> None:
 
 
 def test_max_combined_payload_stays_under_oc_limit() -> None:
-    """最大: 金庫 top5 が 2,000 字チャンク ＋ 長い要約 ＋ 長い場所名・添付名 3 件 × 5。"""
-    out = _payload(content_chars=2_000, answer_chars=2_500, long_slack=True)
+    """最大: 金庫 top5 が 2,000 字チャンクで全部が施策実績（関連資料 2 件ずつ・題名は上限 60 字）
+    ＋ 要約 2,000 字（SEARCH_MAX_TOKENS=800 の上限＋施策リンクの追記）＋ 長い場所名・添付名 3 件 × 5。
+    """
+    out = _payload(content_chars=2_000, answer_chars=2_000, long_slack=True)
+    for hit in out.hits:
+        hit.related_files = [
+            RelatedFileOut(
+                title="あ" * 60 + "…",
+                url="https://drive.google.com/file/d/1AbCdEfGhIjKlMnOpQrStUvWxYz0123456/view",
+                kind="レポート",
+            )
+        ] * 2
     size = _size(out)
     print(f"max={size}")
     assert size <= 20_000
