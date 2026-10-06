@@ -196,6 +196,8 @@ def test_run_injects_weak_header_ahead_of_summary(
     fake_bedrock: MagicMock, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.delenv("SEARCH_WEAK_RESULT_THRESHOLD", raising=False)  # 既定 0.3
+    # 判定を「警告ヘッダ」に限って見る（該当なしの定型文への置換は test_not_found.py が持つ）。
+    monkeypatch.setenv("SEARCH_NOT_FOUND_ANSWER", "false")
     pg = _pgvector([_hit(0.18, client_name="花王")])
 
     out = _skill(fake_bedrock, pg).run(
@@ -207,7 +209,11 @@ def test_run_injects_weak_header_ahead_of_summary(
     assert "動画施策" in out.answer or "花王" in out.answer
 
 
-def test_run_injects_client_mismatch_header(fake_bedrock: MagicMock) -> None:
+def test_run_injects_client_mismatch_header(
+    fake_bedrock: MagicMock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # 判定を「警告ヘッダ」に限って見る（該当なしの定型文への置換は test_not_found.py が持つ）。
+    monkeypatch.setenv("SEARCH_NOT_FOUND_ANSWER", "false")
     pg = _pgvector([_hit(0.81, client_name="花王")], vocab=["花王", "資生堂"])
 
     out = _skill(fake_bedrock, pg).run(
@@ -217,8 +223,12 @@ def test_run_injects_client_mismatch_header(fake_bedrock: MagicMock) -> None:
     assert out.answer.startswith(MISMATCH_HEAD + "花王）。")
 
 
-def test_run_uses_explicit_filter_client_as_the_asked_client(fake_bedrock: MagicMock) -> None:
+def test_run_uses_explicit_filter_client_as_the_asked_client(
+    fake_bedrock: MagicMock, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """明示 filter_client は辞書一致より優先される（利用者の指定が最上位）。"""
+    # 判定を「警告ヘッダ」に限って見る（該当なしの定型文への置換は test_not_found.py が持つ）。
+    monkeypatch.setenv("SEARCH_NOT_FOUND_ANSWER", "false")
     pg = _pgvector([_hit(0.81, client_name="花王")], vocab=[])
 
     out = _skill(fake_bedrock, pg).run(
@@ -243,6 +253,8 @@ def test_kill_switch_restores_previous_behaviour(
     fake_bedrock: MagicMock, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("SEARCH_RESULT_GUARD", "false")
+    # 該当なし判定も止めると、警告ヘッダ導入前と完全に同じ（辞書 SQL も引かない）。
+    monkeypatch.setenv("SEARCH_NOT_FOUND_ANSWER", "false")
     pg = _pgvector([_hit(0.05, client_name="花王")], vocab=["花王", "資生堂"])
 
     out = _skill(fake_bedrock, pg).run(
@@ -271,6 +283,8 @@ def test_two_stage_first_response_carries_the_header(
 ) -> None:
     """二段返しの**第一報**（続報予告）にも同じヘッダが付く。"""
     monkeypatch.setenv(TWO_STAGE_ENV, "true")
+    # 判定を「警告ヘッダ」に限って見る（該当なしの定型文への置換は test_not_found.py が持つ）。
+    monkeypatch.setenv("SEARCH_NOT_FOUND_ANSWER", "false")
     pg = _pgvector([_hit(0.11, client_name="花王")], vocab=["花王", "資生堂"])
     skill = _skill(fake_bedrock, pg)
     skill._slack = MagicMock()  # 後追い投稿はここでは検証しない

@@ -648,6 +648,8 @@ class PgVectorClient:
                 d.metadata->>'cls_target' AS cls_target,
                 d.metadata->>'cls_entities' AS cls_entities,
                 d.metadata->>'campaign_aggregate' AS campaign_aggregate,
+                d.metadata->>'advertiser' AS advertiser,
+                d.metadata->>'campaign' AS campaign,
                 to_char(d.modified_at AT TIME ZONE 'Asia/Tokyo', 'YYYY-MM-DD') AS updated_at
             FROM chunks c
             JOIN documents d ON d.id = c.document_id
@@ -715,6 +717,11 @@ class PgVectorClient:
             # "true" のときだけ詰める（他の文書はキー自体を持たない）。
             if r.get("campaign_aggregate") == "true":
                 meta["campaign_aggregate"] = "true"
+                # 広告主名・案件名（同じ施策の Drive 資料を引く鍵・SearchSkill の関連ファイル）。
+                if r.get("advertiser"):
+                    meta["advertiser"] = str(r["advertiser"])
+                if r.get("campaign"):
+                    meta["campaign"] = str(r["campaign"])
             # 便A-3: 更新日（documents.modified_at・JST・YYYY-MM-DD）。値があるときだけ
             # 詰め、由来を date_basis="modified_at" で明示する（NULL 行はキー自体を
             # 持たない＝呼び側が「根拠不明の日付」を作らない）。
@@ -1570,6 +1577,83 @@ class PgVectorClient:
             resolved=len(resolved),
         )
         return resolved
+
+    def find_drive_files_for_advertisers(
+        self,
+        conn: psycopg.Connection[dict[str, Any]],
+        advertisers: list[str],
+        *,
+        per_advertiser: int = 30,
+        request_id: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """広告主ごとに、同じ広告主の Drive 資料の候補を **1 回の SQL** で引く（read-only）。
+
+        施策実績（ショート動画DBの案件集計）のヒットに、同じ施策のレポート・提案書を添える
+        ための候補取り（SearchSkill._attach_campaign_files）。広告主名の部分一致（題名・
+        cls_project・client_name）で広告主ごとに新しい順に最大 ``per_advertiser`` 件。
+        施策名との照合・資料の種類の優先・業種の最頻値はスキル側（純関数）で決める。
+        **RLS 適用済みの conn 前提**（見えない資料は候補に出ない）。広告主は最大 10 件。
+
+        Returns:
+            ``advertiser``（渡した値）/ ``title`` / ``source_uri`` / ``cls_industry`` /
+            ``case_industry`` / ``cls_doc_type`` / ``updated_at`` の dict の list。
+        """
+        clean: list[str] = []
+        for a in advertisers:
+            value = a.strip() if isinstance(a, str) else ""
+            if len(value) >= 2 and value not in clean:
+                clean.append(value)
+        clean = clean[:10]
+        if not clean:
+            return []
+        patterns = [f"%{self._escape_like(a)}%" for a in clean]
+        sql = """
+            SELECT p.idx::int AS advertiser_idx,
+                   f.title,
+                   f.source_uri,
+                   f.metadata->>'cls_industry' AS cls_industry,
+                   f.metadata->>'case_industry' AS case_industry,
+                   f.metadata->>'cls_doc_type' AS cls_doc_type,
+                   to_char(f.modified_at AT TIME ZONE 'Asia/Tokyo', 'YYYY-MM-DD') AS updated_at
+            FROM unnest(%s::text[]) WITH ORDINALITY AS p(pattern, idx)
+            CROSS JOIN LATERAL (
+                SELECT doc.title, doc.source_uri, doc.metadata, doc.modified_at
+                FROM documents doc
+                WHERE doc.source_type = 'gdrive'
+                  AND doc.source_uri IS NOT NULL
+                  AND doc.metadata->>'suppressed' IS DISTINCT FROM 'true'
+                  AND (doc.title ILIKE p.pattern ESCAPE '\\'
+                       OR doc.metadata->>'cls_project' ILIKE p.pattern ESCAPE '\\'
+                       OR doc.metadata->>'client_name' ILIKE p.pattern ESCAPE '\\')
+                ORDER BY doc.modified_at DESC NULLS LAST
+                LIMIT %s
+            ) f
+        """  # nosec B608
+        out: list[dict[str, Any]] = []
+        with conn.cursor() as cur:
+            cur.execute(sql, [patterns, max(1, int(per_advertiser))])
+            for row in cur.fetchall():
+                idx = int(row.get("advertiser_idx") or 0)
+                if not 1 <= idx <= len(clean):
+                    continue
+                out.append(
+                    {
+                        "advertiser": clean[idx - 1],
+                        "title": str(row.get("title") or ""),
+                        "source_uri": str(row.get("source_uri") or ""),
+                        "cls_industry": row.get("cls_industry"),
+                        "case_industry": row.get("case_industry"),
+                        "cls_doc_type": row.get("cls_doc_type"),
+                        "updated_at": row.get("updated_at"),
+                    }
+                )
+        logger.info(
+            "pgvector_campaign_drive_files",
+            request_id=request_id,
+            advertisers=len(clean),
+            rows=len(out),
+        )
+        return out
 
     def list_documents_for_client(
         self,

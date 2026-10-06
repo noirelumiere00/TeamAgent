@@ -137,6 +137,11 @@ def build_production_tools() -> list[ToolSpec]:
     from teamagent.skills.search.skill import SearchSkill
 
     search = _build_search_skill()  # 共有インスタンス
+    # 複合検索（USE_COMPOSITE_SEARCH・既定 OFF）: MCP 経由の search が金庫と並行して本人の
+    # Slack も探す。読取は本人 xoxp のみ（slack_search と同じ TokenStore・bot token 不使用）。
+    # connect-web / slack_bot は store を持たず、MCP ゲートの印も無いので Slack を叩かない。
+    if _envflag("USE_COMPOSITE_SEARCH"):
+        search.attach_slack_store(_build_slack_store())
     # カタログ成果物の永続化(Part1・外部脳化)。USE_RESEARCH_PERSIST=1 のときだけ有効化し、常駐
     # embedder/pgvector を再利用（二重ロード回避）。None のとき各 skill は完全 no-op（後方互換）。
     _research_persister = None

@@ -190,16 +190,17 @@ def test_pre_v3_versions_are_byte_identical(version: str) -> None:
 
     部分文字列ではなく全文一致で見る（審査指摘 5）。ツール結果は server.py が
     ``model_dump()`` をそのまま返すため、キーが 1 つ増えても本番の入力が変わる（審査指摘 1）。
+    ``found``（金庫に該当があったか）は 10-06 に版を問わず意図して足した 1 キー。
     """
     text, out = _run(version, "サンプル食品の最新の提案書どこ？")
     assert text == _PRE_V3_USER_MESSAGE
-    assert set(out.model_dump()) == {"answer", "hits", "total_cost_usd"}
+    assert set(out.model_dump()) == {"answer", "hits", "total_cost_usd", "found"}
 
 
 def test_v3_tool_output_shape_is_unchanged() -> None:
     """v3 でも回答モードはツール結果に載せない（ログ search_answer_mode で残す）。"""
     _, out = _run("v3", "サンプル食品の最新の提案書どこ？")
-    assert set(out.model_dump()) == {"answer", "hits", "total_cost_usd"}
+    assert set(out.model_dump()) == {"answer", "hits", "total_cost_usd", "found"}
 
 
 def test_followup_path_also_gets_mode() -> None:

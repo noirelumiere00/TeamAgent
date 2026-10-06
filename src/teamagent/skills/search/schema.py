@@ -2,9 +2,16 @@
 
 from __future__ import annotations
 
-from typing import Literal
+from typing import Any, Literal
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    Field,
+    SerializerFunctionWrapHandler,
+    field_validator,
+    model_serializer,
+    model_validator,
+)
 
 
 class SearchInput(BaseModel):
@@ -86,6 +93,19 @@ class SearchInput(BaseModel):
             "False: _summarize をスキップし answer='' / 要約コスト 0 で hits のみ即返す"
             "（Web UI 二段レスポンスの fast path 用。retrieval は通常どおり実行）。"
         ),
+    )
+
+
+class RelatedFileOut(BaseModel):
+    """施策実績のヒットに添える、同じ施策の Drive 資料（レポート・提案書）。"""
+
+    title: str = Field(description="資料名（Drive の題名）")
+    url: str = Field(description="資料を開ける URL")
+    kind: Literal["レポート", "提案書", "資料"] = Field(description="資料の種類")
+    source_uri: str | None = Field(
+        default=None,
+        description="元データの内部識別子（ユーザーに提示しない・配信用）",
+        exclude=True,
     )
 
 
@@ -176,7 +196,9 @@ class SearchHitOut(BaseModel):
     )
     industry: str | None = Field(
         default=None,
-        description="業界（ナレッジ自動分類 cls_industry）",
+        description=(
+            "業界（ナレッジ自動分類 cls_industry）。施策実績は広告主の Drive 資料の業種の最頻値"
+        ),
     )
     doc_type: str | None = Field(
         default=None,
@@ -189,6 +211,13 @@ class SearchHitOut(BaseModel):
     is_low_confidence: bool = Field(
         default=False,
         description="低信頼ヒット（fallback しきい値で救出された borderline）。配信は控える",
+    )
+    related_files: list[RelatedFileOut] | None = Field(
+        default=None,
+        description=(
+            "施策実績のときだけ: 同じ施策の Drive 資料（最大 2 件）。空なら数字はシートのみ"
+        ),
+        exclude_if=lambda v: v is None,
     )
     updated_at: str | None = Field(
         default=None,
@@ -245,9 +274,58 @@ class SearchHitOut(BaseModel):
         return cleaned
 
 
+class SlackHitOut(BaseModel):
+    """複合検索（USE_COMPOSITE_SEARCH）で並行して探した本人の Slack の 1 投稿（短い抜粋だけ）。
+
+    チャンネルからの依頼では公開チャンネルの一致だけが入る（slack_search と同じ規則）。
+    """
+
+    channel: str = Field(default="", description="場所（#ch / 🔒#ch / DM / グループDM）")
+    posted_on: str = Field(default="", description="投稿日（JST・YYYY-MM-DD）")
+    excerpt: str = Field(default="", description="本文の抜粋（160 字まで・通知記法は無害化済み）")
+    permalink: str = Field(default="", description="投稿へのリンク")
+    file_names: list[str] = Field(default_factory=list, description="添付ファイル名（あれば）")
+
+
+# 値が None のときはツール結果から落とすキー（複合検索 OFF のとき出力を 1 バイトも変えないため）。
+_OMIT_WHEN_NONE: tuple[str, ...] = ("slack_hits", "slack_status", "suggested_next")
+
+
 class SearchOutput(BaseModel):
     """検索 Skill の出力。"""
 
     answer: str = Field(description="Claude による要約（引用付き）")
     hits: list[SearchHitOut] = Field(default_factory=list, description="検索ヒット一覧")
     total_cost_usd: float = Field(ge=0.0, description="この検索実行の概算コスト")
+    found: bool = Field(
+        default=True,
+        description=(
+            "金庫に問いへ該当する資料があったか。False のとき answer は"
+            "「金庫に該当する資料は見つかりませんでした（近いもの: …）」で、hits は参考の近いもの"
+        ),
+    )
+    slack_hits: list[SlackHitOut] | None = Field(
+        default=None,
+        description="複合検索のときだけ: 本人の Slack の一致（上位 5 件・短い抜粋）",
+    )
+    slack_status: Literal["ok", "not_connected", "error"] | None = Field(
+        default=None,
+        description=(
+            "複合検索のときだけ: Slack を探せたか。not_connected / error は「探せなかった」で、"
+            "Slack に無いという意味ではない"
+        ),
+    )
+
+    suggested_next: str | None = Field(
+        default=None,
+        description="次の一手（既存ツールを 1 つだけ・提案のみ）。無ければ出さない",
+    )
+
+    @model_serializer(mode="wrap")
+    def _omit_unset_optional(self, handler: SerializerFunctionWrapHandler) -> dict[str, Any]:
+        """複合検索の欄・次の一手は None なら出さない（出す物が無ければ結果は従来と同一）。"""
+        data: dict[str, Any] = handler(self)
+        for key in _OMIT_WHEN_NONE:
+            if key in data and data[key] is None:
+                del data[key]
+        return data

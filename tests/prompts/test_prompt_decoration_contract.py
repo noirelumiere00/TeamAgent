@@ -51,6 +51,10 @@ HUMAN_FACING_PROMPTS = (
     "proposal_review/v1/system.md",
     "search/v2d/system.md",
     "search/v3/system.md",
+    # 複合検索（USE_COMPOSITE_SEARCH）で search の user message に足す節（出典の書き分け）。
+    "search/composite/slack.md",
+    # 施策実績のヒットがあるとき search の user message に足す節（資料リンク・業種の扱い）。
+    "search/campaign/files.md",
     "search_surface_check/v1/analyze.md",
     # 2 段目: 1 本ずつの動画分析（Gemini）の system への追記（場面の telop/speech/intent が
     # 構成表に出る）と、学べること・弱点・絵コンテ案（Bedrock）。
@@ -135,6 +139,9 @@ _NO_BAN_SECTION = (
     "proposal_deck/v1/system.md",
     "proposal_deck/v2/system.md",
     "x_research/v1/buzz.md",
+    # search の system prompt（v2d / v3・禁止節あり）と一緒に送る user message 側の追記節。
+    "search/composite/slack.md",
+    "search/campaign/files.md",
 )
 MUST_HAVE_BAN_SECTION = tuple(p for p in HUMAN_FACING_PROMPTS if p not in _NO_BAN_SECTION)
 

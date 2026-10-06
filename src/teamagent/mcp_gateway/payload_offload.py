@@ -41,6 +41,12 @@ OFFLOAD_TOOLS: frozenset[str] = frozenset(
     }
 )
 
+# 退避先（署名 URL・無認証で開ける）へ **書き出さない** キー。会社共有ナレッジの tool の中に
+# 混ざる「依頼者本人にしか見えない」データ（search の複合検索が足す本人 Slack の一致）。
+# 署名 URL は RLS/本人限定配信をバイパスする経路なので、全文 JSON から落としてから退避する。
+# 切り詰め版（依頼者本人の会話へ返す側）には残す。
+PER_USER_KEYS: frozenset[str] = frozenset({"slack_hits"})
+
 # ペイロード全体（JSON 文字列長）がこれを超えたら退避＋切り詰めを発動。
 _DEFAULT_MAX_CHARS = 10_000
 # 切り詰め後の各文字列フィールド上限（answer 等の要約系はこの5倍まで許容）。
@@ -150,8 +156,18 @@ def maybe_offload(tool: str, data: dict[str, Any], *, request_id: str) -> dict[s
 
     from teamagent.adapters.report_publish import publish_text
 
+    published = raw
+    if any(key in data for key in PER_USER_KEYS):
+        try:
+            published = json.dumps(
+                {k: v for k, v in data.items() if k not in PER_USER_KEYS},
+                ensure_ascii=False,
+                default=str,
+            )
+        except Exception:
+            return data
     url = publish_text(
-        raw,
+        published,
         prefix=os.environ.get("PAYLOAD_OFFLOAD_PREFIX") or "payload-offload/",
         bucket=os.environ.get("PAYLOAD_OFFLOAD_BUCKET") or None,
         request_id=request_id,
@@ -190,4 +206,4 @@ def maybe_offload(tool: str, data: dict[str, Any], *, request_id: str) -> dict[s
     return trimmed
 
 
-__all__ = ["OFFLOAD_TOOLS", "enabled", "maybe_offload"]
+__all__ = ["OFFLOAD_TOOLS", "PER_USER_KEYS", "enabled", "maybe_offload"]
