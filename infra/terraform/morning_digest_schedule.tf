@@ -175,6 +175,12 @@ variable "morning_digest_remind_personal_blocks" {
   default     = true
 }
 
+variable "personal_memory_retire_sweep" {
+  description = "04:00 の planner で本人メモの退職（Slack で削除済み）を消し、ゲスト化を凍結する（PERSONAL_MEMORY_RETIRE_SWEEP・M6）。既定 false。migration 0029 の適用後に点ける。⚠️ TD で変えたら activation 版 tfvars（正本）へ同じ値を追記。"
+  type        = bool
+  default     = false
+}
+
 variable "morning_digest_extra_skip_dates" {
   description = "会社休日（MORNING_DIGEST_EXTRA_SKIP_DATES・YYYY-MM-DD のカンマ区切り・最大 60 件）。morning_digest_holiday_skip=true のときだけ効く（祝日と同じ扱い）。年末年始など。既定 空。⚠️ TD で ON/変更したら activation 版 tfvars（正本・~/dev/worktrees/teamagent-activation/infra/terraform/terraform.tfvars）へ同じ値を必ず追記。忘れると guard 経由の plan が live との env 差分で止まる（config 移行で allowed_env_changes.morning に載せた場合と guard を通さない apply では既定に黙って戻る）。"
   type        = string
@@ -643,6 +649,8 @@ resource "aws_ecs_task_definition" "morning_digest" {
       # （予約を作れないのに一括実行だけが claim する状態を作らない）。
       { name = "MORNING_DIGEST_PERSONALIZED", value = (var.enable_reminders && var.morning_digest_personalized) ? "true" : "false" },
       { name = "MORNING_DIGEST_DEFAULT_TIME", value = var.morning_digest_default_time },
+      # 本人メモの退職・ゲスト化の掃除（M6・既定 OFF）。planner の実行時に 1 日 1 回。
+      { name = "PERSONAL_MEMORY_RETIRE_SWEEP", value = var.personal_memory_retire_sweep ? "true" : "false" },
       # 作業枠（ゲスト・会議リンク無し）への直前リマインド（全員の既定・本人設定が優先）。
       { name = "MORNING_DIGEST_REMIND_PERSONAL_BLOCKS", value = var.morning_digest_remind_personal_blocks ? "true" : "false" },
       # F0 連携切れの見える化（既定 空＝OFF）。TD で変えたら activation 版 tfvars（正本）へ同じ値を追記。

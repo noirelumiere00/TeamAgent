@@ -2808,6 +2808,31 @@ def _mode() -> str:
     return "bulk"
 
 
+PERSONAL_MEMORY_SWEEP_ENV = "PERSONAL_MEMORY_RETIRE_SWEEP"
+
+
+def _maybe_sweep_personal_memory() -> None:
+    """本人メモの退職（Slack で削除済み）を消し、ゲスト化を凍結する（M6・設計 §10b.5）。
+
+    ``PERSONAL_MEMORY_RETIRE_SWEEP`` が真のときだけ。Slack の確認に失敗した人は何もしない。
+    この処理の失敗で朝の予約を止めない（例外は型名だけ残して握る）。
+    """
+    if os.environ.get(PERSONAL_MEMORY_SWEEP_ENV, "").strip().lower() not in {"1", "true", "yes"}:
+        return
+    try:
+        from slack_sdk import WebClient
+
+        from teamagent.adapters.personal_memory_admin import PersonalMemoryAdmin, sweep_retired
+
+        token = os.environ.get("SLACK_BOT_TOKEN", "").strip()
+        if not token:
+            logger.warning("personal_memory_sweep_skipped", reason="no_slack_bot_token")
+            return
+        sweep_retired(PersonalMemoryAdmin(), WebClient(token=token, timeout=10))
+    except Exception as exc:
+        logger.warning("personal_memory_sweep_failed", error=type(exc).__name__)
+
+
 def main() -> int:
     global _TARGET_FETCH_ERROR
     # F0: ログを JSON にする（タスク定義は STRUCTLOG_FORMAT=json を渡しているのに、この
@@ -2832,6 +2857,8 @@ def main() -> int:
 
     if mode == "planner":
         # 04:00 JST: 予約を作るだけ。digest は 1 通も配信しない。
+        # 本人メモの退職・ゲスト化の掃除も 1 日 1 回ここで行う（既定 OFF・失敗しても予約は作る）。
+        _maybe_sweep_personal_memory()
         return run_planner(users)
     if mode == "single":
         # 予約発火: user_ref を連携済み利用者へ解決し、その 1 人分だけ実行する。
