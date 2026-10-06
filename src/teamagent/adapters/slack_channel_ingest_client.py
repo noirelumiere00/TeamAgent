@@ -109,6 +109,16 @@ class IngestChannelConfig:
     extra_metadata: dict[str, Any] = field(default_factory=dict)
 
 
+@dataclass(frozen=True)
+class SlackConversation:
+    """conversations.list の 1 件（名前の頭で取り込み対象を探すのに使う分だけ）。"""
+
+    channel_id: str
+    name: str  # "#" なし（Slack の channel 名そのもの）
+    is_private: bool
+    is_member: bool
+
+
 # -----------------------------------------------------------
 # クライアント本体
 # -----------------------------------------------------------
@@ -224,6 +234,48 @@ class SlackChannelIngestClient:
     # -------------------------------------------------------
     # チャネルメンバー（ACL 用）
     # -------------------------------------------------------
+    def list_conversations(
+        self,
+        request_id: str,
+        *,
+        types: str,
+        cursor: str | None = None,
+        limit: int = 1000,
+    ) -> tuple[list[SlackConversation], str | None]:
+        """conversations.list で channel 一覧を返す（1 ページ・archived は除く）。
+
+        bot token では private channel は bot が参加しているものだけが返る。public は全件返り、
+        ``is_member`` で bot が参加しているか（＝履歴を読めるか）が分かる。
+        """
+        kwargs: dict[str, Any] = {"types": types, "exclude_archived": True, "limit": limit}
+        if cursor:
+            kwargs["cursor"] = cursor
+        start = time.perf_counter()
+        resp = asyncio.run(self._client.conversations_list(**kwargs))
+        latency_ms = int((time.perf_counter() - start) * 1000)
+        raw_channels: list[dict[str, Any]] = list(resp.get("channels", []) or [])
+        channels = [
+            SlackConversation(
+                channel_id=str(raw.get("id", "")),
+                name=str(raw.get("name", "")),
+                is_private=bool(raw.get("is_private", False)),
+                is_member=bool(raw.get("is_member", False)),
+            )
+            for raw in raw_channels
+            if raw.get("id") and raw.get("name")
+        ]
+        meta: dict[str, Any] = resp.get("response_metadata", {}) or {}
+        next_cursor = meta.get("next_cursor") or None
+        logger.info(
+            "slack_list_conversations",
+            request_id=request_id,
+            types=types,
+            returned=len(channels),
+            has_more=bool(next_cursor),
+            latency_ms=latency_ms,
+        )
+        return channels, next_cursor
+
     def list_channel_members(
         self,
         channel_id: str,

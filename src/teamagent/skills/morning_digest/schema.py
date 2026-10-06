@@ -163,6 +163,13 @@ class CalendarEventItem(BaseModel):
     meeting_url: str = Field(
         default="", max_length=600, description="会議リンク（Meet/Zoom等・本人DM表示用）"
     )
+    personal_block: bool = Field(
+        default=False,
+        description=(
+            "ゲストも会議リンクも無い＝本人が入れた作業枠（タスク）か（calendar_window."
+            "is_personal_block）。既定 False＝会議扱い（判らない予定のリマインドを黙って消さない）"
+        ),
+    )
     # --- 事例ブリーフ用の派生値（pre_meeting_brief/signals.build_signal_input の出力）---
     # ⚠️ **生 description のフィールドは作らない**。ここに載せるのは「クライアント行が
     #    あったか」「そこから読めた企業名/代理店」だけ。最大 4000 字の自由文を全消費者へ
@@ -219,6 +226,14 @@ class SlackUnreadItem(BaseModel):
             "本文（本人DM表示用・未マスク・ログ厳禁）。"
             "⚠️ 上限を変えるときは skill 側の切り詰め長と必ず同時に直すこと"
             "（片方だけ伸ばすと pydantic ValidationError で digest ごと落ちる）"
+        ),
+    )
+    body_truncated: bool | None = Field(
+        default=None,
+        description=(
+            "excerpt_display が上限で切られたか（描画の「本文が途中で切れています」の根拠）。"
+            "None は不明＝描画側が本文長から推定する。⚠️ 絵文字を割らずに切るので、切っても"
+            "上限ちょうどの長さになるとは限らない（長さからの推定は外れうる）"
         ),
     )
     permalink: str | None = Field(default=None, description="Slack の permalink")
@@ -411,4 +426,8 @@ class MorningDigestOutput(BaseModel):
     )
     draft_limit: int = Field(
         default=0, ge=0, description="朝の自動作成の上限件数（auto のときの説明文に出す）"
+    )
+    draft_skip_internal: bool = Field(
+        default=False,
+        description="朝の自動作成から社内だけのやり取りを外したか（auto のときの説明文に出す）",
     )

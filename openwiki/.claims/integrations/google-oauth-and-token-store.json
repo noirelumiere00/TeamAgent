@@ -1,0 +1,152 @@
+{
+  "schemaVersion": 1,
+  "pageVersion": "sha256:697ba6465def32206c1fd25a6d00410d2704dba08f0aefc3f074f5d93a01c821",
+  "claims": [
+    {
+      "id": "claim_30eca2e852c04b52b3985227f5744c31",
+      "statement": "OAuth state は email・発行時刻・nonce を OAUTH_STATE_SECRET で HMAC-SHA256 署名した base64url で、inspect_state は発行から 30 分超または発行時刻が 60 秒より未来なら expired、署名不一致なら bad_signature を返す。",
+      "evidence": [
+        {
+          "resource": "repo://src/teamagent/adapters/google_oauth_flow.py#L154-L168",
+          "version": "repo-lines-v1:sha256:77cceceaefeb7fe23ac8588e89d8a40d71cd054dd0af368bf78c3a0d420bcb66:eyJzZWxlY3RlZExpbmVDb3VudCI6MTUsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjQ4NTRmYmU5ZGU1MDRhMmIzNGJiN2Q0OGY0MzA3NjAxZmUzN2I0MjMxZDM4OWFkYzAwMzI2NWQ1YzM4NTI4OTQiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6ImM3MmVmNjBmYmFlZWI1OWExZTNmZjc3OTI3ZTA1M2NjNzY0OWQ5MjE1YjdiMDZhZDYwNzAwZjFmZGI5ODcxZWIiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImNkYTdmZWE3MmVkNWNjNDg1NDQ4MTg1NzBkOTVhNmQyMjgwYWJjNTExZmUwNmU0MDcxYzg1M2I2MjE2N2VlNGEiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjI3OTg5Y2Y1Y2FmZjQzMjhiMTJiODVlM2QxYTNjYzg1YmMxM2ZhOGMwNWIyZDY3MjNiNzZmZGJmZDA4OWQxYTkifQ"
+        },
+        {
+          "resource": "repo://src/teamagent/adapters/google_oauth_flow.py#L192-L206",
+          "version": "repo-lines-v1:sha256:1fe366d5a630016dbe1d58d6f1c4e20220d2000d9e1f890c076046f5b0068046:eyJzZWxlY3RlZExpbmVDb3VudCI6MTUsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjljNzQ3YjFhZDdlZjg5Y2NkMTliOWQ3M2I3ZWM2YjM5OWI5YWQxNmRmNzhmMmVmMjY3ODRiMTk0NjczMTMyYzYiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjJiMjE2MzhiYmQwMDJkNTY2NTQwZGFmMDhlOWZlZWExNWJjNDcxZDA3NWZiNGNkZmU4NTY5NzUxOTA4NjA4ZmUiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjUzYWQ4Y2NmNDY3ZDQxNDlhMDQwYjg1MTU5MjAxYWY1MmQzNDk3NTI0ZjFkODI1ZjE5NTNhNTJjNjcwZTg2YmIiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImE3NDgzMDY1MDVjNzMzNjFhN2I1MjVlZjI1ZjE1NmE4OTI1NTI0OTJiMjg5MWJmZDRkY2Q3MDIwNjI2ZTg3ZjgifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_e57d559e14e541d3854f34a775a87c10",
+      "statement": "consume_state_once は hmac-state DynamoDB テーブルへ OAUTH_STATE#<sha256(state)> を attribute_not_exists 条件付きで書き、再利用なら False、テーブル名/scope の env 未設定なら RuntimeError を返す。",
+      "evidence": [
+        {
+          "resource": "repo://src/teamagent/adapters/google_oauth_flow.py#L221-L267",
+          "version": "repo-lines-v1:sha256:858134683141b7b2a4a59ca691c63f4e762dd3008be95fa3440bc61f9a28c246:eyJzZWxlY3RlZExpbmVDb3VudCI6NDcsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjllZTUzOWJmZGNjOWI5YzhhNDg0NzYyNTA4MmYzMjA5OGI1YmY2MWI3ODE4MWZlMzkzMjczNDcyZDRiNDc0OTMiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjMwZTJhNDY1MDA5NWZhOTVkMGUyYmI0MWIyZGIyOTA5NGQzNDA0ZDI4Y2UxMjMzOWVjODhiYjRiNWM1YmU4ZjYiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjMyZGE3MmUzOGExYzQ1MjhhYmQ4OWNkN2FlMDlmMzNmMWZiMDYyNDRlOTkwZWU1MmVmMmNmMDBjZjA5YzczODIiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImU0YmMwNTY4YWU1ZmZlZWExMjdhNTZmNmM2MmVjYzIzOWFkZjY4ZjU2Y2NjMGRkOGNmZDNlN2Q4MGRiNGU3NDcifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_183a6e77ee4c4859a0c52e8172269672",
+      "statement": "connect-web の /oauth2/start/{state} は state を strict decode して正規形に再エンコードし、署名と TTL を検証するだけで消費せず、同じ state で OAuthConsentFlow.authorization_url を組み直して Cache-Control: no-store の 302 を返す。",
+      "evidence": [
+        {
+          "resource": "repo://src/teamagent/connect_web/app.py#L3974-L4021",
+          "version": "repo-lines-v1:sha256:d3051003085ec7f0d4675e77058540bfecc3bc00cc55804d8afe7c47e8dda97a:eyJzZWxlY3RlZExpbmVDb3VudCI6NDgsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjA4OTkxMzExNGMzOTQzYTRjZDdmZTEyOTc1MDdkOTMzNjk1YzJkNzJkNjliYTg2YTg2YzA5ODE3N2EzYzljNjkiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6ImFiNWZhYmE5ZTYyYzc2YTVlNDg4MjkxMmViMWU0NzhkMmYzNTcyY2RkOGE3ZjJjOTgzZTc2NWY5MjRlNDFlNTMiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjdjYjYxNjNjNmUzZjM3Nzk1Yjg5NWM3ZDY5ZGI3ZTBmY2JlNzExNmJhZmNkZmM1YTE1YWFiYjU5OTU3ZDQ3MDkiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjFhMmYxNzVjMjJjYjNhMDZmMzgzZDVkZGZkZWZjNDBlOTRhZWI0ZWJjNTEwOWFlYjU1MzI3MGRiY2M2M2JlMjgifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_1f0a0f6b47334f57b65ec91a1c49b898",
+      "statement": "/oauth2/callback は state のワンタイム消費で RuntimeError（保管先未設定）を S06/500、その他の例外を S06/503、再利用（False）を S03/400 として出し分ける。",
+      "evidence": [
+        {
+          "resource": "repo://src/teamagent/connect_web/app.py#L4105-L4159",
+          "version": "repo-lines-v1:sha256:e230f23a16d70f2ac8038438ea0736fbc6f3887de9a1f8ef84d44df077bed398:eyJzZWxlY3RlZExpbmVDb3VudCI6NTUsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6ImI1NjljYjA5MjgwZWUwNzgxOTQ1ZTQ4ZDQwNDFiZDJkZmFhZTY5MWFkMmVhYmY1ZDNjYmEwODQ2YzcyMTZjYWEiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjU1MDMyZTk2NGQwOTMyMzUxZTVkMTg1MjY5MjgxYjE3MWEzYTA5YjA4YjI4NmU2NjFlYTQ3MDMyM2M4MmViNGQiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6Ijc0ZTc3OTAxMDkzOWJiNWJlNjZiY2I5YzMwODk2NGY4ODViMzNmN2M3YWYxMWZmNjU3MDlkYWJlMDExYWRiYzIiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjhiMzJmMjJkNDRmNTY4ODdiOTVjYjVmZjEwZmQ2YTI2ZTQ1Nzk0Y2I1M2FkNzI5YWNlOTNhNTJjYmVkMGViNmEifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_def407e6b6394d619db5b4089722949f",
+      "statement": "callback は Google id_token の email が state の email と一致し email_verified が真の場合だけ token を保存し、保存時は id_token を捨てて refresh token と scopes のみを TokenStore に渡す。一致しなければ S04/403 で保存しない。",
+      "evidence": [
+        {
+          "resource": "repo://src/teamagent/connect_web/app.py#L3517-L3530",
+          "version": "repo-lines-v1:sha256:1943b4675c79a48cb6ba93f07568ad94d433d39c9d2addf77f44ba38137639d3:eyJzZWxlY3RlZExpbmVDb3VudCI6MTQsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjY5M2Q5NTViYWU0MWYxNDE4ZDcyMTUwYjgzZjE3NzdmZmE2Y2NiNTZhNThhMjljN2QyZjA1YTI3ZWEwZDM0ZmQiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjMwYzFmMTg4ZjE0MmVkN2E4MjQ2ODBiMjA3MTcyYzU1MTliYzYxNGE0OGZkYTdjZjE2N2VkYjhkZGY3OTk1NmMiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImE2N2Y1NzBiMjc4NGE1ODMyYjUyZTY2NTM0ZTY1YmFkYjc4M2Q5NjM0YjczMGMzNjAxNzI2NDQ1NGVkZGY0NjUiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjM0Yzc4ZTgxYzhmYjQ1MzQ5Yjc5YmE2NTk4ZWI1NjJiMjI1NDZhNTEzMWNjYmE4OWRhMzUzYWU0Y2EyMWE0ZDAifQ"
+        },
+        {
+          "resource": "repo://src/teamagent/connect_web/app.py#L4236-L4266",
+          "version": "repo-lines-v1:sha256:7a1e0e8de4e69327ce6de1f77fe7968b6d008d63b3e832f50d7d8411017e6eb7:eyJzZWxlY3RlZExpbmVDb3VudCI6MzEsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjVkODdmNDhiY2RlYWU4MzYyNGIyMDA5NmNkNzJhYjA1MmNiMmQ1ZGEyM2VlOThlMTZhOWFlYzc2N2QyZmE3OGMiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjY1OWU0MTllNWNmYWRiZDY3YzA4MTgxZDk1OTE3NWIyZGU3ZThiY2EyMGU4NzA5Zjk5NjQ4ZmViZGM4MzI4NDkiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjBlYzQxNmU2ZmQ2NGRhZTg5Njk4Y2RiYjk0NzBkZGI5YTc3ODNlODQ2YzhjZmRmOGFkOGEyNjg0ZWNkNzEwMjYiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6Ijg4MWMzODlmNzgyM2Q1ZTI4ZDI5ZWQzZWJhNWJhZGI2YmY3NzA5ODYzZTEzNzkzZDkxZDVkNWYyNDQ0YTJjOWEifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_026118e1117b4b6783c4f274f8cc2e60",
+      "statement": "RdsTokenStore は refresh token を EncryptionContext {user_email} 付きで KMS 暗号化して oauth_tokens に BYTEA で upsert し、scopes() は KMS 復号せず scopes 列だけを読む。oauth_tokens は FORCE ROW LEVEL SECURITY で本人行（app.user_email GUC）か admin ロールしか見えない。",
+      "evidence": [
+        {
+          "resource": "repo://infra/migrations/0006_oauth_tokens.sql#L44-L60",
+          "version": "repo-lines-v1:sha256:c71e8b504ce80cf10795badd84e447b13e28d2320aa27c7c20cd5f1046a6e3fd:eyJzZWxlY3RlZExpbmVDb3VudCI6MTcsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6ImU5NGUwZmQxYWQ2YTYwOGE2NjBmYmVkNjVlZGVhZDU4OWI4OTE1ZTJiZDgzNGY1MjQzNGMzYzYwOTYwOGM2ZDkiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6Ijg0ZTQyMDhjZDZmZmI4YzRhMzU0N2IyZjU0YWRhMTk5NzhjM2YzNjVlNzhmOTUwMmVmNTE0NWNkZDJhYTg1NDMiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjhmZjlmNjQ2NWEzZjU1Y2JhYmFiN2JhM2U4MDQ5ZjFjNmY5MzFkMWY0MGQ4YzI5YzE3NWUyZDQyZTRlYmM2NGEiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImI5NWQ2NWZmNjJmYTU4Mzc3Y2RkMjk1OGY3MGE1M2I1MGY5ZThmODU5MDc1Nzg4YmE5ZDQ3NWRmZGY2Nzc0MDcifQ"
+        },
+        {
+          "resource": "repo://src/teamagent/adapters/oauth_token_store.py#L169-L221",
+          "version": "repo-lines-v1:sha256:c67337dce1b04a1b0457455176326197609a8f82103e13d45821c88624512226:eyJzZWxlY3RlZExpbmVDb3VudCI6NTMsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6ImJiNjY5MGE2MjdhODM2ZTM1MzEzNWZhMGFiNDFjYzIwMmU2Y2NlMGIwN2I2OGM2ZGNmMWU4NmI4MTIxNmEyNTgiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjRiNDZmMjQ4Y2U4NTczNDFlMjI0OTQ1MGM1NzYwN2QzZjIyZDc5NjU1ZjYwODg5ZDUwY2ZjYTBkZTE5YTZlNzUiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImQ1YTFlNjk4YTc4MjYxMjQ4ZDEwMWUzYzVkZjJiYjhlOWU5YTU2OWZhODEwMTFmMDc1YzYxZGVkMWU2YWMzYmIiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjU0MDBjN2RmYTkyMmExODk0ZjhkNTgwZTdiNGIzM2RkNzc5NDZlOWViNDc5ZjNmZjMzNTE2NjY0YmE5M2NkNDYifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_a45d04b543cc4a4c801dd8c46a5f21e0",
+      "statement": "build_user_credentials は CONNECT_GOOGLE_CLIENT_ID/SECRET を優先し（無ければ GOOGLE_CLIENT_ID/SECRET）、本人の refresh token と保存済み scopes から Credentials を作る。クライアント未設定は ValueError、refresh token が空ならその派生の MissingRefreshTokenError で弾く。",
+      "evidence": [
+        {
+          "resource": "repo://src/teamagent/adapters/google_auth.py#L116-L140",
+          "version": "repo-lines-v1:sha256:7975a0e70fd1bedb6b31c77a6bbb1af0739f4aea1249a46b7be8622ad528d348:eyJzZWxlY3RlZExpbmVDb3VudCI6MjUsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6Ijg0N2NlZDM3OGFjZDc5ZmIxNjM4OTFiNDNjODkxN2ZiMzVkNTQ3NGVjYWRkMTE5NzIxYWMzZjY3NWFmMjVkY2YiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjAzNWI4ZmNmZTRjN2FjNTI4NTZjYWE1NDIxNDBmMDNjY2ExYTY0YzY2N2Q5N2JmMTQ2N2YzNzNjZGMzMGI1MmMiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjAyYjI1NzhkODVmMDU0N2ZhOTE3ZGE3YjE4ZDIwNzg5OTE4MjlhNTM4MmM3OTEyOGJlMTZmNmYxMDg4ZjdhYjUiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjoxLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjMwYzFmMTg4ZjE0MmVkN2E4MjQ2ODBiMjA3MTcyYzU1MTliYzYxNGE0OGZkYTdjZjE2N2VkYjhkZGY3OTk1NmMifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_2d709452d3b14ee8b70199ca8db6935d",
+      "statement": "oauth_connect は metadata に本人 user_email が無ければ PermissionError で fail-closed し、Google は保存済み scopes が WORKSPACE_SCOPES を包含しない場合に再連携リンクを出す。状態判定中の例外は未連携扱いにしてリンクを出す。",
+      "evidence": [
+        {
+          "resource": "repo://src/teamagent/skills/oauth_connect/skill.py#L196-L236",
+          "version": "repo-lines-v1:sha256:14cf0abaac4a0e70e26fda7658e6b32d472ea8b5a1a65d1d11a4604de32aedfc:eyJzZWxlY3RlZExpbmVDb3VudCI6NDEsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6ImY5YjFjZGI0NzIyYTI5MTI1MWZkMjkxOTMwZjQ4NmMxZjg3NDE5NTdhNzhlMmRmY2I0NjA1OTkwM2Q0YzY1NjYiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjAxYmE0NzE5YzgwYjZmZTkxMWIwOTFhN2MwNTEyNGI2NGVlZWNlOTY0ZTA5YzA1OGVmOGY5ODA1ZGFjYTU0NmIiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjIxZmUzZWUwNWQ2YTcyNWQ2MTE1YzlmOWE0NDY1OTBkY2UxMmVmMGM2MTg0YzE2ZGQ1NjE4YmU3M2M2YTNjNTAiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6Ijg0NjY5NjI0OWU0N2RmMmQ0N2JlNmM0M2ZiNDZjMzNlNzA2NmZmODVlNGI2MzQwOGNhOWRlZjhmMGU0Mzg1MDkifQ"
+        },
+        {
+          "resource": "repo://src/teamagent/skills/oauth_connect/skill.py#L324-L340",
+          "version": "repo-lines-v1:sha256:ca90dc56a387ea1ebb7fd9707e6b5be89b3bae8cba520f4ab56481034cfb8e60:eyJzZWxlY3RlZExpbmVDb3VudCI6MTcsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6ImQ4NzdkY2ZiMzc1OGViZjlhMmE0ZGJjNjRkODJhMWRkYzQ2MmNkNWVjMmRiYjAxNWZhZTRiN2Q1MzIzYjRkZmEiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjAxYmE0NzE5YzgwYjZmZTkxMWIwOTFhN2MwNTEyNGI2NGVlZWNlOTY0ZTA5YzA1OGVmOGY5ODA1ZGFjYTU0NmIiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjdmYWVlOTdhODgyYWRiOGEzYWVhYWQ1Mjg0NThhYjY4MjU2YzY0YzMyY2ZjMDNhMTg1NTBmOTkwMzFjMzQwYWUiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImNkODhjOThmZmMzYzIyOGNkMjJmY2EzNTQ2YTk3NjgyNjhjM2I2NGEyMTJlMzI3Mjk0NTFlMGM3YTY3NTkzZGMifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_85754896536042548c4701c06717e417",
+      "statement": "Drive/Sheets アダプタは GOOGLE_APPLICATION_CREDENTIALS があり GOOGLE_FORCE_OAUTH が偽なら SA を優先するため、Vertex SA を置く mcp と ingest タスクは GOOGLE_FORCE_OAUTH=1 で共有 OAuth を強制している。",
+      "evidence": [
+        {
+          "resource": "repo://infra/terraform/fargate.tf#L762-L765",
+          "version": "repo-lines-v1:sha256:89e7d69974063a7fc7972266f70bca407172ebbea0d41f839bc4c24e184cafb9:eyJzZWxlY3RlZExpbmVDb3VudCI6NCwiZmlyc3RTZWxlY3RlZExpbmVIYXNoIjoiNmYwODFhZTBhODBkMjFhZGNlN2E0MmMxMmZlNzdjYTczOGI4NmI2NGZiYmYyZWUwYWQ4OTQyOTc5NzM4NzRmZiIsImxhc3RTZWxlY3RlZExpbmVIYXNoIjoiNTFmZWVlZDZjNjI4YTgzNTlhZDRjYTFkYzgyYjBkMmJjMDlhNjIyNjk3Njg4MDc1ZGE1YTc0NjI5NjdkZmVhNyIsInByZWNlZGluZ0NvbnRleHRMaW5lQ291bnQiOjMsInByZWNlZGluZ0NvbnRleHRIYXNoIjoiZmI4YzJhMTg1ZDNkMDFkNTg1OGY3Y2QxNzBlNGM3NjUwNjllOGJmY2E3MzAyMWFmNjI4MmRlYTk0YjM2ZjRlMyIsImZvbGxvd2luZ0NvbnRleHRMaW5lQ291bnQiOjMsImZvbGxvd2luZ0NvbnRleHRIYXNoIjoiYjAyMWZlZjViNmQ0NjFhNTE3NTM1MjJhYjcwMTRiZmJlYzQzZmI2NzlmMGUzMTI0ZDZiNzdkOTc5OTU3MzIwMiJ9"
+        },
+        {
+          "resource": "repo://infra/terraform/ingest_schedule.tf#L247-L250",
+          "version": "repo-lines-v1:sha256:4cb366cf0223fafae095ddb048e9eb0b6d7bbd70b7e1ba895021870bf359e0c1:eyJzZWxlY3RlZExpbmVDb3VudCI6NCwiZmlyc3RTZWxlY3RlZExpbmVIYXNoIjoiMWYzMDhiMjFiOTAyMTRiZTNkMGI5ODIwNDczMzE3MzFkMTNmNGFlMTRlMTg1ZDRhY2UxZGJkNTQwMDM1NGY2NiIsImxhc3RTZWxlY3RlZExpbmVIYXNoIjoiNTFmZWVlZDZjNjI4YTgzNTlhZDRjYTFkYzgyYjBkMmJjMDlhNjIyNjk3Njg4MDc1ZGE1YTc0NjI5NjdkZmVhNyIsInByZWNlZGluZ0NvbnRleHRMaW5lQ291bnQiOjMsInByZWNlZGluZ0NvbnRleHRIYXNoIjoiMTY3MWY2NjFkMzcyYWE4MjYyMDhkODViMDFmZTY2NWViYmM4MDQ4ZDRkNDNjYmU5NmI3ZjQ5MTQ3MmFkNjljYiIsImZvbGxvd2luZ0NvbnRleHRMaW5lQ291bnQiOjMsImZvbGxvd2luZ0NvbnRleHRIYXNoIjoiNDZmN2ZjYTIzYTA4NmMyOGQzMTQ1NjJhNGE5ZmYwM2Q2NTI1YTRmMGY3ZjQyODNiYmZkNmQ1ODJjMzBkMDcxYyJ9"
+        },
+        {
+          "resource": "repo://src/teamagent/adapters/gdrive_client.py#L901-L920",
+          "version": "repo-lines-v1:sha256:98a43e1db5af131ed15453ee1ca3172684622dc484e7b92ae0bbc58172f5a43b:eyJzZWxlY3RlZExpbmVDb3VudCI6MjAsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6ImU0N2U1NzM3MDViNDUwYWFlNmE0YmUyZmMyMDk4MGZlZmI4ZDFhMWQwMzE0YTkzMjM5ZjFlMDU1ZDJhZjYyMDgiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6ImNjYzM3ZDUwOTE4OWI0MWFkNjZhYmE0ZDRhNDkxZGQyMjE3OWQ5ZWI0MTE4YzBkZDBiZjlmMDg3ZWEzMTVjMDUiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImJhYWNiNmM5ZDY1NjY2ZjMzZTI0YjZkNGQxNjEwNmQzZmRlYTE1MDdkNTA2NTVhNmExNmM1NWNlOWZjNGUxZGQiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjQ4YmU4ZWRiOGJiNDE3YjExNGY4ZTM0M2VmMzAwNDAzYzVkMjIyY2ZmOWQ4ODA3Njk5NzIxYjMxMzNhZDllMmIifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_f31d477fad8d4f2b96788a1df9f792c2",
+      "statement": "per-user TokenStore は OAUTH_KMS_KEY_ID が未設定だと例外にならず空の InMemoryTokenStore にフォールバックし、全員が未連携として扱われる。",
+      "evidence": [
+        {
+          "resource": "repo://src/teamagent/orchestrator/factory.py#L755-L765",
+          "version": "repo-lines-v1:sha256:51423b9e90fd58f44a2dd0b5708022eaee9f476d5231345b5d0f39d9d43c8b2e:eyJzZWxlY3RlZExpbmVDb3VudCI6MTEsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjVmMjNlODYxYWU2N2MwYjZmMjYwYTllYzg5OGYyNTU2YTUxMDU4ZjQ0OTI0MDBlNjQ2ZTBmMGJkOWZkNTlhYjUiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjNhOTM5YTNiMjU0MzI2YzZjNGM0NWNjZDhlZmMyYjBjNTg2ZGFmZjYzYmMyMzJjNzg2YTk4ZTNiMDVkNDViNzAiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjRlMThjYzg0MmQzYTgzZTMwZmY3M2Q2MWY1NTQwNmE4ODc0MWMxMmU1Y2VkNzE3ZGZhNjFlY2Y0MzNkNmFkNzMiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjhlYTdjN2VkOTQ2YzEzYTFhZGNmM2Y2NGI3MGY4ODQ1ZmFlNjZlNGYyYzNkYzQyMDQxZTk1YzQwZTQzMjZiZTAifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_e61a4f53f3244f769536d33769af43f5",
+      "statement": "OAUTH_CONNECT_LIVENESS_PROBE が ON のとき、oauth_connect は「連携済み」と答える前に本番と同じ組み立てで refresh を 1 回だけ試し、結果を alive / token_dead（invalid_grant か refresh token が空のときだけ）/ scope_missing / unknown に分類する。既定は 5 秒で打ち切り、Gmail/Calendar API は呼ばない。",
+      "evidence": [
+        {
+          "resource": "repo://src/teamagent/adapters/google_liveness.py#L1-L33",
+          "version": "repo-lines-v1:sha256:acf733055c0d6301a3ed5c31ec58812c7745c34ff041d46982318a247a869f11:eyJzZWxlY3RlZExpbmVDb3VudCI6MzMsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjdiZWNkYjgzMzM3NjdhNjM3NzU4YjE4MDI2ODhhNjNjZDNkMGQ1OWJiNzMyOGMzN2VkNjBmMzA5Y2RmYTMxNzIiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6Ijc4ZTBiMTM3ZDUyYmY5NGIwNTYzNDk5MjAzYzhmNDA2NmQ0YTE2MDAxZWE2ZmUxNzg3NDNiMGQzMWJlNGJkOTUiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjowLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImUzYjBjNDQyOThmYzFjMTQ5YWZiZjRjODk5NmZiOTI0MjdhZTQxZTQ2NDliOTM0Y2E0OTU5OTFiNzg1MmI4NTUiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjE3MTQ1ZDllN2ZkNjljMTNjOWNiMDhhZTJmZjgxZGZkZWEwNjFhYzU4ZWRmN2Q4NmU2N2E1MDg1NWFkMmU5M2UifQ"
+        },
+        {
+          "resource": "repo://src/teamagent/skills/oauth_connect/skill.py#L196-L236",
+          "version": "repo-lines-v1:sha256:14cf0abaac4a0e70e26fda7658e6b32d472ea8b5a1a65d1d11a4604de32aedfc:eyJzZWxlY3RlZExpbmVDb3VudCI6NDEsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6ImY5YjFjZGI0NzIyYTI5MTI1MWZkMjkxOTMwZjQ4NmMxZjg3NDE5NTdhNzhlMmRmY2I0NjA1OTkwM2Q0YzY1NjYiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjAxYmE0NzE5YzgwYjZmZTkxMWIwOTFhN2MwNTEyNGI2NGVlZWNlOTY0ZTA5YzA1OGVmOGY5ODA1ZGFjYTU0NmIiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjIxZmUzZWUwNWQ2YTcyNWQ2MTE1YzlmOWE0NDY1OTBkY2UxMmVmMGM2MTg0YzE2ZGQ1NjE4YmU3M2M2YTNjNTAiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6Ijg0NjY5NjI0OWU0N2RmMmQ0N2JlNmM0M2ZiNDZjMzNlNzA2NmZmODVlNGI2MzQwOGNhOWRlZjhmMGU0Mzg1MDkifQ"
+        },
+        {
+          "resource": "repo://src/teamagent/skills/oauth_connect/skill.py#L91-L95",
+          "version": "repo-lines-v1:sha256:44856c84d84c020a686758ec1e063f0b728bd57aadce4e61fdb7839bc37e08dd:eyJzZWxlY3RlZExpbmVDb3VudCI6NSwiZmlyc3RTZWxlY3RlZExpbmVIYXNoIjoiODAwMDZiMWRjOWY3M2MyNzFhODkyNWFhMWRhM2M2Yzc4OGM2YWQxNzY4MTE0NWM2NThkZmQwMTIzYmM0MjZlMiIsImxhc3RTZWxlY3RlZExpbmVIYXNoIjoiMDFiYTQ3MTljODBiNmZlOTExYjA5MWE3YzA1MTI0YjY0ZWVlY2U5NjRlMDljMDU4ZWY4Zjk4MDVkYWNhNTQ2YiIsInByZWNlZGluZ0NvbnRleHRMaW5lQ291bnQiOjMsInByZWNlZGluZ0NvbnRleHRIYXNoIjoiOGNjNGE3ZDFjYzc5NmFiYTNlNDY3MjMzMjdmNTE3ZTlmODExOTgyZDI1MGYwNzAyOTg2ZTRiNTc2NGFkOTU4OSIsImZvbGxvd2luZ0NvbnRleHRMaW5lQ291bnQiOjMsImZvbGxvd2luZ0NvbnRleHRIYXNoIjoiMmU5NzQ2NWQwOWIyZTI2M2FkNWI2YjU4Nzk4MjgwMWQzMjNlZjhmNTI1MWE5ZDMzZTdjZGE1OWE1NzJmZDEzMCJ9"
+        }
+      ]
+    }
+  ],
+  "verification": {
+    "by": "openwiki/0.6.1",
+    "at": "2026-09-30T04:50:20.078Z"
+  }
+}

@@ -4743,6 +4743,28 @@ def create_app(
                 media_type="text/plain; charset=utf-8",
             )
         bucket, key, region, remaining_seconds = decoded
+        if key.lower().endswith(".html"):
+            # HTML は /r が自分で返す（アドレスバーを短縮 URL のままにする）。共有されるのは
+            # /r のリンクだけになり、長い presigned の貼り間違い（%2B→空白）と失効が起きない。
+            # 報告書は第三者の文（TikTok の説明文等）を含むため、CSP sandbox で不透明な origin に
+            # 閉じ込める（connect-web の Cookie・API へ触れない）。取れなければ従来の 302。
+            from teamagent.adapters.report_publish import fetch_report_html
+
+            body = fetch_report_html(bucket, key, region=region or os.environ.get("AWS_REGION"))
+            if body is not None:
+                return Response(
+                    body,
+                    media_type="text/html; charset=utf-8",
+                    headers={
+                        "Cache-Control": "no-store",
+                        "Content-Security-Policy": (
+                            "sandbox allow-scripts allow-popups "
+                            "allow-popups-to-escape-sandbox allow-downloads"
+                        ),
+                        "X-Content-Type-Options": "nosniff",
+                        "Referrer-Policy": "no-referrer",
+                    },
+                )
         url = presign_get(
             bucket,
             key,

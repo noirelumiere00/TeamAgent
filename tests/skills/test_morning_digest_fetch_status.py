@@ -397,3 +397,24 @@ def test_draft_mode_follows_the_real_settings(
     )
     assert out.draft_mode == mode
     assert out.draft_limit == limit
+
+
+@pytest.mark.parametrize(
+    ("on_demand", "skip_env", "expected"),
+    [("false", None, True), ("false", "false", False), ("true", None, False)],
+)
+def test_draft_skip_internal_reaches_the_footer_input(
+    monkeypatch: pytest.MonkeyPatch, on_demand: str, skip_env: str | None, expected: bool
+) -> None:
+    """社内だけのやり取りを外したか（#504）は、朝に自動で作るときだけ説明文の材料に載る。"""
+    monkeypatch.setenv("DRAFT_ON_DEMAND_ONLY", on_demand)
+    if skip_env is None:
+        monkeypatch.delenv("MORNING_DIGEST_DRAFT_SKIP_INTERNAL", raising=False)
+    else:
+        monkeypatch.setenv("MORNING_DIGEST_DRAFT_SKIP_INTERNAL", skip_env)
+    out = run_skill(
+        gmail_service=two_thread_service(refs=[]),
+        calendar_result={"items": []},
+        skill_input=MorningDigestInput(max_drafts=5),
+    )
+    assert out.draft_skip_internal is expected

@@ -1,13 +1,21 @@
 # syntax=docker/dockerfile:1.7@sha256:a57df69d0ea827fb7266491f2813635de6f17269be881f696fbfdf2d83dda33e
 # OpenClaw gateway for ECS/Fargate (linux/arm64 only).
 #
-# The official image is used only as a content source. The runtime is a pinned
-# Chainguard (Wolfi) Node 26 image: no shell, package manager, curl, npm, or
-# compiler. Secrets are injected by ECS at runtime, never as build args.
+# The official image is used only as a content source. The runtime filesystem is
+# a pinned Chainguard (Wolfi) Node 26 image minus npm, node-gyp, and busybox:
+# no shell, apk, curl, or compiler. The base ships npm (Wolfi package npm-12),
+# which the runtime never executes but the ECR vulnerability gate scans (CVEs in
+# npm's bundled dependencies blocked releases 2026-09-16 #424 and 2026-10-01
+# #503), and busybox (/bin/sh plus applets), which the gateway never needs.
+# The runtime-rootfs stage removes these packages as `apk del` would (see
+# strip-runtime-packages.mjs) and the final stage starts FROM scratch, so no
+# lower layer still carries them. The npm-free node:latest-slim tracks an older
+# major (25.x), so it is not a drop-in swap.
+# Secrets are injected by ECS at runtime, never as build args.
 
 ARG OPENCLAW_VERSION=2026.7.1
 ARG OPENCLAW_ARM64_DIGEST=sha256:38b611f494cb32e15aaf456d54c6b6be55db9098c90632aed0bfad4a70009707
-ARG RUNTIME_ARM64_DIGEST=sha256:f7fd062637e765a2b19fba77fb8ca9fe0375e2d20fe0b3c0e8d3195b12b2d4c3
+ARG RUNTIME_ARM64_DIGEST=sha256:3de92bf84c6d7b43b0016be75bdbdde0d34e034288fefd6c1581bf44835fe107
 
 # The same pinned upstream image, kept untouched. The stage below prunes /app
 # aggressively and removes /app/src, so the workspace templates the runtime
@@ -68,13 +76,17 @@ RUN set -eux; \
 # unpacked so their development metadata and payload are removed before the
 # runtime inventory check. The assertions below fail the build if a tarball
 # contains anything other than the reviewed version.
-#   axios           1.16.0 -> 1.18.0  GHSA-gcfj-64vw-6mp9 (inherited proxy)
-#   brace-expansion 5.0.7  -> 5.0.9   CVE-2026-69152
+#   axios           1.16.0 -> 1.20.0  GHSA-gcfj-64vw-6mp9 (inherited proxy, 1.18.0),
+#                                     CVE-2026-101898, CVE-2026-101901, CVE-2026-101903,
+#                                     CVE-2026-101905, CVE-2026-101906, CVE-2026-101907,
+#                                     CVE-2026-101909 (1.20.0; HIGH x7 published after 2026-09-30)
+#   brace-expansion 5.0.7  -> 5.0.11  CVE-2026-69152 (5.0.9), CVE-2026-102276 (5.0.10),
+#                                     CVE-2026-102278 (5.0.11)
 #   fast-uri        3.1.2  -> 3.1.7   CVE-2026-18446, CVE-2026-75899, CVE-2026-75931,
 #                                     CVE-2026-75975, CVE-2026-76172 (3.1.6),
 #                                     GHSA-qw65-cvwx-89v3, GHSA-58mr-gqgx-xq4g (3.1.7)
 #   ip-address      10.2.0 -> 10.3.1  CVE-2026-69192
-#   undici          8.5.0  -> 8.9.0   CVE-2026-13697
+#   undici          8.5.0  -> 8.10.2  CVE-2026-13697 (8.9.0), CVE-2026-19534, CVE-2026-84961 (8.10.2)
 #   tar             7.5.19 -> 7.5.21  CVE-2026-73566 (long-path DoS)
 # tar 7.5.21 declares the identical dependency closure as 7.5.19 (chownr,
 # yallist, minipass, minizlib, @isaacs/fs-minipass — registry-verified), so the
@@ -87,18 +99,18 @@ RUN set -eux; \
 # axios and would not satisfy the ^5.0.1 range anyway. debug 4.4.3 and ms 2.1.3
 # already sit beside axios and are reused. Both added packages carry zero known
 # advisories, so the zero-Critical/High gate is unaffected.
-#   https-proxy-agent 5.0.1 (new)     required by axios 1.18.0
+#   https-proxy-agent 5.0.1 (new)     required by axios 1.20.0 (same ^5.0.1 range as 1.18.0)
 #   agent-base        6.0.2 (new)     required by https-proxy-agent 5.0.1
 RUN set -eux; \
     chmod -R u+w /opt/teamagent; \
     patch_dir=/tmp/openclaw-vulnerability-patches; \
     mkdir -p "$patch_dir"; \
     cd "$patch_dir"; \
-    npm pack axios@1.18.0 --ignore-scripts --pack-destination "$patch_dir"; \
-    npm pack brace-expansion@5.0.9 --ignore-scripts --pack-destination "$patch_dir"; \
+    npm pack axios@1.20.0 --ignore-scripts --pack-destination "$patch_dir"; \
+    npm pack brace-expansion@5.0.11 --ignore-scripts --pack-destination "$patch_dir"; \
     npm pack fast-uri@3.1.7 --ignore-scripts --pack-destination "$patch_dir"; \
     npm pack ip-address@10.3.1 --ignore-scripts --pack-destination "$patch_dir"; \
-    npm pack undici@8.9.0 --ignore-scripts --pack-destination "$patch_dir"; \
+    npm pack undici@8.10.2 --ignore-scripts --pack-destination "$patch_dir"; \
     npm pack tar@7.5.21 --ignore-scripts --pack-destination "$patch_dir"; \
     npm pack https-proxy-agent@5.0.1 --ignore-scripts --pack-destination "$patch_dir"; \
     npm pack agent-base@6.0.2 --ignore-scripts --pack-destination "$patch_dir"; \
@@ -120,17 +132,17 @@ RUN set -eux; \
       /app/node_modules/ip-address \
       /app/node_modules/undici \
       /app/node_modules/tar; \
-    tar -xzf "$patch_dir/axios-1.18.0.tgz" --strip-components=1 -C /opt/teamagent/plugins/slack/node_modules/axios; \
+    tar -xzf "$patch_dir/axios-1.20.0.tgz" --strip-components=1 -C /opt/teamagent/plugins/slack/node_modules/axios; \
     tar -xzf "$patch_dir/https-proxy-agent-5.0.1.tgz" --strip-components=1 -C /opt/teamagent/plugins/slack/node_modules/https-proxy-agent; \
     tar -xzf "$patch_dir/agent-base-6.0.2.tgz" --strip-components=1 -C /opt/teamagent/plugins/slack/node_modules/agent-base; \
-    tar -xzf "$patch_dir/brace-expansion-5.0.9.tgz" --strip-components=1 -C /app/node_modules/brace-expansion; \
+    tar -xzf "$patch_dir/brace-expansion-5.0.11.tgz" --strip-components=1 -C /app/node_modules/brace-expansion; \
     tar -xzf "$patch_dir/fast-uri-3.1.7.tgz" --strip-components=1 -C /app/node_modules/fast-uri; \
     tar -xzf "$patch_dir/ip-address-10.3.1.tgz" --strip-components=1 -C /app/node_modules/ip-address; \
-    tar -xzf "$patch_dir/undici-8.9.0.tgz" --strip-components=1 -C /app/node_modules/undici; \
+    tar -xzf "$patch_dir/undici-8.10.2.tgz" --strip-components=1 -C /app/node_modules/undici; \
     tar -xzf "$patch_dir/tar-7.5.21.tgz" --strip-components=1 -C /app/node_modules/tar; \
     cd /tmp; \
     rm -rf "$patch_dir"; \
-    node -e 'const fs=require("fs");const want={"/app/node_modules/brace-expansion":"5.0.9","/app/node_modules/fast-uri":"3.1.7","/app/node_modules/ip-address":"10.3.1","/app/node_modules/undici":"8.9.0","/app/node_modules/tar":"7.5.21","/opt/teamagent/plugins/slack/node_modules/agent-base":"6.0.2","/opt/teamagent/plugins/slack/node_modules/axios":"1.18.0","/opt/teamagent/plugins/slack/node_modules/https-proxy-agent":"5.0.1"};for(const [dir,v] of Object.entries(want)){const got=JSON.parse(fs.readFileSync(dir+"/package.json")).version;if(got!==v)throw new Error(`vulnerability patch mismatch: ${dir} is ${got}, expected ${v}`)}'; \
+    node -e 'const fs=require("fs");const want={"/app/node_modules/brace-expansion":"5.0.11","/app/node_modules/fast-uri":"3.1.7","/app/node_modules/ip-address":"10.3.1","/app/node_modules/undici":"8.10.2","/app/node_modules/tar":"7.5.21","/opt/teamagent/plugins/slack/node_modules/agent-base":"6.0.2","/opt/teamagent/plugins/slack/node_modules/axios":"1.20.0","/opt/teamagent/plugins/slack/node_modules/https-proxy-agent":"5.0.1"};for(const [dir,v] of Object.entries(want)){const got=JSON.parse(fs.readFileSync(dir+"/package.json")).version;if(got!==v)throw new Error(`vulnerability patch mismatch: ${dir} is ${got}, expected ${v}`)}'; \
     chmod -R a-w /opt/teamagent
 
 # The upstream release contains its complete development workspace. Resolve the
@@ -162,11 +174,25 @@ RUN set -eux; \
     rm -rf /tmp/teamagent-openclaw; \
     chmod -R a-w /opt/teamagent
 
-FROM cgr.dev/chainguard/node:latest@${RUNTIME_ARM64_DIGEST} AS runtime
+FROM cgr.dev/chainguard/node:latest@${RUNTIME_ARM64_DIGEST} AS runtime-base
+
+# Copy the pinned runtime base as plain files and drop npm-12, node-gyp, and
+# busybox from both the filesystem and the package database (see the script
+# header).
+# The upstream image only provides node and a shell for this step; nothing from
+# it enters /rootfs.
+FROM upstream-templates AS runtime-rootfs
+USER root
+COPY --from=runtime-base / /rootfs/
+COPY infra/openclaw/strip-runtime-packages.mjs /tmp/strip-runtime-packages.mjs
+RUN node /tmp/strip-runtime-packages.mjs /rootfs && rm -f /tmp/strip-runtime-packages.mjs
+
+FROM scratch AS runtime
+COPY --from=runtime-rootfs /rootfs/ /
 
 ARG OPENCLAW_VERSION=2026.7.1
 ARG OPENCLAW_ARM64_DIGEST=sha256:38b611f494cb32e15aaf456d54c6b6be55db9098c90632aed0bfad4a70009707
-ARG RUNTIME_ARM64_DIGEST=sha256:f7fd062637e765a2b19fba77fb8ca9fe0375e2d20fe0b3c0e8d3195b12b2d4c3
+ARG RUNTIME_ARM64_DIGEST=sha256:3de92bf84c6d7b43b0016be75bdbdde0d34e034288fefd6c1581bf44835fe107
 ARG GIT_COMMIT=unknown
 ARG GIT_BRANCH=unknown
 ARG SOURCE_TREE=unknown
@@ -199,7 +225,10 @@ COPY --chown=65532:65532 --chmod=0555 infra/openclaw/gateway-runtime.mjs /opt/te
 COPY --chown=65532:65532 --chmod=0555 infra/openclaw/rollout-task-canary.mjs /opt/teamagent/rollout-task-canary.mjs
 COPY --chown=65532:65532 --chmod=0444 infra/openclaw/effective-tool-scope.json /opt/teamagent/effective-tool-scope.json
 
+# FROM scratch inherits no config: SSL_CERT_FILE is carried over from the base
+# (NPM_CONFIG_UPDATE_NOTIFIER is dropped with npm).
 ENV NODE_ENV=production \
+    SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt \
     PATH=/usr/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/sbin:/bin \
     HOME=/tmp/teamagent-openclaw/home \
     TMPDIR=/tmp \

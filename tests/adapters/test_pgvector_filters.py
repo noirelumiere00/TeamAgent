@@ -189,3 +189,48 @@ def test_exclude_flags_combine_with_other_filters() -> None:
     assert "COALESCE((d.metadata->>'cls_is_recurring')::bool, false) = false" in sql
     assert "cls_doc_type" in params
     assert "提案書" in params
+
+
+def _has_run(params: list[Any], run: list[Any]) -> bool:
+    """params の中に run が連続して現れるか（後ろに embedding / limit が続くため位置は固定しない）。"""
+    return any(params[i : i + len(run)] == run for i in range(len(params) - len(run) + 1))
+
+
+def test_metadata_filters_strict_by_default() -> None:
+    """既定（allow_missing=False）は従来どおりの厳密一致。SQL・params とも従来と同じ。"""
+    sql, params = _run(metadata_filters={"cls_phase": "受注"})
+    assert "d.metadata->>%s = %s" in sql
+    assert "IS NULL" not in sql
+    assert _has_run(params, ["cls_phase", "受注"])
+    assert params.count("cls_phase") == 1
+
+
+def test_metadata_filters_allow_missing_lets_unclassified_through() -> None:
+    """allow_missing=True は「指定値 OR キー無し（未分類）」。別の値が付いた文書だけ外す。"""
+    sql, params = _run(
+        metadata_filters={"cls_phase": "受注", "cls_solution": "動画広告"},
+        metadata_filters_allow_missing=True,
+    )
+    assert sql.count("(d.metadata->>%s = %s OR d.metadata->>%s IS NULL)") == 2
+    assert _has_run(
+        params, ["cls_phase", "受注", "cls_phase", "cls_solution", "動画広告", "cls_solution"]
+    )
+
+
+def test_allow_missing_does_not_soften_sticky_filters() -> None:
+    """ユーザー明示（sticky）は soft 化しない。自動推定の metadata_filters だけが対象。"""
+    sql, params = _run(
+        metadata_filters={"cls_phase": "受注"},
+        metadata_filters_allow_missing=True,
+        sticky_filters={"cls_doc_type": "提案書"},
+    )
+    assert sql.count("OR d.metadata->>%s IS NULL") == 1
+    assert _has_run(params, ["cls_phase", "受注", "cls_phase", "cls_doc_type", "提案書"])
+    assert params.count("cls_doc_type") == 1
+
+
+def test_allow_missing_keeps_values_in_placeholders() -> None:
+    payload = "'; DROP TABLE documents; --"
+    sql, params = _run(metadata_filters={"cls_phase": payload}, metadata_filters_allow_missing=True)
+    assert payload not in sql
+    assert payload in params

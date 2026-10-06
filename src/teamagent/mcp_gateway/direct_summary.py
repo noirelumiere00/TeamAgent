@@ -129,6 +129,9 @@ def rich_message(
         from teamagent.skills.search_surface_check.slack_render import surface_message
 
         out = SearchSurfaceCheckOutput.model_validate(data)
+        if out.deferred:
+            # 1 通で届ける依頼の「作成中」の 1 行。結果の blocks は完了時に別途出す。
+            return None
         input = skill_input if isinstance(skill_input, SearchSurfaceCheckInput) else None
         return surface_message(out, input)
 

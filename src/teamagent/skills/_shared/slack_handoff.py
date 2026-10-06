@@ -39,6 +39,8 @@ from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, replace
 from typing import Any
 
+from teamagent.skills._shared.grapheme_cut import truncate_graphemes
+
 # JST と日付表記は ``morning_digest/calendar_window`` が唯一の真実源（ここで再定義しない）。
 # 同じ DM の中で「8/21(金) の予定」と「期限 8/21(金)」の書式が割れないようにするため。
 from teamagent.skills.morning_digest.calendar_window import JST, fmt_jst_date, weekday_ja
@@ -682,7 +684,8 @@ def headline_from_body(text: str) -> str:
         if not bare or _PLEASANTRY_RE.match(bare):
             continue
         if len(bare) > _MAX_BODY_HEADLINE_LEN:
-            bare = bare[: _MAX_BODY_HEADLINE_LEN - 1] + "…"
+            # 切り口は絵文字（🇯🇵・ZWJ 連結など）を割らない（片割れを「…」の前に残さない）。
+            bare = truncate_graphemes(bare, _MAX_BODY_HEADLINE_LEN - 1) + "…"
         return quote_wrap(bare)
     return HEADLINE_NO_REQUEST
 

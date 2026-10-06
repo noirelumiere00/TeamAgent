@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "description": "PR2-A0.3 activation manifest の generation input 束縛。buildspec 世代の content-addressed key へ影響する入力を Generation Baseline 時点の git blob へ固定する。1 つでも変化したら STALE MANIFEST（adopt へ進まず manifest を再生成する）。検証: infra/deploy/verify_generation_inputs.py",
-  "generation_baseline": "a83007c120dd481c822863e342bb438ddf7eda7a",
+  "generation_baseline": "8169a5e8809e315b36bb1b30aa0b8a7e6b56cc45",
   "inputs": {
     "infra/codebuild/mcp-source-publisher-buildspec.yml": "9cdb0123e96a8f79a0886d40c29efb4fa30dac15",
     "infra/codebuild/image-attestor-buildspec.yml": "d9b2573bd11f57914941be000b996d2afbc2ea32",
@@ -15,10 +15,10 @@
     "infra/codebuild/openclaw_provenance.py": "22ef083687245abf56c4fbfe8f51569aca0d1775",
     "infra/codebuild/tiktok_source_provenance.py": "77e61e9eb2606b295ae5adfe47ea8bde1c1960eb",
     "infra/codebuild/verify_actual_image.sh": "74795d433d3bb9c42e4922b799ccb2f9f7059063",
-    "infra/codebuild/teamagent_runtime_contract.json": "198c8ca4677b77d2b03b25802b243a20599b0355",
-    "infra/codebuild/teamagent_core_media_release_contract.json": "5ac92ee5a0bffa8844723d8ab541527e1667aa6d",
+    "infra/codebuild/teamagent_runtime_contract.json": "f0670044ecce7f856a91c385485c33542ab020c2",
+    "infra/codebuild/teamagent_core_media_release_contract.json": "650c0b45f0cb693900d6f3a8ecc4c066b1456d91",
     "infra/codebuild/tiktok_release_contract.json": "6e65b8e2ff695a89782c8b83647450ce9a4720ad",
-    "infra/codebuild/openclaw_bundle_contract.json": "854e8e802708e06e8934db7915db7821db487ded",
+    "infra/codebuild/openclaw_bundle_contract.json": "1e1fd231aa25184f69ca8756c213acd0c6585408",
     "infra/terraform/codebuild.tf": "eb3589566c44ad089817e1820d7e898784aee785",
     "infra/terraform/mcp_approval.tf": "ca9d809d4cc2b3d1ea32aac1c796cd13d6dc98ca"
   },
@@ -39,9 +39,9 @@
     "evaluated_at": "2026-08-21T07:15:42Z"
   },
   "expected_generation_sha256": {
-    "teamagent-dev-mcp-source-publisher": "90a9656c82ad78f97f041b3ec224ce89252d887400e29899c87c4ce84e15e09b",
-    "teamagent-dev-image-attestor": "9e47dd164f86ef8b40637a7854c6d928c323991957da9bdd97fdb01554561ba4",
-    "teamagent-dev-image-promoter": "9bce8c327f670b5458d3c5e548cfb5c756d313be9b4c1a93038924c0d754682f",
+    "teamagent-dev-mcp-source-publisher": "789b61fc498376bf719978add807ca132652cf3a11b1114f13ac3a4f1a064b76",
+    "teamagent-dev-image-attestor": "00bdc1203ac12b83af5d07fb19b5b65a1c7e1da4ae31f6d5839c08bf6199b0ff",
+    "teamagent-dev-image-promoter": "a6c0fbaa7c117ad86bc5e5505ae0d72f02ab9ab5fb2284d81c57fd801ff33d2a",
     "teamagent-dev-approval-publisher": "33e2a64353969f75e941a9524fcd76919c2dfcc7d192aabb67ecc09c9921ddf4"
   }
 }

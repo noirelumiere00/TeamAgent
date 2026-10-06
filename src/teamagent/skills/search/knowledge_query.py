@@ -183,6 +183,55 @@ def _normalize_for_match(text: str) -> str:
     return unicodedata.normalize("NFKC", text).casefold()
 
 
+#: 案件決定（#proj-01 の新規案件投稿・案件決定 V2 シート）を求める聞き方の語。
+_DEAL_KEYWORDS: tuple[str, ...] = (
+    "受注",
+    "案件決定",
+    "新規案件",
+    "決まった案件",
+    "決定した案件",
+    "決定案件",
+    "発注",
+    "同行",
+    "経由",
+    "代理店",
+    "進行中の案件",
+    "動いている案件",
+)
+#: 固有名として拾わない英字・カタカナ（一般語）。
+_DEAL_TERM_STOPWORDS: frozenset[str] = frozenset(
+    {
+        "pr", "tiktok", "sns", "kw", "cm", "tv", "tvcm", "ugc", "tto", "vseo", "aico",
+        "instagram", "youtube", "x", "line",
+        "ショート", "ショート動画", "インフルエンサー", "キャンペーン", "プロモーション",
+        "クライアント", "プラン", "コンテンツ", "メディア", "ブランド", "レポート",
+    }
+)  # fmt: skip
+_DEAL_TERM_RE = re.compile(r"[A-Za-z][A-Za-z0-9&.\-]{1,30}|[ァ-ヴー]{3,20}")
+
+
+def is_deal_intent(query: str) -> bool:
+    """決まった案件（受注・案件決定・代理店経由 等）を聞いているか。"""
+    normalized = _normalize_for_match(query or "")
+    return any(_normalize_for_match(kw) in normalized for kw in _DEAL_KEYWORDS)
+
+
+def deal_query_terms(query: str, *, limit: int = 4) -> list[str]:
+    """案件決定の本文から文字で探す固有名（英字の社名・カタカナの社名）を拾う。
+
+    「ADK経由で受注した〜」の ADK のように、意味の近さ（埋め込み）では当たりにくい
+    代理店名・社名を、案件決定の投稿の本文で直接探すため。一般語は除く。
+    """
+    out: list[str] = []
+    for m in _DEAL_TERM_RE.finditer(unicodedata.normalize("NFKC", query or "")):
+        term = m.group(0).strip(".-")
+        if len(term) < 2 or term.casefold() in _DEAL_TERM_STOPWORDS:
+            continue
+        if term.casefold() not in {t.casefold() for t in out}:
+            out.append(term)
+    return out[:limit]
+
+
 def is_campaign_results_intent(
     query: str, *, explicit_doc_type: str | None, has_client: bool
 ) -> bool:

@@ -82,7 +82,7 @@ _ROW_TEXT_MAX = 60
 # 2 段目の照合で無条件に通す数（無し）。本数がすべて 0〜N に収まるため、小さい数を通すと
 # 作り話の「5/5本」「上位5本すべて」「100%」を止められない（B5 レビュー指摘）。
 STRICT_ALWAYS_ALLOWED: frozenset[str] = frozenset()
-_TIKTOK_VIDEO_PATH = re.compile(r"/video/\d+")
+_TIKTOK_VIDEO_PATH = re.compile(r"/video/(\d+)")
 
 
 def hook_label(hook_type: str) -> str:
@@ -96,15 +96,18 @@ def cta_label(cta_type: str) -> str:
 # ── 選ぶ ─────────────────────────────────────────────────────────────
 
 
-def followup_surface(out: SearchSurfaceCheckOutput) -> KwSurface | None:
-    """2 段目で見る面＝最初の KW の TikTok 面（無ければ None＝2 段目はしない）。"""
-    if not out.keywords:
-        return None
-    first = out.keywords[0]
-    return next(
-        (s for s in out.surfaces if s.keyword == first and s.platform == "tiktok"),
-        None,
-    )
+def tiktok_surfaces(out: SearchSurfaceCheckOutput) -> list[KwSurface]:
+    """2 段目で見る面＝全 KW の TikTok 面（KW の順）。"""
+    return [s for s in out.surfaces if s.platform == "tiktok" and s.posts]
+
+
+def followup_label(out: SearchSurfaceCheckOutput, videos: list[SurfacePost]) -> str:
+    """2 段目の見出しに使う語。1 KW ならその KW、全 KW から選んだら KW を「・」でつなぐ。"""
+    if videos and any(v.kw_ranks for v in videos):
+        return "・".join(dict.fromkeys(s.keyword for s in tiktok_surfaces(out)))
+    if videos:
+        return videos[0].keyword
+    return out.keywords[0] if out.keywords else ""
 
 
 def is_analyzable(post: SurfacePost) -> bool:
@@ -119,13 +122,52 @@ def is_analyzable(post: SurfacePost) -> bool:
     return bool(href) and _TIKTOK_VIDEO_PATH.search(post.url) is not None
 
 
+def _video_key(post: SurfacePost) -> str:
+    m = _TIKTOK_VIDEO_PATH.search(post.url)
+    return m.group(1) if m else post.url
+
+
 def select_followup_videos(out: SearchSurfaceCheckOutput, max_videos: int) -> list[SurfacePost]:
-    """最初の KW の TikTok 面から、順位順に分析できる動画を最大 ``max_videos`` 本選ぶ。"""
-    surface = followup_surface(out)
-    if surface is None or max_videos <= 0:
+    """全 KW の TikTok 面から、分析できる動画を最大 ``max_videos`` 本選ぶ。
+
+    並べ方（10-05 小俣さん裁定「表示順位と複数語」）: 複数の KW の上位に出る動画（検索面で
+    強い動画）が先 → その中で一番良い表示順位 → 表示順位の合計。
+    TikTok 面が 1 つ（1 KW）なら今までどおり表示順位の順で、順位もそのまま。
+    複数のときは選んだ順に総合 1〜N 位を振り直し、KW ごとの表示順位は ``kw_ranks`` に残す
+    （以降の集計・1 本ずつの行は総合順位で数える。KW をまたぐと表示順位がぶつかるため）。
+    """
+    surfaces = tiktok_surfaces(out)
+    if not surfaces or max_videos <= 0:
         return []
-    ranked = sorted(surface.posts, key=lambda p: p.rank)
-    return [p for p in ranked if is_analyzable(p)][:max_videos]
+    if len(surfaces) == 1:
+        ranked = sorted(surfaces[0].posts, key=lambda p: p.rank)
+        return [p for p in ranked if is_analyzable(p)][:max_videos]
+    order = {s.keyword: i for i, s in enumerate(surfaces)}
+    pooled: dict[str, dict[str, SurfacePost]] = {}
+    for surface in surfaces:
+        for post in surface.posts:
+            if not is_analyzable(post):
+                continue
+            hits = pooled.setdefault(_video_key(post), {})
+            if post.keyword not in hits or post.rank < hits[post.keyword].rank:
+                hits[post.keyword] = post
+
+    def _score(hits: dict[str, SurfacePost]) -> tuple[int, int, int, int]:
+        ranks = [p.rank for p in hits.values()]
+        first_kw = min(order[k] for k in hits)
+        return (-len(hits), min(ranks), sum(ranks), first_kw)
+
+    chosen = sorted(pooled.values(), key=_score)[:max_videos]
+    picked: list[SurfacePost] = []
+    for i, hits in enumerate(chosen, start=1):
+        by_kw = sorted(hits.values(), key=lambda p: order[p.keyword])
+        best = min(by_kw, key=lambda p: p.rank)
+        picked.append(
+            best.model_copy(
+                update={"rank": i, "kw_ranks": [f"{p.keyword} {p.rank}位" for p in by_kw]}
+            )
+        )
+    return picked
 
 
 def post_to_meta(post: SurfacePost) -> VideoMeta:
@@ -684,7 +726,7 @@ __all__ = [
     "digest_payload",
     "digest_videos",
     "duration_of",
-    "followup_surface",
+    "followup_label",
     "ground_digest_conclusion",
     "has_opening_telop",
     "has_spoken_kw",
@@ -696,5 +738,6 @@ __all__ = [
     "post_to_meta",
     "rule_digest_conclusion",
     "select_followup_videos",
+    "tiktok_surfaces",
     "videos_payload",
 ]

@@ -169,6 +169,12 @@ variable "morning_digest_holiday_skip" {
   default     = false
 }
 
+variable "morning_digest_remind_personal_blocks" {
+  description = "自分だけの作業枠（ゲストも会議リンクも無い予定）にも直前リマインドを送るか（MORNING_DIGEST_REMIND_PERSONAL_BLOCKS・全員の既定。本人は digest_settings の reminder_personal_blocks で上書きできる）。既定 true＝今と同じ。2026-10-05 小俣さん裁定で本番は false（タスクをカレンダーに入れている人への通知が多すぎるため）。⚠️ TD で変えたら activation 版 tfvars（正本・~/dev/worktrees/teamagent-activation/infra/terraform/terraform.tfvars）へ同じ値を必ず追記。"
+  type        = bool
+  default     = true
+}
+
 variable "morning_digest_extra_skip_dates" {
   description = "会社休日（MORNING_DIGEST_EXTRA_SKIP_DATES・YYYY-MM-DD のカンマ区切り・最大 60 件）。morning_digest_holiday_skip=true のときだけ効く（祝日と同じ扱い）。年末年始など。既定 空。⚠️ TD で ON/変更したら activation 版 tfvars（正本・~/dev/worktrees/teamagent-activation/infra/terraform/terraform.tfvars）へ同じ値を必ず追記。忘れると guard 経由の plan が live との env 差分で止まる（config 移行で allowed_env_changes.morning に載せた場合と guard を通さない apply では既定に黙って戻る）。"
   type        = string
@@ -596,6 +602,10 @@ resource "aws_ecs_task_definition" "morning_digest" {
       { name = "DRAFT_ON_DEMAND_ONLY", value = "false" },
       # 作り置きの上限（高重要のみ・コスト抑制。コード既定3→5）。
       { name = "MORNING_DIGEST_MAX_DRAFTS", value = "5" },
+      # 社内だけのやり取り（From/To/Cc の本人以外が全員社内ドメイン）は朝の自動下書きを作らない
+      # （2026-10-01 BU1 ヒアリング）。✏️ ボタンでの作成は残す。false で従来挙動に戻す。
+      { name = "MORNING_DIGEST_DRAFT_SKIP_INTERNAL", value = "true" },
+      { name = "MORNING_DIGEST_DRAFT_INTERNAL_DOMAINS", value = "vectorinc.co.jp,newstv.co.jp" },
       # per-user token のリフレッシュに使う connect(web 型)クライアント ID（secret は下の secrets）。
       { name = "CONNECT_GOOGLE_CLIENT_ID", value = var.connect_google_client_id },
       # OAUTH_KMS_KEY_ID は token store の復号に必要（既存 alias を流用）。
@@ -607,6 +617,11 @@ resource "aws_ecs_task_definition" "morning_digest" {
       { name = "MORNING_DIGEST_SLACK_UNREAD", value = var.morning_digest_slack_unread ? "true" : "false" },
       # 密度優先描画（2026-07-13 パイロットFB「見づらい」対応・env のみで切替可）。
       { name = "MORNING_DIGEST_COMPACT", value = var.morning_digest_compact ? "true" : "false" },
+      # 本人ごとの設定（digest_preferences・migration 0030）を読んで、止める/休む/曜日/欄/件数/
+      # 下書き/直前リマインドを本人ごとに変える（既定OFF）。設定を書く digest_settings tool とセット。
+      # OFF の間は表を 1 度も読まない＝今までどおりの配信。10-01 から本番 true（CLI の TD 差し替え）。
+      # ここを本番の実態に合わせる（false のまま apply すると本人設定が効かなくなる）。
+      { name = "MORNING_DIGEST_PREFERENCES", value = "true" },
       # 📅カレンダー登録ボタン（v0.3 Task3・既定OFF）。押下先 calendar_event tool の有効化とセットで ON。
       { name = "MORNING_DIGEST_CALENDAR_BUTTON", value = var.morning_digest_calendar_button ? "true" : "false" },
       # 🗓日程候補提案ボタン（v0.3 Task4・既定OFF）。押下先 schedule_propose tool の有効化とセットで ON。
@@ -628,6 +643,8 @@ resource "aws_ecs_task_definition" "morning_digest" {
       # （予約を作れないのに一括実行だけが claim する状態を作らない）。
       { name = "MORNING_DIGEST_PERSONALIZED", value = (var.enable_reminders && var.morning_digest_personalized) ? "true" : "false" },
       { name = "MORNING_DIGEST_DEFAULT_TIME", value = var.morning_digest_default_time },
+      # 作業枠（ゲスト・会議リンク無し）への直前リマインド（全員の既定・本人設定が優先）。
+      { name = "MORNING_DIGEST_REMIND_PERSONAL_BLOCKS", value = var.morning_digest_remind_personal_blocks ? "true" : "false" },
       # F0 連携切れの見える化（既定 空＝OFF）。TD で変えたら activation 版 tfvars（正本）へ同じ値を追記。
       { name = "MORNING_DIGEST_FETCH_STATUS_EMAILS", value = var.morning_digest_fetch_status_emails },
       { name = "MORNING_DIGEST_ADMIN_REPORT_EMAILS", value = var.morning_digest_admin_report_emails },

@@ -1,13 +1,14 @@
 """個人別配信時刻の決定（純関数・JST 固定）— DELTA §1 の唯一の実装。
 
-    送信時刻 = clamp(その日の最初の「時刻つき」予定の開始 − 60分, 下限 06:00, 上限 <既定時刻>)
-    予定が 1 件も無い日 = <既定時刻>
+    送信時刻 = max(その日の最初の「時刻つき」予定の開始 − 30分, 下限 06:00)
+    予定が 1 件も無い日 = <既定時刻>（一括実行）
 
 - **終日予定は「最初の予定」の計算から除外**（終日だけの日は「予定なし」扱い）。
 - 分は 5 分単位に **切り下げ**（08:47 → 08:45）。
 - 下限 06:00 に張り付いたら、冒頭に 1 行添える（``clamped_to_floor``）。
-- 上限は現行の既定時刻。最初の予定が 15:00 の人に 14:00 送信だとメール下書きの価値が
-  消えるため、遅い日は既定時刻のまま。
+- **上限なし**（2026-10-01 小俣さん裁定「一律 9:30 を撤廃・予定の 30 分前」）。最初の予定が
+  14:00 の人には 13:30 に届く。旧仕様（60 分前・上限=既定時刻）は ``cap_to_default=True``
+  と ``lead_minutes=60`` で再現できる（戻すときのため）。
 
 planner 実行後に予定が追加・変更されても当日の送信時刻は追随しない（既存リマインドと
 同じ制約）。本関数は祝日・休暇の判定をしない（予定が無ければ既定時刻）。祝日に予約を
@@ -23,8 +24,8 @@ from teamagent.skills.morning_digest import calendar_window as _calwin
 
 #: 配信の下限（これより早くは送らない）。
 FLOOR_HHMM = (6, 0)
-#: 予定の何分前に送るか。
-LEAD_MINUTES = 60
+#: 予定の何分前に送るか（10-01 裁定で 60 → 30）。
+LEAD_MINUTES = 30
 #: 分の丸め単位（切り下げ）。
 ROUND_MINUTES = 5
 
@@ -89,6 +90,7 @@ def compute_send_time(
     default_hhmm: tuple[int, int],
     floor_hhmm: tuple[int, int] = FLOOR_HHMM,
     lead_minutes: int = LEAD_MINUTES,
+    cap_to_default: bool = False,
 ) -> SendPlan:
     """DELTA §1 の式そのもの。``first_start`` は時刻つき予定の最初の開始（JST）。"""
     default_at = _dt.datetime.combine(
@@ -104,11 +106,11 @@ def compute_send_time(
     lead = _dt.timedelta(minutes=lead_minutes)
     target = _floor_to_step(first_start.astimezone(_calwin.JST) - lead)
     # ⚠️ 境界は **厳密不等号**。最初の予定がちょうど 07:00 の日は target == floor_at
-    #   ＝リードタイムは通常どおり 60 分なので、「通常より短い間隔で」の 1 行を
+    #   ＝リードタイムは通常どおりなので、「通常より短い間隔で」の 1 行を
     #   付けてはいけない（嘘の注記になる）。張り付き扱いは target < floor_at だけ。
     if target < floor_at:
         return SendPlan(fire_at=floor_at, clamped_to_floor=True)
-    if target >= default_at:
+    if cap_to_default and target >= default_at:
         return SendPlan(fire_at=default_at, clamped_to_default=True)
     return SendPlan(fire_at=target)
 

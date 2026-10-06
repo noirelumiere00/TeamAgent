@@ -218,6 +218,10 @@ def test_unlock_matches_the_committed_declaration() -> None:
     scope の拡大・gate の欠落・別内容への差し替えを検出する。畳めば else 分岐が
     元の封印と同一になる。
 
+    2026-10-01 human gate で scope を OpenClaw 契約 1 path へ移した（#503 の runtime ベース
+    世代上げに node probe を追随させる PR）。直前の core_media 契約の宣言は
+    ``previous_scope_20261001`` に退避し、その中身もここで封印する。
+
     2026-09-11 human gate で scope を 1 path へ絞り直した（前回の 2 path 宣言は
     PR #386 で消化済み）。media base 同梱の util-linux 系 3 パッケージを
     2.42.1-r0 → 2.42.3-r1 へ pin すると media-apk.lock の 3 行が動き、同 lock の
@@ -229,15 +233,21 @@ def test_unlock_matches_the_committed_declaration() -> None:
     unlock = _freeze_doc()["unlock"]
     if unlock["active"]:
         assert unlock["scope_paths"] == [
+            "infra/codebuild/teamagent_runtime_contract.json",
             "infra/codebuild/teamagent_core_media_release_contract.json",
         ]
-        assert "CVE-2026-85091" in unlock["reason"]
-        assert "tr -d +" in unlock["reason"]
-        assert "ca-certificates 20260611-r0" in unlock["reason"]
-        assert "20260909-r0" in unlock["reason"]
-        assert "libexpat 2.8.4-r0" in unlock["reason"]
-        assert "2.8.5-r0" in unlock["reason"]
-        assert "human gate 2026-09-24" in unlock["gate"]
+        assert "py3-pip-wheel 26.2.1-r1" in unlock["reason"]
+        assert "python 3.14.7→3.14.8" in unlock["reason"]
+        assert "human gate 2026-10-05" in unlock["gate"]
+        previous = unlock["previous_scope_20261005_core_media"]
+        assert previous["scope_paths"] == [
+            "infra/codebuild/teamagent_core_media_release_contract.json",
+        ]
+        assert "pcre2 10.47-r1" in previous["reason"]
+        assert "ffmpeg-libavdevice-8.1.2-r3" in previous["reason"]
+        oc_previous = unlock["previous_scope_20261002_openclaw"]
+        assert oc_previous["scope_paths"] == ["infra/codebuild/openclaw_bundle_contract.json"]
+        assert "actual-image binary hash mismatch: /usr/bin/node" in oc_previous["reason"]
     else:
         assert unlock["scope_paths"] == []
         assert unlock["reason"] is None

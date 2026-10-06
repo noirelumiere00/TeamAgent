@@ -1,0 +1,162 @@
+{
+  "schemaVersion": 1,
+  "pageVersion": "sha256:5222b192438ca9e38a44a29be9494a06fa5650e1a9a7d61b14f4b5d65a0cce9a",
+  "claims": [
+    {
+      "id": "claim_80c96cdc1f7b4452888b83b1a1b8a335",
+      "statement": "旧デプロイ入口（plan_image_release.sh・apply_image_release_plan.sh・register_ingest_td.sh など）は実処理を持たない stub で、guard（terraform_runtime_guard.sh）か README の正規手順を案内して exit 64 で終了する。",
+      "evidence": [
+        {
+          "resource": "repo://infra/deploy/register_ingest_td.sh#L1-L24",
+          "version": "repo-lines-v1:sha256:b2891bb1978fc11130fa516259b545cfaa6dc9c8a2ddf63dcbcf6c31f16d3dfd:eyJzZWxlY3RlZExpbmVDb3VudCI6MjQsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjFkOTVmYzA0YTgwYzk1MmY0OWNlNDE4ODYyN2M1M2IwZmJlOGM0NDA0MWI5NTJkNTkyYWNkMWRlOTk4NjE0NjYiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjVhYjJmYWZkOTQ1NzY4NTRkMjVkNjEwMGEzY2Y2ODJkZjVjMTE2YzAzOTE2ZDg1M2IyOWM2NjhjYWQ3YjgyMGUiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjowLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImUzYjBjNDQyOThmYzFjMTQ5YWZiZjRjODk5NmZiOTI0MjdhZTQxZTQ2NDliOTM0Y2E0OTU5OTFiNzg1MmI4NTUiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjowLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImUzYjBjNDQyOThmYzFjMTQ5YWZiZjRjODk5NmZiOTI0MjdhZTQxZTQ2NDliOTM0Y2E0OTU5OTFiNzg1MmI4NTUifQ"
+        },
+        {
+          "resource": "repo://infra/terraform/apply_image_release_plan.sh#L1-L6",
+          "version": "repo-lines-v1:sha256:b5e431ce9601759c8e82825feeede78f702559fbae477f89dc867da5865e62c1:eyJzZWxlY3RlZExpbmVDb3VudCI6NiwiZmlyc3RTZWxlY3RlZExpbmVIYXNoIjoiMWQ5NWZjMDRhODBjOTUyZjQ5Y2U0MTg4NjI3YzUzYjBmYmU4YzQ0MDQxYjk1MmQ1OTJhY2QxZGU5OTg2MTQ2NiIsImxhc3RTZWxlY3RlZExpbmVIYXNoIjoiNWFiMmZhZmQ5NDU3Njg1NGQyNWQ2MTAwYTNjZjY4MmRmNWMxMTZjMDM5MTZkODUzYjI5YzY2OGNhZDdiODIwZSIsInByZWNlZGluZ0NvbnRleHRMaW5lQ291bnQiOjAsInByZWNlZGluZ0NvbnRleHRIYXNoIjoiZTNiMGM0NDI5OGZjMWMxNDlhZmJmNGM4OTk2ZmI5MjQyN2FlNDFlNDY0OWI5MzRjYTQ5NTk5MWI3ODUyYjg1NSIsImZvbGxvd2luZ0NvbnRleHRMaW5lQ291bnQiOjAsImZvbGxvd2luZ0NvbnRleHRIYXNoIjoiZTNiMGM0NDI5OGZjMWMxNDlhZmJmNGM4OTk2ZmI5MjQyN2FlNDFlNDY0OWI5MzRjYTQ5NTk5MWI3ODUyYjg1NSJ9"
+        },
+        {
+          "resource": "repo://infra/terraform/plan_image_release.sh#L1-L6",
+          "version": "repo-lines-v1:sha256:073dad035e7164812a038dbe8c4cdbcc7fa5831d9b5a9db48d5c349f36172d25:eyJzZWxlY3RlZExpbmVDb3VudCI6NiwiZmlyc3RTZWxlY3RlZExpbmVIYXNoIjoiMWQ5NWZjMDRhODBjOTUyZjQ5Y2U0MTg4NjI3YzUzYjBmYmU4YzQ0MDQxYjk1MmQ1OTJhY2QxZGU5OTg2MTQ2NiIsImxhc3RTZWxlY3RlZExpbmVIYXNoIjoiNWFiMmZhZmQ5NDU3Njg1NGQyNWQ2MTAwYTNjZjY4MmRmNWMxMTZjMDM5MTZkODUzYjI5YzY2OGNhZDdiODIwZSIsInByZWNlZGluZ0NvbnRleHRMaW5lQ291bnQiOjAsInByZWNlZGluZ0NvbnRleHRIYXNoIjoiZTNiMGM0NDI5OGZjMWMxNDlhZmJmNGM4OTk2ZmI5MjQyN2FlNDFlNDY0OWI5MzRjYTQ5NTk5MWI3ODUyYjg1NSIsImZvbGxvd2luZ0NvbnRleHRMaW5lQ291bnQiOjAsImZvbGxvd2luZ0NvbnRleHRIYXNoIjoiZTNiMGM0NDI5OGZjMWMxNDlhZmJmNGM4OTk2ZmI5MjQyN2FlNDFlNDY0OWI5MzRjYTQ5NTk5MWI3ODUyYjg1NSJ9"
+        }
+      ]
+    },
+    {
+      "id": "claim_fdf6ef52cd3e41b7a599651cf4c979f1",
+      "statement": "guard の plan は live 由来の注入引数と必須の -var-file を付け、-target なしで terraform plan -input=false -refresh=true を実行したあと、validate_plan・Freeze v2 の保全検査・live の再 snapshot を順に通す。",
+      "evidence": [
+        {
+          "resource": "repo://infra/deploy/terraform_runtime_guard.sh#L12225-L12278",
+          "version": "repo-lines-v1:sha256:aeabdf96d0258b2adb1a6c4baa3146d56dc095059e567541c9e9e1b0cf62d80e:eyJzZWxlY3RlZExpbmVDb3VudCI6NTQsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6Ijg0ZTc2MDQyNmE4ZTNhODYwZGQxNTBlNmMxMTc4YmFhNmJmMTgyNGM1N2ZlODI3M2IwMmI0YTVjZTQ1M2FhNzEiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6ImVkYTY4OTdlOTJjODZiMzIwM2I3YjA2NTA4OWI2YmFlZWZjZDgyZGQ2NWFiMGUwNTdmNjQyM2VlZTA2ZDhmMzciLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImQ1ODU3ZWQ5ZmJmODdiNWEwZGRhNTZjY2Y4ZGI4MmRkZTljZTdiYWQ1NjA1ZmE3MzQ5NjM4MDk4ZGE5ZmM5ODgiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjBhMTBiZThkODcyZmMzYTE0ZTZjM2QwN2Q5NzY3ZWVjOTQwMGNmZGQwNWEwY2U0YjY2NmM3NWFhMDJkMjI2NTIifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_9c6a161c2d0149369cd0c00cfaa1577a",
+      "statement": "--runtime-sync モードでは各 consumer の desired image と EventBridge rule 状態を live の値そのものに設定し、image deployment intent の UUID は guard が新規生成する（sync は image を変えない）。",
+      "evidence": [
+        {
+          "resource": "repo://infra/deploy/terraform_runtime_guard.sh#L10548-L10589",
+          "version": "repo-lines-v1:sha256:201486a68cc37e1afd80829ff670dff74b7dac042a521e40bcca18b702429ac1:eyJzZWxlY3RlZExpbmVDb3VudCI6NDIsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjEzNThmYWE5MzA0NjZhMmJkN2JiZWViODVkNTA1MmQ0YTc1Yzc1NzYwODgzYjk2OWY0ZjEzZDc5MDA3MmQ3Y2EiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjQxMmNhMzQ1Y2NmNzViZjljMDgwNmJjZTY5NWJlOGRlODA4Yjc5OTg0MjUxYTdhNTRkMjAyY2Y2MTAxZGQ0NTEiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImU4MzAwZTdiYmMzODhhNTU1MDkxNDNmZTBiNTNlZDBkNmE2YjE1OTk2MTFkNzI5ZmY3ODFkNDQzZDdiMDVhZjMiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjZlOGZkZTM5NGNmYjUyZjc2Y2UyNjI4ZDM1MzFhYjQyYWVkMmE4Y2FiMzk5NWYyYjkwN2NjYWRlYzZiYjA5MzMifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_9588116af3254ba59815b47d26977f80",
+      "statement": "validate_plan は plan 中の task definition の env と secrets が live と完全一致することを要求し、差分があれば die する。例外は config kind migration の to.allowed_env_changes[<component>] に列挙したキーだけで、secrets は常に完全一致。",
+      "evidence": [
+        {
+          "resource": "repo://infra/deploy/terraform_runtime_guard.sh#L7943-L7979",
+          "version": "repo-lines-v1:sha256:f705e8fc6b4dd5ebbf438fe7d42a9a70c0a5748473ac55de12efdbfce12110d1:eyJzZWxlY3RlZExpbmVDb3VudCI6MzcsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6ImFiNzViNzE1ZDE5ZGQyZDJiZTQ2MTBlNjYzY2QxMDk5YjFlOWZmNWQwNWVmYzMzYzY2NTBkMGYyMWIyMzkxNTgiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjJlMzFjZjg3MDMxNzQxNmIxYzg2MmQ4MzU4MzJiMjRjMGI2NmJjNzA3MmQ0YzU0OWZlNWI5MWU0YzRiZjNlNTUiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6Ijc0ZjZmYmExNjMxZDA5YTRjNDY3MGM3ZDYzNWY5NjEyNzEyNWJmMDFiOTNiN2FmZTA0MTYzODk5YzVkYmVhYjkiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImRjYTVmNmNmZmJhMWEzN2M3YmE1YjBjZjM4NmJlNDY5MTQxNWJjMWI2ZjNmMWE4YzY3MjQxMzg3M2IxY2RjNjIifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_c08a5a63a61546bb8b84f8555ea68490",
+      "statement": "image を持つ ECS task definition は terraform_data.production_image_release_gate に depends_on し、このゲートは manifest の registry 完全一致・影響 pipeline の release.ready=true・run_image_deployment_gate.sh terraform-gate の verified 結果と mode 一致を precondition で要求する。gate runner は exact trusted automation session 以外では起動を拒否し、allowlist の 8 コマンドだけを受け付ける。",
+      "evidence": [
+        {
+          "resource": "repo://infra/deploy/run_image_deployment_gate.sh#L17-L45",
+          "version": "repo-lines-v1:sha256:1b89a4b90b1e2219b5094efaacf6265ca12f45c884ce8b255eed617a360eaed6:eyJzZWxlY3RlZExpbmVDb3VudCI6MjksImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjM5NGNlZTUwYTUzOTY3NTFjZGU2YTdhMWQ0YTBiZmU1MzE1MjhkOGRmMGE4NWIyY2E3ZGJlNGZjMzc2Y2ZkN2UiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjAxOWYxNzRmNTg5OTkzNjIxNGFjZGZjNjA4ODM1ZDNhNzc4MjdkZGZlZmY1ZDNlMGQ1NTZkNWUyNDdkYTRlODUiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6Ijc0MDY5NzQ4YWU3MjI3MTI2ZDhkOTljYThiYjg1YzliYmM5YzUwMDI3ODE0ZTkyYjkyYWUxMjNmYmZjZDk3NmIiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjNhOWVkNzg2NzZiOTcyMzVhODJhMmNjMWU3MDkxMDU0ZjEwMjY5NGM5ZTI2NjFjMzJhNTc2ZWY4N2Y3ZGMxMzEifQ"
+        },
+        {
+          "resource": "repo://infra/terraform/fargate.tf#L565-L569",
+          "version": "repo-lines-v1:sha256:edf016422db35b7ed463c45e3e5b326c6a25b444ebde62a6411dc381a5d4518f:eyJzZWxlY3RlZExpbmVDb3VudCI6NSwiZmlyc3RTZWxlY3RlZExpbmVIYXNoIjoiYzMyZjQ5NTkzMjUzNWYxOTBlM2Q4ZGEyMzI3YWFiNGQ1ODllZmVkNWVjYTUzMGE3NTI2ZWM3YmI5YTAzMDM2YiIsImxhc3RTZWxlY3RlZExpbmVIYXNoIjoiMzA2NDhmNzdmZDVhOWM2M2IzY2RkMGFmNDlkYWExMjk5MjIwYjc1NDFlODhjYTE3ZWZlMWE2YTExNGI5ZmYyYSIsInByZWNlZGluZ0NvbnRleHRMaW5lQ291bnQiOjMsInByZWNlZGluZ0NvbnRleHRIYXNoIjoiNDcyNzM2NzUxZDI5NGUyM2Q1MjVhNjJmNGNiMDUyOTRhZGJhNjQ5Y2Q3NjVlMGY0ZTY0Y2E3ZThhOGJiZTI5MCIsImZvbGxvd2luZ0NvbnRleHRMaW5lQ291bnQiOjMsImZvbGxvd2luZ0NvbnRleHRIYXNoIjoiMzRlYTFiNzVhNTdlZDFiMGRjYmE2OTYwYjA2YmNjY2MzZWRkZTA3YmE0ODQ3ZmY0NjBlNmRmNWExNDA4NTIwMSJ9"
+        },
+        {
+          "resource": "repo://infra/terraform/image_release_gate.tf#L524-L539",
+          "version": "repo-lines-v1:sha256:bb112655ba7d8634bd20593ee281c15cc1009caca0d2006af4e6312851a5ae6c:eyJzZWxlY3RlZExpbmVDb3VudCI6MTYsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjBlMDg2ZmZhOTg1MzQwNDgwYjU1ZTBhNzAzZmIxYjE4NzAyNDM5MjA0ZjE0YzM1MGQzOTlkMDVlNmJlY2Q4NTYiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjQxMmNhMzQ1Y2NmNzViZjljMDgwNmJjZTY5NWJlOGRlODA4Yjc5OTg0MjUxYTdhNTRkMjAyY2Y2MTAxZGQ0NTEiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImZiNTgwZTk2NGY4M2E0NzNmNDNkNDQzODQ2Mjk0OWQ2OGI1NjAwZmRhNzg3ZjE2Mzc0NWQwMGRlODljYmYzNmEiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImM1YzM3MzA2YTU4MzFlOTJkNzhkYzQzMTNmZjFmYjFlYjIyMWQ4NjNkZTViOTIyMjJiMDkyOTdkZTUxZTQ4OTMifQ"
+        },
+        {
+          "resource": "repo://infra/terraform/image_release_gate.tf#L577-L612",
+          "version": "repo-lines-v1:sha256:4a5e00badb071b3ccdb0134498c4b5a09699845ee21e69e63b6726a30e8f4092:eyJzZWxlY3RlZExpbmVDb3VudCI6MzYsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjFjNDYxYjFlZDdkMTU0NTBhMWM1MjZjNjM4YTI4MjBlMjMyNzM2YTZkOTcxODlmMTMxOWNhMDAxMjRhNDhjZTEiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjI3ZTU3ODhkNWQ5ZDczZDI0YTgxZGJjMGE1YTc0YmZhODJjOWMzYjNhZjk5ZTUyYWY3OTZlOTBiNDY4YThhM2QiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjdmNWU5MWQ3N2JjYTczYzMzYzUyYzIyNGJkOTU4Yjk5Nzk1ZDFkZTM0YzczMjgxNmQxNmNhMmM0MjMxNWY0MWYiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjoxLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjQxMmNhMzQ1Y2NmNzViZjljMDgwNmJjZTY5NWJlOGRlODA4Yjc5OTg0MjUxYTdhNTRkMjAyY2Y2MTAxZGQ0NTEifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_75f10679f5fa4b7686d81e5492ec8074",
+      "statement": "deployment intent ledger では、共有 lease ロックの取得と PREPARED→APPLYING の遷移が 1 つの DynamoDB transaction で行われ、plan・context・receipt claim・期限の一致が条件になる。RECONCILE_REQUIRED へは APPLYING か CONSUMED からだけ遷移できる。",
+      "evidence": [
+        {
+          "resource": "repo://infra/codebuild/release_evidence.py#L3893-L3942",
+          "version": "repo-lines-v1:sha256:c6a5984cee34701922a444868f9676e582a2ae0c9f4a942ceca369d6b65e845b:eyJzZWxlY3RlZExpbmVDb3VudCI6NTAsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjRkYjU5NWU4YzdiMTcyZTE2MGUzYzcxZWMyOWViMzBkZjg4YTgwNjQ4MGVjOTk2ZjNiYTc4ZGM2NWIwNjJjNmUiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6ImFkZDI0NDU4MmI2ZmIwM2QyM2I4NDE1YWJlY2QzNDZiMGM5ZjQ2NmI2Zjc1MmIwNjgxODljZTdlOWEyZGMzNTAiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImFkZjVkZjFhODUwMGE0OGYxNmFkNjgyYmM4N2VlZTJmNjYyNDhhOGM1ZTFiODhhMjNlZGQxNjUxNDQ1MTM3YTkiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjlhODk1MmNiYmViNGZkMjRiNGY0YjYxZmMyOGVkYWQ3MzJlMzhlMTVmMDZhN2Q4MTg4MGM1YjQyYTAzNzM5ZWEifQ"
+        },
+        {
+          "resource": "repo://infra/codebuild/release_evidence.py#L4861-L4893",
+          "version": "repo-lines-v1:sha256:4fca64adf34727408e823efc12550872acb567be3ae84262031c8361c6efc77e:eyJzZWxlY3RlZExpbmVDb3VudCI6MzMsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6Ijc5YzZjMjZiNGNmMzkyNjM0OTlkZTBlNzM0MWVlYTlhOWZmYzJiZmVkMjE3MGI4OTNmNWNkMTEzNDEyY2Y1OTkiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjE3OGZkYjc3NTEwMWUxMTMxODYyYTQ3NTdiYzBkMTBkOTNmNGNjOTY1ZWE0NTNlMjM2ZmEwY2YzMWJhMzY5N2IiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjhjYzRhN2QxY2M3OTZhYmEzZTQ2NzIzMzI3ZjUxN2U5ZjgxMTk4MmQyNTBmMDcwMjk4NmU0YjU3NjRhZDk1ODkiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjY4YjAwNTZlZGExY2NhOTA0ODhiNjYwZjFmYTkzYjE3NjQyOGE5N2RkMjZiMjZhYTdkZmVkZmNkYmZiMGY1ZGUifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_7bcb2e6c4d8c4321abd2c87f3146b79c",
+      "statement": "terraform_apply_supervisor.py は saved plan を fd で開いて sha256 と inode を照合し、/proc/<pid>/fd 経由で terraform apply -lock=true を独立 process group で実行する。ロックの heartbeat が失敗すると process group を終了させて終了コード 75 を返し、apply 後に plan の inode と digest を再照合する。",
+      "evidence": [
+        {
+          "resource": "repo://infra/terraform/terraform_apply_supervisor.py#L104-L160",
+          "version": "repo-lines-v1:sha256:df8560609213290af76834042f3127add55aa56819464839e9f6b4efce042cb0:eyJzZWxlY3RlZExpbmVDb3VudCI6NTcsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6ImMwMTRhZWIwMTVlOGI4ZTcxMDdjNTQyNmZjODY2ZGZmOWRiYWMyNjBjNmYxMTZhYzM1ODYxYjcwOTk5OGM4ZmUiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjhlOTYxMGY4ODU3OGQ0YjNjYjYyNzliYWY4ZGM0MTU3NDYwOTVmMzQ2OWM3MzkwNDg5Y2IxNDExOTRlODM3ZjQiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImU3M2YzZGZlNjg1YjM3YzU1YjlmZGE5MzU5OWYyODg3NTczZWRlMzhiY2E3OGI4ZTEyNzljNTYxOTgzNWFkOTkiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjRhYjE0NzlhYzkwMzlkMjRiNzEwNzM2ZjAwYzc2NjY5NTI4N2EwZDBlMzAwMWJmYzljYjRkZjFhZjczOGRkMDkifQ"
+        },
+        {
+          "resource": "repo://infra/terraform/terraform_apply_supervisor.py#L191-L238",
+          "version": "repo-lines-v1:sha256:dea6306c8f7ac0c16ca022bf357e55618cea4e18a7ef0029a8046740985894d1:eyJzZWxlY3RlZExpbmVDb3VudCI6NDgsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjFiM2FhNzIzMDEyYWY3OTIxYTY2NjMyODU5ZDZkN2IyZDU0ZWY4NDJkYzEwOTY0NTZkNmNjMWUyMTEwOWZmYTciLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjYwNzZiZDM3ZGYyNTFiNjA0YzI2Y2YwZjA3ZGJmOTE4NTg0ZjhlNzFjMTU5NDQ1M2UxNDllNmZhZWY4MzIyZmQiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjlkZGM4OTM3NTAxN2YxODU1OWFmNDA4Njc2MzUyZDYyYWI0MDY1ODQxM2JhMTAyZWM1MmNmYTlkNjVkMWJjOTciLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjVjYjMzNzkyMWY0MTQ1OWE4YTE4YzYyZThmNTUyYjA3MmExMTcxMmY2ZjY3YWQ2NWExYjM3NThmOTgxYzcyMTQifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_c0de680499d64e1d88a3940fffed9ed0",
+      "statement": "apply 後の service probe は canary の task definition を ecs run-task し、command override で mcp と connect-web の /healthz と app HTML の provenance 値を確認する。全項目 true のログを 5 分以内に確認できなければ die する。",
+      "evidence": [
+        {
+          "resource": "repo://infra/deploy/terraform_runtime_guard.sh#L8824-L8858",
+          "version": "repo-lines-v1:sha256:e966200af774974e7c88120993e8bcec823c409153efa6f46d777b7972088f71:eyJzZWxlY3RlZExpbmVDb3VudCI6MzUsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6ImYyMjY0ODlmYzU1ZDQ4ZWUyNDY3ODUxMjhhZDJjZGJlODkxNmJiN2IzY2E4ZjQ4MDQxYTY0NmZlNzc2OGViMDMiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjcwYzE4MmU5YTlkN2IyNzk1ZmU5NWVkMTc5YTExZmMwZGEzODQyYWI0N2FhOWNlZTg5OGU4N2RkMjQzZjg0ODMiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjM0MWYxN2JjMDU3ZTAxNzA0ZjBjMWE2ZmEzOWUzYWUxZjQzNjc0MjA1YTQ2ZGQxNzExMWM2M2JkMGY0NjYyYjMiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjhmNmZmMTIzMmJkYzMyZjg3ZDNiMTA0OGQxMzU5ZTU3NWYxNDcyNGMzYzI4N2Y4OTI5ZGY1NzIwNDQzYjRlMTkifQ"
+        },
+        {
+          "resource": "repo://infra/deploy/terraform_runtime_guard.sh#L8885-L8928",
+          "version": "repo-lines-v1:sha256:e4647606ee292e3ae90e8bd90ba1c1f09749508f1c9e777f84d0c2fac1943830:eyJzZWxlY3RlZExpbmVDb3VudCI6NDQsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6ImRlMDNjMDRlZGM1MTc5YmYyZjUzMWVkNGZjNmFiZmMyMTljODk5NmJmZmFjN2VkZDA1NTljNjYxZDU3ZTU4ZDQiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjQ4OWU5OTlmYjMyYjJiNjJmOWZhOWYyMDZiMTExNDVjNmIzZjMyOWExNGE4N2UxMjk5ZjNhNzNhZTk1YWYwMWEiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImU1YWM3MDZmZjU2NjBhNTEzMTBhNjgwZDAxM2QxMjc0MDgxMmNiMzNhYzE4MzcxZTBiZDMyMmVmZWQ0ZDhiZTEiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjA0NWJhMzMzZWQzYTIwOTE5NDNiNmZjZDFjOWRjZjUwNTI0MTEzZjYxZjJmODJkNzQ4ZmQ0OTFhYmU3ZTAzZWUifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_2b176955a14741efb9fa13f23a5cc8a2",
+      "statement": "activation_freeze_enabled は既定 false で、guard は freeze 宣言の state が active なら true を注入する。assert-plan-preserves-freeze は state=active で freeze policy の delete を、mode=declaration_only で attachment の create を FATAL にする。",
+      "evidence": [
+        {
+          "resource": "repo://infra/deploy/activation_freeze_check.py#L283-L290",
+          "version": "repo-lines-v1:sha256:e255222ee29df7de3c1f1723de5c5b17b11569796f9da7937f3aa46df6d0420c:eyJzZWxlY3RlZExpbmVDb3VudCI6OCwiZmlyc3RTZWxlY3RlZExpbmVIYXNoIjoiZmJhNmJlOGRmODM1NjJiYWQ2NDVjMzQzMWFhMjEwZGU4ZjIyMTJmOWVmNzA3Y2E2ZWRkYzIxZDYyMTM5OTViMiIsImxhc3RTZWxlY3RlZExpbmVIYXNoIjoiZmM5MzhlYjk0YzJjYmQyMTZkM2MwMTdiYzA3ZGRlNGVjNTBmMTlkNGIzMzViMDFiMjg4ZjYwNTNjZGE3NWRhNSIsInByZWNlZGluZ0NvbnRleHRMaW5lQ291bnQiOjMsInByZWNlZGluZ0NvbnRleHRIYXNoIjoiOGNjNGE3ZDFjYzc5NmFiYTNlNDY3MjMzMjdmNTE3ZTlmODExOTgyZDI1MGYwNzAyOTg2ZTRiNTc2NGFkOTU4OSIsImZvbGxvd2luZ0NvbnRleHRMaW5lQ291bnQiOjMsImZvbGxvd2luZ0NvbnRleHRIYXNoIjoiNWE5ZjUzMDkyOTdhMWEzNmI2Zjg2MjkwNjQ5NTBkMGQxMzc2YWQzZTk3ZTMyNzU2MzhlMGI3MzhhZjhhYzJmOSJ9"
+        },
+        {
+          "resource": "repo://infra/deploy/activation_freeze_check.py#L355-L388",
+          "version": "repo-lines-v1:sha256:a374f8c123f180bc4401e4d1820d2e0edbda2f283a5a52c430bbb452e2c57977:eyJzZWxlY3RlZExpbmVDb3VudCI6MzQsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6ImM1MGVkMDE1MmNhMmVmNGFhMTg0NDdjZGU5YTBhYzQ1ZWFhMjAzYzlmMDczMTkwYjFiNzJlODlhOWU4NDkwMWMiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjJhN2RlYzc1NDI3NTlmNGRkYTFkYjhkYWM5ODc3YTc3MmRkMmI1MmEwYTIyMzQxN2ViNDZiNzA1ZTUwODBiNTUiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImM3MWU1YzUwNWQ0MzFjMmFmNjZjNDhjNzIwODc4YWExMzU0N2M0OWU5ZWJkNDg1ZTkzYzg1ZWM4MTgyMGE3NTIiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjJjZTY5YjdiMDA1ODkzNDE5ODA0YWQwYzY4NTg2ZmI3ZGM4YzFiNzZlNmJjN2Y3ZjMyMzRhY2Y2OWE4NmM2MDkifQ"
+        },
+        {
+          "resource": "repo://infra/deploy/terraform_runtime_guard.sh#L10525-L10537",
+          "version": "repo-lines-v1:sha256:a02dbb485e9e6f581a6ebd395183d61b19c144ddd7db67df61d96610f51d6ceb:eyJzZWxlY3RlZExpbmVDb3VudCI6MTMsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6ImViNzI0NjA0OGZmNDc2MmYyNGY2NzVkNGFkNTk4NDE5ZTZhZDQzOWVhZmEwNzUxNWNhZGNmMTlkMTc3NmRiY2IiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjQxMmNhMzQ1Y2NmNzViZjljMDgwNmJjZTY5NWJlOGRlODA4Yjc5OTg0MjUxYTdhNTRkMjAyY2Y2MTAxZGQ0NTEiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImRkMzIxOGVkOWVhZGNhZmE5M2FiOTEzMDFlYWY4ODA0MDg2OWIwMmQ1MDZmMjUxNjAxMDRmNWE3ZWY0MmFkODUiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImI3Y2U1NThlNDA0Mjg3MzAxM2YzNWU2OGM1NDRjNTAyYzBmNzQ5OTJhNWUzNjFlMjI0N2I3YzYyNDBhZWExZTkifQ"
+        },
+        {
+          "resource": "repo://infra/terraform/activation_freeze_policy.tf#L53-L62",
+          "version": "repo-lines-v1:sha256:193a4a0ac66670882d6aed7b11ec33f8debd75367cb40b40e2142b32a374934d:eyJzZWxlY3RlZExpbmVDb3VudCI6MTAsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6ImU3OTNkZDI0NWE5ZDU4MGRiMTg2YjgwNmFiMmVkMTUyMDg0MjQ3YzJiNDA3MTI0ZjA4M2M1MGI4ODFhY2U5OGMiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjQxMmNhMzQ1Y2NmNzViZjljMDgwNmJjZTY5NWJlOGRlODA4Yjc5OTg0MjUxYTdhNTRkMjAyY2Y2MTAxZGQ0NTEiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjY1ZmYxM2ZhM2VkMThjMDlhNzNmZTYyOTAwOGEyMmU1NmI3YjRkZjk2NGEyZDExOWM2NDlkN2M2NjJjMmQ2NzIiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImQ0MGVhZTViNjFkNWQ3MWRjMGNlYjRhMWI5YzY0NDVjNmNjMTdkODI3Nzg0OGQ2NzkwNjgyMmE4MTQ1NDc3NjIifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_6d725b945aa540b4a0bcc3fe43964c98",
+      "statement": "release_mcp.sh は段1 の前に公開済み buildspec 世代を repo の期待値と照合し、不一致なら撃たずに終了する。5 段完走後も本番 task definition の差し替えは行わない。",
+      "evidence": [
+        {
+          "resource": "repo://scripts/aws/release_mcp.sh#L148-L173",
+          "version": "repo-lines-v1:sha256:4a1940711522aa8217292b26551d077354f1987a19550ad8479e05c4211c3a97:eyJzZWxlY3RlZExpbmVDb3VudCI6MjYsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjI5YTc2YzlmMmJlMmU2MGJjZTcyY2VlYjY4Njg4YWE0MzcxOTYwMGY0MWUzN2QyOTc2ZDMzYWZlNmVjY2JhNTYiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjMwNTgxYmQ3ZWZiZWUyN2E4M2Q2YjU1MGFlODNjYjM0MDIzZDA3MjFjMjk3NDU3NzAwMjkxOWI5NTliMjkyNDMiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjRjODc4ZjU4ODg5ZmE5YmVhOTdkMTdiZjk4MjcxY2I5MGU3MjQ3YzAxZThlNjdlNzU2YjA1OTg1MmQ3YTEwM2YiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImFmNmMwOTMzMjc2NGI5YzYwYzUyYmQyMTUzNGI3NmJiOGJhYjdhN2U3ZWI5ODFiOWJmZjYxOGViODcxNDQyN2EifQ"
+        },
+        {
+          "resource": "repo://scripts/aws/release_mcp.sh#L406-L411",
+          "version": "repo-lines-v1:sha256:e603a951a3f710cf4894f5600a88f1fea77fb3ef2eb876ef583b2d6a4a175f15:eyJzZWxlY3RlZExpbmVDb3VudCI6NiwiZmlyc3RTZWxlY3RlZExpbmVIYXNoIjoiYTlmYjM5Mjk3MGQ4ZjNjYTQzNjY4NzVmNjA2OWQxMTgzMDE3ZTc5NmVkNzIxMGE4MDgyZmZmNDViMThkNjJhMSIsImxhc3RTZWxlY3RlZExpbmVIYXNoIjoiOGY0OTA1MGMxZjFmMzhhMmRhODM4YWY0ZTdjN2NhMmZjMTA5OWQ3MjkwOThmMzNiMTFkODIxMTc4ZGY5ZWU3MyIsInByZWNlZGluZ0NvbnRleHRMaW5lQ291bnQiOjMsInByZWNlZGluZ0NvbnRleHRIYXNoIjoiNjc0OGFmYzcyNjk3ZTljMGFiM2FjZDdjNjJmYjdlMzUzOGI4ZDc5NmZjYTY5YjhkMjI0YTA0Zjg4Yzg4OWM5ZiIsImZvbGxvd2luZ0NvbnRleHRMaW5lQ291bnQiOjMsImZvbGxvd2luZ0NvbnRleHRIYXNoIjoiZGQ0ZWI1ZWIwOGE2MWM0OTJlYmE0ZmM5ZDY0YzkwMGNmMmFkYWQxODgxMmM3MWExMjdiMjg2M2E2ZmI3NTI5MSJ9"
+        },
+        {
+          "resource": "repo://scripts/aws/release_mcp.sh#L627-L633",
+          "version": "repo-lines-v1:sha256:292a56780c87b18c7e43e16893224d869ff3b00d2f72675de63c651b91dac957:eyJzZWxlY3RlZExpbmVDb3VudCI6NywiZmlyc3RTZWxlY3RlZExpbmVIYXNoIjoiNTRkMjNjZDFhYzI4NmE4NjU3ZmYwMWYyMDgyZmMxMzFhNjYxNDcxNTk2MmQzMjNmMDc5N2QxYmJhMTAyZmU2OCIsImxhc3RTZWxlY3RlZExpbmVIYXNoIjoiYTA1ZDg3ZjI3NzVmOGNmOTMwNDFhNzg4ZTgwOTI5NDBhZWM3MDlmNTQ3MTY2OTAxMjMyNzJmZjBkOGQ2NGEwZSIsInByZWNlZGluZ0NvbnRleHRMaW5lQ291bnQiOjMsInByZWNlZGluZ0NvbnRleHRIYXNoIjoiY2Y1ZGNlMzMwNTEyZDM5NzYwMTI1MTU4ZWNhNTAzNWZiZWI1MGJjNGFjYTY3NzQ0NGZlNzQ5MWM5MGE2MGFmNCIsImZvbGxvd2luZ0NvbnRleHRMaW5lQ291bnQiOjAsImZvbGxvd2luZ0NvbnRleHRIYXNoIjoiZTNiMGM0NDI5OGZjMWMxNDlhZmJmNGM4OTk2ZmI5MjQyN2FlNDFlNDY0OWI5MzRjYTQ5NTk5MWI3ODUyYjg1NSJ9"
+        }
+      ]
+    }
+  ],
+  "verification": {
+    "by": "openwiki/0.6.1",
+    "at": "2026-09-29T07:51:05.076Z"
+  }
+}

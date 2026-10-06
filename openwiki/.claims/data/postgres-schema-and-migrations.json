@@ -1,0 +1,96 @@
+{
+  "schemaVersion": 1,
+  "pageVersion": "sha256:2453f21a1f0a1c7a67bcc1ab9edf5ee0365ae75d50258a4ac1c3f8a15c89dc24",
+  "claims": [
+    {
+      "id": "claim_fad7ef4316d14d78994cffd4e3147d23",
+      "statement": "documents は source_type ENUM・external_id・owner_email・acl_emails・acl_groups を持ち (source_type, external_id) で UNIQUE、chunks は vector(1024) の embedding と HNSW cosine 索引を持ち、両表とも RLS が FORCE される。",
+      "evidence": [
+        {
+          "resource": "repo://infra/migrations/0001_unified_documents.sql#L39-L115",
+          "version": "repo-lines-v1:sha256:bb68c70fabf01c3b6d67f861a97f671a18c07df804bf3417d89753164b39a11f:eyJzZWxlY3RlZExpbmVDb3VudCI6NzcsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjkyNTM1MTE4ZjA2NGEzMjQzZTkzNjY4YjYwN2M1MTFhMTAyNTg5YmIxYTE1OTRjYzliOTJhOTk3N2IyOGVjOTkiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6ImNjNmE3M2Y2NGI3OWY3NjRmNWFjMTAyMzg4YzA0NzIxYWI3NjZkOTI0MjA4MWY4NWFlYTc2MzI3Mjk4M2Y2NmMiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImFiYzg3YzA4MGRiMDAyMzFlZTQ2MDhkMWM1ZTQ4ZTljODgyYmFhMWRkNWExM2U4MGZkMDQwYjQwNjY4YTQ3MDgiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImIzNmI5OTg1YjdlNDUxODk2NzI3MzgzNGRmYTM1MzdjZmIyNjJmODJiNzVmMmY1MDk2NTY2ZmI5MjAzNjA5ZmYifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_711ce8c86ffa4b1992e3372b46b714dc",
+      "statement": "chunks には Cohere Embed 移行用の並行列 embedding_cohere vector(1024) がある。",
+      "evidence": [
+        {
+          "resource": "repo://infra/migrations/0016_chunks_embedding_cohere.sql#L42-L42",
+          "version": "repo-lines-v1:sha256:fb1c56fa77d0a77c211d65698c9a34bd42173b34a74d6eb272823dbf03cb3c40:eyJzZWxlY3RlZExpbmVDb3VudCI6MSwiZmlyc3RTZWxlY3RlZExpbmVIYXNoIjoiZmIxYzU2ZmE3N2QwYTc3YzIxMWQ2NTY5OGM5YTM0YmQ0MjE3M2IzNGE3NGQ2ZWIyNzI4MjNkYmYwM2NiM2M0MCIsImxhc3RTZWxlY3RlZExpbmVIYXNoIjoiZmIxYzU2ZmE3N2QwYTc3YzIxMWQ2NTY5OGM5YTM0YmQ0MjE3M2IzNGE3NGQ2ZWIyNzI4MjNkYmYwM2NiM2M0MCIsInByZWNlZGluZ0NvbnRleHRMaW5lQ291bnQiOjMsInByZWNlZGluZ0NvbnRleHRIYXNoIjoiMzUyNTgxZDAwZDllNTExN2I5YjQ1ZjQyMzJjM2IxNjcyYWQzY2RhYTJhZDg0MzEwZDQwMTlkNmRjMGUzNjI2YSIsImZvbGxvd2luZ0NvbnRleHRMaW5lQ291bnQiOjMsImZvbGxvd2luZ0NvbnRleHRIYXNoIjoiNjVjMzMyNDY4MDljZDRiMmVhNWJjMGI5ZjY5MmQyNzJjMTNlN2Y0YWQ3MWJkYzJjZjFkZTlmYjU0Njg0Yzc3YyJ9"
+        }
+      ]
+    },
+    {
+      "id": "claim_03c69a75afab4ddc90169128c7fc3027",
+      "statement": "EMBEDDER_BACKEND と EMBEDDING_COLUMN の正準ペアは local⇄embedding、cohere⇄embedding_cohere で、列名は許可リストで検査される。",
+      "evidence": [
+        {
+          "resource": "repo://src/teamagent/adapters/embeddings_client.py#L236-L260",
+          "version": "repo-lines-v1:sha256:b2030d2abd5d5e23170830590aaf5096ba9df4cd1e8ec472cf5789bad2076c29:eyJzZWxlY3RlZExpbmVDb3VudCI6MjUsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6ImJhYzQ2YjMxMTk0ZDhhMzZmYjE1NmQ0YTIxODg0Zjc2ZmQ4ZWY3NDE3M2I3ODc4NDhmZWE5Y2I4MzJhZWU5YzQiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjMwMGUxYzA4NTAxZTcwYjliYWMzMGU5MDE1Y2VlNmZmOGJmOTUyYzQwNWUzZDFmMWZkMzU1NTA2NjFhMTJhNzQiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImQ5ZGJkZmUyZmY3ZjhiODkxOTVkMTUzYjgyNzllNWVmYmYwODgxMmU5NTlkZmNjOTM4ZDgwN2U2Mjk1YWIyNGMiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6Ijc4N2UxNzhjNmEzMDMwYmZjZWJiMjFmMjQ4ZGMyODRhMjcwMTZlMTNmYjg3OTIwMjQxOTdhMGNiMWMwODcyYjEifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_9805441622bf495496e01a21d722f8ce",
+      "statement": "scripts/migrate.py は schema_migrations で適用済みと SHA-256 を管理する forward-only runner で、適用済みファイルの内容変更を検出すると失敗し、1 ファイル 1 トランザクションで適用する。",
+      "evidence": [
+        {
+          "resource": "repo://scripts/migrate.py#L1-L60",
+          "version": "repo-lines-v1:sha256:01ba14fd0197e7333bb4cb336b83bf260f5d1ccca9ef1774345570903c9a84b5:eyJzZWxlY3RlZExpbmVDb3VudCI6NjAsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6ImY3ODgyMDZmYjQ5OTk3NjU3MTRlMDU0ZGI5MzNlYjdiMTgyMTBiODNlMjlkNGVkYWUzZjliN2ZhZGYwODA5MjEiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjhjMzQ5MWMyMWU3NzNlOTJkMDdhYmExZGYzNzJiMTAyZjk5ZTYzNDU4NjlmMDQ2OGE3NWI2ZDQ4YTI5MmUxYTIiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjowLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImUzYjBjNDQyOThmYzFjMTQ5YWZiZjRjODk5NmZiOTI0MjdhZTQxZTQ2NDliOTM0Y2E0OTU5OTFiNzg1MmI4NTUiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjIwYTU2ZDhiMTFmYmIzMDA0ZDU2MmRiMDRlMzUzMTM2OWY4YmYwYmJjZTBmZGEwMmNlYzJlMDlmNDY1Mjk3ODIifQ"
+        },
+        {
+          "resource": "repo://scripts/migrate.py#L112-L187",
+          "version": "repo-lines-v1:sha256:aea264f2daf71562fffe28d8ec40903dfed620f82fafb0184494625ab187eb84:eyJzZWxlY3RlZExpbmVDb3VudCI6NzYsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6ImYyMjcxNmRjYTRkNjM4MGUzY2VjYWZhOTg0NjBhZDJkODNkNWNiNWNjZDhkYTIwNWQ3ZjczMTlkZWZjOWFmMDgiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjAxYmE0NzE5YzgwYjZmZTkxMWIwOTFhN2MwNTEyNGI2NGVlZWNlOTY0ZTA5YzA1OGVmOGY5ODA1ZGFjYTU0NmIiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImIzZGYyYWNmMDZlOGMzZjAzYzcxMzVjNmU4YWM1YTljYTU0MzJhYmUwNmE3NGFjYTBmZGQ5YTUzYTAwOGY5ODciLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjQ5ZGNmMTMzOThkNzcyMmMzOWY4YmUxNmMwMWVmNTI4NzllYzA5YjdmOWI5MGQyOGU0MjNiZTQ2MmEwODc2ZDYifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_0991e6f2236240919b997415f9aee205",
+      "statement": "migration SQL 内のトランザクション制御文と autocommit 接続は runner が拒否し、dry-run は DB へ書き込みを残さない。",
+      "evidence": [
+        {
+          "resource": "repo://scripts/migrate.py#L83-L110",
+          "version": "repo-lines-v1:sha256:cc9c9c0aa28805930ab7acefeb871870872fc00bdfd61d7f4f341e3ee5f0f567:eyJzZWxlY3RlZExpbmVDb3VudCI6MjgsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6ImNmNjFmZTU5OTdjNjk1NjAyOGI1MTAxN2QzYTdjNmEzZTlmN2U5MWY0OTc5YmM1MjFiYjhiOTJjMmMwZmZkNWEiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjAxYmE0NzE5YzgwYjZmZTkxMWIwOTFhN2MwNTEyNGI2NGVlZWNlOTY0ZTA5YzA1OGVmOGY5ODA1ZGFjYTU0NmIiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImI1MjhmNjcwZmNmMTBlN2VjNTE4MzQwMjM1ODE5NDMyOTAzNzQwNmFmMmY2MTFhMmFhM2M1YTJjYjZiNjMzZTciLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjVhMTIxMzEwODZlZTNmODVhNzM4M2U0Y2RiYTE1ZjkzODFlNzcwZjk4YTNmMmEzYzZjZDZhMGFkYTU2ZjBiOGQifQ"
+        },
+        {
+          "resource": "repo://tests/test_migrate_runner.py#L82-L150",
+          "version": "repo-lines-v1:sha256:71f66c1499516f4c531888790323b38a43b2d87414cdfa3d80a2782925c69c33:eyJzZWxlY3RlZExpbmVDb3VudCI6NjksImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6ImUyMDNiZDk4NDcxMzQzOGZlZGY5YTg1MjIzYTJjMDE3NTUwZGQyZWY0OWQ2NmI3MDgwNTFjOGFjYjEyZGQzMWUiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjVhMjZjZTk3OWIyZGM0ODhhYjVkZmI2NmJhZWUwNWYxM2Q0ZjRlZmIwNzllYTk1ZmEzMjNjYTgwZWMxNWY0MjEiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjVmMDhmNjQyOTRkNGVmN2FhZTgxNWM1YjI5MGE1ODAzYWEwZjU5ZWE2MmMxMDZmZTdjNDgwNzViYjk5OWY4MmQiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImNmM2FlYmRlZDM5YTc5YTZmYzQ4YTQ3NzQ4NWIzMzAwZjBjMWFhNDJjNjVjOTU5ODdkZGY2ZTQwMGJkM2VkY2MifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_69674049de4740348e7ae2726dfd378a",
+      "statement": "朝ダイジェストの状態は digest_ack（確認済み）・digest_delivery（送信済み印）・digest_notice（お知らせ重複防止）の 3 表に保存される。",
+      "evidence": [
+        {
+          "resource": "repo://infra/migrations/0025_digest_ack.sql#L1-L25",
+          "version": "repo-lines-v1:sha256:02163130110ca2e696436ca24e202d0bcf63df01bd1d2f45f07375bc5c5445ea:eyJzZWxlY3RlZExpbmVDb3VudCI6MjUsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6ImQ1ZGFjZmEwYTQ0ZWZiNjcwMTRjOWNlNWU5YTgxM2E2NzYzMjYyOWQ5ZmVkODVmMmQ5NmI1ZDI1ZjQzYjE3NTIiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjE3MTk5MThiOTljZjg1OWM3YWE2MDk5ODIzNTEzNGY4ZDk5MGVhNzAwYjZmYjVhYjQ4OTVmY2U0NGQ4MzExMzMiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjowLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImUzYjBjNDQyOThmYzFjMTQ5YWZiZjRjODk5NmZiOTI0MjdhZTQxZTQ2NDliOTM0Y2E0OTU5OTFiNzg1MmI4NTUiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjdiMGNkMzhmNTVmNjg0MmM1Mjc3N2M0MjA1MGU3ZDU4NTBiYWVkMzdhOGNjZjAwNWIxNGQzMjcyMzdhNThlODkifQ"
+        },
+        {
+          "resource": "repo://infra/migrations/0026_digest_delivery.sql#L1-L26",
+          "version": "repo-lines-v1:sha256:6c54cef1e11613b0fe5c65984ffeb44b73f2992fdfe5b076ff6467f8c1c5f14c:eyJzZWxlY3RlZExpbmVDb3VudCI6MjYsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6ImQ1ZGFjZmEwYTQ0ZWZiNjcwMTRjOWNlNWU5YTgxM2E2NzYzMjYyOWQ5ZmVkODVmMmQ5NmI1ZDI1ZjQzYjE3NTIiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6Ijg2MjkxMjA0ZmY5YTJjOTFmZmZjZWI1M2MyOGQwY2U5ODk5MGZkMmFlYjAwOWZkZDg3YmFiNzM3NTQxYjc1MDUiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjowLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImUzYjBjNDQyOThmYzFjMTQ5YWZiZjRjODk5NmZiOTI0MjdhZTQxZTQ2NDliOTM0Y2E0OTU5OTFiNzg1MmI4NTUiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImQyMzc5MDgzMWYxYjJhOGY0ZTliNTdhODNmMWRhZDEwNGFlY2ViNDRkOTM2YjViNjc1ZTkyZWY0NWZjOTA3ODcifQ"
+        },
+        {
+          "resource": "repo://infra/migrations/0027_digest_notice.sql#L1-L34",
+          "version": "repo-lines-v1:sha256:c5d1f5e71024370474677894eb3f619dee2892beb4358c4baef35385f7c23d16:eyJzZWxlY3RlZExpbmVDb3VudCI6MzQsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6ImQ1ZGFjZmEwYTQ0ZWZiNjcwMTRjOWNlNWU5YTgxM2E2NzYzMjYyOWQ5ZmVkODVmMmQ5NmI1ZDI1ZjQzYjE3NTIiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6Ijg2MjkxMjA0ZmY5YTJjOTFmZmZjZWI1M2MyOGQwY2U5ODk5MGZkMmFlYjAwOWZkZDg3YmFiNzM3NTQxYjc1MDUiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjowLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImUzYjBjNDQyOThmYzFjMTQ5YWZiZjRjODk5NmZiOTI0MjdhZTQxZTQ2NDliOTM0Y2E0OTU5OTFiNzg1MmI4NTUiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjFiZDY2MzYwNmQyNTAzNzJmZjI1NjE3Y2VjMjM2NTRiYmY2YTAzMThiZGU5Mzc4OGI1NmMwODYyZDc3NjA2YzgifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_440689d2829444318296436ada592bd8",
+      "statement": "ローカルの init-pgvector.sql は vector・pg_trgm・uuid-ossp 拡張を作るだけで、テーブルは migrate.py で別途適用する。",
+      "evidence": [
+        {
+          "resource": "repo://infra/docker/init-pgvector.sql#L1-L30",
+          "version": "repo-lines-v1:sha256:86ffc3342bbff6c7ebdb95e9922458ce76aa4890bce81a45dc6d8d498f0e070d:eyJzZWxlY3RlZExpbmVDb3VudCI6MzAsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6ImQ1ZGFjZmEwYTQ0ZWZiNjcwMTRjOWNlNWU5YTgxM2E2NzYzMjYyOWQ5ZmVkODVmMmQ5NmI1ZDI1ZjQzYjE3NTIiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjY5MjZjNmM4MWRhNWZiMjVkYjM4ODBjM2Q5Y2MyYTVlNjNmZjMxZTk5NzI0ZjU2N2M0MzVjN2ZhZTljZTBmNzMiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjowLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImUzYjBjNDQyOThmYzFjMTQ5YWZiZjRjODk5NmZiOTI0MjdhZTQxZTQ2NDliOTM0Y2E0OTU5OTFiNzg1MmI4NTUiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjY1ZjFlOGZmNWUwMGQ0NTFjNzM4YThmOTIzZGYwN2Q1YTI3MmIxMzczNzI5ZTlhMjA5YWQwYzA5NTJjYzdmZDMifQ"
+        }
+      ]
+    }
+  ],
+  "verification": {
+    "by": "openwiki/0.6.1",
+    "at": "2026-09-29T07:51:05.076Z"
+  }
+}

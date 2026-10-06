@@ -127,6 +127,8 @@ class SlackSummarySkill(BaseSkill[SlackSummaryInput, SlackSummaryOutput]):
         '「ここ最近の流れ」等は scope="channel" を渡す。'
         "scope 省略時は現スレッドを読み、依頼メッセージだけなら現チャンネルへ自動で切り替える。"
         "別スレッドを指す場合のみ thread_ts / channel_id を渡す。"
+        "リンクが無く**チャンネル名だけ**で別の場所を言われたら（「#〇〇 も見て」）"
+        "この tool ではなく slack_search（query に in:#チャンネル名）を使う。"
         "Slack への投稿・リアクション・要約の転送はしない。"
         "受信メールの要約は mail_summary、社内資料の検索は search を使う。" + USER_CONTEXT_RULE
     )
