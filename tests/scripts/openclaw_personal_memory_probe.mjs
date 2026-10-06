@@ -226,6 +226,28 @@ const report = {};
   report.firstMessage = { out, mcpCalls: p.mcpCalls };
 }
 
+// 4c. 1 通目の戻しが想定外の形で投げても（ここでは prompt の読み出しで例外）、本人メモは届く
+{
+  const p = makePlugin();
+  receiveDm(p, input.userA, "トレンダーズ");
+  const throwingEvent = {
+    messages: [],
+    get prompt() {
+      throw new Error("unexpected event shape");
+    },
+  };
+  let out = null;
+  let threw = false;
+  try {
+    out =
+      (await p.handlers.get("before_prompt_build")(throwingEvent, dmCtx(input.userA, input.dmA))) ??
+      null;
+  } catch {
+    threw = true;
+  }
+  report.firstMessageError = { out, threw };
+}
+
 // 5. コマンド（全文一致）はモデルを通さず本人メモの返事で答える。どのコマンドでもキャッシュは捨てる
 {
   const p = makePlugin();

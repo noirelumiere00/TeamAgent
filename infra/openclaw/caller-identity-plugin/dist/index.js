@@ -5658,7 +5658,14 @@ export function createCallerIdentityPlugin({
       // 1 通目の戻し（同期・appendContext）を先に決め、本人メモ（mcp・appendSystemContext・
       // 1.2 秒で諦めうる）と 1 つの結果に合成する。キーが違うので片方が他方を上書きしない。
       observe("before_prompt_build", async (event, ctx) => {
-        const restore = restoreFirstMessage(event, ctx, api.logger);
+        // 新しいコードが想定外の ctx で投げても、本人メモまで道連れにしない（その場合は戻さない）。
+        let restore;
+        try {
+          restore = restoreFirstMessage(event, ctx, api.logger);
+        } catch {
+          emitPluginLog(api.logger, "warn", "first message restore outcome=error");
+          restore = undefined;
+        }
         const memo = await injectPersonalMemory(event, ctx, api.logger);
         if (restore === undefined) return memo;
         return memo === undefined ? restore : { ...memo, ...restore };

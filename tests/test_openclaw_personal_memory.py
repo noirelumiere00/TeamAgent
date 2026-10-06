@@ -238,6 +238,17 @@ def test_memo_and_first_message_restore_are_merged_into_one_result(
     assert MEMO_MARK not in out["appendContext"]
 
 
+def test_first_message_restore_failure_does_not_drop_the_memo(
+    e2e: tuple[dict[str, Any], _Memory],
+) -> None:
+    """1 通目の戻しが投げても before_prompt_build 全体は落ちず、本人メモは system 側に入る。"""
+    report, _ = e2e
+    result = report["firstMessageError"]
+    assert result["threw"] is False
+    assert set(result["out"]) == {"appendSystemContext"}
+    assert MEMO_MARK in result["out"]["appendSystemContext"]
+
+
 def test_commands_are_answered_without_the_model_and_drop_the_cache(
     e2e: tuple[dict[str, Any], _Memory],
 ) -> None:
