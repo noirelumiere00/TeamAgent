@@ -484,9 +484,7 @@ def test_session_reset_policy_is_pinned() -> None:
     config = _load_reviewed_json5(CONFIG)
     session = config["session"]
     assert session["reset"] == {"mode": "daily", "atHour": 19, "idleMinutes": 60}
-    assert session["resetByType"] == {
-        "thread": {"mode": "daily", "atHour": 19, "idleMinutes": 240}
-    }
+    assert session["resetByType"] == {"thread": {"mode": "daily", "atHour": 19, "idleMinutes": 240}}
     # atHour 19 は「ゲートウェイが UTC」のときだけ日本時間 04:00。TZ を足すなら atHour を直す。
     for tf in sorted((ROOT / "infra/terraform").glob("*.tf")):
         assert not re.search(r'name\s*=\s*"TZ"', tf.read_text()), tf.name
