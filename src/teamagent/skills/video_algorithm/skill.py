@@ -2341,9 +2341,10 @@ class VideoAlgorithmStatusSkill(BaseSkill[VideoAlgorithmStatusInput, VideoAlgori
                 stale = (datetime.now(UTC) - updated).total_seconds() > 180
             except (ValueError, TypeError):
                 stale = True
-            from teamagent.mcp_gateway.detached_jobs import REGISTRY
+            from teamagent.skills._shared.long_jobs import job_is_alive
 
-            if stale and not REGISTRY.has_request(job_id.removeprefix("va_")):
+            # 確かめられない（None）ときは止まったと断定しない（False のときだけ失敗にする）。
+            if stale and job_is_alive(job_id.removeprefix("va_")) is False:
                 store = ProposalJobStore()
                 changed = store.mark_failed(
                     job_id,

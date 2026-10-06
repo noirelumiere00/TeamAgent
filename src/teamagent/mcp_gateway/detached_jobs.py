@@ -913,6 +913,17 @@ class DetachedJobRegistry:
 REGISTRY = DetachedJobRegistry()
 
 
+# skills 側（動画分析の状態照会）へ「このプロセスで生きているか」を渡す（skills は
+# mcp_gateway を import しない決まりなので、こちらから登録する）。
+def _register_liveness_probe() -> None:
+    from teamagent.skills._shared.long_jobs import set_liveness_probe
+
+    set_liveness_probe(REGISTRY.has_request)
+
+
+_register_liveness_probe()
+
+
 async def notify_interrupted(
     *,
     budget_s: float = DEFAULT_INTERRUPT_BUDGET_S,

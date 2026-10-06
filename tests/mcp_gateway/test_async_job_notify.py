@@ -631,6 +631,57 @@ def test_video_still_question_uses_owner_and_keeps_older_owned_jobs_visible(
     assert denied.status == "unknown" and "実行中" not in denied.message
 
 
+@pytest.mark.parametrize(
+    ("alive", "expected"), [(None, "running"), (True, "running"), (False, "failed")]
+)
+def test_video_status_marks_failed_only_when_liveness_is_known_false(
+    notices: list[dict[str, Any]],
+    monkeypatch: pytest.MonkeyPatch,
+    alive: bool | None,
+    expected: str,
+) -> None:
+    """心拍が古い実行中の行は、このプロセスで生きていないと確かめられたときだけ失敗にする。
+
+    skills は mcp_gateway を import しない（import-linter）。生存確認は long_jobs の口経由で、
+    口が未登録（確かめられない）なら止まったと断定しない。
+    """
+    import teamagent.adapters.proposal_job_store as adapter
+    import teamagent.skills.video_algorithm.skill as module
+    from teamagent.skills.video_algorithm.schema import VideoAlgorithmStatusInput
+
+    store = ProposalJobStore(table_name="", memory={})
+    monkeypatch.setattr(adapter, "ProposalJobStore", lambda: store)
+    owner = long_jobs.owner_key(ctx(), "video_algorithm")
+    store.create_job("va_stale", {"owner": owner})
+    store.mark_running("va_stale")
+    row = store.get_job("va_stale")
+    assert row is not None
+    old = "2026-01-01T00:00:00+00:00"
+    monkeypatch.setattr(
+        store,
+        "get_job",
+        lambda job_id: {**row, "updated_at": old} if job_id == "va_stale" else None,
+    )
+    monkeypatch.setattr(
+        store,
+        "mark_failed",
+        lambda *a, **k: row.__setitem__("status", "failed") or True,
+    )
+    monkeypatch.setattr(
+        long_jobs, "_liveness_probe", None if alive is None else (lambda _rid: alive)
+    )
+    out = module.VideoAlgorithmStatusSkill().run(
+        VideoAlgorithmStatusInput(job_id="va_stale"), ctx()
+    )
+    assert out.status == expected
+
+
+def test_detached_jobs_registers_the_liveness_probe() -> None:
+    """mcp プロセスでは detached_jobs の読み込みで生存確認の口が登録される。"""
+    assert long_jobs._liveness_probe is not None
+    assert long_jobs.job_is_alive("no-such-request") is False
+
+
 def test_still_question_for_two_keywords_does_not_claim_both_finished(
     notices: list[dict[str, Any]],
 ) -> None:

@@ -8,6 +8,7 @@ import os
 import shutil
 import tempfile
 import threading
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -17,6 +18,27 @@ from teamagent.skills.base import SkillContext
 
 ORIGIN_KEY = "_verified_long_job_origin"
 _OWNER_KEY = "_verified_long_job_owner"
+
+
+# 実行中の動画分析がこのプロセスで生きているかを答える口。skills は mcp_gateway / runtime を
+# import しない決まり（import-linter）なので、mcp_gateway.detached_jobs が起動時に登録する。
+# 未登録（＝確かめられない）のときは None を返し、呼び出し側は「止まった」と断定しない。
+_liveness_probe: Callable[[str], bool] | None = None
+
+
+def set_liveness_probe(probe: Callable[[str], bool] | None) -> None:
+    global _liveness_probe
+    _liveness_probe = probe
+
+
+def job_is_alive(request_id: str) -> bool | None:
+    probe = _liveness_probe
+    if probe is None:
+        return None
+    try:
+        return bool(probe(request_id))
+    except Exception:
+        return None
 
 
 def enabled() -> bool:
