@@ -45,8 +45,13 @@ def _isolate_omiyage_job_admission() -> Iterator[None]:
     本番で 1 度も効かない）。背景スレッドを故意に堰き止めるテストは枠を返さないので、
     明示リセットしないと後続テストが `busy` で落ちる。
     """
+    from teamagent.adapters import proposal_job_store
     from teamagent.skills.omiyage_report.skill import reset_job_admission
 
+    # 重複受付の錠もプロセス共有（memory 版）。持ち越すと別テストの同じ依頼が
+    # 「受付済み」に寄せられてしまう。
     reset_job_admission()
+    proposal_job_store._MEMORY_DEDUP_LOCKS.clear()
     yield
     reset_job_admission()
+    proposal_job_store._MEMORY_DEDUP_LOCKS.clear()
