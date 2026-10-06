@@ -22,13 +22,44 @@ from pydantic import BaseModel
 import teamagent.orchestrator.factory as factory
 from teamagent.adapters.gmail_client import GmailClient
 from teamagent.adapters.oauth_token_store import InMemoryTokenStore, OAuthToken
-from teamagent.mcp_gateway.server import SEARCH_TOOL_NAME, USER_CONTEXT_KEY, dispatch_tool
+from teamagent.mcp_gateway.server import SEARCH_TOOL_NAME, dispatch_tool
 from teamagent.orchestrator.tools import ToolSpec
 from teamagent.skills.base import SkillContext
 from teamagent.skills.mail_to_internal_context.skill import MailToInternalContextSkill
+from tests.caller_claim_testkit import TEST_SLACK_USER_ID, make_verifier, sign_arguments
 
 OWNER = "s-komata@vectorinc.co.jp"
 GROUPS = ["vectorinc.co.jp", "sales"]
+DM = "D0123456789"
+
+
+async def _resolve_owner(slack_user_id: str) -> Any:
+    from teamagent.identity import ResolvedIdentity
+
+    if slack_user_id != TEST_SLACK_USER_ID:
+        return None
+    return ResolvedIdentity(slack_user_id=slack_user_id, email=OWNER)
+
+
+def _signed_dispatch(by_name: dict[str, Any], tool: str, business: dict[str, Any]) -> Any:
+    """本番と同じく、署名済み claim（本人 DM）と resolver を通して呼ぶ。
+
+    mail_to_internal_context は DM_ONLY_TOOLS（10-01 #495）なので、claim の会話が D… でないと
+    dm_only で止まる。社内検索の RLS 文脈も本番と同じ会社共有グループ経路で作る。
+    """
+    return asyncio.run(
+        dispatch_tool(
+            by_name,
+            tool,
+            sign_arguments(tool, business, channel_id=DM),
+            identity_resolver=_resolve_owner,
+            caller_claim_verifier=make_verifier(),
+            company_shared_groups=frozenset(GROUPS),
+            require_rls=True,
+        )
+    )
+
+
 # メール側にだけ置く文字列。社内検索クエリへ漏れたら G6 違反。
 MAIL_ONLY_TEXT = "件名だけに書いた極秘キャンペーン名"
 
@@ -164,20 +195,12 @@ def test_mcp_dispatch_returns_internal_refs_with_same_rls_context(
     monkeypatch.setattr(GmailClient, "from_user_token", classmethod(_from_user_token))
 
     by_name = _specs_by_name()
-    user_context = {"user_email": OWNER, "user_groups": GROUPS}
 
     out = json.loads(
-        asyncio.run(
-            dispatch_tool(
-                by_name,
-                MailToInternalContextSkill.name,
-                {
-                    "client_name": "森ビル",
-                    "topic_hint": "与件",
-                    USER_CONTEXT_KEY: user_context,
-                },
-                require_rls=True,
-            )
+        _signed_dispatch(
+            by_name,
+            MailToInternalContextSkill.name,
+            {"client_name": "森ビル", "topic_hint": "与件"},
         )[0].text
     )
 
@@ -197,15 +220,8 @@ def test_mcp_dispatch_returns_internal_refs_with_same_rls_context(
     assert search.queries == ["森ビル 与件"]
     assert all(MAIL_ONLY_TEXT not in q for q in search.queries)
 
-    # search tool を同じ _user_context で呼んだときと同じ RLS 文脈で社内検索している。
-    asyncio.run(
-        dispatch_tool(
-            by_name,
-            SEARCH_TOOL_NAME,
-            {"query": "森ビル 与件", USER_CONTEXT_KEY: user_context},
-            require_rls=True,
-        )
-    )
+    # search tool を同じ本人・同じ経路で呼んだときと同じ RLS 文脈で社内検索している。
+    _signed_dispatch(by_name, SEARCH_TOOL_NAME, {"query": "森ビル 与件"})
     (mail_ctx,) = search.retrieve_ctxs
     (search_ctx,) = search.run_ctxs
     for key in ("user_email", "user_groups", "user_role"):
