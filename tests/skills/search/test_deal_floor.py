@@ -109,9 +109,21 @@ def test_intent_and_terms() -> None:
     assert is_deal_intent(Q_ADK)
     assert is_deal_intent("今月決まった案件を教えて")
     assert not is_deal_intent("サラヤのショート動画の提案書")
+    # 社名＋「案件／取引／実績」も決定案件を聞いている（10-06 実機の失敗: 「ADKの案件教えて」）
+    assert is_deal_intent("ADKの案件教えて")
+    assert is_deal_intent("ADKとの取引ってある？")
+    assert is_deal_intent("サンセイアールアンドディの実績")
+    # 社名が無い「案件」だけ・一般語だけでは足さない
+    assert not is_deal_intent("案件の進め方を教えて")
+    assert not is_deal_intent("TikTokの実績を見せて")
     assert deal_query_terms(Q_ADK) == ["ADK"]
     assert deal_query_terms("ＡＤＫ経由のTikTok PR案件") == ["ADK"]  # 全角も・一般語は除く
     assert deal_query_terms("サイバーエージェント経由で受注") == ["サイバーエージェント"]
+    # 漢字の社名は「経由／との／の案件」の直前だけ（10-06 実機: 博報堂経由）
+    assert deal_query_terms("博報堂経由の受注案件ある？") == ["博報堂"]
+    assert deal_query_terms("電通との案件") == ["電通"]
+    assert deal_query_terms("今月の案件を教えて") == []
+    assert is_deal_intent("大広の案件")
 
 
 def test_adk_deal_reaches_rerank_without_naming_the_channel() -> None:
@@ -184,3 +196,15 @@ def test_adapter_query_escapes_terms_and_maps_metadata() -> None:
         pg.search_topic_by_terms(conn, [0.1], topic="案件決定", terms=["x"], embedding_col="e;--")
         == []
     )
+
+
+def test_company_plus_anken_also_reaches_the_deal_posts() -> None:
+    """「ADKの案件教えて」（受注・経由・代理店の語が無い）でも ADK の決定案件が候補に入る。
+
+    変異: _DEAL_WITH_NAME_KEYWORDS の分岐を外すと床が働かず赤。
+    """
+    pg = _DealPg(_corpus())
+    skill, pools = _build(pg)
+    skill.run(input=SearchInput(query="ADKの案件教えて", top_k=5), ctx=SkillContext())
+    assert _pool_has(pools, ADK_MARK)
+    assert pg.term_calls == [{"topic": "案件決定", "terms": ["ADK"]}]

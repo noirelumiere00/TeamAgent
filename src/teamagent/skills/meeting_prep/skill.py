@@ -87,8 +87,10 @@ class MeetingPrepSkill(BaseSkill[MeetingPrepInput, MeetingPrepOutput]):
     description: ClassVar[str] = (
         "Prep report for one of today's external client meetings (商談の準備・アポ前の下調べ): "
         "company overview, recent news, our past deals/contracts and mail with them, and points "
-        "to confirm, each with sources. Use for 次の商談の準備して・14時の〇〇社の準備. "
-        "target = part of the meeting title or the company (empty = next external meeting). "
+        "to confirm, each with sources. Use for 次の商談の準備して・今日の商談の下調べ・"
+        "14時の〇〇社の準備・〇〇との打ち合わせの予習. Call it first; do not ask back for the "
+        "company. target = part of the meeting title or the company (empty = next external "
+        "meeting). "
         "DM only. Return `message` verbatim."
     )
     input_schema: ClassVar[type[BaseModel]] = MeetingPrepInput
