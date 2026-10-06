@@ -3,6 +3,11 @@
 When ``PROPOSAL_JOBS_TABLE`` is unset, all store instances in this process share
 one locked in-memory mapping.  A configured DynamoDB backend never silently
 falls back to memory: losing the durable state boundary must fail loudly.
+
+重複受付の錠（dedup lock）も同じ table の別キー（``dedup_`` で始まる job_id）に置く。
+錠の取得・奪取・返却はすべて条件付き PutItem 1 回（既存の IAM: GetItem/PutItem/UpdateItem
+の範囲・新しい table や GSI は要らない）。同時に 2 本来ても DynamoDB が同じキーへの
+条件付き書込を直列に評価するので、勝つのは 1 本だけになる。
 """
 
 from __future__ import annotations
@@ -20,6 +25,9 @@ _JOB_TTL_SECONDS = 7 * 24 * 60 * 60
 _MAX_RESULT_BYTES = 300 * 1024
 _MEMORY_JOBS: dict[str, dict[str, Any]] = {}
 _MEMORY_JOBS_LOCK = threading.RLock()
+# 錠は job 行と別の mapping に置く（memory 版で「台帳の行数＝ジョブ数」を保つため）。
+_MEMORY_DEDUP_LOCKS: dict[str, dict[str, Any]] = {}
+DEDUP_LOCK_PREFIX = "dedup_"
 
 
 def _utc_now() -> datetime:
@@ -50,6 +58,7 @@ class ProposalJobStore:
         dynamodb_client: Any | None = None,
         clock: Callable[[], datetime] = _utc_now,
         memory: dict[str, dict[str, Any]] | None = None,
+        dedup_memory: dict[str, dict[str, Any]] | None = None,
     ) -> None:
         self._table_name = (
             os.environ.get("PROPOSAL_JOBS_TABLE", "").strip()
@@ -62,6 +71,11 @@ class ProposalJobStore:
         self._clock = clock
         self._memory = _MEMORY_JOBS if memory is None else memory
         self._memory_lock = _MEMORY_JOBS_LOCK if memory is None else threading.RLock()
+        # 専用 memory を渡されたら錠も専用にする（別の台帳のジョブを指す錠を共有しない）。
+        if dedup_memory is not None:
+            self._dedup_memory = dedup_memory
+        else:
+            self._dedup_memory = _MEMORY_DEDUP_LOCKS if memory is None else {}
 
     @property
     def uses_dynamodb(self) -> bool:
@@ -121,6 +135,100 @@ class ProposalJobStore:
             },
             ConditionExpression="attribute_not_exists(job_id)",
         )
+
+    # ------------------------------------------------------------------
+    # dedup lock（同じ依頼の二重受付をはじく錠）
+    # ------------------------------------------------------------------
+
+    def get_dedup_lock(self, lock_id: str) -> dict[str, Any] | None:
+        """錠を強い整合性で読む。無ければ None。返り値は target_job_id / claimed_at。"""
+
+        _require_dedup_lock_id(lock_id)
+        if not self.uses_dynamodb:
+            with self._memory_lock:
+                cached = self._dedup_memory.get(lock_id)
+                return copy.deepcopy(cached) if cached is not None else None
+
+        response = self._client().get_item(
+            TableName=self._table_name,
+            Key={"job_id": {"S": lock_id}},
+            ConsistentRead=True,
+        )
+        item = response.get("Item")
+        if not isinstance(item, dict) or not item:
+            return None
+
+        def string_value(name: str) -> str:
+            value = item.get(name)
+            raw = value.get("S") if isinstance(value, dict) else None
+            return raw if isinstance(raw, str) else ""
+
+        return {
+            "lock_id": lock_id,
+            "target_job_id": string_value("target_job_id"),
+            "claimed_at": string_value("claimed_at"),
+        }
+
+    def put_dedup_lock(
+        self,
+        lock_id: str,
+        target_job_id: str,
+        *,
+        expected_target: str | None,
+    ) -> bool:
+        """錠を条件付きで書く（取得・奪取・返却の共通口）。
+
+        ``expected_target=None`` は「錠がまだ無いときだけ」、文字列なら「錠がその job を
+        指しているときだけ」書く（楽観ロック）。条件に負けたら False（例外にしない）。
+        ``target_job_id=""`` は返却（その錠を次の依頼が奪ってよい印）。
+        """
+
+        _require_dedup_lock_id(lock_id)
+        now = self._clock()
+        if now.tzinfo is None:
+            now = now.replace(tzinfo=UTC)
+        now = now.astimezone(UTC)
+        now_text = _isoformat(now)
+        expires_at = int(now.timestamp()) + _JOB_TTL_SECONDS
+        if not self.uses_dynamodb:
+            with self._memory_lock:
+                current = self._dedup_memory.get(lock_id)
+                if expected_target is None:
+                    if current is not None:
+                        return False
+                elif current is None or current.get("target_job_id") != expected_target:
+                    return False
+                self._dedup_memory[lock_id] = {
+                    "lock_id": lock_id,
+                    "target_job_id": target_job_id,
+                    "claimed_at": now_text,
+                }
+                return True
+
+        arguments: dict[str, Any] = {
+            "TableName": self._table_name,
+            "Item": {
+                "job_id": {"S": lock_id},
+                "kind": {"S": "dedup_lock"},
+                "target_job_id": {"S": target_job_id},
+                "claimed_at": {"S": now_text},
+                "updated_at": {"S": now_text},
+                "expires_at": {"N": str(expires_at)},
+            },
+        }
+        if expected_target is None:
+            arguments["ConditionExpression"] = "attribute_not_exists(job_id)"
+        else:
+            arguments["ConditionExpression"] = "#target_job_id = :expected_target"
+            arguments["ExpressionAttributeNames"] = {"#target_job_id": "target_job_id"}
+            arguments["ExpressionAttributeValues"] = {":expected_target": {"S": expected_target}}
+        try:
+            self._client().put_item(**arguments)
+            return True
+        except Exception as exc:
+            if _is_conditional_failure(exc):
+                return False
+            raise
 
     def get_job(self, job_id: str) -> dict[str, Any] | None:
         """Read one job row using a strongly consistent DynamoDB read."""
@@ -358,8 +466,14 @@ class ProposalJobStore:
             raise
 
 
+def _require_dedup_lock_id(lock_id: str) -> None:
+    # job 行（pb_/omy_/clp_）を錠として上書きしない。
+    if not lock_id.startswith(DEDUP_LOCK_PREFIX):
+        raise ValueError("dedup lock id must start with the dedup prefix")
+
+
 def new_proposal_job_id() -> str:
     return f"pb_{uuid.uuid4().hex}"
 
 
-__all__ = ["ProposalJobStore", "new_proposal_job_id"]
+__all__ = ["DEDUP_LOCK_PREFIX", "ProposalJobStore", "new_proposal_job_id"]

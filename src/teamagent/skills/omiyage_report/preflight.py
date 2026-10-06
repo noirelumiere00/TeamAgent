@@ -271,6 +271,29 @@ def build_accepted_message(
     )
 
 
+def build_deduplicated_message(input: OmiyageReportSubmitInput, existing_status: str) -> str:
+    """同じ内容の依頼を受付済みだったときの定型文（LLM を通さない決定論文言）。
+
+    新しく作らないこと・届く先は最初に受け付けた依頼の行き先であることを言い切る。
+    """
+
+    subject = (
+        f"お土産資料（対象: {input.brand} / 競合: {'、'.join(input.competitors)} / "
+        f"一般KW: {'、'.join(input.keywords)}）"
+    )
+    if existing_status == "done":
+        return (
+            f"同じ内容の{subject}はさきほど作成が終わり、最初に受け付けた依頼の行き先へ"
+            "添付済みです。二重には作りません。"
+            "同じ内容で作り直す場合は、しばらくしてからもう一度お申し付けください。"
+        )
+    return (
+        f"同じ内容の{subject}はすでに受け付けて作成中です。二重には作りません。"
+        "完成したPPTXは最初に受け付けた依頼の行き先へ添付します。"
+        "途中経過は『まだ？』で確認できます。"
+    )
+
+
 def build_busy_message(*, running: int, position: int, wait_minutes: int) -> str:
     """同時実行の上限で受け付けられなかったときの定型文（LLM を通さない決定論文言）。
 
