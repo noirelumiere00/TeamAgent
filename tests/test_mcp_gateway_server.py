@@ -19,6 +19,7 @@ from pydantic import BaseModel
 
 from teamagent.identity import ResolvedIdentity
 from teamagent.mcp_gateway import server as mcp_server
+from teamagent.mcp_gateway import usage_sources
 from teamagent.mcp_gateway.server import (
     SEARCH_TOOL_NAME,
     USER_CONTEXT_KEY,
@@ -28,6 +29,7 @@ from teamagent.mcp_gateway.server import (
 )
 from teamagent.orchestrator.tools import ToolSpec
 from teamagent.skills.base import BaseSkill, SkillContext
+from teamagent.skills.search.schema import SearchHitOut, SearchOutput
 from tests.caller_claim_testkit import (
     TEST_SLACK_USER_ID,
     make_verifier,
@@ -323,6 +325,89 @@ async def test_dispatch_records_search_query_and_trusted_slack_user(
     assert event.via == "mcp"
     assert not hasattr(event, "mail_body")
     assert not mcp_server._usage_record_tasks
+
+
+async def _member_resolver(slack_user_id: str) -> ResolvedIdentity | None:
+    return ResolvedIdentity(slack_user_id=slack_user_id, email="member@vectorinc.co.jp")
+
+
+class _UsageSourcesSearchSkill(BaseSkill[_UsageSearchInput, SearchOutput]):
+    """本物の SearchOutput（source_uri は model_dump から外れる内部項目）を返す search。"""
+
+    name: ClassVar[str] = SEARCH_TOOL_NAME
+    description: ClassVar[str] = "usage 出典記録テスト用フェイク検索。"
+    input_schema: ClassVar[type[BaseModel]] = _UsageSearchInput
+    output_schema: ClassVar[type[BaseModel]] = SearchOutput
+
+    hits: ClassVar[list[SearchHitOut]] = [
+        SearchHitOut(
+            chunk_id=7,
+            content="社外秘の本文",
+            score=0.8,
+            source_type="gdrive",
+            source_uri="gdrive://1FileIdAbc",
+            url="https://drive.google.com/file/d/1FileIdAbc/view",
+        )
+    ]
+
+    def run(self, input: _UsageSearchInput, ctx: SkillContext) -> SearchOutput:
+        return SearchOutput(answer="回答12345", hits=list(self.hits), total_cost_usd=0.0)
+
+
+async def test_dispatch_records_search_source_ids_and_answer_chars_in_metadata(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    recorder = _FakeUsageRecorder()
+    _install_usage_recorder(monkeypatch, recorder)
+    by_name = {SEARCH_TOOL_NAME: ToolSpec(SEARCH_TOOL_NAME, "fake", _UsageSourcesSearchSkill)}
+
+    out = _parse(
+        await dispatch_tool(
+            by_name,
+            SEARCH_TOOL_NAME,
+            sign_arguments(SEARCH_TOOL_NAME, {"query": "事例"}),
+            identity_resolver=_member_resolver,
+            caller_claim_verifier=make_verifier(),
+        )
+    )
+    assert out["answer"] == "回答12345"
+    await _drain_usage_tasks()
+
+    event = recorder.events[0]
+    assert event.metadata == {
+        "source_ids": [{"external_id": "1FileIdAbc", "source_type": "gdrive"}],
+        "answer_chars": len("回答12345"),
+    }
+    assert "社外秘" not in json.dumps(event.metadata, ensure_ascii=False)
+    assert "https" not in json.dumps(event.metadata, ensure_ascii=False)
+
+
+async def test_dispatch_records_usage_even_if_source_extraction_breaks(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    recorder = _FakeUsageRecorder()
+    _install_usage_recorder(monkeypatch, recorder)
+
+    def _explode(item: Any) -> Any:
+        raise RuntimeError("unexpected hit shape")
+
+    # 取り出しの途中で想定外の例外（スキルは成功している）
+    monkeypatch.setattr(usage_sources, "_source_entry", _explode)
+    by_name = {SEARCH_TOOL_NAME: ToolSpec(SEARCH_TOOL_NAME, "fake", _UsageSourcesSearchSkill)}
+
+    out = await dispatch_tool(
+        by_name,
+        SEARCH_TOOL_NAME,
+        sign_arguments(SEARCH_TOOL_NAME, {"query": "事例"}),
+        identity_resolver=_member_resolver,
+        caller_claim_verifier=make_verifier(),
+    )
+    await _drain_usage_tasks()
+
+    assert _parse(out)["answer"] == "回答12345"  # 応答は変わらない
+    assert len(recorder.events) == 1
+    assert recorder.events[0].status == "ok"
+    assert recorder.events[0].metadata is None
 
 
 async def test_dispatch_without_query_records_none_and_ignores_legacy_slack_id(

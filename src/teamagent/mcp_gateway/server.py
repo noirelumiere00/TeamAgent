@@ -56,6 +56,7 @@ from teamagent.mcp_gateway.caller_claim import (
     VerifiedCallerClaim,
 )
 from teamagent.mcp_gateway.personal_memory import PERSONAL_MEMORY_TOOL_NAMES
+from teamagent.mcp_gateway.usage_sources import source_usage_metadata
 from teamagent.orchestrator.tools import ToolSpec
 from teamagent.runtime.usage_recorder import UsageEvent, UsageRecorder
 from teamagent.skills._shared.connect_intent import (
@@ -160,8 +161,12 @@ def _record_usage(
     skill_args: dict[str, Any],
     status: str = "ok",
     error_code: str | None = None,
+    metadata: dict[str, Any] | None = None,
 ) -> None:
-    """MCP 利用を非同期記録へ渡す。入力本文は非空 ``query`` だけを採る。"""
+    """MCP 利用を非同期記録へ渡す。入力本文は非空 ``query`` だけを採る。
+
+    ``metadata`` は本文を含まない付帯情報だけ（``usage_sources.source_usage_metadata``）。
+    """
     if _envflag("USAGE_EVENTS_DISABLE"):
         return
 
@@ -182,6 +187,7 @@ def _record_usage(
             query_chars=len(query_text) if query_text is not None else None,
             query_text=query_text,
             via="mcp",
+            metadata=dict(metadata) if metadata else None,
         )
         # singleton 初期化と DB 書込を task 内へ送り、dispatch は完了を await しない。
         loop = asyncio.get_running_loop()
@@ -1222,6 +1228,9 @@ async def dispatch_tool(
             record_usage=_record_usage,
             loop=asyncio.get_running_loop(),
         )
+    # 出典 ID（上位 5 件）と回答の文字数（search 系だけ・本文/URL は残さない・例外を出さない）。
+    # source_uri は model_dump から外れる内部項目なので、dump 前の出力オブジェクトから取る。
+    usage_metadata = source_usage_metadata(name, output)
     try:
         data = output.model_dump() if hasattr(output, "model_dump") else {"result": str(output)}
     finally:
@@ -1257,6 +1266,7 @@ async def dispatch_tool(
         cost_usd=tool_cost_usd,
         latency_ms=_elapsed_ms,
         skill_args=skill_args,
+        metadata=usage_metadata,
     )
     # ── 直接投稿（USE_DIRECT_SUMMARY_POST 既定OFF＝素通り・mcp_gateway/direct_summary.py）──
     # 対象なら slack_summary を mcp が依頼元の DM へ直接出し、Aico には「投稿済み」だけを返す

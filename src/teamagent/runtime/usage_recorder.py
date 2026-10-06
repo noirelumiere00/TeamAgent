@@ -6,7 +6,8 @@ dispatch の出口で1リクエスト分のメタ（skill / cost / latency / sta
 - **イベントループを塞がない**: 同期 DB 書込は ``run_in_executor`` でワーカースレッドへ逃がす。
 - **二重書込に安全**: ``ON CONFLICT (request_id) DO NOTHING``（リトライ/再入で重複しない）。
 - **本文/PII は原則持ち込まない**: ユーザー裁定済みの query_text のみ例外として
-  最大 2000 文字を保存する。回答・トークン等は列に入れない。
+  最大 2000 文字を保存する。回答・トークン等は列に入れない。``metadata`` には本文を
+  含まない小さな付帯情報（出典 ID・回答の文字数など）だけを入れる。
 
 書込ロール: ``teamagent_app``（migration 0007 で usage_events に INSERT のみ許可）。
 ``app.user_role`` は立てない＝admin でない＝SELECT 不可（書くだけ）。
@@ -15,6 +16,7 @@ dispatch の出口で1リクエスト分のメタ（skill / cost / latency / sta
 from __future__ import annotations
 
 import asyncio
+import json
 from dataclasses import asdict, dataclass
 from typing import Any
 
@@ -55,19 +57,33 @@ class UsageEvent:
     query_chars: int | None = None
     query_text: str | None = None
     via: str | None = None
+    # 本文を含まない小さな付帯情報だけ（例: 出典 ID 上位 5 件・回答の文字数）。
+    # 列は 0007 からある ``metadata JSONB NOT NULL DEFAULT '{}'``。
+    metadata: dict[str, Any] | None = None
 
 
 _INSERT_SQL = """
 INSERT INTO usage_events
     (request_id, user_email, user_id, skill, cost_usd, latency_ms,
      input_tokens, output_tokens, status, error_code, throttle_retries,
-     query_chars, query_text, via)
+     query_chars, query_text, via, metadata)
 VALUES
     (%(request_id)s, %(user_email)s, %(user_id)s, %(skill)s, %(cost_usd)s, %(latency_ms)s,
      %(input_tokens)s, %(output_tokens)s, %(status)s, %(error_code)s, %(throttle_retries)s,
-     %(query_chars)s, %(query_text)s, %(via)s)
+     %(query_chars)s, %(query_text)s, %(via)s, %(metadata)s::jsonb)
 ON CONFLICT (request_id) DO NOTHING
 """
+
+
+def _metadata_json(metadata: dict[str, Any] | None) -> str:
+    """metadata を JSON 文字列へ。直列化できなければ空（行そのものは必ず書く）。"""
+    if not metadata:
+        return "{}"
+    try:
+        return json.dumps(metadata, ensure_ascii=False, separators=(",", ":"))
+    except (TypeError, ValueError):
+        logger.warning("usage_event_metadata_dropped")
+        return "{}"
 
 
 class UsageRecorder:
@@ -87,6 +103,7 @@ class UsageRecorder:
             params["status"] = "ok"  # 未知 status は ok に倒す（CHECK 制約違反で全行落とさない）
         if params["query_text"] is not None:
             params["query_text"] = params["query_text"][:2000]
+        params["metadata"] = _metadata_json(event.metadata)
         with self._pg.connection(app_role=self._app_role) as conn:
             with conn.cursor() as cur:
                 cur.execute(_INSERT_SQL, params)
