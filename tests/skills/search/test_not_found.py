@@ -442,3 +442,44 @@ def test_real_hits_seen_on_prod_are_not_declared_missing(query: str, score: floa
     out = _prod_skill(bedrock, _pg(hits)).run(SearchInput(query=query), SkillContext(metadata={}))
     assert out.found is True
     bedrock.converse.assert_called_once()
+
+
+def test_summary_uses_only_the_named_clients_hits() -> None:
+    """名指しの取引先があれば、要約器には他社の資料を渡さない（2026-10-06 本番事故の再現）。
+
+    事故: 紅茶花伝（日本コカ・コーラ）を聞いたのに、他社（東洋水産・日立）の提案書の数字が
+    根拠のように混ざった。
+    """
+    bedrock = MagicMock()
+    bedrock.converse.return_value = _converse()
+    bedrock.rerank.return_value = _rerank([0.9, 0.85, 0.8])
+    hits = [
+        _hit(0.9, chunk_id=1, content="紅茶花伝サンリオの施策メモ", client_name="日本コカ・コーラ"),
+        _hit(0.88, chunk_id=2, content="東洋水産の予算100万円", client_name="東洋水産"),
+        _hit(0.87, chunk_id=3, content="日立の投稿数20件", client_name="日立ソリューションズ"),
+    ]
+    out = _prod_skill(
+        bedrock, _pg(hits, vocab=["日本コカ・コーラ", "東洋水産", "日立ソリューションズ"])
+    ).run(
+        SearchInput(query="日本コカ・コーラの紅茶花伝のショート動画事例"),
+        SkillContext(metadata={}),
+    )
+    assert out.found is True
+    sent = str(bedrock.converse.call_args)
+    assert "紅茶花伝サンリオの施策メモ" in sent
+    assert "東洋水産の予算100万円" not in sent and "日立の投稿数20件" not in sent
+
+
+def test_summary_client_scope_can_be_turned_off(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("SEARCH_SUMMARY_CLIENT_SCOPE", "false")
+    bedrock = MagicMock()
+    bedrock.converse.return_value = _converse()
+    bedrock.rerank.return_value = _rerank([0.9, 0.85])
+    hits = [
+        _hit(0.9, chunk_id=1, content="紅茶花伝の施策メモ", client_name="日本コカ・コーラ"),
+        _hit(0.88, chunk_id=2, content="東洋水産の予算100万円", client_name="東洋水産"),
+    ]
+    _prod_skill(bedrock, _pg(hits, vocab=["日本コカ・コーラ", "東洋水産"])).run(
+        SearchInput(query="日本コカ・コーラの事例"), SkillContext(metadata={})
+    )
+    assert "東洋水産の予算100万円" in str(bedrock.converse.call_args)
