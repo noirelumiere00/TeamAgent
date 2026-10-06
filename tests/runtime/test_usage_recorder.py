@@ -6,6 +6,7 @@ disabled で no-op・書込ロールは teamagent_app（admin GUC を立てな�
 
 from __future__ import annotations
 
+import json
 from contextlib import contextmanager
 from typing import Any
 
@@ -136,3 +137,39 @@ async def test_record_disabled_is_noop() -> None:
     await rec.record(UsageEvent(request_id="r5", skill="x"))
     assert pg.executed == []
     assert pg.calls == []
+
+
+def test_write_serializes_metadata_as_jsonb() -> None:
+    pg = _FakePg()
+    rec = UsageRecorder(pg)
+    rec.write(
+        UsageEvent(
+            request_id="r-meta",
+            skill="search",
+            metadata={
+                "source_ids": [{"external_id": "F1", "source_type": "gdrive"}],
+                "answer_chars": 12,
+            },
+        )
+    )
+    sql, params = pg.executed[-1]
+    assert "metadata" in sql and "%(metadata)s::jsonb" in sql
+    assert json.loads(params["metadata"]) == {
+        "source_ids": [{"external_id": "F1", "source_type": "gdrive"}],
+        "answer_chars": 12,
+    }
+
+
+def test_write_without_metadata_writes_empty_object() -> None:
+    pg = _FakePg()
+    UsageRecorder(pg).write(UsageEvent(request_id="r-nometa", skill="x"))
+    _sql, params = pg.executed[-1]
+    assert params["metadata"] == "{}"
+
+
+def test_unserializable_metadata_still_writes_the_row() -> None:
+    pg = _FakePg()
+    UsageRecorder(pg).write(UsageEvent(request_id="r-bad", skill="x", metadata={"bad": object()}))
+    _sql, params = pg.executed[-1]
+    assert params["request_id"] == "r-bad"
+    assert params["metadata"] == "{}"
