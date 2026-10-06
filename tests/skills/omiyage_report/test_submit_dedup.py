@@ -71,7 +71,9 @@ class _FakeDynamo:
         with self._lock:
             current = self.items.get(key)
             condition = kwargs.get("ConditionExpression")
-            if condition == "attribute_not_exists(job_id)":
+            if condition is None:
+                pass  # 条件なしの PutItem は本物と同じく黙って上書きする
+            elif condition == "attribute_not_exists(job_id)":
                 if current is not None:
                     raise _ConditionalCheckFailedError
             elif condition == "#target_job_id = :expected_target":
