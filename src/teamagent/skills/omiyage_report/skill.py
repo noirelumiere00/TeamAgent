@@ -58,6 +58,12 @@ from teamagent.skills.omiyage_report.deck_plan import (
     build_deck_plan,
     top5_candidates,
 )
+from teamagent.skills.omiyage_report.dedup import (
+    DedupOutcome,
+    OmiyageSubmitDedup,
+    dedup_lock_id,
+    normalize_text,
+)
 from teamagent.skills.omiyage_report.fmt.build import build_delivery_comment
 from teamagent.skills.omiyage_report.fmt.editable import EDIT_MARKER
 from teamagent.skills.omiyage_report.input_check import (
@@ -82,6 +88,7 @@ from teamagent.skills.omiyage_report.preflight import (
     PreflightResult,
     build_accepted_message,
     build_busy_message,
+    build_deduplicated_message,
     build_needs_input_message,
     estimate_duration,
     run_preflight,
@@ -131,6 +138,8 @@ _RESULT_INVALID = "RESULT_INVALID"
 _RETRY_SECONDS_DEFAULT = 60
 _HEARTBEAT_SECONDS_DEFAULT = 30
 _STALE_SECONDS_DEFAULT = 180
+# 同じ利用者・同じ内容の依頼を 1 本にまとめる時間（分）。0 で重複判定を止める。
+_DEDUP_MINUTES_DEFAULT = 30
 
 # 同時に走らせてよいお土産資料ジョブの本数。1 ジョブが検索軸ごとの実スクレイプ＋
 # 動画DL＋Bedrock 視覚推論＋PPTX レンダを daemon thread で回すため、無制限だと
@@ -218,6 +227,15 @@ def _configured_stale_seconds() -> int:
         maximum=86_400,
     )
     return max(configured, _configured_heartbeat_seconds() * 3)
+
+
+def _configured_dedup_seconds() -> int:
+    return 60 * _envint(
+        "OMIYAGE_SUBMIT_DEDUP_MINUTES",
+        _DEDUP_MINUTES_DEFAULT,
+        minimum=0,
+        maximum=24 * 60,
+    )
 
 
 def configured_search_depth() -> int:
@@ -519,8 +537,19 @@ class OmiyageReportSubmitSkill(BaseSkill[OmiyageReportSubmitInput, OmiyageReport
         admission: JobAdmission | None = None,
         competitor_checker: _CompetitorChecker | None = None,
         relevance_checker: _RelevanceChecker | None = None,
+        dedup_seconds: int | None = None,
+        clock: Callable[[], datetime] = _utc_now,
     ) -> None:
         self._store = store or ProposalJobStore()
+        self._dedup = OmiyageSubmitDedup(
+            self._store,
+            window_seconds=(
+                _configured_dedup_seconds() if dedup_seconds is None else max(0, dedup_seconds)
+            ),
+            stale_seconds=_configured_stale_seconds(),
+            job_kind=OMIYAGE_JOB_KIND,
+            clock=clock,
+        )
         # None のままにして「呼び出し時点の共有インスタンス」を見る（reset_job_admission
         # をテストが後から呼んでも効くようにする）。
         self._admission_override = admission
@@ -614,12 +643,32 @@ class OmiyageReportSubmitSkill(BaseSkill[OmiyageReportSubmitInput, OmiyageReport
                 message=build_needs_input_message(input, preflight),
             )
 
+        estimate = self._duration_estimate(input)
+        job_id = new_omiyage_job_id()
+        # 同じ利用者・同じ内容の依頼が作成中（or 直近に受付済み）なら新しく作らない。
+        # アドミッションより前に見る（重複は枠を使わず、順番待ちにもしない）。
+        dedup = self._claim_dedup(input, ctx, job_id, log)
+        if dedup.duplicate_of:
+            log.info(
+                "omiyage_report_deduplicated",
+                job_id=dedup.duplicate_of,
+                existing_status=dedup.duplicate_status,
+            )
+            return OmiyageReportSubmitOutput(
+                status="queued",
+                job_id=dedup.duplicate_of,
+                retry_after_seconds=self._retry_after_seconds,
+                message=build_deduplicated_message(input, dedup.duplicate_status),
+                deduplicated=True,
+            )
+
         # 入口で走行本数を絞る。**ジョブを作る前**に判定するので、順番待ちになった
         # 依頼は台帳にも残らない（status 照会の対象が増えない・掃除も要らない）。
-        estimate = self._duration_estimate(input)
         waiter_key = ctx.user_id or ctx.request_id
         admission = self._admission
         if not admission.try_acquire(eta_minutes=estimate.minutes, waiter_key=waiter_key):
+            # ジョブを作らないので錠も返す（枠が空いてからの再 submit を重複扱いしない）。
+            self._dedup.release(dedup.lock_id, job_id, log)
             busy = admission.busy_info(waiter_key, fallback_eta_minutes=estimate.minutes)
             log.info(
                 "omiyage_report_admission_rejected",
@@ -642,7 +691,6 @@ class OmiyageReportSubmitSkill(BaseSkill[OmiyageReportSubmitInput, OmiyageReport
         # その場で返す。返し損ねると「実行中 0 本なのに永久に順番待ち」になる。
         handed_off = False
         try:
-            job_id = new_omiyage_job_id()
             request_summary = {
                 "kind": OMIYAGE_JOB_KIND,
                 "request_id": ctx.request_id,
@@ -683,6 +731,7 @@ class OmiyageReportSubmitSkill(BaseSkill[OmiyageReportSubmitInput, OmiyageReport
         finally:
             if not handed_off:
                 admission.release()
+                self._dedup.release(dedup.lock_id, job_id, log)
 
         log.info("omiyage_report_submitted", job_id=job_id)
         return OmiyageReportSubmitOutput(
@@ -690,6 +739,42 @@ class OmiyageReportSubmitSkill(BaseSkill[OmiyageReportSubmitInput, OmiyageReport
             job_id=job_id,
             retry_after_seconds=self._retry_after_seconds,
             message=build_accepted_message(input, estimate),
+        )
+
+    def _claim_dedup(
+        self,
+        input: OmiyageReportSubmitInput,
+        ctx: SkillContext,
+        job_id: str,
+        log: Any,
+    ) -> DedupOutcome:
+        """重複判定の錠を取る。利用者が分からない・無効なら判定しない（従来どおり新規）。"""
+        if not self._dedup.enabled:
+            return DedupOutcome()
+        if not ctx.user_id:
+            log.info("omiyage_report_dedup_skipped", reason="no_user_id")
+            return DedupOutcome()
+        lock_id = self._dedup_lock_id(input, ctx.user_id)
+        return self._dedup.claim(lock_id, job_id, log)
+
+    def _dedup_lock_id(self, input: OmiyageReportSubmitInput, user_id: str) -> str:
+        """利用者＋正規化した入力（ブランド・競合・一般KW・検索軸の集合）から錠の ID を作る。"""
+        # 検索軸は「正規化・ソート済みの入力」から組む（短い英字名に添える語が一般KWの
+        # 先頭で決まるため、元の並び順のままだと並び替えただけで別の軸になってしまう）。
+        canonical = input.model_copy(
+            update={
+                "brand": normalize_text(input.brand),
+                "competitors": sorted({normalize_text(c) for c in input.competitors}),
+                "keywords": sorted({normalize_text(k) for k in input.keywords}),
+                "category": normalize_text(input.category),
+            }
+        )
+        return dedup_lock_id(
+            user_id=user_id,
+            brand=canonical.brand,
+            competitors=canonical.competitors,
+            keywords=canonical.keywords,
+            axes=[(role, query) for role, _label, query in self._axis_plan(canonical)],
         )
 
     def _duration_estimate(self, input: OmiyageReportSubmitInput) -> DurationEstimate:

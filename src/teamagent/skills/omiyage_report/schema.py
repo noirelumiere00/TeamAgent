@@ -123,6 +123,8 @@ class OmiyageReportSubmitOutput(_StrictModel):
 
     ``busy`` = 同時実行の上限に達していて受け付けなかった（失敗ではなく順番待ち）。
     ``retry_after_seconds`` を置いてから同じ入力で再 submit すればよい。
+    ``deduplicated`` = 同じ利用者・同じ内容の依頼が作成中（または直近に受付済み）だったので
+    新しいジョブを作らず、既存の job_id を返した（形は通常の受付と同じ）。
     """
 
     status: Literal["queued", "needs_input", "busy", "failed"]
@@ -131,6 +133,7 @@ class OmiyageReportSubmitOutput(_StrictModel):
     missing: list[MissingField] = Field(default_factory=list)
     suggestions: list[OmiyageSuggestion] = Field(default_factory=list)
     message: str
+    deduplicated: bool = False
 
 
 class OmiyageReportStatusInput(_StrictModel):
