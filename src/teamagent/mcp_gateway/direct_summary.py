@@ -33,6 +33,7 @@ import structlog
 from mcp.types import TextContent
 
 from teamagent.mcp_gateway import detached_jobs
+from teamagent.mcp_gateway.allowlist import email_allowed
 from teamagent.skills._shared.slack_blocks import RichMessage, render_or_none
 from teamagent.skills._shared.slack_mrkdwn import markdown_bold_to_mrkdwn
 
@@ -102,8 +103,8 @@ def decide(
         return None, "unverified"
     email = metadata.get("user_email")
     # 照合するのは resolver が解決した email（_user_context の申告値ではない）。
-    # 空の allowlist は全員拒否。
-    if not isinstance(email, str) or email.strip().lower() not in policy.allowed_emails:
+    # 空の allowlist は全員拒否・`*` は本人確認済みの全員（allowlist.email_allowed）。
+    if not email_allowed(email, policy.allowed_emails):
         return None, "not_allowed"
     destination = detached_jobs.destination_from_claim(verified_caller)
     if destination is None:
