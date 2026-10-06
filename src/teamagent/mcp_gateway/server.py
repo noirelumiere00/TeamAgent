@@ -1276,7 +1276,9 @@ async def dispatch_tool(
                 skill_input=skill_input,
             )
             if direct_status != direct_summary.FAILED:
-                return direct_summary.posted_response(direct_status)
+                return direct_summary.posted_response(
+                    direct_status, deferred=bool(data.get("deferred"))
+                )
     # ── 返却前ミドルウェア（順序契約・v0.3 監査 Step4-(a)）────────────────────
     # (0.5) 返す欄の絞り込み（skill の mcp_relay_fields・None＝全体）: usage 記録（total_cost_usd
     #     を読む）より後、退避・注入より前。Aico に生データを渡さず文面をそのまま返させる。

@@ -1058,7 +1058,7 @@ def test_items_found_reports_connection_live_without_error() -> None:
     assert out.connection == "live"
     assert out.note == (
         "※ スレッドの最新メッセージをメタデータで確認し、あなたの返信が最後のものは除外して"
-        "います（gmail.readonly のみ・本文は読みません）。"
+        "います（読み取りのみ・本文は読みません）。"
     )
 
 
@@ -1121,7 +1121,7 @@ def test_second_stage_hit_is_disclosed_in_the_note() -> None:
     assert len(out.items) == 1
     assert out.error == ""
     assert out.note.startswith("※「花王のメール」では 0 件だったため「花王」で検索し直した")
-    assert "gmail.readonly のみ" in out.note  # 正直ラベリングも消えていない
+    assert "読み取りのみ" in out.note  # 正直ラベリングも消えていない
 
 
 def test_second_stage_miss_is_disclosed_in_the_zero_note() -> None:

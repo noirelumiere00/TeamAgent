@@ -63,13 +63,25 @@ _MAX_FIELD_LEN: Final[int] = 2000
 
 def _scrub_str(s: str) -> str:
     """文字列に対してシークレット/PII マスクと長さ制限をかける。"""
-    for pat in _SECRET_PATTERNS:
-        s = pat.sub("[REDACTED_SECRET]", s)
-    for pat in _PII_PATTERNS:
-        s = pat.sub("[REDACTED_PII]", s)
+    s = redact_secrets_and_pii(s)
     if len(s) > _MAX_FIELD_LEN:
         s = s[:_MAX_FIELD_LEN] + f"...[TRUNCATED:{len(s)} chars]"
     return s
+
+
+def redact_secrets_and_pii(text: str) -> str:
+    """シークレットと PII（メール/電話）を redact する（**長さ制限はしない**）。
+
+    ``scrub_value`` と同じマスクを、2000 文字の hard cap 抜きでかける。メール本文のように
+    PII マスクは要るが上限は呼び出し側の設定（MAIL_REPLY_MAX_BODY_CHARS 等）で決めたい
+    経路はこちらを使う。``scrub_value`` だと設定より先に 2000 文字で切れ、
+    ``...[TRUNCATED:N chars]`` の印まで LLM へ渡ってしまう。
+    """
+    for pat in _SECRET_PATTERNS:
+        text = pat.sub("[REDACTED_SECRET]", text)
+    for pat in _PII_PATTERNS:
+        text = pat.sub("[REDACTED_PII]", text)
+    return text
 
 
 def redact_secrets(text: str) -> str:

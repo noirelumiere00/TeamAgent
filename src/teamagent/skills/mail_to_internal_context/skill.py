@@ -1,6 +1,6 @@
 """mail_to_internal_context Skill 本体（メール×社内ナレッジ横断・読み取り専用）。
 
-営業がクライアントのメールを指すと、本人 OAuth（gmail.readonly）で受信箱を client+期間で
+営業がクライアントのメールを指すと、本人 OAuth（読み取り専用）で受信箱を client+期間で
 限定走査し（**メタデータのみ・本文は読まない**）、対応する社内ナレッジ（Slack スレッド・
 過去提案・営業 FB＝既存 RAG コーパス）を突き合わせて、参照リンクつきで返す。
 「このメール、社内で誰か触れてた?」をチャンネル漁りなしで把握できる、今回の目玉機能。
@@ -10,7 +10,8 @@
   G2 連携必須: TokenStore に本人トークンが無ければ fail-closed。
   G3 生データを返さない: メール側はドメイン/件数/日時のみ（ローカル部・件名・本文は出さない）。
                        社内側の抜粋は scrub_value でマスク＋短縮。
-  G4 readonly 最小スコープ（gmail.readonly）。書込メソッドは呼ばない。
+  G4 読み取り専用: 連携スコープは gmail.modify だが readonly クライアント（書込メソッドは
+     adapter で封鎖）だけを使い、書込メソッドは呼ばない。
   G5 クエリ限定: client_name + 期間で必ず絞る（無差別走査禁止）。
   G6 インジェクション対策: メール本文を LLM に渡さない（メタデータのみ）。社内サマリ生成時も
                           社内ナレッジ抜粋を「資料（データ）」として扱い指示に従わせない。
@@ -75,7 +76,7 @@ class MailToInternalContextSkill(BaseSkill[MailInternalContextInput, MailInterna
 
     name: ClassVar[str] = "mail_to_internal_context"
     description: ClassVar[str] = (
-        "本人の受信箱（gmail.readonly・メタデータのみ）で指定クライアントのメールを確認し、"
+        "本人の受信箱（読み取りのみ・メタデータのみ）で指定クライアントのメールを確認し、"
         "対応する社内のSlackスレッド・過去提案・営業FBを突き合わせて参照リンクつきで返す。"
         "『このメール、社内で何か話してた?』に答える。本人が利用するには"
         + CONNECT_SUFFIX
