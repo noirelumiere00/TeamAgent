@@ -27,10 +27,13 @@ from __future__ import annotations
 import asyncio
 import re
 import time
+import unicodedata
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 from typing import Any
+from urllib.parse import parse_qs, urlsplit
 
 import structlog
 from slack_sdk.web.async_client import AsyncWebClient
@@ -76,6 +79,7 @@ class SlackSearchMatch:
     # 一致したメッセージの添付ファイル名（応答の ``files[].name``・無ければ ``title``）。
     # 応答に files が無い一致は空タプル（推測で埋めない）。
     file_names: tuple[str, ...] = ()
+    thread_ts: str = ""
 
 
 @dataclass(frozen=True)
@@ -91,6 +95,7 @@ class SlackSearchRead:
     matches: tuple[SlackSearchMatch, ...] = ()
     total: int = 0
     error: str = ""
+    truncated: bool = False
 
 
 def _opt_bool(value: Any) -> bool | None:
@@ -132,6 +137,10 @@ def _search_match_from_raw(m: dict[str, Any]) -> SlackSearchMatch:
         channel_is_im=_opt_bool(ch.get("is_im")),
         channel_is_group=_opt_bool(ch.get("is_group")),
         file_names=_file_names_from_raw(m),
+        thread_ts=str(
+            m.get("thread_ts")
+            or (parse_qs(urlsplit(str(m.get("permalink") or "")).query).get("thread_ts") or [""])[0]
+        ),
     )
 
 
@@ -146,6 +155,22 @@ class SlackThreadRead:
 
     messages: tuple[SlackMessage, ...] = ()
     error: str = ""
+    truncated: bool = False
+
+
+@dataclass(frozen=True)
+class SlackChannelResolution:
+    """検索から確実に識別できた会話だけを返す。未知の公開範囲は非公開扱い。"""
+
+    channel_id: str = ""
+    is_public: bool = False
+    error: str = ""
+
+
+def normalize_channel_name(name: str) -> str:
+    """全半角・大小文字と利用者の「〇〇のチャンネル」表記を揃える。"""
+    name = unicodedata.normalize("NFKC", name).strip().lower().lstrip("#")
+    return re.sub(r"(?:の)?チャンネル$", "", name).strip()
 
 
 def _slack_error_code(exc: BaseException) -> str:
@@ -186,7 +211,7 @@ class SlackUserReader:
     def __init__(self, xoxp: str, *, client: AsyncWebClient | None = None) -> None:
         if not xoxp or not xoxp.strip():
             raise ValueError("xoxp が空です（本人 Slack 未連携）")
-        self._client = client or AsyncWebClient(token=xoxp)
+        self._client = client or AsyncWebClient(token=xoxp, timeout=15, retry_handlers=[])
         # user_id -> (表示名 or None, 有効期限 monotonic 秒)。インスタンス単位
         # （＝1 ユーザーの xoxp 単位）に閉じる。他人のトークンの結果と混ぜない。
         self._name_cache: dict[str, tuple[str | None, float]] = {}
@@ -302,6 +327,165 @@ class SlackUserReader:
         )
         return SlackThreadRead(messages=msgs)
 
+    def resolve_channel_checked(self, name: str, request_id: str) -> SlackChannelResolution:
+        """現在の scope で in:#名前 を検索する（list の read scopes は未付与）。
+
+        検索に投稿が無い会話は解決できない。部分一致の候補が複数／取り切れない場合は
+        推測で選ばない。名前を検索演算子として注入できないよう空白・引用符等を拒否する。
+        """
+        name = normalize_channel_name(name)
+        if not name or not re.fullmatch(r"[\w\-]+", name):
+            return SlackChannelResolution(error="bad_target")
+        for query, partial in ((f"in:#{name}", False), (f"in:#{name}*", True)):
+            result = self.search_checked(query, request_id, count=100)
+            if result.error:
+                return SlackChannelResolution(error=result.error)
+            candidates = {
+                m.channel_id: m
+                for m in result.matches
+                if re.fullmatch(r"[CG][A-Za-z0-9]{1,32}", m.channel_id)
+                and (
+                    name in normalize_channel_name(m.channel_name)
+                    if partial
+                    else name == normalize_channel_name(m.channel_name)
+                )
+            }
+            if partial and result.total > len(result.matches):
+                return SlackChannelResolution(error="ambiguous_channel")
+            if len(candidates) > 1:
+                return SlackChannelResolution(error="ambiguous_channel")
+            if candidates:
+                match = next(iter(candidates.values()))
+                return SlackChannelResolution(
+                    channel_id=match.channel_id,
+                    is_public=(
+                        match.channel_id.startswith("C")
+                        and match.channel_is_private is False
+                        and match.channel_is_mpim is False
+                        and match.channel_is_im is not True
+                        and match.channel_is_group is not True
+                    ),
+                )
+        return SlackChannelResolution(error="channel_not_found")
+
+    def read_period_checked(
+        self,
+        channel_id: str,
+        request_id: str,
+        *,
+        oldest: str,
+        latest: str,
+        thread_ts: str = "",
+        max_messages: int = 1000,
+        max_pages: int = 10,
+        deadline: float | None = None,
+    ) -> SlackThreadRead:
+        """期間の本文をページ送りで読む。API・件数・時間は有界、途中失敗は空にしない。
+
+        history/replies とも半開区間 [oldest, latest)。返信取得でも同じ期間を指定する。
+        cursor が無い has_more や循環 cursor は完了と誤認せず truncated として返す。
+        """
+        if not channel_id:
+            return SlackThreadRead(error="bad_target")
+        max_messages = max(1, min(max_messages, 1000))
+        max_pages = max(1, min(max_pages, 10))
+        deadline = deadline if deadline is not None else time.monotonic() + 30
+        messages: dict[str, SlackMessage] = {}
+        cursor = ""
+        seen_cursors: set[str] = set()
+        for _ in range(max_pages):
+            if time.monotonic() >= deadline:
+                return SlackThreadRead(messages=tuple(messages.values()), truncated=True)
+            params: dict[str, Any] = {
+                "channel": channel_id,
+                "oldest": oldest,
+                "latest": latest,
+                "inclusive": True,
+                "limit": min(100, max_messages - len(messages)),
+            }
+            if cursor:
+                params["cursor"] = cursor
+            method: Any = self._client.conversations_history
+            if thread_ts:
+                params["ts"] = thread_ts
+                method = self._client.conversations_replies
+            try:
+
+                async def fetch(method: Any = method, params: dict[str, Any] = params) -> Any:
+                    return await asyncio.wait_for(method(**params), timeout=15)
+
+                resp = _run_sync(fetch)
+                if resp.get("ok") is False:
+                    return SlackThreadRead(error=str(resp.get("error") or "api_error"))
+                raw = resp.get("messages")
+                if not isinstance(raw, list) or any(not isinstance(m, dict) for m in raw):
+                    return SlackThreadRead(error="bad_response")
+                for item in raw:
+                    message = _message_from_raw(item)
+                    if not message.ts or not re.fullmatch(r"\d+\.\d+", message.ts):
+                        return SlackThreadRead(error="bad_response")
+                    if float(oldest) <= float(message.ts) < float(latest):
+                        messages[message.ts] = message
+                    if len(messages) >= max_messages:
+                        break
+                metadata = resp.get("response_metadata") or {}
+                if not isinstance(metadata, dict):
+                    return SlackThreadRead(error="bad_response")
+                next_cursor = str(metadata.get("next_cursor") or "").strip()
+                more = bool(next_cursor or resp.get("has_more"))
+            except Exception as exc:
+                code = _slack_error_code(exc)
+                logger.warning("slack_user_period_failed", request_id=request_id, slack_error=code)
+                return SlackThreadRead(error=code)
+            ordered = tuple(sorted(messages.values(), key=lambda m: float(m.ts)))
+            if not more:
+                return SlackThreadRead(messages=ordered, truncated=len(raw) > params["limit"])
+            if len(messages) >= max_messages or not next_cursor or next_cursor in seen_cursors:
+                return SlackThreadRead(messages=ordered, truncated=True)
+            seen_cursors.add(next_cursor)
+            cursor = next_cursor
+        return SlackThreadRead(
+            messages=tuple(sorted(messages.values(), key=lambda m: float(m.ts))), truncated=True
+        )
+
+    def search_period_checked(
+        self,
+        channel_id: str,
+        request_id: str,
+        *,
+        oldest: str,
+        latest: str,
+        max_pages: int = 10,
+        deadline: float | None = None,
+    ) -> SlackSearchRead:
+        """history に現れない古い親への返信を検索で発見する。抜粋は要約本文に使わない。
+
+        Slack 検索の日付境界・タイムゾーン差を避けるため前後1日を検索し、呼び出し側で
+        ts を期間に絞る。API 予算は最大10ページ・1000件。
+        """
+        after = (datetime.fromtimestamp(float(oldest), UTC) - timedelta(days=1)).date()
+        before = (datetime.fromtimestamp(float(latest), UTC) + timedelta(days=1)).date()
+        query = f"in:{channel_id} after:{after} before:{before}"
+        deadline = deadline if deadline is not None else time.monotonic() + 30
+        matches: dict[str, SlackSearchMatch] = {}
+        for page in range(1, max(1, min(max_pages, 10)) + 1):
+            if time.monotonic() >= deadline:
+                return SlackSearchRead(matches=tuple(matches.values()), truncated=True)
+            result = self.search_checked(query, request_id, count=100, page=page)
+            if result.error:
+                return SlackSearchRead(error=result.error)
+            previous = len(matches)
+            matches.update((m.ts, m) for m in result.matches)
+            if result.total <= page * 100:
+                return SlackSearchRead(
+                    matches=tuple(matches.values()),
+                    total=result.total,
+                    truncated=len(matches) < result.total,
+                )
+            if len(matches) == previous:
+                break
+        return SlackSearchRead(matches=tuple(matches.values()), total=result.total, truncated=True)
+
     def get_display_name(self, user_id: str, request_id: str) -> str | None:
         """``users.info`` で表示名を 1 件引く（24h TTL キャッシュ・失敗は ``None``）。
 
@@ -395,7 +579,9 @@ class SlackUserReader:
         )
         return out
 
-    def search_checked(self, query: str, request_id: str, *, count: int = 10) -> SlackSearchRead:
+    def search_checked(
+        self, query: str, request_id: str, *, count: int = 10, page: int = 1
+    ) -> SlackSearchRead:
         """search.messages を **error code つき** で呼ぶ（1 ページ・読み取り専用）。
 
         `search` は fail-open で「トークン切れ」「API 障害」「0 件」が全部 `[]` になる。
@@ -407,7 +593,12 @@ class SlackUserReader:
         start = time.perf_counter()
         try:
             resp = _run_sync(
-                lambda: self._client.search_messages(query=query, count=count, sort="timestamp")
+                lambda: asyncio.wait_for(
+                    self._client.search_messages(
+                        query=query, count=count, sort="timestamp", page=page
+                    ),
+                    timeout=15,
+                )
             )
         except Exception as e:  # fail-closed（error code を上へ返す）
             code = _slack_error_code(e)
