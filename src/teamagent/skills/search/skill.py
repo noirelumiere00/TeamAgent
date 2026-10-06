@@ -125,7 +125,7 @@ _PUNT_WHO = (
     r"|[一-龥ァ-ヶー]{1,6}さん)"
 )
 _PUNT_ACT = r"(?:確認|検索|問い合わせ|問合せ|お問い合わせ|聞いて|聞く|探して|探す)"
-_PUNT_ASK = r"(?:お勧め|おすすめ|オススメ|推奨|ください|下さい|してみて|が確実|をお願い)"
+_PUNT_ASK = r"(?:お勧め|おすすめ|オススメ|推奨|ください|下さい|してみて|が確実|をお願い|いただ)"
 _PUNT_LINE_RE = re.compile(rf"{_PUNT_WHO}[^。\n]{{0,30}}{_PUNT_ACT}[^。\n]{{0,20}}{_PUNT_ASK}")
 _PUNT_LEAD_RE = re.compile(rf"(?:以下|次)の(?:方法|手段)[^。\n]{{0,10}}{_PUNT_ASK}")
 _PUNT_BULLET_RE = re.compile(rf"^\s*(?:[-・•*]|\d+[.)．])\s*.*{_PUNT_WHO}.*{_PUNT_ACT}")

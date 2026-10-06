@@ -182,6 +182,8 @@ PUNTING_LLM_TEXT = """資生堂（EDP部勉強会、シーブリーズ案件）
 
 具体的な提案資料ファイルが必要な場合は、高林拓也さんへの確認をお勧めします。
 
+該当案件の担当者に直接確認いただくか、より詳細な検索キーワード（案件名、実施時期など）をご提供いただければ、より正確な情報提供が可能です。
+
 撮影日は先方に確認が必要です。
 予算は 575万円です。"""
 
@@ -191,7 +193,14 @@ def test_answer_never_asks_the_user_to_search_or_ask_internally() -> None:
     out = _skill(_bedrock(PUNTING_LLM_TEXT)).run(
         SearchInput(query="エリクシールの施策実績"), SkillContext(metadata={})
     )
-    for punt in ("営業DB", "担当営業", "Slack内の", "さんへの確認", "お勧めします"):
+    for punt in (
+        "営業DB",
+        "担当営業",
+        "Slack内の",
+        "さんへの確認",
+        "お勧めします",
+        "直接確認いただく",
+    ):
         assert punt not in out.answer
     assert "撮影日は先方に確認が必要です。" in out.answer
     assert "575万円" in out.answer and "資生堂" in out.answer
