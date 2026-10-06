@@ -466,6 +466,7 @@ def plan_vault(clients: dict[str, dict[str, list[dict[str, Any]]]]) -> dict[str,
     doc_path_by_uri: dict[str, str] = {}
     doc_path_by_source_key: dict[tuple[str, str], str] = {}
     doc_ownership_by_path: dict[str, tuple[str, str]] = {}
+    doc_source_key_by_path: dict[str, tuple[str, str]] = {}
 
     def _claim(prefix: str, base: str, *, duplicate_separator: str = "_") -> str:
         """portable filesystem 上で未使用の ``{prefix}/{base}`` 系パスを予約して返す。"""
@@ -517,7 +518,16 @@ def plan_vault(clients: dict[str, dict[str, list[dict[str, Any]]]]) -> dict[str,
                     doc_path_by_uri[uri] = reused_path
                 doc_paths.append(reused_path)
                 continue
-            if uri and uri in doc_path_by_uri:
+            # URL 一致での再利用は「安定 ID が無い資料」の予備。両方に安定 ID があって
+            # 異なるなら別の論理資料（例: ショート動画データベース 1 シートから広告主×案件ごとに
+            # 作る campaign_aggregate 文書は source_uri を共有する）なので、まとめずに別 note にする。
+            distinct_identity = bool(
+                uri
+                and uri in doc_path_by_uri
+                and source_key
+                and doc_source_key_by_path.get(doc_path_by_uri[uri]) not in (None, source_key)
+            )
+            if uri and uri in doc_path_by_uri and not distinct_identity:
                 # 同一資料は既存 note を再利用（複数クライアントから wikilink される）
                 reused_path = doc_path_by_uri[uri]
                 if doc_ownership_by_path[reused_path] != ownership:
@@ -559,8 +569,10 @@ def plan_vault(clients: dict[str, dict[str, list[dict[str, Any]]]]) -> dict[str,
             )
             if source_key:
                 doc_path_by_source_key[source_key] = doc_path
+                doc_source_key_by_path[doc_path] = source_key
             if uri:
-                doc_path_by_uri[uri] = doc_path
+                # 安定 ID 違いで別 note にしたときは、最初の note の対応を残す。
+                doc_path_by_uri.setdefault(uri, doc_path)
             doc_ownership_by_path[doc_path] = ownership
             primary_path = (
                 client_path_by_name.get(primary_client)
