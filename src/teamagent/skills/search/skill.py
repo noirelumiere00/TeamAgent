@@ -49,11 +49,14 @@ from teamagent.skills.search.knowledge_query import (
     extract_query_industry,
     is_campaign_results_intent,
 )
+from teamagent.skills.search.not_found import FoundDecision, build_not_found_answer, judge_found
 from teamagent.skills.search.query_planner import QueryPlanner
 from teamagent.skills.search.rerank import sort_by_budget_proximity, sort_by_client_match
 from teamagent.skills.search.result_guard import (
+    aliases,
     build_result_header,
     find_client_mention,
+    is_self_org_name,
     prefix_header,
 )
 from teamagent.skills.search.schema import SearchHitOut, SearchInput, SearchOutput
@@ -369,6 +372,20 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
         self._client_guard_entities = self._envflag("SEARCH_CLIENT_GUARD_ENTITIES", default="true")
         # クライアント語彙キャッシュの TTL（秒・既定 10 分）。
         self._client_vocab_ttl_s = self._envfloat("SEARCH_CLIENT_VOCAB_TTL_S", 600.0)
+        # 「該当なし」をはっきり言う（2026-10-06・評価セットの該当なし 7 問が 0/7 だった対策）。
+        # 判定は not_found.judge_found（retrieval の実数値とメタだけ・LLM に任せない）。該当なしなら
+        # 要約器を呼ばずに「金庫に該当する資料は見つかりませんでした（近いもの: …）」を返す。
+        # - SEARCH_NOT_FOUND_ANSWER: kill switch（**既定 ON**）。false で判定ごと止まり従来どおり。
+        # - SEARCH_NOT_FOUND_THRESHOLD: top1 の rerank relevance がこれ未満なら該当なし
+        #   （既定 0.25）。
+        #   根拠: gold set 実測（c8cf1e83）で実ヒット 0.50〜0.94・該当なし 0.23/0.12/0.06、
+        #   2 段階しきい値の A/B（3d3d6479）で fallback=0.25 が該当なしを守り 0.15 は退行。
+        #   PoC の境界の実ヒット 0.30 も残す。0 以下で無効。
+        # - SEARCH_NOT_FOUND_SUBJECT_BELOW: 主題語の照合は top1 がこれ未満のときだけ（既定 0.5＝
+        #   gold set の実ヒット最低値。確信の高いヒットを語の表記ゆれで落とさない）。0 以下で無効。
+        self._not_found_answer = self._envflag("SEARCH_NOT_FOUND_ANSWER", default="true")
+        self._not_found_threshold = self._envfloat("SEARCH_NOT_FOUND_THRESHOLD", 0.25)
+        self._not_found_subject_below = self._envfloat("SEARCH_NOT_FOUND_SUBJECT_BELOW", 0.5)
 
     @property
     def embedder(self) -> Any:
@@ -449,9 +466,24 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
 
         # 2. pgvector で類似 chunk を取得（RLS 評価用 user_email を ctx から取得）
         _t = time.perf_counter()
-        probe: dict[str, str] | None = {} if self._result_guard else None
+        probe: dict[str, str] | None = (
+            {} if (self._result_guard or self._not_found_answer) else None
+        )
         hits = self._retrieve(embedding, input, ctx, timings=timings, probe=probe)
         timings["retrieve_ms"] = (time.perf_counter() - _t) * 1000
+
+        # 2-a. 「該当なし」の判定（retrieval の実数値とメタだけ・LLM に任せない）。
+        found_decision = self._judge_found(input.query, hits, probe)
+        found = found_decision.found
+        if not found and self._not_found_answer:
+            log.info(
+                "search_not_found",  # G8: クエリ原文・資料名は出さない
+                request_id=ctx.request_id,
+                reason=found_decision.reason,
+                top_score=hits[0].score if hits else None,
+                hit_count=len(hits),
+                terms=len(found_decision.terms),
+            )
 
         # 2-bis. **回答生成に入る前に**、retrieval の実数値だけで警告ヘッダを確定させる。
         #        LLM に判断させない（プロンプトは守られないことがある／ここは無い）。
@@ -504,7 +536,10 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
         #    回答文は発信元スレッドへ後追い投稿する」。フラグ OFF ならこの分岐は
         #    _should_defer_answer が必ず False を返し、以下は 1 バイトも従来と変わらない。
         deferred = False
-        if input.include_answer and self._should_defer_answer(hits, ctx):
+        if input.include_answer and not found:
+            # 該当なし: 要約器を呼ばない（無いものを有るように書かせない）。近いものは名前だけ。
+            answer, cost_usd = build_not_found_answer(hits), 0.0
+        elif input.include_answer and self._should_defer_answer(hits, ctx):
             answer, cost_usd = self._start_followup_answer(input, hits, file_urls, ctx), 0.0
             deferred = True
         elif input.include_answer:
@@ -525,13 +560,16 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
         #        「別クライアント」の事実が、要約本体を待たずに最初の一報で伝わる。
         #        include_answer=False（/app の fast path）は answer='' の契約を守るため
         #        触らない（/app は include_answer=True の並行フェッチ側でヘッダを受け取る）。
-        if input.include_answer:
+        #        該当なしの定型文には重ねない（「見つかりませんでした」が警告の上位互換）。
+        if input.include_answer and found:
             answer = prefix_header(guard_header, answer)
 
         # 3-ter. 次の一手の提案。ヒットの**実ファイルが解決済み**のときだけ、
         #        「実ファイルをお送りしますか？」を末尾に 1 個だけ足す（受け皿は
         #        knowledge_deliver。その tool が OFF の環境では出来ない約束をしない）。
-        answer = self._append_next_step(answer, query=input.query, file_urls=file_urls)
+        #        該当なしのときは近いものの実ファイルを勧めない。
+        if found:
+            answer = self._append_next_step(answer, query=input.query, file_urls=file_urls)
 
         # 4. 出力スキーマに整形。資料名解決はヒットごとに一度だけ行い、
         #    正準 URL と配信用の内部ファイル名で同じ結果を使う。
@@ -585,6 +623,7 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
             answer=answer,
             hits=search_hits,
             total_cost_usd=cost_usd,
+            found=found,
         )
         total_ms = (time.perf_counter() - run_started) * 1000
         log.info(
@@ -610,6 +649,28 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
             deferred=deferred,
         )
         return output
+
+    def _judge_found(
+        self, query: str, hits: list[SearchHit], probe: dict[str, str] | None
+    ) -> FoundDecision:
+        """金庫のヒットが問いに該当するか（SEARCH_NOT_FOUND_ANSWER=false なら件数だけで決める）。
+
+        名指しの取引先は retrieval が確定させた ``probe['query_client']``（明示 filter_client か
+        既知語彙への語境界つき一致）だけを使う。自社・自社プロダクト名は取引先として扱わない。
+        """
+        if not self._not_found_answer:
+            return FoundDecision(found=bool(hits), reason="disabled")
+        asked = (probe or {}).get("query_client")
+        if asked and is_self_org_name(asked):
+            asked = None
+        return judge_found(
+            query,
+            hits,
+            score_threshold=self._not_found_threshold,
+            subject_check_below=self._not_found_subject_below,
+            query_client=asked,
+            client_aliases=sorted(aliases(asked)) if asked else (),
+        )
 
     def _embed(self, text: str) -> list[float]:
         """クエリを埋め込みベクトルに変換する。

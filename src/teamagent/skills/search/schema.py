@@ -251,3 +251,10 @@ class SearchOutput(BaseModel):
     answer: str = Field(description="Claude による要約（引用付き）")
     hits: list[SearchHitOut] = Field(default_factory=list, description="検索ヒット一覧")
     total_cost_usd: float = Field(ge=0.0, description="この検索実行の概算コスト")
+    found: bool = Field(
+        default=True,
+        description=(
+            "金庫に問いへ該当する資料があったか。False のとき answer は"
+            "「金庫に該当する資料は見つかりませんでした（近いもの: …）」で、hits は参考の近いもの"
+        ),
+    )
