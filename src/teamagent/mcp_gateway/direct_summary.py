@@ -50,6 +50,7 @@ FAILED = "failed"
 
 # Aico に返す文（SOUL の「slack_summary をそのまま返す」規約に乗っても短い一言で終わるようにする）。
 POSTED_TEXT = "結果はこの会話に投稿しました（上のメッセージをご覧ください）。"
+DEFERRED_TEXT = "作成中です。できあがったら、この会話に 1 通でお届けします。"
 UNCERTAIN_TEXT = (
     "結果をこの会話に投稿しました。届いていない場合は、同じ依頼をもう一度送ってください。"
 )
@@ -164,9 +165,17 @@ def deliver(
     return status
 
 
-def posted_response(status: str) -> list[TextContent]:
-    """Aico への返却（中身の無い「投稿済み」）。集計・URL は載せない。"""
-    text = UNCERTAIN_TEXT if status == UNCERTAIN else POSTED_TEXT
+def posted_response(status: str, *, deferred: bool = False) -> list[TextContent]:
+    """Aico への返却（中身の無い「投稿済み」）。集計・URL は載せない。
+
+    ``deferred``（検索上位と動画の中身を 1 通で届ける依頼の「作成中」だけを出した）なら、
+    結果はまだ出ていないので「作成中」と返す（10-06 実機: 作成中の 1 行の直後に Aico が
+    「結果が投稿されました」と返し、まだ届いていない結果を届いたと言った）。
+    """
+    if deferred:
+        text = DEFERRED_TEXT
+    else:
+        text = UNCERTAIN_TEXT if status == UNCERTAIN else POSTED_TEXT
     payload = {
         "status": "posted",
         "delivered": status == POSTED,
@@ -178,6 +187,7 @@ def posted_response(status: str) -> list[TextContent]:
 
 __all__ = [
     "ALLOWED_EMAILS_ENV",
+    "DEFERRED_TEXT",
     "DIRECT_TOOLS",
     "ENABLED_ENV",
     "FAILED",

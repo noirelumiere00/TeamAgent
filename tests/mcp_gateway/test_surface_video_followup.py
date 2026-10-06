@@ -1015,6 +1015,8 @@ async def test_one_shot_direct_post_shows_only_the_wait_line_first(
     skill, _g, _d = _skill(downloader=FakeDownloader(gate=gate))
     out = await _call(_spec(skill))
     assert out["status"] == "posted"
+    # 結果はまだ出ていないので「投稿しました」ではなく「作成中」と Aico に返す（10-06 実機）
+    assert out["slack_summary"] == direct_summary.DEFERRED_TEXT
     assert len(slack.posts) == 1
     first = slack.posts[0]
     assert first["blocks"] is None and "1 通でお届けします" in first["text"]
