@@ -52,6 +52,7 @@ slack_channels:
       案件ごとにクライアント名／商材・代理店・Salesforce の商談 URL・予算・撮影日・納品月が並ぶ。
     include_files: false      # 本文だけ（添付の契約・見積類は取り込まない）
     oldest_days: 365          # 過去 1 年の案件決定
+    history_pages: 10         # 最新 100 件より前も読む（最大 1,000 件・10-06 ADK/博報堂の拾い漏れ）
     extra_metadata:
       topic: "案件決定"
       use_case: "案件の現在地（案件検索 v3）"

@@ -940,6 +940,7 @@ def test_entrypoint_is_readonly_secret_safe_and_environment_allowlisted() -> Non
     assert diagnostic == {
         "TEAMAGENT_CALLER_IDENTITY_TRACE",
         "CONNECT_ADMIN_NAME",
+        "TEAMAGENT_PERSONAL_MEMORY",
     }
     # 秘密値の受け皿にしない（allowlist の意味が消える）。
     assert diagnostic.isdisjoint(passthrough)
@@ -4159,6 +4160,8 @@ def test_every_registered_hook_reports_its_first_invocation() -> None:
         "message_received",
         "before_agent_reply",
         "before_model_resolve",
+        # 本人メモ（M8・2026-10-05）。既定 OFF でも登録はする（バナーと first_fired で発火を観測する）。
+        "before_prompt_build",
         "before_tool_call",
         "before_agent_finalize",
         "reply_payload_sending",

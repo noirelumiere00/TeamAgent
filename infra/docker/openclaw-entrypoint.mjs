@@ -87,6 +87,9 @@ const DIAGNOSTIC_ENV = [
   // 利用者へ案内する管理者名（connect_diagnostics.admin_name() と同じ env 名）。
   // 未設定なら plugin 側の既定にフォールバックするので、無くても壊れない。
   "CONNECT_ADMIN_NAME",
+  // 本人メモ（M8・2026-10-05）の plugin 側スイッチ。値が 1 のときだけ ON（秘密値ではない）。
+  // ここに無いと TD に入れても黙って捨てられ、plugin は常に OFF になる（TRACE と同じ事故の形）。
+  "TEAMAGENT_PERSONAL_MEMORY",
 ];
 
 function fail(message) {

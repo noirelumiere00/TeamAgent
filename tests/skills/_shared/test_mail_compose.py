@@ -130,6 +130,24 @@ def test_build_thread_history_empty_when_only_target() -> None:
     assert build_thread_history(msgs, exclude_id="m0", requester="me@vectorinc.co.jp") == ""
 
 
+def test_build_thread_history_per_msg_chars_above_2000_is_honored() -> None:
+    # MAIL_REPLY_THREAD_PER_MSG_CHARS を 2000 超にしても、マスクの 2000 字切りで潰れない。
+    body = "前" * 2500 + "末尾の依頼"
+    msgs = [
+        _Msg(
+            id="m-old",
+            headers={"From": "alice@ext.com"},
+            payload={"mimeType": "text/plain", "body": {"data": _b64(body)}},
+            internal_date_ms=100,
+        ),
+    ]
+    hist = build_thread_history(
+        msgs, exclude_id="m-new", requester="me@vectorinc.co.jp", per_msg_chars=3000
+    )
+    assert "末尾の依頼" in hist
+    assert "TRUNCATED" not in hist
+
+
 # ── env helpers ──────────────────────────────────────────────────────────────
 
 

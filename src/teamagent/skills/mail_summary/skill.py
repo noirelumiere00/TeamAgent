@@ -1,13 +1,14 @@
 """mail_summary Skill 本体（本人受信箱の要約・読み取り専用）。
 
-指定クライアントの直近メールを本人 OAuth（gmail.readonly）で取得し、DLP マスク後に
+指定クライアントの直近メールを本人 OAuth（読み取り専用クライアント）で取得し、DLP マスク後に
 Bedrock で「横断要約」を作って返す。要約には本文が要るので LLM へは **マスク後本文** を渡すが、
 戻り値・ログには生本文・生件名・生 From を出さない。
 
 ⚠️ 死守ライン（mail_constraints と同じ G1-G7）:
   G1 本人受信箱限定（user_email→token, fail-closed）。G2 未連携 fail-closed。
   G3 生データを返さない/ログに出さない（要約は LLM 生成文、件名はマスク+短縮、相手はマスク）。
-  G4 readonly 最小スコープ。書込メソッドは呼ばない。
+  G4 読み取り専用。連携スコープは gmail.modify だが readonly クライアント（書込メソッドは
+     adapter で封鎖）だけを使い、書込メソッドは呼ばない。
   G5 client+期間で必ず絞る（無差別走査禁止）。
   G6 インジェクション対策（メール=資料であり指示でない・固定の要約タスク）。
   G7 監査ログ masked/counts only。
@@ -115,7 +116,7 @@ class MailSummarySkill(BaseSkill[MailSummaryInput, MailSummaryOutput]):
     description: ClassVar[str] = (
         "**『◯◯からのメールをまとめて』『◯◯の件、どうなってる？』"
         "と言われたらこれ（内容の横断要約）。**"
-        "本人の受信箱（gmail.readonly）から指定クライアント/案件の直近メールを取得し、"
+        "本人の受信箱（読み取りのみ）から指定クライアント/案件の直近メールを取得し、"
         "横断要約（論点・依頼・期限・懸念）を返す。生本文は返さない。"
         "**要返信・返信漏れの抽出は mail_followup**、空き時間は calendar_freebusy、"
         "予定の一覧は calendar_freebusy(mode='agenda')。"

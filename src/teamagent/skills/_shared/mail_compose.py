@@ -1,7 +1,7 @@
 """メール下書きの「全返信宛先・スレッド文脈・署名」を組み立てる共有ヘルパー（純粋・テスト容易）。
 
 morning_digest（朝の自動下書き）と mail_reply（メンション時の返信下書き）の両方から再利用する。
-全て副作用なし（I/O は呼び出し側で済ませ、ここは整形のみ）。DLP は `scrub_value` を必ず通す。
+全て副作用なし（I/O は呼び出し側で済ませ、ここは整形のみ）。DLP（秘密/PII マスク）を必ず通す。
 
 死守ライン:
   - 全返信(Cc)に本人・主宛先・重複を入れない。Bcc は引き継がない（情報漏れ防止）。
@@ -19,7 +19,7 @@ import structlog
 
 from teamagent.adapters.gmail_client import extract_plain_text, extract_thread_participants
 from teamagent.identity import normalize_email
-from teamagent.observability import scrub_value
+from teamagent.observability import redact_secrets_and_pii
 
 logger = structlog.get_logger(__name__)
 
@@ -137,8 +137,9 @@ def build_thread_history(
         body = extract_plain_text(getattr(m, "payload", {}) or {})
         # G6: scrub に加え境界トークン(<<< / >>>)を無害化し、本文が枠から脱出して
         # 指示位置に注入されるのを防ぐ（攻撃者制御テキストのため）。
+        # scrub_value は 2000 字で先に切れるので、上限なしのマスク→per_msg_chars で切る。
         masked = (
-            str(scrub_value(body))
+            redact_secrets_and_pii(body)
             .strip()[:per_msg_chars]
             .replace("<<<", "‹‹‹")
             .replace(">>>", "›››")

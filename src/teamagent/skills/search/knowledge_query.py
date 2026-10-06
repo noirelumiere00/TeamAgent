@@ -208,12 +208,35 @@ _DEAL_TERM_STOPWORDS: frozenset[str] = frozenset(
     }
 )  # fmt: skip
 _DEAL_TERM_RE = re.compile(r"[A-Za-z][A-Za-z0-9&.\-]{1,30}|[ァ-ヴー]{3,20}")
+#: 漢字の社名・代理店名（博報堂・電通・大広 など）は「経由／との／の案件／の受注」の直前だけ拾う
+#: （漢字は一般語と区別できないため、位置で絞る）。
+_DEAL_KANJI_TERM_RE = re.compile(r"([一-龥々ヶ]{2,12}?)(?=経由|との|の案件|の受注|の決定|案件)")
+_DEAL_KANJI_STOPWORDS: frozenset[str] = frozenset(
+    {
+        "今月", "先月", "来月", "今年", "去年", "最近", "新規", "過去", "全部", "全体", "社内",
+        "弊社", "自社", "当社", "決定", "受注", "直近", "今週", "先週", "代理店", "大型", "既存",
+        "経由", "案件", "取引", "実績", "決定案件", "新規案件",
+    }
+)  # fmt: skip
+
+
+#: 社名・代理店名と並ぶと「その相手との案件」を聞いていると読む語（10-06 実機: 「ADKの案件教えて」で
+#: 案件決定の投稿が候補に入らず、決定済み 3 件が出なかった）。単独では案件決定の意図にしない。
+_DEAL_WITH_NAME_KEYWORDS: tuple[str, ...] = ("案件", "取引", "お仕事", "実績")
 
 
 def is_deal_intent(query: str) -> bool:
-    """決まった案件（受注・案件決定・代理店経由 等）を聞いているか。"""
+    """決まった案件（受注・案件決定・代理店経由 等）を聞いているか。
+
+    「ADKの案件教えて」のように、固有名（英字・カタカナの社名）と「案件／取引／実績」が
+    並ぶ聞き方も含める（その相手との決定案件を候補に入れる。追加の照会は 1 本だけ）。
+    """
     normalized = _normalize_for_match(query or "")
-    return any(_normalize_for_match(kw) in normalized for kw in _DEAL_KEYWORDS)
+    if any(_normalize_for_match(kw) in normalized for kw in _DEAL_KEYWORDS):
+        return True
+    return any(kw in normalized for kw in _DEAL_WITH_NAME_KEYWORDS) and bool(
+        deal_query_terms(query)
+    )
 
 
 def deal_query_terms(query: str, *, limit: int = 4) -> list[str]:
@@ -223,12 +246,18 @@ def deal_query_terms(query: str, *, limit: int = 4) -> list[str]:
     代理店名・社名を、案件決定の投稿の本文で直接探すため。一般語は除く。
     """
     out: list[str] = []
-    for m in _DEAL_TERM_RE.finditer(unicodedata.normalize("NFKC", query or "")):
+    text = unicodedata.normalize("NFKC", query or "")
+    for m in _DEAL_TERM_RE.finditer(text):
         term = m.group(0).strip(".-")
         if len(term) < 2 or term.casefold() in _DEAL_TERM_STOPWORDS:
             continue
         if term.casefold() not in {t.casefold() for t in out}:
             out.append(term)
+    for m in _DEAL_KANJI_TERM_RE.finditer(text):
+        term = m.group(1)
+        if term in _DEAL_KANJI_STOPWORDS or term in out:
+            continue
+        out.append(term)
     return out[:limit]
 
 
