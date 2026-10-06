@@ -19,6 +19,7 @@ import pytest
 from slack_sdk.errors import SlackApiError
 
 from teamagent.adapters.pgvector_client import SearchHit
+from teamagent.adapters.slack_user_reader import SlackThreadRead
 from teamagent.skills._shared.next_step import (
     ATTACHMENT_MODE_SUGGESTION,
     CALENDAR_SUGGESTION,
@@ -111,13 +112,15 @@ class _Reader:
         self._messages = messages
 
     def read_thread_checked(self, channel: str, ts: str, request_id: str, **kw: Any) -> Any:
-        return type("R", (), {"error": "", "messages": tuple(self._messages)})()
+        # 本物の結果型（error / truncated の既定値も本物どおり）を返す。
+        return SlackThreadRead(messages=tuple(self._messages))
 
 
 class _Msg:
     def __init__(self, text: str) -> None:
         self.text = text
         self.user = "U1"
+        self.ts = "1700000000.000100"  # 本物の SlackMessage と同じく ts を持つ
 
 
 class _Resp:
