@@ -68,7 +68,16 @@ class SlackSummaryInput(BaseModel):
             if _PERMALINK.search(str(raw_ts or "")):
                 out["channel_id"] = from_link
         if "channel_id" in out:
-            out["channel_id"] = normalize_channel_id(out["channel_id"])
+            normalized = normalize_channel_id(out["channel_id"])
+            if normalized and not re.fullmatch(r"[CGD][A-Za-z0-9]{1,32}", normalized):
+                from teamagent.adapters.slack_user_reader import normalize_channel_name
+
+                if not re.fullmatch(r"[\w\-]+", normalize_channel_name(str(out["channel_id"]))):
+                    raise ValueError("invalid channel name")
+                if not str(out.get("channel_name") or "").strip():
+                    out["channel_name"] = str(out["channel_id"])
+                normalized = ""
+            out["channel_id"] = normalized
         if "thread_ts" in out:
             out["thread_ts"] = normalize_thread_ts(raw_ts)
         return out
@@ -88,8 +97,14 @@ class SlackSummaryInput(BaseModel):
         description=(
             "対象スレッドまたは対象チャンネルの ID（<#C…|name> 由来の C…/G…/D…）。"
             "**省略時は依頼が行われたチャンネルを自動採用**する。"
-            "チャンネル名（#営業）では指定できない＝ID が要る。"
+            "名前指定は channel_name を使う。"
         ),
+    )
+    channel_name: str = Field(
+        default="", max_length=100, description="対象のチャンネル名・部分名。"
+    )
+    period: str = Field(
+        default="", max_length=80, description="昨日・今週・先月・YYYY-MM-DD（〜で日付範囲）。"
     )
     thread_ts: str = Field(
         default="",
@@ -126,4 +141,5 @@ class SlackSummaryOutput(BaseModel):
         default="",
         description="LLM がそのまま返す決定的日本語文（言い換え・要約のやり直しをしないこと）",
     )
+    truncated: bool = Field(default=False, description="取得・要約の上限や返信の取得失敗で一部のみ")
     total_cost_usd: float = Field(default=0.0, ge=0.0, description="要約に要した Bedrock 費用")
