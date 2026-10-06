@@ -64,6 +64,18 @@ const controls = {
       c.session.resetTriggers = "新しい会話";
     }),
   ),
+  reset_at_hour_out_of_range: verdict(
+    OpenClawSchema,
+    mutated((c) => {
+      c.session.reset.atHour = 24;
+    }),
+  ),
+  reset_mode_unknown: verdict(
+    OpenClawSchema,
+    mutated((c) => {
+      c.session.reset.mode = "hourly";
+    }),
+  ),
   session_unknown_key: verdict(
     OpenClawSchema,
     mutated((c) => {
