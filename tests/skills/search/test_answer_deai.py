@@ -170,3 +170,36 @@ def test_plain_answer_is_unchanged() -> None:
         input=SearchInput(query="採用動画"), ctx=SkillContext()
     )
     assert out.answer.split("\n\n探した範囲:", 1)[0] == "採用ショート動画は1日密着型が効果的です。"
+
+
+# 2026-10-06 の実データ評価で、探し直しても見つからないときに要約が出した「作業を利用者に戻す」文。
+PUNTING_LLM_TEXT = """資生堂（EDP部勉強会、シーブリーズ案件）
+
+エリクシールの施策実績をお探しでしたら、以下の方法をお勧めします：
+- 営業DBで「エリクシール」で検索
+- 担当営業への直接確認
+- Slack内の案件チャネルで検索
+
+具体的な提案資料ファイルが必要な場合は、高林拓也さんへの確認をお勧めします。
+
+撮影日は先方に確認が必要です。
+予算は 575万円です。"""
+
+
+def test_answer_never_asks_the_user_to_search_or_ask_internally() -> None:
+    """社内の検索・確認を利用者に頼む文は run() の出口で落ちる（先方への確認と数字は残す）。"""
+    out = _skill(_bedrock(PUNTING_LLM_TEXT)).run(
+        SearchInput(query="エリクシールの施策実績"), SkillContext(metadata={})
+    )
+    for punt in ("営業DB", "担当営業", "Slack内の", "さんへの確認", "お勧めします"):
+        assert punt not in out.answer
+    assert "撮影日は先方に確認が必要です。" in out.answer
+    assert "575万円" in out.answer and "資生堂" in out.answer
+
+
+def test_punt_filter_can_be_turned_off(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("SEARCH_NO_PUNT", "0")
+    out = _skill(_bedrock(PUNTING_LLM_TEXT)).run(
+        SearchInput(query="エリクシールの施策実績"), SkillContext(metadata={})
+    )
+    assert "担当営業への直接確認" in out.answer

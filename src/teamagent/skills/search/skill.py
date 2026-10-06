@@ -116,6 +116,39 @@ _VocabKey = tuple[tuple[str, ...], str | None, str]
 _CHUNK_ID_RE = re.compile(r"\s*[\[(][^\[\]()]*chunk_id[^\[\]()]*[\])]")
 
 
+# 利用者に「社内で探して・聞いて」と作業を戻す文（全 DM 判定のテーマ P2・2026-10-06 実測）。
+# 指示文（prompts/search/retry）だけでは止まらなかった（「営業DBで検索・担当営業への確認・
+# Slack 内で検索をお勧めします」「◯◯さんへの確認をお勧めします」）ので、出口でも落とす。
+# 先方（クライアント）への確認は営業の正当な次の一手なので対象外（社内の宛先だけを見る）。
+_PUNT_WHO = (
+    r"(?:営業\s*DB|担当営業|担当者|担当の方|Slack|スラック|チャネル|チャンネル|社内"
+    r"|[一-龥ァ-ヶー]{1,6}さん)"
+)
+_PUNT_ACT = r"(?:確認|検索|問い合わせ|問合せ|お問い合わせ|聞いて|聞く|探して|探す)"
+_PUNT_ASK = r"(?:お勧め|おすすめ|オススメ|推奨|ください|下さい|してみて|が確実|をお願い)"
+_PUNT_LINE_RE = re.compile(rf"{_PUNT_WHO}[^。\n]{{0,30}}{_PUNT_ACT}[^。\n]{{0,20}}{_PUNT_ASK}")
+_PUNT_LEAD_RE = re.compile(rf"(?:以下|次)の(?:方法|手段)[^。\n]{{0,10}}{_PUNT_ASK}")
+_PUNT_BULLET_RE = re.compile(rf"^\s*(?:[-・•*]|\d+[.)．])\s*.*{_PUNT_WHO}.*{_PUNT_ACT}")
+
+
+def _drop_punt_lines(text: str) -> str:
+    """利用者に社内の検索・確認を頼む行（と「以下の方法をお勧めします」に続く箇条）を落とす。"""
+    if os.environ.get("SEARCH_NO_PUNT", "1").strip().lower() in {"0", "false", "no", "off"}:
+        return text
+    out: list[str] = []
+    in_punt_list = False
+    for line in text.split("\n"):
+        if _PUNT_LEAD_RE.search(line) or _PUNT_LINE_RE.search(line):
+            in_punt_list = bool(_PUNT_LEAD_RE.search(line))
+            continue
+        if in_punt_list and _PUNT_BULLET_RE.search(line):
+            continue
+        if in_punt_list and line.strip():
+            in_punt_list = False
+        out.append(line)
+    return re.sub(r"\n{3,}", "\n\n", "\n".join(out))
+
+
 def _strip_internal_markers(text: str, *, request_id: str | None = None) -> str:
     """内部マーカーを落とし、続けて「AI が書いた感じ」の装飾を正規化する。
 
@@ -129,6 +162,7 @@ def _strip_internal_markers(text: str, *, request_id: str | None = None) -> str:
     out = _CHUNK_ID_RE.sub("", text)
     out = out.replace("（関連度低・参考）", "")
     out = strip_ai_decoration(out, request_id=request_id)
+    out = _drop_punt_lines(out)
     return out.strip()
 
 
