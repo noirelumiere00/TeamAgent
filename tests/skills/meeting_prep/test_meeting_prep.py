@@ -4,6 +4,9 @@
 - DM 以外では作らない（メールと社内資料を読むため）
 - 対象の商談: 今日の時刻つき・社外（社内会議は除く）・タスク枠は除く・終わったものは除く・
   target があれば予定名／会社名で絞る・一番早いもの
+- 今日に無ければ MEETING_PREP_LOOKAHEAD_DAYS（既定 7）日先まで 1 回の list_events で探す。
+  今日にあれば今日を優先・範囲より先は選ばない・0 なら従来どおり今日だけ・
+  明日以降を選んだら冒頭に 1 行で知らせ「いつ」に日付を出す（10-05 本番の空振りの再現）
 - 会社名が読めなければ聞き返す（推測しない）
 - 材料の番号は web → 金庫 → メールの順。出典欄の URL は材料から機械的に付ける
 - LLM の出力: 範囲外の番号は消す・根拠番号の無い行は落とす・材料に無い数字の文は落とす・
@@ -42,12 +45,21 @@ def _ctx(channel: str = DM) -> SkillContext:
     )
 
 
-def _raw(eid: str, title: str, hh: int, *, guests: bool = True, desc: str = "") -> dict[str, Any]:
+@pytest.fixture(autouse=True)
+def _frozen_today(monkeypatch: pytest.MonkeyPatch) -> None:
+    """「今日」は skill の now だけでなく calendar_window.now_jst も固定する（日付テストの地雷）。"""
+    monkeypatch.setattr(calwin, "now_jst", lambda: NOW)
+    monkeypatch.delenv("MEETING_PREP_LOOKAHEAD_DAYS", raising=False)
+
+
+def _raw(
+    eid: str, title: str, hh: int, *, guests: bool = True, desc: str = "", day: int = 5
+) -> dict[str, Any]:
     ev: dict[str, Any] = {
         "id": eid,
         "summary": title,
-        "start": {"dateTime": f"2026-10-05T{hh:02d}:00:00+09:00"},
-        "end": {"dateTime": f"2026-10-05T{hh + 1:02d}:00:00+09:00"},
+        "start": {"dateTime": f"2026-10-{day:02d}T{hh:02d}:00:00+09:00"},
+        "end": {"dateTime": f"2026-10-{day:02d}T{hh + 1:02d}:00:00+09:00"},
         "description": desc,
     }
     if guests:
@@ -59,12 +71,27 @@ def _raw(eid: str, title: str, hh: int, *, guests: bool = True, desc: str = "") 
 
 
 class _Cal:
+    """Google の events.list と同じく、[timeMin, timeMax) に重なる予定だけを開始順に
+    max_results 件まで返す（窓の外を返すフェイクだと「範囲より先を選ばない」を検証できない）。"""
+
     def __init__(self, raw: list[dict[str, Any]]) -> None:
         self.raw = raw
+        self.calls: list[dict[str, Any]] = []
 
     def list_events(self, request_id: str, **kw: Any) -> list[Any]:
         assert kw.get("want_description") is True
-        return extract_events(self.raw, want_description=True)
+        self.calls.append(kw)
+        lo = _dt.datetime.fromisoformat(kw["time_min"])
+        hi = _dt.datetime.fromisoformat(kw["time_max"])
+
+        def _at(ev: dict[str, Any], key: str) -> _dt.datetime:
+            return _dt.datetime.fromisoformat(ev[key]["dateTime"])
+
+        hits = sorted(
+            (ev for ev in self.raw if _at(ev, "end") > lo and _at(ev, "start") < hi),
+            key=lambda ev: _at(ev, "start"),
+        )
+        return extract_events(hits[: kw["max_results"]], want_description=True)
 
 
 class _Hit:
@@ -168,8 +195,9 @@ LLM_TEXT = "\n".join(
 
 
 def _skill(raw: list[dict[str, Any]], *, llm: str = LLM_TEXT, **kw: Any) -> MeetingPrepSkill:
+    cal = kw.get("cal") or _Cal(raw)
     return MeetingPrepSkill(
-        calendar_factory=lambda _e: _Cal(raw),
+        calendar_factory=lambda _e: cal,
         search=kw.get(
             "search",
             _Search(
@@ -315,3 +343,107 @@ def test_task_block_about_a_client_is_not_the_meeting() -> None:
     raw = [_raw("prep", "JTB様 資料準備_JTB", 10, guests=False), EXTERNAL]
     out = _skill(raw).run(MeetingPrepInput(), _ctx())
     assert out.meeting_title == "JTB様 定例_JTB"
+
+
+# ---- 今日に無ければ数日先まで（2026-10-05 17:44 本番:「次の商談の準備」→ 今日だけ見て空振り） ----
+
+LATER = _raw("m7", "JTB様 定例_JTB", 14, day=7)  # 10/7(水) 14:00
+
+
+def test_next_meeting_on_a_later_day_is_prepared_when_today_has_none() -> None:
+    """本番の再現: 今日は社外商談 0 件（タスク枠だけ）・明後日に社外商談。
+
+    修正前は今日だけを読んで no_meeting。修正後はその商談のレポートを、日付つきで作る。
+    変異: time_max を今日 +1 日に戻す（先読みを外す）と no_meeting で赤。
+    """
+    cal = _Cal([_raw("task", "資料作成", 10, guests=False), LATER])
+    out = _skill([], cal=cal).run(MeetingPrepInput(), _ctx())
+    assert out.error == "" and out.meeting_title == "JTB様 定例_JTB"
+    lines = out.message.split("\n")
+    assert lines[0] == "今日これからの社外商談は無いので、次の10/7(水)の商談を準備しました。"
+    assert lines[1] == "📋 *商談の準備* 10/7(水) 14:00–15:00「JTB様 定例_JTB」"
+    # 呼び出しは 1 回で今日 0:00〜7 日先の終わりまで（1 日 100 件の目安で上限を広げる）
+    assert len(cal.calls) == 1
+    call = cal.calls[0]
+    assert call["time_min"] == "2026-10-05T00:00:00+09:00"
+    assert call["time_max"] == "2026-10-13T00:00:00+09:00"
+    assert call["max_results"] == 800
+
+
+def test_today_meeting_wins_over_later_days() -> None:
+    """今日にあれば今日（明日以降が先に並んでいても）。日付も前置きも付けない。
+
+    変異: 候補の並べ替えを逆順にする（今日優先を外す）と 10/7 が選ばれて赤。
+    """
+    raw = [_raw("later", "HIS様 提案_HIS", 10, day=6), LATER, EXTERNAL]
+    out = _skill(raw).run(MeetingPrepInput(), _ctx())
+    assert out.meeting_title == "JTB様 定例_JTB"
+    assert out.message.startswith("📋 *商談の準備* 14:00–15:00「JTB様 定例_JTB」")
+    # target があっても今日の一致を優先
+    out2 = _skill([LATER, EXTERNAL]).run(MeetingPrepInput(target="JTB"), _ctx())
+    assert out2.message.startswith("📋 *商談の準備* 14:00–15:00「JTB様 定例_JTB」")
+
+
+def test_target_only_on_a_later_day_is_found_with_lead_line() -> None:
+    raw = [EXTERNAL, _raw("his", "HIS様 提案_HIS", 11, day=8)]
+    out = _skill(raw).run(MeetingPrepInput(target="HIS"), _ctx())
+    assert out.meeting_title == "HIS様 提案_HIS"
+    lines = out.message.split("\n")
+    assert (
+        lines[0] == "今日これからの「HIS」の社外商談は無いので、次の10/8(木)の商談を準備しました。"
+    )
+    assert lines[1].startswith("📋 *商談の準備* 10/8(木) 11:00–12:00")
+
+
+@pytest.mark.parametrize(("day", "picked"), [(12, True), (13, False)])
+def test_meetings_beyond_lookahead_are_not_picked(day: int, picked: bool) -> None:
+    """7 日先（10/12）の終わりまでは選び、8 日先（10/13）は選ばない。
+
+    変異: 日数を無視して上限（30 日）まで読むと 10/13 が選ばれて赤。
+    """
+    out = _skill([_raw("far", "JTB様 定例_JTB", 9, day=day)]).run(MeetingPrepInput(), _ctx())
+    if picked:
+        assert out.error == "" and out.message.startswith(
+            "今日これからの社外商談は無いので、次の10/12(月)の商談を準備しました。"
+        )
+    else:
+        assert out.error == "no_meeting"
+        assert out.message == (
+            "今日から7日先までの予定に社外の商談が見つかりませんでした"
+            "（社内会議・タスク枠は除いています）。"
+        )
+
+
+def test_no_meeting_message_with_target_names_the_range() -> None:
+    out = _skill([EXTERNAL]).run(MeetingPrepInput(target="HIS"), _ctx())
+    assert out.error == "no_meeting"
+    assert out.message == (
+        "今日から7日先までの予定に「HIS」に当てはまる社外の商談が見つかりませんでした"
+        "（社内会議・タスク枠は除いています）。"
+    )
+    assert "検索" not in out.message and "確認して" not in out.message  # 利用者に作業を頼まない
+
+
+def test_lookahead_zero_keeps_today_only(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("MEETING_PREP_LOOKAHEAD_DAYS", "0")
+    cal = _Cal([LATER])
+    out = _skill([], cal=cal).run(MeetingPrepInput(), _ctx())
+    assert out.error == "no_meeting"
+    assert out.message == (
+        "今日の予定にこれからの社外の商談が見つかりませんでした（社内会議・タスク枠は除いています）。"
+    )
+    assert cal.calls[0]["time_max"] == "2026-10-06T00:00:00+09:00"
+    assert cal.calls[0]["max_results"] == 100
+    # 今日の商談は従来どおり（日付も前置きも無し）
+    out2 = _skill([EXTERNAL]).run(MeetingPrepInput(), _ctx())
+    assert out2.message.startswith("📋 *商談の準備* 14:00–15:00「JTB様 定例_JTB」")
+
+
+@pytest.mark.parametrize(
+    ("raw", "days"), [("", 7), ("3", 3), ("abc", 7), ("-2", 0), ("99", 30), (" 0 ", 0)]
+)
+def test_lookahead_days_env(monkeypatch: pytest.MonkeyPatch, raw: str, days: int) -> None:
+    from teamagent.skills.meeting_prep.skill import lookahead_days
+
+    monkeypatch.setenv("MEETING_PREP_LOOKAHEAD_DAYS", raw)
+    assert lookahead_days() == days

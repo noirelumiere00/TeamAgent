@@ -15,7 +15,7 @@ class MeetingPrepInput(BaseModel):
         max_length=80,
         description=(
             "Part of the meeting title or the client company name. Empty = the next external "
-            "meeting today."
+            "meeting (today first, else the coming days)."
         ),
     )
 

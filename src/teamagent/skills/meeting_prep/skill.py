@@ -1,4 +1,4 @@
-"""meeting_prep Skill — 今日の社外商談 1 件の準備レポート（v1＝DM でのオンデマンド）。
+"""meeting_prep Skill — 次の社外商談 1 件の準備レポート（v1＝DM でのオンデマンド）。
 
 10-05 小俣さん依頼「社外商談の 30 分前に準備レポート（会社概要・相手の近況・当社との契約と
 過去のやり取り・直近ニュース・当日の確認事項）。出典を添え、不明点は推測せず明記。社内会議・
@@ -6,11 +6,16 @@
 配信（v2）は、個人別の送信時刻（#496）の予約の仕組みに乗せる。
 
 対象の商談の選び方（決定論・LLM なし）:
-  - 今日の時刻つき予定のうち、開始が 30 分前より後のもの（終わった商談は選ばない）
+  - 今日 0:00 から MEETING_PREP_LOOKAHEAD_DAYS 日先（既定 7・0 なら今日だけ）までの時刻つき
+    予定を 1 回の list_events で読む。開始が 30 分前より後のものだけ（終わった商談は選ばない）
   - タスク枠（ゲストも会議リンクも無い予定）は除く（calendar_window.is_personal_block）
   - 社外判定は事例ブリーフと同じ classify_external（internal は除く・uncertain は残す）
   - キャンセル済みは Google の events.list が返さない（showDeleted=false）
-  - target があれば予定名か会社名にその語を含むものだけ。無ければ一番早いもの
+  - target があれば予定名か会社名にその語を含むものだけ。その中で一番早いもの（＝今日を優先）
+  - 今日に無く明日以降を選んだときは、レポートの冒頭に 1 行「今日これからの社外商談は無いので、
+    次の◯/◯の商談を準備しました」と添え、「いつ」にも日付を出す。「今日の商談の下調べ」と
+    今日を明示された依頼でも同じ（input に「今日だけ」の手がかりが無いため、勝手に選んだことを
+    冒頭の 1 行で必ず見せる。2026-10-05 本番: 「次の商談の準備」が今日だけを見て空振りした）
 
 守ること:
   - DM（本人だけの面）でだけ答える。メールと社内資料を読むため
@@ -61,6 +66,24 @@ NOT_CONNECTED_MESSAGE = (
 )
 #: 開始からこの分数までは「まだ準備する商談」として選ぶ（遅れて開いた人にも出す）。
 STARTED_GRACE_MINUTES = 30
+#: 今日に社外商談が無いとき、何日先まで探すか（0＝今日だけ＝10-05 以前の挙動）。
+LOOKAHEAD_DAYS_ENV = "MEETING_PREP_LOOKAHEAD_DAYS"
+DEFAULT_LOOKAHEAD_DAYS = 7
+MAX_LOOKAHEAD_DAYS = 30
+#: list_events は 1 ページだけ読む（ページングしない）。1 日 100 件を目安に、
+#: API の上限 2500 で頭打ち。
+EVENTS_PER_DAY = 100
+EVENTS_MAX_RESULTS = 2500
+
+
+def lookahead_days() -> int:
+    """MEETING_PREP_LOOKAHEAD_DAYS（既定 7・0〜30 に丸める・数字でなければ既定）。"""
+    raw = os.environ.get(LOOKAHEAD_DAYS_ENV, "").strip()
+    try:
+        days = int(raw) if raw else DEFAULT_LOOKAHEAD_DAYS
+    except ValueError:
+        return DEFAULT_LOOKAHEAD_DAYS
+    return max(0, min(MAX_LOOKAHEAD_DAYS, days))
 
 
 def _norm(text: str) -> str:
@@ -81,11 +104,12 @@ def _internal_domains(requester: str) -> frozenset[str]:
 
 @register
 class MeetingPrepSkill(BaseSkill[MeetingPrepInput, MeetingPrepOutput]):
-    """今日の社外商談 1 件について、出典つきの準備レポートを作る。"""
+    """次の社外商談 1 件（今日を優先・無ければ数日先）について、出典つきの準備レポートを作る。"""
 
     name: ClassVar[str] = "meeting_prep"
     description: ClassVar[str] = (
-        "Prep report for one of today's external client meetings (商談の準備・アポ前の下調べ): "
+        "Prep report for the next external client meeting, today first "
+        "(商談の準備・アポ前の下調べ): "
         "company overview, recent news, our past deals/contracts and mail with them, and points "
         "to confirm, each with sources. Use for 次の商談の準備して・今日の商談の下調べ・"
         "14時の〇〇社の準備・〇〇との打ち合わせの予習. Call it first; do not ask back for the "
@@ -186,16 +210,24 @@ class MeetingPrepSkill(BaseSkill[MeetingPrepInput, MeetingPrepOutput]):
             return MeetingPrepOutput(message=NOT_CONNECTED_MESSAGE, error="calendar_not_connected")
 
         now = self._now()
-        picked = self._pick_meeting(calendar, now, input.target, ctx, requester=email)
+        today = now.astimezone(_calwin.JST).date()
+        days = lookahead_days()
+        picked = self._pick_meeting(calendar, now, input.target, ctx, requester=email, days=days)
         if picked is None:
-            what = f"「{input.target}」に当てはまる" if input.target else "これからの"
             return MeetingPrepOutput(
-                message=f"今日の予定に{what}社外の商談が見つかりませんでした（社内会議・タスク枠は除いています）。",
-                error="no_meeting",
+                message=_no_meeting_message(input.target, days), error="no_meeting"
             )
         event, _sig, company = picked
         title = str(getattr(event, "summary", "") or "")
-        when = self._when(event)
+        when = self._when(event, today=today)
+        begins = _calwin.parse_jst_datetime(str(getattr(event, "start", "") or ""))
+        lead = ""
+        if begins is not None and begins.date() > today:
+            what = f"「{input.target}」の" if input.target else ""
+            lead = (
+                f"今日これからの{what}社外商談は無いので、"
+                f"次の{_calwin.fmt_jst_date(begins.date())}の商談を準備しました。"
+            )
         if not company:
             return MeetingPrepOutput(
                 message=(
@@ -205,10 +237,17 @@ class MeetingPrepSkill(BaseSkill[MeetingPrepInput, MeetingPrepOutput]):
                 meeting_title=title,
                 error="no_company",
             )
-        return self._build(email, title, when, company, ctx)
+        return self._build(email, title, when, company, ctx, lead=lead)
 
     def _pick_meeting(
-        self, calendar: Any, now: _dt.datetime, target: str, ctx: SkillContext, *, requester: str
+        self,
+        calendar: Any,
+        now: _dt.datetime,
+        target: str,
+        ctx: SkillContext,
+        *,
+        requester: str,
+        days: int,
     ) -> tuple[Any, Any, str] | None:
         from teamagent.skills.pre_meeting_brief.classify import classify_external, extract_client
         from teamagent.skills.pre_meeting_brief.signals import build_signal_input
@@ -218,8 +257,8 @@ class MeetingPrepSkill(BaseSkill[MeetingPrepInput, MeetingPrepOutput]):
         events = calendar.list_events(
             ctx.request_id,
             time_min=start.isoformat(),
-            time_max=(start + _dt.timedelta(days=1)).isoformat(),
-            max_results=100,
+            time_max=(start + _dt.timedelta(days=1 + days)).isoformat(),
+            max_results=min(EVENTS_MAX_RESULTS, EVENTS_PER_DAY * (1 + days)),
             want_description=True,
         )
         domains = _internal_domains(requester)
@@ -252,20 +291,32 @@ class MeetingPrepSkill(BaseSkill[MeetingPrepInput, MeetingPrepOutput]):
             candidates.append((begins, ev, sig, company))
         if not candidates:
             return None
+        # 一番早いもの＝今日にあれば今日（Google は開始順で返すが、ここでも並べ直して頼らない）
         candidates.sort(key=lambda c: c[0])
         _, ev, sig, company = candidates[0]
         return ev, sig, company
 
     @staticmethod
-    def _when(event: Any) -> str:
+    def _when(event: Any, *, today: _dt.date | None = None) -> str:
+        """ "14:00–15:00"。today と違う日なら "10/7(水) 14:00–15:00" と日付を前に付ける。"""
         s = _calwin.parse_jst_datetime(str(getattr(event, "start", "") or ""))
         e = _calwin.parse_jst_datetime(str(getattr(event, "end", "") or ""))
         if s is None:
             return ""
-        return s.strftime("%H:%M") + (f"–{e.strftime('%H:%M')}" if e else "")
+        day = (
+            f"{_calwin.fmt_jst_date(s.date())} " if today is not None and s.date() != today else ""
+        )
+        return day + s.strftime("%H:%M") + (f"–{e.strftime('%H:%M')}" if e else "")
 
     def _build(
-        self, email: str, title: str, when: str, company: str, ctx: SkillContext
+        self,
+        email: str,
+        title: str,
+        when: str,
+        company: str,
+        ctx: SkillContext,
+        *,
+        lead: str = "",
     ) -> MeetingPrepOutput:
         from teamagent.skills._shared.client_name_guard import classify_client_name, to_gmail_phrase
 
@@ -342,7 +393,12 @@ class MeetingPrepSkill(BaseSkill[MeetingPrepInput, MeetingPrepOutput]):
             materials=materials,
             grounding_texts=[user_message],
         )
-        parts = [f"📋 *商談の準備* {when}「{title}」", f"相手: {name}", "", body]
+        parts = ([lead] if lead else []) + [
+            f"📋 *商談の準備* {when}「{title}」",
+            f"相手: {name}",
+            "",
+            body,
+        ]
         if missing:
             parts += ["", "取れなかった材料: " + "・".join(missing)]
         if materials:
@@ -368,6 +424,21 @@ class MeetingPrepSkill(BaseSkill[MeetingPrepInput, MeetingPrepOutput]):
             ],
             total_cost_usd=round(cost, 6),
         )
+
+
+def _no_meeting_message(target: str, days: int) -> str:
+    """見つからないときの文言。探した範囲（今日だけ／今日から N 日先まで）をそのまま書く。"""
+    if days <= 0:
+        what = f"「{target}」に当てはまる" if target else "これからの"
+        return (
+            f"今日の予定に{what}社外の商談が見つかりませんでした"
+            "（社内会議・タスク枠は除いています）。"
+        )
+    what = f"「{target}」に当てはまる" if target else ""
+    return (
+        f"今日から{days}日先までの予定に{what}社外の商談が見つかりませんでした"
+        "（社内会議・タスク枠は除いています）。"
+    )
 
 
 def enabled() -> bool:
