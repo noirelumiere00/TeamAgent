@@ -295,10 +295,13 @@ def _clean_env(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_prod_low_confidence_rescue_no_longer_summarizes() -> None:
-    """本番の失敗モード: 0.4 で全滅 → 0.05 で低信頼救出 → 以前は要約器がそれで回答していた。"""
+    """本番の失敗モード: 0.4 で全滅 → 0.05 で低信頼救出 → 以前は要約器がそれで回答していた。
+
+    スコアは 10-06 本番金庫の gold 23（東芝）の実測 top1 0.154。
+    """
     bedrock = MagicMock()
     bedrock.converse.return_value = _converse()
-    bedrock.rerank.return_value = _rerank([0.23, 0.11])
+    bedrock.rerank.return_value = _rerank([0.154, 0.11])
     hits = [
         _hit(0.9, chunk_id=1, content="他社の提案", title="花王_提案書.pptx"),
         _hit(0.9, chunk_id=2, content="他社の報告", title="ライオン報告.pdf"),
@@ -418,5 +421,24 @@ def test_threshold_is_env_tunable(monkeypatch: pytest.MonkeyPatch) -> None:
     out = _prod_skill(bedrock, _pg([_hit(0.9, chunk_id=1)])).run(
         SearchInput(query="何か"), SkillContext(metadata={})
     )
+    assert out.found is True
+    bedrock.converse.assert_called_once()
+
+
+@pytest.mark.parametrize(
+    ("query", "score"),
+    [
+        # 10-06 本番金庫の gold 14・32: 正しい資料が 1〜2 位なのに top1 0.188 で「無い」と言い切った
+        ("検討止まりの案件と止まった理由", 0.188),
+        # gold 31: 一般語「リストアップ」を主題語と見なして「無い」と言い切った（top1 0.408）
+        ("これまでの提案案件を全部リストアップして", 0.408),
+    ],
+)
+def test_real_hits_seen_on_prod_are_not_declared_missing(query: str, score: float) -> None:
+    bedrock = MagicMock()
+    bedrock.converse.return_value = _converse()
+    bedrock.rerank.return_value = _rerank([score])
+    hits = [_hit(0.9, chunk_id=1, content="提案案件の検討状況と止まった理由の一覧")]
+    out = _prod_skill(bedrock, _pg(hits)).run(SearchInput(query=query), SkillContext(metadata={}))
     assert out.found is True
     bedrock.converse.assert_called_once()

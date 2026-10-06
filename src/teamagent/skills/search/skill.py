@@ -419,14 +419,15 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
         # 要約器を呼ばずに「金庫に該当する資料は見つかりませんでした（近いもの: …）」を返す。
         # - SEARCH_NOT_FOUND_ANSWER: kill switch（**既定 ON**）。false で判定ごと止まり従来どおり。
         # - SEARCH_NOT_FOUND_THRESHOLD: top1 の rerank relevance がこれ未満なら該当なし
-        #   （既定 0.25）。
-        #   根拠: gold set 実測（c8cf1e83）で実ヒット 0.50〜0.94・該当なし 0.23/0.12/0.06、
-        #   2 段階しきい値の A/B（3d3d6479）で fallback=0.25 が該当なしを守り 0.15 は退行。
-        #   PoC の境界の実ヒット 0.30 も残す。0 以下で無効。
+        #   （既定 0.16）。
+        #   根拠（10-06 本番金庫で gold 50 問）: 0.25 では正しい資料を 1〜2 位に出せていた問い
+        #   （14・32: top1 0.19）まで「無い」と言い切った。該当なし側は 0.04/0.14/0.15、正例の最低は
+        #   0.17（42）。偽の「無い」は曖昧な答えより害が大きいので、正例を落とさない側の 0.16。
+        #   差は 0.15〜0.17 と薄い（gold で合わせた値）＝本番の 👍👎 で見直す。0 以下で無効。
         # - SEARCH_NOT_FOUND_SUBJECT_BELOW: 主題語の照合は top1 がこれ未満のときだけ（既定 0.5＝
         #   gold set の実ヒット最低値。確信の高いヒットを語の表記ゆれで落とさない）。0 以下で無効。
         self._not_found_answer = self._envflag("SEARCH_NOT_FOUND_ANSWER", default="true")
-        self._not_found_threshold = self._envfloat("SEARCH_NOT_FOUND_THRESHOLD", 0.25)
+        self._not_found_threshold = self._envfloat("SEARCH_NOT_FOUND_THRESHOLD", 0.16)
         self._not_found_subject_below = self._envfloat("SEARCH_NOT_FOUND_SUBJECT_BELOW", 0.5)
 
     def attach_slack_store(self, slack_store: Any) -> None:
