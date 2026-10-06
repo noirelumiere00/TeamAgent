@@ -163,3 +163,15 @@ def call_with_retry(
 
 
 __all__ = ["RateLimitPolicy", "RetryPolicy", "backoff_cap", "call_with_retry"]
+
+
+def retry_long_job_once(fn: Callable[[], T]) -> T:
+    """読み取り・ローカル生成のジョブ段階を一度だけ再試行する（公開・投稿は対象外）。"""
+    import os
+
+    enabled = os.environ.get("USE_LONG_JOB_RETRY", "1").strip().lower() in {"1", "true", "yes"}
+    return call_with_retry(
+        fn,
+        is_retryable=lambda exc: True,
+        policy=RetryPolicy(max_attempts=2 if enabled else 1, base_delay_s=0, max_delay_s=0),
+    )

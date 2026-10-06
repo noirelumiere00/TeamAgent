@@ -1263,3 +1263,13 @@ class VideoAlgorithmOutput(BaseModel):
     # サムネ（一覧の表紙）の読み取りの範囲。""＝以前の分析（読み取りが無い）・off＝止めている設定・
     # top＝表示順の上位 n 本・board＝6〜30 位も読んだ。
     cover_read_mode: Literal["", "off", "top", "board"] = ""
+
+
+class VideoAlgorithmStatusInput(BaseModel):
+    job_id: str = ""
+
+
+class VideoAlgorithmStatusOutput(BaseModel):
+    job_id: str = ""
+    status: str
+    message: str

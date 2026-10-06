@@ -87,7 +87,7 @@ def test_busy_message_states_queue_position_and_minutes_not_seconds() -> None:
     assert "目安あと約 17 分" in message
     assert "まだ着手していません" in message
     assert "約 17 分後に同じ内容でもう一度" in message
-    assert "『まだ？』で確認できます" in message
+    assert "『まだ？』で確認できます" not in message
     assert "秒" not in message
     assert "omiyage_report_status" not in message
 

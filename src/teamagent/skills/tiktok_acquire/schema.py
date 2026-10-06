@@ -80,10 +80,13 @@ class TikTokAcquireOutput(BaseModel):
 
 
 class TikTokAcquireStatusInput(BaseModel):
-    job_id: str = Field(description="tiktok_acquire が返した job_id")
+    job_id: str = Field(default="", description="省略時は本人の直近の取得")
 
 
 class TikTokAcquireStatusOutput(BaseModel):
+    job_results: list[dict[str, Any]] = Field(
+        default_factory=list, exclude_if=lambda value: not value
+    )
     job_id: str
     status: str = Field(description="queued | running | done | failed | unknown")
     progress: dict[str, Any] | None = None

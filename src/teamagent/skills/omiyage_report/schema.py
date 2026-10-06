@@ -137,7 +137,7 @@ class OmiyageReportSubmitOutput(_StrictModel):
 
 
 class OmiyageReportStatusInput(_StrictModel):
-    job_id: str = Field(pattern=OMIYAGE_JOB_ID_PATTERN)
+    job_id: str = Field(default="", pattern=OMIYAGE_JOB_ID_PATTERN)
 
 
 class OmiyageAxisSummary(_StrictModel):

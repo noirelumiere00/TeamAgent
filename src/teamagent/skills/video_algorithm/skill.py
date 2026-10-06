@@ -29,6 +29,7 @@ import structlog
 from pydantic import BaseModel, ValidationError
 
 from teamagent.adapters.gemini_client import GeminiClient
+from teamagent.adapters.retry import retry_long_job_once
 from teamagent.adapters.tiktok_video_fallback import (
     ACQUIRED_VIA_APIFY,
     apify_fallback_enabled,
@@ -68,6 +69,8 @@ from teamagent.skills.video_algorithm.schema import (
     ThumbColor,
     VideoAlgorithmInput,
     VideoAlgorithmOutput,
+    VideoAlgorithmStatusInput,
+    VideoAlgorithmStatusOutput,
     VideoMeta,
     VideoVSEOAnalysis,
 )
@@ -733,7 +736,9 @@ class VideoAlgorithmSkill(BaseSkill[VideoAlgorithmInput, VideoAlgorithmOutput]):
         acquired_via = ""
         try:
             with _stage("download", request_id, meta.rank):
-                data, mime = self._download(meta.url, request_id, downloader=downloader)
+                data, mime = retry_long_job_once(
+                    lambda: self._download(meta.url, request_id, downloader=downloader)
+                )
         except Exception as e:  # 取得失敗 → 二段構え（opt-in）→ それでも無理ならサムネ縮退
             logger.warning("video_algorithm_fetch_failed", rank=meta.rank, error=type(e).__name__)
             recovered = (
@@ -2299,3 +2304,68 @@ class VideoAlgorithmSkill(BaseSkill[VideoAlgorithmInput, VideoAlgorithmOutput]):
             f"_概算 ${out.total_cost_usd:.4f}・n={c.video_count} の観測仮説（相関≠因果）_"
             f"{client_line}"
         )
+
+
+@register
+class VideoAlgorithmStatusSkill(BaseSkill[VideoAlgorithmStatusInput, VideoAlgorithmStatusOutput]):
+    name: ClassVar[str] = "video_algorithm_status"
+    description: ClassVar[str] = "動画分析の実際の状態を返す。番号省略時は本人の直近の分析。"
+    input_schema: ClassVar[type[BaseModel]] = VideoAlgorithmStatusInput
+    output_schema: ClassVar[type[BaseModel]] = VideoAlgorithmStatusOutput
+
+    def run(
+        self, input: VideoAlgorithmStatusInput, ctx: SkillContext
+    ) -> VideoAlgorithmStatusOutput:
+        from teamagent.adapters.proposal_job_store import ProposalJobStore
+        from teamagent.skills._shared.long_jobs import latest_job, owner_key
+
+        job_id = input.job_id or latest_job(ctx, "video_algorithm")
+        owner = owner_key(ctx, "video_algorithm")
+        row = ProposalJobStore().get_job(job_id) if job_id.startswith("va_") and owner else None
+        try:
+            summary = json.loads(row.get("request_summary") or "{}") if row else {}
+        except (ValueError, TypeError):
+            summary = {}
+        if row is None or not isinstance(summary, dict) or summary.get("owner") != owner:
+            return VideoAlgorithmStatusOutput(
+                job_id=job_id, status="unknown", message="確認できる動画分析がありません。"
+            )
+        state = str(row.get("status") or "unknown")
+        if state in {"queued", "running"}:
+            from datetime import UTC, datetime
+
+            try:
+                updated = datetime.fromisoformat(
+                    str(row.get("updated_at") or "").replace("Z", "+00:00")
+                )
+                stale = (datetime.now(UTC) - updated).total_seconds() > 180
+            except (ValueError, TypeError):
+                stale = True
+            from teamagent.mcp_gateway.detached_jobs import REGISTRY
+
+            if stale and not REGISTRY.has_request(job_id.removeprefix("va_")):
+                store = ProposalJobStore()
+                changed = store.mark_failed(
+                    job_id,
+                    "MCP_RESTARTED",
+                    expected_statuses=(state,),
+                    expected_updated_at=row.get("updated_at"),
+                    error_summary="動画分析の実行継続を確認できなくなりました。",
+                )
+                row = store.get_job(job_id) or row
+                state = "failed" if changed else str(row.get("status") or "unknown")
+        message = {
+            "queued": "動画分析は順番待ちです。",
+            "running": "動画分析は実行中です。",
+            "failed": str(row.get("error_summary") or "動画分析の途中で問題が起きました。"),
+            "unknown": "動画分析の状態を確認できません。",
+        }.get(state, "動画分析の状態を確認できません。")
+        if state == "done":
+            try:
+                result = json.loads(row.get("result_json") or "{}")
+                message = str(result.get("message") or "") if isinstance(result, dict) else ""
+            except (ValueError, TypeError):
+                message = ""
+            if not message:
+                state, message = "unknown", "動画分析の結果を確認できません。"
+        return VideoAlgorithmStatusOutput(job_id=job_id, status=state, message=message)

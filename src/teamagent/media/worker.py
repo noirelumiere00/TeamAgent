@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import Any, Protocol
 
 import teamagent.media.operations as media_operations
+from teamagent.adapters.retry import retry_long_job_once
 from teamagent.media.contracts import (
     ARTIFACT_RETENTION_SECONDS,
     DDB_RETENTION_GRACE_SECONDS,
@@ -41,6 +42,7 @@ from teamagent.media.contracts import (
 from teamagent.media.deadline import DeadlineBudget, MediaDeadlineExceededError, botocore_config
 from teamagent.media.operations import (
     MediaOperationError,
+    OperationOutput,
     ProducedArtifact,
     execute_operation,
 )
@@ -1188,11 +1190,19 @@ def run_job(
                     execution_budget.checkpoint()
                     return loaded
 
-                output = execute_operation(
-                    request.operation,
-                    workdir=workdir,
-                    load_object=load,
-                    budget=execution_budget,
+                def execute() -> OperationOutput:
+                    execution_budget.checkpoint()
+                    return execute_operation(
+                        request.operation,
+                        workdir=workdir,
+                        load_object=load,
+                        budget=execution_budget,
+                    )
+
+                output = (
+                    retry_long_job_once(execute)
+                    if isinstance(request.operation, TikTokAcquireOperation)
+                    else execute()
                 )
                 artifacts_list: list[MediaArtifact] = []
                 for artifact in output.artifacts:

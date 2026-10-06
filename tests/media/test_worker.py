@@ -1029,3 +1029,40 @@ def test_worker_reserves_terminal_budget_before_starting_operation(
     assert result.status == "failed"
     assert result.error_code == "MEDIA_JOB_DEADLINE_EXCEEDED"
     assert backend.events == ["store", "cleanup"]
+
+
+def test_tiktok_job_retries_once_inside_the_same_fenced_attempt(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from teamagent.media.contracts import TikTokAcquireOperation
+
+    request = make_job_request(
+        operation=TikTokAcquireOperation(
+            kind="tiktok_acquire", keywords=("keyword",), n_per_kw=1, videos_per_kw=0
+        ),
+        output_bucket="teamagent-media-test",
+        request_fingerprint="retry-once",
+        now_epoch_s=100,
+        timeout_s=300,
+    )
+    backend = _Backend()
+    calls: list[Path] = []
+
+    def transient(*args: object, **kwargs: object) -> OperationOutput:
+        workdir = kwargs["workdir"]
+        assert isinstance(workdir, Path)
+        calls.append(workdir)
+        if len(calls) == 1:
+            raise MediaOperationError("RATELIMITED", "retryable fetch failure")
+        return _successful_operation(*args, **kwargs)
+
+    monkeypatch.setattr("teamagent.media.worker.execute_operation", transient)
+    result = run_job(request, backend=backend, temp_root=tmp_path, now_epoch_s=100, owner="worker")
+    assert result.status == "done" and len(calls) == 2 and calls[0] == calls[1]
+    assert backend.claims == 1 and backend.stores == 1 and backend.uploads == 1
+    # 再配送しても生成も投稿もやり直さない。
+    duplicate = run_job(
+        request, backend=backend, temp_root=tmp_path, now_epoch_s=100, owner="other"
+    )
+    assert duplicate == result and len(calls) == 2 and backend.stores == 1

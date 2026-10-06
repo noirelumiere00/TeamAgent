@@ -433,7 +433,7 @@ class ProposalBuilderSubmitOutput(_StrictModel):
 class ProposalBuilderStatusInput(_StrictModel):
     """proposal_builder_submit が返した job_id の照会入力。"""
 
-    job_id: str = Field(min_length=1, max_length=100)
+    job_id: str = Field(default="", min_length=1, max_length=100)
 
 
 class ProposalBuilderCaseReference(_StrictModel):
