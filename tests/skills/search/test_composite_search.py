@@ -202,7 +202,7 @@ def test_flag_off_is_byte_identical_and_never_touches_slack(
     assert json.dumps(out.model_dump(), ensure_ascii=False) == json.dumps(
         base.model_dump(), ensure_ascii=False
     )
-    assert set(out.model_dump()) == {"answer", "hits", "total_cost_usd", "found"}
+    assert not {"slack_hits", "slack_status"} & set(out.model_dump())
     assert _user_message(b_on) == _user_message(b_plain)
 
 

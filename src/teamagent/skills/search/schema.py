@@ -266,7 +266,7 @@ class SlackHitOut(BaseModel):
 
 
 # 値が None のときはツール結果から落とすキー（複合検索 OFF のとき出力を 1 バイトも変えないため）。
-_OMIT_WHEN_NONE: tuple[str, ...] = ("slack_hits", "slack_status")
+_OMIT_WHEN_NONE: tuple[str, ...] = ("slack_hits", "slack_status", "suggested_next")
 
 
 class SearchOutput(BaseModel):
@@ -294,9 +294,14 @@ class SearchOutput(BaseModel):
         ),
     )
 
+    suggested_next: str | None = Field(
+        default=None,
+        description="次の一手（既存ツールを 1 つだけ・提案のみ）。無ければ出さない",
+    )
+
     @model_serializer(mode="wrap")
     def _omit_unset_optional(self, handler: SerializerFunctionWrapHandler) -> dict[str, Any]:
-        """複合検索の欄は None なら出さない（フラグ OFF のツール結果を従来と同一に保つ）。"""
+        """複合検索の欄・次の一手は None なら出さない（出す物が無ければ結果は従来と同一）。"""
         data: dict[str, Any] = handler(self)
         for key in _OMIT_WHEN_NONE:
             if key in data and data[key] is None:

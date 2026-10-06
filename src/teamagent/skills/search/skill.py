@@ -61,6 +61,7 @@ from teamagent.skills.search.knowledge_query import (
     extract_query_industry,
     is_campaign_results_intent,
 )
+from teamagent.skills.search.next_move import suggest_next_move
 from teamagent.skills.search.not_found import FoundDecision, build_not_found_answer, judge_found
 from teamagent.skills.search.query_planner import QueryPlanner
 from teamagent.skills.search.rerank import sort_by_budget_proximity, sort_by_client_match
@@ -628,6 +629,18 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
         if found:
             answer = self._append_next_step(answer, query=input.query, file_urls=file_urls)
 
+        # 3-quater. 結果に添える次の一手（既存ツールを 1 つだけ・モデルに 2 本目を選ばせる）。
+        #           本文に提案が付いていればそれと同じ一手にそろえる（次の一手は 1 個）。
+        suggested_next = suggest_next_move(
+            query=input.query,
+            found=found,
+            slack_status=slack_lookup.status if slack_lookup is not None else None,
+            slack_shown=len(slack_items),
+            delivery_offered=DELIVER_SUGGESTION in answer,
+            query_client=self._asked_client(probe),
+            requester=str(ctx.metadata.get("user_email") or "") or None,
+        )
+
         # 4. 出力スキーマに整形。資料名解決はヒットごとに一度だけ行い、
         #    正準 URL と配信用の内部ファイル名で同じ結果を使う。
         search_hits: list[SearchHitOut] = []
@@ -683,6 +696,7 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
             found=found,
             slack_hits=([item.hit for item in slack_items] if slack_lookup is not None else None),
             slack_status=slack_lookup.status if slack_lookup is not None else None,
+            suggested_next=suggested_next,
         )
         total_ms = (time.perf_counter() - run_started) * 1000
         log.info(
@@ -762,6 +776,14 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
         )
         return lookup
 
+    @staticmethod
+    def _asked_client(probe: dict[str, str] | None) -> str | None:
+        """利用者が名指しした既知の取引先（retrieval が確定させた値・自社名は除く）。"""
+        asked = (probe or {}).get("query_client")
+        if asked and is_self_org_name(asked):
+            return None
+        return asked or None
+
     def _judge_found(
         self, query: str, hits: list[SearchHit], probe: dict[str, str] | None
     ) -> FoundDecision:
@@ -772,9 +794,7 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
         """
         if not self._not_found_answer:
             return FoundDecision(found=bool(hits), reason="disabled")
-        asked = (probe or {}).get("query_client")
-        if asked and is_self_org_name(asked):
-            asked = None
+        asked = self._asked_client(probe)
         return judge_found(
             query,
             hits,
