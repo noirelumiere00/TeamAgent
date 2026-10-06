@@ -29,7 +29,7 @@ import os
 import time
 import uuid
 from collections.abc import Callable
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 
 import structlog
 from mcp.server import Server
@@ -44,7 +44,12 @@ from teamagent.identity import (
     no_access_metadata,
     shared_company_domains_from_env,
 )
-from teamagent.mcp_gateway import detached_jobs, direct_summary, surface_video_followup
+from teamagent.mcp_gateway import (
+    answer_feedback,
+    detached_jobs,
+    direct_summary,
+    surface_video_followup,
+)
 from teamagent.mcp_gateway.caller_claim import (
     CallerClaimError,
     CallerClaimVerifier,
@@ -62,6 +67,9 @@ from teamagent.skills.base import ASYNC_JOB_POLL_METADATA_KEY, SkillContext
 
 # 二段返しの契約定数だけを持つ軽量モジュール（boto3/psycopg を引かない）。
 from teamagent.skills.search.two_stage import TWO_STAGE_CTX_KEY
+
+if TYPE_CHECKING:
+    from teamagent.adapters.answer_feedback_store import AnswerFeedbackStore
 
 logger = structlog.get_logger(__name__)
 
@@ -1426,6 +1434,147 @@ async def dispatch_personal_memory_tool(
         )
 
 
+def _afb_err(code: str) -> list[TextContent]:
+    """回答評価の拒否・失敗。固定コードだけを返す（トークン・検索語・例外文は返さない）。"""
+    payload = {"error": "answer_feedback_rejected", "code": code}
+    return [TextContent(type="text", text=json.dumps(payload, ensure_ascii=False))]
+
+
+_answer_feedback_store_singleton: AnswerFeedbackStore | None = None
+
+
+def _default_answer_feedback_store() -> AnswerFeedbackStore:
+    """本番の保存先（RDS・teamagent_app）を遅延生成する。"""
+    global _answer_feedback_store_singleton
+
+    if _answer_feedback_store_singleton is None:
+        from teamagent.adapters.answer_feedback_store import PgAnswerFeedbackStore
+
+        _answer_feedback_store_singleton = PgAnswerFeedbackStore.from_env()
+    return _answer_feedback_store_singleton
+
+
+async def dispatch_answer_feedback_tool(
+    arguments: dict[str, Any],
+    *,
+    identity_resolver: IdentityResolver | None,
+    allowed_domains: frozenset[str] | None,
+    company_shared_groups: frozenset[str] | None,
+    caller_claim_verifier: CallerClaimVerifier | None,
+    store: AnswerFeedbackStore | None = None,
+) -> list[TextContent]:
+    """回答評価（answer_feedback_record）専用の経路。dispatch_tool を通さない。
+
+    判定の順: 署名済み claim 必須（nonce を消費）→ 予約 tool_call_id（aico-fb-<32hex> かつ
+    run_id == tool_call_id＝plugin の直接呼び出し）→ 入力検証 → 評価トークン（署名・期限・
+    押した人＝質問した人・team）→ resolver で本人 email → search_feedback へ INSERT。
+    「連携」振り替え・usage 記録・進捗投稿は走らせない。例外は外へ出さない。
+    ログは outcome・rating だけ（email・検索語・トークンは出さない）。
+    """
+    received = time.perf_counter()
+    outcome = "internal"
+    rating: int | None = None
+    tool = answer_feedback.ANSWER_FEEDBACK_TOOL_NAME
+    try:
+
+        def reject(code: str) -> list[TextContent]:
+            nonlocal outcome
+            outcome = code
+            return _afb_err(code)
+
+        if identity_resolver is None or caller_claim_verifier is None:
+            return reject("AFB_UNAVAILABLE")
+        raw = arguments.get(USER_CONTEXT_KEY)
+        if not isinstance(raw, dict):
+            return reject("AFB_INVALID_INPUT")
+        verified, caller_fail = await _verify_caller(
+            arguments,
+            tool=tool,
+            identity_resolver=identity_resolver,
+            company_shared_groups=company_shared_groups,
+            caller_claim_verifier=caller_claim_verifier,
+        )
+        if caller_fail is not None:
+            return reject("AFB_CALLER_REJECTED")
+        if verified is None:
+            return reject("AFB_CALLER_REQUIRED")
+        if not answer_feedback.reserved_invocation_ok(verified.tool_call_id, verified.run_id):
+            return reject("AFB_INVOCATION_REJECTED")
+
+        from pydantic import ValidationError
+
+        business = {k: v for k, v in arguments.items() if k != USER_CONTEXT_KEY}
+        try:
+            payload = answer_feedback.AnswerFeedbackInput.model_validate(business)
+        except ValidationError:
+            return reject("AFB_INVALID_INPUT")
+        try:
+            claim = answer_feedback.verify_feedback_token(
+                payload.feedback_token,
+                key=caller_claim_verifier.derive_purpose_key(answer_feedback.KEY_LABEL),
+                now=caller_claim_verifier.now(),
+                presser_user_id=verified.slack_user_id,
+                team_id=verified.slack_team_id,
+            )
+        except answer_feedback.AnswerFeedbackTokenError as error:
+            return reject(error.code)
+        metadata, fail = await _resolve_metadata(
+            raw,
+            verified_caller=verified,
+            require_rls=True,
+            identity_resolver=identity_resolver,
+            allowed_domains=allowed_domains,
+            company_shared_groups=company_shared_groups,
+            tool=tool,
+        )
+        email = metadata.get("user_email")
+        if (
+            fail is not None
+            or metadata.get("identity_verified") is not True
+            or metadata.get("verified_slack_user_id") != verified.slack_user_id
+            or not isinstance(email, str)
+            or not email.strip()
+        ):
+            return reject("AFB_IDENTITY_REJECTED")
+
+        from teamagent.adapters.answer_feedback_store import (
+            AnswerFeedbackRow,
+            AnswerFeedbackStoreError,
+        )
+
+        try:
+            row = AnswerFeedbackRow(
+                user_email=email.strip().lower(),
+                query=claim.query,
+                rating=payload.rating,
+                answer_id=claim.answer_id,
+                search_session_id=answer_feedback.slack_search_session_id(claim.answer_id),
+            )
+            target = store if store is not None else _default_answer_feedback_store()
+            await asyncio.to_thread(target.insert, row)
+        except AnswerFeedbackStoreError as error:
+            logger.warning("answer_feedback_store_failed", code=error.code)
+            return reject("AFB_STORE_FAILED")
+        except Exception as error:
+            logger.warning("answer_feedback_store_failed", code=type(error).__name__)
+            return reject("AFB_STORE_FAILED")
+        outcome = "ok"
+        rating = payload.rating
+        result = {"ok": True, "rating": payload.rating}
+        return [TextContent(type="text", text=json.dumps(result, ensure_ascii=False))]
+    except Exception as exc:
+        outcome = "AFB_INTERNAL"
+        logger.warning("answer_feedback_internal_error", error=type(exc).__name__)
+        return _afb_err("AFB_INTERNAL")
+    finally:
+        logger.info(
+            "answer_feedback_call",
+            outcome=outcome,
+            rating=rating,
+            total_ms=int((time.perf_counter() - received) * 1000),
+        )
+
+
 async def dispatch_run_agent(
     specs: list[ToolSpec],
     arguments: dict[str, Any],
@@ -1556,8 +1705,12 @@ def build_server(
     allowed_domains: frozenset[str] | None = None,
     company_shared_groups: frozenset[str] | None = None,
     caller_claim_verifier: CallerClaimVerifier | None = None,
+    answer_feedback_store: AnswerFeedbackStore | None = None,
 ) -> Server:
-    """TeamAgent MCP サーバを構築する（specs 省略時は本番ツールを遅延構築）。"""
+    """TeamAgent MCP サーバを構築する（specs 省略時は本番ツールを遅延構築）。
+
+    ``answer_feedback_store`` はテスト用の注入口（未指定なら本番は RDS へ遅延生成）。
+    """
     if specs is None:
         from teamagent.orchestrator.factory import build_production_tools
 
@@ -1572,7 +1725,11 @@ def build_server(
     # 本人メモのツールを ToolSpec にすると list_tools と L2 のツール面に出てしまうので禁じる
     if any(n.startswith("personal_memory") for n in by_name):
         raise RuntimeError("personal_memory_* must not be registered as a ToolSpec")
+    # 回答評価も同じ（モデルのツール面に出さない・plugin の直接呼び出しだけ）
+    if answer_feedback.ANSWER_FEEDBACK_TOOL_NAME in by_name:
+        raise RuntimeError("answer_feedback_record must not be registered as a ToolSpec")
     enable_orchestrator = _envflag("USE_AGENT_ORCHESTRATOR")
+    enable_answer_feedback = _envflag(answer_feedback.ANSWER_FEEDBACK_FLAG_ENV)
     enable_personal_memory = _envflag("USE_PERSONAL_MEMORY")
     if enable_personal_memory:
         from teamagent.mcp_gateway.personal_memory.gate import install_sdk_warning_filter
@@ -1602,6 +1759,19 @@ def build_server(
                 allowed_domains=allowed_domains,
                 company_shared_groups=company_shared_groups,
                 caller_claim_verifier=caller_claim_verifier,
+            )
+        # 回答評価（list_tools に出さない）。フラグ off なら未登録ツールと同じ応答にし、
+        # claim の検証（nonce の消費）にも DB にも触れない。
+        if name == answer_feedback.ANSWER_FEEDBACK_TOOL_NAME:
+            if not enable_answer_feedback:
+                return _err(f"unknown tool: {name}")
+            return await dispatch_answer_feedback_tool(
+                arguments,
+                identity_resolver=identity_resolver,
+                allowed_domains=allowed_domains,
+                company_shared_groups=company_shared_groups,
+                caller_claim_verifier=caller_claim_verifier,
+                store=answer_feedback_store,
             )
         if request_gate is not None:
             from teamagent.runtime.request_gate import GateTimeoutError, QueueFullError
