@@ -2,9 +2,16 @@
 
 from __future__ import annotations
 
-from typing import Literal
+from typing import Any, Literal
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    Field,
+    SerializerFunctionWrapHandler,
+    field_validator,
+    model_serializer,
+    model_validator,
+)
 
 
 class SearchInput(BaseModel):
@@ -245,6 +252,23 @@ class SearchHitOut(BaseModel):
         return cleaned
 
 
+class SlackHitOut(BaseModel):
+    """複合検索（USE_COMPOSITE_SEARCH）で並行して探した本人の Slack の 1 投稿（短い抜粋だけ）。
+
+    チャンネルからの依頼では公開チャンネルの一致だけが入る（slack_search と同じ規則）。
+    """
+
+    channel: str = Field(default="", description="場所（#ch / 🔒#ch / DM / グループDM）")
+    posted_on: str = Field(default="", description="投稿日（JST・YYYY-MM-DD）")
+    excerpt: str = Field(default="", description="本文の抜粋（160 字まで・通知記法は無害化済み）")
+    permalink: str = Field(default="", description="投稿へのリンク")
+    file_names: list[str] = Field(default_factory=list, description="添付ファイル名（あれば）")
+
+
+# 値が None のときはツール結果から落とすキー（複合検索 OFF のとき出力を 1 バイトも変えないため）。
+_OMIT_WHEN_NONE: tuple[str, ...] = ("slack_hits", "slack_status")
+
+
 class SearchOutput(BaseModel):
     """検索 Skill の出力。"""
 
@@ -258,3 +282,23 @@ class SearchOutput(BaseModel):
             "「金庫に該当する資料は見つかりませんでした（近いもの: …）」で、hits は参考の近いもの"
         ),
     )
+    slack_hits: list[SlackHitOut] | None = Field(
+        default=None,
+        description="複合検索のときだけ: 本人の Slack の一致（上位 5 件・短い抜粋）",
+    )
+    slack_status: Literal["ok", "not_connected", "error"] | None = Field(
+        default=None,
+        description=(
+            "複合検索のときだけ: Slack を探せたか。not_connected / error は「探せなかった」で、"
+            "Slack に無いという意味ではない"
+        ),
+    )
+
+    @model_serializer(mode="wrap")
+    def _omit_unset_optional(self, handler: SerializerFunctionWrapHandler) -> dict[str, Any]:
+        """複合検索の欄は None なら出さない（フラグ OFF のツール結果を従来と同一に保つ）。"""
+        data: dict[str, Any] = handler(self)
+        for key in _OMIT_WHEN_NONE:
+            if key in data and data[key] is None:
+                del data[key]
+        return data

@@ -73,6 +73,9 @@ class SlackSearchMatch:
     channel_is_mpim: bool | None = None
     channel_is_im: bool | None = None
     channel_is_group: bool | None = None
+    # 一致したメッセージの添付ファイル名（応答の ``files[].name``・無ければ ``title``）。
+    # 応答に files が無い一致は空タプル（推測で埋めない）。
+    file_names: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -95,6 +98,23 @@ def _opt_bool(value: Any) -> bool | None:
     return value if isinstance(value, bool) else None
 
 
+def _file_names_from_raw(m: dict[str, Any]) -> tuple[str, ...]:
+    """一致の ``files`` から添付ファイル名を拾う（name → title の順・文字列だけ・最大 5 件）。"""
+    raw = m.get("files")
+    if not isinstance(raw, list):
+        return ()
+    names: list[str] = []
+    for f in raw:
+        if not isinstance(f, dict):
+            continue
+        name = f.get("name") or f.get("title")
+        if isinstance(name, str) and name.strip() and name.strip() not in names:
+            names.append(name.strip())
+        if len(names) >= 5:
+            break
+    return tuple(names)
+
+
 def _search_match_from_raw(m: dict[str, Any]) -> SlackSearchMatch:
     """search.messages の 1 マッチを SlackSearchMatch へ写す（マッピングの単一真実源）。"""
     ch: dict[str, Any] = m.get("channel") or {}
@@ -111,6 +131,7 @@ def _search_match_from_raw(m: dict[str, Any]) -> SlackSearchMatch:
         channel_is_mpim=_opt_bool(ch.get("is_mpim")),
         channel_is_im=_opt_bool(ch.get("is_im")),
         channel_is_group=_opt_bool(ch.get("is_group")),
+        file_names=_file_names_from_raw(m),
     )
 
 

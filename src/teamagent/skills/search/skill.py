@@ -19,6 +19,8 @@ import os
 import re
 import threading
 import time
+from concurrent.futures import Future, ThreadPoolExecutor
+from concurrent.futures import TimeoutError as FutureTimeoutError
 from typing import Any, ClassVar
 
 import structlog
@@ -41,6 +43,16 @@ from teamagent.skills.base import BaseSkill, SkillContext, register
 from teamagent.skills.search.aggregation import extract_aggregation_filter
 from teamagent.skills.search.answer_mode import MODE_INSTRUCTIONS, classify_answer_mode
 from teamagent.skills.search.client_match import normalize_filter_client
+from teamagent.skills.search.composite import (
+    MCP_SURFACE_CTX_KEY,
+    SlackItem,
+    SlackLookup,
+    composite_enabled,
+    lookup_slack,
+    slack_prompt_block,
+    slack_timeout_s,
+    status_note,
+)
 from teamagent.skills.search.dates import extract_title_date, resolve_date_basis
 from teamagent.skills.search.dedup import cap_per_document, collapse_near_duplicates
 from teamagent.skills.search.fusion import reciprocal_rank_fusion
@@ -153,6 +165,8 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
         app_role: str | None = "teamagent_app",
         query_planner: QueryPlanner | None = None,
         slack: Any = None,
+        slack_store: Any = None,
+        slack_reader_factory: Any = None,
     ) -> None:
         """Adapter は外から注入する（テストでモック差し替え可能にするため）。
 
@@ -180,6 +194,13 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
         # 既定 None＝必要になった時に SlackClient.from_env() を遅延生成する
         # （knowledge_deliver と同じ流儀。フラグ OFF のときは一切生成しない）。
         self._slack = slack
+        # 複合検索（USE_COMPOSITE_SEARCH・既定 OFF）: MCP ゲートを通った search の呼び出しで、
+        # 金庫と並行して本人の Slack 全体（search.messages・本人 xoxp）も探す（composite.py）。
+        # slack_store は本人 xoxp の TokenStore（factory が attach_slack_store で注入）。
+        # フラグ OFF なら Slack には一切触れず、ツール結果も 1 バイトも変わらない。
+        self._composite = composite_enabled()
+        self._slack_store = slack_store
+        self._slack_reader_factory = slack_reader_factory
         self._use_new_schema = use_new_schema
         if use_contextual:
             # Contextual Retrieval テーブルを優先（明示指定がなければ）
@@ -387,6 +408,10 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
         self._not_found_threshold = self._envfloat("SEARCH_NOT_FOUND_THRESHOLD", 0.25)
         self._not_found_subject_below = self._envfloat("SEARCH_NOT_FOUND_SUBJECT_BELOW", 0.5)
 
+    def attach_slack_store(self, slack_store: Any) -> None:
+        """複合検索で使う本人 Slack(xoxp) の TokenStore を後から注入する（factory 用）。"""
+        self._slack_store = slack_store
+
     @property
     def embedder(self) -> Any:
         """常駐 embedder（LocalE5）。ResearchPersister が二重ロード回避のため再利用する。"""
@@ -459,6 +484,11 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
         run_started = time.perf_counter()
         timings: dict[str, float] = {}
 
+        # 0. 複合検索: 本人の Slack 検索を**最初に**別スレッドへ投げ、金庫の検索と並行させる。
+        slack_pending = (
+            self._start_slack_lookup(input, ctx) if self._composite_active(ctx) else None
+        )
+
         # 1. クエリを embedding 化
         _t = time.perf_counter()
         embedding = self._embed(input.query)
@@ -527,6 +557,12 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
         file_urls = self._resolve_file_urls(hits, ctx)
         timings["resolve_urls_ms"] = (time.perf_counter() - _t) * 1000
 
+        # 2-c. 複合検索: 並行して投げた Slack 検索を回収する（失敗・時間切れは状態だけ持つ）。
+        slack_lookup: SlackLookup | None = None
+        if slack_pending is not None:
+            slack_lookup = self._collect_slack_lookup(slack_pending, ctx)
+        slack_items = slack_lookup.items if slack_lookup is not None else ()
+
         # 3. Bedrock で要約（chunk が 0 件のときはスキップ）。
         #    include_answer=False（二段レスポンスの fast path）は要約そのものを
         #    スキップし answer='' / 要約コスト 0 で hits だけ返す。0 件時の
@@ -539,12 +575,26 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
         if input.include_answer and not found:
             # 該当なし: 要約器を呼ばない（無いものを有るように書かせない）。近いものは名前だけ。
             answer, cost_usd = build_not_found_answer(hits), 0.0
+            if slack_items:
+                # 複合検索で Slack にだけ有る: 金庫の資料は渡さず、Slack の投稿だけで要約する
+                # （要約器には「金庫には無い」と明示し、「Slack にだけある」と書かせる）。
+                _t = time.perf_counter()
+                slack_answer, cost_usd = self._summarize(
+                    input.query, [], ctx.request_id, slack_items=slack_items
+                )
+                timings["converse_ms"] = (time.perf_counter() - _t) * 1000
+                answer = f"{answer}\n\n{slack_answer}"
         elif input.include_answer and self._should_defer_answer(hits, ctx):
-            answer, cost_usd = self._start_followup_answer(input, hits, file_urls, ctx), 0.0
+            answer = self._start_followup_answer(
+                input, hits, file_urls, ctx, slack_items=slack_items
+            )
+            cost_usd = 0.0
             deferred = True
         elif input.include_answer:
             _t = time.perf_counter()
-            answer, cost_usd = self._summarize(input.query, hits, ctx.request_id)
+            answer, cost_usd = self._summarize(
+                input.query, hits, ctx.request_id, slack_items=slack_items
+            )
             timings["converse_ms"] = (time.perf_counter() - _t) * 1000
             # 要約は資料名を挙げてもURLを出さないため回答末尾に「資料リンク」を決定論で付与。
             # markdown [label](url) は openclaw(@Aico) が Slack 装飾リンクへ変換する。ただし
@@ -563,6 +613,13 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
         #        該当なしの定型文には重ねない（「見つかりませんでした」が警告の上位互換）。
         if input.include_answer and found:
             answer = prefix_header(guard_header, answer)
+
+        # 3-bis'. 複合検索で Slack を探せなかった（未連携・切れ・失敗）／非公開の一致しか無い
+        #         ときは 1 行で言う（「無い」と「探せなかった」を区別する）。
+        if input.include_answer and slack_lookup is not None:
+            note = status_note(slack_lookup)
+            if note:
+                answer = f"{answer}\n\n{note}" if answer else note
 
         # 3-ter. 次の一手の提案。ヒットの**実ファイルが解決済み**のときだけ、
         #        「実ファイルをお送りしますか？」を末尾に 1 個だけ足す（受け皿は
@@ -624,6 +681,8 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
             hits=search_hits,
             total_cost_usd=cost_usd,
             found=found,
+            slack_hits=([item.hit for item in slack_items] if slack_lookup is not None else None),
+            slack_status=slack_lookup.status if slack_lookup is not None else None,
         )
         total_ms = (time.perf_counter() - run_started) * 1000
         log.info(
@@ -649,6 +708,59 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
             deferred=deferred,
         )
         return output
+
+    # ── 複合検索（金庫 ＋ 本人の Slack を並行）。USE_COMPOSITE_SEARCH 既定 OFF ─────────
+
+    def _composite_active(self, ctx: SkillContext) -> bool:
+        """この呼び出しで Slack も並行して探すか（フラグ ON かつ MCP ゲート経由の search だけ）。"""
+        return self._composite and bool(ctx.metadata.get(MCP_SURFACE_CTX_KEY))
+
+    def _start_slack_lookup(
+        self, input: SearchInput, ctx: SkillContext
+    ) -> tuple[Future[SlackLookup], float]:
+        """Slack 検索を別スレッドで始める（金庫の検索を待たせない・結果は後で回収）。
+
+        時間切れでもスレッドの終了は待たない（shutdown(wait=False)）。読み取り専用の
+        search.messages 1 本なので、取り残されても副作用は無い。
+        """
+        executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="search-slack")
+        try:
+            future = executor.submit(
+                lookup_slack,
+                slack_store=self._slack_store,
+                reader_factory=self._slack_reader_factory,
+                query=input.query,
+                metadata=dict(ctx.metadata),
+                request_id=ctx.request_id,
+            )
+        finally:
+            executor.shutdown(wait=False)
+        return future, time.perf_counter()
+
+    def _collect_slack_lookup(
+        self, pending: tuple[Future[SlackLookup], float], ctx: SkillContext
+    ) -> SlackLookup:
+        """Slack 検索の結果を回収する。時間切れ・例外は error（金庫の結果はそのまま返す）。"""
+        future, started = pending
+        remaining = max(0.0, slack_timeout_s() - (time.perf_counter() - started))
+        waited = time.perf_counter()
+        try:
+            lookup = future.result(timeout=remaining)
+        except FutureTimeoutError:
+            future.cancel()
+            lookup = SlackLookup(status="error", reason="timeout")
+        except Exception:  # lookup_slack は例外を握るが、念のため金庫の結果を守る
+            lookup = SlackLookup(status="error", reason="internal_error")
+        logger.info(
+            "search_composite_slack",  # G6: 件数・状態・理由コードだけ
+            request_id=ctx.request_id,
+            status=lookup.status,
+            reason=lookup.reason,
+            shown=len(lookup.items),
+            hidden=lookup.hidden_count,
+            wait_ms=int((time.perf_counter() - waited) * 1000),
+        )
+        return lookup
 
     def _judge_found(
         self, query: str, hits: list[SearchHit], probe: dict[str, str] | None
@@ -1726,6 +1838,8 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
         hits: list[SearchHit],
         file_urls: dict[str, str],
         ctx: SkillContext,
+        *,
+        slack_items: tuple[SlackItem, ...] = (),
     ) -> str:
         """回答生成をバックグラウンドへ逃がし、ツール応答に載せる定型文を返す。
 
@@ -1735,15 +1849,18 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
         target = resolve_followup_target(ctx.metadata)
         if target is None:  # _should_defer_answer で確認済み。二重ガード（宛先未確定では投げない）
             return TWO_STAGE_NOTICE
+        followup_kwargs: dict[str, Any] = {
+            "query": input.query,
+            "hits": list(hits),
+            "file_urls": dict(file_urls),
+            "request_id": ctx.request_id,
+            "target": target,
+        }
+        if slack_items:  # 複合検索の Slack 投稿も後追いの要約へ渡す（OFF なら従来の引数のまま）
+            followup_kwargs["slack_items"] = tuple(slack_items)
         thread = threading.Thread(
             target=self.deliver_followup_answer,
-            kwargs={
-                "query": input.query,
-                "hits": list(hits),
-                "file_urls": dict(file_urls),
-                "request_id": ctx.request_id,
-                "target": target,
-            },
+            kwargs=followup_kwargs,
             name=f"search-followup-{ctx.request_id}",
             daemon=True,
         )
@@ -1765,6 +1882,7 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
         file_urls: dict[str, str],
         request_id: str,
         target: FollowupTarget,
+        slack_items: tuple[SlackItem, ...] = (),
     ) -> bool:
         """要約を生成して後追い投稿する（同期）。例外は握って False（fail-open）。
 
@@ -1772,7 +1890,7 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
         """
         started = time.perf_counter()
         try:
-            answer, cost_usd = self._summarize(query, hits, request_id)
+            answer, cost_usd = self._summarize(query, hits, request_id, slack_items=slack_items)
             if _source_links_enabled():
                 answer += self._source_links_block(hits, file_urls=file_urls)
             converse_ms = (time.perf_counter() - started) * 1000
@@ -1855,13 +1973,19 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
         query: str,
         hits: list[SearchHit],
         request_id: str,
+        *,
+        slack_items: tuple[SlackItem, ...] = (),
     ) -> tuple[str, float]:
         """Bedrock に system prompt + chunks + query を渡して要約させる。
 
         Day 8 Phase 2: is_related_drive=True の hits は「関連 Drive 資料」セクションに
         分離して渡すことで、Sonnet 4.6 が主検索結果と関連資料を区別して回答できるようにする。
+
+        slack_items（複合検索の本人 Slack の投稿・表示してよいものだけ）があるときだけ、
+        参考資料を「金庫の資料」と明示し、Slack の投稿の節と出典の書き分け規則を足す。
+        空なら要約器への入力は従来と 1 バイトも変わらない。
         """
-        if not hits:
+        if not hits and not slack_items:
             return ("該当する資料が見つかりませんでした。", 0.0)
 
         system = load_prompt("search", self._prompt_version, "system")
@@ -1878,7 +2002,11 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
             + f"]\n{h.content}"
             for h in primary_hits
         )
-        sections = [f"# 質問\n{query}\n\n# 参考資料\n{primary_block}"]
+        if slack_items:
+            vault_block = primary_block or "（金庫に該当する資料はありません）"
+            sections = [f"# 質問\n{query}\n\n# 参考資料（金庫の資料）\n{vault_block}"]
+        else:
+            sections = [f"# 質問\n{query}\n\n# 参考資料\n{primary_block}"]
         if self._answer_modes:
             # 回答モードを決めるのはここ 1 か所だけ（同期・二段返しの後追いの両方が通る）。
             # ツール出力（SearchOutput）には載せない＝v2d のツール結果の形を変えないため、
@@ -1905,6 +2033,9 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
                 "Drive に存在する関連 PDF / Doc の冒頭抜粋です。回答中で別途紹介してください。\n\n"
                 + related_block
             )
+        if slack_items:
+            sections.append(slack_prompt_block(slack_items))
+            sections.append(load_prompt("search", "composite", "slack"))
         user_message = "以下の社内資料から質問に答えてください。\n\n" + "\n\n".join(sections)
 
         resp = self._bedrock.converse(
