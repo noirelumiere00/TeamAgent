@@ -92,6 +92,9 @@ const DIAGNOSTIC_ENV = [
   "TEAMAGENT_PERSONAL_MEMORY",
   // 回答評価ボタン（2026-10-06）の plugin 側スイッチ。値が 1 のときだけ ON（秘密値ではない）。
   "TEAMAGENT_ANSWER_FEEDBACK",
+  // 新しい会話の 1 通目を戻す（2026-10-06・P7）の plugin 側スイッチ。既定 ON・値が 0 のときだけ OFF
+  // （秘密値ではない）。ここに無いと TD で 0 にしても黙って捨てられ、止められない。
+  "TEAMAGENT_FIRST_MESSAGE_RESTORE",
 ];
 
 function fail(message) {

@@ -967,6 +967,7 @@ def test_entrypoint_is_readonly_secret_safe_and_environment_allowlisted() -> Non
         "CONNECT_ADMIN_NAME",
         "TEAMAGENT_PERSONAL_MEMORY",
         "TEAMAGENT_ANSWER_FEEDBACK",
+        "TEAMAGENT_FIRST_MESSAGE_RESTORE",
     }
     # 秘密値の受け皿にしない（allowlist の意味が消える）。
     assert diagnostic.isdisjoint(passthrough)
