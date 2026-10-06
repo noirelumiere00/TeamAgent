@@ -399,8 +399,10 @@ def build_production_tools() -> list[ToolSpec]:
         )
 
     # メール×社内ナレッジ横断ツール（read-only・per-user OAuth）。**既定 OFF**
-    # （USE_MAIL_LINK_TOOL=1）。本番 Slack Bot へは intent.py + slack_bot.py 経由で届くため、
-    # ここはBedrockオーケストレータ用の並行配線（dark）に過ぎない。token_store を必ず渡す。
+    # （USE_MAIL_LINK_TOOL=1）。本番 mcp タスクでは ON＝Slack（Aico）から呼ばれる主経路。
+    # token_store と共有 search を必ず渡す（slack_bot.get_mail_link_skill と同じ構成）。
+    # search が無いと「社内の関連資料」欄が常に空になる（2026-09-30 修正）。検索クエリは
+    # skill 側で client_name + topic_hint だけに限られ、メール本文は渡らない（G6）。
     if _envflag("USE_MAIL_LINK_TOOL"):
         from teamagent.skills.mail_to_internal_context.skill import MailToInternalContextSkill
 
@@ -410,7 +412,9 @@ def build_production_tools() -> list[ToolSpec]:
                 MailToInternalContextSkill.name,
                 MailToInternalContextSkill.description,
                 MailToInternalContextSkill,
-                factory=lambda: MailToInternalContextSkill(token_store=mail_link_store),
+                factory=lambda: MailToInternalContextSkill(
+                    token_store=mail_link_store, search_skill=search
+                ),
             )
         )
 

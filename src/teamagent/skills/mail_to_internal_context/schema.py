@@ -71,12 +71,19 @@ class InternalRef(BaseModel):
     title: str = Field(
         default="", max_length=200, description="表示用タイトル（チャネル名/ファイル名等）"
     )
-    # slack://… の permalink 化は runtime 層の責務（3層分離: skill は raw を返す）。
+    # source_uri は内部識別子のまま返す。開けるリンクは url（search の url と同じ規則）。
     source_uri: str | None = Field(
         default=None,
-        description="生の参照 URI（例 slack://CHANNEL/TS）。リンク化は runtime 層の責務",
+        description="生の参照 URI（例 slack://CHANNEL/TS）。内部識別子なので URL として出さない",
     )
     drive_url: str | None = Field(default=None, description="Drive 直リンク（判明時）")
+    url: str | None = Field(
+        default=None,
+        description=(
+            "ブラウザで開ける URL（Drive 直リンク / Slack permalink）。開けないときは None"
+            "（URL を推測して作らない）"
+        ),
+    )
     snippet: str = Field(default="", max_length=240, description="抜粋（DLP マスク後・短縮）")
     score: float = Field(default=0.0, ge=0.0, le=1.0, description="関連度（cosine 類似度）")
 

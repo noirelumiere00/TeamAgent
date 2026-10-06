@@ -172,7 +172,7 @@ def test_happy_path_links_and_masked_signal() -> None:
     assert out.mail_signal.counterpart_domains == ["moribuild.co.jp"]
     for d in out.mail_signal.counterpart_domains:
         assert "tantou" not in d and "@" not in d
-    # 社内参照: slack は raw source_uri を保持（permalink 化は runtime 責務）
+    # 社内参照: slack は raw source_uri を保持（開けるリンクは url 側）
     kinds = {r.kind for r in out.internal_refs}
     assert "slack" in kinds and "drive" in kinds
     slack_ref = next(r for r in out.internal_refs if r.kind == "slack")
@@ -184,6 +184,25 @@ def test_happy_path_links_and_masked_signal() -> None:
     assert out.total_cost_usd == 0.0
     assert out.inbox_owner_masked == "s***@vectorinc.co.jp"
     assert out.note
+
+
+def test_internal_refs_carry_openable_url(monkeypatch: pytest.MonkeyPatch) -> None:
+    # MCP（Aico）経路は runtime の整形を通らない。url は search の url と同じ規則で付く。
+    monkeypatch.delenv("SLACK_WORKSPACE_DOMAIN", raising=False)
+    monkeypatch.setenv("SLACK_WORKSPACE", "vectorinc")
+    skill = MailToInternalContextSkill(gmail=FakeGmail([]), search_skill=FakeSearch(_hits()))
+    out = skill.run(MailInternalContextInput(client_name="森ビル"), _ctx())
+    by_kind = {r.kind: r for r in out.internal_refs}
+    assert by_kind["slack"].url == "https://vectorinc.slack.com/archives/C091/p1748244936050099"
+    assert by_kind["drive"].url == "https://drive.google.com/file/d/abc"
+
+    # workspace が分からなければ内部識別子をリンクにしない（推測しない）。
+    monkeypatch.delenv("SLACK_WORKSPACE")
+    out = skill.run(MailInternalContextInput(client_name="森ビル"), _ctx())
+    by_kind = {r.kind: r for r in out.internal_refs}
+    assert by_kind["slack"].url is None
+    assert by_kind["slack"].source_uri == "slack://C091/1748244936.050099"
+    assert by_kind["drive"].url == "https://drive.google.com/file/d/abc"
 
 
 def test_bulk_noreply_and_daily_report_are_excluded_from_mail_signal(
