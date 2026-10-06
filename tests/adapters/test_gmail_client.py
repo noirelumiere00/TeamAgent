@@ -32,6 +32,7 @@ from teamagent.adapters.gmail_client import (
     extract_plain_text,
     extract_thread_participants,
 )
+from teamagent.adapters.oauth_token_store import OAuthToken
 
 
 # -----------------------------------------------------------
@@ -481,6 +482,50 @@ def test_from_env_default_scope_is_modify() -> None:
 def test_from_env_readonly_scope_when_explicit() -> None:
     client = GmailClient.from_env(readonly=True)
     assert "https://www.googleapis.com/auth/gmail.readonly" in client._scopes
+
+
+def _user_client(monkeypatch: pytest.MonkeyPatch, *, readonly: bool) -> GmailClient:
+    """本番と同じ from_user_token で作り、HTTP の手前だけ偽 service に差し替える。"""
+    monkeypatch.setenv("GOOGLE_CLIENT_ID", "cid")
+    monkeypatch.setenv("GOOGLE_CLIENT_SECRET", "secret")
+    granted = ("https://www.googleapis.com/auth/gmail.modify",)
+    client = GmailClient.from_user_token(
+        OAuthToken(refresh_token="rt", scopes=granted), readonly=readonly
+    )
+    # 資格情報は本人が許可したスコープ（gmail.modify）のまま＝readonly でも読み取り専用に
+    # 絞られない。読み取り専用はこの下の policy だけが守っている。
+    assert tuple(client._credentials.scopes) == granted
+    client._service = FakeGmailService()
+    return client
+
+
+def test_readonly_user_client_blocks_write_methods(monkeypatch: pytest.MonkeyPatch) -> None:
+    client = _user_client(monkeypatch, readonly=True)
+    with pytest.raises(RuntimeError, match=r"users\.drafts\.create"):
+        client.create_draft(to="a@x.com", subject="s", body_text="b", request_id="r")
+    with pytest.raises(RuntimeError, match=r"users\.messages\.modify"):
+        client.modify_message_labels("M1", request_id="r", add=["Label_1"])
+    with pytest.raises(RuntimeError, match=r"users\.labels\.create"):
+        client.create_hidden_label("TeamAgent/x", request_id="r")
+    # 読み取りは通る
+    client.list_messages(query="from:a@x.com", request_id="r")
+    client.list_labels(request_id="r")
+
+
+def test_read_write_user_client_can_still_create_drafts(monkeypatch: pytest.MonkeyPatch) -> None:
+    # 下書きを作る mail_reply / morning_digest（readonly=False）は従来どおり。送信は封鎖のまま。
+    client = _user_client(monkeypatch, readonly=False)
+    draft = client.create_draft(to="a@x.com", subject="s", body_text="b", request_id="r")
+    assert draft.id == "DRAFT_1"
+    client.modify_message_labels("M1", request_id="r", add=["Label_1"])
+    assert client._safe_policy._denylist >= {"users.messages.send", "users.drafts.send"}
+
+
+def test_from_env_readonly_blocks_write_methods() -> None:
+    client = GmailClient.from_env(readonly=True)
+    client._service = FakeGmailService()
+    with pytest.raises(RuntimeError, match=r"users\.drafts\.create"):
+        client.create_draft(to="a@x.com", subject="s", body_text="b", request_id="r")
 
 
 def test_from_env_picks_up_impersonate_user(monkeypatch: pytest.MonkeyPatch) -> None:
