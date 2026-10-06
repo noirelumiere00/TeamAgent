@@ -29,6 +29,7 @@ from pydantic import BaseModel
 from teamagent.adapters.bedrock_client import BedrockClient
 from teamagent.adapters.embeddings_client import Embedder
 from teamagent.adapters.pgvector_client import PgVectorClient, SearchHit
+from teamagent.ingest.industry_taxonomy import normalize_industry
 from teamagent.prompts.loader import load_prompt
 from teamagent.skills._shared.deai_text import strip_ai_decoration
 from teamagent.skills._shared.next_step import (
@@ -42,6 +43,15 @@ from teamagent.skills._shared.source_url import hit_doc_url
 from teamagent.skills.base import BaseSkill, SkillContext, register
 from teamagent.skills.search.aggregation import extract_aggregation_filter
 from teamagent.skills.search.answer_mode import MODE_INSTRUCTIONS, classify_answer_mode
+from teamagent.skills.search.campaign_files import (
+    advertiser_pattern,
+    attach_related_files,
+    campaign_header,
+    campaign_key,
+    is_campaign_hit,
+    links_footer,
+    scope_by_industry,
+)
 from teamagent.skills.search.client_match import normalize_filter_client
 from teamagent.skills.search.composite import (
     MCP_SURFACE_CTX_KEY,
@@ -72,7 +82,12 @@ from teamagent.skills.search.result_guard import (
     is_self_org_name,
     prefix_header,
 )
-from teamagent.skills.search.schema import SearchHitOut, SearchInput, SearchOutput
+from teamagent.skills.search.schema import (
+    RelatedFileOut,
+    SearchHitOut,
+    SearchInput,
+    SearchOutput,
+)
 from teamagent.skills.search.two_stage import (
     TWO_STAGE_CTX_KEY,
     TWO_STAGE_NOTICE,
@@ -394,6 +409,11 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
         self._client_guard_entities = self._envflag("SEARCH_CLIENT_GUARD_ENTITIES", default="true")
         # クライアント語彙キャッシュの TTL（秒・既定 10 分）。
         self._client_vocab_ttl_s = self._envfloat("SEARCH_CLIENT_VOCAB_TTL_S", 600.0)
+        # 施策実績（ショート動画DBの案件集計）に同じ施策の Drive 資料（レポート・提案書）と
+        # 広告主の業種を添え、問いの業種で要約を絞る（campaign_files.py・10-06 の実例の対策）。
+        # 施策実績のヒットがあるときだけ、本人の RLS のまま SQL を 1 回足す。**既定 ON**。
+        # SEARCH_CAMPAIGN_FILES=false で添付・絞り込み・リンク併記ごと止まり従来どおり。
+        self._campaign_files = self._envflag("SEARCH_CAMPAIGN_FILES", default="true")
         # 「該当なし」をはっきり言う（2026-10-06・評価セットの該当なし 7 問が 0/7 だった対策）。
         # 判定は not_found.judge_found（retrieval の実数値とメタだけ・LLM に任せない）。該当なしなら
         # 要約器を呼ばずに「金庫に該当する資料は見つかりませんでした（近いもの: …）」を返す。
@@ -558,6 +578,28 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
         file_urls = self._resolve_file_urls(hits, ctx)
         timings["resolve_urls_ms"] = (time.perf_counter() - _t) * 1000
 
+        # 2-b'. 施策実績のヒットに同じ施策の Drive 資料と広告主の業種を添え、要約に渡す
+        #       施策実績を問いの業種で絞る（別業種は外し、業種不明は末尾へ）。施策実績が
+        #       無い・SEARCH_CAMPAIGN_FILES=false なら summary_hits は hits そのもの。
+        summary_hits = hits
+        asked_industry: str | None = None
+        if self._campaign_files and any(is_campaign_hit(h) for h in hits):
+            self._attach_campaign_files(hits, ctx)
+            asked_industry = normalize_industry(input.filter_industry) or extract_query_industry(
+                input.query
+            )
+            summary_hits = scope_by_industry(hits, asked_industry)
+            if found and not summary_hits:
+                found = False
+                log.info(
+                    "search_not_found",  # G8: 業種は固定語彙・クエリ原文は出さない
+                    request_id=ctx.request_id,
+                    reason="industry_scope",
+                    top_score=hits[0].score if hits else None,
+                    hit_count=len(hits),
+                    terms=0,
+                )
+
         # 2-c. 複合検索: 並行して投げた Slack 検索を回収する（失敗・時間切れは状態だけ持つ）。
         slack_lookup: SlackLookup | None = None
         if slack_pending is not None:
@@ -587,16 +629,27 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
                 answer = f"{answer}\n\n{slack_answer}"
         elif input.include_answer and self._should_defer_answer(hits, ctx):
             answer = self._start_followup_answer(
-                input, hits, file_urls, ctx, slack_items=slack_items
+                input,
+                summary_hits,
+                file_urls,
+                ctx,
+                slack_items=slack_items,
+                asked_industry=asked_industry,
             )
             cost_usd = 0.0
             deferred = True
         elif input.include_answer:
             _t = time.perf_counter()
             answer, cost_usd = self._summarize(
-                input.query, hits, ctx.request_id, slack_items=slack_items
+                input.query,
+                summary_hits,
+                ctx.request_id,
+                slack_items=slack_items,
+                asked_industry=asked_industry,
             )
             timings["converse_ms"] = (time.perf_counter() - _t) * 1000
+            # 施策の数字に資料リンク・「シートのみ」を要約が落としたらコードで足す。
+            answer = self._append_campaign_footer(answer, summary_hits)
             # 要約は資料名を挙げてもURLを出さないため回答末尾に「資料リンク」を決定論で付与。
             # markdown [label](url) は openclaw(@Aico) が Slack 装飾リンクへ変換する。ただし
             # connect-web(/app) は answer を textContent で生表示しリテラル化するため、env で
@@ -679,10 +732,19 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
                     channel_type=(str(meta["channel_type"]) if meta.get("channel_type") else None),
                     title=(str(meta["title"]) if meta.get("title") else None),
                     project=(str(meta["cls_project"]) if meta.get("cls_project") else None),
-                    industry=(str(meta["cls_industry"]) if meta.get("cls_industry") else None),
+                    industry=(
+                        str(meta.get("cls_industry") or meta.get("campaign_industry"))
+                        if (meta.get("cls_industry") or meta.get("campaign_industry"))
+                        else None
+                    ),
                     doc_type=(str(meta["cls_doc_type"]) if meta.get("cls_doc_type") else None),
                     budget=(str(meta["cls_budget"]) if meta.get("cls_budget") else None),
                     is_low_confidence=bool(meta.get("is_low_confidence", False)),
+                    related_files=(
+                        [RelatedFileOut(**f) for f in meta["related_files"]]
+                        if isinstance(meta.get("related_files"), list)
+                        else None
+                    ),
                     updated_at=updated_at,
                     title_date=title_date,
                     date_basis=resolve_date_basis(updated_at, title_date),
@@ -775,6 +837,62 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
             wait_ms=int((time.perf_counter() - waited) * 1000),
         )
         return lookup
+
+    # ── 施策実績の関連ファイル（SEARCH_CAMPAIGN_FILES 既定 ON）────────────────────────
+
+    def _attach_campaign_files(self, hits: list[SearchHit], ctx: SkillContext) -> None:
+        """施策実績のヒットへ同じ施策の Drive 資料と広告主の業種を添える（SQL は 1 回）。
+
+        接続は検索と同じ RLS（本人の email / groups / role）＝見えない資料は添えない。
+        失敗しても検索は続ける（fail-open・何も添えない＝ヘッダでも「無い」と主張しない）。
+        """
+        advertisers: list[str] = []
+        for h in hits:
+            key = campaign_key(h) if is_campaign_hit(h) else None
+            if key is None:
+                continue
+            pattern = advertiser_pattern(key[0])
+            if pattern and pattern not in advertisers:
+                advertisers.append(pattern)
+        if not advertisers:
+            return
+        try:
+            with self._pgvector.connection(
+                app_role=self._app_role,
+                user_email=ctx.metadata.get("user_email"),
+                user_groups=(
+                    list(ctx.metadata["user_groups"])
+                    if isinstance(ctx.metadata.get("user_groups"), (list, tuple))
+                    else None
+                ),
+                user_role=ctx.metadata.get("user_role"),
+            ) as conn:
+                rows = self._pgvector.find_drive_files_for_advertisers(
+                    conn, advertisers, request_id=ctx.request_id
+                )
+        except Exception as exc:  # 添付の失敗で検索回答そのものを壊さない
+            logger.warning(
+                "search_campaign_files_failed",
+                request_id=ctx.request_id,
+                error=type(exc).__name__,
+            )
+            return
+        campaigns, attached = attach_related_files(hits, rows)
+        logger.info(
+            "search_campaign_files",  # G8: 件数だけ（広告主名・資料名は出さない）
+            request_id=ctx.request_id,
+            advertisers=len(advertisers),
+            campaigns=campaigns,
+            attached=attached,
+            candidates=len(rows),
+        )
+
+    def _append_campaign_footer(self, answer: str, hits: list[SearchHit]) -> str:
+        """要約が施策の資料リンク・「シートのみ」を落としたとき、末尾へ足す（OFF なら素通し）。"""
+        if not self._campaign_files or not answer:
+            return answer
+        footer = links_footer(hits, answer)
+        return f"{answer}\n\n{footer}" if footer else answer
 
     @staticmethod
     def _asked_client(probe: dict[str, str] | None) -> str | None:
@@ -1860,6 +1978,7 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
         ctx: SkillContext,
         *,
         slack_items: tuple[SlackItem, ...] = (),
+        asked_industry: str | None = None,
     ) -> str:
         """回答生成をバックグラウンドへ逃がし、ツール応答に載せる定型文を返す。
 
@@ -1878,6 +1997,8 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
         }
         if slack_items:  # 複合検索の Slack 投稿も後追いの要約へ渡す（OFF なら従来の引数のまま）
             followup_kwargs["slack_items"] = tuple(slack_items)
+        if asked_industry:  # 施策実績を業種で絞ったときだけ（無ければ従来の引数のまま）
+            followup_kwargs["asked_industry"] = asked_industry
         thread = threading.Thread(
             target=self.deliver_followup_answer,
             kwargs=followup_kwargs,
@@ -1903,6 +2024,7 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
         request_id: str,
         target: FollowupTarget,
         slack_items: tuple[SlackItem, ...] = (),
+        asked_industry: str | None = None,
     ) -> bool:
         """要約を生成して後追い投稿する（同期）。例外は握って False（fail-open）。
 
@@ -1910,7 +2032,10 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
         """
         started = time.perf_counter()
         try:
-            answer, cost_usd = self._summarize(query, hits, request_id, slack_items=slack_items)
+            answer, cost_usd = self._summarize(
+                query, hits, request_id, slack_items=slack_items, asked_industry=asked_industry
+            )
+            answer = self._append_campaign_footer(answer, hits)
             if _source_links_enabled():
                 answer += self._source_links_block(hits, file_urls=file_urls)
             converse_ms = (time.perf_counter() - started) * 1000
@@ -1995,6 +2120,7 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
         request_id: str,
         *,
         slack_items: tuple[SlackItem, ...] = (),
+        asked_industry: str | None = None,
     ) -> tuple[str, float]:
         """Bedrock に system prompt + chunks + query を渡して要約させる。
 
@@ -2019,6 +2145,7 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
             + ("（関連度低・参考）" if (h.metadata or {}).get("is_low_confidence") else "")
             + (self._title_header(h) if self._answer_modes else "")
             + self._date_header(h)
+            + (campaign_header(h) if self._campaign_files else "")
             + f"]\n{h.content}"
             for h in primary_hits
         )
@@ -2053,6 +2180,13 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
                 "Drive に存在する関連 PDF / Doc の冒頭抜粋です。回答中で別途紹介してください。\n\n"
                 + related_block
             )
+        if self._campaign_files and any(
+            is_campaign_hit(h) and "related_files" in (h.metadata or {}) for h in primary_hits
+        ):
+            # 施策実績の書き方（数字には資料リンク・無ければ「シートのみ」・業種の扱い）。
+            if asked_industry:
+                sections.append(f"# 問いの業種\n{asked_industry}")
+            sections.append(load_prompt("search", "campaign", "files"))
         if slack_items:
             sections.append(slack_prompt_block(slack_items))
             sections.append(load_prompt("search", "composite", "slack"))

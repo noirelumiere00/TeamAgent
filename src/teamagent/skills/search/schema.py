@@ -96,6 +96,19 @@ class SearchInput(BaseModel):
     )
 
 
+class RelatedFileOut(BaseModel):
+    """施策実績のヒットに添える、同じ施策の Drive 資料（レポート・提案書）。"""
+
+    title: str = Field(description="資料名（Drive の題名）")
+    url: str = Field(description="資料を開ける URL")
+    kind: Literal["レポート", "提案書", "資料"] = Field(description="資料の種類")
+    source_uri: str | None = Field(
+        default=None,
+        description="元データの内部識別子（ユーザーに提示しない・配信用）",
+        exclude=True,
+    )
+
+
 class SearchHitOut(BaseModel):
     """検索結果の1ヒット。
 
@@ -183,7 +196,9 @@ class SearchHitOut(BaseModel):
     )
     industry: str | None = Field(
         default=None,
-        description="業界（ナレッジ自動分類 cls_industry）",
+        description=(
+            "業界（ナレッジ自動分類 cls_industry）。施策実績は広告主の Drive 資料の業種の最頻値"
+        ),
     )
     doc_type: str | None = Field(
         default=None,
@@ -196,6 +211,13 @@ class SearchHitOut(BaseModel):
     is_low_confidence: bool = Field(
         default=False,
         description="低信頼ヒット（fallback しきい値で救出された borderline）。配信は控える",
+    )
+    related_files: list[RelatedFileOut] | None = Field(
+        default=None,
+        description=(
+            "施策実績のときだけ: 同じ施策の Drive 資料（最大 2 件）。空なら数字はシートのみ"
+        ),
+        exclude_if=lambda v: v is None,
     )
     updated_at: str | None = Field(
         default=None,
