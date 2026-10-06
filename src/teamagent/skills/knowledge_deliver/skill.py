@@ -10,18 +10,24 @@
 - 依頼者本人（ctx.metadata["user_email"]）の DM を開いて upload_file で添付する。
 - skill.run は同期だが dispatch が thread 実行するため、Slack 非同期呼び出しは asyncio.run で駆動。
 - どこで失敗しても要約テキストは返す（fail-open）。
+- 取引先ガード（KNOWLEDGE_DELIVER_CLIENT_GUARD・既定 ON）: 質問が取引先を名指ししていれば
+  その取引先の資料と言えるヒットだけを添付・根拠リンクにし、検索側が「該当なし」
+  （found=False）なら何も添付しない。判定は search の警告と同じ部品（client_match /
+  result_guard）で行う。
 """
 
 from __future__ import annotations
 
 import asyncio
 import os
+import re
 import shutil
 from typing import Any, ClassVar
 
 import structlog
 from pydantic import BaseModel
 
+from teamagent.adapters.pgvector_client import SearchHit
 from teamagent.skills._shared.drive_slack_delivery import (
     PreparedFile,
     deliver_files,
@@ -38,8 +44,20 @@ from teamagent.skills.knowledge_deliver.schema import (
     KnowledgeDeliverOutput,
     KnowledgeRef,
 )
+from teamagent.skills.search.client_match import (
+    _MIN_CLIENT_LEN,
+    hit_is_about_client,
+    normalize_client,
+    normalize_filter_client,
+)
 from teamagent.skills.search.knowledge_query import extract_query_industry
-from teamagent.skills.search.schema import SearchInput
+from teamagent.skills.search.result_guard import (
+    aliases,
+    detect_query_client,
+    hit_client_vocabulary,
+    is_self_org_name,
+)
+from teamagent.skills.search.schema import SearchHitOut, SearchInput, SearchOutput
 
 logger = structlog.get_logger(__name__)
 
@@ -51,6 +69,88 @@ __all__ = [
     "extract_drive_binary_file_id",
     "extract_drive_file_id",
 ]
+
+
+# 取引先ガード（2026-10-06 本番事故の再発防止）。既定 ON・"0" で従来どおり。
+# 事故: 「日本コカ・コーラの紅茶花伝…の事例を根拠の PDF つきで」に対し、本文は紅茶花伝を
+# 要約したのに、添付は東洋水産・アイホン・日立など別取引先の提案書 3 件だった。top1（本当の
+# 記録）に Drive 実体が無く、配信基準（スコア・低信頼・業界）だけを見ていたため下位の別取引先が
+# 回った。名指しの取引先がある依頼では「その取引先の資料」と言えるものだけを添付し、
+# 検索側が「該当なし」（found=False）と判定したときは何も添付しない。
+_CLIENT_GUARD_ENV = "KNOWLEDGE_DELIVER_CLIENT_GUARD"
+
+# search の回答末尾の「📎 資料リンク」ブロック（SearchSkill._source_links_block）の 1 行。
+_LINKS_HEAD = "📎 *資料リンク*"
+_LINK_LINE_RE = re.compile(r"^- \[[^\]]*\]\((?P<url>[^)\s]+)\)")
+
+
+def _client_guard_enabled() -> bool:
+    """取引先ガードが有効か（既定 ON。0 / false / no / off で従来どおり）。"""
+    raw = os.environ.get(_CLIENT_GUARD_ENV, "1").strip().lower()
+    return raw not in ("0", "false", "no", "off")
+
+
+def _as_search_hit(h: SearchHitOut) -> SearchHit:
+    """``hit_is_about_client`` / ``hit_client_vocabulary`` が読むメタだけを持つ SearchHit。
+
+    search の警告（result_guard）と同じ部品で判定するための詰め替え。本文は渡さない
+    （取引先判定は本文を見ない契約・競合比較ページで沈黙させないため）。
+    """
+    meta: dict[str, Any] = {
+        "client_name": h.client_name,
+        "cls_project": h.project,
+        "title": h.title,
+    }
+    if h.entities:
+        meta["cls_entities"] = list(h.entities)
+    return SearchHit(chunk_id=h.chunk_id, content="", score=h.score, metadata=meta)
+
+
+def _resolve_asked_client(
+    input: KnowledgeDeliverInput, s_out: SearchOutput
+) -> tuple[str | None, str]:
+    """利用者が名指しした取引先と、その出どころ（ログ用の固定語）を返す。
+
+    search と同じ規則・同じ優先順:
+      1. search が retrieval で確定させた値（明示 filter_client → 既知語彙への語境界つき一致）
+      2. 明示 filter_client（search 側の判定が無効な構成のとき）
+      3. ヒットに付いた取引先名を語彙にした語境界つき一致（result_guard の fallback と同じ）
+    自社・自社プロダクト名は取引先として扱わない。短すぎる名前は判定不能＝従来どおり。
+    """
+    candidates: list[tuple[str | None, str]] = [
+        (s_out.query_client, "search"),
+        (input.filter_client, "filter"),
+    ]
+    if not any(name and name.strip() for name, _ in candidates):
+        vocabulary = hit_client_vocabulary([_as_search_hit(h) for h in s_out.hits])
+        candidates.append((detect_query_client(input.query, vocabulary), "hits"))
+    for name, source in candidates:
+        if not name or not name.strip():
+            continue
+        asked = normalize_filter_client(name) or name.strip()
+        if is_self_org_name(asked) or len(normalize_client(asked)) < _MIN_CLIENT_LEN:
+            return None, "self_or_short"
+        return asked, source
+    return None, "none"
+
+
+def _drop_link_lines(answer: str, urls: set[str]) -> str:
+    """回答末尾の「📎 資料リンク」から ``urls`` の行を落とす（見出しだけ残ったら見出しも）。"""
+    if not answer or not urls:
+        return answer
+    lines = answer.split("\n")
+    kept = [
+        line for line in lines if not ((m := _LINK_LINE_RE.match(line)) and m.group("url") in urls)
+    ]
+    if len(kept) == len(lines):
+        return answer
+    out: list[str] = []
+    for i, line in enumerate(kept):
+        nxt = kept[i + 1] if i + 1 < len(kept) else ""
+        if line.strip() == _LINKS_HEAD and not _LINK_LINE_RE.match(nxt):
+            continue
+        out.append(line)
+    return "\n".join(out).rstrip()
 
 
 def _format_applied_filters(input: KnowledgeDeliverInput) -> str:
@@ -130,6 +230,18 @@ class KnowledgeDeliverSkill(BaseSkill[KnowledgeDeliverInput, KnowledgeDeliverOut
         # 明示 filter_industry が来たらそれを優先（クエリ自動抽出より上位）。明示が無ければ
         # 従来どおりクエリ文字列から推定して別業界の誤添付を防ぐ（設計 E: 明示フィルタ優先）。
         query_industry = input.filter_industry or extract_query_industry(input.query)
+        # 取引先ガード: 名指しの取引先があれば、その取引先の資料と言えるヒットだけを添付・
+        # 根拠リンクにする。検索側が「該当なし」と判定したら何も添付しない。
+        client_guard = _client_guard_enabled()
+        asked_client, asked_source = (
+            _resolve_asked_client(input, s_out) if client_guard else (None, "off")
+        )
+        asked_aliases = sorted(aliases(asked_client)) if asked_client else []
+        not_found_block = client_guard and not s_out.found
+        client_excluded = 0  # 配信基準は満たしたが別取引先（または取引先不明）で外した件数
+        other_client_urls: set[str] = set()
+        kept_urls: set[str] = set()
+        evidence_refs: list[KnowledgeRef] = []
         refs: list[KnowledgeRef] = []
         ref_by_fid: dict[str, list[KnowledgeRef]] = {}
         candidates: list[tuple[str, str]] = []  # (file_id, filename)
@@ -156,6 +268,17 @@ class KnowledgeDeliverSkill(BaseSkill[KnowledgeDeliverInput, KnowledgeDeliverOut
             refs.append(ref)
             if file_id:
                 ref_by_fid.setdefault(file_id, []).append(ref)
+            about_client = (
+                asked_client is None
+                or hit_is_about_client(_as_search_hit(h), asked_client, aliases=asked_aliases)
+                is not None
+            )
+            hit_urls = {u for u in (h.url, h.drive_url) if u}
+            if about_client:
+                evidence_refs.append(ref)
+                kept_urls |= hit_urls
+            else:
+                other_client_urls |= hit_urls
             industry_mismatch = bool(query_industry and h.industry and h.industry != query_industry)
             if (
                 file_id
@@ -165,12 +288,26 @@ class KnowledgeDeliverSkill(BaseSkill[KnowledgeDeliverInput, KnowledgeDeliverOut
                 and file_id not in seen_ids
                 and len(candidates) < input.top_k
             ):
+                if not_found_block:
+                    continue
+                if not about_client:
+                    client_excluded += 1
+                    continue
                 seen_ids.add(file_id)
                 candidates.append(
                     (file_id, safe_filename(h.resolved_file_name or h.title or h.file_name))
                 )
                 if h.source_type != "gdrive":
                     resolved_candidates += 1
+
+        # 根拠に使わない（別取引先の）リンクを回答末尾の「📎 資料リンク」から外す。
+        # 同じ URL を名指しの取引先のヒットも持っていれば残す。
+        answer = s_out.answer
+        if asked_client:
+            answer = _drop_link_lines(answer, other_client_urls - kept_urls)
+        # ガードが無ければ添付していた（＝ガードが 0 件の原因）なら、従来の理由文ではなく
+        # 「名指しの取引先の資料は無い」とそのまま言う。
+        guard_emptied = not candidates and (not_found_block or client_excluded > 0)
 
         # 3. 候補ファイルを Drive から取得 → 一時ファイル化（_shared の共通部品）。
         #    tmpdir の後始末は呼び出し側の責務（_shared/drive_slack_delivery の契約）。
@@ -231,6 +368,14 @@ class KnowledgeDeliverSkill(BaseSkill[KnowledgeDeliverInput, KnowledgeDeliverOut
                 # hits / file_id / 配信基準 のどこで落ちたかを文言に出し、誤読を止める。
                 if not refs:
                     reason = "関連する記録・資料が見つかりませんでした"
+                elif guard_emptied or not_found_block:
+                    # 取引先ガード: 該当なし／名指しの取引先の資料が無い。別取引先の資料を
+                    # 根拠として出さず、無いことをそのまま言う（条件緩和の提案もしない＝
+                    # 取引先を外すと別取引先の資料が根拠の顔で戻るため）。
+                    if asked_client:
+                        reason = f"{asked_client}の資料のファイル本体は見つかりませんでした"
+                    else:
+                        reason = "問いに該当する資料は見つかりませんでした"
                 elif not ref_by_fid:
                     reason = (
                         "社内のやり取り（Slack / 管理シートの行）は見つかりましたが、"
@@ -240,7 +385,11 @@ class KnowledgeDeliverSkill(BaseSkill[KnowledgeDeliverInput, KnowledgeDeliverOut
                     reason = "関連資料は見つかりましたが、配信の関連度基準に届きませんでした"
                 else:
                     reason = "該当資料の取得に失敗しました"
-                if applied:
+                if refs and (guard_emptied or not_found_block):
+                    note = f"{reason}（要約のみお返しします）。"
+                    if client_excluded:
+                        note += "別の取引先の資料は根拠にならないため、お送りしていません。"
+                elif applied:
                     note = (
                         f"{applied} で{reason}"
                         "（要約のみお返しします）。"
@@ -257,7 +406,7 @@ class KnowledgeDeliverSkill(BaseSkill[KnowledgeDeliverInput, KnowledgeDeliverOut
                     delivered_ids, where = asyncio.run(
                         self._deliver(
                             prepared=prepared,
-                            answer=s_out.answer,
+                            answer=answer,
                             request_id=ctx.request_id,
                             channel_id=channel_id,
                             thread_ts=thread_ts,
@@ -284,6 +433,15 @@ class KnowledgeDeliverSkill(BaseSkill[KnowledgeDeliverInput, KnowledgeDeliverOut
             for ref in ref_by_fid.get(fid, []):
                 ref.delivered = True
 
+        # 利用者へ返すリンク一覧（根拠）。取引先ガード有効時は、該当なしなら空・
+        # 名指しの取引先があればその取引先の資料だけ（別取引先を根拠として並べない）。
+        if not_found_block:
+            out_refs: list[KnowledgeRef] = []
+        elif asked_client:
+            out_refs = evidence_refs
+        else:
+            out_refs = refs
+
         log.info(
             "knowledge_deliver_done",
             hits=len(refs),
@@ -291,6 +449,11 @@ class KnowledgeDeliverSkill(BaseSkill[KnowledgeDeliverInput, KnowledgeDeliverOut
             resolved_candidates=resolved_candidates,
             delivered=len(delivered_ids),
             cost_usd=s_out.total_cost_usd,
+            # 取引先ガードの観測値（G8: 取引先名・資料名は載せない。固定語と件数だけ）。
+            client_guard=client_guard,
+            asked_source=asked_source,
+            found=s_out.found,
+            client_excluded=client_excluded,
         )
         if not on_private_surface:
             # その場（チャンネル等）へ返す本文には資料名・要約を載せない（DM 側にだけ出る）。
@@ -308,8 +471,8 @@ class KnowledgeDeliverSkill(BaseSkill[KnowledgeDeliverInput, KnowledgeDeliverOut
                 total_cost_usd=s_out.total_cost_usd,
             )
         return KnowledgeDeliverOutput(
-            answer=s_out.answer,
-            references=refs,
+            answer=answer,
+            references=out_refs,
             delivered_count=len(delivered_ids),
             note=note,
             total_cost_usd=s_out.total_cost_usd,

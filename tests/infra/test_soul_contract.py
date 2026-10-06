@@ -993,3 +993,27 @@ def test_slack_summary_relay_detector_catches_regressions() -> None:
     current = _relay_rule_line(SOUL.read_text(encoding="utf-8"))
     reversed_polarity = current.replace("を**そのまま**返す", "を読みやすい表に整えて返す")
     assert "そのまま返す（極性）" in _relay_rule_gaps(reversed_polarity)
+
+
+def test_first_message_of_a_new_session_is_answered_not_greeted(soul: str) -> None:
+    """新しい会話の 1 通目の依頼を挨拶で捨てない（10-06 全 DM 655 往復の判定・テーマ P7）。
+
+    本番の失敗: 「トレンダーズ」「連携」や依頼文をそのまま送っても「おはようございます。何かお手伝い
+    できることは？」とだけ返り、利用者が言い直していた。#531 の「最初の返事は挨拶 1 行だけ」はこれを
+    指示文で固定してしまう（#539 の 1 時間区切りで新しい会話の 1 通目は約 4 割に増える）。
+    変異: 「挨拶 1 行だけ」の行に戻すと赤。
+    """
+    assert "新しい会話の最初の返事は日本語の挨拶 1 行だけ" not in soul
+    assert "新しい会話の 1 通目でも依頼の本文があればまず答える" in soul
+
+
+def test_guess_first_and_retry_before_saying_missing(soul: str) -> None:
+    """推して先に実行・「無い」の前に表記を変えて呼び直す（10-06 全 DM 判定のテーマ P5・P2）。
+
+    本番の失敗: 直前の流れや予定から推せるのに 3〜5 項目を聞き返して着手しない（同じ依頼に 4 往復）。
+    金庫を 1 回探して「無い」と答え「Slack で検索を」「担当者に確認を」と作業を利用者に戻した
+    （INPEX と言い直すとすぐ見つかった）。変異: どちらかの文を消すと赤。
+    """
+    assert "「◯◯で進めます（違えば一言で）」と先に実行する" in soul
+    assert "「無い」と言う前に表記を変えて" in soul
+    assert "利用者に検索や確認を頼まない" in soul
