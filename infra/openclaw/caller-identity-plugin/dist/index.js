@@ -280,6 +280,70 @@ const SLACK_MAX_RETRY_AFTER_SECONDS = 5;
 const CONNECT_GUARANTEE_INVOCATION_PREFIX = "connect-d1";
 // 保証経路が MCP にも Slack にも届かなかったときの最終文面。無言終了を作らない。
 const CONNECT_GUARANTEE_DIAGNOSTIC_CODE = "CONNECT-Z02";
+// ── (PM) 本人メモ v1（M8・docs/architecture/hermes_migration_design.md §10b）──────────
+// DM の本人発話を学習係へ渡し（observe）、覚えた内容を返事の前に system 側へ差し込み（context）、
+// 記憶の操作コマンドをモデルを通さずに処理する（command）。3 つのツールは LLM のツール面に
+// 出さず、ここから予約 ID（aico-pm-(obs|ctx|cmd)-<32hex>・run_id と同じ）で直接呼ぶ。
+// mcp 側は署名済み claim・DM・予約 ID・スレッド無し・allowlist をすべて検査する（gate.py）。
+// 既定 OFF（TEAMAGENT_PERSONAL_MEMORY=1 のときだけ動く）。
+//
+// 設計からの変更（2026-10-05・M8 実装時）: 設計書は observe を message_received に置いていたが、
+// message_received の ctx には DM の正準 id（D…）が無く claim を作れない（hook-types の
+// PluginHookMessageContext）。そこで observe は before_agent_reply（ctx.chatId に D… がある・
+// 本番で発火を確認済み）で、cleanedBody をその場で渡す。本文は plugin に保持しない（G7）。
+const PERSONAL_MEMORY_ENV = "TEAMAGENT_PERSONAL_MEMORY";
+const PM_TOOLS = Object.freeze({
+  observe: "personal_memory_observe",
+  context: "personal_memory_context",
+  command: "personal_memory_command",
+});
+const PM_KINDS = Object.freeze({ observe: "obs", context: "ctx", command: "cmd" });
+export const PM_INVOCATION_PREFIX = "aico-pm-";
+// 返事を止めない上限（設計 §10b.3「1.2 秒で諦め、メモなしで現行 Aico が返信」）。
+const PM_CONTEXT_BUDGET_MS = 1_200;
+const PM_OBSERVE_TIMEOUT_MS = 10_000;
+const PM_COMMAND_TIMEOUT_MS = 15_000;
+// 差し込み文のキャッシュ（設計 §10b.5「plugin のキャッシュ 最大 60 秒」）。コマンドで即時に捨てる。
+const PM_CONTEXT_CACHE_TTL_MS = 60_000;
+// 告知の二重投稿を防ぐ間隔（告知済みの記録が届くまでの短い窓）。
+const PM_NOTICE_GUARD_MS = 10 * 60_000;
+const PM_UTTERANCE_MAX = 800;
+const MCP_PM_CLIENT_NAME = "teamagent-caller-identity-memory";
+const PM_UNAVAILABLE_TEXT =
+  "いま本人メモを操作できません。時間をおいて、もう一度同じ言葉で送ってください。";
+// コマンドの語句（全文一致）。正本は src/teamagent/mcp_gateway/personal_memory/texts.py の
+// COMMAND_PHRASES / FORGET_PHRASE_RE。一致は tests/test_openclaw_personal_memory.py で固定。
+export const PERSONAL_MEMORY_COMMAND_PHRASES = Object.freeze({
+  "何を覚えてる？": "list",
+  "覚えるのを止めて": "freeze",
+  "記憶を再開して": "resume",
+  "覚えたことを全部消して": "erase_request",
+  "はい、全部消して": "erase_confirm",
+});
+export const PERSONAL_MEMORY_FORGET_RE = /^([1-9][0-9]?)番を忘れて$/u;
+// DM のセッション鍵（上流の kind=direct）。チャンネル・スレッド・mpim はこの形にならない。
+const PM_DIRECT_SESSION_RE = /^agent:[^:]+:slack:direct:([a-z0-9]+)$/u;
+
+// 全文一致だけ（前後の空白は落とす）。部分一致・言い換えは受けない（普段の依頼と衝突させない）。
+export function classifyMemoryCommand(text) {
+  if (typeof text !== "string") return null;
+  const trimmed = text.trim();
+  if (Object.hasOwn(PERSONAL_MEMORY_COMMAND_PHRASES, trimmed)) {
+    return { action: PERSONAL_MEMORY_COMMAND_PHRASES[trimmed] };
+  }
+  const forget = PERSONAL_MEMORY_FORGET_RE.exec(trimmed);
+  if (forget) return { action: "forget", itemNo: Number(forget[1]) };
+  return null;
+}
+
+// モデル経路で本人メモのツール・予約 ID を名乗る呼び出しは拒否する（mcp 側の検査と二重化）。
+export function isPersonalMemoryToolName(value) {
+  return typeof value === "string" && /personal_memory/iu.test(value);
+}
+export function isReservedMemoryInvocation(value) {
+  return typeof value === "string" && value.trim().toLowerCase().startsWith(PM_INVOCATION_PREFIX);
+}
+
 // 本番でどのフックを登録要求するかの**期待値**（単一正本）。
 // register() は実際に api.on した名前でバナーを出し、両者が食い違ったら起動時に fail する
 // （下の register 末尾）。定数とコードが黙って乖離しないようにするための二重化。
@@ -288,6 +352,7 @@ export const REGISTERED_HOOKS = Object.freeze([
   "message_received",
   "before_agent_reply",
   "before_model_resolve",
+  "before_prompt_build",
   "before_tool_call",
   "before_agent_finalize",
   "reply_payload_sending",
@@ -2053,6 +2118,15 @@ export function createCallerIdentityPlugin({
   // heartbeat run を bindSlackActionRun で束縛）のまま。register のバナーに button_direct を出す。
   const buttonDirect =
     mcpBearer !== null && slackBotToken !== null && typeof fetchFn === "function";
+  // 本人メモ（M8）。flag と mcp の bearer と fetch がそろったときだけ。告知の投稿には bot token も使う。
+  const personalMemoryEnabled =
+    String(env[PERSONAL_MEMORY_ENV] ?? "").trim() === "1" &&
+    mcpBearer !== null &&
+    typeof fetchFn === "function";
+  // 送信者 → { text, atMs }。差し込み文だけ（発話本文は持たない）。コマンドで即時に捨てる。
+  const memoContextBySender = new Map();
+  // 送信者 → 告知を投稿した時刻（告知済みの記録が mcp に届くまでの二重投稿防止）。
+  const memoNoticeBySender = new Map();
 
   // 送信者 → DM の正準 conversation id（`D…`）。conversations.open は冪等だが、
   // 「連携」1 通ごとに Slack を叩かないための素朴なキャッシュ。値は不変。
@@ -2420,6 +2494,14 @@ export function createCallerIdentityPlugin({
     // 動画 URL × 0 tool call の層2 用。種類と依頼語の有無だけを持つ（URL・本文は保持しない＝G7）。
     const videoUrlKind = classifyVideoUrl(event?.content);
     const videoRequestIntent = videoUrlKind !== null && hasVideoRequestIntent(event?.content);
+    // 本人メモの observe 用。添付つきの発話は学習しない（guard の ATTACHMENT）。真偽だけを持つ。
+    const meta = event?.metadata ?? {};
+    const hasMedia = Boolean(
+      meta.mediaPath ||
+        meta.mediaUrl ||
+        (Array.isArray(meta.mediaPaths) && meta.mediaPaths.length > 0) ||
+        (Array.isArray(meta.mediaUrls) && meta.mediaUrls.length > 0),
+    );
     const ingress = {
       ingressKind: "message",
       pendingKey,
@@ -2442,6 +2524,7 @@ export function createCallerIdentityPlugin({
       connectShape,
       videoUrlKind,
       videoRequestIntent,
+      hasMedia,
     };
     const existing = pendingByMessage.get(pendingKey);
     if (existing && !sameIngress(existing, ingress)) {
@@ -3344,6 +3427,222 @@ export function createCallerIdentityPlugin({
   //   outcome=answered    … 層1 が handled で応答した（常時出す）
   // `layer1 entered` が 1 行も出なければ、before_agent_reply hook 自体が
   // 呼ばれていないと確定できる（上流側の問題と切り分けられる）。
+  // ── (PM) 本人メモ（M8）────────────────────────────────────────────────
+  // 1 対 1 DM の判定（設計 §10b.3 の 3 条件）: ① 受信の channelId が `DM:<sender>` ② ctx.chatId が
+  // `D…` に fullmatch ③ セッション鍵が kind=direct（`agent:<id>:slack:direct:<sender>`）。
+  // conversations.open の fallback は使わない。スレッド・チャンネル・mpim は対象外。
+  // 戻り値は { ok:true, ingress, claimChannel, senderId } か { ok:false, reason }。
+  function personalMemoryTarget(ctx) {
+    if (!personalMemoryEnabled) return { ok: false, reason: "disabled" };
+    if (String(ctx?.messageProvider ?? "").toLowerCase() !== "slack") {
+      return { ok: false, reason: "not_slack" };
+    }
+    if (ctx?.trigger !== undefined && ctx?.trigger !== "user") {
+      return { ok: false, reason: "trigger_not_user" };
+    }
+    const sessionKey = nonBlank(ctx?.sessionKey, 2048);
+    const senderId = normalizeSlackId(ctx?.senderId, SLACK_USER_RE);
+    if (!sessionKey || !senderId) return { ok: false, reason: "missing_session_or_sender" };
+    const direct = PM_DIRECT_SESSION_RE.exec(sessionKey);
+    if (!direct || direct[1] !== senderId.toLowerCase()) return { ok: false, reason: "not_direct" };
+    const chatChannel = resolveSlackChannel(ctx?.chatId);
+    if (chatChannel === null || !SLACK_DM_CHANNEL_RE.test(chatChannel)) {
+      return { ok: false, reason: "no_dm_chat" };
+    }
+    const channelId = consistentSlackChannel([ctx?.conversationId, ctx?.channelId, ctx?.channel]);
+    if (!channelId) return { ok: false, reason: "no_channel" };
+    const nowMs = now();
+    pruneState(nowMs);
+    const seen = new Set();
+    const candidates = [];
+    for (const ingress of [...pendingByMessage.values(), ...ingressByRun.values()]) {
+      if (ingress.ingressKind !== "message" || seen.has(ingress.pendingKey)) continue;
+      if (!matchesConversation(ingress, { sessionKey, senderId, channelId, nowMs })) continue;
+      seen.add(ingress.pendingKey);
+      candidates.push(ingress);
+    }
+    if (candidates.length !== 1) {
+      return { ok: false, reason: candidates.length === 0 ? "no_ingress" : "ambiguous_ingress" };
+    }
+    const ingress = candidates[0];
+    if (ingress.channelId !== `DM:${senderId}`) return { ok: false, reason: "not_dm_ingress" };
+    if (ingress.threadTs !== null) return { ok: false, reason: "thread" };
+    return { ok: true, ingress, claimChannel: chatChannel, senderId };
+  }
+
+  // 予約 ID で 1 回だけ署名して直接呼ぶ。mcp の応答（TextContent の JSON）を object で返す。
+  async function callPersonalMemory(target, kind, args, timeoutMs) {
+    const invocationId = `${PM_INVOCATION_PREFIX}${PM_KINDS[kind]}-${randomBytesFn(16).toString("hex")}`;
+    const nonceBytes = randomBytesFn(16);
+    if (!Buffer.isBuffer(nonceBytes) || nonceBytes.length !== 16) {
+      throw new ConnectPathError("nonce_failed");
+    }
+    let signed;
+    try {
+      signed = mintCallerClaim({
+        trusted: { ...target.ingress, channelId: target.claimChannel },
+        runId: invocationId,
+        toolCallId: invocationId,
+        tool: PM_TOOLS[kind],
+        params: { ...args, [USER_CONTEXT_KEY]: {} },
+        nowMs: now(),
+        nonceBytes,
+      });
+    } catch {
+      throw new ConnectPathError("claim_failed");
+    }
+    const result = await callMcpTool({
+      fetchFn,
+      mcpUrl,
+      bearer: mcpBearer,
+      name: PM_TOOLS[kind],
+      toolArguments: signed.params,
+      timeoutMs,
+      clientName: MCP_PM_CLIENT_NAME,
+    });
+    const text = Array.isArray(result?.content)
+      ? result.content.find(part => part?.type === "text")?.text
+      : null;
+    let payload = null;
+    try {
+      payload = typeof text === "string" ? JSON.parse(text) : null;
+    } catch {
+      payload = null;
+    }
+    if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+      throw new ConnectPathError("pm_invalid_payload");
+    }
+    return payload;
+  }
+
+  // G7: 理由と結果の種類だけ。本文・識別子は出さない。
+  function pmLog(logger, level, message) {
+    emitPluginLog(logger, level, `personal_memory ${message}`);
+  }
+
+  // before_agent_reply: 記憶の操作コマンド（全文一致）はモデルを通さずに処理する。
+  // 対象外（チャンネル・未許可など mcp が拒否）は undefined＝今までどおりモデルへ渡す。
+  async function answerMemoryCommand(event, ctx, logger) {
+    if (!personalMemoryEnabled) return undefined;
+    const command = classifyMemoryCommand(event?.cleanedBody);
+    if (command === null) return undefined;
+    const target = personalMemoryTarget(ctx);
+    if (!target.ok) {
+      pmLog(logger, "info", `command skipped reason=${target.reason}`);
+      return undefined;
+    }
+    // どのコマンドでも差し込み文のキャッシュは捨てる（凍結・削除・忘れるを次の返事から効かせる）。
+    memoContextBySender.delete(target.senderId);
+    const args =
+      command.action === "forget"
+        ? { action: "forget", item_no: command.itemNo }
+        : { action: command.action };
+    let reply;
+    try {
+      const payload = await callPersonalMemory(target, "command", args, PM_COMMAND_TIMEOUT_MS);
+      if (payload.error === "personal_memory_rejected") {
+        pmLog(logger, "info", `command rejected code=${String(payload.code ?? "none")}`);
+        return undefined;
+      }
+      reply = typeof payload.reply === "string" && payload.reply.trim() ? payload.reply : null;
+    } catch (error) {
+      pmLog(logger, "warn", `command failed reason=${error?.code ?? error?.name ?? "error"}`);
+      reply = PM_UNAVAILABLE_TEXT;
+    }
+    if (reply === null) reply = PM_UNAVAILABLE_TEXT;
+    memoContextBySender.delete(target.senderId);
+    pmLog(logger, "info", `command answered action=${command.action}`);
+    return { handled: true, reply: { text: reply }, reason: "personal_memory_command" };
+  }
+
+  // before_agent_reply（コマンド以外）: 発話を学習係へ渡す。返事は待たない（切り離す）。
+  function startMemoryObserve(event, ctx, logger) {
+    if (!personalMemoryEnabled) return;
+    const body = typeof event?.cleanedBody === "string" ? event.cleanedBody.trim() : "";
+    if (!body) return;
+    const target = personalMemoryTarget(ctx);
+    if (!target.ok) return;
+    const utterance = [...body].slice(0, PM_UTTERANCE_MAX).join("");
+    const task = callPersonalMemory(
+      target,
+      "observe",
+      { utterance, has_attachment: target.ingress.hasMedia === true },
+      PM_OBSERVE_TIMEOUT_MS,
+    )
+      .then(payload => {
+        pmLog(logger, "info", `observe status=${String(payload.status ?? payload.code ?? "none")}`);
+      })
+      .catch(error => {
+        pmLog(logger, "warn", `observe failed reason=${error?.code ?? error?.name ?? "error"}`);
+      });
+    onBackgroundTask(task);
+  }
+
+  // 初回の告知を DM へ投稿し、投稿できたときだけ「告知済み」を mcp に記録する（未投稿なら学習しない）。
+  function startMemoryNotice(target, noticeText, logger) {
+    const nowMs = now();
+    const last = memoNoticeBySender.get(target.senderId);
+    if (last !== undefined && nowMs - last < PM_NOTICE_GUARD_MS) return;
+    if (slackBotToken === null) {
+      pmLog(logger, "warn", "notice skipped reason=no_slack_bot_token");
+      return;
+    }
+    memoNoticeBySender.set(target.senderId, nowMs);
+    const task = (async () => {
+      await callSlackApi({
+        fetchFn,
+        botToken: slackBotToken,
+        method: "chat.postMessage",
+        body: { channel: target.claimChannel, text: noticeText, unfurl_links: false },
+        timeoutMs: SLACK_API_TIMEOUT_MS,
+        sleepFn,
+      });
+      const payload = await callPersonalMemory(
+        target,
+        "command",
+        { action: "notice_ack" },
+        PM_COMMAND_TIMEOUT_MS,
+      );
+      pmLog(logger, "info", `notice posted ack_ok=${payload.ok === true ? "yes" : "no"}`);
+    })().catch(error => {
+      memoNoticeBySender.delete(target.senderId);
+      pmLog(logger, "warn", `notice failed reason=${error?.code ?? error?.name ?? "error"}`);
+    });
+    onBackgroundTask(task);
+  }
+
+  // before_prompt_build: 覚えた内容を system 側（appendSystemContext）にだけ差し込む。
+  // 1.2 秒で諦めてメモなしで返事を続ける。利用者発話側（prependContext）には入れない
+  // （会話記録に本人メモが毎ターン残らないように・設計 §10b.4）。
+  async function injectPersonalMemory(_event, ctx, logger) {
+    if (!personalMemoryEnabled) return undefined;
+    const target = personalMemoryTarget(ctx);
+    if (!target.ok) return undefined;
+    const nowMs = now();
+    const cached = memoContextBySender.get(target.senderId);
+    if (cached && nowMs - cached.atMs <= PM_CONTEXT_CACHE_TTL_MS) {
+      return cached.text ? { appendSystemContext: cached.text } : undefined;
+    }
+    let payload;
+    try {
+      payload = await callPersonalMemory(target, "context", {}, PM_CONTEXT_BUDGET_MS);
+    } catch (error) {
+      pmLog(logger, "warn", `context skipped reason=${error?.code ?? error?.name ?? "error"}`);
+      return undefined;
+    }
+    if (payload.error === "personal_memory_rejected") {
+      pmLog(logger, "info", `context rejected code=${String(payload.code ?? "none")}`);
+      return undefined;
+    }
+    if (payload.notice_required === true && typeof payload.notice_text === "string") {
+      if (payload.notice_text.trim()) startMemoryNotice(target, payload.notice_text, logger);
+    }
+    const text = typeof payload.memo_context === "string" ? payload.memo_context : "";
+    memoContextBySender.set(target.senderId, { text, atMs: nowMs });
+    pmLog(logger, "info", `context items=${Number.isInteger(payload.items) ? payload.items : 0}`);
+    return text ? { appendSystemContext: text } : undefined;
+  }
+
   async function answerShortConnectRequest(_event, ctx, logger) {
     const invocationId =
       `${CONNECT_L1_INVOCATION_PREFIX}-${randomBytesFn(16).toString("hex")}`;
@@ -3815,6 +4114,14 @@ export function createCallerIdentityPlugin({
   function signToolCall(event, ctx, logger) {
     const observedToolName = nonBlank(event?.toolName, 256);
     const contextToolName = nonBlank(ctx?.toolName, 256);
+    // 本人メモのツール・予約 ID はモデルから呼ばせない（plugin の直接呼出しだけ）。
+    if (
+      [observedToolName, contextToolName].some(isPersonalMemoryToolName) ||
+      [event?.toolCallId, ctx?.toolCallId].some(isReservedMemoryInvocation)
+    ) {
+      emitPluginLog(logger, "warn", "before_tool_call blocked personal_memory_reserved");
+      return { block: true, blockReason: "このツールは使えません。" };
+    }
     // 拒否ログに載せる「形」だけの手掛かり。値（user id / channel id / ts）は出さない。
     const shape = () =>
       idShape({
@@ -4673,12 +4980,21 @@ export function createCallerIdentityPlugin({
       observe("message_received", (event, ctx) => {
         startConnectGuarantee(event, ctx, api.logger, "message_received");
       });
-      observe("before_agent_reply", (event, ctx) =>
-        answerShortConnectRequest(event, ctx, api.logger),
-      );
+      // 連携（層1）を先に評価し、答えなかったときだけ本人メモ（コマンド→observe）を見る。
+      observe("before_agent_reply", async (event, ctx) => {
+        const connect = await answerShortConnectRequest(event, ctx, api.logger);
+        if (connect !== undefined) return connect;
+        const command = await answerMemoryCommand(event, ctx, api.logger);
+        if (command !== undefined) return command;
+        startMemoryObserve(event, ctx, api.logger);
+        return undefined;
+      });
       observe("before_model_resolve", (event, ctx) => {
         bindAgentRun(event, ctx, api.logger);
       });
+      observe("before_prompt_build", (event, ctx) =>
+        injectPersonalMemory(event, ctx, api.logger),
+      );
       // logger を渡していなかったのが「14 日間 warn が 1 行も出ない」原因だった（2026-09-03）。
       observe("before_tool_call", (event, ctx) => signToolCall(event, ctx, api.logger));
       // 連携側を先に評価し、何もしなかったときだけ動画 URL × 0 tool call の層2 を評価する。
@@ -4707,7 +5023,8 @@ export function createCallerIdentityPlugin({
           ` trace=${traceEnabled ? "on" : "off"}` +
           ` mcp_bearer=${mcpBearer === null ? "no" : "yes"}` +
           ` slack_bot_token=${slackBotToken === null ? "no" : "yes"}` +
-          ` button_direct=${buttonDirect ? "yes" : "no"}`,
+          ` button_direct=${buttonDirect ? "yes" : "no"}` +
+          ` personal_memory=${personalMemoryEnabled ? "on" : "off"}`,
       );
     },
   };
