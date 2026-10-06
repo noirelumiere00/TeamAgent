@@ -492,6 +492,17 @@ def test_session_reset_policy_is_pinned() -> None:
         assert not re.search(r'name\s*=\s*"TZ"', tf.read_text()), tf.name
 
 
+def test_model_sees_japan_time() -> None:
+    """モデルに見える時刻を日本時間に（2026-10-06・「朝の時間帯ですね」の取り違え）。
+
+    ゲートウェイは UTC なので、指定しないと envelope の時刻も system prompt の時間帯も UTC になる。
+    変異: userTimezone を外す・envelopeTimezone を local に戻すと赤。
+    """
+    defaults = _load_reviewed_json5(CONFIG)["agents"]["defaults"]
+    assert defaults["userTimezone"] == "Asia/Tokyo"
+    assert defaults["envelopeTimezone"] == "user"
+
+
 def _plugin_module_value(expression: str) -> Any:
     """plugin の実物を import して ``expression``（m.<名前> の式）を JSON で返す。"""
     plugin = ROOT / "infra/openclaw/caller-identity-plugin/dist/index.js"

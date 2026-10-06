@@ -33,6 +33,13 @@
       //   installToolResultContextGuard＝窓×0.5×2 字で、この値とは連動しない）。
       //   最初の 1 回の overflow を防ぐのは MCP 側のエラー文の短縮（server.py）。
       contextLimits: { toolResultMaxChars: 20000 },
+      // §time（2026-10-06）: ゲートウェイは UTC で動く（TZ 無し）ため、受け取ったメッセージの時刻（envelope）も
+      //   system prompt の「Current Date & Time」の時間帯も UTC になり、モデルが日本時間の昼に「朝の時間帯ですね」と
+      //   言っていた。上流 2026.7.1 docs/concepts/timezone.md: userTimezone は system prompt の時間帯、
+      //   envelopeTimezone "user" はメッセージの時刻をその時間帯で付ける（時計の値は envelope にだけ入る）。
+      //   ⚠️ 会話の区切り（session.reset.atHour）はゲートウェイの時計（setHours）で数えるので、この設定では変わらない。
+      userTimezone: "Asia/Tokyo",
+      envelopeTimezone: "user",
       // §O: cacheRetention の明示パラメータは Bedrock 公式 doc に記載なし(unverified)のため
       // 削除して既定挙動に。★prompt caching チューニングは P1 実測後に再評価（§D）。
     },
