@@ -99,7 +99,19 @@ locals {
     # 2026-09-24 publish 世代（apk ロック追随）。Alpine 上流で libexpat 2.8.4-r0 が索引から消え
     # 2.8.5-r0 へ入れ替わった（r28 段 3 の media ビルドで停止）ため media-apk.lock 1 行と契約
     # artifact.apk-lock.sha256 を追随させたことによる再レンダリング。値の出所は repo tree からのオフライン導出。
-    "90a9656c82ad78f97f041b3ec224ce89252d887400e29899c87c4ce84e15e09b" = {
+    # 2026-09-30 publish 世代（apk lock 再生成）。実ビルドで lock 差分 -1 +1（240→240 行）、削除: ada-libs-3.3.0-r1 / 追加: ada-libs-3.3.0-r2 を検出したため
+    # media-apk.lock と契約 artifact.apk-lock.sha256 を追随させた再レンダリング（apply_apklock.sh）。
+    # 2026-10-01 publish 世代（apk ロック追随）。Alpine 上流の入替（libcrypto3 3.5.8-r0→3.5.9-r0・libssl3 3.5.8-r0→3.5.9-r0・python3 3.14.7-r0→3.14.8-r0）で段 3 の media ビルドが
+    # 解決不能になるため media-apk.lock と契約 artifact.apk-lock.sha256 を追随させた再レンダリング（apply_apklock.sh）。
+    # 2026-10-02 publish 世代（apk ロック追随）。Alpine 上流の入替（font-noto 2026.09.01-r0→2026.10.01-r0）で段 3 の media ビルドが
+    # 解決不能になるため media-apk.lock と契約 artifact.apk-lock.sha256 を追随させた再レンダリング（apply_apklock.sh）。
+    # 2026-10-02 publish 世代（pcre2 の CVE 対応）。r43 段 3 の media が ECR 脆弱性ゲート（pcre2 10.47-r1・CVE 8 件）で
+    # 止まったため pcre2=10.49-r0 を明示 pin し、media-apk.lock と契約 artifact.apk-lock.sha256 を追随させた再レンダリング（apply_apklock.sh）。
+    # 2026-10-05 publish 世代（apk lock 再生成）。実ビルドで lock 差分 -3 +4（240→241 行）、削除: ffmpeg-libavdevice-8.1.2-r1、ffmpeg-libavfilter-8.1.2-r1、ffmpeg-libswscale-8.1.2-r1 / 追加: ffmpeg-libavdevice-8.1.2-r3、ffmpeg-libavfilter-8.1.2-r3、ffmpeg-libswscale-8.1.2-r3、ほか 1 行 を検出したため
+    # media-apk.lock と契約 artifact.apk-lock.sha256 を追随させた再レンダリング（apply_apklock.sh）。
+    # 2026-10-05 publish 世代（Chainguard python ベースのバンプ）。r44 段4 の Trivy が core の py3-pip-wheel 26.2.1-r1（HIGH 2）で停止したため
+    # ベースを上げ python 3.14.7→3.14.8。runtime 契約と release 契約の両方が動いた再レンダリング（apply_mcp_base_bump.py）。
+    "789b61fc498376bf719978add807ca132652cf3a11b1114f13ac3a4f1a064b76" = {
       content_type                  = "text/yaml"
       object_lock_retain_until_date = "2099-12-31T00:00:00Z"
     }
@@ -158,7 +170,21 @@ locals {
     # 2026-09-24 publish 世代（apk ロック追随）。Alpine 上流で libexpat 2.8.4-r0 が索引から消え
     # 2.8.5-r0 へ入れ替わった（r28 段 3 の media ビルドで停止）ため media-apk.lock 1 行と契約
     # artifact.apk-lock.sha256 を追随させたことによる再レンダリング。値の出所は repo tree からのオフライン導出。
-    "9e47dd164f86ef8b40637a7854c6d928c323991957da9bdd97fdb01554561ba4" = {
+    # 2026-09-30 publish 世代（apk lock 再生成）。実ビルドで lock 差分 -1 +1（240→240 行）、削除: ada-libs-3.3.0-r1 / 追加: ada-libs-3.3.0-r2 を検出したため
+    # media-apk.lock と契約 artifact.apk-lock.sha256 を追随させた再レンダリング（apply_apklock.sh）。
+    # 2026-10-01 publish 世代（apk ロック追随）。Alpine 上流の入替（libcrypto3 3.5.8-r0→3.5.9-r0・libssl3 3.5.8-r0→3.5.9-r0・python3 3.14.7-r0→3.14.8-r0）で段 3 の media ビルドが
+    # 解決不能になるため media-apk.lock と契約 artifact.apk-lock.sha256 を追随させた再レンダリング（apply_apklock.sh）。
+    # 2026-10-01 publish 世代（OpenClaw 契約の node probe 追随）。#503 の runtime ベース 10-01 世代で
+    # /usr/bin/node が b6c4b27f… → 12929629… に動いたため契約の base64 を差し替えた再レンダリング。
+    # 2026-10-02 publish 世代（apk ロック追随）。Alpine 上流の入替（font-noto 2026.09.01-r0→2026.10.01-r0）で段 3 の media ビルドが
+    # 解決不能になるため media-apk.lock と契約 artifact.apk-lock.sha256 を追随させた再レンダリング（apply_apklock.sh）。
+    # 2026-10-02 publish 世代（pcre2 の CVE 対応）。r43 段 3 の media が ECR 脆弱性ゲート（pcre2 10.47-r1・CVE 8 件）で
+    # 止まったため pcre2=10.49-r0 を明示 pin し、media-apk.lock と契約 artifact.apk-lock.sha256 を追随させた再レンダリング（apply_apklock.sh）。
+    # 2026-10-05 publish 世代（apk lock 再生成）。実ビルドで lock 差分 -3 +4（240→241 行）、削除: ffmpeg-libavdevice-8.1.2-r1、ffmpeg-libavfilter-8.1.2-r1、ffmpeg-libswscale-8.1.2-r1 / 追加: ffmpeg-libavdevice-8.1.2-r3、ffmpeg-libavfilter-8.1.2-r3、ffmpeg-libswscale-8.1.2-r3、ほか 1 行 を検出したため
+    # media-apk.lock と契約 artifact.apk-lock.sha256 を追随させた再レンダリング（apply_apklock.sh）。
+    # 2026-10-05 publish 世代（Chainguard python ベースのバンプ）。r44 段4 の Trivy が core の py3-pip-wheel 26.2.1-r1（HIGH 2）で停止したため
+    # ベースを上げ python 3.14.7→3.14.8。runtime 契約と release 契約の両方が動いた再レンダリング（apply_mcp_base_bump.py）。
+    "00bdc1203ac12b83af5d07fb19b5b65a1c7e1da4ae31f6d5839c08bf6199b0ff" = {
       content_type                  = "text/yaml"
       object_lock_retain_until_date = "2099-12-31T00:00:00Z"
     }
@@ -217,7 +243,19 @@ locals {
     # 2026-09-24 publish 世代（apk ロック追随）。Alpine 上流で libexpat 2.8.4-r0 が索引から消え
     # 2.8.5-r0 へ入れ替わった（r28 段 3 の media ビルドで停止）ため media-apk.lock 1 行と契約
     # artifact.apk-lock.sha256 を追随させたことによる再レンダリング。値の出所は repo tree からのオフライン導出。
-    "9bce8c327f670b5458d3c5e548cfb5c756d313be9b4c1a93038924c0d754682f" = {
+    # 2026-09-30 publish 世代（apk lock 再生成）。実ビルドで lock 差分 -1 +1（240→240 行）、削除: ada-libs-3.3.0-r1 / 追加: ada-libs-3.3.0-r2 を検出したため
+    # media-apk.lock と契約 artifact.apk-lock.sha256 を追随させた再レンダリング（apply_apklock.sh）。
+    # 2026-10-01 publish 世代（apk ロック追随）。Alpine 上流の入替（libcrypto3 3.5.8-r0→3.5.9-r0・libssl3 3.5.8-r0→3.5.9-r0・python3 3.14.7-r0→3.14.8-r0）で段 3 の media ビルドが
+    # 解決不能になるため media-apk.lock と契約 artifact.apk-lock.sha256 を追随させた再レンダリング（apply_apklock.sh）。
+    # 2026-10-02 publish 世代（apk ロック追随）。Alpine 上流の入替（font-noto 2026.09.01-r0→2026.10.01-r0）で段 3 の media ビルドが
+    # 解決不能になるため media-apk.lock と契約 artifact.apk-lock.sha256 を追随させた再レンダリング（apply_apklock.sh）。
+    # 2026-10-02 publish 世代（pcre2 の CVE 対応）。r43 段 3 の media が ECR 脆弱性ゲート（pcre2 10.47-r1・CVE 8 件）で
+    # 止まったため pcre2=10.49-r0 を明示 pin し、media-apk.lock と契約 artifact.apk-lock.sha256 を追随させた再レンダリング（apply_apklock.sh）。
+    # 2026-10-05 publish 世代（apk lock 再生成）。実ビルドで lock 差分 -3 +4（240→241 行）、削除: ffmpeg-libavdevice-8.1.2-r1、ffmpeg-libavfilter-8.1.2-r1、ffmpeg-libswscale-8.1.2-r1 / 追加: ffmpeg-libavdevice-8.1.2-r3、ffmpeg-libavfilter-8.1.2-r3、ffmpeg-libswscale-8.1.2-r3、ほか 1 行 を検出したため
+    # media-apk.lock と契約 artifact.apk-lock.sha256 を追随させた再レンダリング（apply_apklock.sh）。
+    # 2026-10-05 publish 世代（Chainguard python ベースのバンプ）。r44 段4 の Trivy が core の py3-pip-wheel 26.2.1-r1（HIGH 2）で停止したため
+    # ベースを上げ python 3.14.7→3.14.8。runtime 契約と release 契約の両方が動いた再レンダリング（apply_mcp_base_bump.py）。
+    "a6c0fbaa7c117ad86bc5e5505ae0d72f02ab9ab5fb2284d81c57fd801ff33d2a" = {
       content_type                  = "text/yaml"
       object_lock_retain_until_date = "2099-12-31T00:00:00Z"
     }
@@ -416,18 +454,18 @@ removed {
 }
 
 import {
-  to = aws_s3_object.mcp_source_publisher_buildspec_generation["90a9656c82ad78f97f041b3ec224ce89252d887400e29899c87c4ce84e15e09b"]
-  id = "teamagent-dev-image-release-evidence/codebuild-buildspecs/teamagent-dev-mcp-source-publisher/90a9656c82ad78f97f041b3ec224ce89252d887400e29899c87c4ce84e15e09b.yml"
+  to = aws_s3_object.mcp_source_publisher_buildspec_generation["789b61fc498376bf719978add807ca132652cf3a11b1114f13ac3a4f1a064b76"]
+  id = "teamagent-dev-image-release-evidence/codebuild-buildspecs/teamagent-dev-mcp-source-publisher/789b61fc498376bf719978add807ca132652cf3a11b1114f13ac3a4f1a064b76.yml"
 }
 
 import {
-  to = aws_s3_object.image_attestor_buildspec_generation["9e47dd164f86ef8b40637a7854c6d928c323991957da9bdd97fdb01554561ba4"]
-  id = "teamagent-dev-image-release-evidence/codebuild-buildspecs/teamagent-dev-image-attestor/9e47dd164f86ef8b40637a7854c6d928c323991957da9bdd97fdb01554561ba4.yml"
+  to = aws_s3_object.image_attestor_buildspec_generation["00bdc1203ac12b83af5d07fb19b5b65a1c7e1da4ae31f6d5839c08bf6199b0ff"]
+  id = "teamagent-dev-image-release-evidence/codebuild-buildspecs/teamagent-dev-image-attestor/00bdc1203ac12b83af5d07fb19b5b65a1c7e1da4ae31f6d5839c08bf6199b0ff.yml"
 }
 
 import {
-  to = aws_s3_object.image_promoter_buildspec_generation["9bce8c327f670b5458d3c5e548cfb5c756d313be9b4c1a93038924c0d754682f"]
-  id = "teamagent-dev-image-release-evidence/codebuild-buildspecs/teamagent-dev-image-promoter/9bce8c327f670b5458d3c5e548cfb5c756d313be9b4c1a93038924c0d754682f.yml"
+  to = aws_s3_object.image_promoter_buildspec_generation["a6c0fbaa7c117ad86bc5e5505ae0d72f02ab9ab5fb2284d81c57fd801ff33d2a"]
+  id = "teamagent-dev-image-release-evidence/codebuild-buildspecs/teamagent-dev-image-promoter/a6c0fbaa7c117ad86bc5e5505ae0d72f02ab9ab5fb2284d81c57fd801ff33d2a.yml"
 }
 
 import {

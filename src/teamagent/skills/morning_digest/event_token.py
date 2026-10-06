@@ -24,6 +24,7 @@ from teamagent.hmac_keyring import (
     load_mail_action_token_ttl_s,
     validate_epoch_seconds,
 )
+from teamagent.skills._shared.grapheme_cut import truncate_graphemes
 from teamagent.skills.morning_digest.draft_token import (
     _SIG_LEN,
     _b64d,
@@ -66,7 +67,9 @@ def encode_event_token(
     書く（``ensure_ascii=False``）。既定の ``\\uXXXX`` だと日本語 1 字が 6 バイトになり、
     件名が 38 字前後を超えると 500 字を超えていた（実測: 10 字で 277・38 字で 501・60 字で 677）。
     UTF-8 なら 60 字でも 437 字に収まる。それでも収まらない件名（4 バイト文字の多い件名など）は
-    末尾から削って収め、件名を空にしても収まらなければ発行しない（None＝📅 を出さない）。
+    末尾から書記素クラスタ（見た目の 1 文字）単位で削って収め、件名を空にしても収まらなければ
+    発行しない（None＝📅 を出さない）。60 字の上限もクラスタ単位で切る（コードポイント単位だと
+    🇯🇵 の片割れや肌色の抜けた 👍 がカレンダーの件名に残る）。
     decode は受け取った raw バイトで HMAC を検証し ``json.loads`` するので、旧形式
     （``\\uXXXX``）と新形式のどちらも従来どおり読める（配布の順序に依らない）。
     """
@@ -81,7 +84,9 @@ def encode_event_token(
             return None
         # LLM 由来の件名に孤立サロゲートが混じると UTF-8 に符号化できない（以前は \uXXXX で
         # 通っていた）。「?」に置き換えて、📅 を出せなくなる退行を避ける。
-        title_text = str(title).encode("utf-8", "replace").decode("utf-8")[:_TITLE_MAX_CHARS]
+        title_text = truncate_graphemes(
+            str(title).encode("utf-8", "replace").decode("utf-8"), _TITLE_MAX_CHARS
+        )
         while True:
             payload = {
                 "v": _TOKEN_VERSION,
@@ -101,7 +106,7 @@ def encode_event_token(
                 return token
             if not title_text:
                 return None
-            title_text = title_text[:-1]
+            title_text = truncate_graphemes(title_text, len(title_text) - 1)  # 末尾 1 クラスタ
     except Exception:
         return None
 

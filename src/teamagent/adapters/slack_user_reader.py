@@ -17,6 +17,8 @@ CLAUDE.md 6-bis Adapter 層。Skill から slack_sdk を直接呼ばない。
   - **fail-closed 用の別口**: `read_thread_checked` / `read_channel_checked` は error code を返す
     （not_in_channel / channel_not_found 等）。「空スレッド」と「権限なし」を区別しないと
     いけない用途（slack_summary）はこちらを使う。既存メソッドの挙動は変えない。
+    `search_checked` も同じ考え方で、「0 件」と「トークン切れ・API 障害」を区別する
+    （slack_search 用。一致ごとに channel の is_private / is_mpim 等も写す）。
   - **G8**: ログは件数・latency・error code のみ。本文 / permalink / channel 名は出さない。
 """
 
@@ -51,7 +53,13 @@ _SLACK_USER_ID_RE = re.compile(r"^[UW][A-Z0-9]{2,}$")
 
 @dataclass(frozen=True)
 class SlackSearchMatch:
-    """search.messages の 1 マッチ（本人 token 限定）。"""
+    """search.messages の 1 マッチ（本人 token 限定）。
+
+    ``channel_is_*`` は応答の ``channel`` オブジェクトの真偽値をそのまま写す。
+    **値が無い・bool でないときは None**（＝判定できない）。公開/非公開の判定に使う側は
+    None を「公開ではない」として扱うこと（fail-closed。推測で公開側へ倒さない）。
+    ``match_type`` は応答の ``type``（DM の一致は ``"im"``・Slack API 仕様）。
+    """
 
     ts: str
     text: str
@@ -59,6 +67,51 @@ class SlackSearchMatch:
     channel_name: str
     user: str | None = None
     permalink: str = ""
+    username: str = ""
+    match_type: str = ""
+    channel_is_private: bool | None = None
+    channel_is_mpim: bool | None = None
+    channel_is_im: bool | None = None
+    channel_is_group: bool | None = None
+
+
+@dataclass(frozen=True)
+class SlackSearchRead:
+    """error-aware な検索結果（fail-closed 用・slack_search が使う）。
+
+    ``error`` は Slack API の error code（invalid_auth / missing_scope / ratelimited …）。
+    成功時は空文字で、そのときの ``matches == ()`` は **本当に 0 件**。
+    応答の形が想定外なら ``bad_response``（0 件と区別する）。
+    ``total`` は Slack が申告した総ヒット数（取れなければ返ってきた件数）。
+    """
+
+    matches: tuple[SlackSearchMatch, ...] = ()
+    total: int = 0
+    error: str = ""
+
+
+def _opt_bool(value: Any) -> bool | None:
+    """bool だけを通す（"false" 等の文字列や欠損は None＝判定不能）。"""
+    return value if isinstance(value, bool) else None
+
+
+def _search_match_from_raw(m: dict[str, Any]) -> SlackSearchMatch:
+    """search.messages の 1 マッチを SlackSearchMatch へ写す（マッピングの単一真実源）。"""
+    ch: dict[str, Any] = m.get("channel") or {}
+    return SlackSearchMatch(
+        ts=str(m.get("ts", "")),
+        text=str(m.get("text", "")),
+        channel_id=str(ch.get("id", "")),
+        channel_name=str(ch.get("name", "")),
+        user=m.get("user"),
+        permalink=str(m.get("permalink", "")),
+        username=str(m.get("username", "") or ""),
+        match_type=str(m.get("type", "") or ""),
+        channel_is_private=_opt_bool(ch.get("is_private")),
+        channel_is_mpim=_opt_bool(ch.get("is_mpim")),
+        channel_is_im=_opt_bool(ch.get("is_im")),
+        channel_is_group=_opt_bool(ch.get("is_group")),
+    )
 
 
 @dataclass(frozen=True)
@@ -310,17 +363,7 @@ class SlackUserReader:
         out: list[SlackSearchMatch] = []
         for m in matches_raw:
             try:
-                ch: dict[str, Any] = m.get("channel") or {}
-                out.append(
-                    SlackSearchMatch(
-                        ts=str(m.get("ts", "")),
-                        text=str(m.get("text", "")),
-                        channel_id=str(ch.get("id", "")),
-                        channel_name=str(ch.get("name", "")),
-                        user=m.get("user"),
-                        permalink=str(m.get("permalink", "")),
-                    )
-                )
+                out.append(_search_match_from_raw(m))
             except Exception:  # 1 件の欠損で全体を落とさない
                 continue
         logger.info(
@@ -330,3 +373,59 @@ class SlackUserReader:
             latency_ms=int((time.perf_counter() - start) * 1000),
         )
         return out
+
+    def search_checked(self, query: str, request_id: str, *, count: int = 10) -> SlackSearchRead:
+        """search.messages を **error code つき** で呼ぶ（1 ページ・読み取り専用）。
+
+        `search` は fail-open で「トークン切れ」「API 障害」「0 件」が全部 `[]` になる。
+        利用者へ「見つかりませんでした」と答える用途（slack_search）は、失敗を 0 件と
+        取り違えないようこちらを使う。既存の `search` の挙動は変えない。
+        """
+        if not query or not query.strip():
+            return SlackSearchRead(error="no_query")
+        start = time.perf_counter()
+        try:
+            resp = _run_sync(
+                lambda: self._client.search_messages(query=query, count=count, sort="timestamp")
+            )
+        except Exception as e:  # fail-closed（error code を上へ返す）
+            code = _slack_error_code(e)
+            logger.warning(
+                "slack_user_search_checked_failed",
+                request_id=request_id,
+                error=type(e).__name__,
+                slack_error=code,  # G8: 検索語・本文は出さない
+            )
+            return SlackSearchRead(error=code)
+        # slack_sdk は通常 ok:false で例外を投げるが、ok:false が素通りしても落とさない。
+        if resp.get("ok") is False:
+            return SlackSearchRead(error=str(resp.get("error") or "api_error"))
+        block = resp.get("messages")
+        raw = block.get("matches") if isinstance(block, dict) else None
+        if not isinstance(raw, list):
+            # 形が想定外＝「0 件」とは言えない（黙って空を返さない）。
+            logger.warning("slack_user_search_checked_bad_response", request_id=request_id)
+            return SlackSearchRead(error="bad_response")
+        out: list[SlackSearchMatch] = []
+        for m in raw:
+            try:
+                out.append(_search_match_from_raw(m))
+            except Exception:  # 1 件の欠損で全体を落とさない
+                continue
+        total = _search_total(block, len(out))
+        logger.info(
+            "slack_user_search_checked",
+            request_id=request_id,
+            returned=len(out),
+            latency_ms=int((time.perf_counter() - start) * 1000),
+        )
+        return SlackSearchRead(matches=tuple(out), total=total)
+
+
+def _search_total(block: dict[str, Any], fallback: int) -> int:
+    """search.messages の総ヒット数（``total`` → ``paging.total`` → 返ってきた件数）。"""
+    paging = block.get("paging")
+    for value in (block.get("total"), paging.get("total") if isinstance(paging, dict) else None):
+        if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+            return max(value, fallback)
+    return fallback

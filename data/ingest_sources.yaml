@@ -39,16 +39,46 @@ slack_channels:
       use_case: "顧客温度感・案件温度感の蓄積"
       priority: "high"        # 取り込み優先度
 
-gdrive_folders:
-  # ---- ナレッジ共有 Drive フォルダ ----
-  - folder_id: "12FMLe9XG24wlPrBCHOQ_vcr4uELtMN1E"
-    folder_name: "ナレッジ共有 - 添付ファイル"
-    description: "#proj-ナレッジ共有 で共有された添付資料の保管先"
-    include_subfolders: true
-    mime_type_filter: null    # PDF / Doc / Sheet すべて
+  # ---- 案件決定（案件検索 v3 の「案件の現在地」）----
+  # 2026-10-01 小俣さん依頼で追加。channel_id / 公開チャンネルであることは slack_search_channels で確認済。
+  # 中身: 新規案件決定の定型投稿（クライアント名／商材・代理店・Salesforce の商談 URL・予算・撮影日・
+  # 納品月・KPI・掲載媒体）と、同行依頼・撮影日の連絡・オーガニック投稿の URL 共有。
+  # ACL は既存どおりチャンネルメンバーの email（約 55 名）。⚠️ 取り込みは bot token で読むため、
+  # Aico の bot をこのチャンネルに招待しないと 1 件も取れない（10-01 時点で未参加）。
+  - channel_id: "C08MH3MG02F"
+    channel_name: "#proj-01案件決定-同行依頼"
+    description: |
+      新規案件が決まったときの定型投稿（案件決定ワークフロー）と同行依頼のチャネル。
+      案件ごとにクライアント名／商材・代理店・Salesforce の商談 URL・予算・撮影日・納品月が並ぶ。
+    include_files: false      # 本文だけ（添付の契約・見積類は取り込まない）
+    oldest_days: 365          # 過去 1 年の案件決定
     extra_metadata:
-      topic: "提案ナレッジ"
-      source_chain: "slack -> drive"  # Slack → Drive の関係性
+      topic: "案件決定"
+      use_case: "案件の現在地（案件検索 v3）"
+      priority: "high"
+
+# 名前の頭で channel をまとめて取り込む（2026-10-02・BU1 意見箱「fp連携チャンネルも読み取ってほしい」）。
+# 取り込みのたびに conversations.list で探すので、同じ頭の channel が増えても yaml は触らない。
+# ⚠️ 読めるのは Aico（bot）が参加している channel だけ。未参加の public channel は
+# ingest ログの ingest_slack_prefix_not_member に名前が出る（招待すれば次回から入る）。
+# private channel は Aico が招待されていないと一覧にも出ない。
+# channel_id で上に書いた channel は二重に取り込まない（明示の設定が優先）。
+slack_channel_prefixes:
+  - name_prefix: "fp連携"
+    description: |
+      名前が「fp連携」で始まる案件ごとの連携チャンネル（パートナーとの制作のやり取り）。
+    include_files: false
+    oldest_days: 365
+    max_channels: 200
+    extra_metadata:
+      topic: "fp連携"
+
+gdrive_folders:
+  # ---- ナレッジ共有 Drive フォルダ（12FMLe…）は 2026-10-01 に取り込み対象から外した ----
+  # 小俣さん依頼（「いらないかも・消して」）。このフォルダ（現名「ナレッジ共有（ナレッジ共有Slack
+  # から自動格納）」）は下の "ショート動画資料全般"(14Wfp6…) の**子フォルダ**なので、エントリを
+  # 消すだけでは親の再帰 walk で取り込まれ続ける。末尾の gdrive_exclude_folder_name_re に
+  # フォルダ名を足して、親経由でも配下ごと skip する。既存の取り込み済み文書の削除は DB 側で別途。
 
   # ---- ショート動画資料全般 (Day 7 = 2026-05-27 追加、最重要) ----
   # 営業との合意で「命名ルール付きで全資料をここに集約」する運用に決定。
@@ -135,6 +165,25 @@ gsheets:
       priority: "high"
       structure: "form-response"
       use_case: "顧客温度感の経時追跡 + 検索"
+
+  # ---- 案件決定v2（#proj-01案件決定-同行依頼 の台帳）2026-10-02 追加 ----
+  # 案件が決まったときの同行依頼 1 件 = 1 行（撮影日・クライアント／商材・種別・開始/終了日・
+  # 案件ID・映プロ担当 等。2026-10-02 時点 1,088 行）。BU1 ヒアリングの「受注した施策を知りたい」
+  # （杉浦さん）に、チャンネルの投稿より構造化された形で答えられる。
+  # gid は Drive 連携から取れないため auto（取り込み時にタブ名から実 gid を引く・引けなければ skip）。
+  - sheet_id: "1UNicjhmAPYzlY4TBTgTn92dqRkVYPqAmYh1c3oxcsYU"
+    sheet_name: "案件決定v2"
+    description: |
+      #proj-01案件決定-同行依頼 の投稿を GAS がフォーム形式で台帳化したもの。
+      行単位で 1 案件（同じクライアントでも撮影日ごとに別行）。
+    tabs:
+      - gid: auto
+        tab_name: "フォーム形式の回答"
+    row_unit: true
+    extra_metadata:
+      topic: "案件決定"
+      structure: "form-response"
+      use_case: "決まった案件（同行依頼）の一覧・検索"
 
   # ---- 📍ショート動画施策事例集（マスター表）2026-09-11 追加・B-10 ----
   # アポ前 事例ブリーフィング（pre_meeting_brief）が引く **唯一の母集団**。
@@ -284,8 +333,9 @@ gdrive_rulebook_root_folder_id: "REPLACE_WITH_KNOWLEDGE_ROOT"
 # （skipped_folder ログで観測可能）。省略時はコード側の既定
 #   ^\s*99[_＿]|一次倉庫|検索対象外
 # が使われる（99_一次倉庫＝検索対象外の運用ルールをコードで保証）。
-# 上書きしたい場合のみ、下の行のコメントを外して編集する:
-# gdrive_exclude_folder_name_re: "^\\s*99[_＿]|一次倉庫|検索対象外"
+# 上書きしたい場合のみ、下の行を編集する（上書きすると既定は使われないので、既定の 3 つも残す）。
+# 2026-10-01: ナレッジ共有の自動格納フォルダ（ショート動画資料全般の子・12FMLe…）を除外に追加。
+gdrive_exclude_folder_name_re: "^\\s*99[_＿]|一次倉庫|検索対象外|ナレッジ共有Slackから自動格納"
 
 # ============================================================
 # Adapter ↔ source_type マッピング

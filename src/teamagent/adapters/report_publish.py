@@ -349,6 +349,37 @@ def presign_get(
         return None
 
 
+#: /r が HTML を自分で返すときの上限（これより大きいものは従来どおり presigned へ 302）。
+INLINE_REPORT_MAX_BYTES = 8 * 1024 * 1024
+
+
+def fetch_report_html(bucket: str, key: str, *, region: str | None = None) -> bytes | None:
+    """HTML レポートの本文を取る（connect-web /r が自分で返す用）。失敗・上限超えは None。
+
+    10-05: /r の 302 先（presigned S3）がアドレスバーに残り、それを Slack に貼ると ``%2B`` が
+    空白に化けて InvalidToken になる。しかも一時認証情報で署名した presigned は数時間で失効する。
+    HTML は /r 自身が返せばアドレスバーは短縮 URL のままになる。
+    """
+    try:
+        import boto3
+
+        rgn = (
+            region
+            or os.environ.get("AWS_REGION")
+            or os.environ.get("AWS_DEFAULT_REGION")
+            or "ap-northeast-1"
+        )
+        s3 = boto3.session.Session().client("s3", region_name=rgn)
+        resp = s3.get_object(Bucket=bucket, Key=key)
+        if int(resp.get("ContentLength") or 0) > INLINE_REPORT_MAX_BYTES:
+            return None
+        body: bytes = resp["Body"].read(INLINE_REPORT_MAX_BYTES + 1)
+        return body if len(body) <= INLINE_REPORT_MAX_BYTES else None
+    except Exception as e:
+        logger.warning("report_fetch_failed", error=type(e).__name__)
+        return None
+
+
 # §Q-HTML→PPTX: 提案用 PPTX の配布（別 prefix・PPTX MIME）。
 _PPTX_CT = "application/vnd.openxmlformats-officedocument.presentationml.presentation"
 _PPTX_PREFIX = "vseo-proposals/"

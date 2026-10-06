@@ -1,0 +1,88 @@
+{
+  "schemaVersion": 1,
+  "pageVersion": "sha256:c9361cb80fcf5452b245f46a2022bfb955ebcb43d05746f7ea2879a192c89a31",
+  "claims": [
+    {
+      "id": "claim_d3d1a46775844431869c538df0ecf2bb",
+      "statement": "factory の _envflag は env が 1/true/yes のときだけ True で既定は false。search・clientkarte・proposal_draft・proposal_review は常に登録され、共有 SearchSkill が proposal 系に注入される。",
+      "evidence": [
+        {
+          "resource": "repo://src/teamagent/orchestrator/factory.py#L121-L157",
+          "version": "repo-lines-v1:sha256:ad97d36a45569dc6523a12504e6b2b312e9288328e7a072d3c65f631f27048e8:eyJzZWxlY3RlZExpbmVDb3VudCI6MzcsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjUzYjRjNjE1YmY2MDBhN2VlZjZkYzI4NTVmNTE1MjU2ZDRlZTg2YzdiZTI4MTVjMjM0NDc2NzA2YTBkZTIxMGQiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjAxYmE0NzE5YzgwYjZmZTkxMWIwOTFhN2MwNTEyNGI2NGVlZWNlOTY0ZTA5YzA1OGVmOGY5ODA1ZGFjYTU0NmIiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImQxNjIzZjU4MjgyNTIyZDdhMDYwNjI0NjczYzUxMGZjNmQ0Njc5MTRjYTExM2E4NmViMjhkMGE3NzVmM2Y5OTMiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImM1NTllN2NlOWMxYjhhOWI0MzVkZGY5N2Y5ZWQ1ZjBlYjVjMjkzYzhjMzQ2NzY5YjlhYjVmYTBlNzAyZGNkODEifQ"
+        },
+        {
+          "resource": "repo://src/teamagent/orchestrator/factory.py#L24-L25",
+          "version": "repo-lines-v1:sha256:6a9c0f03b040349158d58ae4a5777f4ec9715da27809491b6b84ff20ff083253:eyJzZWxlY3RlZExpbmVDb3VudCI6MiwiZmlyc3RTZWxlY3RlZExpbmVIYXNoIjoiNmI1YjY1ZjhlZGVkMGYzZDc2YmIyYmFmMGE4ZTU1NTFmOGM0NGQzYjg5NzgxNWVkYjM3MjU5Zjc1ZGJiZDFlZiIsImxhc3RTZWxlY3RlZExpbmVIYXNoIjoiMWUzMjZjOTYwZGFiZTQ1ZGVlMGYzNDkzODQ0MmYyMTA0ZDE4ODdiNThhYWVjZDJmOTA5MDc4ZWI5ZWE1ZDZmMiIsInByZWNlZGluZ0NvbnRleHRMaW5lQ291bnQiOjMsInByZWNlZGluZ0NvbnRleHRIYXNoIjoiODdlOWJlY2NiOTYzNGNmNzcxOWNkOWM4YjQxNDNmMjRkYmQxZWI4N2IxNmE4ODFhMmU4M2E4MWY0MThmZGFmZSIsImZvbGxvd2luZ0NvbnRleHRMaW5lQ291bnQiOjMsImZvbGxvd2luZ0NvbnRleHRIYXNoIjoiZTA5ZWZlZWIzZmQ0ZTVkMTVkOTBiN2I1ZDZkZmU4MTM3YTkxYjY0NmI0MWM3MzZjMjUwNjlkZGRjOGE2NzFhYiJ9"
+        }
+      ]
+    },
+    {
+      "id": "claim_ecdaf4a8401d48fc8d23dd9f659d8516",
+      "statement": "その他のツールは USE_* フラグごとに build_production_tools で追加される（例: USE_VIDEO_TOOLS で video_analysis と video_algorithm、USE_X_RESEARCH_TOOLS で X リサーチ 4 ツール）。",
+      "evidence": [
+        {
+          "resource": "repo://src/teamagent/orchestrator/factory.py#L121-L752",
+          "version": "repo-lines-v1:sha256:081e6f8ca2581012a6badf0f4a915488f95a9672754daca71d008db644b35c84:eyJzZWxlY3RlZExpbmVDb3VudCI6NjMyLCJmaXJzdFNlbGVjdGVkTGluZUhhc2giOiI1M2I0YzYxNWJmNjAwYTdlZWY2ZGMyODU1ZjUxNTI1NmQ0ZWU4NmM3YmUyODE1YzIzNDQ3NjcwNmEwZGUyMTBkIiwibGFzdFNlbGVjdGVkTGluZUhhc2giOiI5YTA5YjA1MDQzYTM1MmE0NzI1Njc4Nzk1NzU5NTRjMGUzZWZiZDk4NDMwZTg4YmEyNDcyY2Y1MGU3YjlkODI1IiwicHJlY2VkaW5nQ29udGV4dExpbmVDb3VudCI6MywicHJlY2VkaW5nQ29udGV4dEhhc2giOiJkMTYyM2Y1ODI4MjUyMmQ3YTA2MDYyNDY3M2M1MTBmYzZkNDY3OTE0Y2ExMTNhODZlYjI4ZDBhNzc1ZjNmOTkzIiwiZm9sbG93aW5nQ29udGV4dExpbmVDb3VudCI6MywiZm9sbG93aW5nQ29udGV4dEhhc2giOiJhMzk0YWI2ODMwODZhNTlkOThmN2E4Mjk4Y2QxZWFkYTcxY2JhYjAxMjcwMWExMjVlNjhkMzkyNTlkNTFhYWFhIn0"
+        }
+      ]
+    },
+    {
+      "id": "claim_baaad2b4048947b48ee59aa691aaf8cc",
+      "statement": "resolve_search_skill_config は SearchSkill の全ノブを env から解決する唯一の真実源で、USE_CLIENT_BOOST だけ既定 ON、PROMPT_VERSION の既定は v2d。",
+      "evidence": [
+        {
+          "resource": "repo://src/teamagent/orchestrator/factory.py#L46-L92",
+          "version": "repo-lines-v1:sha256:e4c1f8a53d925ccfc5986efe07e6e1b373351aaec1d0f9f3e1971ee5692c03a0:eyJzZWxlY3RlZExpbmVDb3VudCI6NDcsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6ImRiMjQ0Y2UxNDA4ZDdhYjg3YjNhM2I2NDJkNzZkYzc1ZDQ4NTVlMzA0YjJhODI2YmY3YWZkZmQ4OWI2NzVhZjciLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjAxYmE0NzE5YzgwYjZmZTkxMWIwOTFhN2MwNTEyNGI2NGVlZWNlOTY0ZTA5YzA1OGVmOGY5ODA1ZGFjYTU0NmIiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjJiN2U2NmM3YjliY2M1NTI0ZWY1MjMxNzVhOGU4MTkyMDZlMTQ2NjViNzNhOGUwYjY4ZTNkMDU1Yjc5ZTY4YTkiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImYzN2M5YmEyYTAxMWY5MjEyOGEzNWZiM2Q1Yjk0ZjE5NjBjMTBkMzU2MDAzZWIyMjlhMDdiNmQ0OWEyZjFjMGYifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_36e9b32612a54605a587f2af15881d6f",
+      "statement": "MCP task env には mail 系・morning_digest・mail_draft・oauth_connect などが固定 ON で直書きされ、DRAFT_ON_DEMAND_ONLY=true と STRUCTLOG_FORMAT=json も設定される。",
+      "evidence": [
+        {
+          "resource": "repo://infra/terraform/fargate.tf#L660-L695",
+          "version": "repo-lines-v1:sha256:4ecab37d56bc216526414e9c3010c1df4b10271c7401aff5cbe1b3bb902f516a:eyJzZWxlY3RlZExpbmVDb3VudCI6MzYsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6ImNlZWUxNjY1ZTUyNGQ5OTc2MDJhNGRjNDUzOTc4ZjU2MmQ1YTQ3YzNiYTdjYzA4NDgzMzY1NGMxYjYzNjEzN2YiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjU3NWVkYWY0ZjlmZjI3MWE4NzVkZGU3MDVkZDJkNDg3MWQxM2MyMzFhYjBjZDZhNmI3MTRjOGFmNjEzODYxZTgiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImZlY2VjNmEyZDUwMjkxNWFlMWRjNzg4NGMzY2M3MjQwZTVhN2Y1NTU2NWY4ODFkNmM2NzM3YzEwZjViZjM3NDUiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjhmMGU0YzRkMTZjNzI2YWZjYTRmNWQ5OTJlZGZjOThiNGVkZWU4Njg2MGRjNmQ2ZTg0Mzk2N2RiMmUxNDZiMDkifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_9e24882b7dd444d3a82f1b483d319754",
+      "statement": "enable_x_research や enable_scrape_tools などの機能変数が真のときだけ、関連する USE_* とキュー・テーブル名が concat で MCP env に足される。",
+      "evidence": [
+        {
+          "resource": "repo://infra/terraform/fargate.tf#L791-L869",
+          "version": "repo-lines-v1:sha256:91bec4d38e0c9976da1d836a1a27046f6e1b619580c59478d64b12c30eb7b1b2:eyJzZWxlY3RlZExpbmVDb3VudCI6NzksImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjUxNzc1MzY4YjQ5YTcwNzVkOTMxNjAxODhhNTIyYWNlNDA1MzJlMmRkMDlkMzY3N2JjM2M2YmY1ZDIyZmVkNDQiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6ImMwYjYwYTIxMDYyODFlODBjNDIwYzk3MGQ3ZmE1MGI0YjdhZGRiZmY0MzRiNWQwNWU0Mjk4YmRkNGQ2ZjM4ZjQiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImU1MmY1ZmEwZTMxZGIxNzBiMjA2MTEwNTE4NzdjODNhYzc3MjAyNjhlYjNlYTI5MjhmMmMzODQ5ZDBkOGNiZjgiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjdmZDlkZjkxMjFkYWM4ZmJlZmE2MDAxMzdiYjdkNWQ3Y2EyYTBhMGVmYjAzMzhjMGMzYWE3NTAzNDIzYWQyMjgifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_147c5d4f5f5941259ab74b36a1b7ab79",
+      "statement": "enable_scrape_tools・enable_proposal_builder・enable_omiyage_report は media worker が有効でないと precondition で失敗する。",
+      "evidence": [
+        {
+          "resource": "repo://infra/terraform/fargate.tf#L924-L938",
+          "version": "repo-lines-v1:sha256:252b90e2357e41c34962a8eadff7d6a1a095377e82bfbc8553368edb0e9263fd:eyJzZWxlY3RlZExpbmVDb3VudCI6MTUsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjAxYmE0NzE5YzgwYjZmZTkxMWIwOTFhN2MwNTEyNGI2NGVlZWNlOTY0ZTA5YzA1OGVmOGY5ODA1ZGFjYTU0NmIiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjQ4OTNmNDBlMzc4MWViODk2YzgyZDA0NmEwODA2N2ExMWUzNWNkZjJmMWRmYWYyNmZlYTkwYjhkYjY2NzY0MTMiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImEwMjkwN2ExMzQ5OThiYTJhNWM1NzczMjc2MmZiYWE3MmU4NDA4YWE2NjIxYmViNWM0ZjIyNmNjMDg0MzNjYjUiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImViNGE1ZTU5ZWU2ZTMyNGYzNDUzZWZkZGRiMWE0MzgyNGQ0Zjk1MGJmZjcyNzZhMTgyNzI3ZmNiYTU2MmZmMDQifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_0d265697e9f942cfac483e2bd9e6492d",
+      "statement": "effective-tool-scope.json は OpenClaw の include と MCP 登録の両方が必要という規則を定め、runtime contract テストがそのファイルを読んで整合を検査する。",
+      "evidence": [
+        {
+          "resource": "repo://infra/openclaw/effective-tool-scope.json#L1-L10",
+          "version": "repo-lines-v1:sha256:52a6fc701a89ccb94dc8a9f75d05fc7902852f151a2ed57647d7357069bb9bc1:eyJzZWxlY3RlZExpbmVDb3VudCI6MTAsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6ImE2ZmIwOGZkYTFhY2I5NTdiNjExNmJkMzc4MTFhMWZlNDFhMDE2MTFjMDYzMWVkYmY3ODZkNjg4OWEyN2E1NWMiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6ImQzZmIxZWZiNDQwMGUwZDhkM2FiZGFhODcxZDJlMmFhODZlY2ZlNGYzZTI3ODRlMzNmZTZjOGMwYzRhNmM0ODAiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjowLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImUzYjBjNDQyOThmYzFjMTQ5YWZiZjRjODk5NmZiOTI0MjdhZTQxZTQ2NDliOTM0Y2E0OTU5OTFiNzg1MmI4NTUiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjA0NThmNmQ0MmE1YmQxYjIzNmVkNzg3YWQxM2Y2ODk4YTQ5MzYwZjlmZDgyNDg4ZmIyOTE1ZWE0ZTk1Y2FkZmQifQ"
+        },
+        {
+          "resource": "repo://tests/scripts/test_openclaw_runtime_contract.py#L30-L30",
+          "version": "repo-lines-v1:sha256:5ad4f17559d8ec10e4a428476772d5f942635a7e2dcff39da3b1a963b6c0128e:eyJzZWxlY3RlZExpbmVDb3VudCI6MSwiZmlyc3RTZWxlY3RlZExpbmVIYXNoIjoiNWFkNGYxNzU1OWQ4ZWMxMGU0YTQyODQ3Njc3MmQ1Zjk0MjYzNWE3ZTJkY2ZmMzlkYTNiMWE5NjNiNmMwMTI4ZSIsImxhc3RTZWxlY3RlZExpbmVIYXNoIjoiNWFkNGYxNzU1OWQ4ZWMxMGU0YTQyODQ3Njc3MmQ1Zjk0MjYzNWE3ZTJkY2ZmMzlkYTNiMWE5NjNiNmMwMTI4ZSIsInByZWNlZGluZ0NvbnRleHRMaW5lQ291bnQiOjMsInByZWNlZGluZ0NvbnRleHRIYXNoIjoiMzMyMGU2MTg1MGYxZjcwYjNkMGIyZmY2N2YwN2ZiMzdmYzRjOWUwZmYyM2EwMzQ2NTQ5MTE0YTFiNmFkMmQyNyIsImZvbGxvd2luZ0NvbnRleHRMaW5lQ291bnQiOjMsImZvbGxvd2luZ0NvbnRleHRIYXNoIjoiZmMwZjliNjU0MjkxN2VmMTI1MjkwNmJhYWEzMzRhMjI0YTFlZjBiYTA3MGE5OGRlMTZlMGI3YmFiMjFiMzY3NyJ9"
+        }
+      ]
+    }
+  ],
+  "verification": {
+    "by": "openwiki/0.6.1",
+    "at": "2026-09-30T04:50:20.078Z"
+  }
+}

@@ -7477,7 +7477,6 @@ validate_exact_runtime_iam_plan() {
     . as $plan |
     (
       [
-        "aws_iam_role_policy.worker_app",
         "aws_iam_role_policy.lambda_app",
         "aws_iam_role_policy.mcp_task",
         "aws_iam_role_policy.connect_web_task[0]",

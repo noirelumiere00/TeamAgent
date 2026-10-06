@@ -47,3 +47,29 @@ def test_missing_glyph_fails_fast() -> None:
 def test_missing_font_asset_fails_fast(tmp_path: Path) -> None:
     with pytest.raises(FmtFontError, match="font asset missing"):
         build_embedded_fonts({"gothic": set("あ")}, base_dir=tmp_path)
+
+
+@pytest.mark.parametrize(
+    ("text", "expected", "dropped"),
+    [
+        ("JTB 海外旅行 おすすめ7選", "JTB 海外旅行 おすすめ7選", 0),  # 描けるものは一切変えない
+        ("𝐁𝐞𝐧𝐜𝐡 𝐏𝐑", "Bench PR", 0),  # 装飾用の数学英字は NFKC で ASCII へ
+        ("club™", "clubTM", 0),
+        ("İstanbul", "Istanbul", 0),  # 書体に無いアクセント付きは基底文字へ
+        ("1㌐の動画", "1ギガの動画", 0),  # NFKC を先に試す（結合記号を外すと「キカ」になる）
+        ("서울 여행 Seoul", "Seoul", 4),  # 寄せられないものは落として数える
+    ],
+)
+def test_make_renderable(text: str, expected: str, dropped: int) -> None:
+    from teamagent.skills.omiyage_report.fmt.fonts import make_renderable
+
+    assert make_renderable(text, "gothic") == (expected, dropped)
+
+
+def test_made_renderable_text_passes_the_gate() -> None:
+    """make_renderable を通した文字列は、どの役割でもゲート（missing glyphs）を通る。"""
+    from teamagent.skills.omiyage_report.fmt.fonts import make_renderable
+
+    raw = "𝐁𝐞𝐧𝐜𝐡 서울 İ ™ ① Café ẞ ʟ ꕤ"
+    chars = {role: [make_renderable(raw, role)[0]] for role in ("mincho", "gothic", "latin")}
+    build_embedded_fonts(chars)  # type: ignore[arg-type]

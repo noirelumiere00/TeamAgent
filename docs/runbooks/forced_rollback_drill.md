@@ -41,9 +41,13 @@ builder、validatorで一致させること。IAM拡張、内部helperの直実�
 - `alias/teamagent-dev-forced-rollback-drill-signing`
 
 通常のdrill前に基盤applyは行わない。再配備が必要な場合もfull planは正規経路
-ではない。`infra/terraform/worker.tf:201` のpreconditionはHMAC rollout有効を
-要求するが、本番の `mail_action_hmac_rollout_phase` は既定の `"blocked"` で
-あるためfull planは失敗する。配備担当がreviewした固定targetだけを
+ではない。`infra/terraform/fargate.tf` の `aws_ecs_task_definition.mcp`
+（connect-web・morning-digest のタスク定義も同じ）のpreconditionはHMAC rollout
+有効を要求するが、本番の `mail_action_hmac_rollout_phase` は既定の `"blocked"` で
+あるためfull planは失敗する（例外はHMACのrollbackモードで、そのタスクのrollback
+用の門が揃っている場合だけ）。EC2 worker の撤去前は `infra/terraform/worker.tf`
+のprecondition（rollbackの例外なし）も同じ理由で止めていたが、worker.tf は
+2026-09-28 の裁定で削除した。配備担当がreviewした固定targetだけを
 `-target` でplan/applyするのが現行の正規手順であり、drill中に対象を追加したり
 plain `terraform apply` へ切り替えたりしない。
 

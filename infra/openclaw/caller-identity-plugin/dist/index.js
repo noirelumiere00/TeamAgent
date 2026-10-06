@@ -429,6 +429,44 @@ export const ACTION_BINDINGS = Object.freeze({
     }),
   }),
 });
+// ── context overflow の案内を日本語にする（2026-09-30・DM が上限を超えて詰まった件）──────
+// 上流 openclaw@2026.7.1 は overflow から回復できなかった run の最終応答として英語の固定文を返す
+// （agent-runner.runtime-DYRSfwOn.js:1648 buildContextOverflowRecoveryText・:2934 の run 失敗文 /
+//  embedded-agent-CLJk10ON.js:3657。errors-XbAR6hS3.js:818 も :3657 と同じ文へ写す）。本番 09-29 の石田さんの DM では、reserveTokensFloor の
+// 設定案内つきの英文が利用者に届いていた（推定・isError=true）。reply_payload_sending は
+// その run でも発火する（本番 19:52:48 の connect suppression skipped 行で確認）ので、ここで差し替える。
+// 文面は上流からバイト単位で写した（先頭の ⚠️ は U+26A0 U+FE0F）。上流の版を上げたら照合し直す
+// （tests が plugins-lock.json の openclaw.version と、OPENCLAW_DIST_DIR 指定時は dist の実物と突き合わせる）。
+export const CONTEXT_OVERFLOW_UPSTREAM_VERSION = "2026.7.1";
+// 先頭一致で最初に当たったものを採る。どの 2 つも互いの接頭辞にならない（context_limit は末尾の「.」まで含める）。
+export const CONTEXT_OVERFLOW_MARKERS = Object.freeze([
+  Object.freeze(["auto_compaction", "\u26a0\ufe0f Auto-compaction could not recover this turn."]),
+  Object.freeze(["compaction_limit", "\u26a0\ufe0f Context limit exceeded during compaction."]),
+  Object.freeze(["context_limit", "\u26a0\ufe0f Context limit exceeded."]),
+  Object.freeze(["embedded", "Context overflow: prompt too large for the model."]),
+  Object.freeze(["run_failure", "\u26a0\ufe0f Context overflow \u2014 prompt too large for this model."]),
+]);
+// 利用者向けの案内。「同じ依頼を送れば通る」とは約束しない（1 ターンで 60k tokens 近く使う依頼は
+// 送り直しても溢れうる）。会話の始め直しは「/new」ではなく日本語の合言葉で案内する
+// （Slack は「/」で始まる入力を未登録のスラッシュコマンドとして送らない。合言葉は
+// openclaw.config.json5 の session.resetTriggers）。em ダッシュと「--」は使わない（deai 正規化と衝突させない）。
+export const CONTEXT_OVERFLOW_RESET_PHRASE = "新しい会話";
+export const CONTEXT_OVERFLOW_REPLY_TEXT =
+  "この会話が長くなり、Aico が一度に読める量を超えたため、今回の依頼は最後まで処理できませんでした。\n" +
+  "依頼を分けるか短くして、もう一度送ってください。\n" +
+  `続けて同じ案内が出るときは「${CONTEXT_OVERFLOW_RESET_PHRASE}」とだけ送ってください。` +
+  "会話を最初から始め直せます（それまでのやり取りは引き継がれません）。";
+// 本文の先頭一致だけを見る（モデルが本文の途中で英語の文を引用した場合は置き換えない）。
+export function classifyContextOverflowReply(payload) {
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) return null;
+  if (typeof payload.text !== "string") return null;
+  const text = payload.text.trim();
+  for (const [kind, marker] of CONTEXT_OVERFLOW_MARKERS) {
+    if (text.startsWith(marker)) return kind;
+  }
+  return null;
+}
+
 // 直接実行の共通の定型文（ツール名・コード・URL・トークンは含めない）。
 // ツールが mcp に無い（digest_ack は本番 OFF）ときの 1 行。SOUL のボタン共通プロトコルと同じ文。
 export const BUTTON_UNAVAILABLE_TEXT = "このボタンはいま使えません。";
@@ -4456,9 +4494,26 @@ export function createCallerIdentityPlugin({
     return { payload: { ...payload, text } };
   }
 
+  // 送信直前の本文の仕上げ。overflow の英語の固定文は日本語の案内に差し替え、それ以外は
+  // deai 正規化へ回す。抑止（cancel）と層3 の定型文置換はこれより先に判定する（優先順位は従来どおり）。
+  function finalizeOutgoingText(event, logger, runId) {
+    const kind = classifyContextOverflowReply(event?.payload);
+    if (kind) {
+      // G7: 本文・識別子は出さない。isError の有無だけ残す（上流の markAgentRunFailureReplyPayload が付ける）。
+      emitPluginLog(
+        logger,
+        "warn",
+        `context overflow reply replaced runId=${runId ?? "none"} kind=${kind}` +
+          ` is_error=${event.payload.isError === true ? "yes" : "no"}`,
+      );
+      return { payload: { ...event.payload, text: CONTEXT_OVERFLOW_REPLY_TEXT } };
+    }
+    return normalizeOutgoingText(event, logger, runId);
+  }
+
   function replaceExhaustedConnectReply(event, ctx, logger) {
     const eventRunId = authoritativeRunId(event, ctx, logger, "reply_payload_sending");
-    if (!eventRunId) return normalizeOutgoingText(event, logger, null);
+    if (!eventRunId) return finalizeOutgoingText(event, logger, null);
     // ── 二重返信の抑止（2026-09-04 本番実測 TD:45）───────────────────────────
     // 実測ログ: 保証経路が `outcome=delivered` で 1 通配信したあと、層2 の revise を経て
     // モデル経路も同じ内容を 1 通返し、**利用者に同じ内容が 2 通**届いていた。
@@ -4511,7 +4566,7 @@ export function createCallerIdentityPlugin({
         describeConnectDecision(decision, ctx),
     );
     const entry = connectFallbackByRun.get(eventRunId);
-    if (!entry) return normalizeOutgoingText(event, logger, eventRunId);
+    if (!entry) return finalizeOutgoingText(event, logger, eventRunId);
     const payload = event?.payload;
     if (!payload || typeof payload !== "object" || Array.isArray(payload)) return undefined;
     const text = typeof payload.text === "string" ? payload.text.trim() : "";

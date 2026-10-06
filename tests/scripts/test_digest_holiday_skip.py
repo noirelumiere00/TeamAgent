@@ -791,7 +791,16 @@ def test_planner_makes_no_reservation_on_a_holiday(
     w = _install(monkeypatch, [U1, U2])
     notices = _NoticeStore()
     monkeypatch.setattr(mod, "_notice_store", lambda: notices)
-    cals = {U1: _PlanCal("2026-10-12T09:00:00+09:00"), U2: None}  # 8:00 に送る予約
+
+    class _Reserve:  # planner の予約印（0031）。祝日でない日は印を付けて予約する
+        def reserve(self, *_: Any, **__: Any) -> bool:
+            return True
+
+        def release(self, *_: Any, **__: Any) -> bool:
+            return True
+
+    monkeypatch.setattr(mod, "_delivery_store", lambda: _Reserve())
+    cals = {U1: _PlanCal("2026-10-12T09:00:00+09:00"), U2: None}  # 8:30 に送る予約
     monkeypatch.setattr(mod, "_read_only_calendar", lambda store, email: cals[email])
 
     assert mod.run_planner([U1, U2]) == 0

@@ -1,0 +1,146 @@
+{
+  "schemaVersion": 1,
+  "pageVersion": "sha256:38c2115cbc0f7b0a5cd5d423eeb6c399c7a4f848001cfd2c8059eca6900fe6fb",
+  "claims": [
+    {
+      "id": "claim_bdda732f89e54d2bb318263e07d031ab",
+      "statement": "x_buzz のワーカーは定期実行ではなく、SQS をイベントソースとする Lambda x_dispatch（batch_size=1・ReportBatchItemFailures）が 1 通ごとに ECS RunTask で起動する。状態が done ならメッセージを ack し、queued なら SQS messageId と taskdef から作った clientToken で冪等に RunTask して、起動後もメッセージを保持する。",
+      "evidence": [
+        {
+          "resource": "repo://infra/terraform/lambda/x_dispatch/handler.py#L84-L131",
+          "version": "repo-lines-v1:sha256:90e45c2c783e4ab8268a15ba7069e81d1aa8bfe4ce6d87d24a0f433f83948cae:eyJzZWxlY3RlZExpbmVDb3VudCI6NDgsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6ImQ0NjM5M2JhMmFkMjE5ZTljOWVjYzAzOGExMGNjYWUzZDM2MDM5YmExMTU3NGJjNDI4NmUwNjkyYWIyOTNkYjUiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6ImEwY2U1NDQyOGM2YjlhMzMxYmUzZjA0MGI4NDRlNDU3MzY3MDYyNDFjMmU2NGFkMTUzY2MwZDE2NmY2YmVhOWUiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImIzOWFlYmE3MWVjNzZhZGQ5MjJlYTU5MWFlNmEzOTQwYzcxNTA0ZTIxZDc0MzAyOTQ1Mjc0MDU1ZWRmZDJiNTgiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjoyLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6Ijc1ZjY2MzEwZDA1YzYwMDBkZDEzMzFjMDRjZjQ4YzFlMzUzZTEwZWM5NDkxMjJkZjdkNWU1NGNkM2U2ZThiY2EifQ"
+        },
+        {
+          "resource": "repo://infra/terraform/x_research.tf#L468-L487",
+          "version": "repo-lines-v1:sha256:f2ab5e9c41f96d4ad60e5e3b1e1ddf2eb274030302ad439dfab0ab519e900410:eyJzZWxlY3RlZExpbmVDb3VudCI6MjAsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjU1MGE1MmNjNDk0NDZiYWFjOGE5MGNkZjQ0NzVjMTk2NDI0NzhlNjhlZDAzMmIwYjc5MmY1MTE0MjlmODgxNzgiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjQxMmNhMzQ1Y2NmNzViZjljMDgwNmJjZTY5NWJlOGRlODA4Yjc5OTg0MjUxYTdhNTRkMjAyY2Y2MTAxZGQ0NTEiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImZiNTgwZTk2NGY4M2E0NzNmNDNkNDQzODQ2Mjk0OWQ2OGI1NjAwZmRhNzg3ZjE2Mzc0NWQwMGRlODljYmYzNmEiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImZiY2ViOTk1ZjgzOTgxY2NjMjQ2NmJkZjQzYTQ1MDNhNGZlYzFhMDFiYTc2NTdkNzY1YTczMjRjZmY1MmNkZmYifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_36a697ea61d546d58f0b09eeeb15a441",
+      "statement": "MCP タスクロールには SQS SendMessage・ジョブ表の Get/Put/Update・コスト台帳の Get/Update・S3 x-research/* の GetObject だけを与え、ecs:RunTask と iam:PassRole は Lambda x_dispatch のロールだけが持つ。",
+      "evidence": [
+        {
+          "resource": "repo://infra/terraform/x_research.tf#L395-L431",
+          "version": "repo-lines-v1:sha256:39881fcbb2cb3520ed3dd79e7195ee0492d792199eecd1327183da0d66e93ebd:eyJzZWxlY3RlZExpbmVDb3VudCI6MzcsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjAxYmE0NzE5YzgwYjZmZTkxMWIwOTFhN2MwNTEyNGI2NGVlZWNlOTY0ZTA5YzA1OGVmOGY5ODA1ZGFjYTU0NmIiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjQxMmNhMzQ1Y2NmNzViZjljMDgwNmJjZTY5NWJlOGRlODA4Yjc5OTg0MjUxYTdhNTRkMjAyY2Y2MTAxZGQ0NTEiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjUxNDNmNDUzY2Q5ZTY2OTVjMGMyOWNlNWQ2NGViZGQ4NDI3ZmFiODQwOTI5MzgyZmIyNDQzMGQ5MTU0NmJhNzIiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6Ijc2OTFjNzIyOGRkODMzNDcxMjJiZmZmMWQxZjE2ZWM5NzM0YzFjNjA5NGI1ZmU3OTZlN2NhNTIzZTM1MzkxMWMifQ"
+        },
+        {
+          "resource": "repo://infra/terraform/x_research.tf#L489-L522",
+          "version": "repo-lines-v1:sha256:debd0fe912dbf4b34ae3f68f1109cbf852c44119e7d48cd7fb6d348a30ed3424:eyJzZWxlY3RlZExpbmVDb3VudCI6MzQsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjE4NDY4YzUwYTRlYTJiMGY1Zjg4NjI1MzA2ZGQ2NThhNTYyYjQyYjY2Y2EyNDEzY2QxNmQzMzBkYmQ5MTUyOTYiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjQxMmNhMzQ1Y2NmNzViZjljMDgwNmJjZTY5NWJlOGRlODA4Yjc5OTg0MjUxYTdhNTRkMjAyY2Y2MTAxZGQ0NTEiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImZiNTgwZTk2NGY4M2E0NzNmNDNkNDQzODQ2Mjk0OWQ2OGI1NjAwZmRhNzg3ZjE2Mzc0NWQwMGRlODljYmYzNmEiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjMzMmJjNDU2NmM5ODYxNmNkMDFhZGIwOGVlZWU3YzUwZWI0ZWZhMjg1MjE5MDI5MzQzODhhOTA1ZjM4MGJiZTcifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_feaf7abc413d4f6e931d2dafc6cf6a4a",
+      "statement": "x_buzz_measure_status は段階公開ゲートに加え、DynamoDB に保存した requested_by と呼び出した人の email が一致しない場合は結果を返さず denied にする（job_id は認可に使わない）。",
+      "evidence": [
+        {
+          "resource": "repo://src/teamagent/skills/x_research/skill.py#L888-L915",
+          "version": "repo-lines-v1:sha256:7bc3e94bac64550693e23154030032c9fff005de592a1096ab22bd04f65f7c8f:eyJzZWxlY3RlZExpbmVDb3VudCI6MjgsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6ImNlZmE3NzA2YmI2Mzk0MDFhY2U5MTU3OTAzYjk0NmM5MGIxMzg1MTIxNzU3MmNiOTlhNDZmY2VmMWY2MDdmNmUiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjIzYjM1YmI1ODBiOWE2MDRkZmFkNzNkMzBhMDJhNzVjOTkxYTk3MThhZTRhZDk5NGZmMTg4MmFmZDRkNDc2Y2EiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImM1MWQ5ZDMyNDNhNWYyY2Q4OTYyMmFmMjFkYjNmNzEzYTJjNDQ0NTZjYWZjNDQ0NzQyODU5NmFlMzAyOTM2NTQiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjhiY2FlNTE1Y2UxNDY5ZDVlODI0ODVjYTBlN2ZiNjczNjg0ZWMzN2E1YTE4ZmVjM2FiY2NiM2IwOWJmMTczMGUifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_909db8aea7a04a0b9f7e3845f3a483c8",
+      "statement": "x_buzz_measure_status は done 後の最初の照会でだけ Sonnet の山分析と HTML レポートを作り、report_url と spike_analysis を DynamoDB にキャッシュする。report_url が作れない環境でも spike_analysis はキャッシュする。",
+      "evidence": [
+        {
+          "resource": "repo://src/teamagent/adapters/x_task_store.py#L134-L156",
+          "version": "repo-lines-v1:sha256:6d41add4e1d79b3d18902093844f689c3255080568c79067c8d02efb80f675a5:eyJzZWxlY3RlZExpbmVDb3VudCI6MjMsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjU3YWVlMDgzNjNhZTU0MGZlMDZmZWY0ZTMwZGE5Y2FkMjJlZGJkMjNiMDkzOWZkMGZhYTg0Yzg0NGFiYWM3MDkiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjcyOGY0ZGNhMTE4MGZmMTIwNDU2YTBjNGFhNWQ2NDYzMDBhZjBiOGJiZTAzZmY4MTM5YTY4MWU2YmMzOTFiYWIiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImU0YTEyYWZjYmUxYmMzOTQyY2VjMDY5NGUyYzY4MDRmN2E1ZjQ1ZDg0ZmE2ZDU4YjRmZTUzYTRmMjc5MTM2NDIiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImFlMzlkNWM5Y2U5YzRhNTFlMzUwNjMwOGZmYmQzZGVmYWRkMDBhOGI5MDQyNWJhYjc0OGYxM2JkNDNjZTgzMTEifQ"
+        },
+        {
+          "resource": "repo://src/teamagent/skills/x_research/skill.py#L953-L1002",
+          "version": "repo-lines-v1:sha256:dad29c9cdc7ebaf9086be419a71fd9b0a7c9ffef20b461982061f12c72c64453:eyJzZWxlY3RlZExpbmVDb3VudCI6NTAsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6ImQ2ZGRmYjVmZTA4ZDk1MDAzMzdhMzJiYjk0ZTFlZThmYjkyZjAwMzdiNzBlNGYxN2RhOGUyNTUwZmU0ZWYzZTciLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjIyNjAxZmViYWRlZWY0NGQ3NDIxYTFhMjQzN2I3NDUwZTQzNDliYjBlYzY0Yzc3MmNiMGY5NzQxNmZiOGIwNjYiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImFlNGI3OTNhOWNiZGE2NDIzZGUxMGFmNTYxZjQxMDUzMWJjM2ZmNjk5YTQ0MTZmNmZkZTYzMDBmNGNlMjIzZDYiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImMzNzBmNWIxZjMyYjEzMWJjZmI2NWIyOTM2MjI1ZWViMmIxMTIxODk4OWFiYjJiMTE5YTAzZWRlNjdlNDE5MjIifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_7119a99e32be46ceb364390f46bfbf3a",
+      "statement": "x_buzz_job ワーカーは期間を 1 日ずつ取得し、日ごとに running と進捗を書く。1 日分の ApifyError は count=-1 の欠測として続行し、予算超過（CostLimitExceededError）は error_code COST_LIMIT の failed にして終了する。",
+      "evidence": [
+        {
+          "resource": "repo://src/teamagent/workers/x_buzz_job.py#L98-L141",
+          "version": "repo-lines-v1:sha256:007274c5a94bc00c47f3de45e2206f45082485cd9a74ced1326849e7f3948a9a:eyJzZWxlY3RlZExpbmVDb3VudCI6NDQsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6ImZlMzhmZGJjYWQ4YjIzMDBjNzljNDcwNTQ2YmY3MmZlNmQxYWJlZTJmOWEzMjVjOWUxYzg5MzE2YjczOTEzMTUiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjQwOTNkY2UwMmZhM2U1YzBiOGMxYzg2YWM2N2U4NzYzZTNhMjQ5YWFhZDAxZjlhOGVkZTJkNjcyNzE1MGJkNzgiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjA0MWYyODE4OTI5ZmQwMjIwZTgwYmExZTI0M2JlNDVjMjlhZjQzM2IwMjYyNWY4ZGYyYWI5ZjUzMTljYTcwMmYiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImFjZGFlMTQ5Y2JkN2FkNGM2YThkNzRiYjgxYjlmNjVjMjQwOWRjMWYyZThlMWRmYTk1YTc0MDVjZTM4ZWI0NmUifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_901af9b966f94bd2a7c6d3d547b69a41",
+      "statement": "x_buzz のジョブキューは可視性タイムアウト 1800 秒・maxReceiveCount 24 で DLQ に移り、DLQ の深度 1 以上で SNS にアラームを送る。アラームの説明文は「3回失敗」と書かれており、実際の条件と食い違っている。",
+      "evidence": [
+        {
+          "resource": "repo://infra/terraform/x_research.tf#L165-L180",
+          "version": "repo-lines-v1:sha256:30b6861bd5d6bb3d4bfdff715d90d8eef2183a4d1adc2bdbfa79015d2ba55bc0:eyJzZWxlY3RlZExpbmVDb3VudCI6MTYsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjZlZGJlZWY4ZDE0ZjRmNzIwZDczNTI4YjI3YjhjYzVmNDAyMmEyMDdjYTgxMzlmMDViMzA3YjkzNmRjN2M2NDMiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjAxYmE0NzE5YzgwYjZmZTkxMWIwOTFhN2MwNTEyNGI2NGVlZWNlOTY0ZTA5YzA1OGVmOGY5ODA1ZGFjYTU0NmIiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImZiNTgwZTk2NGY4M2E0NzNmNDNkNDQzODQ2Mjk0OWQ2OGI1NjAwZmRhNzg3ZjE2Mzc0NWQwMGRlODljYmYzNmEiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjcyNDMyOWQ3NjRlZjQxMDg5MGM0NjRhYWMyZDE1NmZkYzNjZjAwYTM0ZDc4NTg4MjkyYjM2ZjgxNTY2YmI3OGEifQ"
+        },
+        {
+          "resource": "repo://infra/terraform/x_research.tf#L525-L546",
+          "version": "repo-lines-v1:sha256:dd8cc3963071d5457e6e128fff9bc6bdda62c42a816fc48a1e1e026dcdd621af:eyJzZWxlY3RlZExpbmVDb3VudCI6MjIsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjVmM2Y2ZDI0YjEyZWEzZmNkZTA1MDI5OTA2YzRjMDQ4MDk5YzU1NWI5ZTVmYzliMmNkZDM4ZWU2YmUxYWZiZWUiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjIxNjM2OTJiNjAwNTMzYjE2MDA4ZWFkNDBmZjNjMmFkODg3YTg1Y2U2ZWU1Yzc1YjM5Yzg2YWI3NzZjNDEwNmQiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImRmOTVmZTc3MzcwMDhkZDc5NDZiNDg2NDhjMmViNzNhMTE0MTQ3ZDVmODYwOWFiNGUyMWJlNjI2NjQyYWIyOGUiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImZiNTgwZTk2NGY4M2E0NzNmNDNkNDQzODQ2Mjk0OWQ2OGI1NjAwZmRhNzg3ZjE2Mzc0NWQwMGRlODljYmYzNmEifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_a0ed4b610021456baa62fe72d100d43a",
+      "statement": "段階公開の rollout_allowed は env が空なら全員を許可し、値があればカンマ区切りの email に含まれる人だけを通し、email が解決できない人は拒否する。X 系は X_RESEARCH_ALLOWED_EMAILS に var.pr_research_allowed_emails を配り、web_research は WEB_RESEARCH_ALLOWED_EMAILS を空文字に固定している。",
+      "evidence": [
+        {
+          "resource": "repo://infra/terraform/fargate.tf#L708-L715",
+          "version": "repo-lines-v1:sha256:0c03af8ead82d5f2b16537e7c2ce1d90124d611a97396c079c8fa4ac70705edf:eyJzZWxlY3RlZExpbmVDb3VudCI6OCwiZmlyc3RTZWxlY3RlZExpbmVIYXNoIjoiZjkzYzQzMzIyN2IwOTUzOTQxYzE3N2Y0YzQ2ODZjYmFhYTYzYzI2NDhjZWRiNDE2NTU4YjM4ZGEyNjdmZTkzMCIsImxhc3RTZWxlY3RlZExpbmVIYXNoIjoiODhhMDgzOWJhYTA3ZGQ4ZTBhYjAwMDMzNmM0ZDEzYzVkYTQxN2Q1OGUzYTMxYTAyOTgyMmRiYjFhNjkwMzllMyIsInByZWNlZGluZ0NvbnRleHRMaW5lQ291bnQiOjMsInByZWNlZGluZ0NvbnRleHRIYXNoIjoiOGY0OTZjM2Y0M2RiN2Y4MDkxN2VkNWU1ODM2MzUzMTU1MWVhNTU1MjM5OGE5Y2U4ZTE0MzMwN2E4OGI5ZTZmNSIsImZvbGxvd2luZ0NvbnRleHRMaW5lQ291bnQiOjMsImZvbGxvd2luZ0NvbnRleHRIYXNoIjoiNDViOGVhYTkzMGVjMDNmYTZkZGI2NDQ1MTY0MTVmZjY3YzgwODdiOTk1ODU1MjZiNDI2N2ZlNzJjM2EwZTNlZSJ9"
+        },
+        {
+          "resource": "repo://infra/terraform/fargate.tf#L832-L858",
+          "version": "repo-lines-v1:sha256:0349e415ffc9618a50444dd9fcd31f483eee652a94a8c5858ac9451f6b79b173:eyJzZWxlY3RlZExpbmVDb3VudCI6MjcsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6ImEzMTBlN2UyMGY5YTg0MWEyNzNiNTIyYTczYWVlZmE3OTkzOWY5YmFmNzljYjkxZDlkMzZiYTY3NjBlOTkwOTkiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjE4ZGVjMzgyMmRkYTM4NmY5MGFmOTAzN2I2ZDBhM2E1NjgzN2M4ZTNhODg0ZTlmNzliZjYxMTQxMGZjM2I3Y2QiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImM4YWRlMTQzNTczNzc3YmU4NmY3ZGZhNmU5NGVmYTEzZTZmZTMxMjRjODNjYjY0NTgxNzMwZjExNzIzYWY2OGUiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImNiMDU0MGRiNDE4ZWUxZTU0ZDllMjU0MjkxNGNmYzM5M2RlNmYwZGMwZWQ5MTQzN2RiOTQ5NmQzNDNmNDBlMDQifQ"
+        },
+        {
+          "resource": "repo://src/teamagent/skills/_shared/rollout.py#L12-L22",
+          "version": "repo-lines-v1:sha256:f3fe69eb40b8ea28de268c63b2244041b5f4210530c7db2896e3326c3b00a872:eyJzZWxlY3RlZExpbmVDb3VudCI6MTEsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6ImFkOGY3NTQwNzhjMzdmYzUyODUzMmJkMWIyM2FmNDFiODM5NTZhN2M3MTk3NDJhZjAzNmQxN2JhOGQwYzRlZGQiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6ImJiNzAzODUyZmJlNzVjNjgzZjliYzM2ODcwY2Q2NjRmMmYzOGQyNWQ3ZThjNDBlNjIyYmVmMGQ3N2Y3YTY2OTgiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImNjM2QxYWYzNDhhZTgyYjQzMjBhMmQ5NzcyZGNiYjI4OThiMzgzNjA4ZmMxOWE2OWYzNjNmZTQ5ZDlhMDA0NmIiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImI3OTRjZWEzMzUyZDA1MjcxMjJiYzJhNGJjMDY2NjE3MzI0MWQ0ODM5NWI5MmFhMDQ3YjlhN2JkNmViYWYyMWQifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_a84007f4c0fe41789073bcf9bf97a4bf",
+      "statement": "web_research の出典は groundingMetadata からサーバが機械的に組み（https だけ・同一 URL 除外・max_results まで）、グラウンディングが無い・有効な出典が 0 件・要約が空のいずれかなら not_grounded を返して要約だけを返さない。",
+      "evidence": [
+        {
+          "resource": "repo://src/teamagent/skills/web_research/render.py#L41-L78",
+          "version": "repo-lines-v1:sha256:95c25dd7abcee58ae0ae0f16e688c8061f635b3c74fbd73c343e42af85703f23:eyJzZWxlY3RlZExpbmVDb3VudCI6MzgsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6Ijc1Y2FjYzk3MmI4M2Y1ZDQ0YTk5ZGEyZDA1Njg5MmEyYjg2ZmM1OWFkZTViOWFjMmE5NzIwZTIwZTNmMDJhMzgiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjAxYmE0NzE5YzgwYjZmZTkxMWIwOTFhN2MwNTEyNGI2NGVlZWNlOTY0ZTA5YzA1OGVmOGY5ODA1ZGFjYTU0NmIiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6Ijg3NjhjYWVkNTNhMzU3MGM3NWY3YmUxZTc5NWJlNzAwYzY2OWZiMjE3YzZkMWUwZDFmYjNiYTUzZjAxZGJkZTgiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImZjMDJkMmY4MWE2ODc5MzNkYmQ4YjIyNzFkNTJhMjcxYzJkYzFlNThlMTViYTZlMmNkMjZlYTJjMDQ1YjRjMWMifQ"
+        },
+        {
+          "resource": "repo://src/teamagent/skills/web_research/skill.py#L143-L160",
+          "version": "repo-lines-v1:sha256:faf6aa4b2459cb1372cb2f7c2d4bde652d2d862f34c48e635be7f325cc7ff336:eyJzZWxlY3RlZExpbmVDb3VudCI6MTgsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjAzNTMxMGE5MDIwYjEzNWY3ODg1MDU2ZWMxOTY1YzZjOWY5MzFmNzgxMDM1Yzk1ZDEwY2M1ODUxOTFjMTg1MWQiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjU1MDMyZTk2NGQwOTMyMzUxZTVkMTg1MjY5MjgxYjE3MWEzYTA5YjA4YjI4NmU2NjFlYTQ3MDMyM2M4MmViNGQiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjFjZmMxNGIxNThkMmEyZTgwMTA0ZWQ2MGZkNjFkZWVlYmNlYTNlY2U3N2EzYjgzNmRmNGMwNmFlNWU0YjM2MjciLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjYwMmYyNGZlNGQxMWVlMDhlMTBkNzRlNzIyMjYxOWEzNWJmY2VjZWQ5YzBmMzdlYTgxMDA4ZGY2NzM3YzYxM2IifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_7c1bba75aaf14b63a77be262c933ef42",
+      "statement": "同期の X ツールは内部デッドライン X_SYNC_DEADLINE_S（既定 170 秒・最小 60 秒）を持ち、残り時間が 20 秒未満なら実在検証を省いて全件を「要再確認」として返す。",
+      "evidence": [
+        {
+          "resource": "repo://src/teamagent/skills/x_research/skill.py#L300-L330",
+          "version": "repo-lines-v1:sha256:7ea4191e398719ebca7c822a338ee31eff6bca93c3b6696d6f94b36faa4989a1:eyJzZWxlY3RlZExpbmVDb3VudCI6MzEsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjY1YmJiYjRkNDk1ZjEwYzMyMzdlZmZlMWM3N2E0ZWJlOTM1ZDA2MTZkNmUzZmE0MjgyNzI2OWNiYmIzZDA5YTYiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjgxYTkyZWNkYjJiNDkzZWM5YjM2MWExYzg2ZmQwNTM3MjE4MDcwYTExOTc0YjA0YWUwYWQ5M2RmZTg4N2M5YWIiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImI1ZGM5OGRiYWY5YzdiNmU0MjhlYTg5ZWFhYmE4MmZkNTRjNTQ3NDA2ZWFmZDUzMDU0YWU4ZTM3YjUxMmU0NDUiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjJhYzZjMTEyZGNmYTU0OTAxZDA4YzQ2NTE5Mjg2MDg4YWQ1ZDczYTY0YjFhY2VkYTVjNGUyNjg3ZjZmZjI1ZTgifQ"
+        },
+        {
+          "resource": "repo://src/teamagent/skills/x_research/skill.py#L72-L78",
+          "version": "repo-lines-v1:sha256:a2051b0b5f316173929e16f8f9cb6f8beaa8eede3b1e560063bf4922155c8f24:eyJzZWxlY3RlZExpbmVDb3VudCI6NywiZmlyc3RTZWxlY3RlZExpbmVIYXNoIjoiMGVhZGU1MThiY2JiNmU2NDBkMTdjMmIwZWNhNDBkYzgyNjEzMzIxMDEyYTBlOWQ0ODQ2ZTgxNjAzMTVkZDAzOCIsImxhc3RTZWxlY3RlZExpbmVIYXNoIjoiZDRlODgyYTA3MWU4NzljZDM4ZDAwMWNjMDRkZjRlZjFmNDI0YmY2MjgwODJjZGQwMjNjNThiYWZjNGNmZTVmZCIsInByZWNlZGluZ0NvbnRleHRMaW5lQ291bnQiOjMsInByZWNlZGluZ0NvbnRleHRIYXNoIjoiZWY1ZGUyYjM4MmNiZTBiZmI1YTcyOGUzMzgzNjU2YTdhYzBmOTEzNmY0YWQ5YTkzZWEyYTViZTYxYWYxYWUyNSIsImZvbGxvd2luZ0NvbnRleHRMaW5lQ291bnQiOjMsImZvbGxvd2luZ0NvbnRleHRIYXNoIjoiYTdjNDQ2NTNkY2RmN2JiZGI1ZDA5YzEyYzhmZWQ5M2NlMzJjZjVkZWU0ODNiZTI4NWViMDRiMmUyYWU2MTZhMSJ9"
+        }
+      ]
+    },
+    {
+      "id": "claim_faed81f393444341a7b7ab7cb0a0bfff",
+      "statement": "x_voice_search と x_needs_mining は HTML レポートを作ったあとで、MCP の応答に載せるカードから base64 のアバター・添付画像を消す（OpenClaw がツール結果を切り詰めて投稿 URL が文脈から消えるのを防ぐため）。",
+      "evidence": [
+        {
+          "resource": "repo://src/teamagent/skills/x_research/skill.py#L154-L167",
+          "version": "repo-lines-v1:sha256:59b1429739fb5a820439ab845fc9c28cb8714d57ca508ccef99ec3469f5f8caa:eyJzZWxlY3RlZExpbmVDb3VudCI6MTQsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6Ijc1Y2JjYWYxNzE0OWM3ODBiOWFiYjg4ZTA2NTQzZTdkZWExZmRiMWY4NWM5M2NmMzA5ZmZmMTQyNTE1NWE4MDAiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6Ijc3ZWY3MGY1Yjk1NjA5ZTY4NmY3ZjBhZjUyZGYxYTg5MzQ3YjcwNmVhY2VhZjk4MmE4MTVkNWZmYTJiYzk5NTEiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjhjYzRhN2QxY2M3OTZhYmEzZTQ2NzIzMzI3ZjUxN2U5ZjgxMTk4MmQyNTBmMDcwMjk4NmU0YjU3NjRhZDk1ODkiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImNkODNlYWNiM2RhNzYwZTM3Yzc2YmQxNDg1YTAyMzdkNGYzNTU0ODkzNjE3NmI4MDcwMzM0ZjYyMWM0NGNhNjYifQ"
+        },
+        {
+          "resource": "repo://src/teamagent/skills/x_research/skill.py#L568-L574",
+          "version": "repo-lines-v1:sha256:4598fece5fcb087bb26debe80f4f31ae81f0a65690cd0063724ed962db092090:eyJzZWxlY3RlZExpbmVDb3VudCI6NywiZmlyc3RTZWxlY3RlZExpbmVIYXNoIjoiMzQ4N2Q3ZDk0NTU2YmRiMDViZjI2NTE4NDE2Mjk0M2Q1NzQ1MWI0MThiZTAxMTdmMjM2ZjE4M2I5MGIxYjg4NiIsImxhc3RTZWxlY3RlZExpbmVIYXNoIjoiYzcxOTA3MGNkY2NjOWY2OWI3ZTYzMTU5YmJmN2Y3ZDg3YWJjYThmZGMwMjhmMTcxMDI1YzQ4ZTZlNWEzYzhjOCIsInByZWNlZGluZ0NvbnRleHRMaW5lQ291bnQiOjMsInByZWNlZGluZ0NvbnRleHRIYXNoIjoiODM5ZWRiOTU4Yjc2NWU0NmM3NWYxYTkwYTNlMDZiMTVjNmVhOGYwNzJjMzAwNjFmZTRhM2Y1YmRkYjVmOTVkNSIsImZvbGxvd2luZ0NvbnRleHRMaW5lQ291bnQiOjMsImZvbGxvd2luZ0NvbnRleHRIYXNoIjoiMzBkOGVkYTI0OTUxZmZkZGQ1MjU4OGYzYmMxZDBmMDRjYjU1YzJhYjI4ODFjOWM1NDI2MzRlNGFlODVlNDAyNSJ9"
+        }
+      ]
+    }
+  ],
+  "verification": {
+    "by": "openwiki/0.6.1",
+    "at": "2026-09-29T07:51:05.076Z"
+  }
+}

@@ -1,0 +1,126 @@
+{
+  "schemaVersion": 1,
+  "pageVersion": "sha256:7e964fd8d30a93cc64044d46d988545c68e9f6398a8a3375fe2d3b83b79b1dcc",
+  "claims": [
+    {
+      "id": "claim_66e2079d2269460b831037aaf8fca1ab",
+      "statement": "migration 0002 はアプリ実行ロール teamagent_app を NOLOGIN NOBYPASSRLS で作成し、master の teamagent に GRANT して SET ROLE で切り替えられるようにする。表の owner のままでは FORCE RLS が実質すり抜けられるためのロール分離である。",
+      "evidence": [
+        {
+          "resource": "repo://infra/migrations/0002_app_role_separation.sql#L3-L37",
+          "version": "repo-lines-v1:sha256:9a148ac0296628e149ad8f9ab2024521914d25fd5ac56760e0dafbf2d14abe6f:eyJzZWxlY3RlZExpbmVDb3VudCI6MzUsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6ImQ1ZGFjZmEwYTQ0ZWZiNjcwMTRjOWNlNWU5YTgxM2E2NzYzMjYyOWQ5ZmVkODVmMmQ5NmI1ZDI1ZjQzYjE3NTIiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjhkMTA5YzBjODM0NzI0ZTEyNmRmYjI5YjhjNDVmMjA5OTQwYTMyMGY1NTQ5MWZmY2RmZjJiOTU2NmIxNjg2YWYiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjoyLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjdkZTU3YmY5YmZmM2Y3MTQ2MTQyODEzZTQ2YjQ5ZWU4ZWM1YjI4ODU1ZjM3NDIzNjYwMTMzZmRiMTVhYmI5OWIiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6Ijk5YTUzYmE5MTVmODI5M2ZlYjliNWQ3MGZiMTA4NjVlYmVjODk5YjljODg5NjdkZjUzZTg4NzBiZjJjMjMzZDQifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_f40f44caa9244806834c73acd31a0384",
+      "statement": "PgVectorClient._apply_session は app_role を英数字と _ のみに検査してから SET ROLE を発行し、app.user_role / app.user_email / app.user_groups（カンマ連結）と hnsw.ef_search を set_config(..., true) で transaction-local に注入する。",
+      "evidence": [
+        {
+          "resource": "repo://src/teamagent/adapters/pgvector_client.py#L233-L283",
+          "version": "repo-lines-v1:sha256:b7068c4dfce5f3562ffe8547c81cfe67f7b90b3e0af5f68634e88af79c29d7fe:eyJzZWxlY3RlZExpbmVDb3VudCI6NTEsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6ImI1MDVjMDJhZDI4NDMwNWFkMzgyZjlkNWVkNTgzYzQ3NTYxYzg4MWI3MjQ3Yzg0OWM1NGY4MWExMTk0MWNhNzEiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjAxYmE0NzE5YzgwYjZmZTkxMWIwOTFhN2MwNTEyNGI2NGVlZWNlOTY0ZTA5YzA1OGVmOGY5ODA1ZGFjYTU0NmIiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjQ3YzI1MTg5M2RlZjMyMGFiZTZkNDllOGVkMGMyMmYwNWMyNzI1MGJkMTRmZGZlMGM0NGY0YWQ2MTNjYjE5YjAiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImExMmQwZThjN2MwNzBkZDU3ZDJhZDJlZjdlNDE0NTgzYmFhZTRmNWE0MGQyNzgzNDQyNjYxNzAzNWYyOWU0NmEifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_aa1b5bfb7f114db1aac6bbe91b6e3769",
+      "statement": "migration 0010 は documents_user_acl（SELECT）と documents_owner_insert（INSERT）を DROP POLICY IF EXISTS → CREATE で作り直し、email と group を GUC 側・DB 側の両方で lower() して比較する。admin 例外は残す。",
+      "evidence": [
+        {
+          "resource": "repo://infra/migrations/0010_rls_email_case_insensitive.sql#L15-L44",
+          "version": "repo-lines-v1:sha256:9f3daf306b0934906a34fc3a3f2121818e56a494e54c273db3760288ed61ff01:eyJzZWxlY3RlZExpbmVDb3VudCI6MzAsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjdlMTcyZGFlNWQzNjNhNzk3ZTI1OTBjM2VlOWE3NjRlYzRhYjM1NGEwZjE0YzNkNTQ1ODk5OGEyYjA4YWI3ZWUiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6Ijg0ZTQyMDhjZDZmZmI4YzRhMzU0N2IyZjU0YWRhMTk5NzhjM2YzNjVlNzhmOTUwMmVmNTE0NWNkZDJhYTg1NDMiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImU3YjRkNzRiYjM3MDk2Y2ZlMWQ1MTY0ZTM3YzA4ZWEyMjllZWUyOWY2YmE2OGIwZDM2ZDM3NTBhMGY0MzQ1ZmIiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjQ4ZDA2NzJhMWI2ZDhmM2JlNGQ5NzJhZTZkYTJiZDNlYmY2ODQ0YjVjYjdhYmYwOWY5MGY2YTdiZDljZGVkODgifQ"
+        },
+        {
+          "resource": "repo://tests/test_rls_email_ci_migration.py#L23-L40",
+          "version": "repo-lines-v1:sha256:c18d3141aaec3b5fed831da12cf8df7d999c823f6d2b0fe1aa2259363e0dbcd4:eyJzZWxlY3RlZExpbmVDb3VudCI6MTgsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6ImZkMzEzYjdiYWVlOWVlNGFiZjBlM2U2YzBmNmUxZmZmNDM1Zjg3NzQ3OWM2MGEyOTZiMDFkNzExMzM1NTczNDIiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6ImQyNjdlMGVlMzYyOWVmMzAwOWVhNWQ4M2M2NzBjZWI4NjYyMWQ3Y2Q4MDViYTJkMTc2OWEwNGUzYzBjNWFiMzQiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6Ijc5YWVkMDAxOWIyNDZlMTM3OTM4YTAwZTExNjMxNWU2ODczMjQzNThiNDJkZDlmNzA0Y2I4NmM0OWQ2MDkzZjQiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjowLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImUzYjBjNDQyOThmYzFjMTQ5YWZiZjRjODk5NmZiOTI0MjdhZTQxZTQ2NDliOTM0Y2E0OTU5OTFiNzg1MmI4NTUifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_2e106bcb8d664247a1bc3e283a1e03cd",
+      "statement": "documents と chunks は ENABLE/FORCE ROW LEVEL SECURITY で、GUC 未設定時は current_setting(..., true) が NULL となり何も見えない（fail-safe）。chunks は documents への EXISTS で親文書の可視性を継承する。",
+      "evidence": [
+        {
+          "resource": "repo://infra/migrations/0001_unified_documents.sql#L105-L162",
+          "version": "repo-lines-v1:sha256:0f5d2b60aba79f2f33b4214306ab2fa54b75f870649e5538f3dd1728187ee518:eyJzZWxlY3RlZExpbmVDb3VudCI6NTgsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6ImQ1ZGFjZmEwYTQ0ZWZiNjcwMTRjOWNlNWU5YTgxM2E2NzYzMjYyOWQ5ZmVkODVmMmQ5NmI1ZDI1ZjQzYjE3NTIiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6Ijg0ZTQyMDhjZDZmZmI4YzRhMzU0N2IyZjU0YWRhMTk5NzhjM2YzNjVlNzhmOTUwMmVmNTE0NWNkZDJhYTg1NDMiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjFmM2ZlN2ZhMzE5MWFhZDA5MTU5NjE5Nzg4NTgzNmJkZmMzZTA3NjZlZmU2NzViNTA0NGZkYzk2ZGRjYTRjYjciLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImY3MDA0YTM0MjkyMGE4ZDhjMWNkMGZlZGM4MDFmOTQ5NDE1MWExODllNDUxNTNhODQwMGEwODIxNWIxMDlhMjIifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_824bdae0f6f443c183b1a03491efedc3",
+      "statement": "pg_pool は接続返却時に rollback → RESET ROLE → commit を行い、セッション持続の SET ROLE を次の借用者へ持ち越さない。reset に失敗した接続や壊れた接続はプールに戻さず破棄し reset_failures を数える。",
+      "evidence": [
+        {
+          "resource": "repo://src/teamagent/adapters/pg_pool.py#L220-L237",
+          "version": "repo-lines-v1:sha256:27585b02b489d11fe00844862c9cfbffac0ba884597c4b61756713fabaa17ec9:eyJzZWxlY3RlZExpbmVDb3VudCI6MTgsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjQzZDkzZmZkYjNhNGY2MWQzMTRhYzIwYjUyMWI5ZDg0NWIwMDJjYmIzMDc1MTY1MTU4MzI4NjI2YTU5OGI1NjAiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6ImU3MTdkNmZiMTNmMWU3N2IxM2E2OTQyNmY3ZjhjNmViYzk2YzE0NWI3ZjQyNjc3NjJlZmNmYzgxM2M4NmI2OTIiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjdjOTFlYmQ4YjA1NzdlZGQxMmQzNWQzZjk2MWNlMWZmODk1MmUxNzdkODg3M2ZjYTQ5NDFiZTczNWNiYTA4NDciLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjNiMjM2N2JkMGRmMGE2MmRmYzNkMTIxOTkxYjI5OGZlNGU5YzNkMzI2NzUyZTY5ODU1OTQzYjZjZjRiMjQ4M2QifQ"
+        },
+        {
+          "resource": "repo://src/teamagent/adapters/pg_pool.py#L73-L85",
+          "version": "repo-lines-v1:sha256:6cf491fb48ffa9c7f1d22b02b3bd7e192c3700d36650c175562703281bc82c36:eyJzZWxlY3RlZExpbmVDb3VudCI6MTMsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjZkNDViNjVhZDgxNzlmMzZiMGEzOTU2ZWM1MzYwZGZlYjFlMmI5MjNlMjM0MGU2ZTg5YjJkNjVhMjNkZTc5YWQiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjAxYmE0NzE5YzgwYjZmZTkxMWIwOTFhN2MwNTEyNGI2NGVlZWNlOTY0ZTA5YzA1OGVmOGY5ODA1ZGFjYTU0NmIiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImZiNWEwN2VmYzdkZmJlYTgyODc4N2FmY2Q3MzM5NWU1YzUyNGE0NmJiMmJmYjAzMTMxY2JhOTYxM2E3NDAxM2IiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6Ijk5NGFiNzkwYTM4OGVkOGM1ZGEwOGRlYTY0Nzk4ODJjMGZlZmE1ZDEzNmM3ODlkZWJiMWMwYTNjOGEyYWQ4YmUifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_46d2d758995943aab12fb22481deafd3",
+      "statement": "identity.build_rls_metadata は email を strip+lower+形式検証で正規化し、user_role を常に member に固定し、user_groups を email ドメイン＋解決済みグループ（カンマを含むものは除外）から作る。不正・非メンバー・許可外ドメインは None を返す。",
+      "evidence": [
+        {
+          "resource": "repo://src/teamagent/identity.py#L115-L162",
+          "version": "repo-lines-v1:sha256:1ccca1643a0c907c9025ec00b6a869a8c864fbaff549fd9ef4bb808050e0ef01:eyJzZWxlY3RlZExpbmVDb3VudCI6NDgsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6ImMxOWJhNzBmNzlhZTM3MThhNGNhYThlOTFhNjkxNGM0MDg5YWYzZjkzODg1ZGFkYjAxOTNhZDcxMDIwMDcwMDAiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjQ4OTNmNDBlMzc4MWViODk2YzgyZDA0NmEwODA2N2ExMWUzNWNkZjJmMWRmYWYyNmZlYTkwYjhkYjY2NzY0MTMiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjRmYmQwMDkzMTRiYzI3MDg0MTY3MzRhMDJhZTVmZjM5YTFlNDhhMDUwYmU5MWY0M2IyZmFhOTIwMDJjNjJiZmMiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjowLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImUzYjBjNDQyOThmYzFjMTQ5YWZiZjRjODk5NmZiOTI0MjdhZTQxZTQ2NDliOTM0Y2E0OTU5OTFiNzg1MmI4NTUifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_9ca1f5c60a6e4db7a8448025388f5fbb",
+      "statement": "会社共有モードの _resolve_metadata は、署名済み caller と Slack 本人解決に成功した場合だけ、会社ドメイン群と解決済みグループを合わせた user_groups と本人の user_email を RLS メタに入れる。欠ければ本人確認拒否を返す。",
+      "evidence": [
+        {
+          "resource": "repo://src/teamagent/mcp_gateway/server.py#L488-L522",
+          "version": "repo-lines-v1:sha256:36a5a463c1c6a1b5effc077a6c370637fb2add08522fa6acd922cd930c806810:eyJzZWxlY3RlZExpbmVDb3VudCI6MzUsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjJkY2RjYzdjYTc4ODIxYzdkMzVlODdiMjZiMTlhNGIwMDlkNjFhN2NiOWNjMjgwN2MxYTg3Njg1ZjI5NWZmMWQiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjhlZjYxYTA5ZjY5YmNkNTY4NzlmMjViOTIzODQ2N2U3ZGRiNmQyM2Y4MjY5NDk2NzU3YjFiYWZmZTMzOGFmNmIiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImQ4NDdkZmQxYmI2ZjA3NmVkYmViZGZlY2M2ZmY5YjViZjA4MzE4NTkzYThhMGEwYmMxMmJiN2RmOGM1MzNjZDMiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6Ijk2ZTY1ZjY4MWVmOGU1YTI0NTA2OGNmNWM4YTZmZjc1YzYyYmQwYzY4Njc4NDc1MWYyZWIwNjhlYTI2NjkwNjUifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_4232a363070d4c4980338bdedbe973e8",
+      "statement": "会社共有グループは TEAMAGENT_SHARED_COMPANY_DOMAINS を単一の真実源にし、ingest が新規 documents.acl_groups に付与し、migration 0011 が既存の slack / gsheets 行に冪等に backfill する。",
+      "evidence": [
+        {
+          "resource": "repo://infra/migrations/0011_backfill_company_acl_groups.sql#L20-L23",
+          "version": "repo-lines-v1:sha256:f3e4fd7f26a774cc803e5b75f4c95bd42755778660d64255e8df83d1ca988cd4:eyJzZWxlY3RlZExpbmVDb3VudCI6NCwiZmlyc3RTZWxlY3RlZExpbmVIYXNoIjoiYTczZGJkYWQyNDE4MTg4ZjhmYTc2ZGEzYmUxMjk2MDYyYmUyOWNlZWIyZDcwN2JiZmNmOTJhZjc0MmM1NGMyZSIsImxhc3RTZWxlY3RlZExpbmVIYXNoIjoiOTRjYjI0ZjQ5ZTRmMWVmNzRlYmQ1ZmFlNzQ4NzM2YjkwYjJkMDRkNzJjZWQ5MDEzZDBhYjkwYzNjZjc0YmU2YyIsInByZWNlZGluZ0NvbnRleHRMaW5lQ291bnQiOjMsInByZWNlZGluZ0NvbnRleHRIYXNoIjoiNGJiNDY3MjRiOTU2ZWViOTYxOGRiMjhlYTVjZjk0MWE4ZTM3ZjAwM2Y0NTIxZDBiNTg1MzEzOTljZDA5NmJiYSIsImZvbGxvd2luZ0NvbnRleHRMaW5lQ291bnQiOjAsImZvbGxvd2luZ0NvbnRleHRIYXNoIjoiZTNiMGM0NDI5OGZjMWMxNDlhZmJmNGM4OTk2ZmI5MjQyN2FlNDFlNDY0OWI5MzRjYTQ5NTk5MWI3ODUyYjg1NSJ9"
+        },
+        {
+          "resource": "repo://src/teamagent/ingest/pipeline.py#L578-L585",
+          "version": "repo-lines-v1:sha256:93bab64d1c5fa5f816b484aca158d4454c3014e4051d7bee0fd075ef6b0df45a:eyJzZWxlY3RlZExpbmVDb3VudCI6OCwiZmlyc3RTZWxlY3RlZExpbmVIYXNoIjoiNzFmNjA1MDU1Y2Y5MzNjOTlmZTEzZDM4MzFlYTJhZDEzNzYzZGIwOGFmOWZjNjE2MzMzNDM2N2M2NGQ0MWY4YSIsImxhc3RTZWxlY3RlZExpbmVIYXNoIjoiNzg3YzJiOGZmMjdmNGY2MjYwZTNmMTM2ZDBmY2ZjNDQxZTMzN2Y4YTFmMzg4ZTM1MjFjY2ZjMzQxMDhlOGVlYSIsInByZWNlZGluZ0NvbnRleHRMaW5lQ291bnQiOjMsInByZWNlZGluZ0NvbnRleHRIYXNoIjoiMjNiMGMwZjdiNDQyYTcyZTc3NDBjN2Y3ODNiZDBkYmNlOGZmOWU0OWIwNzY5NzUxNjM3YTQ0NGI4YzliMjBmMCIsImZvbGxvd2luZ0NvbnRleHRMaW5lQ291bnQiOjMsImZvbGxvd2luZ0NvbnRleHRIYXNoIjoiMWNjMmFkNzNhNjA5OTU3YzUyNmI3NDhmMGY0N2M5M2Y3MzUyYjU5MTgyMTc1ODMzMTAxMDAwMzcxMjdiYWQzMyJ9"
+        }
+      ]
+    },
+    {
+      "id": "claim_59b14ca40545471ea03a6b642a019e43",
+      "statement": "ingest の repository は teamagent_app に SET ROLE したうえで user_role='admin' と固定の application_name を入れて documents と ops テーブルに書く。",
+      "evidence": [
+        {
+          "resource": "repo://src/teamagent/ingest/repository.py#L424-L448",
+          "version": "repo-lines-v1:sha256:c24347f1900a0157430931535a4e04c8081dfc36861bc213f9eb4277aa04a06c:eyJzZWxlY3RlZExpbmVDb3VudCI6MjUsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjcxZDkxOGVkZmFmNGZmZTQwNTI0ZmIxOTU0MGU2OWM5N2UzMDI4NzQ4MWU3ZTcwZTVhYzlmODBlMjYzMTE1ZTMiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjU5MDlhNTNhNjE4ZDAyOGUxZDMwMDBjMGE3YWJjZWVjYmU1ZmIzN2Y0ZTUxMWVmZTQ2NjQzZmFkNmU2Njg3MmYiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjMzNWQwZTcyMTBiNWYzMjMxNzhhMTdlN2NlZDc3NDM1YWNmNTVhZDgzYjM1MzA2MzJmMWY3ZmUzN2EyZTZkNjMiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImM3ZTUxMDY5ODM3NWQ3MWE1YjU2NThiMGIzNTU0NDM4ZjYwMTQ0NDMxY2U0YmEyNmQxZmE5OTc0MzRjMTQ2MzAifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_28a5ac7e8b9f40f1ada69f76b642f7d4",
+      "statement": "CI は PostgreSQL サービスに対し teamagent_app を NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS NOLOGIN で用意して接続ユーザーに GRANT し、DB テストは uuid 付きの使い捨てスキーマを作って teamagent_app に USAGE を与え、ロールが無い・切り替えられない場合は skip する。",
+      "evidence": [
+        {
+          "resource": "repo://.github/workflows/ci.yml#L73-L98",
+          "version": "repo-lines-v1:sha256:8e406cae3f83192d86727c89728f7bc1a57e2f3cbfd1b5268b17a57ac68b3dc1:eyJzZWxlY3RlZExpbmVDb3VudCI6MjYsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6ImM1ZWIxOGQ2MWUyNDIxNTIyOWE2ZmExYWU1NmVhMDYyZjNlNzJlYWUxNGViMjZkZTJiNzM3OGE3Mzk4NTU5ODgiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6Ijg2OWQ2YjRhMDUzNzVkNWM2NzQ2MTgwNzVlOTkzZDJmZWFhNGU1MTAwZWQ1YTkyMjMyODlmMWJjOGIzNzQwYzAiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjRmZDM1YmFjY2IwYWQzMmVmMjg1NDYxZTE3NjIyNTIyZmM1MDQ3NDY5ZDViZjYxNWM5MzNhMWU5NzQxNDBlZTAiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjRhYWRiOGI3YzhlZjYxNGUxYmVkMjBlYThiMmE1NGRkMWNlNDFjMWQ4ZGM2ZThkYjc5M2Y4Mzk3MmJhMmI0OTgifQ"
+        },
+        {
+          "resource": "repo://tests/ingest/test_ingest_source_health_postgres.py#L38-L54",
+          "version": "repo-lines-v1:sha256:a22995742e92166703e1022d510dedbe779728450857e5b106e13601e2fd8852:eyJzZWxlY3RlZExpbmVDb3VudCI6MTcsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6Ijg5OTY5ZDZiYzc2NWFlZTNiYjU4ODZmMTQ5ZjMwOWZjOGEzMzcxNDVhNDhlMTBlOWZlNzg0ZDI0YTFlY2Y2OTgiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6ImQ3N2YzNWYxOTFmNjM1MDM5NzUzYTdlZDYxMzk3NmFkN2E5MzRkODM1ZDkxMmM1NGVjNGVjODcwMmY5NTI5YjciLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImE5OGIwNjNkOWI0N2U2NTM3OTYyNTU3MmNjZTE5NzY2OWQ1NzY3ZTEyYzE4YmUwNzU2NTJiOGNkOTgxY2U4ZDUiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImYyNjU2MGIwNTdhZGRlNzg1YWI1NTRmN2RhZGE2OGY1YmVjNmVhNTNkOThmNGNhNzEyMmQzNzk5MWI5NzMwNTcifQ"
+        }
+      ]
+    }
+  ],
+  "verification": {
+    "by": "openwiki/0.6.1",
+    "at": "2026-09-29T07:51:05.076Z"
+  }
+}

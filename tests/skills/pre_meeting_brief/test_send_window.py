@@ -19,29 +19,39 @@ def _at(hour: int, minute: int) -> _dt.datetime:
     return _dt.datetime(2026, 9, 11, hour, minute, tzinfo=JST)
 
 
-def test_typical_case_is_one_hour_before() -> None:
+def test_typical_case_is_thirty_minutes_before() -> None:
+    """10-01 裁定: 最初の予定の 30 分前（60 分に戻すと赤）。"""
     plan = compute_send_time(DAY, _at(10, 0), default_hhmm=DEFAULT)
-    assert plan.fire_at == _at(9, 0)
+    assert plan.fire_at == _at(9, 30)
     assert plan.clamped_to_floor is False
     assert plan.clamped_to_default is False
 
 
 def test_minutes_floor_to_five() -> None:
-    """08:47 の予定 → 07:47 → **切り下げ** 07:45（切り上げにすると赤）。"""
+    """08:47 の予定 → 08:17 → **切り下げ** 08:15（切り上げにすると赤）。"""
     plan = compute_send_time(DAY, _at(8, 47), default_hhmm=DEFAULT)
-    assert plan.fire_at == _at(7, 45)
+    assert plan.fire_at == _at(8, 15)
 
 
 def test_early_meeting_clamps_to_floor_and_flags() -> None:
-    """06:30 の予定は 05:30 でなく 06:00 へ。冒頭の 1 行を出す印が立つ。"""
-    plan = compute_send_time(DAY, _at(6, 30), default_hhmm=DEFAULT)
+    """06:20 の予定は 05:50 でなく 06:00 へ。冒頭の 1 行を出す印が立つ。"""
+    plan = compute_send_time(DAY, _at(6, 20), default_hhmm=DEFAULT)
     assert plan.fire_at == _at(6, 0)
     assert plan.clamped_to_floor is True
 
 
-def test_late_meeting_stays_at_default() -> None:
-    """15:00 の予定に 14:00 送信だとメール下書きの価値が消える＝既定時刻のまま。"""
+def test_late_meeting_is_not_capped_at_default() -> None:
+    """10-01 裁定「一律 9:30 を撤廃」: 15:00 の予定なら 14:30（上限を戻すと赤）。"""
     plan = compute_send_time(DAY, _at(15, 0), default_hhmm=DEFAULT)
+    assert plan.fire_at == _at(14, 30)
+    assert plan.clamped_to_default is False
+
+
+def test_legacy_mode_reproduces_the_old_rule() -> None:
+    """戻すとき用: 60 分前・上限=既定時刻 は引数で再現できる。"""
+    plan = compute_send_time(
+        DAY, _at(15, 0), default_hhmm=DEFAULT, lead_minutes=60, cap_to_default=True
+    )
     assert plan.fire_at == _at(9, 30)
     assert plan.clamped_to_default is True
 
@@ -53,19 +63,19 @@ def test_no_event_uses_default() -> None:
 
 
 def test_exactly_at_floor_is_not_flagged() -> None:
-    """最初の予定がちょうど 07:00 の日は **通常どおり 60 分前**。嘘の注記を付けない。
+    """最初の予定がちょうど 06:30 の日は **通常どおり 30 分前**。嘘の注記を付けない。
 
     変異: ``compute_send_time`` の境界を ``target <= floor_at`` に戻すと
     ``clamped_to_floor`` が True になり赤（冒頭に「通常より短い間隔で」が出る）。
     """
-    plan = compute_send_time(DAY, _at(7, 0), default_hhmm=DEFAULT)
+    plan = compute_send_time(DAY, _at(6, 30), default_hhmm=DEFAULT)
     assert plan.fire_at == _at(6, 0)
     assert plan.clamped_to_floor is False
 
 
 def test_below_floor_is_flagged() -> None:
-    """06:59 始まりの日は 06:00 へ張り付く＝リードが短いので注記を出す。"""
-    plan = compute_send_time(DAY, _at(6, 59), default_hhmm=DEFAULT)
+    """06:29 始まりの日は 06:00 へ張り付く＝リードが短いので注記を出す。"""
+    plan = compute_send_time(DAY, _at(6, 29), default_hhmm=DEFAULT)
     assert plan.fire_at == _at(6, 0)
     assert plan.clamped_to_floor is True
 

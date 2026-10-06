@@ -43,14 +43,17 @@ def test_is_placeholder_passes_real_values() -> None:
 def test_load_real_yaml_has_all_sources() -> None:
     """data/ingest_sources.yaml は実 ID 投入済（2026-05-27 で channel_id 確定）。
 
-    Slack 2 ch / Drive 1 folder / Sheets 2 sheets が含まれる前提。
+    Slack 3 ch / Drive 1 folder / Sheets 2 sheets が含まれる前提
+    （2026-10-01 に #proj-01案件決定-同行依頼 を追加して 3 ch）。
     """
     sources = load_ingest_sources(REAL_YAML, skip_placeholder=True)
     assert isinstance(sources, IngestSources)
-    assert len(sources.slack_channels) == 2, (
-        f"Slack 2 ch 期待。 channel_id がプレースホルダに戻った場合 skip される。 "
+    assert len(sources.slack_channels) == 3, (
+        f"Slack 3 ch 期待。 channel_id がプレースホルダに戻った場合 skip される。 "
         f"got={[c.channel_id for c in sources.slack_channels]}"
     )
+    decision = next(c for c in sources.slack_channels if c.channel_id == "C08MH3MG02F")
+    assert decision.include_files is False  # 本文だけ（添付の契約・見積類は取り込まない）
     assert len(sources.gdrive_folders) >= 1
     assert len(sources.gsheets) >= 1
 

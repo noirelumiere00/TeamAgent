@@ -1,0 +1,122 @@
+{
+  "schemaVersion": 1,
+  "pageVersion": "sha256:4e8c8e0e952fcd38bfc1698c4e0ef3c627ba41f088791cf54406fce19327c110",
+  "claims": [
+    {
+      "id": "claim_8cacd7dafbd34654a9bc2af5a0bb491b",
+      "statement": "本人メモの 3 ツールは list_tools に出さず、ToolSpec として登録されていれば起動時に RuntimeError となり、USE_PERSONAL_MEMORY が OFF なら未登録ツールと同じ応答を返す。",
+      "evidence": [
+        {
+          "resource": "repo://src/teamagent/mcp_gateway/server.py#L1490-L1520",
+          "version": "repo-lines-v1:sha256:0a9abb959daeb0bb38804bbc0b2c8696eae8d784310c29a32e42262ab8d88ad1:eyJzZWxlY3RlZExpbmVDb3VudCI6MzEsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6Ijg2NzBkODU0YzI3ZGU2YjljNzkwOWMwMzJjOWVkZWMxMWI0ODZkMTFkMzI2ZDhiMTRkYjYyODRmZmVlMGIyNjIiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjU1MDMyZTk2NGQwOTMyMzUxZTVkMTg1MjY5MjgxYjE3MWEzYTA5YjA4YjI4NmU2NjFlYTQ3MDMyM2M4MmViNGQiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImQ3NmY0MjExM2FmZTY1ZTcyNDE1ZjMwOGFjZDY1ODMwYThlNzQ1YWYxOTdjYTFhN2RkYWE4ZDMzODE1MzU0MTYiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6Ijk0YjlkYjJkMjBjNzE5Zjc4NzRlMzQ5ZmY1YmFlNjhmZjZkMGVhNDZiZjA4NTRmOTg2NDM5ZDY1OTgxZDViMTEifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_7540ae0b6c56426d989fdae869f3c19e",
+      "statement": "dispatch_personal_memory_tool は署名済み claim、DM の channel、予約 tool_call_id（run_id と一致）、スレッド不可、resolver、allowlist の順で検査し、dispatch_tool を通らない。",
+      "evidence": [
+        {
+          "resource": "repo://src/teamagent/mcp_gateway/personal_memory/gate.py#L1-L45",
+          "version": "repo-lines-v1:sha256:59ad63c62bf006fc4e4f21a0eb65a196540a8ea141322247bae66016a69b9a93:eyJzZWxlY3RlZExpbmVDb3VudCI6NDUsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjdlYjEwYTE3ZDNkMTU1OWI4ZGZkZWUwMzAwZDM5NDUwOTljODZjMmY0MzFjODFmMDliOWY0MmQ4MzkyZGNmYTEiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6ImY5OTlmYzU2YWJhNWI5YjJhZGQwMzQ5NTE1MTYyNzNkYWRkOTFhN2M5MzRkM2EyNGU5MjhiNjYzYTNmYjIyYjciLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjowLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImUzYjBjNDQyOThmYzFjMTQ5YWZiZjRjODk5NmZiOTI0MjdhZTQxZTQ2NDliOTM0Y2E0OTU5OTFiNzg1MmI4NTUiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjBmYjVlOWI2YTk2ZTc1NzcyOTUzZjk0ZjgyYjIyODM0NGI2MTg4NjJhNjFjYmYzNjlhMDllMjQ5ZGRiZDM0NzcifQ"
+        },
+        {
+          "resource": "repo://src/teamagent/mcp_gateway/server.py#L1236-L1300",
+          "version": "repo-lines-v1:sha256:ce7968128137b88263d186d147176cd0ba6b3c090a233da5ba516783c33c6c90:eyJzZWxlY3RlZExpbmVDb3VudCI6NjUsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjIyZjlhOTgzMDZiNGE4ZDI5MDhmYjQ0OGNkNjI0NGQzODgzMGZhNjI0M2RkZjRiMzZjMmUzM2RhMDQxNzY5ZGMiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjhkZTk1YWUxNTViOWQ4Njk0MDA4ZmQ5NjAyNmEzZDhmNDdlMzQ4M2JjYjU0NmE2MzQ4ZWY3Mjc1NjIwMzRkZjQiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjBkYmY1M2Y0OTUyYWM4YTBhODhlYjgwZGNlNjJmMjM5MTM1YzRkZmE4YmY3NzI2YWU0OWFmOGM4MGZkNTJkMjQiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImU4MTdmN2E0YjBhZWQ0NDY5NzI4MTgwNGJiMGIwY2E0YjQ4OTg3NWFkYzZmYzJkZDJjMjAzNzFkNzIwMGQ3NzQifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_531b47082d534fb4bbf611ca5f2c2c61",
+      "statement": "PERSONAL_MEMORY_ALLOWED_EMAILS が空・未設定なら本人メモは全員拒否となる。",
+      "evidence": [
+        {
+          "resource": "repo://src/teamagent/mcp_gateway/personal_memory/gate.py#L1-L20",
+          "version": "repo-lines-v1:sha256:fe72bba21580e1ac8720a2effac45292ab6d75130e8afc3a514060f575539524:eyJzZWxlY3RlZExpbmVDb3VudCI6MjAsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjdlYjEwYTE3ZDNkMTU1OWI4ZGZkZWUwMzAwZDM5NDUwOTljODZjMmY0MzFjODFmMDliOWY0MmQ4MzkyZGNmYTEiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjY5MzU1YmNhOTdlNTVlYmY3NjgwNTY5YzVkODkzMzg1ODExNDY1N2ExYjUzZDExMzRkYzYxNTUwZTk3Nzk1NmIiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjowLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImUzYjBjNDQyOThmYzFjMTQ5YWZiZjRjODk5NmZiOTI0MjdhZTQxZTQ2NDliOTM0Y2E0OTU5OTFiNzg1MmI4NTUiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjA3ZjU4MDg0MGJlMzFmMTQ1YWVjN2JiYTg2MDdjMDYxZTY5YTVmZDZlYTVlMzc3MGI5YjU5YzM5MDg2YzhkMGEifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_c6b91cc569e34628a4de2a4f3a3e371f",
+      "statement": "発話は MCP プロセスのメモリにだけ置かれ、1 人 5 発話または 480 秒で学習ジョブを起動し、1 人 1 日 6 ジョブまで。単一プロセス・desired_count=1 が前提。",
+      "evidence": [
+        {
+          "resource": "repo://src/teamagent/mcp_gateway/personal_memory/buffer.py#L1-L35",
+          "version": "repo-lines-v1:sha256:c0ad1dd4f093f760f69a92c37ff7adbdc4d347e6769505fe1afa4324aa1057a7:eyJzZWxlY3RlZExpbmVDb3VudCI6MzUsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjlhNWZmN2JmNGMzOTY0YjUxOWIzMTg0ZTJlOTViOWRjZGUxOGM1YzRhMDZiYzRjMTk3ZTk0NTA4YWI4MTQyMDMiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6ImRkM2YyNDBjNjVmYjVkNDFkNjZkNjY5ODhhMTRhMzU2MGZhZjMzOGRiMGM4NmM2ZTY1ODRjNDJjNTdkZDAzNTQiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjowLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImUzYjBjNDQyOThmYzFjMTQ5YWZiZjRjODk5NmZiOTI0MjdhZTQxZTQ2NDliOTM0Y2E0OTU5OTFiNzg1MmI4NTUiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjViOTgyZmQzZWIwOWNmYjQyZmM1MWFkYjVlMWY5OGFiZjUyOTE5N2UyZTQ1NmMyN2NjNWE3MGRkYTRkZDQ1MGMifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_ec1ff194f06347d38f62fac022ed267f",
+      "statement": "学習ジョブは送った snapshot との差分で追加・削除を決め、削除が 5 件を超えるとジョブごと捨て、追加は guard を通し、読んだ版での楽観的反映を行う。",
+      "evidence": [
+        {
+          "resource": "repo://src/teamagent/mcp_gateway/personal_memory/learner.py#L1-L42",
+          "version": "repo-lines-v1:sha256:9458134eed832f2524714acbcf40e122c1590f15a0acffdbd2e8486d8cbfa743:eyJzZWxlY3RlZExpbmVDb3VudCI6NDIsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjRhZTdjZTlmNWRhMmUzMDkyZTA5Nzk5YzJhMWY2NjIwYjRhZTFlZTdkNzYwNjhhMzJjNWZmZjVhOTc5NTFjMTQiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6ImRjMzJhMzg0MzE4MGU5NTk1ZDczMTM1Mzg2NjIyYzYxNmMwNjBiNjkzMjAwOTllYmVkNzA5YWU2OTE4NmY1NmMiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjowLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImUzYjBjNDQyOThmYzFjMTQ5YWZiZjRjODk5NmZiOTI0MjdhZTQxZTQ2NDliOTM0Y2E0OTU5OTFiNzg1MmI4NTUiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjI0YWNmOGU1ODc0Zjg1YjliMmQ0MjQyNWRmNzBkNWU0ZDNiYzk0MjhmZDE0YzIzMzc0MGNjZmIyNjJlOWRmNWMifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_90f8606da63c4717b148dd8ebce41338",
+      "statement": "context は 1.0 秒で諦めて空を返し、DB と Hermes の処理は専用スレッドプールで動かす。",
+      "evidence": [
+        {
+          "resource": "repo://src/teamagent/mcp_gateway/personal_memory/service.py#L1-L16",
+          "version": "repo-lines-v1:sha256:49538e4b1d22fec4ac37d26de635d6f43a402cc571307621d2f3401deceff1be:eyJzZWxlY3RlZExpbmVDb3VudCI6MTYsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6ImU0NmI2ZmQ5ZDYyZTczMjliYTU2MTBhZjZiMTMyMTIzODdjOTdjODk1MGVjM2YzNDJjNTkyZWRmN2U2MjRhZDIiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjAxYmE0NzE5YzgwYjZmZTkxMWIwOTFhN2MwNTEyNGI2NGVlZWNlOTY0ZTA5YzA1OGVmOGY5ODA1ZGFjYTU0NmIiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjowLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImUzYjBjNDQyOThmYzFjMTQ5YWZiZjRjODk5NmZiOTI0MjdhZTQxZTQ2NDliOTM0Y2E0OTU5OTFiNzg1MmI4NTUiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImViM2ZiZGQyZmFiMTg0NGRjMmM5OWJmMWM4NmIxMGMzNTk3YjA1NDc0N2YyOGRmZTdiMGEwNTYwNWZhYzgzNjYifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_e86026550fe945aa9313670d82babf35",
+      "statement": "guard は 200 字以内のメモに対し、メール・電話・URL・長い数字・逐語・人名・注入・秘密などを拒否する IO の無い純粋検査である。",
+      "evidence": [
+        {
+          "resource": "repo://src/teamagent/personal_memory/guard.py#L1-L60",
+          "version": "repo-lines-v1:sha256:8ed027447b1f082f0f148511d6c9c8c5a0c96476f11a69450d2c7377153b9023:eyJzZWxlY3RlZExpbmVDb3VudCI6NjAsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjMxZTViZWM4OWYxYzg2YTkxYjkwNzNiNzEyNDE0ZGZlOThjZTY2ZmViZGJiZTA3NWE1ZmUxOGJkMzA4NzE0MTkiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6ImY5Y2E4OTFiZmY3YWMxZjdjZWFhZTQwZWYwNTEwNjZiZTllZmU0N2I0ZTQyODFlODZjMzE5YmUyYzU1ZWJjZTQiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjowLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImUzYjBjNDQyOThmYzFjMTQ5YWZiZjRjODk5NmZiOTI0MjdhZTQxZTQ2NDliOTM0Y2E0OTU5OTFiNzg1MmI4NTUiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjUzMmEyYTY1NGNkMjFhNGQ5M2I4Y2JhNmI4ZjkyNmRlNWRhYmM2ODhlN2E1ZjBiMmJiNTkzMmJjYWQ1ZGJlNWIifQ"
+        },
+        {
+          "resource": "repo://src/teamagent/personal_memory/guard.py#L178-L381",
+          "version": "repo-lines-v1:sha256:04fb7a0c4b8922327aecf2a1fa14f84b11d0c1bff0b4c7ad06e3b4d3edc0652a:eyJzZWxlY3RlZExpbmVDb3VudCI6MjA0LCJmaXJzdFNlbGVjdGVkTGluZUhhc2giOiI5MGYzNzI3ZjBkYTI1OTdmZmViZjc5OWQxZTUyMzQ0YWYyZTk3MmJhYmZkZTBhYTBjMTg4YzJjNWUzMGNhNjQzIiwibGFzdFNlbGVjdGVkTGluZUhhc2giOiI3ZjEwMGJmNjg4YzMwNGIyZmNkMDUxMTM1MGJjYTE3M2RiNzMwYTY0ODc5ZDE4NjRkZjFhZWY4NzcyN2RhM2IzIiwicHJlY2VkaW5nQ29udGV4dExpbmVDb3VudCI6MywicHJlY2VkaW5nQ29udGV4dEhhc2giOiJhNzgzNDMwYzFmNzE1MTAyNjgyNmMyOWZmZmFmNWMxNWU2NDhhYTU4NzcwYjljNTE0ZDA1YjcwNjcyZjIzNWNmIiwiZm9sbG93aW5nQ29udGV4dExpbmVDb3VudCI6MywiZm9sbG93aW5nQ29udGV4dEhhc2giOiI5MDM4YzU5ODUyNzZiN2U2MGQ4YThlMjgxNDAzZGQyODRkZWUzOWRhYmRlNWM0MTM1MzRiMDY2MTNiNDdiZTAyIn0"
+        }
+      ]
+    },
+    {
+      "id": "claim_48e1e275ccf5434483dcd07b17d2a35e",
+      "statement": "0029 migration は admin 例外を入れず、専用ロール personal_memory_app だけに表権限を与え、所有者を NOLOGIN NOBYPASSRLS の definer にして、他人の行には監査付き SECURITY DEFINER 関数だけで届く設計にしている。",
+      "evidence": [
+        {
+          "resource": "repo://infra/migrations/0029_personal_memory.sql#L1-L70",
+          "version": "repo-lines-v1:sha256:f82383750d9485c4ba8aa192c1e3075355a378dd937e9e9d9457d6a19557eb6f:eyJzZWxlY3RlZExpbmVDb3VudCI6NzAsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6ImQ1ZGFjZmEwYTQ0ZWZiNjcwMTRjOWNlNWU5YTgxM2E2NzYzMjYyOWQ5ZmVkODVmMmQ5NmI1ZDI1ZjQzYjE3NTIiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjA3NjJkZjg1ODFiZmM2MjUwMTk5YTQ1NDhhMGZmYTUxZmYyZTE0NzJlMDBhZjk0ZWUwY2I2YTZmZWViN2ZjNzIiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjowLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImUzYjBjNDQyOThmYzFjMTQ5YWZiZjRjODk5NmZiOTI0MjdhZTQxZTQ2NDliOTM0Y2E0OTU5OTFiNzg1MmI4NTUiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjkwZGU5OTYwZTBhZDQzZGVhOTIxZTRhNjVhNzU4NzM0OTQ0N2Y2ZWI5ODJkNmU2NTNmNzM2NWJkOTY4YTZjZjYifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_7db1f3e3d66e4e078b1cd0dbc4246396",
+      "statement": "hermes_learn_client は HERMES_SERVICE_URL・ingress bearer・CA PEM を env から読み、TLS でホスト名検証し、プロキシ設定を読まず、送信前の接続失敗に 1 回だけ再試行する。",
+      "evidence": [
+        {
+          "resource": "repo://src/teamagent/adapters/hermes_learn_client.py#L1-L40",
+          "version": "repo-lines-v1:sha256:d201eda24678bb551896ff19e70a57eebb0466be8ac4815b063337b79194e519:eyJzZWxlY3RlZExpbmVDb3VudCI6NDAsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6ImMwYTA3ZGE3MjE0MTg2OWI0MjkyNDVhOWE3NDU4ODEyMTVjOWFjMjgyNDIwNWNkMDczZjJkZmYyNGE4OWI1ODUiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjhiOGFkYTJjY2E1OTY1NDJkN2Q4ZmEzZWFkZGY0NjBiODY2YWEzZDBhZDU0ODNmNDBmM2YwMjlhYTU4ZDE1YWUiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjowLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImUzYjBjNDQyOThmYzFjMTQ5YWZiZjRjODk5NmZiOTI0MjdhZTQxZTQ2NDliOTM0Y2E0OTU5OTFiNzg1MmI4NTUiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImE5MmNmMDZjY2NhM2M4MjAzZDYwMzQwYzRkNDg5NTM1MWU4ZGZlZTBiNDllMDFjN2I1ZmU0ZjgzZmIzNDQ5ZjQifQ"
+        },
+        {
+          "resource": "repo://src/teamagent/adapters/hermes_learn_client.py#L120-L135",
+          "version": "repo-lines-v1:sha256:777aef425b17ee25cdbac7016e24697c67d47bfd37c23c35eaa3cdc61b32153a:eyJzZWxlY3RlZExpbmVDb3VudCI6MTYsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjkxZjBhYjIyNzllZjAzNGJkNjNmZWEyZGYyYTYyOWNiZWUzNzM5NjJiNjllM2JiNWYzMTgxMTIyMGRkNTczNTQiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjFhNDBkZGIxZjEwMGViYmMxODg2YzEzODYxMjJlMzY1MzcyZThlNDBhYjA4Mjk2YTU3ZTZhOGE1YTU5NmE1MmUiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImZlNzEzZTZmYTM1NzkxNjhiZDIzZmMxNjViNjAyMWFmNWE3ODI3MDUwNTcyZjM5M2VhYjVkYTA2MzQ2N2Y5OTgiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImFiM2U2NTgzYzViMzk2NjA0YTFhMmUxYjcxOWQ3MTgwZmZlOWNiM2E3NjEzNGQ3YmI2ODI2YjkxN2JhNGE0NjMifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_08cd78d1a7be429fbbfebe84f2120f35",
+      "statement": "Hermes 学習サービスは TLS 必須の /v1/learn（bearer 必須・同時 2 件・超過 503）を持ち、ジョブごとに使い捨て HERMES_HOME の子プロセスで学習する。",
+      "evidence": [
+        {
+          "resource": "repo://hermes_runtime/README.md#L1-L20",
+          "version": "repo-lines-v1:sha256:39fb9936507e1dc3841ec0ddd452e630fff6d583064a99105b7493c796ddff32:eyJzZWxlY3RlZExpbmVDb3VudCI6MjAsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjhlZDQwNTA0YmU3Y2JjODMwYTEwMTg2YjkxM2IwZmNiMTExOTM2NGQwOTRkNDQ0M2ExOGIzZWJmZGU5NGFjOGQiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6ImViODdhOTBmOGMyNTcxMDFhZDQ1NTMyM2VkYTU2ODhjMzY1ZmZkN2QwMjE4OTQ0YzAyNDVkYTM3ZTg1YjE2MzciLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjowLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImUzYjBjNDQyOThmYzFjMTQ5YWZiZjRjODk5NmZiOTI0MjdhZTQxZTQ2NDliOTM0Y2E0OTU5OTFiNzg1MmI4NTUiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjhiMTBhZjlkNjZmNzFkZTg3NzU5NWEzMWRkMjljMGY0N2JhZTQ2NjAzMjgxY2M5NDFlZTUxOGM5MTRlMjlmNGYifQ"
+        }
+      ]
+    }
+  ],
+  "verification": {
+    "by": "openwiki/0.6.1",
+    "at": "2026-09-29T07:51:05.076Z"
+  }
+}

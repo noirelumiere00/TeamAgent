@@ -30,10 +30,12 @@ from typing import Any
 import structlog
 
 from teamagent.adapters.digest_delivery_store import CLAIM_CLAIMED as _CLAIM_CLAIMED
+from teamagent.adapters.digest_delivery_store import CLAIM_RESERVED as _CLAIM_RESERVED
 from teamagent.adapters.digest_delivery_store import CLAIM_TAKEN as _CLAIM_TAKEN
 from teamagent.hmac_durable_state import require_runtime_startup
 from teamagent.hmac_keyring import MAIL_ACTION_MAX_TOKEN_TTL_S
 from teamagent.skills._shared import slack_handoff as _handoff
+from teamagent.skills._shared.grapheme_cut import truncate_graphemes
 from teamagent.skills._shared.mail_connection import (
     FETCH_NEEDS_RECONNECT,
     FETCH_OK,
@@ -43,6 +45,7 @@ from teamagent.skills._shared.mail_connection import (
     FETCH_UNKNOWN,
 )
 from teamagent.skills.morning_digest import calendar_window as _calwin
+from teamagent.skills.morning_digest import preferences as _prefs
 
 logger = structlog.get_logger(__name__)
 
@@ -237,6 +240,13 @@ _HANDOFF_FOOTNOTE = (
     "（要約文は作りません）。"
 )
 
+#: 本人の設定（digest_settings）で表示を変えている人の DM 末尾に添える 1 行。
+#: 「欄が消えた＝不具合」と誤解させず、戻し方をその場で分かるようにする。
+_PREFS_FOOTER = (
+    "_あなたの設定で表示を変えています。"
+    "Aico の DM で「朝の設定を見せて」と言えば確認・変更できます。_"
+)
+
 #: 既に敬称が付いている表示名（「田中さん」）へ「さん」を重ねないための検査。
 _HONORIFIC_TAIL_RE = re.compile(r"(?:さん|サン|様|さま|氏|君|くん|ちゃん|先生|部長|課長|社長)$")
 
@@ -265,9 +275,12 @@ _LINK_BARE_RE = re.compile(r"<https?://[^>]+>")
 
 
 def _truncate(s: str, limit: int) -> str:
-    """limit 超過時は末尾を「…」に置き換える（1件=1行原則のための単純字数切詰）。"""
+    """limit 超過時は末尾を「…」に置き換える（1件=1行原則のための単純字数切詰）。
+
+    切り口は絵文字（🇯🇵・ZWJ 連結など）を割らない（片割れを「…」の前に残さない）。
+    """
     s = s or ""
-    return s if len(s) <= limit else s[: max(0, limit - 1)] + "…"
+    return s if len(s) <= limit else truncate_graphemes(s, max(0, limit - 1)) + "…"
 
 
 def _resolve_mention(user_id: str, names: dict[str, str] | None) -> str:
@@ -601,7 +614,7 @@ def _slack_was_scanned(digest: Any) -> bool:
     return bool(getattr(digest, "slack_unread_scanned", False))
 
 
-def _slack_handoff_lines(digest: Any) -> list[str]:
+def _slack_handoff_lines(digest: Any, max_items: int = _HANDOFF_MAX_ITEMS) -> list[str]:
     """💬 セクションの行リスト（旧描画・compact 描画で共通）。0 件でも 1 行返す。"""
     items = list(getattr(digest, "slack_unread", []) or [])
     if not items:
@@ -613,7 +626,7 @@ def _slack_handoff_lines(digest: Any) -> list[str]:
     # me_user_id は描画時点で解決できない（email→user_id は API 呼び出し）。判定層は
     # 未指定なら「名指しリストから自分 1 人を引く」フォールバックで他人数を数える。
     triaged = _handoff.triage_slack_handoff(items, now=_handoff_now(), me_user_id=None)
-    shown = triaged.cards[:_HANDOFF_MAX_ITEMS]
+    shown = triaged.cards[:max_items]
     total = _slack_handoff_count(digest)
     truncated = bool(getattr(digest, "slack_unread_truncated", False))
 
@@ -653,7 +666,9 @@ def _slack_handoff_lines(digest: Any) -> list[str]:
     return [_guard_no_raw_ids(ln, known_ids) for ln in lines]
 
 
-def _slack_handoff_card_blocks(digest: Any) -> list[dict[str, Any]]:
+def _slack_handoff_card_blocks(
+    digest: Any, max_items: int = _HANDOFF_MAX_ITEMS
+) -> list[dict[str, Any]]:
     """💬 セクションを「1 カード = 1 section + ☑️ accessory」で描く（ack ボタン ON 時のみ）。
 
     ボタン OFF のときは呼ばれない。OFF 時の描画（`_slack_handoff_lines` → 1 つの section）は
@@ -673,7 +688,7 @@ def _slack_handoff_card_blocks(digest: Any) -> list[dict[str, Any]]:
     names = _handoff_names(items)
     known_ids = _handoff_known_ids(items)
     triaged = _handoff.triage_slack_handoff(items, now=_handoff_now(), me_user_id=None)
-    shown = triaged.cards[:_HANDOFF_MAX_ITEMS]
+    shown = triaged.cards[:max_items]
     total = _slack_handoff_count(digest)
     truncated = bool(getattr(digest, "slack_unread_truncated", False))
     counts = {b: triaged.count(b) for b in _handoff.BUCKET_ORDER}
@@ -734,7 +749,9 @@ def _slack_handoff_card_blocks(digest: Any) -> list[dict[str, Any]]:
     return blocks
 
 
-def _slack_handoff_block_section(digest: Any) -> list[dict[str, Any]]:
+def _slack_handoff_block_section(
+    digest: Any, max_items: int = _HANDOFF_MAX_ITEMS
+) -> list[dict[str, Any]]:
     """`_slack_handoff_card_blocks` の **fail-safe 境界**（行版 `_slack_handoff_section` と同役）。
 
     判定層は 800 行超の決定論ロジックを任意のユーザー本文に対して走らせる。そこで想定外の
@@ -743,7 +760,7 @@ def _slack_handoff_block_section(digest: Any) -> list[dict[str, Any]]:
     縮退させ、他セクションを巻き添えにしない。
     """
     try:
-        return _slack_handoff_card_blocks(digest)
+        return _slack_handoff_card_blocks(digest, max_items)
     except Exception as exc:
         print(
             f"[run_morning_digest_fargate] WARN: 💬 ブロック描画失敗 {type(exc).__name__}",
@@ -752,12 +769,14 @@ def _slack_handoff_block_section(digest: Any) -> list[dict[str, Any]]:
         return [{"type": "section", "text": {"type": "mrkdwn", "text": _HANDOFF_FAILED_LINE}}]
 
 
-def _push_slack_handoff(blocks: list[dict[str, Any]], digest: Any) -> None:
+def _push_slack_handoff(
+    blocks: list[dict[str, Any]], digest: Any, max_items: int = _HANDOFF_MAX_ITEMS
+) -> None:
     """💬 セクションを積む。ack ボタン OFF なら従来どおりの行描画に完全に一致させる。"""
     if _ack_button_enabled():
-        blocks.extend(_slack_handoff_block_section(digest))
+        blocks.extend(_slack_handoff_block_section(digest, max_items))
     else:
-        _push_section_lines(blocks, _slack_handoff_section(digest))
+        _push_section_lines(blocks, _slack_handoff_section(digest, max_items))
 
 
 def _ack_all_blocks(digest: Any) -> list[dict[str, Any]]:
@@ -780,7 +799,7 @@ def _ack_all_blocks(digest: Any) -> list[dict[str, Any]]:
     ]
 
 
-def _slack_handoff_section(digest: Any) -> list[str]:
+def _slack_handoff_section(digest: Any, max_items: int = _HANDOFF_MAX_ITEMS) -> list[str]:
     """💬 セクションの描画（**このセクションだけの fail-safe**）。
 
     判定層は 800 行を超える決定論ロジックを任意のユーザー本文に対して走らせる。そこで
@@ -789,7 +808,7 @@ def _slack_handoff_section(digest: Any) -> list[str]:
     ここで受け止めて 💬 の 1 行へ縮退させ、他セクションを巻き添えにしない。
     """
     try:
-        return _slack_handoff_lines(digest)
+        return _slack_handoff_lines(digest, max_items)
     except Exception as exc:
         print(
             f"[run_morning_digest_fargate] WARN: 💬 描画失敗 {type(exc).__name__}",
@@ -1145,11 +1164,14 @@ def _push_mail_status(
 
 
 def _push_slack_handoff_units(
-    blocks: list[dict[str, Any]], units: _BlockUnits, digest: Any
+    blocks: list[dict[str, Any]],
+    units: _BlockUnits,
+    digest: Any,
+    max_items: int = _HANDOFF_MAX_ITEMS,
 ) -> None:
     """💬 節を積み、削ってよい塊を控える（☑️ボタン時はカード 1 枚ずつ）。"""
     start = len(blocks)
-    _push_slack_handoff(blocks, digest)
+    _push_slack_handoff(blocks, digest, max_items)
     end = len(blocks)
     if _ack_button_enabled() and end - start > 2:
         # [見出し, カード…, 脚注]。見出しと脚注は残し、カードを後ろから削る。
@@ -1173,9 +1195,11 @@ def _footer_text(digest: Any) -> str:
         return head + "_"
     limit = int(getattr(digest, "draft_limit", 0) or 0)
     cap = f"最大 {limit} 件・" if limit > 0 else ""
+    # 社内だけのやり取りを外したときは除外にも書く（10-01 BU1 ヒアリング・#504）。
+    internal = "社内だけのやり取りと" if getattr(digest, "draft_skip_internal", False) else ""
     return head + (
         f"重要で本人宛てのメールには、Aico が返信の下書きを Gmail に作っておきます"
-        f"（{cap}日程の打診は除く）。送信はしません（送るかはご自身で）。_"
+        f"（{cap}{internal}日程の打診は除く）。送信はしません（送るかはご自身で）。_"
     )
 
 
@@ -1350,7 +1374,11 @@ def _format_block_kit(digest: Any, user_email: str) -> tuple[str, list[dict[str,
     return text, blocks
 
 
-def _format_block_kit_compact(digest: Any, user_email: str) -> tuple[str, list[dict[str, Any]]]:
+def _format_block_kit_compact(
+    digest: Any,
+    user_email: str,
+    prefs: _prefs.DigestPreferences = _prefs.DEFAULT_PREFERENCES,
+) -> tuple[str, list[dict[str, Any]]]:
     """密度優先の Block Kit（MORNING_DIGEST_COMPACT=1・2026-07-13 パイロットFB対応）。
 
     設計原則: DM は「索引」・詳細は元アプリ（Gmail/Slack/Calendar）。1件=1行、
@@ -1368,6 +1396,11 @@ def _format_block_kit_compact(digest: Any, user_email: str) -> tuple[str, list[d
     unread = [m for m in mail_items if getattr(m, "is_unread", False) and not _is_reply(m)]
     cal_items = list(getattr(digest, "calendar_events", []) or [])
     slack_total = _slack_handoff_count(digest)
+    # 本人の設定（digest_settings）。既定なら従来と 1 バイトも変わらない。
+    show_reply, show_unread = prefs.shows("reply"), prefs.shows("unread")
+    show_slack, show_cal = prefs.shows("slack"), prefs.shows("calendar")
+    lim_reply, lim_unread = prefs.limit("reply"), prefs.limit("unread")
+    lim_cal = prefs.limit("calendar")
     f0 = _fetch_status_enabled(user_email)
     units = _BlockUnits()
 
@@ -1382,12 +1415,33 @@ def _format_block_kit_compact(digest: Any, user_email: str) -> tuple[str, list[d
     n_unread = str(len(unread)) if mail_ok else "–"
     n_cal = str(len(cal_items)) if cal_ok else "–"
     # fallback text は通知プレビューに出るため件数のみ（PII ゼロ）。
-    text = f"朝ダイジェスト｜要返信{n_high}・未確認{n_unread}・Slack{slack_total}・予定{n_cal}"
+    # 見出しの件数は **載せる欄だけ**（本人が消した欄の件数を毎朝見せない）。
+    text_parts = [
+        part
+        for shown, part in (
+            (show_reply, f"要返信{n_high}"),
+            (show_unread, f"未確認{n_unread}"),
+            (show_slack, f"Slack{slack_total}"),
+            (show_cal, f"予定{n_cal}"),
+        )
+        if shown
+    ]
+    head_parts = [
+        part
+        for shown, part in (
+            (show_reply, f"🔴{n_high}"),
+            (show_unread, f"📬{n_unread}"),
+            (show_slack, f"💬{slack_total}"),
+            (show_cal, f"📅{n_cal}"),
+        )
+        if shown
+    ]
+    text = "朝ダイジェスト｜" + ("・".join(text_parts) or "設定により表示する欄なし")
     problem = _f0_problem(digest) if f0 else ""
     if problem:
         text = f"朝ダイジェスト｜⚠️ {problem}｜{text.split('｜', 1)[1]}"
-    header = (
-        f"📬 *{day_label} の朝ダイジェスト*｜🔴{n_high}・📬{n_unread}・💬{slack_total}・📅{n_cal}"
+    header = f"📬 *{day_label} の朝ダイジェスト*" + (
+        "｜" + "・".join(head_parts) if head_parts else ""
     )
     blocks: list[dict[str, Any]] = [
         {"type": "section", "text": {"type": "mrkdwn", "text": header}},
@@ -1410,12 +1464,12 @@ def _format_block_kit_compact(digest: Any, user_email: str) -> tuple[str, list[d
         who = _slack_escape(getattr(m, "counterpart_display", "") or m.counterpart_masked)
         return subj, who
 
-    # --- 🔴 要返信（最大5件・各件にボタン）---
-    if high:
+    # --- 🔴 要返信（既定 最大5件・各件にボタン）---
+    if high and show_reply:
         blocks.append(
             {"type": "section", "text": {"type": "mrkdwn", "text": f"🔴 *要返信（{len(high)}件）*"}}
         )
-        for m in high[:5]:
+        for m in high[:lim_reply]:
             item_start = len(blocks)
             subj, who = _subj_who(m)
             tag = f"`{m.sender_label}` " if getattr(m, "sender_label", "") else ""
@@ -1433,7 +1487,7 @@ def _format_block_kit_compact(digest: Any, user_email: str) -> tuple[str, list[d
             blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": body}})
             blocks.append({"type": "actions", "elements": _reply_buttons(m)})
             units.drop(_DROP_MAIL_ITEM, item_start, len(blocks))
-        rem = len(high) - 5
+        rem = len(high) - lim_reply
         if rem > 0:
             units.drop(_DROP_MAIL_EXTRA, len(blocks), len(blocks) + 1)
             blocks.append(
@@ -1465,14 +1519,14 @@ def _format_block_kit_compact(digest: Any, user_email: str) -> tuple[str, list[d
             )
         blocks.append({"type": "divider"})
 
-    # --- 📬 未確認（最大5件・1件=1行・要約なし）---
-    if unread:
+    # --- 📬 未確認（既定 最大5件・1件=1行・要約なし）---
+    if unread and show_unread:
         unread_start = len(blocks)
         lines = [f"📬 *未確認（{len(unread)}件）*"]
-        for m in unread[:5]:
+        for m in unread[:lim_unread]:
             subj, who = _subj_who(m)
             lines.append(f"• {who}: *{subj}*")
-        rem = len(unread) - 5
+        rem = len(unread) - lim_unread
         if rem > 0:
             lines.append(f"• 〈他{rem}件〉 <{_GMAIL_INBOX_URL}|受信トレイで見る>")
         _push_lines(lines)
@@ -1480,23 +1534,30 @@ def _format_block_kit_compact(digest: Any, user_email: str) -> tuple[str, list[d
         units.drop(_DROP_MAIL_UNREAD, unread_start, len(blocks))
 
     # 「📭 新着なし」の位置。F0 の対象者は、取れなかった日を「新着なし」と書かない。
-    _push_mail_status(blocks, units, digest, f0=f0, has_items=bool(high or unread))
+    # メールの欄を両方消した人には出さない。片方だけ消した人は、消した欄に件数があれば
+    # 「新着なし」と言わない（has_items は消した欄も含めて数える＝嘘の「なし」を書かない）。
+    if show_reply or show_unread:
+        _push_mail_status(blocks, units, digest, f0=f0, has_items=bool(high or unread))
 
     # --- 💬 Slack 返信漏れ（判定は _shared/slack_handoff・ここは並べるだけ。
     #     display は本人 DM のみ・ログ厳禁 G3/G7）---
-    _push_slack_handoff_units(blocks, units, digest)
-    blocks.append({"type": "divider"})
+    if show_slack:
+        _push_slack_handoff_units(blocks, units, digest, prefs.limit("slack"))
+        blocks.append({"type": "divider"})
 
     # --- 📌 本日の社外MTG 事例ブリーフ（既定OFF・節ごと消える設計）---
-    brief_start = len(blocks)
-    _push_brief_section(blocks, digest)
-    units.drop(_DROP_BRIEF, brief_start, len(blocks))
+    if prefs.shows("brief"):
+        brief_start = len(blocks)
+        _push_brief_section(blocks, digest)
+        units.drop(_DROP_BRIEF, brief_start, len(blocks))
 
     # --- 📅 当日の予定（最大10件・1行形式は旧描画と共通・見出しは実日付）---
     cal_start = len(blocks)
-    if cal_items:
+    if not show_cal:
+        pass
+    elif cal_items:
         lines = [f"📅 *{day_label} の予定（{len(cal_items)}件）*"]
-        for ev in cal_items[:10]:
+        for ev in cal_items[:lim_cal]:
             when = _fmt_event_time(
                 getattr(ev, "start_at", None),
                 getattr(ev, "end_at", None),
@@ -1516,7 +1577,7 @@ def _format_block_kit_compact(digest: Any, user_email: str) -> tuple[str, list[d
             if url:
                 line += f"  <{url}|🔗参加>"  # 会議リンクは実 URL なのでエスケープしない
             lines.append(line)
-        rem = len(cal_items) - 10
+        rem = len(cal_items) - lim_cal
         if rem > 0:
             lines.append(f"• 〈他{rem}件〉 <{_CALENDAR_URL}|カレンダーを開く>")
         _push_lines(lines)
@@ -1534,7 +1595,18 @@ def _format_block_kit_compact(digest: Any, user_email: str) -> tuple[str, list[d
 
     # --- 末尾（☑️ 全部確認した + 脚注（DLP 注記・下書きの作り方・旧描画と同一））---
     # 打ち切りに巻き込ませないため、本文とは別に組んで最後に足す。
-    tail: list[dict[str, Any]] = _ack_all_blocks(digest) + _footer_blocks(digest)
+    # ☑️「全部確認した」は、本人が消した欄に項目があるときは出さない（見ていない項目まで
+    # 確認済みにしてしまうため。個別の ☑️ は表示した項目にしか付かないので残る）。
+    hidden_has_items = (
+        (not show_reply and bool(high))
+        or (not show_unread and bool(unread))
+        or (not show_slack and slack_total > 0)
+    )
+    ack_all = [] if hidden_has_items else _ack_all_blocks(digest)
+    tail: list[dict[str, Any]] = ack_all + _footer_blocks(digest)
+    if prefs.hidden_sections or prefs.limits:
+        # 欄・件数を変えている人だけ（リマインドだけ変えた人の DM は見た目が変わらない）。
+        tail.append({"type": "context", "elements": [{"type": "mrkdwn", "text": _PREFS_FOOTER}]})
 
     if f0:
         # F0: 節の優先順位つきの最終ガード（案内と今日の予定は削らず、メールの一覧から削る）。
@@ -1607,12 +1679,36 @@ def _early_notice(digest: Any) -> bool:
     day = _digest_date(digest)
     starts = [
         str(getattr(ev, "start_at", "") or "")
-        # 終日は「最初の予定」の計算から除外（planner と同じ扱い）。
+        # 終日とタスク枠は「最初の予定」の計算から除外（planner と同じ扱い）。
         for ev in (getattr(digest, "calendar_events", []) or [])
-        if not bool(getattr(ev, "all_day", False)) and "T" in str(getattr(ev, "start_at", "") or "")
+        if not bool(getattr(ev, "all_day", False))
+        and "T" in str(getattr(ev, "start_at", "") or "")
+        and not bool(getattr(ev, "personal_block", False))
     ]
     plan = compute_send_time(day, first_timed_start(starts, day), default_hhmm=_default_send_hhmm())
     return plan.clamped_to_floor
+
+
+def _preferences_enabled() -> bool:
+    """MORNING_DIGEST_PREFERENCES=1 のときだけ本人の設定（migration 0030）を読む（既定OFF）。
+
+    OFF の間は表を 1 度も読まない＝今までどおりの配信（表が未作成の環境でも警告を出さない）。
+    """
+    return os.environ.get("MORNING_DIGEST_PREFERENCES", "").strip().lower() in {"1", "true", "yes"}
+
+
+def _preferences_store() -> Any | None:
+    """本人の設定ストア（OFF・DB 未設定なら None＝全員既定）。"""
+    if not _preferences_enabled() or not os.environ.get("DATABASE_URL", "").strip():
+        return None
+    from teamagent.adapters.digest_preferences_store import DigestPreferencesStore
+
+    return DigestPreferencesStore()
+
+
+def _load_prefs(store: Any | None, email: str, request_id: str) -> _prefs.DigestPreferences:
+    """1 人分の設定。読めなければ既定（fail-open・理由は preferences の docstring）。"""
+    return _prefs.load_preferences(store, email, request_id=request_id)
 
 
 def _reminders_enabled() -> bool:
@@ -1620,7 +1716,11 @@ def _reminders_enabled() -> bool:
     return os.environ.get("MORNING_DIGEST_REMINDERS", "").strip().lower() in {"1", "true", "yes"}
 
 
-def _schedule_event_reminders(digest: Any, im_channel: str) -> int:
+def _schedule_event_reminders(
+    digest: Any,
+    im_channel: str,
+    prefs: _prefs.DigestPreferences = _prefs.DEFAULT_PREFERENCES,
+) -> int:
     """当日予定の「開始 N 分前」リマインドを EventBridge Scheduler に登録する（v0.3 Task5）。
 
     - 対象: start_at が「今から lead+1 分より先」の予定のみ（過ぎた/直近すぎる予定は skip）
@@ -1628,7 +1728,11 @@ def _schedule_event_reminders(digest: Any, im_channel: str) -> int:
     - payload に short title（≤60字）を載せる（2026-07-14・本人の予定を本人 DM に出す用途に
       限定。「何の予定か分からない」の解消・ユーザー要望）。Lambda はタイトルをログに出さない
     - schedule 名は channel×開始時刻から決定的＝再実行でも二重登録しない（Conflict→成功扱い）
+    - 本人の設定（digest_settings）: リマインドを止めた人は 1 件も登録しない／何分前かの上書き／
+      予定名に除外語を含む予定（例「タスク」）は登録しない
     """
+    if not prefs.reminders:
+        return 0
     from teamagent.adapters.scheduler_client import SchedulerClient
 
     try:
@@ -1641,6 +1745,8 @@ def _schedule_event_reminders(digest: Any, im_channel: str) -> int:
     except ValueError:
         lead_min = 5
     lead_min = min(60, max(1, lead_min))
+    if prefs.reminder_lead_minutes is not None:
+        lead_min = prefs.reminder_lead_minutes
 
     # 壁時計は calendar_window.now_jst（skill の取得窓と同じ時刻源・テストで固定できる）。
     now = _calwin.now_jst()
@@ -1652,6 +1758,14 @@ def _schedule_event_reminders(digest: Any, im_channel: str) -> int:
             continue  # 終日 or 不明
         start = _calwin.parse_jst_datetime(start_iso)  # naive は JST とみなす（UTC 誤解釈防止）
         if start is None:
+            continue
+        # 除外語は表示名（生タイトル）で照合する（本人が見ている名前で「タスク」と言っている）。
+        raw_title = str(
+            getattr(ev, "summary_display", "") or getattr(ev, "summary_scrubbed", "") or ""
+        )
+        if not prefs.reminder_allowed(
+            raw_title, personal_block=bool(getattr(ev, "personal_block", False))
+        ):
             continue
         fire_at = start - _dt.timedelta(minutes=lead_min)
         if fire_at <= now + _dt.timedelta(minutes=1):
@@ -1840,7 +1954,11 @@ def _read_only_calendar(token_store: Any, email: str) -> Any | None:
 
 
 def _plan_send_time(calendar: Any, day: _dt.date, request_id: str) -> Any:
-    """当日の最初の「時刻つき」予定から送信時刻を決める（終日は除外）。"""
+    """当日の最初の「時刻つき」会議から送信時刻を決める（終日とタスク枠は除外）。
+
+    タスク枠（ゲストも会議リンクも無い予定）は数えない。カレンダーに作業を入れている人は
+    朝 7:00 の「メール処理」で 6:30 に起こされることになるため（10-05 小俣さん指摘）。
+    """
     from teamagent.skills.morning_digest.send_window import compute_send_time, first_timed_start
 
     window_start = _dt.datetime.combine(day, _dt.time.min, tzinfo=_JST)
@@ -1855,7 +1973,11 @@ def _plan_send_time(calendar: Any, day: _dt.date, request_id: str) -> Any:
         str(getattr(ev, "start", "") or "")
         # ⚠️ 終日予定は「最初の予定」の計算から除外（終日だけの日は予定なし扱い）。
         for ev in events
-        if not bool(getattr(ev, "all_day", False)) and "T" in str(getattr(ev, "start", "") or "")
+        if not bool(getattr(ev, "all_day", False))
+        and "T" in str(getattr(ev, "start", "") or "")
+        and not _calwin.is_personal_block(
+            getattr(ev, "attendees", None), getattr(ev, "meeting_url", "")
+        )
     ]
     return compute_send_time(day, first_timed_start(starts, day), default_hhmm=_default_send_hhmm())
 
@@ -1965,8 +2087,16 @@ def run_planner(users: list[str]) -> int:
     planned = 0
     skipped = 0
     notified = 0
+    prefs_store = _preferences_store()
+    # 予約印（migration 0031）。9:30 の一括が「後で個別に送る人」を見送るための唯一の根拠。
+    delivery_store = _delivery_store()
+    default_at = _dt.datetime.combine(day, _dt.time(*_default_send_hhmm()), tzinfo=_JST)
     for email in users:
         request_id = f"digest-plan-{uuid.uuid4().hex[:8]}"
+        # 本人が止めた/休み/曜日外の日は予約を作らない（予約が発火すると DM が届く）。
+        if _load_prefs(prefs_store, email, request_id).skip_reason(day) is not None:
+            skipped += 1
+            continue
         calendar = _read_only_calendar(token_store, email)
         if calendar is None:
             # PLAN §2-1: 未連携の人が「自分はブリーフの対象外」だと永久に気づけない
@@ -1985,7 +2115,7 @@ def run_planner(users: list[str]) -> int:
             )
             skipped += 1
             continue
-        if plan.no_timed_event or plan.clamped_to_default:
+        if plan.no_timed_event or plan.clamped_to_default or plan.fire_at == default_at:
             # ⚠️ 既定時刻のままの人は **予約を作らない**（DELTA §1「予定が 1 件も無い日＝
             #   既定時刻」「予約が作れなかった利用者は既定時刻の一括実行に残す」）。
             #   ここで予約を作ると (a) 一括配信が走らない土曜にも DM が出る
@@ -1995,6 +2125,11 @@ def run_planner(users: list[str]) -> int:
             continue
         ref = user_ref(email)
         if not ref:
+            skipped += 1
+            continue
+        # 先に予約印を付ける（付けられなければ予約しない＝9:30 の一括に残す）。
+        # ⚠️ 印だけ残って予約が無い状態はその日 1 通も届かないので、予約に失敗したら印を消す。
+        if delivery_store is None or not delivery_store.reserve(email, day, request_id=request_id):
             skipped += 1
             continue
         ok = scheduler.schedule_digest(
@@ -2007,6 +2142,7 @@ def run_planner(users: list[str]) -> int:
         if ok:
             planned += 1
         else:
+            delivery_store.release(email, day, request_id=request_id)
             skipped += 1
     # ⚠️ 件数のみ。メールアドレス・予定タイトル・時刻の個人分布は出さない。
     summary = {
@@ -2092,7 +2228,12 @@ def _warn_if_holiday_table_stale(day: _dt.date) -> bool:
     return True
 
 
-def _register_holiday_reminders(skill: Any, skill_input: Any, email: str) -> tuple[str, int]:
+def _register_holiday_reminders(
+    skill: Any,
+    skill_input: Any,
+    email: str,
+    prefs: _prefs.DigestPreferences = _prefs.DEFAULT_PREFERENCES,
+) -> tuple[str, int]:
     """祝日の 1 人分: 予定を取ってリマインドだけ登録する（DM は送らない）。
 
     返り値 (状態, 登録数)。状態は "reminded" / "skipped"（未連携・予定なし）/ "error"。
@@ -2101,6 +2242,8 @@ def _register_holiday_reminders(skill: Any, skill_input: Any, email: str) -> tup
     from teamagent.skills.base import SkillContext
     from teamagent.skills.morning_digest.schema import MorningDigestOutput
 
+    if not prefs.reminders:
+        return ("skipped", 0)  # 本人がリマインドを止めている（予定も取りに行かない）
     ctx = SkillContext(
         request_id=f"morning-holiday-{uuid.uuid4().hex[:8]}", metadata={"user_email": email}
     )
@@ -2130,7 +2273,7 @@ def _register_holiday_reminders(skill: Any, skill_input: Any, email: str) -> tup
         return ("error", 0)
     holder = MorningDigestOutput(user_email_masked=_mask_email(email), calendar_events=events)
     try:
-        n = _schedule_event_reminders(holder, im_channel)
+        n = _schedule_event_reminders(holder, im_channel, prefs)
     except Exception as exc:
         print(
             f"[run_morning_digest_fargate] WARN: reminder 登録失敗 {type(exc).__name__}",
@@ -2152,8 +2295,10 @@ def _run_holiday(users: list[str], day: _dt.date, reason: str) -> int:
 
         skill = MorningDigestSkill(token_store=_build_token_store())
         skill_input = MorningDigestInput()
+        prefs_store = _preferences_store()
         for email in users:
-            state, n = _register_holiday_reminders(skill, skill_input, email)
+            prefs = _load_prefs(prefs_store, email, f"morning-holiday-{uuid.uuid4().hex[:8]}")
+            state, n = _register_holiday_reminders(skill, skill_input, email, prefs)
             counts[{"reminded": "reminded", "skipped": "skipped"}.get(state, "errors")] += 1
             counts["reminders"] += n
     # ⚠️ 件数のみ。メールアドレス・予定のタイトルは出さない。
@@ -2394,6 +2539,8 @@ def _format_admin_report(
     errors = [o for o in outcomes if o.status == "error"]
     not_connected = sum(1 for o in outcomes if o.reason == "not_connected")
     already = sum(1 for o in outcomes if o.reason == "already_delivered")
+    # 最初の予定が遅い日で、あとで個別に送る予約の人（9:30 の一括では送らない・正常）。
+    later = sum(1 for o in outcomes if o.reason == "reserved_later")
     # 配信権（digest_delivery）を DB で確かめられず、送らずに止めた人。「送信済み」とは別に数える
     # （DB 障害の朝は全員がここに入り、誰にも届かない）。
     claim_failed = sum(1 for o in outcomes if o.reason == "claim_failed")
@@ -2403,8 +2550,14 @@ def _format_admin_report(
     )
     if already:
         head += f"・送信済み {already}"
+    if later:
+        head += f"・予定に合わせて後で送る {later}"
     if claim_failed:
         head += f"・送信の確認失敗 {claim_failed}"
+    # 本人が DM で止めた/休み/曜日外にした人（件数だけ・誰がどう設定したかは出さない）。
+    by_pref = sum(1 for o in outcomes if o.reason.startswith("pref_"))
+    if by_pref:
+        head += f"・本人設定で停止 {by_pref}"
     lines = [head]
     if target_error == TARGET_ZERO_ROWS:
         lines.append(
@@ -2540,6 +2693,7 @@ def _process_user(
     day: _dt.date | None = None,
     origin: str = "bulk",
     sink: list[UserOutcome] | None = None,
+    prefs_store: Any | None = None,
 ) -> str:
     """1 ユーザー分を処理し "delivered"/"skipped"/"error" を返す（例外は内側で封じ込め）。
 
@@ -2561,14 +2715,26 @@ def _process_user(
 
     request_id = f"morning-{uuid.uuid4().hex[:10]}"
     target_day = day or _dt.datetime.now(tz=_JST).date()
+    # 本人の設定（digest_settings）。止めた/休み/曜日外なら、配信権も取らず skill も呼ばない
+    # （Gmail 走査・下書き生成・Bedrock を 1 度も走らせない）。
+    prefs = _load_prefs(prefs_store, email, request_id)
+    skip_reason = prefs.skip_reason(target_day)
+    if skip_reason is not None:
+        return _done("skipped", skip_reason)
+    if not prefs.auto_drafts:
+        # 返信の下書きを自動で作らない人。共有の skill_input は書き換えず、この人の分だけ複製。
+        skill_input = skill_input.model_copy(update={"max_drafts": 0})
     if store is not None:
         verdict = _claim_delivery(store, email, target_day, origin=origin, request_id=request_id)
         if verdict != _CLAIM_CLAIMED:
             # 「別の経路が送った（正常）」と「DB で確かめられず止めた（全員に届かない障害）」を
             # 数え分ける。どちらも送らない（fail-closed）のは同じ。
-            return _done(
-                "skipped", "already_delivered" if verdict == _CLAIM_TAKEN else "claim_failed"
-            )
+            reason = {
+                _CLAIM_TAKEN: "already_delivered",
+                # planner が「後で個別に送る」と予約した人（最初の予定が遅い日）。正常な見送り。
+                _CLAIM_RESERVED: "reserved_later",
+            }.get(verdict, "claim_failed")
+            return _done("skipped", reason)
     ctx = SkillContext(request_id=request_id, metadata={"user_email": email})
     try:
         digest = skill.run(skill_input, ctx)
@@ -2587,8 +2753,9 @@ def _process_user(
         return _done("error", "skill_failed", error=type(exc).__name__)
     # 配信(整形+Slack)も封じ込め（1 人の失敗で全体を落とさない）。
     try:
-        if _compact_enabled():
-            text, blocks = _format_block_kit_compact(digest, email)
+        # 欄・件数を変えている人は密度優先描画で組む（設定は compact 描画だけが解釈する）。
+        if _compact_enabled() or prefs.hidden_sections or prefs.limits:
+            text, blocks = _format_block_kit_compact(digest, email, prefs)
         else:
             text, blocks = _format_block_kit(digest, email)
         delivered, im_channel = asyncio.run(_deliver_to_slack(email, text, blocks))
@@ -2607,7 +2774,7 @@ def _process_user(
         # 登録失敗してもダイジェスト配信の成功は変えない）。
         if im_channel and _reminders_enabled():
             try:
-                n = _schedule_event_reminders(digest, im_channel)
+                n = _schedule_event_reminders(digest, im_channel, prefs)
                 if n:
                     print(f"[run_morning_digest_fargate] reminders scheduled: {n}", flush=True)
             except Exception as exc:
@@ -2745,13 +2912,21 @@ def main() -> int:
     # ⚠️ 既定時刻の一括実行は「その日すでに送った人」を必ず除外する。ここが壊れると
     #    予約で受け取った人へ 9:30 にもう 1 通届く。
     store = _delivery_store()
+    prefs_store = _preferences_store()
     origin = "scheduled" if mode == "single" else "bulk"
     # F0: 1 人ずつの結果（管理者 DM と run_done の集計用・メモリ上だけ）。
     outcomes: list[UserOutcome] = []
 
     def _run_one(email: str) -> str:
         return _process_user(
-            skill, skill_input, email, store=store, day=day, origin=origin, sink=outcomes
+            skill,
+            skill_input,
+            email,
+            store=store,
+            day=day,
+            origin=origin,
+            sink=outcomes,
+            prefs_store=prefs_store,
         )
 
     # concurrency=1（既定）は従来どおり逐次。>1 で人数に応じた所要時間短縮。

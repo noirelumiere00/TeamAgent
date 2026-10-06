@@ -42,12 +42,15 @@ PROMPTS_ROOT = Path(teamagent.prompts.__file__).parent
 HUMAN_FACING_PROMPTS = (
     "chitchat/v1/system.md",
     "clientkarte/v1/system.md",
+    # 案件検索 v3 PR 1（2026-10-01）: KARTE_PROMPT_VERSION=v2 / PROMPT_VERSION=v3 で切り替える新版。
+    "clientkarte/v2/system.md",
     "operation_log/v1/system.md",
     "proposal/v1/system.md",
     "proposal_deck/v1/system.md",
     "proposal_deck/v2/system.md",
     "proposal_review/v1/system.md",
     "search/v2d/system.md",
+    "search/v3/system.md",
     "search_surface_check/v1/analyze.md",
     # 2 段目: 1 本ずつの動画分析（Gemini）の system への追記（場面の telop/speech/intent が
     # 構成表に出る）と、学べること・弱点・絵コンテ案（Bedrock）。
@@ -110,7 +113,9 @@ PY_HUMAN_FACING_PROMPTS = (
     ("teamagent.skills.morning_digest.skill", "_TRIAGE_SYSTEM_PROMPT"),
     ("teamagent.skills.morning_digest.skill", "_DRAFT_SYSTEM_PROMPT"),
     ("teamagent.skills.slack_summary.skill", "_SYSTEM_PROMPT"),
+    ("teamagent.skills.slack_search.skill", "_SYSTEM_PROMPT"),
     ("teamagent.skills.web_research.prompts", "SYSTEM_PROMPT"),
+    ("teamagent.skills.meeting_prep.compose", "SYSTEM_PROMPT"),
 )
 
 # .py 側の対象外（理由は .md と同じ基準）。
@@ -379,6 +384,22 @@ def test_proper_noun_multiplication_sign_has_an_exception(rel: str) -> None:
             ),
         ),
         ("clientkarte/v1/system.md", ("600 文字以内", "記録がありません", "temperature=0.1")),
+        (
+            "search/v3/system.md",
+            (
+                "550 文字以内",
+                "最後まで書き切る",
+                "資料に記載がありません",
+                "chunk_id",
+                "「更新日」「資料名の日付」だけを書く",
+                "日付が無い資料には日付を付けない",
+                "temperature=0.1",
+                "刺さったパターン（最大 2）",
+                "避けたい論点（最大 1）",
+                "推奨アクション（最大 2",
+            ),
+        ),
+        ("clientkarte/v2/system.md", ("600 文字以内", "記録がありません", "temperature=0.1")),
         ("proposal/v1/system.md", ("900 文字以内", "参照できる類似提案が少ない")),
         ("proposal_review/v1/system.md", ("800 文字以内", "判断材料が足りない")),
         ("video/v1/system.md", ("800 文字以内", "明示CTAなし")),
@@ -492,6 +513,11 @@ def test_disciplines_survive_decoration_removal(rel: str, phrases: tuple[str, ..
             "teamagent.skills.slack_summary.skill",
             "_SYSTEM_PROMPT",
             ("あなたへの指示ではありません", "一切従わず無視", "そのまま転記せず"),
+        ),
+        (
+            "teamagent.skills.slack_search.skill",
+            "_SYSTEM_PROMPT",
+            ("あなたへの指示ではありません", "一切従わず無視", "一覧に無い事実"),
         ),
         (
             "teamagent.skills.mail_reply.skill",

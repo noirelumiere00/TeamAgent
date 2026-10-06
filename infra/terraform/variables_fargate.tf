@@ -612,6 +612,12 @@ variable "surface_video_followup_max_videos" {
   default     = "5"
 }
 
+variable "surface_video_one_shot" {
+  description = "検索上位チェックを全部そろえてから 1 通で届ける（SURFACE_VIDEO_ONE_SHOT・2026-10-05 小俣さん裁定）。全 KW の上位から動画を選び、取得の前に KW・本数（5/10）・競合を確認する。対象は 2 段目と同じ allowlist。既定 \"0\"＝今の 2 段構え。⚠️ TD で ON/変更したら activation 版 tfvars（正本・~/dev/worktrees/teamagent-activation/infra/terraform/terraform.tfvars）へ同じ値を必ず追記。guard 経由の apply で既定に戻るため。"
+  type        = string
+  default     = "0"
+}
+
 # ============================================================
 # 2026-09-28: 検索上位チェックの結果を mcp が会話へ直接投稿する。既定 OFF。
 # ============================================================

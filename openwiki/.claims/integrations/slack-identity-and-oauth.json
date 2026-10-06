@@ -1,0 +1,202 @@
+{
+  "schemaVersion": 1,
+  "pageVersion": "sha256:c05798418a239e9bfaad71d4ece943f9b4e9284910dba2aa6f625a28b26f687b",
+  "claims": [
+    {
+      "id": "claim_139cd7e83ef24bc885505a2b46833b92",
+      "statement": "SlackClient.resolve_identity は、user_id が ^U[A-Z0-9]{8,}$ に合わない（API 呼び出し前に判定）、users.info の失敗、deleted・is_bot・is_restricted・is_ultra_restricted・is_stranger のいずれかが真、SLACK_TEAM_ID の欠落や形式不正、team_id 不一致、email が normalize_email を通らない場合に None を返し、成功・失敗とも結果を 60 秒だけキャッシュする。",
+      "evidence": [
+        {
+          "resource": "repo://src/teamagent/adapters/slack_client.py#L35-L40",
+          "version": "repo-lines-v1:sha256:ffdde930f836d688a48047f038be7a09ede5a38ef3ae18158b67dbb5bdff11bd:eyJzZWxlY3RlZExpbmVDb3VudCI6NiwiZmlyc3RTZWxlY3RlZExpbmVIYXNoIjoiNmFiYTk3OGI0NWM0YTAyZDRhNWJlN2EyZjBlOTdiZDBlZTE0OWExYzVkZjMxZWU1YmNiNjJhZGExMDQ2NWRkMCIsImxhc3RTZWxlY3RlZExpbmVIYXNoIjoiNDg5NjQyZjZhNzA1NWJhZTM3ZjdhMDJkODFmZjU1NjUwNjBjNmJlZDY1YWZkZWY3NzUwNzVhZTJjOWEyZmIyNCIsInByZWNlZGluZ0NvbnRleHRMaW5lQ291bnQiOjMsInByZWNlZGluZ0NvbnRleHRIYXNoIjoiY2Y2NDg1NzNlYjIyNDIwNzE2YWFhNTQ5MTA1ZjA2ZmQyMDE0MTlhZDRkNTNjMmE5NDIxZThkZTY3NDUwMGVhZCIsImZvbGxvd2luZ0NvbnRleHRMaW5lQ291bnQiOjMsImZvbGxvd2luZ0NvbnRleHRIYXNoIjoiYWZjNjBlNjE2ZDAyZDY4Njg0NTFlNGUxNTM5ZTZkY2VlOGQ2M2U2NjA4YTJlMjk2NDdjOWFhYWNjZWU2YjU2OSJ9"
+        },
+        {
+          "resource": "repo://src/teamagent/adapters/slack_client.py#L377-L386",
+          "version": "repo-lines-v1:sha256:171c12daec7d8cb142b19baee6c677ceba4dd052f562e1600eda2e8f56228c30:eyJzZWxlY3RlZExpbmVDb3VudCI6MTAsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjUxMDFjNDE3ZDZhMGJmOTYzNzc3N2VmNWZmODdmOTg2OTE0ZGYxNzkyZjY4OGRjODA0ZmUwZWFiODcyOTY1YzkiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6ImRmZGVmNzcyNDgwMWU1YjkxMmU2NTJhMDg2NTAxNTljMGRlYjU2Yzg1MmExNDYwOWFlMTEzZjA0ODg0YWFlNWIiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImVlYzI5MTZjYTk1OGE2OWEyNmQ3MzgzYzA5NjA2YmNiZWI2NjJhM2UzYTczYzRhNzZmMzM4NTkwMDE1ZDMwOTEiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjYwNmUyMGJhNzE0OTY1Y2ZmMmUyZGRjMmZiMDA2ZjNhODRmYjUwYzdjOTFjNGMxNjM2NjgyNGY4NjExMTVhNTQifQ"
+        },
+        {
+          "resource": "repo://src/teamagent/adapters/slack_client.py#L388-L427",
+          "version": "repo-lines-v1:sha256:19ea8b7492d01885b4623aae9d03c85d6b81f897ad26d3aaebe556b65e0d7874:eyJzZWxlY3RlZExpbmVDb3VudCI6NDAsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6ImYxYzE0ZjczYTIzNGU2M2I4YjEwMDc0MzhmM2YxYmIwNDBlZTI2MmJlZTM3MjA4YWQ3OGI3NDgzMmFhMDQyNzciLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjQyMDc4MzkyZmZlOTM1MTNhNGNlYzA2MjQ2ODZhOTcyM2Y4MzgxYjM4YTNjNjBmYWQ0NmYzYjEwYTc2NjVlN2UiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjRiYzMyYzFkMzhiM2RhZjU3NmE5YWViMjY5NDRhNDdiNDJkZTc5NTYyYmYzYTExZjc2NDk4YjJkMjc2MmFiNzIiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjQ5MTY3OTY5ZmYzODMzMmQ5NWY4M2QzYjdjYzQzMTY5OTQ3YWY0ZTk1NTYxZmQyOTk0ZmFkNGVjNGQ0ODM5NTIifQ"
+        },
+        {
+          "resource": "repo://src/teamagent/identity.py#L29-L48",
+          "version": "repo-lines-v1:sha256:b1f585f8462497d2709cb953eac70b12ebee3bb4f5e8e841c11d5b96154f420a:eyJzZWxlY3RlZExpbmVDb3VudCI6MjAsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjkwZmI4MGRiY2NhYmUzMmQyYTBiOWQ4MjNlMjYwYTA3ODE3MTI4OTY5NjlkZmFkZDcyZTlmYjFhMjBhYmNjYjIiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6ImM4NWQ1N2M2M2NiNzc1YjlmODJjODBjYzU4MzZkNmVjYTU1NzkwMWI5MDQ0Y2I1MTMwNGIzMmEwMjFkZmQyYjEiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjI4MzA1N2FmNmM3Mzk2YTVhNWQ0ZWU0ODgwZGIzZjc1MmIzZDdkZmI0OWY5NGI1MzRmYzEzM2VmN2MxMWIzNGMiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjcwY2UzZjI0YWI0N2MyZjVhOWQzMzdmMzc3ZWQ4NTczZmE1NjU4NDA3NjQwMmYxYWYwNTRhM2RlZDYxOTQ2MmYifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_0f9255b197394b119e9ff9cb7f55fafd",
+      "statement": "mcp_gateway は SLACK_BOT_TOKEN があるときだけ resolve_identity を resolver にし、本番サーバ構築は resolver が無いと RuntimeError で起動を拒否する。STRICT モードでは resolver が None を返すか例外を投げると依頼を本人確認拒否で返す。",
+      "evidence": [
+        {
+          "resource": "repo://src/teamagent/mcp_gateway/server.py#L1447-L1462",
+          "version": "repo-lines-v1:sha256:e51e761c83fa44c57111e0b1d151a5a9104c016da482e8b9fb11d020ecde534c:eyJzZWxlY3RlZExpbmVDb3VudCI6MTYsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjM3MjJlNGRlYjE3YzcyMWJhMTc5OGVmY2I4NmE3MTRiZjQwZDIyYWUwMGUyNGVhZDAyNzMzYWFkOTJlYmQ3OGIiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjczOWVjY2FkYTQ3YTcwMmZlMGQ5ZWMzN2RjZWJkY2I5NWI0OWQzODNmMWI3OGQwYzFhOGY1ZGIzNmI0NTNhYWQiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjhjMzg5YzBjMjYwOTY0NzEzM2Y5MzkxYTdhMWJmMDUxMzU0NzVkYWFlOGMyNzVkZTM1MDM0NDFjYWI1NzYyMjUiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjYzYzIyODc2YmE5YWExMTY5NGNkMzVlM2ZiNjM1NzE4NWJlNTYyNjkyZTBjZmM2YTQyNjE5ZDBhY2VjNTdiN2YifQ"
+        },
+        {
+          "resource": "repo://src/teamagent/mcp_gateway/server.py#L1554-L1557",
+          "version": "repo-lines-v1:sha256:05932d0d2d0166e1c5304515e349b1d741506c71859daa49a66b9145dea27494:eyJzZWxlY3RlZExpbmVDb3VudCI6NCwiZmlyc3RTZWxlY3RlZExpbmVIYXNoIjoiYTZhNzE1MjU3MmVlODRmMTA5MDZjNzRiOWYyYTkyNDM0ZGRhYjBlM2M0MjgxM2IwNGU1OTdlZmNlYzk1MWIyNiIsImxhc3RTZWxlY3RlZExpbmVIYXNoIjoiMjE2ZDU1ODE2OWM3MDRkODQ4MGQ2ZTA0NDc3NGU1MTJhNTYxYjEzM2RkMTk4MTMzMDdjOTYwMzE0MzQwMzQzZiIsInByZWNlZGluZ0NvbnRleHRMaW5lQ291bnQiOjMsInByZWNlZGluZ0NvbnRleHRIYXNoIjoiOWE2MjQ2YmI5NDIzNGYwNDUyYzM2MWFmNGJhYjJiNzI0MTI2ZDYzM2NjMWJlODhjNzRkZTA2NjBkZDliMGJjNSIsImZvbGxvd2luZ0NvbnRleHRMaW5lQ291bnQiOjMsImZvbGxvd2luZ0NvbnRleHRIYXNoIjoiODJlZWEyMzY4ZTVkZjc4ZjM4MGVkNGU3Y2FmMWQxNjQ2MTE4ZDFkZDhjNjFlOGNiYTc0OTk2OWY2NThhYTY1ZSJ9"
+        },
+        {
+          "resource": "repo://src/teamagent/mcp_gateway/server.py#L539-L553",
+          "version": "repo-lines-v1:sha256:8ca52980833488c96bb4723af94be1023ed576e64fec285cc88c763a17548b0f:eyJzZWxlY3RlZExpbmVDb3VudCI6MTUsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjkwNTVhM2ExMDMzYjVmMzk4MjI5ZGM0NTdjMjEzOWI5ODc2MGMxZDNkOTZjZWEwMjVjNGU1OTM0NDZmNzI0MjEiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6Ijg2ODJkNzkyZTRjMjMwZjMyMTI5YTNkYmYwMmVjZDJiZmJhZjE0ZTk1ZDFjZTIyOGMwMDMwODA0NDZjZGE5ZjciLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjFjYzNiNDk3OGNiMjhiYzRhZGViZjg2YWViNjc3NzA2ZGIzMjk4NDA5MTU1Y2Y5YWE0YzY2NzIzNTMxNTgzZTQiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjQ3NjQwMTM4OTNmMGVkMTc3NjA1MzFmNTJjOGJhMzg5MjUzMTRhYzQwZGViY2EwZjRhM2RjZDRmODMyMWY1NjEifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_a71eab16014a41f5bf5c3d78c9bd730e",
+      "statement": "Slack の per-user 連携が要求する user scope は search:read・channels:history・groups:history・im:history・mpim:history・users:read の読み取り系だけで、認可 URL は scope= ではなく user_scope= に並べ、xoxp は oauth.v2.access 応答の authed_user 配下から取る。",
+      "evidence": [
+        {
+          "resource": "repo://src/teamagent/adapters/slack_oauth_flow.py#L202-L208",
+          "version": "repo-lines-v1:sha256:ef2565d64c865251c95a3fd3b4f9660ec5c3be5f2272d411325e0186f51c1ffa:eyJzZWxlY3RlZExpbmVDb3VudCI6NywiZmlyc3RTZWxlY3RlZExpbmVIYXNoIjoiOTExMmYzZDc0MDhiNDQwNDM4YjY2MGQ1NTNmN2UwY2QwZDkwMTBkNTEwYTcwZGNmZjI2NjJlNTQwZmRkZGNmZCIsImxhc3RTZWxlY3RlZExpbmVIYXNoIjoiMTQ3OGFhM2QwZGJkZWY0MWJhM2U1YzJhZTdkODU2MmMxMTgyZjE2ZDVlYjMyZDNkOWZlNWNjYmY0NjIzZWI4NSIsInByZWNlZGluZ0NvbnRleHRMaW5lQ291bnQiOjMsInByZWNlZGluZ0NvbnRleHRIYXNoIjoiZGM4MmU3YWYyYjExNzdhMDkxM2M4MTM2NWNkZmY5NDYwZjE4YTNjMzcwMDRmNzU0ZDljNjc0NjRjNmNmNDZkMyIsImZvbGxvd2luZ0NvbnRleHRMaW5lQ291bnQiOjMsImZvbGxvd2luZ0NvbnRleHRIYXNoIjoiZTVlNGQ1YTI1NzY1NDFkMDBmNDgxNzk3ZTIxZGFhNTNjY2U4OWUzZWY2Y2ZlYWJmYmU2ODEzYWI4YWVmODM3NiJ9"
+        },
+        {
+          "resource": "repo://src/teamagent/adapters/slack_oauth_flow.py#L226-L230",
+          "version": "repo-lines-v1:sha256:fe7d5cc966571f7ab707c7c0b715a7686ee59e5f45936d6a4bedc43d2359587d:eyJzZWxlY3RlZExpbmVDb3VudCI6NSwiZmlyc3RTZWxlY3RlZExpbmVIYXNoIjoiNmRmMTEzZDU4ZjE4MmUwYTc5OThiNDE1NzdmNDc1N2YwNGEyODFkNzljYzYzYTdlNWQwYjJlMjczM2U4YTE0MSIsImxhc3RTZWxlY3RlZExpbmVIYXNoIjoiYzc5OGM5YjhmODA1OTJjMzRhNjM3ZjAxYjNhNGMyYTIxMjQ2ODA4ZWVmYWUzNzQ0MzcxZWQ5ZjQ0MDdmNzAzOCIsInByZWNlZGluZ0NvbnRleHRMaW5lQ291bnQiOjMsInByZWNlZGluZ0NvbnRleHRIYXNoIjoiYjVkNDZkMDZkNzU5NzYwNWQzYzY0Nzg2ZDI2YTZjOWQxMWZjNTYyMDU3MzYyZjg0ODljYjczZjk4ZTA1ODI2ZCIsImZvbGxvd2luZ0NvbnRleHRMaW5lQ291bnQiOjMsImZvbGxvd2luZ0NvbnRleHRIYXNoIjoiMjIwZjQwNjAzNmJiMDExZDI5ZTQ1Mjc2NmZlNWQxODk4YTI4NTE0NGU0YTgwOGUxNjZmYzlhYjUxYzE2MDM1NSJ9"
+        },
+        {
+          "resource": "repo://src/teamagent/adapters/slack_oauth_flow.py#L30-L40",
+          "version": "repo-lines-v1:sha256:2601b85832ca214f158cfcd225f9c6e85df962ae09ebd874d8659f5038879354:eyJzZWxlY3RlZExpbmVDb3VudCI6MTEsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjdhMTVlM2E3YWUxN2Y5Yjc1ZjY3NTEyZTZmMzU2MTEzNzIxMWYzMGE4OGM4ODhlMzU4Zjc1NzI4ZWZlYjEzODciLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6ImZhZmJhMDUyN2MzOTUzYzRiNmUwZTViNTczOWJhODM2MTJmODA1M2JjZGM5NDY2NzMwMTkzY2QxZDU5MGI0MDgiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjYyMjMyMDZhZGEzMDk2MTdiODRjMjFkZmZmNjg1OWEyMmMxOTdkMzlkZmY2ZmE1MWEwOGZiNmVmOGNkYzI4MTQiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImMwZTc0NzRiM2E1NGViZGU4ZWI4M2Q3ZmIwNmI3MzZjZGM5MmFhYjA5ZmRhMDQ0OTgyOGI1MGQ3MDJiOThjZDIifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_5a868a434a014881b3c2d78aef21ec33",
+      "statement": "Slack OAuth の state は email・発行時刻・nonce を SLACK_OAUTH_STATE_SECRET で HMAC-SHA256 署名したもので、有効期限は既定 1800 秒、未来の発行時刻は 60 秒まで許し、検証済み Slack user/team があれば nonce に slackbind:v1:{team}:{user} の HMAC から作る bind_tag を付ける。",
+      "evidence": [
+        {
+          "resource": "repo://src/teamagent/adapters/slack_oauth_flow.py#L145-L150",
+          "version": "repo-lines-v1:sha256:12b4c19df479319c0ec92dabd723a8b546976b3a0905b97ac4236c3298ef7a7b:eyJzZWxlY3RlZExpbmVDb3VudCI6NiwiZmlyc3RTZWxlY3RlZExpbmVIYXNoIjoiZjA0MDhkYTQ1OWIzNGVjZjNmMGI3Y2M1Mzk4MmJmNDNkMTEzM2IzMGE5MDY3Y2E4MzhjYzIyZGE2N2VjOTg2MyIsImxhc3RTZWxlY3RlZExpbmVIYXNoIjoiMDM3NGFjOTg1ZjIxZjAyZTBjODgzN2NlNzMzMWI1NmFlOGVmZmQ3NWEwYTliYzdmNmNjOTY1OTc5YjFlMmE2ZSIsInByZWNlZGluZ0NvbnRleHRMaW5lQ291bnQiOjMsInByZWNlZGluZ0NvbnRleHRIYXNoIjoiNDE5NzMxNWU5ODVkN2YyMzAzYjcwNjM2ZWE2NzcxZTYxN2JjMjc0MWQzOTFhMGMyMTliZGYzYjU2NmJjM2NmMiIsImZvbGxvd2luZ0NvbnRleHRMaW5lQ291bnQiOjMsImZvbGxvd2luZ0NvbnRleHRIYXNoIjoiYTc0ODMwNjUwNWM3MzM2MWE3YjUyNWVmMjVmMTU2YTg5MjU1MjQ5MmIyODkxYmZkNGRjZDcwMjA2MjZlODdmOCJ9"
+        },
+        {
+          "resource": "repo://src/teamagent/adapters/slack_oauth_flow.py#L43-L46",
+          "version": "repo-lines-v1:sha256:8cc628d8a2825a213d5fb911cba4046e7a5049e37216ccbd12d2d1d9a0c7778c:eyJzZWxlY3RlZExpbmVDb3VudCI6NCwiZmlyc3RTZWxlY3RlZExpbmVIYXNoIjoiODEzOGNjZDY5ZGE2NGVmYTNjZDk1YTA0Y2U0MDk5NTM5YzM5ZWIxMjE2YTYwZjE2ZTJmOTFhOGY3ZDFjMjJkOCIsImxhc3RTZWxlY3RlZExpbmVIYXNoIjoiMjY3MTM4MTMzYjFlNDk1NDIwYjY5MTMyOTFmZTUxNzI5MzkxOTU4YTk1ZTBhOTYyMTBhZGM1NmExOTc5YTkyNiIsInByZWNlZGluZ0NvbnRleHRMaW5lQ291bnQiOjMsInByZWNlZGluZ0NvbnRleHRIYXNoIjoiZWE5NzliOTc0ZGExYjQyMjJjZTJmYmMxNDlmYmM1YzdkYzg0ODQ5ZDM1MDdkYjZlNzM2N2ZmN2ZkOTBlZjFjNCIsImZvbGxvd2luZ0NvbnRleHRMaW5lQ291bnQiOjMsImZvbGxvd2luZ0NvbnRleHRIYXNoIjoiMDU0ZTZmYzc0MGY3NmExMjYxM2ZjYmU5MGI0Yjk3NDgyZmRiNjhkYWNhMDkyNzAxZjVjYmMwOWExNjE2ZjNiMSJ9"
+        },
+        {
+          "resource": "repo://src/teamagent/adapters/slack_oauth_flow.py#L79-L120",
+          "version": "repo-lines-v1:sha256:e048d61042edaec8441b7a08e7d574c006e99ba8eca0c80573b129bb2cb46673:eyJzZWxlY3RlZExpbmVDb3VudCI6NDIsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6ImM1MTlhNWY5Y2ZhNGRiYjRkZjNjZDIyM2Q2ODgzNWUzMjk5NDdjNTNiNGY4M2ZmOWM4ODE0MTliNTljZDNiOGUiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6ImM3MmVmNjBmYmFlZWI1OWExZTNmZjc3OTI3ZTA1M2NjNzY0OWQ5MjE1YjdiMDZhZDYwNzAwZjFmZGI5ODcxZWIiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjA2YmJlZThmMzU1NTRiZGJhMDhhMzk0MmQ1MDM0MmMzYjQ2MThhMmExZTUzYTkzMGRjMzNhYjMyNTRhNzI3MzgiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjEzMzBiMDI5N2IxNjZhNDgzZTIwMTczM2Y3MjI3NzFiMzdkYWMwZmFkMzE2ZTFlYThiOWE5ZjNmN2ZhYTAxZTMifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_f88db2d71cd44bafab91f66c9d02cb09",
+      "statement": "connect-web の Slack callback は state を DynamoDB の条件付き更新（SLACK_OAUTH_STATE# 接頭辞）で一度だけ消費し、bind_tag の無い state を拒否し、交換した token の team/user から計算し直した bind_tag を state の bind_tag と照合して、不一致なら取得した xoxp を revoke して 403 を返す。",
+      "evidence": [
+        {
+          "resource": "repo://src/teamagent/adapters/google_oauth_flow.py#L151-L173",
+          "version": "repo-lines-v1:sha256:a038bc1a6a7718d6c2d085dfa0581d3d748f7a784cd35f34dd79cc3b6bc8722e:eyJzZWxlY3RlZExpbmVDb3VudCI6MjMsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjM5NWYzYjJlMDg2ZjViZTgzMTI4OGI2ZWMzMDIwZGI5NzI1OGYxYzAzZjk0YTY0MWFmNTJiNDNkMGQ4NDRhZDgiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjEzYjIyMzQzZTljNzU1OTIzM2RjNDZkY2VhNTg5OTY1OGY2Yzg2YTczMTRmYTQ2MjA5OGYyOTI4YWY2YWQzZjUiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjU5YmYzOTZkNTczN2MzZjQ1NjZmZDYxNjc3NGViZTY0MTUxNzMzZjBjM2MxN2VkMjg2MmYzMmE4ZGJkMjAyODciLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImRlNzU3NWMzYjc3NzZjZjJmOWMyYmZiY2E0NGYyMTQ4MTNhNzgyN2VhYTljMzg0NTRjNzAzYjY4OWE3NDQzODYifQ"
+        },
+        {
+          "resource": "repo://src/teamagent/connect_web/app.py#L3628-L3631",
+          "version": "repo-lines-v1:sha256:6311d52b60f2ee98a79f32c96640ce0c33b14cc5a34e06ae5bd6d1dae621a513:eyJzZWxlY3RlZExpbmVDb3VudCI6NCwiZmlyc3RTZWxlY3RlZExpbmVIYXNoIjoiZjk5OGU1MDI0MDE0MDY0ODYzZWE4ZTdkZjExNjhkMGE0ZjQzYjc0MzhkMDBhZWJhNzU5NDBmNWNiYTY3MDAwNSIsImxhc3RTZWxlY3RlZExpbmVIYXNoIjoiZTZiNDA4N2ZkOGEyMTczYzQ1ODk5YTQ1Y2NlZTk4MTg2YjI4NTE2NTk4MWRjMWM1M2IwY2QxMWNmMTI3MTA1OSIsInByZWNlZGluZ0NvbnRleHRMaW5lQ291bnQiOjMsInByZWNlZGluZ0NvbnRleHRIYXNoIjoiMGU4ZDhhZTkyOGE3MzQ5MmUyMjYyNGRlZDc3Y2NmMjJhZjc1Y2YxODQxZTI0N2QyMTNmMWIxMmRlMDRmYjE4MiIsImZvbGxvd2luZ0NvbnRleHRMaW5lQ291bnQiOjMsImZvbGxvd2luZ0NvbnRleHRIYXNoIjoiZmY5MDZiM2VlZTRmNTE5MmZlZmU1NmRlZmYxMzViNmZiM2ViMmIxMzhjMTcxMmQxNDM1ZWM0MWQ0ZjZhZjZlNSJ9"
+        },
+        {
+          "resource": "repo://src/teamagent/connect_web/app.py#L4446-L4469",
+          "version": "repo-lines-v1:sha256:96d7371b48bc7775332935284e02973941b1417943bcf2601d2e60a4fc563d3d:eyJzZWxlY3RlZExpbmVDb3VudCI6MjQsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjAyMzYzYjNjMjA3YjNiNWNkNGU5MzE0ZWI3ODIwYjkxYWNhNGFhN2JhM2NlYTM3MTk5MDAyOTBiMjU1ZjVmMmEiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjU1MDMyZTk2NGQwOTMyMzUxZTVkMTg1MjY5MjgxYjE3MWEzYTA5YjA4YjI4NmU2NjFlYTQ3MDMyM2M4MmViNGQiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImU4MjIzMjdiMTE2NmQ0MTNmMjVlN2JmMDZhOGFjMWI5NTliNzEzNzU5OGY5ZjZmODhmNjRhMjg3OTJmZjczNjUiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjNjZTM2ODVlZjE1OWUzOWQzYjgwMDU1NjE3MTJlMzZkYWRmNDBjZGU5NzgwOGIwOTY3NjFhYjA1MmE1MzkxNTAifQ"
+        },
+        {
+          "resource": "repo://src/teamagent/connect_web/app.py#L4503-L4538",
+          "version": "repo-lines-v1:sha256:d8161ac293467782adf02c38fc18ada95f0beb2e2773a6a204764d9223fed4c5:eyJzZWxlY3RlZExpbmVDb3VudCI6MzYsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjcwOTI0MDkyNTgxNTZlZmYwY2IxMWNlMjA4ODUyMTA4M2E2Y2RlZGJlZGZkMGVhNWE4MzYyZjhlN2M1ODZjOWMiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjU1MDMyZTk2NGQwOTMyMzUxZTVkMTg1MjY5MjgxYjE3MWEzYTA5YjA4YjI4NmU2NjFlYTQ3MDMyM2M4MmViNGQiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjliY2JjZmRhZmMyZWE4MWRhZTRmYTM5OTg1OTFjMWE5Yjk5NGUxMDg4YjczNmRlZjU3ZWRlZTdmNTUwOTE5ZmIiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjZiYTBkYzYzYmJhOWJlYzcyZjZiNzgyNGI5Njc5OWIyYmNiZmQxNmY1Mzc1ZGUwNzcyOTJkYTg3NWZkNzI2OGMifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_3ee2c9b7d0a34b28ab8757aaffaa9872",
+      "statement": "xoxp は slack_oauth_tokens に KMS 暗号文（EncryptionContext に user_email）としてだけ保存され、テーブルは FORCE ROW LEVEL SECURITY の本人行ポリシーで守られ、(team_id, slack_user_id) の部分一意インデックスで同じ Slack アカウントの複数 email への紐付けを防ぐ。",
+      "evidence": [
+        {
+          "resource": "repo://infra/migrations/0018_slack_oauth_tokens.sql#L31-L34",
+          "version": "repo-lines-v1:sha256:f6381639779864b522a9a583a9ef4754d01f3d723bcf8bee9f36f33e256f9687:eyJzZWxlY3RlZExpbmVDb3VudCI6NCwiZmlyc3RTZWxlY3RlZExpbmVIYXNoIjoiOWExOWUyZjIxMWU2MTBhNmNlNmIwYjllNmVkNjhmMjEzYzU0NzMyNTVhNWM1NzBiOTg1OTgxNjQwM2Q0Y2U4NSIsImxhc3RTZWxlY3RlZExpbmVIYXNoIjoiNmZmNjQ5MjgxM2U4NzhjZTkwMzc5NjU4MDliZDEwYmU3YzQwMTdlYmFjMzA5YTdhMGQ3MWFhNDA2M2IzYjAyZSIsInByZWNlZGluZ0NvbnRleHRMaW5lQ291bnQiOjMsInByZWNlZGluZ0NvbnRleHRIYXNoIjoiNWYxMzA0NzZkNmYyYTcwZjY0MDFkNGVhZThlZmU2MmNmNGIyN2EyYWQyNzAzYjAzNTIwODNlYWU1NTUxMjI4YyIsImZvbGxvd2luZ0NvbnRleHRMaW5lQ291bnQiOjMsImZvbGxvd2luZ0NvbnRleHRIYXNoIjoiZTAwY2VmMDhlYTJjZWU3YmE5ZWMwMzk3NDlkNGE2YjEyN2Y2ZWRhYTU2OGZjYzI2MTQ4MjIzYmViNjgyYTAyNCJ9"
+        },
+        {
+          "resource": "repo://infra/migrations/0018_slack_oauth_tokens.sql#L49-L65",
+          "version": "repo-lines-v1:sha256:1d6096503b315da436a6c85332b4955feb0ea650a6a1f3800b69824033ad741e:eyJzZWxlY3RlZExpbmVDb3VudCI6MTcsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6ImU5NGUwZmQxYWQ2YTYwOGE2NjBmYmVkNjVlZGVhZDU4OWI4OTE1ZTJiZDgzNGY1MjQzNGMzYzYwOTYwOGM2ZDkiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6Ijg0ZTQyMDhjZDZmZmI4YzRhMzU0N2IyZjU0YWRhMTk5NzhjM2YzNjVlNzhmOTUwMmVmNTE0NWNkZDJhYTg1NDMiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjdlYjk5NDgyYTk3YTVmYzgwNjUxNDFmMDU1NWFkNmQ1YzNmNzgyZDY2Y2QwMWQ3YmNhYTE0MDk1ZjA0ZWE0ZTEiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImE2ZWI4M2VjNjRhZjAzNzU2YTQ3MjhlM2NkNjI5NWY2YWVlOTRlMTExYjAzODEyZDU2YmVkYzljYTkxM2NiMzQifQ"
+        },
+        {
+          "resource": "repo://src/teamagent/adapters/oauth_token_store.py#L257-L295",
+          "version": "repo-lines-v1:sha256:0784619c58e4b9c822421a7c26f16f4e91ec5dfa3540c23be7f990430894126a:eyJzZWxlY3RlZExpbmVDb3VudCI6MzksImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6ImViOTMzYmI2NWUxOWM2ZTVjY2Y4Nzk4MmM1ZDBlN2UxNmEyZjUzZmYwZTA2N2FhODg2MTgxYjAzNDU5NjQ5YTkiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjJjYTA1NzA0MWM3ODU5YzVkMjI2ODZhYWQ5N2Y0ODAwMjM4NmMyY2VmNzFhMzYxNGIxZDdjMmU4MDIzNTliYjciLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjJhNjQ2MjIwZWU0OTg4YzAzNjMwNzNhNGFmNzY4ODRlY2VjOTIyZWZjNWJhMDRjM2M0ZTViZGY1MGY3ODc5M2QiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjdmMWQxOTIyYzM1MDFhNmE1NGQxOWU3NzFkODYyMzdiMzFkM2VjMzA0MjU3NTUxMzAyNTJiNGFhYzk1NjNkMWQifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_6500c5403e8e40e38ec90c040e38ba22",
+      "statement": "download_file_guarded と download_file_bounded は httpx の自動追従を切り、302/303 だけを 1 回だけ追い、転送先は既定 slack-files.com の allowlist で検証し、転送先へは Authorization ヘッダを送らない。",
+      "evidence": [
+        {
+          "resource": "repo://src/teamagent/adapters/slack_client.py#L609-L649",
+          "version": "repo-lines-v1:sha256:37f65c050d0d3f13a6c691b0d927ad2f10490904a58be33bd22aa3a03cd6cad8:eyJzZWxlY3RlZExpbmVDb3VudCI6NDEsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjM1ODFmZGY1ZjNjMzVmNGNiOTU0YWFkYjNkODJjMWI2MzEwODllMDMzNGUzNTFjZjVlNzFmMGMxNjU2YTI5ZjIiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6ImYzOTEyYmVhODgwZmJhMTQzZTZjZWUwYTU2NmI5MjBiY2IwYzdlZTBmMWEyNDY2NWZjNDEwMzgwZmVkYmRmNGQiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6Ijk5Y2M3OGJlZjdiZGYwYjU0OGQ0NzQ2ZDljZTU5Njg0ODE1YjA2NDYyMzgxOTFjOWJjZDE1NzkxMWU4M2JjNWYiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjQxYzkzMzA1MmY2Y2QzN2RjMDNmZTgzODgxOTBlM2U5NjZmNzkzMTYzYWNlYzg3ZDlmN2EwMTU5ZjE0MjNkMDMifQ"
+        },
+        {
+          "resource": "repo://src/teamagent/adapters/slack_file_guard.py#L30-L45",
+          "version": "repo-lines-v1:sha256:21812773647c8bb4d7e68edeb18450916a25614c12a7120b4d7442a3d96dfe3b:eyJzZWxlY3RlZExpbmVDb3VudCI6MTYsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6Ijc0YTA4NWVkMmY4N2RmYzQ4YjVkNjE3NmQyOTQ4MTRhNTAxYWVhMmI0YmIxOTBiYzk2OTdkNzMyMzNlYzA4MmMiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6ImQyMWU0ZjExZWE1YmViMWM2YmZmYzMzODNhY2VjYjczMWM0ZWQ5MjNjZWQ5ODNhMTExZjUyYjFiODUwZjY5YTQiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjYyNTkxMTdlODA0NTg4YjUzZGY5ZTkyMGVkMDRiZWFhY2M3MDY3MWM0MGQ3MWVkZmQ0MmRjNmIzMmFjMzRkMmEiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjQ1MGU0NjViODkyMjI2ZGQ0MWRmMGY1NGZlNjU1YjZkYzkzYTI4ZmFjMjY1YTIwNzE1NGE0MGY5NWVjMWJhOGQifQ"
+        },
+        {
+          "resource": "repo://tests/adapters/test_slack_file_redirect.py#L88-L101",
+          "version": "repo-lines-v1:sha256:bea585016b4ae9029f4698584a5230fc16030f778468442d5800b527d7b7b06f:eyJzZWxlY3RlZExpbmVDb3VudCI6MTQsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjAxYmE0NzE5YzgwYjZmZTkxMWIwOTFhN2MwNTEyNGI2NGVlZWNlOTY0ZTA5YzA1OGVmOGY5ODA1ZGFjYTU0NmIiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6Ijc1OGYyMGJmZDcwMjhmYTZhM2NkZmM5MTgxN2RlNDIzYTJmNGQyM2Q4ZDBlMmQzNjc1MGRmMzQ2YWNhMjU4NWUiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjI1NjFiNTA3ZTk2ZTBmNGFmMGRlN2E3OWM1YWYzMjQ1NGVmOWE0MjgzMDkyNjBlZDUyOTNjN2FlMGFkYWFhYWIiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImM3YmFhNWU0ODRiMDRkNzUxOTIwMzExZGE2YjQyYjQ4ZDEwMzZjNDliMGQ1NGIwZjA4ZDNmOTdiZjYyMzM1YTYifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_ec77e00bccb447678f0be304fd6d3e6f",
+      "statement": "url_private のホスト allowlist は経路ごとに異なり、download_file_guarded は既定 files.slack.com のみ（SLACK_FILE_ALLOWED_HOSTS で追加可）、download_file_bounded は slack.com と *.slack.com の正規 HTTPS、旧 download_file はホスト検査を行わない。",
+      "evidence": [
+        {
+          "resource": "repo://src/teamagent/adapters/slack_client.py#L42-L60",
+          "version": "repo-lines-v1:sha256:874f454ffce5b765f4fc612062eeff887839b35641796d9e92b4eae80c3e222f:eyJzZWxlY3RlZExpbmVDb3VudCI6MTksImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjdlMDI2ZTgyZDI5YjExZDI0NTcxYmZlZTNiM2Q1NDljOWQzYWE5MjcwZTVmNDk3YTc2YWYzYmUzOTU2ZDk5NTEiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6Ijg0MDZlMjk0NGMwNDAzOWRjODkwY2JjNTUxODQxODE2ZmRjNjRmNWM4MGExOTk3M2ZiNTM4MTUyYTM3NTI5NGYiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjM1OTA2NmViYWIxZjlmNjI0ZDVmZGM0NTkzYTM3ODAwN2RhN2M5ZmM2YWU1YWUwZDhjMmZlMmU2NWU0ODJkODgiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjcwY2UzZjI0YWI0N2MyZjVhOWQzMzdmMzc3ZWQ4NTczZmE1NjU4NDA3NjQwMmYxYWYwNTRhM2RlZDYxOTQ2MmYifQ"
+        },
+        {
+          "resource": "repo://src/teamagent/adapters/slack_client.py#L445-L469",
+          "version": "repo-lines-v1:sha256:383d39e84c679ed2469f47a0e40e31b2a2523a92744bbab2c956264dac20d0e9:eyJzZWxlY3RlZExpbmVDb3VudCI6MjUsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjRhNTY2MjgwOWI1ODY0NmVmMzJmMmI5MTJlMzkzNTIyODZiZGM1NDhhZWZmOTA0OWVhZGM2N2QyNzRkYjM2MzUiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjhjMjVlM2FlYzFiMTNmOTBhMzhjYjJjY2NiZjlkZjgzYmM1ZmU2NjAyODE3OTJlYzczMDc0MjcwMjMwYzcyYjYiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjQ2ZThkMmNiNTZlYzJmOTAxOWMzZDllZGFiMzU2YmJhYjVhZGI5NjA2NDBlYWQyMjE0ZDFmN2FjZGU5MjM4ZTYiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImIzZGFiMzFkYzQ3NTc5MTM2MDllNzljYjBlMTcyMjI5ZWY4NzE3MTE2M2Q2YWU5ZjRhMDIxOWYwOTAwNjM2ZmMifQ"
+        },
+        {
+          "resource": "repo://src/teamagent/adapters/slack_client.py#L566-L570",
+          "version": "repo-lines-v1:sha256:e33539f952c595071f54fb493f9183d6c8acd0c5e0c949158e3fd277b50028a4:eyJzZWxlY3RlZExpbmVDb3VudCI6NSwiZmlyc3RTZWxlY3RlZExpbmVIYXNoIjoiNDEwYjY2ZDI5NzAxMjc1OTMzYTU3YTU2NDM1MjdhNmZkNjBmMGMyZGU5NzBjNjliNjgwNTVjMWExM2IyMzA2OSIsImxhc3RTZWxlY3RlZExpbmVIYXNoIjoiNDc1NDZhNWQyMjZiNGNiNWMyZWEyMDhjMTlkNzE1MDFjM2IyYjc2YjM1Nzk0ZWE2ODg1OWJlYzZjNTkzYjVlYiIsInByZWNlZGluZ0NvbnRleHRMaW5lQ291bnQiOjMsInByZWNlZGluZ0NvbnRleHRIYXNoIjoiYmEzYWI1Nzc5OTg4NTY2Y2MyM2Q1YTFmYzdmZjI1ZTE1OTdkMTVhNjJjZTRiMDBlNjIxMzMwM2RkODQ0OWM2MiIsImZvbGxvd2luZ0NvbnRleHRMaW5lQ291bnQiOjMsImZvbGxvd2luZ0NvbnRleHRIYXNoIjoiMWY1N2E1NGU5ZjY0M2I0OWM2MmNjY2Y4YmExOGZiOTQ0OWJlMTA4YjdhOTM4ODI0ZTczYzk0ZmY2ZjlmOTEyZSJ9"
+        },
+        {
+          "resource": "repo://src/teamagent/adapters/slack_file_guard.py#L25-L28",
+          "version": "repo-lines-v1:sha256:59ad770d2158eafa6a0d528a34e44e4883a83b26fa91d120be107dbfe0173603:eyJzZWxlY3RlZExpbmVDb3VudCI6NCwiZmlyc3RTZWxlY3RlZExpbmVIYXNoIjoiNWU5NTNkNDNkNmYwYzQ4ZmM4ZTc1NDFhYjBiNDEzOTc3NGVlNjBiYmY0NmRmN2I4NGMxOTRhNzczMmJjMjVlYyIsImxhc3RTZWxlY3RlZExpbmVIYXNoIjoiYjdhOTQxOWU0MzAyMzdkYzI3MzgyYjJlMmMxMGNhNmNhNjlmMjdiYzEzNWYxNmJlZmE4Mzk3ZWMwOTVkNTJlNSIsInByZWNlZGluZ0NvbnRleHRMaW5lQ291bnQiOjMsInByZWNlZGluZ0NvbnRleHRIYXNoIjoiY2Y2NDg1NzNlYjIyNDIwNzE2YWFhNTQ5MTA1ZjA2ZmQyMDE0MTlhZDRkNTNjMmE5NDIxZThkZTY3NDUwMGVhZCIsImZvbGxvd2luZ0NvbnRleHRMaW5lQ291bnQiOjMsImZvbGxvd2luZ0NvbnRleHRIYXNoIjoiOWQ1NWU2YjczYzExNzRjZmQ4MDY5ZTQ3ZjFjNjJiODg1YWM1YzYwODM2NGEzM2Q0NmQzODQ0MjA5MmZiYzYzOCJ9"
+        },
+        {
+          "resource": "repo://src/teamagent/adapters/slack_file_guard.py#L57-L66",
+          "version": "repo-lines-v1:sha256:4fae1cc02db8a805fd3d7ae6669fc2c7e7d1f748459a504e84a65cc1b794e0a5:eyJzZWxlY3RlZExpbmVDb3VudCI6MTAsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6ImVkNTUyNzJmYmYyODBhN2JjZmZmMTcxYzBlNTJmNjhmYTZiOGZhYjk3ODM1YTIwZTFmZjFhNTUyYmU0MTdiZWMiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjYxOWI2NTZjMDdlZjQ0OGQ3Zjg3YWE0YWI5ZDI2ODEwYzAwYmI1MTczNmM4NGE2NDNlNTQ5ODk4MDkwYzcyYzMiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjAyYjI1NzhkODVmMDU0N2ZhOTE3ZGE3YjE4ZDIwNzg5OTE4MjlhNTM4MmM3OTEyOGJlMTZmNmYxMDg4ZjdhYjUiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImYwNDNiNDA5MjEwMmZmMjgyM2M5N2I0NWI5N2FiODNiNTExN2JhYWNmZjZkZDZmNGQ1NDk1MTFmYjQ1MzQ3Y2IifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_9d9a4537616d46928b79c8357ec9ac37",
+      "statement": "SlackMemberDirectory は削除済み・bot・アプリ・ゲスト・外部・USLACKBOT・別 team を除いた在籍者の名前だけを集め、20 ページで打ち切られた名簿は使わず、取得失敗時は直前の結果を stale_max_s（既定 24 時間）まで使いその後は空集合を返す。",
+      "evidence": [
+        {
+          "resource": "repo://src/teamagent/adapters/slack_member_directory.py#L119-L136",
+          "version": "repo-lines-v1:sha256:5397b8afe87c68db615126b2ee350e2336cee58a2b9dd08a33f5005f68ae026e:eyJzZWxlY3RlZExpbmVDb3VudCI6MTgsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjkyNjk3YjJhYjA3Y2ZkNjdiYWZhY2UyNDVmMWJlMjg5OThiY2Q3YzdkYTI5MWUyMmZkNmUyNzM4MTRkZjYzYjAiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjgwNWYxYWE5ZGJmNzkwYWY3NzhhNmZjOTMwMjk1M2NlZWEyYmRiYzA4NDBlYzdlODExNTkyMmZkMDczNTYzYzEiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjY5NzIzZTg3ZDMzMGIwMWRhMGYxODAxMGI3Y2VlYmM3ZWY3ODBiYzRkNmI0MDRlMDdlMWE1OTNjMDI1ZWI5NTEiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjU2M2FiYzI2YjczNzEwNTYwY2M4YjRjMzgzOTI2YmUzZDc3YjE0NjQ2YmNlODdkNmEwM2IxODEyNGM5NjQwMTIifQ"
+        },
+        {
+          "resource": "repo://src/teamagent/adapters/slack_member_directory.py#L138-L163",
+          "version": "repo-lines-v1:sha256:04c99197dc6f65323e010a0a3c305f32af78b9cc0eb2a72386f789cc69599991:eyJzZWxlY3RlZExpbmVDb3VudCI6MjYsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjIxNzYxNWFlNWQ1ZDY1MWZmOTNmMzNiMjJiYTdkN2Q5NWZkNmQ5MjMwYTM3ZDFiY2NjNWY4M2Q5MGQ5ZjhiYmUiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjVlN2JjZDM2ZWY1M2I0NDUyM2U2NWU5OGQxOTQ0OTkzZTBmZjE3NDZmNTUzNmMxYTUxMTc0NmYzZTAxZTc1NmYiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImEwNDlkNjBkMTk3YzA5YjNlNWM1MTRkNzI4ZmE1YTc2NzFjOWUxYmI2MjcwMTgxMTk1ZTE2NDEzYmVlN2JjNjAiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjAxZDljODIwZTRkZDBkMzkyZDBiZWQ2OGQyOGJjMTczNjhkOTY5YjM3NWU3ODYzY2YwMjU2ZjFiMjE2YWU4NzIifQ"
+        },
+        {
+          "resource": "repo://src/teamagent/adapters/slack_member_directory.py#L53-L64",
+          "version": "repo-lines-v1:sha256:3741b0302c157b78aed4e4cdc422a2590fb5e046c44f9ae4705bb28a2f6294cb:eyJzZWxlY3RlZExpbmVDb3VudCI6MTIsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjY4YmZmZmRhZmNkNjNlMDg3MGU2ZmJlMjg0ZDgwZjVjNDJjYjUwY2E4ODQzY2ZmMmQyMWIxOWQzMjI1MDg5ZTMiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjE1Y2NhMmM3YjlhZTY3ZmU1OWMxYjcyZDY3Yjg4NzlkZWIzNzZlMmZhMTdjOWNhZmRiNDBhYmFhNDNlNTc2NDAiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImQ4M2E1ODAzZWY3MWU1ODY3MzE3MTAxMzQwZWQ4MGRiZDYwZTc3MTQ2YmY5MmZhYjNhOTMyZTU3NjZhYzIyZTMiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjFmZjcxNjQ5Y2VlYzMxNDQ3ZjU5M2MxYzFmOTcwOTBjNDFlOWFiMWRmYzdkNGMxNmFlYmE1MGMzZDMwZTRlNDcifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_b5fc999c58a8460fb56afd6f515c7722",
+      "statement": "Slack チャンネル取り込みの ACL はチャンネルメンバーを users.info で email に解決し bot と削除済みを除いたものに extra_acl_emails を足したもので、これが空ならそのチャンネルは取り込まない。",
+      "evidence": [
+        {
+          "resource": "repo://src/teamagent/ingest/pipeline.py#L1507-L1524",
+          "version": "repo-lines-v1:sha256:cc5e16266c761d2afd07dbf576e8126105959ec061cb8706648bcccc80e3275b:eyJzZWxlY3RlZExpbmVDb3VudCI6MTgsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjZmOWIxYzI2ZWIyYjYyODNlNjEwZTU2ZWJkNmQ5MjQxYTQxZmU4YTYwNDIxNGUwZjE1MGZlZjM1YTg1YjZjNDgiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6ImEyNzE5MjZjMmMyZjhhNDNjMjIwN2VmNDQyNzM3OWRkYzcxZDE4OGVmNGY1NmI4MjhkYjg2NTIyYzMzMzAyMmUiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImRlNzU3NWMzYjc3NzZjZjJmOWMyYmZiY2E0NGYyMTQ4MTNhNzgyN2VhYTljMzg0NTRjNzAzYjY4OWE3NDQzODYiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjU2ZDk0MTBhMzVmNTJhNjM0NDE5ZmM1ZTNiZDNiZWI4OWE4N2ZmN2ExYjYyNzI4NzMwODgwMjcwZjRmYmRhMzYifQ"
+        },
+        {
+          "resource": "repo://src/teamagent/ingest/pipeline.py#L1562-L1591",
+          "version": "repo-lines-v1:sha256:fe23f1d98931c2b479d42760c38509c912a318104e8f8f117716cf8a116205cd:eyJzZWxlY3RlZExpbmVDb3VudCI6MzAsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjRiMDk1YWE3ZjQzNGQ3YjBiMzkzMDhmMjMxMGEzM2UxM2U5M2E3ZTEzODk1ZTcxMzRkNWI0NThiOGNjMTcxZTQiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6ImJiZmNhN2U0NjJlMzNlM2JiOGJiYWViY2YzZjEwMjFhODRiZWUxYTRmNTE2NjQ0NjcxMGE2NzMwZjIwMmNhN2EiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjNkMDJhYmZlMzgxYjU3OWExMWE4Y2IxZWI3NzliOWQ0Y2RmMTZhM2Q2OGQ2YzAzNTBhOGVmNjUxYThmOGI1MDgiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjQ0ZTMwMDc2MGQ0M2VkMzdkNDcyMzNiOWExZTg3ZTg0ZDIzMmZjNjA2OTM2ODRjMWVhNTE5MTdkOGY2ZjIzOWEifQ"
+        }
+      ]
+    }
+  ],
+  "verification": {
+    "by": "openwiki/0.6.1",
+    "at": "2026-09-29T07:51:05.076Z"
+  }
+}

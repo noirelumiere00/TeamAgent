@@ -1184,8 +1184,8 @@ def _safe_plan() -> dict[str, Any]:
         },
         separators=(",", ":"),
     )
+    # EC2 worker（worker_app）は 2026-09-28 の裁定で撤去済み。本番の撤去後の計画と同じ形にする。
     for address in (
-        "aws_iam_role_policy.worker_app",
         "aws_iam_role_policy.lambda_app",
         "aws_iam_role_policy.mcp_task",
         "aws_iam_role_policy.connect_web_task[0]",

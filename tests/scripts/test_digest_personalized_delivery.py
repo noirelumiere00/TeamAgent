@@ -55,6 +55,36 @@ def _freeze_today(monkeypatch: pytest.MonkeyPatch) -> None:
     )
 
 
+#: autouse の差し替え前の本物（「機能 OFF なら None」を確かめるテスト用）。
+_ORIGINAL_DELIVERY_STORE = mod._delivery_store
+
+
+class _ReserveStore:
+    """planner の予約印（migration 0031）のフェイク。本番同様、同じ (email, day) は 1 回だけ。"""
+
+    def __init__(self, *, ok: bool = True) -> None:
+        self.ok = ok
+        self.reserved: list[str] = []
+        self.released: list[str] = []
+
+    def reserve(self, email: str, day: _dt.date, *, request_id: str) -> bool:
+        if not self.ok or email in self.reserved:
+            return False
+        self.reserved.append(email)
+        return True
+
+    def release(self, email: str, day: _dt.date, *, request_id: str) -> bool:
+        self.released.append(email)
+        return True
+
+
+@pytest.fixture(autouse=True)
+def _reserve_store(monkeypatch: pytest.MonkeyPatch) -> _ReserveStore:
+    store = _ReserveStore()
+    monkeypatch.setattr(mod, "_delivery_store", lambda: store)
+    return store
+
+
 # ── user_ref（不可逆・メールを復元できない）──────────────────────────
 def test_user_ref_is_stable_and_does_not_contain_the_email() -> None:
     ref = user_ref(USER, pepper="p")
@@ -201,7 +231,7 @@ def test_without_store_behaviour_is_unchanged(monkeypatch: pytest.MonkeyPatch) -
 
 def test_delivery_store_is_none_when_feature_is_off(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("MORNING_DIGEST_PERSONALIZED", raising=False)
-    assert mod._delivery_store() is None
+    assert _ORIGINAL_DELIVERY_STORE() is None
 
 
 # ── planner ───────────────────────────────────────────────────────────
@@ -244,7 +274,7 @@ def test_planner_uses_first_timed_event(monkeypatch: pytest.MonkeyPatch) -> None
         ]
     )
     plan = mod._plan_send_time(cal, DAY, "r")
-    assert (plan.fire_at.hour, plan.fire_at.minute) == (7, 0)
+    assert (plan.fire_at.hour, plan.fire_at.minute) == (7, 30)  # 08:00 の 30 分前
 
 
 def test_planner_reads_all_events_not_just_twenty(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -273,7 +303,7 @@ def test_planner_creates_one_idempotent_reservation_per_user(
     monkeypatch.setenv("DIGEST_USER_REF_PEPPER", "p")
     monkeypatch.setattr(mod, "_build_token_store", lambda: object())
     monkeypatch.setattr(
-        mod, "_read_only_calendar", lambda store, email: _Cal([_Ev("2026-09-11T10:00:00+09:00")])
+        mod, "_read_only_calendar", lambda store, email: _Cal([_Ev("2026-09-11T11:00:00+09:00")])
     )
     import teamagent.adapters.scheduler_client as sched_mod
 
@@ -315,7 +345,7 @@ def test_planner_honors_operator_date_over_the_wall_clock(
     monkeypatch.setenv("DIGEST_USER_REF_PEPPER", "p")
     monkeypatch.setattr(mod, "_build_token_store", lambda: object())
     monkeypatch.setattr(
-        mod, "_read_only_calendar", lambda store, email: _Cal([_Ev("2026-09-11T10:00:00+09:00")])
+        mod, "_read_only_calendar", lambda store, email: _Cal([_Ev("2026-09-11T11:00:00+09:00")])
     )
     import teamagent.adapters.scheduler_client as sched_mod
 
@@ -356,16 +386,18 @@ def test_planner_skips_users_without_calendar(monkeypatch: pytest.MonkeyPatch) -
     assert created == []
 
 
-def test_planner_does_not_reserve_when_the_time_is_the_default(
-    monkeypatch: pytest.MonkeyPatch,
+def test_planner_reserves_late_starters_and_leaves_default_ones_to_bulk(
+    monkeypatch: pytest.MonkeyPatch, _reserve_store: _ReserveStore
 ) -> None:
-    """既定時刻のままの人は予約を作らない＝一括実行に残す（DELTA §1-3）。
+    """10-01 裁定（30 分前・上限なし）での振り分け。
 
-    予約を作ると (a) 一括配信が走らない土曜にも DM が出る (b) 平日は bulk と同時刻に
-    1 人 1 タスクの Fargate が余分に立つ、が同時に起きる。
+    - 時刻つき予定なし → 予約しない（9:30 の一括）
+    - 最初の予定 10:00 → 送信 9:30 ＝既定時刻と同じ → 予約しない（一括で同時刻に届く）
+    - 最初の予定 15:00 → 14:30 に予約（旧仕様は上限で 9:30 に丸めていた）
+    - 最初の予定 08:00 → 07:30 に予約
 
-    変異: ``run_planner`` の ``no_timed_event or clamped_to_default`` 分岐を外すと
-    予約が 2 件作られて赤。
+    変異: 上限（cap_to_default）を戻すと 15:00 の人が予約されず赤。
+    ``fire_at == default_at`` の判定を外すと 10:00 の人に余分な予約ができて赤。
     """
     created: list[dict[str, Any]] = []
 
@@ -382,20 +414,100 @@ def test_planner_does_not_reserve_when_the_time_is_the_default(
 
     monkeypatch.setattr(sched_mod.SchedulerClient, "from_env", classmethod(lambda cls: _Sched()))
 
+    late, early = "late@vectorinc.co.jp", USER
     cals = {
-        # 時刻つき予定なし（終日のみ）→ 既定時刻
         "a@vectorinc.co.jp": _Cal([_Ev("2026-09-11", all_day=True)]),
-        # 最初の予定が 15:00 → 14:00 は上限を超える（＝既定時刻のまま）
-        "b@vectorinc.co.jp": _Cal([_Ev("2026-09-11T15:00:00+09:00")]),
-        # 最初の予定が 10:00 → 09:00（＝個人別配信の対象）
-        USER: _Cal([_Ev("2026-09-11T10:00:00+09:00")]),
+        "b@vectorinc.co.jp": _Cal([_Ev("2026-09-11T10:00:00+09:00")]),
+        late: _Cal([_Ev("2026-09-11T15:00:00+09:00")]),
+        early: _Cal([_Ev("2026-09-11T08:00:00+09:00")]),
     }
     monkeypatch.setattr(mod, "_read_only_calendar", lambda store, email: cals[email])
 
-    assert mod.run_planner(["a@vectorinc.co.jp", "b@vectorinc.co.jp", USER]) == 0
-    assert [c["name"] for c in created] == [
-        digest_schedule_name(user_ref(USER, pepper="p"), "20260911")
-    ]
+    assert mod.run_planner(list(cals)) == 0
+    fires = {c["name"]: (c["fire_at"].hour, c["fire_at"].minute) for c in created}
+    assert fires == {
+        digest_schedule_name(user_ref(late, pepper="p"), "20260911"): (14, 30),
+        digest_schedule_name(user_ref(early, pepper="p"), "20260911"): (7, 30),
+    }
+    # 予約した人だけに印を付ける（9:30 の一括はこの印で見送る）。
+    assert sorted(_reserve_store.reserved) == sorted([late, early])
+
+
+def test_planner_does_not_schedule_without_a_reservation_mark(
+    monkeypatch: pytest.MonkeyPatch, _reserve_store: _ReserveStore
+) -> None:
+    """印を付けられない（DB 障害・再実行）なら予約しない＝9:30 の一括に残す。
+
+    変異: reserve の結果を見ずに予約すると、9:30 の一括と予約の両方から 2 通届いて赤。
+    """
+    _reserve_store.ok = False
+    created: list[dict[str, Any]] = []
+
+    class _Sched:
+        def schedule_digest(self, **kw: Any) -> bool:
+            created.append(kw)
+            return True
+
+    monkeypatch.setenv("MORNING_DIGEST_PERSONALIZED", "true")
+    monkeypatch.setenv("DIGEST_USER_REF_PEPPER", "p")
+    monkeypatch.setattr(mod, "_build_token_store", lambda: object())
+    monkeypatch.setattr(
+        mod, "_read_only_calendar", lambda store, email: _Cal([_Ev("2026-09-11T15:00:00+09:00")])
+    )
+    import teamagent.adapters.scheduler_client as sched_mod
+
+    monkeypatch.setattr(sched_mod.SchedulerClient, "from_env", classmethod(lambda cls: _Sched()))
+    assert mod.run_planner([USER]) == 0
+    assert created == []
+
+
+def test_failed_schedule_removes_the_mark(
+    monkeypatch: pytest.MonkeyPatch, _reserve_store: _ReserveStore
+) -> None:
+    """予約（Scheduler）が作れなかったら印を消す。残すとその日は誰も送らない。
+
+    変異: release 呼び出しを外すと印が残って赤。
+    """
+
+    class _Sched:
+        def schedule_digest(self, **kw: Any) -> bool:
+            return False
+
+    monkeypatch.setenv("MORNING_DIGEST_PERSONALIZED", "true")
+    monkeypatch.setenv("DIGEST_USER_REF_PEPPER", "p")
+    monkeypatch.setattr(mod, "_build_token_store", lambda: object())
+    monkeypatch.setattr(
+        mod, "_read_only_calendar", lambda store, email: _Cal([_Ev("2026-09-11T15:00:00+09:00")])
+    )
+    import teamagent.adapters.scheduler_client as sched_mod
+
+    monkeypatch.setattr(sched_mod.SchedulerClient, "from_env", classmethod(lambda cls: _Sched()))
+    assert mod.run_planner([USER]) == 0
+    assert _reserve_store.reserved == [USER] and _reserve_store.released == [USER]
+
+
+def test_bulk_run_skips_a_reserved_user_as_normal(monkeypatch: pytest.MonkeyPatch) -> None:
+    """9:30 の一括で予約済みの人は「後で送る」として見送り、管理者 DM でも問題にしない。"""
+    from teamagent.adapters.digest_delivery_store import CLAIM_RESERVED
+
+    class _Reserved:
+        def claim_result(self, *a: Any, **k: Any) -> str:
+            return CLAIM_RESERVED
+
+        def release(self, *a: Any, **k: Any) -> bool:
+            raise AssertionError("予約印を消してはいけない")
+
+    sent = _patch_delivery(monkeypatch, ok=True)
+    skill = _StubSkill()
+    outcomes: list[Any] = []
+    result = mod._process_user(
+        skill, object(), USER, store=_Reserved(), day=DAY, origin="bulk", sink=outcomes
+    )
+    assert result == "skipped" and skill.calls == [] and sent == []
+    assert [o.reason for o in outcomes] == ["reserved_later"]
+    text, problem = mod._format_admin_report(outcomes, day=DAY, users=1)
+    assert not problem
+    assert "予定に合わせて後で送る 1" in text.split("\n")[0]
 
 
 def test_planner_cron_matches_the_bulk_schedule_weekdays() -> None:
@@ -641,7 +753,7 @@ def test_early_notice_appears_only_on_a_floor_clamped_scheduled_run(
     monkeypatch.setenv("MORNING_DIGEST_MODE", "single")
     monkeypatch.setenv("MORNING_DIGEST_DEFAULT_TIME", "09:30")
     monkeypatch.setenv("MORNING_DIGEST_COMPACT", "true")
-    digest = _digest_with_first_event("2026-09-11T06:30:00+09:00")
+    digest = _digest_with_first_event("2026-09-11T06:20:00+09:00")
     _text, blocks = mod._format_block_kit_compact(digest, USER)
     assert "最初の予定が近いため" in str(blocks)
 

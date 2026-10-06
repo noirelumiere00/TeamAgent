@@ -44,6 +44,12 @@ OUTLINE_FALLBACK_LINE = (
     "構成案が必要なら『骨子で』とだけ返信してください。"
 )
 
+# 一般KWを決めかねる依頼者のための 1 行（10-05 実測: 「おまかせで」と返したのに回答欄を
+# もう一度埋めさせられた）。任された場合は Aico が選び、受付文の「一般KW」に出る。
+KEYWORD_DELEGATE_LINE = (
+    "一般検索キーワードはお任せいただくこともできます。"
+    "『キーワードはおまかせ』と返信すれば、こちらで3語選んで作成し、選んだ語を受付でお知らせします。"
+)
 # 所要目安のモデル（分）。実測に合わせる:
 # - TikTok 取得: PR #377 の clamp（1軸 ≤30 本）後は 1 軸 ≈2 分（取得＋集計）。軸は逐次。
 # - 動画分析: 1 本 ≈2.5 分（media worker 取得＋視覚AI・09-03 E2E 実測）÷ 並列度。
@@ -230,6 +236,9 @@ def build_needs_input_message(
         lines.append("- 公式TikTokアカウントURL（公式投稿の露出判定に使います）")
         lines.append("")
 
+    if "keywords" in result.fields_to_fill:
+        lines.append(KEYWORD_DELEGATE_LINE)
+        lines.append("")
     lines.append("以下をコピーしてご返信ください。")
     lines.extend(f"{_REPLY_FIELD_LABELS[name]}：" for name in result.fields_to_fill)
     if not input.official_tiktok_account:

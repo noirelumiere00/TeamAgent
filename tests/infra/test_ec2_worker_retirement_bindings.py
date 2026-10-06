@@ -14,8 +14,14 @@ gate 側は ``saved_plan_sha256`` が ``terraform_plan_unreadable`` を投げる
 初めて落ちるので、既存のテストはファイルを消しても緑のまま通ってしまう（2026-09-28 に
 requirements-worker.lock を外して確認）。このテストはその穴を塞ぐ。
 
-退役を仕上げるとき（worker.tf の destroy と便δの worker 経路の撤去を同じ変更で行うとき）は、
-3 か所の束縛とこのテストを一緒に消すこと。
+退役は 2 段階で進める。
+
+- 段階 1（2026-09-28・今回）: worker.tf を消して EC2 の資源を destroy し、配布経路は
+  ``enable_hmac_worker_deploy`` の validation（常に false）で封じる。経路のファイルと
+  3 か所の束縛は残すので、このテストも残す。
+- 段階 2（別 PR・便δを再開する前）: worker 経路を依存の順に撤去し、HMAC の門の
+  ``worker_verified`` 段を「EC2 が無いことの証明」に置き換える。そのときに 3 か所の束縛と
+  このテストを一緒に消すこと。
 """
 
 from __future__ import annotations
@@ -38,7 +44,7 @@ LOCAL_ONLY = {".env.production"}
 #    一致判定が素通りし、存在確認も空集合で緑になる。固定しておけば抽出の故障で赤になる。
 # 2. 便δの worker 経路に束縛ファイルを足す・外す変更は、退役途中の今は意図して行うべきもの。
 #    3 か所をそろえた正当な変更でも、ここの更新で「退役とどう関係するか」を一度考えさせる。
-# 退役を仕上げるときは、このテストごと消す（モジュール docstring 参照）。
+# 退役の段階 2（経路の撤去と門の再設計）で、このテストごと消す（モジュール docstring 参照）。
 EXPECTED_NAMES = {
     "atomic_switch",
     "base_environment",

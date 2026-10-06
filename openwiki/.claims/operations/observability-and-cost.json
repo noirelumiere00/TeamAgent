@@ -1,0 +1,158 @@
+{
+  "schemaVersion": 1,
+  "pageVersion": "sha256:55938c10474638bc6a0f6f86c34ba4b38d627b38d16a1e53951285524646667c",
+  "claims": [
+    {
+      "id": "claim_ab465177247149cdb81571be2f6efd21",
+      "statement": "configure_logging は env STRUCTLOG_FORMAT=json のときだけ structlog を JSONRenderer に切り替え、それ以外（既定）は ConsoleRenderer にする。MCP HTTP サーバは main() の最初でこれを呼ぶ。",
+      "evidence": [
+        {
+          "resource": "repo://scripts/run_mcp_http_server.py#L153-L158",
+          "version": "repo-lines-v1:sha256:03ada21a1055bb46da2511de713d5b44190d1c561718e144bc2b641580db63c6:eyJzZWxlY3RlZExpbmVDb3VudCI6NiwiZmlyc3RTZWxlY3RlZExpbmVIYXNoIjoiNzBiYzUxMjY1ZGEzYzQ5NGJkZDI5NDA4YzBlMTc3NjY1YmZlYWQ2ZmQyNzkzNmYwNTlkMmM1NTdiMTlhM2NlMSIsImxhc3RTZWxlY3RlZExpbmVIYXNoIjoiZTQ0NWM0YTAyNjMxZDdjYmY5NTkwN2FlOGMxMTY3NDViMTA3YjVlMTFlNGFmYTYzMDkyNGNjMjNlYmIzMGMxNiIsInByZWNlZGluZ0NvbnRleHRMaW5lQ291bnQiOjMsInByZWNlZGluZ0NvbnRleHRIYXNoIjoiOGNjNGE3ZDFjYzc5NmFiYTNlNDY3MjMzMjdmNTE3ZTlmODExOTgyZDI1MGYwNzAyOTg2ZTRiNTc2NGFkOTU4OSIsImZvbGxvd2luZ0NvbnRleHRMaW5lQ291bnQiOjMsImZvbGxvd2luZ0NvbnRleHRIYXNoIjoiNWQwOTkxYjcwNWQxNDJjYzVkM2M3MWRmMmVhMWI3NDdlNmNmMjY5MGMzZTgwZTU3M2FiY2M1ZTBlMTk0Yjk5YyJ9"
+        },
+        {
+          "resource": "repo://src/teamagent/observability/logging_config.py#L45-L97",
+          "version": "repo-lines-v1:sha256:21319078b833091ed3811211e36dbe9c6484362d5173e8a7e53901dc6de8ff89:eyJzZWxlY3RlZExpbmVDb3VudCI6NTMsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjAxZGZiYTQyY2ZiNmUxNjEyOTUwOWQ1ODMzYjc3ZWQ3MTM1MjNlOTg4NTEyNDMxNTczMTFmOTA3ZmYzZWIxMWQiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjdkMTc3NGNiNGM1ZmRiODNmMDFhZTJjMjJmNGFkYzIxZmYyNDhkOGNhYTgxYmUzYjlkY2RhYTVmZTEzZmQzOTAiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImY1NTE5ZjEyYmRmMjJlZGVhYTQ0OTlkNTQ1YTM2MzEwMDE5YzkzOWMzNjI4NDFlZmVjNDlkNWU5NTZiNTQ1NGEiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjQ4Y2EyNjA1NDMzNmNlZGRiYjc1NjMzMWE1NWNmNTg4ZDM5YTlhZThiMDBmYTNlZTQ1MTcwZWIyZTllZTg2ZjYifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_28532bb749af46b1a764efc7b65d6cb4",
+      "statement": "init_sentry は SENTRY_DSN が空なら何もせず False を返し、有効時は send_default_pii=False・EventScrubber のキー名 denylist・before_send の値スクラブを併用し、ログからの自動送信を止める（LoggingIntegration の event_level=None）。初期化は slack_bot の _run（async 文脈）で行う。",
+      "evidence": [
+        {
+          "resource": "repo://src/teamagent/observability/sentry.py#L259-L318",
+          "version": "repo-lines-v1:sha256:5283ff6d6384ed99a8dfa5e7b81e938eb7d961938e0882b177d06bed4d1d4b6b:eyJzZWxlY3RlZExpbmVDb3VudCI6NjAsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6ImNlMTZhZjRmMzFmYWZmZGJhYTk4YWQzNzMzYWU0NDIwYmMzNWYyNzcyMmUxMTQ4NjI3MTNiZWY5OTcwZDM3NTYiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjYzZjZlMTc1OTc0MTAxNzFkMmJhZjdhNDY5NmZjM2QwMmRlY2VlMWZiZTRiOWZmNjQ4MThlOTU4YmI4N2YzOWUiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImNiZGY4MzRjNDdmNDFjNzAzYmRjNmY0YTBjY2Y2ZmRkNTE2MmI1M2I1ZGE5OTMyN2Q5OTJjNGVmYTk0OTgxOTEiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjgxMDBjZjg3NDIzODdmMWU0ZWQyYmVmMWM4ZGZkNTU4Zjk3ZWUzMTgyMzYzYzBmMDM4MmJhYTU5YmFkYWUwYTEifQ"
+        },
+        {
+          "resource": "repo://src/teamagent/runtime/slack_bot.py#L2980-L2985",
+          "version": "repo-lines-v1:sha256:9108d06383553f1bec812848c69c2b1c807be4026d64ceb3edfa19bdf69a58c9:eyJzZWxlY3RlZExpbmVDb3VudCI6NiwiZmlyc3RTZWxlY3RlZExpbmVIYXNoIjoiMDFiYTQ3MTljODBiNmZlOTExYjA5MWE3YzA1MTI0YjY0ZWVlY2U5NjRlMDljMDU4ZWY4Zjk4MDVkYWNhNTQ2YiIsImxhc3RTZWxlY3RlZExpbmVIYXNoIjoiMjZiYTUxNDY5ZjVkMGRkNGM0MGQ1YWFjYjRmZjZhODk4MmVjMTRlZDllMWQ0ZGFiMWMyOTI2ZGM4OTBiM2E3MyIsInByZWNlZGluZ0NvbnRleHRMaW5lQ291bnQiOjMsInByZWNlZGluZ0NvbnRleHRIYXNoIjoiMTY2ZjM0ZTRmZDI4NjE3ZjM4YWQ5NzYyMzAyYTBhYTkzZTczMmVkYTM0MTFlYmI0MjQzNmQ5MTQ3YjQ1MTIwMSIsImZvbGxvd2luZ0NvbnRleHRMaW5lQ291bnQiOjMsImZvbGxvd2luZ0NvbnRleHRIYXNoIjoiMDkxMmQ5N2ZkZDI0Y2IzYzI5YWZhYzg3ZTE0YjBkZTNkZWQ2OGI2Mzk5ZGIwNGUwNTg1NDNjZTc0M2I2MWNlYSJ9"
+        }
+      ]
+    },
+    {
+      "id": "claim_bb294820aee043e9a3c3ce01e9146461",
+      "statement": "UsageRecorder は usage_events へ INSERT ... ON CONFLICT (request_id) DO NOTHING で書き、未知の status は ok に倒し、query_text を 2000 文字で切る。record() は書き込みを executor に逃がし、失敗は usage_event_write_failed を出して握り潰す。",
+      "evidence": [
+        {
+          "resource": "repo://src/teamagent/runtime/usage_recorder.py#L60-L107",
+          "version": "repo-lines-v1:sha256:4cb69dd80d9ee637571ec70ff438dac998d57da2568a28d6e3671a959ddbfded:eyJzZWxlY3RlZExpbmVDb3VudCI6NDgsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6ImNmOTczMWQxZjFkNzM2YTM1MDNhZDM5ZGIzYWVhMDhiNTk2YTMxN2M4OWU5ZDgwZjIxODg5YzZhODdiOTRlM2IiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjM1MDMzOTQxNjQ0ZDA2NmNlMjdjYTU4YTg2MmIyYjIwMDA5OWJjZTYwNGQ1MjFiNWQ4MTU4ZjI2NGVmM2I5ZTYiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6Ijg5NTNiMDVmZTk4ZDg2MGE5MzAxOTg2YjZiNmVlZjAzODkzY2JhZjljMTM0MmY1MGIwYWZmODg3Nzg0YzlhOWMiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjFkNjFjYmI0MmM1YmZlMjMxYTI1MDQ5NDUwNWRlZmQ3NGZmMGJjMTZjMzRhMzQzOTRiZjMzMjg3ZjE2Mjk1MjcifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_07bd534e1ad04d41a3503f0f9935cba1",
+      "statement": "MCP の _record_usage は USAGE_EVENTS_DISABLE で止められ、本文として非空の query 引数だけを残し、via=\"mcp\" で fire-and-forget の task として記録する。usage_events.user_id には署名検証済み claim の Slack ID だけを使う。",
+      "evidence": [
+        {
+          "resource": "repo://src/teamagent/mcp_gateway/server.py#L144-L185",
+          "version": "repo-lines-v1:sha256:48540cf9aa195fe1ef9d97efefa4995acb189313d7db52ed350c3f32fb51c27b:eyJzZWxlY3RlZExpbmVDb3VudCI6NDIsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjNlODI0MDU5NTI3ZmU3NTdkNmRhZWE1NmE4MmMzYTU5NmQ4YzgwZjI5MGMyMTNkODZkZTMwMTA1NjVkOWM5OWMiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjM4MThiNzgwMDM5YzI5YTE2ZjBhMWJmNDA0YTdlZGZiYjdhOGU2ZDA3NzQyZDk1ZjEwNzY5NmQ4ODI2Yjc1MGEiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImI1ZjliYTVmOWJmNTBhODMzMThhODI4NGY1ODk2MThmNWJkZjQ4NjkzNjViZmM3YTAwNzk4MmIwZWQ3NGMyZDgiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImZiMTFiZWViZTg5MWZmNzU3ZTBjNzA5N2M2ZjA4ZjlmYWZmYTk2MjA0NmMwYWJiNThkNWYyY2YzM2MxMWVkZTkifQ"
+        },
+        {
+          "resource": "repo://src/teamagent/mcp_gateway/server.py#L905-L907",
+          "version": "repo-lines-v1:sha256:f5aec119e349e46105dfbfbdcf821947695221c432d0f8691838f9548e47e1ba:eyJzZWxlY3RlZExpbmVDb3VudCI6MywiZmlyc3RTZWxlY3RlZExpbmVIYXNoIjoiMTc2YjkxMTkwZDUxOTUwZmRhYjQxMWMyMzU2YTAxNmZmMTFlNjczODcwZjg2NWRiNzE3MDZjMjExYTczNTRhZiIsImxhc3RTZWxlY3RlZExpbmVIYXNoIjoiOGQxMjk0NDcwZjU5NjE3NjY0N2M0NTA0NGY0ZDJkMmExMmVjOWFlYjdjOTAzYzJiYTVjYmYzODZkMzUyMDc5NiIsInByZWNlZGluZ0NvbnRleHRMaW5lQ291bnQiOjMsInByZWNlZGluZ0NvbnRleHRIYXNoIjoiNWQ0ZTVkYjQ5MjZjMmVkYjRjMDliNmI5NzEzNmMyNjNjZTg4MTViYWE1OWM4M2Y5NDcyMGU3Yzk3ZDlkNzc1ZSIsImZvbGxvd2luZ0NvbnRleHRMaW5lQ291bnQiOjMsImZvbGxvd2luZ0NvbnRleHRIYXNoIjoiZTk3MjY2MmM3YWQzMzZjOWYyN2YzOWViMTFlNDJjZWI2MDJmYjVmYWY1MjBlZjIxNGUzZjEzOGRlMzJlNGIwMyJ9"
+        }
+      ]
+    },
+    {
+      "id": "claim_3153d7cb09c74227b067aa019cb4d4f5",
+      "statement": "usage_events は RLS で SELECT を app.user_role='admin' の接続に限り、teamagent_app には INSERT、teamagent_dashboard には SELECT を与える。0024 で ON CONFLICT のために teamagent_app へ request_id 列だけの SELECT と専用ポリシーが追加された。",
+      "evidence": [
+        {
+          "resource": "repo://infra/migrations/0007_usage_events.sql#L96-L128",
+          "version": "repo-lines-v1:sha256:9c4c2d15873f85fc7b94c58c8ba7b24adf32400a0fa53fc75cc015b2e2ca1669:eyJzZWxlY3RlZExpbmVDb3VudCI6MzMsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6ImRjNWE4ZGFhNmEwMmNkOWEwNjhiMTY3NWE4MGM5YTdmZDdkNDdkM2M3MTRiZWI2NTY3MGM5Y2M3MjU5YTEzNTIiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6ImQ5N2M1MmQ5MWU1NDAxM2FjM2QwMGE2MDljZjMzZjUxZWM4MWU0N2ExMDQwM2FiOGYyNjQxNWNmYTNlOGM3NGMiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjBmZGU2MGE2YjcwYzlkNzA2M2YzZmQ0YzUyMzU4OTIwYmI5ZjU5MDBlM2RjZTZmYzJmNmRkYjFiZTRlYmFlYmQiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImE0NjFlN2VlOTllYjAzOTdiZDAzM2NkMjdjMTFkZjBhZGEwMWJiNWJmMTM3ZTQzZmQyYTgyZDBjZmE4MTVkZWQifQ"
+        },
+        {
+          "resource": "repo://infra/migrations/0024_usage_events_conflict_read.sql#L25-L31",
+          "version": "repo-lines-v1:sha256:ec8bb744d6557059240520e98831cdd9fd5ae85d80c7c19d483575f37a49ef2f:eyJzZWxlY3RlZExpbmVDb3VudCI6NywiZmlyc3RTZWxlY3RlZExpbmVIYXNoIjoiYmZkNWUxNmJhNzU2YWM3ZWVjNGVjYWE0ZmVjMDBlNjJlNTg5MjlmNzQ0MTYwZjE3YjQ5N2RlNGMzZjkwYTg5MSIsImxhc3RTZWxlY3RlZExpbmVIYXNoIjoiNjFiMGIwNjY5YTU5ODI0NmNmNjUxNjA4NzZlNDRkMDQzMDQ3MjFjMjE5MjgzMWNiNTc5YzI1YWI2Yzk0MDQ4NyIsInByZWNlZGluZ0NvbnRleHRMaW5lQ291bnQiOjMsInByZWNlZGluZ0NvbnRleHRIYXNoIjoiNDFhMDkzYTE4OGM2NTc3Yjc1OTdhMzZlNzE0ODFjMzIyNjlkNjZiZWVjNTAwYzJjOWU3MmMwNzJhMjhlNmRlYiIsImZvbGxvd2luZ0NvbnRleHRMaW5lQ291bnQiOjEsImZvbGxvd2luZ0NvbnRleHRIYXNoIjoiZDVkYWNmYTBhNDRlZmI2NzAxNGM5Y2U1ZTlhODEzYTY3NjMyNjI5ZDlmZWQ4NWYyZDk2YjVkMjVmNDNiMTc1MiJ9"
+        }
+      ]
+    },
+    {
+      "id": "claim_ad5fab89c712423f90080ba563adac90",
+      "statement": "MetricsSnapshotter は gate と接続プールの状態を既定 15 秒ごとに runtime_metrics へ INSERT し、失敗はログだけで続ける。起動は slack_bot の build_app で行い、間隔は RUNTIME_METRICS_INTERVAL_S で変えられる。",
+      "evidence": [
+        {
+          "resource": "repo://src/teamagent/runtime/metrics_snapshot.py#L87-L125",
+          "version": "repo-lines-v1:sha256:29751090e6af31f639fe15a9e87f810d2b3707becefed2061133454ec6f9e265:eyJzZWxlY3RlZExpbmVDb3VudCI6MzksImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjMwNmE2NGMwODI5NjRkOTQwNTY4ODU1M2E0OTc1OTE1MGEwY2JmNTA4NDEzNThhNDJhNWU4MmQ1MDAwOTU4MmIiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6ImY3MjEwZGU2ODljMWU5MmRkZDBhMzYzNGI3NWVhODFjYmI1MTVhOTcyOTljMzNlYzkxNDE5YTljNzQxM2FjNWEiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6Ijc0OGViYWYxODVhOWQxNjNkNTQ1ODI0MmY5MTc2Yzk1NzZjMjUwMGQ4NGY1NDRjMmRiMmQ3OTU1ZDg3YzM1ODAiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImRhZmI1Mjg1MDNiMWVhYzRjZDU3MDUyNTQyNzQyMzlkNDVjMjI0OWQ5ODUyZmVmYzFjOTAwYjFkNGM2YzFmNTgifQ"
+        },
+        {
+          "resource": "repo://src/teamagent/runtime/slack_bot.py#L1911-L1926",
+          "version": "repo-lines-v1:sha256:239e2d07819dddcf0805a7b78074459631f081d0f210c81cfe3ac044593b3025:eyJzZWxlY3RlZExpbmVDb3VudCI6MTYsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6ImZiNmQxODMxZmEyYzA0OTc2MDE3ZjdkNGYwZWUxOTc2NTM2MTYzZjliMGQ0MTM1Y2UxNzZlNzNkNzAwZDMzYzQiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjA4YWYyNzkyMzU0M2M2NTY1ZjM0MzFkMjEwMDNjNjdhMzM2MTQ1M2E5YzZkNzE4YzkwZjAzNjM3MmNlMWE2MjkiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjYwMWVlYzBlMTRmMTZkNjk2NWM4MmFhNGZiM2JjMzQxNzQ3ZDUzYzYzNDkzNjA4Y2UwMDM3MDgwMzBmMWZlMjEiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImFiZTRhOWVjZTI5YmQxZDk2Zjg0ODg0M2NlMzQ5NzcyNjE2YWVkYjFmMDYyMGE2N2Y1NTY4MjQxZTBjYzg0MTcifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_812ec8b9cfc94b25afa94943905851ae",
+      "statement": "connect-web の /admin は CONNECT_ADMIN_EMAILS の allowlist に無い利用者には 404 を返し、?user= は 254 文字を超えたら捨て、集計関数ごとに teamagent_dashboard / admin の接続を分けて一部の失敗が他の表示を巻き込まないようにしている。",
+      "evidence": [
+        {
+          "resource": "repo://src/teamagent/connect_web/app.py#L5044-L5100",
+          "version": "repo-lines-v1:sha256:cb854fe933aa7dff89f923a5914e9815d0ff40b09b27aefaf4babbd443fa108e:eyJzZWxlY3RlZExpbmVDb3VudCI6NTcsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjMzYTVkN2JhNzUwMWMzNmQ2YTE5ZGFlN2VlMTQxZTIwMGNmYWZkMzJkZWM1Y2FkZWY2OTNjYjFmMTIyYmM3YTAiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6Ijc0Mzg0ZjhiNzI1NWQ5MWEwOTFiY2YxNjg3ZjE4OWVmNDRhZjBkNWEzNDE4MGM5Y2U4OGUzYjkxMWI0NzdmNTEiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImUyZDE5MjQzNjMzNzA2ZGJkMDYyZjY2NDk0OGE4ZDg0NDcyZjFjNjcwODVmOGU3M2Y2Yzg2ZDAxMmJiMTNmNWIiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjlkNWZiYTBlNDFiMzY0NTg3ZWRiZjA4M2NjYWNmYjQwYjFjZmY1MDIxZDkzNmVjOTJmYTE5OGNhMThhMGJjNWYifQ"
+        },
+        {
+          "resource": "repo://src/teamagent/connect_web/app.py#L655-L664",
+          "version": "repo-lines-v1:sha256:3d441894885c367f65da42fb548581ab3eb400484dcf164791732678dc90d891:eyJzZWxlY3RlZExpbmVDb3VudCI6MTAsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6ImMyMDdkODdjM2JlYjVjOWU1NmEzZmRlMjFmNzA2NGMyZGRlYzEwYTQwZDk1MjkyZDc4MTZiODAwNjY5ODcwZjMiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjFhM2E1NTA0N2M4YmIzMzdkZDc2ZDk4OGNkMjM5ZjU3MTA5MDI3ZGJiZDM3ZTBhZjlmYTIzYjlhOGY2ZjU5MDciLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjMwMDIwZjNjMDk4ODRlY2YxNTczYTU0ZmY5MDQ3YWFkMjFkMWM2MGNmMmRkMGYzZDg3OTIxYWI5ZmVlZjgyMzYiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImIzZGJlMGQ4YjI3NjA0YWQ1NWI3ODkwMGZmNzdmYWMxNThmMjBhNDY3MDk5NzUyZTFmNjNiNDM0Nzg5NTdhZmQifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_e1054195f9d947b3b90ba36e138ef37d",
+      "statement": "MCP ロググループの metric filter は identity_spoof_rejected・mcp_tool_error または level=error・cost_usd を拾い、なりすまし拒否は 5 分で 1 件以上、ツールエラーは 5 分で error_count_threshold（既定 3）件以上、コストは日次合計が daily_cost_threshold_usd（既定 5 USD）超で SNS に通知する。欠測は notBreaching。",
+      "evidence": [
+        {
+          "resource": "repo://infra/terraform/cloudwatch_fargate.tf#L101-L116",
+          "version": "repo-lines-v1:sha256:f3ff88f257bb7c531eadbfa88052dcedefdbeabc4763e9f1c0a9297e7d0fc555:eyJzZWxlY3RlZExpbmVDb3VudCI6MTYsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6ImZiMjFiNjc0OTY4ZmUxODVhNTk3OTFlOTYzZDM4OWViZjlmMDdjZDc0NWNmNjcyNjVlYjU4MzI2OTkyYTQ1MTciLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjQxMmNhMzQ1Y2NmNzViZjljMDgwNmJjZTY5NWJlOGRlODA4Yjc5OTg0MjUxYTdhNTRkMjAyY2Y2MTAxZGQ0NTEiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImZiNTgwZTk2NGY4M2E0NzNmNDNkNDQzODQ2Mjk0OWQ2OGI1NjAwZmRhNzg3ZjE2Mzc0NWQwMGRlODljYmYzNmEiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImQxNjgwYjYzZGE1NTE5NWQ3YTA3OTBjNjQ5NmUxMTk5YTZlYWFlMzM3NTdkMmY0MGE0ZjYzY2U4N2FiNGFmNWUifQ"
+        },
+        {
+          "resource": "repo://infra/terraform/cloudwatch_fargate.tf#L150-L178",
+          "version": "repo-lines-v1:sha256:30fa1f13594e7155f799bf4ebe40dc206c07e85abf4a67ac1bfb0c302b1b9c59:eyJzZWxlY3RlZExpbmVDb3VudCI6MjksImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjkwNTk4OTQ0MTk0MDA1ZDU0Mzg3YWFlYWRiODA1NTE3NTk2MDVmOGUzYTc2ZDYyN2MwNWZmMDhhN2YyNTc3NzEiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjQxMmNhMzQ1Y2NmNzViZjljMDgwNmJjZTY5NWJlOGRlODA4Yjc5OTg0MjUxYTdhNTRkMjAyY2Y2MTAxZGQ0NTEiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjFkM2MyZTViMmU0NzU4MWM2OWZjZmNjYjljZTMwODcwZjQyYmI0YWIwODNhYjA1NmRkNTZiODZjYmZlNjQyYzEiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjAyMmM3MjA2NTlmNDc2MTk5MzdlOTRiOGFiNTEzMDM0OTZjNDk0Nzk0NDIzMDZmYjcyMmYxZmEwNzUzYjI5MmEifQ"
+        },
+        {
+          "resource": "repo://infra/terraform/cloudwatch_fargate.tf#L9-L49",
+          "version": "repo-lines-v1:sha256:1ccdfc043dcec5fbf5b3c79bd4afbdf18ea920b643fe552442c2a7b938262d6e:eyJzZWxlY3RlZExpbmVDb3VudCI6NDEsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjEwNjFhNmU1OGI4M2ViY2ZlZmRiMGNmODRjYjg1MTA0YzMyMzI1NGFkYzUzMzhhN2M3ODg3Mzg5ZTBjNzM1MTgiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjQxMmNhMzQ1Y2NmNzViZjljMDgwNmJjZTY5NWJlOGRlODA4Yjc5OTg0MjUxYTdhNTRkMjAyY2Y2MTAxZGQ0NTEiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjQ1ZDkyMjg2MTQ5ZDUxMzc2MzA2ODY1NjNiZTg3NWZhNDZjYTNjNmE3NjVhN2Y0YzBjZWNmNWYyMTQyYTNlNjEiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjlkZmEwNjgwNTlmZGNkYTU4M2I2OGExNDYzZjQ5ZDAwZjRhNjIxOGFjNmY5NTZiNzRiMTQwZGQzYWY1Njk5YTMifQ"
+        },
+        {
+          "resource": "repo://infra/terraform/variables.tf#L146-L162",
+          "version": "repo-lines-v1:sha256:4611d3b073e5ce46570707d683c3bb0b28c9305945497544aab7718445bbe10a:eyJzZWxlY3RlZExpbmVDb3VudCI6MTcsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6ImRlYTk1ZjJlZDM4NjdkZmJjNmFiZjA0YTk1ZDFhYjY0YTM1NmZlNjhlOTA4ZDQ4YmFjNGM2NWM0M2Y1MTQxYzEiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjQxMmNhMzQ1Y2NmNzViZjljMDgwNmJjZTY5NWJlOGRlODA4Yjc5OTg0MjUxYTdhNTRkMjAyY2Y2MTAxZGQ0NTEiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImRlNjhlMmIzOTU1MzU3MzkyNDUxOWVhYzVkYTM0YzExMTdhMzZmNTQ0YmE3YmIxODc4NjhlZWU0NGRlZGE5ZjMiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjIzYzA5ZWZlMTRjZmE4OTk4OWQ4Y2I0YTk2ZTMxYWQzY2YxZGJlODRlMmE2OGUyNjU0MDUxNDBiODg0OGJmNWUifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_23e24292d92c4de19ed6dace9c60628b",
+      "statement": "合成カナリアは結果が空なら不合格とし、canary_health_result を出して失敗時は exit 1 で終わる。失敗計数のアラームは欠測を notBreaching、生存確認のアラームは 1 時間窓で 2 回連続して結果が無いと鳴る（欠測を breaching）。",
+      "evidence": [
+        {
+          "resource": "repo://infra/terraform/canary_schedule.tf#L92-L127",
+          "version": "repo-lines-v1:sha256:294fe331b57b14e4765562c3f71eac43638c967267ccc3d96f2c85977f2d8bcb:eyJzZWxlY3RlZExpbmVDb3VudCI6MzYsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjVkM2Q4NDQxODUxYzQ5NTUzOGJmOTcxYTFkYTgxMTY1MWI4YzkwOThlOGQyM2ZiZGNmOGM2Y2NiM2VlZmI5MGEiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjIyY2VlOWY5OGY5MDU1YjZjMzMzMDdlOWQ0MjBjMDllZjFjODZiY2M1YWIxZWU1NDRjMGRiMWFjN2E4YmRiZjIiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImZiNTgwZTk2NGY4M2E0NzNmNDNkNDQzODQ2Mjk0OWQ2OGI1NjAwZmRhNzg3ZjE2Mzc0NWQwMGRlODljYmYzNmEiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjkyZGRmMWNlYjZjM2FmMTJhMTFiMWQ3ZDYyMTdhNzZiOGMwMjFmZWFkNjE5OWVmMmYzYWM0MmMwN2EwNGJlMzcifQ"
+        },
+        {
+          "resource": "repo://scripts/run_canary_health.py#L30-L70",
+          "version": "repo-lines-v1:sha256:521b40fee7435ae0ae86de34e52e2137773384cb21382aad1a3451830998e77a:eyJzZWxlY3RlZExpbmVDb3VudCI6NDEsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6ImM4MGYwYmI4NjFjYWJjYjgwZWY0MTZkNmI1MTM5MGQwMDQ1YjM1MTI2ZmQ5NDA5ODAxMGQ3MmFiNjI3N2E1NjUiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6ImIzM2MzOTk2MjJiNWFkODJmYjdhOWZiODE3NzM2OWNkOTI1NDcxNTMzOGY1ZjE4YTZkZmU5NzcxN2M0MjBmMTgiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjFjOGJlYmQyMzg5MjM2ZDAzYWNhODlkMzYzN2ZiMDM1ZTlhMzY2NDg3ZTVmYTU2MjI3Zjk0YmNhZGE0YzhmNWQiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjNkNDEzNDBjYzIzOWExNTljZTliNjAyMmU5ZjYzMjI4MzJlMmVhZDc2Y2FlOWU0NzU0ZDIxMGViOGZiNmQ1ZTgifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_ec4baadd632f4754b1887c9987716b09",
+      "statement": "AWS Budgets の月次予算は既定 250 USD で、実績 80%・実績 100%・予測 120% で SNS に通知する。Cost Anomaly Detection はサービス別に監視し、影響額が既定 50 USD 以上の異常を即時通知する。どちらも通知だけで自動停止はしない。",
+      "evidence": [
+        {
+          "resource": "repo://infra/terraform/budgets.tf#L4-L21",
+          "version": "repo-lines-v1:sha256:9b687385d0aa4bdb3597098f7bc8eb5e7f02e2bfa553f1c01a6db620030b06e0:eyJzZWxlY3RlZExpbmVDb3VudCI6MTgsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjNmY2M0NmI5NTNlMTg5N2JkYjNhODZjMTlkZTkxOWM3Y2JhNTBlMTZlZTNlOTRlMzk4YWIyZjIzN2ZkN2E5Y2UiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjQxMmNhMzQ1Y2NmNzViZjljMDgwNmJjZTY5NWJlOGRlODA4Yjc5OTg0MjUxYTdhNTRkMjAyY2Y2MTAxZGQ0NTEiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjM1OTY5NDE2MDU2MGU0YWI1ZWM4OWJkZTAwMDczZGQ3YTRhNzczZjRhMTgyNGQwZmM3ZTUwNTRlNTEzODNkOWIiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImRlMjZiYzU1NzQ0MjA2MjFlNDViZTdkODY2MzVhMzNiY2ZkOGNkNWNhZWQ1MTBiM2U5MmJlNDM0YTAwMjE2NWMifQ"
+        },
+        {
+          "resource": "repo://infra/terraform/budgets.tf#L54-L89",
+          "version": "repo-lines-v1:sha256:0cbe732d3de055de1e659f690e206eb3d2c1a52f77477dea47ffc14c04d56a57:eyJzZWxlY3RlZExpbmVDb3VudCI6MzYsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6ImVhOWQyNjdlZDhmZTQxM2ZiN2IxYTFkOGM5OGI2NWUxY2JmZjU3NjU2MTEzN2VmYmMxY2I3NDhkZDYzYjUwZDciLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjQxMmNhMzQ1Y2NmNzViZjljMDgwNmJjZTY5NWJlOGRlODA4Yjc5OTg0MjUxYTdhNTRkMjAyY2Y2MTAxZGQ0NTEiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjJlNzA3NzA1NzVmNWFjZDJiMjdkNTZmYTA4MzIzYmMwNTM2YTFkMGNjYWZmZDRlYzRkMTcwZGI0ZGMyMWE3OGYiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjUyMjNjNGMyOWQ5M2FkNDIzNGM0NzdlZTVmZTQ1NGNlNDdkNzJmNTZhODA0ZmRiZWU1OTRlMWQzOTNlYTI0MmUifQ"
+        },
+        {
+          "resource": "repo://infra/terraform/budgets.tf#L92-L120",
+          "version": "repo-lines-v1:sha256:ce8f4965eb0477edfcee1397286299fc5cc275780ee3fb4382b544d2b196cc3b:eyJzZWxlY3RlZExpbmVDb3VudCI6MjksImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6ImE2MzQyZDY5OTFjZjVmYmMyYjQyYzcwNWUzNzgyOTFiNWYzYzljZDhiYmIzNDExNmViNTI0YjUxNWFiZmQ1ZWUiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjI3ZTU3ODhkNWQ5ZDczZDI0YTgxZGJjMGE1YTc0YmZhODJjOWMzYjNhZjk5ZTUyYWY3OTZlOTBiNDY4YThhM2QiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImE1N2M5NzQ3ZTEzZTA3NzVjMmFiNjUwYzUzMjk0MDVmZGZiMGE0NDZlOWVmZTllODllY2FhNzZlNGM4ZGJlMzciLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImY5ZDk2ZTdlMTQ5MTdkMTJhYTUzYjZmNmNjNDQ4YjY5YzY4ZTZkNDkzZDdlN2I0ZTUyODA5ODg3YzBhYjRmM2IifQ"
+        }
+      ]
+    }
+  ],
+  "verification": {
+    "by": "openwiki/0.6.1",
+    "at": "2026-09-29T07:51:05.076Z"
+  }
+}

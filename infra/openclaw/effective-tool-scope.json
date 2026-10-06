@@ -188,6 +188,13 @@
       "enabledBy": { "kind": "envAllTrue", "names": ["USE_DIGEST_ACK_TOOL"] }
     },
     {
+      "name": "digest_settings",
+      "effect": "digest-preferences-state-write",
+      "terraformGate": "USE_DIGEST_SETTINGS_TOOL=false",
+      "defaultEnabledByTerraform": false,
+      "enabledBy": { "kind": "envAllTrue", "names": ["USE_DIGEST_SETTINGS_TOOL"] }
+    },
+    {
       "name": "calendar_freebusy",
       "effect": "calendar-freebusy-read-only",
       "terraformGate": "use_calendar_freebusy_tool",
@@ -286,6 +293,13 @@
       "enabledBy": { "kind": "envAllTrue", "names": ["USE_SLACK_SUMMARY_TOOL"] }
     },
     {
+      "name": "slack_search",
+      "effect": "slack-search-read-analysis",
+      "terraformGate": "USE_SLACK_SEARCH_TOOL=false",
+      "defaultEnabledByTerraform": false,
+      "enabledBy": { "kind": "envAllTrue", "names": ["USE_SLACK_SEARCH_TOOL"] }
+    },
+    {
       "name": "attachment_assist",
       "effect": "slack-file-read-analysis",
       "terraformGate": "use_attachment_tools",
@@ -305,6 +319,13 @@
       "terraformGate": "use_web_research_tool",
       "defaultEnabledByTerraform": false,
       "enabledBy": { "kind": "envAllTrue", "names": ["USE_WEB_RESEARCH_TOOL"] }
+    },
+    {
+      "name": "meeting_prep",
+      "effect": "meeting-prep-read-mail-vault-web",
+      "terraformGate": "USE_MEETING_PREP_TOOL=false",
+      "defaultEnabledByTerraform": false,
+      "enabledBy": { "kind": "envAllTrue", "names": ["USE_MEETING_PREP_TOOL"] }
     }
   ]
 }

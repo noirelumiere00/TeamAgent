@@ -25,7 +25,7 @@
         "component": "python-builder",
         "evidence": "base_image_digest",
         "value_kind": "sha256_digest",
-        "value": "sha256:951031ead2458c44bb8546f20494bcdbf69b5add30968bddb85558faf296e7e0",
+        "value": "sha256:a38e1716f8e5858c7647ec467613cd8cf289e1db90e5d5d74776a10a5213ebde",
         "build_arg": "PYTHON_BUILDER_ARM64_DIGEST",
         "oci_label": "io.teamagent.contract.python-builder-arm64-digest",
         "dockerfile_uses": [
@@ -37,7 +37,7 @@
         "component": "python-runtime",
         "evidence": "base_image_digest",
         "value_kind": "sha256_digest",
-        "value": "sha256:1f8890b2fb67a125e64836cff9f77565ba3c1309fd05e088373d33a1c14dbdc5",
+        "value": "sha256:348247389f6aae35cbe588efff26ff0f53f65ce8612eaca7ba21c743c22bc225",
         "build_arg": "PYTHON_RUNTIME_ARM64_DIGEST",
         "oci_label": "io.teamagent.contract.python-runtime-arm64-digest",
         "dockerfile_uses": [
@@ -61,7 +61,7 @@
         "component": "python",
         "evidence": "binary_sha256",
         "value_kind": "sha256",
-        "value": "025d8125ab49b3d37b45ecafbb54fe199c5fd33ecad6595434820bec7bdca5be",
+        "value": "2796fb308e5e3ca82656e6744db8c8cc9d96c73358fc5e60001a6e1ba746016a",
         "build_arg": "PYTHON_BINARY_SHA256",
         "oci_label": "io.teamagent.contract.python-binary-sha256",
         "dockerfile_uses": [
@@ -85,7 +85,7 @@
         "component": "python",
         "evidence": "component_version",
         "value_kind": "version",
-        "value": "3.14.7",
+        "value": "3.14.8",
         "build_arg": "PYTHON_VERSION",
         "oci_label": "io.teamagent.contract.python-version",
         "dockerfile_uses": [

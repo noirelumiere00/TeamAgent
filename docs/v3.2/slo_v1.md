@@ -96,7 +96,7 @@ P1 パイロット実測で確定する想定。
 webhook を Secrets Manager (`teamagent/prod/ops-slack-webhook`) に投入することで有効化。
 未投入なら ingest 失敗時は人手検知（下の注記）。
 
-> **2026-09-28 注記**: 上の 2 文は EC2 worker の systemd ユニットで ingest を回していた時代の記述。EC2 worker は退役を決め、ユニットは repo から削除した（worker.tf の EC2・IAM・SG は terraform に残っており、destroy は保留中）。本番の ingest は ECS Scheduled Task（`infra/terraform/ingest_schedule.tf`）で動き、失敗は CloudWatch Logs `/${project_name}/${environment}/ingest` で人手検知する。現在の ingest タスク定義は `OPS_SLACK_WEBHOOK_URL` を渡していないため、Secret を投入しても #ops 通知は出ない（`src/teamagent/ingest/ops_alert.py` は未設定なら no-op）。
+> **2026-09-28 注記**: 上の 2 文は EC2 worker の systemd ユニットで ingest を回していた時代の記述。EC2 worker は退役を決め、ユニットは repo から削除した。worker.tf も 2026-09-28 の裁定で削除し、EC2・IAM・SG は terraform で destroy した（`docs/v3.2/ec2_cutover_runbook.md` 冒頭）。本番の ingest は ECS Scheduled Task（`infra/terraform/ingest_schedule.tf`）で動き、失敗は CloudWatch Logs `/${project_name}/${environment}/ingest` で人手検知する。現在の ingest タスク定義は `OPS_SLACK_WEBHOOK_URL` を渡していないため、Secret を投入しても #ops 通知は出ない（`src/teamagent/ingest/ops_alert.py` は未設定なら no-op）。
 
 ---
 
