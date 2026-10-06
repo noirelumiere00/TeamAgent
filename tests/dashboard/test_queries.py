@@ -5,7 +5,11 @@ from __future__ import annotations
 from contextlib import contextmanager
 from typing import Any
 
-from teamagent.dashboard.queries import DashboardQueries, recent_questions
+from teamagent.dashboard.queries import (
+    DashboardQueries,
+    answer_feedback_summary,
+    recent_questions,
+)
 
 
 class _FakeCursor:
@@ -182,3 +186,40 @@ def test_recent_questions_empty_who_is_treated_as_no_filter() -> None:
     sql, params = pg.executed[0]
     assert "%(who)s" not in sql
     assert params == {"limit": 200}
+
+
+def test_answer_feedback_summary_counts_latest_vote_per_answer() -> None:
+    pg = _FakePg(
+        [
+            [{"up": 4, "down": 2}],
+            [{"created_at": "2026-10-06 01:00:00+00", "who": "u@x.com", "query": "JAL の事例"}],
+        ]
+    )
+    with pg.connection(app_role="teamagent_dashboard", user_role="admin") as conn:
+        out = answer_feedback_summary(conn, 30)
+    assert out == {
+        "days": 30,
+        "up": 4,
+        "down": 2,
+        "downs": [
+            {"created_at": "2026-10-06 01:00:00+00", "who": "u@x.com", "query": "JAL の事例"}
+        ],
+    }
+    (count_sql, count_params), (downs_sql, downs_params) = pg.executed
+    for sql in (count_sql, downs_sql):
+        # 1 回答 1 票: (user, answer_id) ごとに最新の 1 行だけ
+        assert "DISTINCT ON (lower(user_email), answer_id)" in sql
+        assert "ORDER BY lower(user_email), answer_id, created_at DESC" in sql
+        # Slack の評価だけ（Web UI の行は混ぜない）・値はプレースホルダ
+        assert "search_session_id LIKE 'slack-%%'" in sql
+        assert "make_interval(days => %(days)s)" in sql
+    assert "WHERE rating = -1" in downs_sql
+    assert "LIMIT %(limit)s" in downs_sql
+    assert count_params == downs_params == {"days": 30, "limit": 50}
+
+
+def test_answer_feedback_summary_empty() -> None:
+    pg = _FakePg([[], []])
+    with pg.connection(app_role="teamagent_dashboard", user_role="admin") as conn:
+        out = answer_feedback_summary(conn, 30)
+    assert out == {"days": 30, "up": 0, "down": 0, "downs": []}

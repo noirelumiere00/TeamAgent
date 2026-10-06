@@ -90,6 +90,8 @@ const DIAGNOSTIC_ENV = [
   // 本人メモ（M8・2026-10-05）の plugin 側スイッチ。値が 1 のときだけ ON（秘密値ではない）。
   // ここに無いと TD に入れても黙って捨てられ、plugin は常に OFF になる（TRACE と同じ事故の形）。
   "TEAMAGENT_PERSONAL_MEMORY",
+  // 回答評価ボタン（2026-10-06）の plugin 側スイッチ。値が 1 のときだけ ON（秘密値ではない）。
+  "TEAMAGENT_ANSWER_FEEDBACK",
 ];
 
 function fail(message) {

@@ -11,6 +11,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 MIGRATIONS_DIR = PROJECT_ROOT / "infra" / "migrations"
 MIG_0015 = MIGRATIONS_DIR / "0015_search_feedback.sql"
 MIG_0022 = MIGRATIONS_DIR / "0022_search_feedback_score.sql"
+MIG_0032 = MIGRATIONS_DIR / "0032_search_feedback_dashboard_read.sql"
 
 
 def _without_line_comments(sql: str) -> str:
@@ -21,6 +22,7 @@ def _without_line_comments(sql: str) -> str:
 def test_search_feedback_migrations_exist() -> None:
     assert MIG_0015.exists(), f"missing: {MIG_0015}"
     assert MIG_0022.exists(), f"missing: {MIG_0022}"
+    assert MIG_0032.exists(), f"missing: {MIG_0032}"
 
 
 def test_0015_original_rating_and_privacy_contract_is_preserved() -> None:
@@ -95,3 +97,31 @@ def test_forbidden_grant_pattern_catches_all_privileges(statement: str) -> None:
     )
 
     assert grant_pattern.search(statement)
+
+
+def test_0032_grants_select_to_dashboard_only() -> None:
+    """/admin の回答評価の集計（teamagent_dashboard）に SELECT だけを付ける。"""
+    sql = MIG_0032.read_text(encoding="utf-8")
+    executable = _without_line_comments(sql)
+
+    assert "-- 0032:" in sql
+    statements = [stmt.strip() for stmt in executable.split(";") if stmt.strip()]
+    assert statements == ["GRANT SELECT ON search_feedback TO teamagent_dashboard"]
+    # ロールバック手順を残す
+    assert "REVOKE SELECT ON search_feedback FROM teamagent_dashboard;" in sql
+
+
+def test_no_migration_grants_dashboard_mutation_on_search_feedback() -> None:
+    """管理画面ロールは read-only（INSERT/UPDATE/DELETE/ALL を search_feedback に付けない）。"""
+    pattern = re.compile(
+        r"\bGRANT\s+(?=[^;]*\b(?:ALL(?:\s+PRIVILEGES)?|INSERT|UPDATE|DELETE|TRUNCATE)\b)[^;]*"
+        r"\bON\s+search_feedback\b[^;]*\bTO\s+teamagent_dashboard\b",
+        re.IGNORECASE,
+    )
+    offenders = [
+        path.name
+        for path in sorted(MIGRATIONS_DIR.glob("[0-9][0-9][0-9][0-9]_*.sql"))
+        if pattern.search(_without_line_comments(path.read_text(encoding="utf-8")))
+    ]
+    assert offenders == []
+    assert pattern.search("GRANT INSERT ON search_feedback TO teamagent_dashboard;")
