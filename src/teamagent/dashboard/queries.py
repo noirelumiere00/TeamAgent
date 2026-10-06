@@ -433,7 +433,7 @@ def answer_feedback_summary(conn: Any, days: int = 30, *, limit: int = 50) -> di
         SELECT COUNT(*) FILTER (WHERE rating = 1) AS up,
                COUNT(*) FILTER (WHERE rating = -1) AS down
         FROM latest
-        """,
+        """,  # nosec B608  # 連結するのは定数の CTE だけ・days は placeholder（下で bind）
         params,
     )
     downs = _select_conn(
@@ -445,7 +445,7 @@ def answer_feedback_summary(conn: Any, days: int = 30, *, limit: int = 50) -> di
         WHERE rating = -1
         ORDER BY created_at DESC
         LIMIT %(limit)s
-        """,
+        """,  # nosec B608  # 連結するのは定数の CTE だけ・days/limit は placeholder（下で bind）
         params,
     )
     head = counts[0] if counts else {}
