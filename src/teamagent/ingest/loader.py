@@ -34,6 +34,10 @@ class SlackChannelSpec:
     oldest_days: int | None = 90
     extra_acl_emails: tuple[str, ...] = ()
     extra_metadata: dict[str, Any] = field(default_factory=dict)
+    # 1 回の取り込みで読む履歴のページ数（1 ページ＝最新 100 件）。既定 1＝今と同じ。
+    # 2 以上なら oldest_days より新しい投稿だけを、ページを辿って最大この数まで読む
+    # （差分取り込み INGEST_DIFFERENTIAL があるので、2 回目以降は変わった投稿だけを処理する）。
+    history_pages: int = 1
 
 
 @dataclass(frozen=True)
@@ -336,9 +340,26 @@ def _parse_slack_channels(
                 oldest_days=item.get("oldest_days") if item.get("oldest_days") is not None else 90,
                 extra_acl_emails=tuple(item.get("extra_acl_emails", []) or ()),
                 extra_metadata=dict(item.get("extra_metadata", {}) or {}),
+                history_pages=_history_pages(item.get("history_pages", 1), channel_id),
             )
         )
     return tuple(out)
+
+
+#: 1 チャンネルで読むページ数の上限（100 件 × 20 = 2,000 件）。取り込み 1 回の時間と費用の安全弁。
+MAX_HISTORY_PAGES = 20
+
+
+def _history_pages(raw: Any, channel_id: str) -> int:
+    try:
+        pages = int(raw)
+    except (TypeError, ValueError):
+        raise ValueError(f"history_pages が不正: {raw!r}（channel {channel_id}）") from None
+    if not 1 <= pages <= MAX_HISTORY_PAGES:
+        raise ValueError(
+            f"history_pages は 1〜{MAX_HISTORY_PAGES}（channel {channel_id}: {pages}）"
+        )
+    return pages
 
 
 def _parse_gdrive_folders(
