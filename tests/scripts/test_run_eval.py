@@ -204,3 +204,22 @@ def test_append_partial_is_crash_safe_each_line_independent(tmp_path: Path) -> N
     assert len(lines) == 5
     parsed = [json.loads(line) for line in lines]
     assert [p["case_id"] for p in parsed] == [1, 2, 3, 4, 5]
+
+
+def test_said_not_found_counts_as_a_correct_negative_and_flags_false_negatives() -> None:
+    """search が近いものを残したまま「該当なし」と言い切る（10-06 not_found）を正しく数える。
+
+    旧集計は hits が空のときだけ正解にしていたので、言い切りの改善が数字に出なかった。
+    """
+    hit = [{"chunk_id": 1}]
+    results = [
+        run_eval.CaseResult(
+            case_id=1, query="無い", expect_zero=True, actual_top_hits=hit, said_not_found=True
+        ),
+        run_eval.CaseResult(case_id=2, query="無い", expect_zero=True, actual_top_hits=hit),
+        run_eval.CaseResult(case_id=3, query="有る", top5_hit=True, actual_top_hits=hit),
+        run_eval.CaseResult(case_id=4, query="有る", actual_top_hits=hit, said_not_found=True),
+    ]
+    summary = run_eval._summarize(results, "t", {})
+    assert (summary.zero_hit_correct, summary.zero_hit_total) == (1, 2)
+    assert summary.false_not_found == 1

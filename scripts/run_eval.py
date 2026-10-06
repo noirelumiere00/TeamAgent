@@ -55,6 +55,9 @@ class CaseResult:
     mrr: float = 0.0
     expected_rank: int | None = None  # 1-based、見つからなければ None
     actual_top_hits: list[dict[str, Any]] = field(default_factory=list)  # debug 用
+    # search が「金庫に該当なし」と言い切ったか（out.found is False・10-06 の not_found）。
+    # 近いものを hits に残したまま言い切るので、hits の空だけでは「黙る能力」を測れない。
+    said_not_found: bool = False
     cost_usd: float = 0.0
     latency_ms: int = 0
     error: str | None = None
@@ -76,6 +79,8 @@ class EvalSummary:
     zero_hit_correct: int  # ネガティブケースの正解数
     zero_hit_total: int
     per_case: list[CaseResult]
+    # 正例なのに「該当なし」と言い切った件数（not_found の取りこぼし＝偽の「無い」）。
+    false_not_found: int = 0
 
 
 def _load_gold_set() -> list[dict[str, Any]]:
@@ -153,11 +158,13 @@ def _evaluate_case(skill: Any, ctx_cls: Any, case: dict[str, Any]) -> CaseResult
         for h in out.hits[:5]
     ]
 
-    # ネガティブケース: 0 ヒットが正解
+    result.said_not_found = getattr(out, "found", True) is False
+    # ネガティブケース: 0 ヒット、または「該当なし」と言い切ったら正解
     if expect_zero:
-        result.top1_hit = len(out.hits) == 0
-        result.top5_hit = len(out.hits) == 0
-        result.mrr = 1.0 if len(out.hits) == 0 else 0.0
+        silent = len(out.hits) == 0 or result.said_not_found
+        result.top1_hit = silent
+        result.top5_hit = silent
+        result.mrr = 1.0 if silent else 0.0
         return result
 
     # 通常ケース: 期待 chunk が top-5 に居るか
@@ -206,7 +213,10 @@ def _summarize(results: list[CaseResult], label: str, config: dict[str, Any]) ->
     #   (b) 単に検索ミスしたポジティブケースが分母に混入
     # して 0/0 を満点と誤読していた (QW-3)。expect_zero を母数に据えて根治する。
     zero_total = sum(1 for r in results if r.expect_zero)
-    zero_correct = sum(1 for r in results if r.expect_zero and not r.actual_top_hits)
+    zero_correct = sum(
+        1 for r in results if r.expect_zero and (not r.actual_top_hits or r.said_not_found)
+    )
+    false_not_found = sum(1 for r in results if not r.expect_zero and r.said_not_found)
 
     return EvalSummary(
         label=label,
@@ -221,6 +231,7 @@ def _summarize(results: list[CaseResult], label: str, config: dict[str, Any]) ->
         zero_hit_correct=zero_correct,
         zero_hit_total=zero_total,
         per_case=results,
+        false_not_found=false_not_found,
     )
 
 
@@ -238,6 +249,7 @@ def _print_summary(s: EvalSummary) -> None:
     print(f"mean cost / query:  ${s.mean_cost_usd:.4f}")
     print(f"mean latency / q:   {s.mean_latency_ms:.0f} ms")
     print(f"zero-hit handling:  {s.zero_hit_correct}/{s.zero_hit_total} correct")
+    print(f"false not-found:    {s.false_not_found} positive cases said 該当なし")
     print("=" * 60)
     # 詳細 (失敗ケースのみ)
     failed = [r for r in s.per_case if not r.top5_hit]
