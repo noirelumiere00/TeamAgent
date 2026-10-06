@@ -1054,7 +1054,7 @@ def test_tiktok_job_retries_once_inside_the_same_fenced_attempt(
         assert isinstance(workdir, Path)
         calls.append(workdir)
         if len(calls) == 1:
-            raise MediaOperationError("RATELIMITED", "retryable fetch failure")
+            raise TimeoutError("transient fetch timeout")  # 一時的な通信の失敗だけやり直す
         return _successful_operation(*args, **kwargs)
 
     monkeypatch.setattr("teamagent.media.worker.execute_operation", transient)

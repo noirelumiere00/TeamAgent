@@ -28,6 +28,7 @@ _monotonic: Callable[[], float] = time.monotonic
 _active: dict[str, tuple[str, str, Origin, str]] = {}
 _lock = threading.Lock()
 _OUTBOX_KEY = "dedup_long_job_outbox"
+_CREATED_AT_KEY = "_long_job_created_at"
 _recovery_stop = threading.Event()
 _recovery_started = False
 
@@ -120,17 +121,21 @@ def schedule_completion_notice(
             or media_audit_principal_hash(
                 ctx.metadata.get("user_email") or ctx.user_id or "unknown"
             ),
+            # 再開しても最初の受付時刻を引き継ぐ（再開のたびに期限が延びないように）。
+            "created_at": float(ctx.metadata.get(_CREATED_AT_KEY) or time.time()),
             "updated_at": time.time(),
         }
         try:
-            _change_outbox(lambda entries: {**entries, key: entry})
+            _change_outbox(lambda entries: {**_drop_expired(entries), key: entry})
         except Exception as exc:
-            with _lock:
-                _active.pop(key, None)
+            # 台帳に書けなくても依頼そのものは落とさない。見張りはこのプロセスで続け、
+            # 再起動後の再開だけを諦める（ジョブの受付を通知の都合で失敗させない）。
+            ctx = None
             logger.warning(
                 "long_job_outbox_write_failed", request_id=request_id, error=type(exc).__name__
             )
-            raise
+
+    outbox_key = key if ctx is not None else None
 
     def run() -> None:
         try:
@@ -139,11 +144,15 @@ def schedule_completion_notice(
                 origin=origin,
                 request_id=request_id,
                 poll=poll,
-                outbox_key=key if ctx is not None else None,
+                outbox_key=outbox_key,
             )
         finally:
             with _lock:
                 _active.pop(key, None)
+            # 更新での停止（cancelled）だけは行を残し、次のプロセスが見張りを再開する。
+            # それ以外の終わり方（完了・失敗・24 時間の見守り切れ・例外）では行を消す。
+            if outbox_key and not origin.cancelled:
+                _remove_from_outbox(outbox_key, request_id)
 
     try:
         threading.Thread(target=run, name="long-job-notify", daemon=True).start()
@@ -194,17 +203,6 @@ def _run_completion_notice(
                     job_id=job_id,
                     completed=status == "done",
                 )
-                if outbox_key:
-                    try:
-                        _change_outbox(
-                            lambda entries: {k: v for k, v in entries.items() if k != outbox_key}
-                        )
-                    except Exception as exc:
-                        logger.warning(
-                            "long_job_outbox_cleanup_failed",
-                            request_id=request_id,
-                            error=type(exc).__name__,
-                        )
                 return
         if _monotonic() - started >= _TIMEOUT_SECONDS:
             message = (
@@ -254,7 +252,7 @@ async def notify_interrupted(*, budget_s: float) -> int:
         _, job_id, target, request_id = job
         await asyncio.to_thread(
             publish_notice,
-            "システム更新で結果の自動配信が中断されました。完了は確認できていません。",
+            "システム更新のため結果の確認をいったん止めました。更新後に確認を再開し、結果はこの会話にお届けします。",
             origin=target,
             request_id=request_id,
             job_id=job_id,
@@ -267,6 +265,25 @@ async def notify_interrupted(*, budget_s: float) -> int:
     except TimeoutError:
         logger.warning("long_job_interrupt_budget_exceeded", count=len(jobs))
     return len(jobs)
+
+
+def _remove_from_outbox(outbox_key: str, request_id: str) -> None:
+    try:
+        _change_outbox(lambda entries: {k: v for k, v in entries.items() if k != outbox_key})
+    except Exception as exc:
+        logger.warning(
+            "long_job_outbox_cleanup_failed", request_id=request_id, error=type(exc).__name__
+        )
+
+
+def _drop_expired(entries: dict[str, Any]) -> dict[str, Any]:
+    """見守りの上限（24 時間）を過ぎた行を捨てる。行が溜まって台帳が満杯になるのを防ぐ。"""
+    limit = time.time() - _MAX_WATCH_SECONDS - 2 * 60 * 60
+    return {
+        k: v
+        for k, v in entries.items()
+        if float(v.get("created_at", v.get("updated_at", 0.0))) >= limit
+    }
 
 
 def _read_outbox(store: ProposalJobStore) -> tuple[str | None, dict[str, Any]]:
@@ -299,6 +316,12 @@ def recover_pending_notices() -> int:
     from teamagent.skills.base import ASYNC_JOB_POLL_METADATA_KEY
 
     _, entries = _read_outbox(ProposalJobStore())
+    if len(_drop_expired(entries)) != len(entries):
+        try:
+            _change_outbox(_drop_expired)
+        except Exception as exc:
+            logger.warning("long_job_outbox_expire_failed", error=type(exc).__name__)
+        entries = _drop_expired(entries)
     resumed = 0
     for key, entry in entries.items():
         with _lock:
@@ -322,6 +345,7 @@ def recover_pending_notices() -> int:
                 _OWNER_KEY: entry["owner"],
                 "channel_id": entry["channel_id"],
                 "_long_job_principal_hash": entry["principal"],
+                _CREATED_AT_KEY: entry.get("created_at", entry["updated_at"]),
                 ASYNC_JOB_POLL_METADATA_KEY: True,
             },
         )

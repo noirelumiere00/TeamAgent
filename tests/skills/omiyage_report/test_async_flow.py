@@ -509,7 +509,7 @@ def test_result_is_saved_before_the_single_completion_delivery(
     assert delivered.slack_delivered and "この会話へ添付しました" in delivered.result_message
 
 
-def test_build_failure_retries_once_and_notifies_without_diagnostic_codes(
+def test_deterministic_build_failure_is_not_retried_and_notifies_without_codes(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("USE_LONG_JOB_NOTIFY", "1")
@@ -537,7 +537,7 @@ def test_build_failure_retries_once_and_notifies_without_diagnostic_codes(
     )
     accepted = skill.run(_input(), context)
     assert launcher.finished.wait(timeout=10)
-    assert len(calls) == 2 and calls[0] == calls[1]
+    assert len(calls) == 1  # 書体に無い字はやり直しても同じ（一時的な通信の失敗ではない）
     status = OmiyageReportStatusSkill(store=store)
     import teamagent.skills.omiyage_report.skill as module
 

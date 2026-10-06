@@ -225,6 +225,27 @@ def test_retry_is_exactly_once_and_flag_can_disable_it(monkeypatch: pytest.Monke
     assert len(calls) == 1
 
 
+@pytest.mark.parametrize(
+    "error",
+    [RuntimeError("apify run failed"), ValueError("bad input"), PermissionError("budget")],
+)
+def test_retry_skips_non_transient_failures_so_paid_calls_are_not_doubled(
+    error: Exception,
+) -> None:
+    """取得 API・生成・予算の失敗はやり直さない（同じ結果で課金だけ 2 倍になる）。"""
+    from teamagent.adapters.retry import retry_long_job_once
+
+    calls: list[int] = []
+
+    def action() -> int:
+        calls.append(1)
+        raise error
+
+    with pytest.raises(type(error)):
+        retry_long_job_once(action)
+    assert len(calls) == 1
+
+
 def test_automatic_video_detach_uses_verified_claim_and_can_be_disabled(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -253,7 +274,7 @@ async def test_shutdown_notifies_the_monitor_interruption_once(
     await notify.notify_interrupted(budget_s=1)
     assert len(notices) == 1
     assert origin.cancelled
-    assert "自動配信が中断" in notices[0]["text"]
+    assert "確認を再開" in notices[0]["text"]  # 更新後は台帳から見張りを再開する
     assert "作業が中断" not in notices[0]["text"]
 
 
@@ -427,6 +448,7 @@ def test_restart_recovers_pending_notice_from_existing_store(
         "request_id": "req-recover",
         "owner": "verified-owner",
         "principal": "a" * 64,
+        "created_at": notify.time.time() - 600,
         "updated_at": 0,
     }
     notify._change_outbox(lambda entries: {entry["key"]: entry})
@@ -444,6 +466,143 @@ def test_restart_does_not_take_over_a_fresh_monitor(
     monkeypatch.setattr(notify.time, "time", lambda: 1000)
     notify._change_outbox(lambda entries: {"fresh": {"updated_at": 999}})
     assert notify.recover_pending_notices() == 0 and notices == []
+
+
+def _outbox() -> dict[str, Any]:
+    _, entries = notify._read_outbox(notify.ProposalJobStore())
+    return entries
+
+
+def _inline_threads(monkeypatch: pytest.MonkeyPatch) -> None:
+    class Thread:
+        def __init__(self, *, target: Any, **kwargs: Any) -> None:
+            self.target = target
+
+        def start(self) -> None:
+            self.target()
+
+    monkeypatch.setattr(notify.threading, "Thread", Thread)
+    monkeypatch.setattr(notify, "_INITIAL_DELAY_SECONDS", 0)
+
+
+def test_outbox_write_failure_does_not_fail_the_job_request(
+    notices: list[dict[str, Any]], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """台帳に書けなくても受付は落とさず、このプロセスの見張りで結果は届く。"""
+    _inline_threads(monkeypatch)
+
+    def broken(_change: Any) -> None:
+        raise RuntimeError("notification outbox contention")
+
+    monkeypatch.setattr(notify, "_change_outbox", broken)
+    notify.schedule_completion_notice(
+        tool="tiktok_acquire",
+        job_id="tk_1",
+        origin=target(),
+        request_id="req-1",
+        poll=lambda: ("done", "結果 https://example.test/r"),
+        ctx=ctx(),
+    )
+    assert len(notices) == 1 and "結果" in notices[0]["text"]
+
+
+def test_finished_watch_is_removed_from_outbox_but_shutdown_keeps_it(
+    notices: list[dict[str, Any]], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """完了・24 時間の見守り切れでは行を消す。更新での停止（cancelled）だけは残して再開に回す。"""
+    _inline_threads(monkeypatch)
+    notify.schedule_completion_notice(
+        tool="tiktok_acquire",
+        job_id="tk_done",
+        origin=target(),
+        request_id="req-done",
+        poll=lambda: ("done", "結果"),
+        ctx=ctx(),
+    )
+    assert _outbox() == {}
+
+    clock = [0.0]
+    monkeypatch.setattr(notify, "_monotonic", lambda: clock[0])
+    monkeypatch.setattr(notify, "_MAX_WATCH_SECONDS", 60)
+
+    def advance(_deadline: float, interval: float) -> None:
+        clock[0] += interval
+
+    monkeypatch.setattr(notify, "_wait_until_next_poll", advance)
+    notify.schedule_completion_notice(
+        tool="tiktok_acquire",
+        job_id="tk_slow",
+        origin=target(),
+        request_id="req-slow",
+        poll=lambda: ("running", ""),
+        ctx=ctx(),
+    )
+    assert _outbox() == {}
+
+    cancelled = target()
+    cancelled.cancelled = True
+    notify.schedule_completion_notice(
+        tool="tiktok_acquire",
+        job_id="tk_cut",
+        origin=cancelled,
+        request_id="req-cut",
+        poll=lambda: ("running", ""),
+        ctx=ctx(),
+    )
+    assert list(_outbox()) == ["tiktok_acquire:tk_cut:D12345678:111.222"]
+
+
+def test_expired_outbox_rows_are_dropped_and_not_resumed(
+    notices: list[dict[str, Any]], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """見守りの上限を過ぎた行は再開せず台帳から消す（溜まって満杯にならない）。"""
+    built: list[str] = []
+    monkeypatch.setattr(
+        server, "_build_async_job_poll", lambda tool, job_id, context: built.append(job_id)
+    )
+    old = notify.time.time() - notify._MAX_WATCH_SECONDS - 3 * 60 * 60
+    notify._change_outbox(
+        lambda entries: {"stale": {"tool": "tiktok_acquire", "created_at": old, "updated_at": old}}
+    )
+    assert notify.recover_pending_notices() == 0
+    assert built == [] and notices == [] and _outbox() == {}
+
+
+def test_recovery_keeps_the_original_created_at(
+    notices: list[dict[str, Any]], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """再開のたびに期限が延びない（最初の受付時刻を引き継ぐ）。"""
+    monkeypatch.setattr(server, "_build_async_job_poll", lambda *a: lambda: ("running", ""))
+
+    class Thread:
+        def __init__(self, **kwargs: Any) -> None:
+            pass
+
+        def start(self) -> None:  # 見張りは走らせない（台帳の行だけを見る）
+            pass
+
+    monkeypatch.setattr(notify.threading, "Thread", Thread)
+    created = notify.time.time() - 3600
+    key = "tiktok_acquire:tk_r:D12345678:123.456"
+    notify._change_outbox(
+        lambda entries: {
+            key: {
+                "key": key,
+                "tool": "tiktok_acquire",
+                "job_id": "tk_r",
+                "channel_id": "D12345678",
+                "thread_ts": "123.456",
+                "user_id": "U12345678",
+                "request_id": "req-r",
+                "owner": "verified-owner",
+                "principal": "a" * 64,
+                "created_at": created,
+                "updated_at": 0,
+            }
+        }
+    )
+    assert notify.recover_pending_notices() == 1
+    assert _outbox()[key]["created_at"] == pytest.approx(created)
 
 
 def test_video_still_question_uses_owner_and_keeps_older_owned_jobs_visible(
