@@ -18,6 +18,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from io import BytesIO
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 from teamagent.adapters.media_job import MediaJobClient
@@ -227,6 +228,14 @@ class _Slack:
     events: list[str] = field(default_factory=list)
     fail_all: bool = False
     uploads: list[dict[str, Any]] = field(default_factory=list)
+    posts: list[dict[str, Any]] = field(default_factory=list)
+
+    async def post_message(
+        self, channel: str, text: str, request_id: str, thread_ts: str | None = None
+    ) -> Any:
+        self.events.append("post")
+        self.posts.append({"channel": channel, "text": text, "thread_ts": thread_ts})
+        return SimpleNamespace(channel=channel, ts="1.0", ok=not self.fail_all)
 
     async def upload_file(
         self,
@@ -455,8 +464,10 @@ def test_deck_build_failure_marks_job_failed_without_delivery() -> None:
     )
     assert failed.status == "failed"
     assert failed.error_code == "OMIYAGE_BUILD_FAILED"
-    assert "再依頼" in failed.message  # 黙って消えない（選択肢の提示）
+    assert failed.message.startswith("お土産資料は作成に失敗しました")  # 失敗を先に言う
+    assert "もう一度作る場合" in failed.message  # 黙って消えない（次の一手の提示）
     assert slack.uploads == []  # 失敗時に中途半端なファイルを配らない
+    assert [p["text"] for p in slack.posts] == [":warning: " + failed.message]  # 自分から知らせる
 
 
 def test_total_delivery_failure_is_done_with_disclosure() -> None:

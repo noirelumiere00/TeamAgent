@@ -28,6 +28,8 @@ from typing import Any
 
 import structlog
 
+from teamagent.util.grapheme_cut import truncate_graphemes
+
 logger = structlog.get_logger(__name__)
 
 _JST = _dt.timezone(_dt.timedelta(hours=9))
@@ -104,8 +106,10 @@ class SchedulerClient:
             pass
         payload: dict[str, Any] = {"v": 1, "channel": channel, "start_hm": start_hm, "url": url}
         short_title = (title or "").strip().replace("\n", " ")
+        # title / loc は本人 DM にそのまま出るので、絵文字（🇯🇵・ZWJ 連結など）の途中では
+        # 切らない（片割れが残る）。Lambda 側の 60 字切りは、ここで収めてあれば効かない。
         if short_title:
-            payload["title"] = short_title[:60]
+            payload["title"] = truncate_graphemes(short_title, 60)
         end_hm = ""
         try:
             if end_iso:
@@ -119,7 +123,7 @@ class SchedulerClient:
             payload["end_hm"] = end_hm
         short_loc = (location or "").strip().replace("\n", " ")
         if short_loc:
-            payload["loc"] = short_loc[:60]
+            payload["loc"] = truncate_graphemes(short_loc, 60)
         started = time.perf_counter()
         try:
             self._ensure_client().create_schedule(

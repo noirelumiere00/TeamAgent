@@ -40,6 +40,7 @@ from teamagent.adapters.gmail_client import (
 )
 from teamagent.adapters.oauth_token_store import TokenStore
 from teamagent.observability import scrub_value
+from teamagent.skills._shared.grapheme_cut import truncate_graphemes
 from teamagent.skills._shared.mail_compose import (
     build_cc,
     build_thread_history,
@@ -120,6 +121,11 @@ _CALENDAR_MAX_RESULTS_LEGACY = 20
 #: Provider 側は max_thread_checks で構造的に有界だが、下流は全件を舐める
 #: （生 ID 掃除・triage）ので、上限は受け取り側でも明示しておく。
 _SLACK_UNREAD_MAX_ITEMS = 25
+
+#: Slack 返信漏れの本文（excerpt_display）の上限字数。
+#: ⚠️ schema.SlackUnreadItem.excerpt_display の max_length と対。片方だけ動かすと
+#: pydantic ValidationError で digest が落ちる。
+_SLACK_EXCERPT_MAX = 1500
 
 #: 「☑️ 全部確認した」1 トークンに載せる項目数の上限。
 #: Slack の button `value` は 2000 バイト上限で、ack_token 側にも 1900 バイトの
@@ -321,6 +327,23 @@ class MorningDigestSkill(BaseSkill[MorningDigestInput, MorningDigestOutput]):
         self._internal_domain = (
             env_str("DIGEST_INTERNAL_DOMAIN", "vectorinc.co.jp").strip().lower().lstrip("@")
         )
+        # 朝の自動下書きから「社内だけのやり取り」を外す（2026-10-01・BU1 ヒアリング
+        # 「社内向けのメールへの返信は不要では？」「自分で下書き管理しているのとバッティング」）。
+        # 外すのは朝の自動生成だけで、一覧の「✏️ 下書きを作成」ボタンは残す（押せば作れる）。
+        # 社内だけ＝最新メッセージの From/To/Cc のうち本人以外が全員、社内ドメインのとき。
+        # 社外の人が 1 人でも入っていれば（顧客スレッドに同僚が全員返信した等）従来どおり作る。
+        # 既定 ON。env MORNING_DIGEST_DRAFT_SKIP_INTERNAL=false で従来挙動に戻せる。
+        self._draft_skip_internal = env_bool("MORNING_DIGEST_DRAFT_SKIP_INTERNAL", True)
+        # 社内とみなすドメイン（カンマ区切り）。グループ会社（NewsTV）も同じ Slack で案件を
+        # 動かしているので既定に含める。表示ラベル用の DIGEST_INTERNAL_DOMAIN（単一）とは別。
+        self._draft_internal_domains = frozenset(
+            d.strip().lower().lstrip("@")
+            for d in env_str(
+                "MORNING_DIGEST_DRAFT_INTERNAL_DOMAINS",
+                f"{self._internal_domain},newstv.co.jp" if self._internal_domain else "",
+            ).split(",")
+            if d.strip()
+        )
         # 冪等性: 既存下書きのあるスレッドへの二重作成を防ぐ（毎日運用で必須）。
         self._dedupe_drafts = env_bool("MORNING_DIGEST_DEDUPE_DRAFTS", True)
         # オンデマンド下書き: True なら朝は生成せず、要返信メールのボタン押下で生成する。
@@ -481,6 +504,7 @@ class MorningDigestSkill(BaseSkill[MorningDigestInput, MorningDigestOutput]):
         else:
             out.draft_mode = "auto"
             out.draft_limit = input.max_drafts
+            out.draft_skip_internal = self._draft_skip_internal
         try:
             if self._draft_on_demand_only:
                 self._mark_existing_drafts(token, raw_msgs, out.mail_digest, ctx)
@@ -697,7 +721,8 @@ class MorningDigestSkill(BaseSkill[MorningDigestInput, MorningDigestOutput]):
                     to_self=addressed,  # To に本人がいる＝要返信(下書き)対象
                     # 表示専用（本人 DM のみ・未マスク・PII・ログ厳禁）
                     counterpart_display=_display_counterpart(anchor.headers, requester),
-                    subject_display=str(anchor.headers.get("Subject", ""))[:160],
+                    # 表示用の切り詰めは絵文字（🇯🇵・ZWJ 連結など）を割らない（片割れが DM に残る）。
+                    subject_display=truncate_graphemes(str(anchor.headers.get("Subject", "")), 160),
                     # ボタン用：生 thread_id は出さず HMAC 署名トークン化（G3）。To 自分宛のみ発行。
                     draft_token=draft_action_token,
                     ack_token=ack_action_token,
@@ -728,11 +753,12 @@ class MorningDigestSkill(BaseSkill[MorningDigestInput, MorningDigestOutput]):
                 if idx < len(triaged):
                     t = triaged[idx]
                     item.importance = t.get("importance", "medium")
-                    item.summary = str(t.get("summary", ""))[:200]
+                    # 以下 4 つは LLM の出力だが DM にそのまま出る（件名の絵文字を写すことがある）。
+                    item.summary = truncate_graphemes(str(t.get("summary", "")), 200)
                     dl = t.get("deadline")
-                    item.deadline = str(dl)[:80] if dl else None
-                    item.ask = str(t.get("ask", ""))[:120]
-                    item.next_step = str(t.get("next_step", ""))[:120]
+                    item.deadline = truncate_graphemes(str(dl), 80) if dl else None
+                    item.ask = truncate_graphemes(str(t.get("ask", "")), 120)
+                    item.next_step = truncate_graphemes(str(t.get("next_step", "")), 120)
                     # v0.3 Task3/4: 確定MTG・日程打診の抽出（フラットキー＝打ち切り救済と互換）。
                     start_iso = _meeting_iso(t.get("meeting_start"))
                     end_iso = _meeting_iso(t.get("meeting_end"))
@@ -752,7 +778,11 @@ class MorningDigestSkill(BaseSkill[MorningDigestInput, MorningDigestOutput]):
                     if start_iso:
                         item.meeting_start = start_iso
                         item.meeting_end = end_iso or _plus_hour(start_iso)
-                        item.meeting_title = str(t.get("meeting_title") or "")[:60]
+                        # 60 字で切るときに絵文字（🇯🇵・ZWJ で繋いだ家族など）を割らない
+                        # （割れた片割れが 📅 で作る予定の件名に残るため）。
+                        item.meeting_title = truncate_graphemes(
+                            str(t.get("meeting_title") or ""), 60
+                        )
                         # 📅ボタン用トークン（To 本人のみ・LLM 由来の日時は encode 前に検証済み）。
                         if item.to_self and mail_action_hmac_ready:
                             try:
@@ -760,7 +790,8 @@ class MorningDigestSkill(BaseSkill[MorningDigestInput, MorningDigestOutput]):
                                     encode_event_token(
                                         start_iso=item.meeting_start,
                                         end_iso=item.meeting_end,
-                                        title=item.meeting_title or item.subject_display[:60],
+                                        title=item.meeting_title
+                                        or truncate_graphemes(item.subject_display, 60),
                                         owner_email=requester,
                                     )
                                     or ""
@@ -944,13 +975,19 @@ class MorningDigestSkill(BaseSkill[MorningDigestInput, MorningDigestOutput]):
                 CalendarEventItem(
                     summary_scrubbed=str(scrub_value(getattr(ev, "summary", "")))[:80],
                     # 本人 DM 表示用の実名（未マスク）。runner が DM にだけ描画しログには出さない。
-                    summary_display=str(getattr(ev, "summary", "") or "")[:120],
+                    # 表示用は絵文字を割らずに切る（location_display も同じ）。
+                    summary_display=truncate_graphemes(str(getattr(ev, "summary", "") or ""), 120),
                     start_at=start_at,
                     end_at=end_at,
                     all_day=all_day,
                     location_scrubbed=str(scrub_value(getattr(ev, "location", "") or ""))[:80],
-                    location_display=str(getattr(ev, "location", "") or "")[:120],
+                    location_display=truncate_graphemes(
+                        str(getattr(ev, "location", "") or ""), 120
+                    ),
                     meeting_url=str(getattr(ev, "meeting_url", "") or "")[:600],
+                    personal_block=_calwin.is_personal_block(
+                        getattr(ev, "attendees", None), getattr(ev, "meeting_url", "")
+                    ),
                     attendee_domains=list(sig.attendee_domains)[:10],
                     attendee_list_available=sig.attendee_list_available,
                     # ⚠️ 判定用の予定名も **派生値として写す**（display から作り直さない）。
@@ -1064,16 +1101,21 @@ class MorningDigestSkill(BaseSkill[MorningDigestInput, MorningDigestOutput]):
                     channel_name_masked=str(scrub_value(m.channel_name))[:40],
                     excerpt_scrubbed=_strip_sentinels(str(scrub_value(m.text))[:120]),
                     # display はマスク無し（本人 DM 専用・G3/G7: ログには絶対に出さない）。
-                    channel_name_display=str(m.channel_name)[:80],
-                    # ⚠️ 1500 は schema.SlackUnreadItem.excerpt_display の max_length と対。
-                    # 片方だけ動かすと pydantic ValidationError で digest が落ちる。
-                    excerpt_display=str(m.text)[:1500],
+                    # display の 3 つは絵文字を割らずに切る（片割れが DM に残るため）。
+                    channel_name_display=truncate_graphemes(str(m.channel_name), 80),
+                    # ⚠️ _SLACK_EXCERPT_MAX は schema の max_length と対（定数の注記を参照）。
+                    excerpt_display=truncate_graphemes(str(m.text), _SLACK_EXCERPT_MAX),
+                    # 切ったかどうかは長さでなく元の本文から決める（絵文字を丸ごと落とすと
+                    # 上限に届かず、描画側の長さからの推定では「切れていない」に見える）。
+                    body_truncated=len(str(m.text)) > _SLACK_EXCERPT_MAX,
                     permalink=m.permalink or None,
                     occurred_at=m.occurred_at or None,
                     channel_id=str(m.channel_id or "")[:32],
                     channel_kind=m.channel_kind,
                     from_user_id=(str(m.user)[:32] if m.user else None),
-                    from_display_name=(str(m.user_display)[:80] if m.user_display else None),
+                    from_display_name=(
+                        truncate_graphemes(str(m.user_display), 80) if m.user_display else None
+                    ),
                     thread_message_count=m.thread_message_count,
                     thread_participant_ids=[str(u)[:32] for u in m.thread_participant_ids],
                     thread_last_user_id=(
@@ -1113,6 +1155,7 @@ class MorningDigestSkill(BaseSkill[MorningDigestInput, MorningDigestOutput]):
         # 作成数が max_drafts に満たない取りこぼしになる。候補は全部集める
         # （全体は digest 規模＝max_threads で有界）。
         targets: list[tuple[int, Any]] = []
+        skipped_internal = 0
         for i, item in enumerate(digest_items):
             if item.importance not in self._draft_importances:
                 continue
@@ -1123,9 +1166,23 @@ class MorningDigestSkill(BaseSkill[MorningDigestInput, MorningDigestOutput]):
                 continue
             if i >= len(raw_msgs):
                 continue
-            if not _is_addressed_to(getattr(raw_msgs[i], "headers", {}) or {}, requester):
+            headers = getattr(raw_msgs[i], "headers", {}) or {}
+            if not _is_addressed_to(headers, requester):
+                continue
+            if self._draft_skip_internal and _is_internal_only(
+                headers, requester, self._draft_internal_domains
+            ):
+                # 社内だけのやり取りは朝の自動下書きを作らない（ボタン押下での作成は従来どおり可）。
+                skipped_internal += 1
                 continue
             targets.append((i, raw_msgs[i]))
+        if skipped_internal:
+            logger.info(
+                "morning_digest_auto_draft_skipped_internal",
+                request_id=ctx.request_id,
+                skipped=skipped_internal,
+                targets=len(targets),
+            )
         if not targets:
             return (0, 0.0)
 
@@ -1440,6 +1497,28 @@ def _sender_priority(
             if a.partition("@")[2] == internal_domain:
                 return "internal"
     return "external"
+
+
+def _is_internal_only(
+    headers: dict[str, str], requester: str, internal_domains: frozenset[str]
+) -> bool:
+    """最新メッセージの From/To/Cc のうち、本人以外が全員社内ドメインか。
+
+    社外の人が 1 人でも入っていれば False（顧客スレッドに同僚が全員返信した場合などは、
+    本人が顧客へ返す下書きが要るので外さない）。本人以外が誰もいない・ドメイン未設定も False。
+    ドメインは完全一致（サブドメインは社内扱いしない）。VIP 指定の有無とは独立。
+    """
+    if not internal_domains:
+        return False
+    req = requester.strip().lower()
+    others = [
+        email.strip().lower()
+        for field in ("From", "To", "Cc")
+        if headers.get(field)
+        for email in extract_thread_participants({field: headers[field]})
+        if email.strip().lower() != req
+    ]
+    return bool(others) and all(e.partition("@")[2] in internal_domains for e in others)
 
 
 def _sender_label_ja(priority: str) -> str:

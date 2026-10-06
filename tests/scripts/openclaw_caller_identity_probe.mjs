@@ -373,6 +373,15 @@ const OAUTH_CONNECT_MESSAGE = [
 ].join("\n");
 const SELF_MADE_REPLY =
   "アカウントが未登録のようです。管理者にお問い合わせください。";
+// 上流 openclaw@2026.7.1 の overflow の固定文（context overflow のシナリオと、保証経路の抑止との
+// 優先順位のシナリオの両方で使う）。
+const UPSTREAM_AUTO_COMPACTION_TEXT =
+  "\u26a0\ufe0f Auto-compaction could not recover this turn. I kept this conversation mapped to the current " +
+  "session. Please try again, use /compact, or use /new to start a fresh session." +
+  "\n\nTo prevent this, increase `agents.defaults.compaction.reserveTokensFloor` to 50000 or higher in your config.";
+const UPSTREAM_EMBEDDED_TEXT =
+  "Context overflow: prompt too large for the model. Try /reset (or /new) to start a fresh session, " +
+  "or use a larger-context model.";
 // mcp が新規ユーザー（Slack プロフィールに会社メールが無い）に返す実物の形。
 // 失敗も成功と同じ TextContent の JSON で返り（server.py:442-445,819）、
 // `error` の中身は既に利用者向けに整形済み（skill.py:228-236 /
@@ -1760,6 +1769,8 @@ async function suppressionScenario({
   agentEndBeforeDelivery = true,
   // run を束縛する（before_model_resolve を呼ぶ）。false は束縛失敗の再現。
   bindRun = true,
+  // モデル経路の最終応答の本文。overflow の英文を渡すと「抑止・層3 が案内の差し替えより先」を見る。
+  replyText = SELF_MADE_REPLY,
 } = {}) {
   const plugin = makeGuaranteePlugin({ slackMode });
   const { handlers } = plugin;
@@ -1788,12 +1799,19 @@ async function suppressionScenario({
   );
   if (agentEndBeforeDelivery) await step("agent_end", () => endRun(handlers));
   const delivery = await step("reply_payload_sending", () =>
-    deliverPayload(handlers, { text: SELF_MADE_REPLY }),
+    deliverPayload(
+      handlers,
+      // overflow の英文は上流と同じく isError:true を付ける（従来のシナリオの payload は変えない）。
+      replyText === SELF_MADE_REPLY ? { text: replyText } : { text: replyText, isError: true },
+    ),
   );
   if (!agentEndBeforeDelivery) await step("agent_end", () => endRun(handlers));
   const replyCancelled = delivery?.cancel === true;
   return {
     hookOrder,
+    // 配信された本文（cancel なら null・書き換えが無ければ null＝上流の payload のまま）。
+    deliveredText: delivery?.payload?.text ?? null,
+    overflowReplaced: plugin.logs.some((m) => m.includes("context overflow reply replaced")),
     // 保証経路が Slack へ投稿した通数。
     guaranteePosts: plugin.posts.length,
     // plugin 自身が mcp へ発行した oauth_connect（＝保証・層1 由来の state token 数）。
@@ -1959,6 +1977,15 @@ async function suppressionReport() {
     post_failed: await suppressionScenario({ slackMode: "post_fails" }),
     // ③ 保証経路が未発火（連携依頼ではない）→ モデル経路は一切影響を受けない。
     not_connect_request: await suppressionScenario({ content: "今日の予定を教えて" }),
+    // ④ 保証経路が配信成功した run でモデル経路が overflow した（2026-09-30 反証レビュー指摘 3）。
+    //    抑止（cancel）が overflow の案内への差し替えより先に効き、利用者に届くのは保証の 1 通だけ。
+    delivered_overflow: await suppressionScenario({ replyText: UPSTREAM_AUTO_COMPACTION_TEXT }),
+    // ④' 保証経路が配信失敗した run で overflow → 抑止しない（無言にしない）。英文ではなく
+    //    日本語の案内が 1 通届く。
+    post_failed_overflow: await suppressionScenario({
+      slackMode: "post_fails",
+      replyText: UPSTREAM_AUTO_COMPACTION_TEXT,
+    }),
   };
 }
 
@@ -2678,6 +2705,56 @@ async function deaiCases() {
 }
 const deaiReport = await deaiCases();
 
+// ── context overflow の英語の固定文を日本語の案内へ（2026-09-30） ──────────────────
+// 上流 openclaw@2026.7.1 の実物の文面（agent-runner.runtime-DYRSfwOn.js:1648・:2934 /
+// embedded-agent-CLJk10ON.js:3657）を、上流と同じ payload の形（isError:true・event.kind="final"・
+// DM の sessionKey）で reply_payload_sending に通す。auto_compaction は本番 09-29 に石田さんの DM へ
+// 届いた形（reserveTokensFloor の設定案内つき）。文面は ⚠️（U+26A0 U+FE0F）を escape で書く。
+// UPSTREAM_AUTO_COMPACTION_TEXT / UPSTREAM_EMBEDDED_TEXT は冒頭（SELF_MADE_REPLY の直後）で定義する
+// （保証経路の抑止シナリオ＝suppressionReport が先に評価されるため）。
+async function contextOverflowCases() {
+  const { handlers, logs } = makePlugin();
+  const run = async (name, payload, { unbound = false } = {}) => {
+    const before = logs.length;
+    const result = unbound
+      ? await handlers.get("reply_payload_sending")(
+          { payload, kind: "final", channel: "slack", sessionKey: DM_SESSION_KEY },
+          { channelId: "slack", conversationId: `user:${USER}`, sessionKey: DM_SESSION_KEY },
+        )
+      : await deliverPayload(handlers, payload, { runId: `overflow-${name}` });
+    return {
+      input: payload.text,
+      result: result ?? null,
+      logs: logs.slice(before).filter((m) => m.includes("context overflow reply replaced")),
+    };
+  };
+  return {
+    auto_compaction: await run("auto_compaction", { text: UPSTREAM_AUTO_COMPACTION_TEXT, isError: true }),
+    embedded: await run("embedded", { text: UPSTREAM_EMBEDDED_TEXT, isError: true }),
+    compaction_limit: await run("compaction_limit", {
+      text: "\u26a0\ufe0f Context limit exceeded during compaction. I've reset our conversation to start fresh - please try again.",
+      isError: true,
+    }),
+    context_limit: await run("context_limit", {
+      text: "\u26a0\ufe0f Context limit exceeded. I've reset our conversation to start fresh - please try again.",
+      isError: true,
+    }),
+    run_failure: await run("run_failure", {
+      text: "\u26a0\ufe0f Context overflow \u2014 prompt too large for this model. Try a shorter message or a larger-context model.",
+      isError: true,
+    }),
+    unbound_run: await run("unbound", { text: UPSTREAM_AUTO_COMPACTION_TEXT, isError: true }, { unbound: true }),
+    quoted: await run("quoted", {
+      text: `エラーの意味は ${UPSTREAM_EMBEDDED_TEXT} です。`,
+    }),
+    normal_error: await run("normal_error", {
+      text: "検索に失敗しました。時間をおいてもう一度お試しください。",
+      isError: true,
+    }),
+  };
+}
+const contextOverflowReport = await contextOverflowCases();
+
 const report = {
   // チャンネルの app_mention。run ctx は `c0b0pqd83n2:thread:<ts>`（本番実測）。
   channel_threaded: scenario({
@@ -2987,6 +3064,8 @@ const report = {
   g7: g7Report,
   // ── 送信直前の em ダッシュ / -- 読点化（2026-09-14） ────────────────────────
   deai: deaiReport,
+  // ── context overflow の英語の固定文を日本語の案内へ（2026-09-30） ──────────────
+  context_overflow: contextOverflowReport,
 };
 
 process.stdout.write(JSON.stringify(report, null, 2) + "\n");

@@ -67,6 +67,9 @@ USAGE_SKILL = "search_surface_check_video"
 ENABLED_ENV = "USE_SURFACE_VIDEO_FOLLOWUP"
 ALLOWED_EMAILS_ENV = "SURFACE_VIDEO_FOLLOWUP_ALLOWED_EMAILS"
 MAX_VIDEOS_ENV = "SURFACE_VIDEO_FOLLOWUP_MAX_VIDEOS"
+# 1 通で届ける（全部そろってから・取得の前に確認）。
+# 既定 OFF＝今の 2 段構え（先に検索上位・後で追記）。
+ONE_SHOT_ENV = "SURFACE_VIDEO_ONE_SHOT"
 
 DEFAULT_MAX_VIDEOS = 5
 MIN_MAX_VIDEOS = 1
@@ -106,6 +109,7 @@ class FollowupPolicy:
     enabled: bool = False
     allowed_emails: frozenset[str] = frozenset()
     max_videos: int = DEFAULT_MAX_VIDEOS
+    one_shot: bool = False
 
     @classmethod
     def from_env(cls) -> FollowupPolicy:
@@ -117,6 +121,7 @@ class FollowupPolicy:
                 if e.strip()
             ),
             max_videos=_max_videos_from_env(),
+            one_shot=_truthy(os.environ.get(ONE_SHOT_ENV)),
         )
 
 
@@ -319,6 +324,123 @@ def in_progress_line(*, same_conversation: bool) -> str:
 _QUEUED_SUFFIX = "。混み合っているため、順番待ちのあと始めます"
 
 
+# ── 1 通で届ける（10-05 小俣さん裁定: 検索上位＋全 KW の動画の中身を、全部そろってから 1 通）──
+# 対象（2 段目の対象＝本人確認済みの DM・allowlist）で 2 段目を始められたときだけ、1 段目の結果は
+# その場で出さず、ジョブの完了時に検索上位と動画の中身をまとめて 1 通で投稿する。
+# 始められなかった（混雑・二重・上限 0・終了処理中）ときは今までどおり 1 段目をその場で出す。
+# ジョブが失敗・中断しても検索上位の結果は必ず届ける（動画の中身が無い旨を添える）。
+
+
+def one_shot_wait_text(keyword: str, count: int, *, queued: bool, reused: bool = False) -> str:
+    from teamagent.skills.search_surface_check.confirm import estimate_minutes
+
+    if reused:
+        return (
+            f"検索上位チェック「{keyword}」を作成中です。上位{count}本の動画の中身は 24 時間以内の"
+            "同じ分析を使うので、まもなく検索上位とまとめて 1 通でお届けします"
+            "（動画分析の回数は使いません）。"
+        )
+    return (
+        f"検索上位チェック「{keyword}」を作成中です。検索上位と、上位{count}本の動画の中身"
+        "（フック・テロップ・構成・CTA など）を全部そろえてから、この会話に 1 通でお届けします"
+        f"（目安 約{estimate_minutes(count)}分・動画分析の回数を最大 {count} 本使います）"
+        + (_QUEUED_SUFFIX if queued else "")
+        + "。"
+    )
+
+
+def _defer(output: Any, text: str) -> None:
+    """1 段目の応答を「作成中」の 1 行にする（結果は後で 1 通で出す）。"""
+    output.slack_summary = text
+    output.followup_note = ""
+    output.report_url = None
+    output.deferred = True
+
+
+def one_shot_failed_note(keyword: str) -> str:
+    # 注意書きは 120 字で切られるので短く（後ろに理由が続く）。
+    return f"動画の中身「{keyword}」は分析できず、検索上位だけお届けします"
+
+
+def _plain_reason(detail: str) -> str:
+    """失敗の文から理由の 1 行を取り出す（見出し・概算の行を除き、Markdown の太字を外す）。
+
+    形は 3 つ: failure_text「「KW」上位の動画の中身: 理由」・上限 0（見出し＋理由）・
+    全滅（見出し＋理由＋概算）。
+    """
+    for line in detail.split("\n"):
+        text = line.strip().replace("**", "")
+        if not text or text.startswith("_概算"):
+            continue
+        if "上位の動画の中身: " in text:
+            return text.split("上位の動画の中身: ", 1)[1][:300]
+        if "動画の中身「" in text and text.endswith("TikTok"):
+            continue  # 見出し行
+        return text[:300]
+    return ""
+
+
+def one_shot_interrupted_text(stage1: Any, keyword: str) -> str:
+    """再デプロイの中断文。検索上位の結果は失わずに届ける（動画の中身だけ依頼し直し）。"""
+    return (
+        markdown_bold_to_mrkdwn(str(stage1.slack_summary or ""))
+        + "\n\n"
+        + f"上位の動画の中身「{keyword}」の分析は、システム更新で中断されました。"
+        "動画の中身が必要なら、もう一度依頼してください（動画分析の回数を使い直します）。"
+    )
+
+
+def one_shot_payload(
+    stage1: Any,
+    skill_input: Any,
+    result: Any,
+    error: BaseException | None,
+    *,
+    keyword: str,
+    request_id: str,
+    reused: bool = False,
+) -> tuple[str, RichMessage | None]:
+    """1 通の（文字, Block Kit）。動画の中身が描けなければ検索上位だけ＋分析できなかった旨。"""
+    from teamagent.skills.search_surface_check.slack_render import (
+        one_shot_message,
+        surface_message,
+    )
+
+    surface_text = str(stage1.slack_summary or "")
+    final_url = getattr(result, "report_url", None) if error is None else None
+    if final_url and stage1.report_url and final_url != stage1.report_url:
+        surface_text = surface_text.replace(stage1.report_url, final_url)
+    if error is None and getattr(result, "status", None) == "ok":
+        video_text = str(getattr(result, "slack_text", "") or "")
+        if reused:
+            video_text = "\n".join([REUSED_PREFIX, video_text])
+        text = surface_text + "\n\n" + video_text
+        rich = render_or_none(
+            lambda: one_shot_message(stage1, skill_input, result, reused=reused),
+            request_id=request_id,
+            kind="search_surface_check_one_shot",
+        )
+        if rich is not None:
+            return text, rich
+    detail = (
+        failure_text(keyword, error)
+        if error is not None
+        else str(getattr(result, "slack_text", "") or one_shot_failed_note(keyword))
+    )
+    text = surface_text + "\n\n" + detail
+    # Block Kit で出すときは blocks しか読まれないので、理由（利用者向けの文）も注記に入れる。
+    reason = _plain_reason(detail)
+    note = one_shot_failed_note(keyword) + (f"。{reason}" if reason else "")
+    # 「作成中」の印（砂時計）が付く followup_note ではなく、注意書きとして出す。
+    marked = stage1.model_copy(update={"warnings": [*stage1.warnings, note]})
+    rich = render_or_none(
+        lambda: surface_message(marked, skill_input),
+        request_id=request_id,
+        kind="search_surface_check",
+    )
+    return text, rich
+
+
 # ── 完了処理（ジョブの thread で走る）──────────────────────────────────────
 
 
@@ -337,13 +459,23 @@ def _complete(
     record_usage: Callable[..., None],
     loop: asyncio.AbstractEventLoop,
     cache_key: str | None = None,
+    stage1: Any = None,
+    skill_input: Any = None,
 ) -> None:
-    """追記の投稿 → 使い回し用に覚える → usage 記録。順番待ちのまま中断したら中断文だけ送る。"""
+    """追記の投稿 → 使い回し用に覚える → usage 記録。順番待ちのまま中断したら中断文だけ送る。
+
+    ``stage1``（1 通で届けるときの 1 段目の結果）があれば、検索上位と動画の中身を 1 通で出す。
+    失敗・中断でも検索上位の結果は必ず出す。
+    """
     if isinstance(error, detached_jobs.DetachInterruptedError):
         logger.warning("surface_video_followup_queued_interrupted", request_id=request_id)
         if not interrupted:
             detached_jobs.post_to_origin(
-                interrupted_text(keyword), destination, request_id=request_id
+                one_shot_interrupted_text(stage1, keyword)
+                if stage1 is not None
+                else interrupted_text(keyword),
+                destination,
+                request_id=request_id,
             )
         return
     elapsed_ms = int((time.perf_counter() - started) * 1000)
@@ -353,7 +485,11 @@ def _complete(
         logger.warning("surface_video_followup_done_after_interrupt", request_id=request_id)
     else:
         rich: RichMessage | None = None
-        if error is not None:
+        if stage1 is not None:
+            text, rich = one_shot_payload(
+                stage1, skill_input, result, error, keyword=keyword, request_id=request_id
+            )
+        elif error is not None:
             text = failure_text(keyword, error)
         else:
             text = str(getattr(result, "slack_text", "") or "")
@@ -466,7 +602,10 @@ def _maybe_schedule(
         followup_notice_line,
         followup_reused_line,
     )
-    from teamagent.skills.search_surface_check.video_digest import select_followup_videos
+    from teamagent.skills.search_surface_check.video_digest import (
+        followup_label,
+        select_followup_videos,
+    )
 
     if not (
         isinstance(skill, SearchSurfaceCheckSkill)
@@ -479,13 +618,17 @@ def _maybe_schedule(
     if destination is None:
         logger.info("surface_video_followup_decision", request_id=ctx.request_id, reason=reason)
         return reason
-    videos = select_followup_videos(output, policy.max_videos)
+    # 本数は依頼者の指定（確認で 5 か 10）が先、無ければ env の既定。
+    max_videos = getattr(skill_input, "max_videos", None) or policy.max_videos
+    videos = select_followup_videos(output, max_videos)
     if not videos:
         logger.info(
             "surface_video_followup_decision", request_id=ctx.request_id, reason="no_videos"
         )
         return "no_videos"
-    keyword = videos[0].keyword
+    keyword = followup_label(output, videos)
+    # 1 通で届けるときの 1 段目の結果（予告の行を足す前の写し）。始められたときだけ使う。
+    stage1 = output.model_copy(deep=True) if policy.one_shot else None
     slack_user_id = str(verified_caller.slack_user_id)
     cache_key = reuse_key(slack_user_id, keyword, [p.url for p in videos])
     cached = CACHE.get(cache_key)
@@ -495,8 +638,14 @@ def _maybe_schedule(
             destination=destination,
             request_id=f"{ctx.request_id}-video",
             fallback_user_id=slack_user_id,
+            stage1=stage1,
+            skill_input=skill_input,
+            keyword=keyword,
         )
-        _add_line(output, followup_reused_line(len(videos)))
+        if stage1 is not None:
+            _defer(output, one_shot_wait_text(keyword, len(videos), queued=False, reused=True))
+        else:
+            _add_line(output, followup_reused_line(len(videos)))
         logger.info("surface_video_followup_decision", request_id=ctx.request_id, reason="reused")
         return "reused"
     quota_state, remaining = quota_gate(ctx)
@@ -545,8 +694,14 @@ def _maybe_schedule(
             record_usage=record_usage,
             loop=loop,
             cache_key=cache_key,
+            stage1=stage1,
+            skill_input=skill_input,
         ),
-        interrupted_message=interrupted_text(keyword),
+        interrupted_message=(
+            one_shot_interrupted_text(stage1, keyword)
+            if stage1 is not None
+            else interrupted_text(keyword)
+        ),
         priority=detached_jobs.PRIORITY_AUTO,
     )
     line: str | None
@@ -562,7 +717,11 @@ def _maybe_schedule(
         else:
             if detach_state == detached_jobs.DETACH_DONE:
                 job.deliver_in_background()
-            line = followup_notice_line(len(videos)) + (_QUEUED_SUFFIX if will_wait else "")
+            if stage1 is not None:
+                line = None
+                _defer(output, one_shot_wait_text(keyword, len(videos), queued=will_wait))
+            else:
+                line = followup_notice_line(len(videos)) + (_QUEUED_SUFFIX if will_wait else "")
     else:
         line = None  # closing（終了処理中）
     if line:
@@ -592,17 +751,38 @@ def _post_reused_later(
     destination: detached_jobs.Destination,
     request_id: str,
     fallback_user_id: str,
+    stage1: Any = None,
+    skill_input: Any = None,
+    keyword: str = "",
 ) -> None:
-    """使い回しの追記を、1 段目の返信が届くころに別 thread で投稿する（登録簿は使わない）。"""
+    """使い回しの追記を、1 段目の返信が届くころに別 thread で投稿する（登録簿は使わない）。
+
+    ``stage1`` があれば検索上位とまとめて 1 通で出す（前回の結果が描けなければ検索上位＋前回の文）。
+    """
 
     def _post() -> None:
-        rich = (
-            followup_rich(entry.source, request_id=request_id, reused=True)
-            if entry.source is not None
-            else None
-        )
+        if stage1 is not None and entry.source is not None:
+            text, rich = one_shot_payload(
+                stage1,
+                skill_input,
+                entry.source,
+                None,
+                keyword=keyword,
+                request_id=request_id,
+                reused=True,
+            )
+        elif stage1 is not None:
+            text = str(stage1.slack_summary or "") + "\n\n" + reused_text(entry)
+            rich = None
+        else:
+            text = reused_text(entry)
+            rich = (
+                followup_rich(entry.source, request_id=request_id, reused=True)
+                if entry.source is not None
+                else None
+            )
         delivered = detached_jobs.post_to_origin(
-            markdown_bold_to_mrkdwn(reused_text(entry)),
+            markdown_bold_to_mrkdwn(text),
             destination,
             request_id=request_id,
             fallback_user_id=fallback_user_id,
@@ -621,6 +801,7 @@ __all__ = [
     "CACHE",
     "ENABLED_ENV",
     "MAX_VIDEOS_ENV",
+    "ONE_SHOT_ENV",
     "REUSED_PREFIX",
     "REUSE_POST_DELAY_S",
     "REUSE_TTL_S",

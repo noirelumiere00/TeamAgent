@@ -406,7 +406,6 @@ def test_openclaw_task_efs_service_and_bedrock_contracts() -> None:
 def test_bedrock_and_lambda_secret_iam_are_exact() -> None:
     fargate = (TF_ROOT / "fargate.tf").read_text(encoding="utf-8")
     lambda_iam = (TF_ROOT / "lambda_iam.tf").read_text(encoding="utf-8")
-    worker = (TF_ROOT / "worker.tf").read_text(encoding="utf-8")
     all_terraform = "\n".join(
         path.read_text(encoding="utf-8") for path in sorted(TF_ROOT.glob("*.tf"))
     )
@@ -422,12 +421,6 @@ def test_bedrock_and_lambda_secret_iam_are_exact() -> None:
     assert "resources = local.lambda_bedrock_resources" in lambda_iam
     assert "resources = [data.aws_secretsmanager_secret.database_url.arn]" in lambda_iam
     assert "arn:aws:secretsmanager:${var.aws_region}:*" not in lambda_iam
-    assert "aws_secretsmanager_secret.db_password.arn" in worker
-    assert "local.hmac_secret_iam_arns" in worker
-    assert "resources = local.bedrock_resources" in worker
-    assert "secret:${var.project_name}/${var.environment}/*" not in worker
-    assert "foundation-model/*" not in worker
-    assert "inference-profile/*" not in worker
     # Converse/ConverseStream APIs authorize through InvokeModel actions; the
     # similarly named strings are not IAM actions.
     assert '"bedrock:Converse"' not in all_terraform
@@ -446,7 +439,6 @@ def test_bedrock_and_lambda_secret_iam_are_exact() -> None:
         "2026-07-wolfi-runtime-v1"
     ]
     required_iam_addresses = {
-        "aws_iam_role_policy.worker_app",
         "aws_iam_role_policy.lambda_app",
         "aws_iam_role_policy.mcp_task",
         "aws_iam_role_policy.connect_web_task[0]",
@@ -468,10 +460,22 @@ def test_bedrock_and_lambda_secret_iam_are_exact() -> None:
     assert "exact_pass_service" in guard
 
 
+# EC2 worker（aws_iam_role_policy.worker_app）は 2026-09-28 の裁定で撤去したので、guard の
+# 必須リストは残りの 5 アドレスだけになる。
+EXACT_IAM_REQUIRED_ADDRESSES = (
+    "aws_iam_role_policy.lambda_app",
+    "aws_iam_role_policy.mcp_task",
+    "aws_iam_role_policy.connect_web_task[0]",
+    "aws_iam_role_policy.ingest_task[0]",
+    "aws_iam_role_policy.morning_digest_task[0]",
+)
+
+
 def _run_exact_iam_validator(
     tmp_path: Path,
     *,
     mutation: str | None = None,
+    omit_addresses: tuple[str, ...] = (),
 ) -> subprocess.CompletedProcess[str]:
     statements: list[dict[str, object]] = [
         {
@@ -526,12 +530,7 @@ def _run_exact_iam_validator(
         separators=(",", ":"),
     )
     addresses = [
-        "aws_iam_role_policy.worker_app",
-        "aws_iam_role_policy.lambda_app",
-        "aws_iam_role_policy.mcp_task",
-        "aws_iam_role_policy.connect_web_task[0]",
-        "aws_iam_role_policy.ingest_task[0]",
-        "aws_iam_role_policy.morning_digest_task[0]",
+        address for address in EXACT_IAM_REQUIRED_ADDRESSES if address not in omit_addresses
     ]
     plan = {
         "resource_changes": [
@@ -592,6 +591,31 @@ def test_exact_runtime_iam_validator_rejects_broad_permissions(
     result = _run_exact_iam_validator(tmp_path, mutation=mutation)
     assert result.returncode == 1
     assert "runtime IAM plan" in result.stderr
+
+
+def test_exact_runtime_iam_validator_accepts_a_plan_without_the_retired_worker_policy(
+    tmp_path: Path,
+) -> None:
+    """EC2 worker の撤去後の計画（worker_app が無い）を guard が通すこと。
+
+    撤去前の guard は worker_app を必須にしていたので、この形の計画を
+    「required IAM resource missing」で止めていた。
+    """
+    assert "aws_iam_role_policy.worker_app" not in EXACT_IAM_REQUIRED_ADDRESSES
+    result = _run_exact_iam_validator(tmp_path)
+    assert result.returncode == 0, result.stderr
+    assert "required IAM resource missing" not in result.stderr
+
+
+@pytest.mark.parametrize("missing", EXACT_IAM_REQUIRED_ADDRESSES)
+def test_exact_runtime_iam_validator_still_requires_each_remaining_policy(
+    tmp_path: Path,
+    missing: str,
+) -> None:
+    """worker_app を外しても、残り 5 つの必須検査は 1 つ欠けるだけで止まること。"""
+    result = _run_exact_iam_validator(tmp_path, omit_addresses=(missing,))
+    assert result.returncode == 1
+    assert "required IAM resource missing" in result.stderr
 
 
 @pytest.mark.parametrize(

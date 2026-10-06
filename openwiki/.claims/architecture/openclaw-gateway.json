@@ -1,0 +1,120 @@
+{
+  "schemaVersion": 1,
+  "pageVersion": "sha256:a4632ae55a950cb48643f94cc73e0d67c3376f2737b0e2e779b4415b882c4859",
+  "claims": [
+    {
+      "id": "claim_1f0672c3a5944ece887c9a3af8e4611f",
+      "statement": "OpenClaw は Haiku 4.5 の東京推論プロファイルを使い、heartbeat 0m、bootstrapMaxChars 32000、許可プラグインは slack・amazon-bedrock・teamagent-caller-identity の 3 つだけ。",
+      "evidence": [
+        {
+          "resource": "repo://infra/openclaw/openclaw.config.json5#L13-L92",
+          "version": "repo-lines-v1:sha256:b205babcdca12da58563a9aef4dda98be25569e8ac13b85bab3152ba26183abf:eyJzZWxlY3RlZExpbmVDb3VudCI6ODAsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjAwYjcyOTAzZmMxZGRjZTQ1YjI0NGM3MWYxNzY4ZmEyNWUzYWE4MjhiMmI3ZDFjYTljODQ2NjE1NTc2MTIwZDMiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjRkNWNkMmZiNGYzZGY4ODQ1MTUyNTViMzk1MjNmMmY4YjU0NzJiZWVhOWY1NjZmZmNhMjA0ZGI4MDI1NjEwNDEiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjYxMTdiMDQyZWI2ZTdiMzc1N2I4YTAxOTU2ZTBkOTM1Y2EzYzIwN2ZlNjkyZmE0MTYyN2JiYzhhMTE5MjNhOTMiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImZiOWYxNzJhNTQ1MWFjZDMzZTQ3YTVlNDc5YTIwMTBiM2NkODkwYWFhYzQ0ZmE0ZDYyZjllNDA3NzAyODY0NGEifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_d3ecac0715cb47479c9d4fb789071557",
+      "statement": "Slack は Socket Mode で、焼き込みの dmPolicy は open・allowFrom は [\"*\"]、セッションは per-channel-peer で分離される。DM でモデルに送る履歴は dmHistoryLimit 2 で前の依頼 2 件以降に絞られ、ツール結果 1 件は 20,000 字で切られ、会話は /new・/reset・「新しい会話」で始め直せる。messages.groupChat.historyLimit 20 は会話履歴の上限ではなく、チャンネル・スレッドの履歴上限は未設定である。",
+      "evidence": [
+        {
+          "resource": "repo://infra/openclaw/openclaw.config.json5#L121-L153",
+          "version": "repo-lines-v1:sha256:50b6a9d440510ba47cbbdcb3780e657f69b140f8d541c5421992705fc8ee2004:eyJzZWxlY3RlZExpbmVDb3VudCI6MzMsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjlmZTM2YmY1MGUxMmFkMGM0OWU4NGU5Y2RlZTFhYWRhOWVhNzIxYjI4YjM0NGNlMTY2NWY0ODcyODkwNDI5YWMiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjAwMDc3MmJmYTAwNDk1ZjI3ZmJkZDJhYWJlOTg2NGRhNzcyMTMwMDFmODExNWIzMzA5MjM1ZjAxNjNkMTg0NDUiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImQyZmFiY2EwMjJmZDQyOTQ5MGVjMjRjNDNmN2NkNjhhZDAyYzg4MzQ3YTFiNmZhNDA2OTQ2YTMzM2UxM2UyNTYiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjkwMjI0NDg5YzM2ODYxZWJhNzU0MGM3YmIxMzU0YzI1NGU1NmY2NzkzNmY2N2IwNGEyNzAwY2QzN2U0ZmQ2ZjIifQ"
+        },
+        {
+          "resource": "repo://infra/openclaw/openclaw.config.json5#L155-L170",
+          "version": "repo-lines-v1:sha256:4eb0a914edc1039b33fde6769f69de630b5c4414dcf3357c3ecc3860ec89e028:eyJzZWxlY3RlZExpbmVDb3VudCI6MTYsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjAxYmE0NzE5YzgwYjZmZTkxMWIwOTFhN2MwNTEyNGI2NGVlZWNlOTY0ZTA5YzA1OGVmOGY5ODA1ZGFjYTU0NmIiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjRlMGNkNTQ3ZTU3NTQ2YWMzYWMxMDlmM2U4MzI0NmNiZTFhODUyNjQ4MjhlMTUwOWI4ODgwOGYzM2RkNmM3MjciLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImE3YzA2ZjJiZmU1MjIxYjc3NDFhNTlhMzk3ZTA0NmU5ZWZmODA5OGUxOWMwYjJlOWFmNmEzMDJhMGU5ZWE4MWUiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjMyOTZjOGQ4YWVkNjVkNDgwNTFhYWFkMTcwZDkxMmU0ZGFjOTEyNjc2NTYwNDVlYzI4OTk5YjgzZTA0Y2U5M2UifQ"
+        },
+        {
+          "resource": "repo://infra/openclaw/openclaw.config.json5#L20-L35",
+          "version": "repo-lines-v1:sha256:73d8507f96d38b580b4fd046b44c9564753deb312231f7d0b311e55da86e4540:eyJzZWxlY3RlZExpbmVDb3VudCI6MTYsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjdhOWQwNTlkNzczMzk1ZDJhYmViMDI5MDQ4NGM3MjA1MTIyOTcyM2VjNDQyZDgyMDRjYzhhMjNiZjNkNTgyODIiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6Ijg1NTc2YTA2MWRlNjFkZWY1MGYwZGRiYzEzNDJmZWU3Y2E4YTczYmY1NDBmMDlkNjZlYjJiMmFjNmM2ODU3ZTMiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjgzZDRjODZjNDk2ZjllZmVmMTllYmE1NTg3MGIwMTMwODNhNGMyMjlkZDVhNjI2MjQ4OGNmNWZjMDhjNjAwMjUiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6Ijc0NmZjZjk2ZDFiNmQxM2E4NGQ4N2ZmZWNhYjY3NTdiMmViMjViMmYzZmViNzc4MmVmZTA1ZGExNDViMjVjMzEifQ"
+        },
+        {
+          "resource": "repo://infra/openclaw/openclaw.config.json5#L99-L119",
+          "version": "repo-lines-v1:sha256:38e792d99414189dad2a0926c0b44e8a950023b337800c0fe1cbd5d774be7571:eyJzZWxlY3RlZExpbmVDb3VudCI6MjEsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjFhZjQ0OTgxZWM3OTAxYjg2NzIzYmEwZDBkNmQ2Y2Y5MDA3NzBhMTIwM2Q5OGI0OWUzNTg5OTc2M2Y2M2E0NGEiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6Ijg5NDE5MTE5Nzk5YTUwNDVmOWY5OTkxY2YxZjkxMGE0OGZjYmNlNDU4MmRlMDE3NmM4MzJhNjRhYmM3ZmYzNmEiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImQ3NmNiYzE2MDc2NWQ3MTY1NDQ2NDM4ZmNmMmY4MDhmYjViMTFjZTQ0NjdjMDg3N2Y4ODc3OGZkZGRkMjliZTEiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImNmZDlhN2U5OWM5Y2ZhYmEyNTBjNWI4ODVhMjJmZjg1NDNiMWUwMjk4YTAzMzgxMzNlZjU5MWQyNWI5YWViMDQifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_cfceb79e749445ee8aadc3ff42e709a0",
+      "statement": "native ツールは profile minimal に bundle-mcp だけを足し、message・read・write・send・sessions_* などを deny、exec を deny にしている。ゲートウェイは loopback:18789 で terminal 無効。",
+      "evidence": [
+        {
+          "resource": "repo://infra/openclaw/openclaw.config.json5#L197-L228",
+          "version": "repo-lines-v1:sha256:7afe3b868ba25e0e0f96533e5c14dc6fc5db6d37b8f380be86aad822159716a0:eyJzZWxlY3RlZExpbmVDb3VudCI6MzIsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjMwZTM1N2Y0ZTQ3OWY2NjNlMjI1MjA4YjY4ZWEwNzljN2IwZTE3NDUzZjNjNWQzMWMyOTIzNWQyZWRlZDMzN2QiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjRkNWNkMmZiNGYzZGY4ODQ1MTUyNTViMzk1MjNmMmY4YjU0NzJiZWVhOWY1NjZmZmNhMjA0ZGI4MDI1NjEwNDEiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6Ijg5NWNkZjk1ZGVjNDhmMDMyODg3NTg0MjY4ZGFlODM1YjhkOGUxMzM3NGNjNTI3MDlmNmI5MGEyYjdlYTdjMWEiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjI1OGJjMTg3NTM3YTNiYzk5YzcyMzk5OWUxZDYwMmI3OTcyZWNkOGQ0MTQzNjVlMGU2MzgzYjM3NGMyOTQ5YTIifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_9d2e31ec7c9a4e96af6d263ad85243c9",
+      "statement": "MCP 接続は Cloud Map 内部名の :8787/mcp へ streamable-http と bearer ヘッダで行い、ツール共通の timeout は 600 秒。",
+      "evidence": [
+        {
+          "resource": "repo://infra/openclaw/openclaw.config.json5#L231-L244",
+          "version": "repo-lines-v1:sha256:616ecd647874c6d25468270966b804253ec73f4020bae1d2779fc5664bf3a0f8:eyJzZWxlY3RlZExpbmVDb3VudCI6MTQsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6ImUxZGQ5NDliNTBjZTAyZTZkMzNjZjllZjBiNWY2YzRkOTVkNDRkNjE5YTdkZWY3MWY2ODBlNTFjNGY1MGFmOGMiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6ImFiN2M2YTkxOTkzMjkzNmZmNDA4YTFjNDY5NzMwOGU0ODI0ZDNmMmYxOTRmYzUyZTFjMjA2NzlhYzQ3NjRmMzEiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImQyYTJkNjY3MmQ2OTE0NWYwOWNkMTgwM2JjNjI2MmZlNDAwNjhkMDIzZGQxYjdlMmU1YmRmMDE3Mzc5N2QzNzciLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImMyOTk3OGJhYjMzMDY4MWE1ODM3NTJmZGQ3MzkyYmY5MzZhMTI0NDIzZjkwZWFhYzViM2M5YmE2ZmZkNTI1YmUifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_fb2727c039624c18bc303664c6a4a787",
+      "statement": "toolFilter は include で明示許可し、run_agent は意図的に含めず、chitchat・recommend・proposal_campaign・mail_constraints・workspace_search・proposal_deck・proposal_builder・*confirm* を exclude する。",
+      "evidence": [
+        {
+          "resource": "repo://infra/openclaw/openclaw.config.json5#L252-L347",
+          "version": "repo-lines-v1:sha256:2cfb1b1fbb6093623ba049422b4ee12aeee0ec7f3414cb5a891e50d8f75543ae:eyJzZWxlY3RlZExpbmVDb3VudCI6OTYsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjMzZGFhYmE0YTZmMjI4M2I3NWVkYmVmZjY4MjNlNmYxNTU5NzJlNmNkMmE3OTM5ZTY0OWU0YWRjMTQ3NzY3YjAiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjFlNjczYWJkNDU3YTk3ZWVhMTdhNjAwNjJlYjBmYWVhNmJkZjA5NDg2OGNjNmI4ZjhjMGViZGEyZjYxZWQ0MmYiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjQzMGYxZDExMzMyN2EwNzE1NzEzNWNjYjhiYmRjMWY2NTQwNzEyMjk4MzQ2MTBjYThhMDJhOGE1ZTE4ODVkYTIiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6Ijk0OGRkNzVmMzBkMGE1ZjQ3MDRkNDg5MDI5OGE1YTI3NzM5ZTE3MDc4YjQ3OTQ2NjA1ZTdmZTRlYzkyMzZhMmUifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_10448deff9a041058315aa0c57b48ef1",
+      "statement": "check_openclaw_config.py は dmPolicy open なのに allowFrom に * が無い構成や空の allowFrom・不正値を検出して失敗させる。",
+      "evidence": [
+        {
+          "resource": "repo://scripts/check_openclaw_config.py#L58-L86",
+          "version": "repo-lines-v1:sha256:61667533b35e43a8a662128fa0f6eb39bab91b545cb4fab39159ccddd9ddd73c:eyJzZWxlY3RlZExpbmVDb3VudCI6MjksImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6ImU4MDVkN2M3NGViN2E3NGJiZjE0OTQxOTBjNDgxNDc2ODM2ODY3ZWFjMDZjYWQ3MWQwOGVhMTY5MzJjMzQ0YjQiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjAxYmE0NzE5YzgwYjZmZTkxMWIwOTFhN2MwNTEyNGI2NGVlZWNlOTY0ZTA5YzA1OGVmOGY5ODA1ZGFjYTU0NmIiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjRmYmQwMDkzMTRiYzI3MDg0MTY3MzRhMDJhZTVmZjM5YTFlNDhhMDUwYmU5MWY0M2IyZmFhOTIwMDJjNjJiZmMiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImU2ZDI3NGE4MjYyYjcyOWY1OTAwNzU3YjdmMTA2NDQzMDQ2NGU0NzU2NmM2OGE4MmQ1MGM1NTM2MzQ0NzM0YzAifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_6e711dce6e884fea8271e648f714321d",
+      "statement": "entrypoint は SLACK_DM_ALLOWLIST を必須とし、caller claim 秘密と MCP bearer の一致を拒否し、実行ディレクトリを /tmp/teamagent-openclaw に固定する。",
+      "evidence": [
+        {
+          "resource": "repo://infra/docker/openclaw-entrypoint.mjs#L14-L40",
+          "version": "repo-lines-v1:sha256:6402d4ebceb464cc76a900d25aad20f406f1b33e6bfad843dc44e72aaa616616:eyJzZWxlY3RlZExpbmVDb3VudCI6MjcsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjAxYmE0NzE5YzgwYjZmZTkxMWIwOTFhN2MwNTEyNGI2NGVlZWNlOTY0ZTA5YzA1OGVmOGY5ODA1ZGFjYTU0NmIiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6Ijk2NGQ4YzA3MzQyOTg5MzEwMTU3NmQ4OGQ5OTEyN2U4OWQ2ODkxZDNiMTdlODlkZjAyZWM5YWU3MDcwNWQ4YmUiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjVlOGJlNDkwY2M5NTk1ODIxZGI3OWUzNDcxMmNkMGEzZGJhMjAyZjliYjQwMjI3NzJiZTQ1MGRjMGY2MzY1MDgiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjY4ZmNjYTNlMmYwZGY3YjQ3NDU3YWFiOTY0YmVmNDExOWM5ZTZhMGM0MjczZDVlNDFhMGE0OTcwMDQxOGFjOGYifQ"
+        },
+        {
+          "resource": "repo://infra/docker/openclaw-entrypoint.mjs#L236-L255",
+          "version": "repo-lines-v1:sha256:19e7c925973ad1526890c5ce9b3211586134eace673d5f0bd22b892e017e932d:eyJzZWxlY3RlZExpbmVDb3VudCI6MjAsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjA5ZDEwNTVlYjVjNzgxODM0NDM4ZDZlOTAxMWFmZGJkMzQ0OGY2Zjg2YjQ1NWVjMGU5OGRhOWIyNzRkYzIyNGIiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjI3ZTU3ODhkNWQ5ZDczZDI0YTgxZGJjMGE1YTc0YmZhODJjOWMzYjNhZjk5ZTUyYWY3OTZlOTBiNDY4YThhM2QiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjA3YTRlYjhhOGFiZWM0NzZlMDM0YjhiMjEyODc4OTM5YWZlN2RhZDE4NGU4NWVlZGVkMDkyMDg5NjYwODA4ZWUiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjExMWEyZjVmNmY2NjBlNTA0MDFjNDhlZDIzMTdkNTYwNmRlYTFmZGRjYzEyODY1YWFkOTRlYjlkNDQ4MDYwMWMifQ"
+        },
+        {
+          "resource": "repo://infra/docker/openclaw-entrypoint.mjs#L96-L124",
+          "version": "repo-lines-v1:sha256:e1a9d7ddb68c59e7f8794eda8c2ef241c50ab07536b47811f77165a3482606c0:eyJzZWxlY3RlZExpbmVDb3VudCI6MjksImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6ImM3ZDA2MTU4NjY5NmZmMmRiNzhiZTE3MmU5OGY2NDcyNTMzYmY0ODJiNTU3YWJiMWMwNTkxZWRmN2M5NjcxYzAiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjI3ZTU3ODhkNWQ5ZDczZDI0YTgxZGJjMGE1YTc0YmZhODJjOWMzYjNhZjk5ZTUyYWY3OTZlOTBiNDY4YThhM2QiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjZkMTU3OGQ1ZTY1M2NjNjA1NjkxMzM0MzVjMTdkNGM1ZDliMGJhNzczOTQyN2M2NDAxNzI5NjllYmRkNjMwYTciLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImIzZjhjMjg3YmYxOGZiZTkxMmExYmEyOWM5ZTdmYzRlYTkwNjViNmZlZjJiZjYyMjdhNGM3YjgwNGNkMzUwYWEifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_c145f0e51987402aaad4b6c94fc1fb47",
+      "statement": "entrypoint は SOUL.md・HEARTBEAT.md・IDENTITY.md を毎起動 workspace へ上書き seed し、symlink を拒否する。",
+      "evidence": [
+        {
+          "resource": "repo://infra/docker/openclaw-entrypoint.mjs#L311-L324",
+          "version": "repo-lines-v1:sha256:e67871649d52c864cfdcc8925e5679a457e9d36904b8ac57e201f636a841d69f:eyJzZWxlY3RlZExpbmVDb3VudCI6MTQsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6ImI0NzZkYTVhM2JjOTk4MjMyZmYzYWRlMjY1ZjY1OTIzZTk3ZTEyNmRkNjk4ZjFjMzNhYTMwZWU4ZmIzN2U5NzciLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjI3ZTU3ODhkNWQ5ZDczZDI0YTgxZGJjMGE1YTc0YmZhODJjOWMzYjNhZjk5ZTUyYWY3OTZlOTBiNDY4YThhM2QiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImM1ZjdkZTViZDc3MzNmYjc2MTAzYTZlZTA2YzJmNzhmZWMzYzk2NWU4NDc5Y2RhYzgwZDMyOTZlMTk0ZGYxZTEiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImNjNzE0MjdhODQ3ZDllNDVjZDQxMjdlMDM1MWVkYmVjMmZkZTdlYjNlNTZhNTQ2MWMxZDVhMDU1ZDQ2OTZmNTYifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_25110192c0ce4372a3191c2495bfce94",
+      "statement": "effective-tool-scope.json は OpenClaw の include と MCP backend の登録の両方が揃ったツールだけが呼べるという規則と、ツールごとの副作用分類・terraform ゲート・enabledBy を持つ。",
+      "evidence": [
+        {
+          "resource": "repo://infra/openclaw/effective-tool-scope.json#L1-L50",
+          "version": "repo-lines-v1:sha256:18614aba380009e0bf22e078abbef50a8157125060edcbd04a9191e73fa2fd48:eyJzZWxlY3RlZExpbmVDb3VudCI6NTAsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6ImE2ZmIwOGZkYTFhY2I5NTdiNjExNmJkMzc4MTFhMWZlNDFhMDE2MTFjMDYzMWVkYmY3ODZkNjg4OWEyN2E1NWMiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6ImZlZjlmZTc4NGZlNWY3ZjZiZWUyOTFlOGMyZThjMjEyYWVmMDIwYzM0NTQzYmYxODk5YjAxZDE2Mzk2YWYxY2YiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjowLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImUzYjBjNDQyOThmYzFjMTQ5YWZiZjRjODk5NmZiOTI0MjdhZTQxZTQ2NDliOTM0Y2E0OTU5OTFiNzg1MmI4NTUiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImEzYTUwNDg4OWFkNGE2MWEzMGZlN2ZkNjViNzgyNWRlZGYyODcyMmU5ZWJmZjgwMmY0YTQ3OTFhZjUxMTFkYzgifQ"
+        }
+      ]
+    }
+  ],
+  "verification": {
+    "by": "openwiki/0.6.1",
+    "at": "2026-09-30T04:50:20.078Z"
+  }
+}

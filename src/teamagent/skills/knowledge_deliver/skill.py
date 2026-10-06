@@ -30,6 +30,7 @@ from teamagent.skills._shared.drive_slack_delivery import (
     prepare_drive_files,
     safe_filename,
 )
+from teamagent.skills._shared.private_surface import is_private_surface
 from teamagent.skills._shared.user_context import USER_CONTEXT_RULE
 from teamagent.skills.base import BaseSkill, SkillContext, register
 from teamagent.skills.knowledge_deliver.schema import (
@@ -75,7 +76,7 @@ class KnowledgeDeliverSkill(BaseSkill[KnowledgeDeliverInput, KnowledgeDeliverOut
     description: ClassVar[str] = (
         "「〇〇への提案資料出して」「〇〇業界の提案事例ある？」「〇〇施策のレポート出して」"
         "のような依頼に対し、社内ナレッジを検索して要約し、該当資料の実ファイルを"
-        "依頼者本人の DM（チャンネル/スレッド内ならその場）に添付して届ける。"
+        "依頼者本人の DM に添付して届ける（チャンネルで頼まれても DM・その場は note の 1 行だけ）。"
         "ファイル本体が欲しい時に使う（リンク・要約だけで良い時は search）。\n"
         "依頼文に含まれる条件は必ず該当フィールドに振り分けて埋めること（自然文の精度が上がる）:\n"
         "- 取引先/会社名（電通・サイバーエージェント・ニチレイ・アース製薬 等）→ filter_client\n"
@@ -175,6 +176,13 @@ class KnowledgeDeliverSkill(BaseSkill[KnowledgeDeliverInput, KnowledgeDeliverOut
         #    tmpdir の後始末は呼び出し側の責務（_shared/drive_slack_delivery の契約）。
         #    常駐 ECS タスクの /tmp に最大 256MB × top_k が残り続けるのを防ぐため、
         #    添付が終わったら（失敗しても）必ず消す。
+        # 出力面ガード（10-01 監査候補①・clientkarte と同じ型・deny-by-default）。
+        # 本人 DM 以外（チャンネル・グループ・外部共有・判定不能）で頼まれたら、実ファイルと
+        # 要約は依頼者本人の DM へ送り、その場には資料名も要約も出さない。チャンネルに
+        # 第三者が置いた指示文でモデルが呼ばされても、資料が共有面へ出ない。
+        on_private_surface = is_private_surface(
+            ctx.metadata.get("channel_id"), ctx.metadata.get("identity_verified") is True
+        )
         prepared: list[PreparedFile] = []
         tmpdir: str | None = None
         delivered_ids: set[str] = set()
@@ -202,6 +210,13 @@ class KnowledgeDeliverSkill(BaseSkill[KnowledgeDeliverInput, KnowledgeDeliverOut
             channel_id = channel_id if isinstance(channel_id, str) and channel_id else None
             thread_ts = ctx.metadata.get("thread_ts")
             thread_ts = thread_ts if isinstance(thread_ts, str) and thread_ts else None
+            # 本人 DM で頼まれた → その DM へそのまま添付。それ以外 → channel は使わず
+            # email から本人 DM を開いて送る（deliver_files の DM 経路）。
+            dm_channel: str | None = None
+            if on_private_surface:
+                dm_channel, channel_id, thread_ts = channel_id, None, None
+            else:
+                channel_id, thread_ts = None, None
 
             # 適用フィルタのラベル（例「電通 × 提案書」）。note に「何で絞ったか」を明示し、
             # 0 件時は絞りを述べて緩和提案する（設計 E）。
@@ -233,7 +248,7 @@ class KnowledgeDeliverSkill(BaseSkill[KnowledgeDeliverInput, KnowledgeDeliverOut
                     )
                 else:
                     note = f"{reason}（要約のみお返しします）。"
-            elif not channel_id and not requester_email:
+            elif not dm_channel and not requester_email:
                 note = (
                     "資料は見つかりましたが、配信先が分からずお届けできませんでした（要約のみ）。"
                 )
@@ -247,6 +262,7 @@ class KnowledgeDeliverSkill(BaseSkill[KnowledgeDeliverInput, KnowledgeDeliverOut
                             channel_id=channel_id,
                             thread_ts=thread_ts,
                             email=requester_email,
+                            dm_channel=dm_channel,
                         )
                     )
                 except Exception:
@@ -276,6 +292,21 @@ class KnowledgeDeliverSkill(BaseSkill[KnowledgeDeliverInput, KnowledgeDeliverOut
             delivered=len(delivered_ids),
             cost_usd=s_out.total_cost_usd,
         )
+        if not on_private_surface:
+            # その場（チャンネル等）へ返す本文には資料名・要約を載せない（DM 側にだけ出る）。
+            log.info("knowledge_deliver_surface_guard", delivered=len(delivered_ids))
+            return KnowledgeDeliverOutput(
+                answer="",
+                references=[],
+                delivered_count=len(delivered_ids),
+                note=(
+                    f"該当資料 {len(delivered_ids)} 件と要約をあなたの DM にお送りしました"
+                    "（このチャンネルには資料名・要約を出していません）。"
+                    if delivered_ids
+                    else "資料と要約は DM でお出しします。Aico との DM でもう一度お声がけください。"
+                ),
+                total_cost_usd=s_out.total_cost_usd,
+            )
         return KnowledgeDeliverOutput(
             answer=s_out.answer,
             references=refs,
@@ -293,6 +324,7 @@ class KnowledgeDeliverSkill(BaseSkill[KnowledgeDeliverInput, KnowledgeDeliverOut
         channel_id: str | None = None,
         thread_ts: str | None = None,
         email: str | None = None,
+        dm_channel: str | None = None,
     ) -> tuple[set[str], str]:
         """prepared を配信（配信先の決定ルールは _shared/drive_slack_delivery に集約）。"""
         slack = self._slack or self._build_slack()
@@ -304,6 +336,7 @@ class KnowledgeDeliverSkill(BaseSkill[KnowledgeDeliverInput, KnowledgeDeliverOut
             channel_id=channel_id,
             thread_ts=thread_ts,
             email=email,
+            dm_channel=dm_channel,
         )
 
     # --- 遅延生成（factory が注入しない / 本番起動時のフォールバック） ---

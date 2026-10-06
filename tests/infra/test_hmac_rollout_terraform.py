@@ -212,11 +212,6 @@ def test_execution_roles_have_only_the_hmac_domains_their_tasks_need() -> None:
         'data "aws_iam_policy_document"',
         "ecs_execution_morning_digest_secrets",
     )
-    worker_policy = _terraform_block(
-        TF_ROOT / "worker.tf",
-        'data "aws_iam_policy_document"',
-        "worker_app",
-    )
     runtime_policies = (
         _terraform_block(
             TF_ROOT / "fargate.tf",
@@ -233,7 +228,6 @@ def test_execution_roles_have_only_the_hmac_domains_their_tasks_need() -> None:
             'data "aws_iam_policy_document"',
             "morning_digest_task",
         ),
-        worker_policy,
     )
 
     assert "local.hmac_secret_iam_arns" in mcp_policy
@@ -241,14 +235,10 @@ def test_execution_roles_have_only_the_hmac_domains_their_tasks_need() -> None:
     assert "local.hmac_mail_secret_iam_arns" not in connect_policy
     assert "local.hmac_mail_secret_iam_arns" in digest_policy
     assert "local.hmac_report_secret_iam_arns" not in digest_policy
-    assert "local.hmac_secret_iam_arns" in worker_policy
-    assert "data.aws_secretsmanager_secret.slack_bot.arn" in worker_policy
-    assert "${var.project_name}/${var.environment}/*" not in worker_policy
     for policy in runtime_policies:
         assert "aws_dynamodb_table.hmac_state.arn" in policy
         assert "dynamodb:GetItem" in policy
         assert "dynamodb:UpdateItem" in policy
-    assert "dynamodb:TransactWriteItems" in worker_policy
 
 
 def test_connect_web_terraform_closure_never_reaches_a_mail_action_local() -> None:
@@ -445,7 +435,9 @@ def test_rollout_gate_policy_covers_exact_reconciliation_dependencies() -> None:
 
 
 def test_legacy_worker_and_direct_deploy_paths_cannot_bypass_preflight() -> None:
-    worker = (TF_ROOT / "worker.tf").read_text(encoding="utf-8")
+    # EC2 worker は 2026-09-28 の裁定で撤去した（worker.tf を destroy）。worker 資源の定義が
+    # 戻っていないことだけを確かめ、配布経路（deploy_to_ec2.sh など）の検査は残す。
+    assert not (TF_ROOT / "worker.tf").exists()
     loader = (ROOT / "scripts" / "load_secrets.sh").read_text(encoding="utf-8")
     connect_deploy = (ROOT / "infra" / "deploy" / "deploy_connectweb_unified.sh").read_text(
         encoding="utf-8"
@@ -462,12 +454,6 @@ def test_legacy_worker_and_direct_deploy_paths_cannot_bypass_preflight() -> None
     hmac_tf = (TF_ROOT / "hmac_keyrings.tf").read_text(encoding="utf-8")
     assert (ROOT / "scripts" / "preflight_hmac_rotation.py").stat().st_mode & 0o111
 
-    assert "only by the signed, saved-plan-bound atomic release flow" in worker
-    assert "pip install" not in worker
-    assert "npm install" not in worker
-    assert "npx " not in worker
-    assert "local.mail_action_hmac_transition_valid" in worker
-    assert "local.report_link_hmac_transition_valid" in worker
     assert "_get_secret_version" in loader
     assert "_load_hmac_keyring MAIL_ACTION && _load_hmac_keyring REPORT_LINK" in loader
     assert "TEAMAGENT_HMAC_REQUIRED_DOMAINS" in loader
@@ -504,7 +490,6 @@ def test_legacy_worker_and_direct_deploy_paths_cannot_bypass_preflight() -> None
     assert worker_deploy.count("source /opt/teamagent/current/hmac.env") >= 2
     assert "source scripts/load_secrets.sh MAIL_ACTION,REPORT_LINK" in worker_deploy
     assert "source scripts/load_secrets.sh REPORT_LINK" in worker_deploy
-    assert "Environment=TEAMAGENT_HMAC_REQUIRED_DOMAINS" not in worker
     assert "Environment=TEAMAGENT_HMAC_REQUIRED_DOMAINS" not in worker_deploy
     assert worker_deploy.index("--action pre-worker-upload") < worker_deploy.index(
         "aws s3api put-object"

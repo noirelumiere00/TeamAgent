@@ -39,6 +39,10 @@ def client(monkeypatch: pytest.MonkeyPatch) -> TestClient:
     monkeypatch.setenv("REPORT_LINK_HMAC_SECRET", _REPORT_SECRET)
     monkeypatch.delenv("MAIL_ACTION_HMAC_SECRET", raising=False)
     monkeypatch.setenv("VSEO_REPORT_BUCKET", _BUCKET)
+    # 既定は「本文を取れない」＝従来の 302 経路（S3 を叩かない）。本文を返す経路は下の専用テスト。
+    import teamagent.adapters.report_publish as rp
+
+    monkeypatch.setattr(rp, "fetch_report_html", lambda bucket, key, **kw: None)
     return TestClient(create_app())
 
 
@@ -236,3 +240,70 @@ def test_access_log_redacts_shortlink_token() -> None:
     cfg = build_uvicorn_log_config()  # log_config に filter が登録される
     assert "redact_shortlink" in cfg.get("filters", {})
     assert "redact_shortlink" in cfg["loggers"]["uvicorn.access"].get("filters", [])
+
+
+def test_html_report_is_served_inline_so_the_short_url_stays_in_the_address_bar(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """10-05: 302 先の長い presigned を Slack に貼ると %2B が空白に化けて InvalidToken。
+
+    HTML は /r が自分で返す（200）。CSP sandbox で不透明 origin に閉じ込め、Cookie に触れさせない。
+    変異: /r の HTML 分岐を外すと 302 のままで赤。
+    """
+    import teamagent.adapters.report_publish as rp
+    from teamagent.adapters.report_link_token import encode_report_token
+
+    seen: list[str] = []
+    monkeypatch.setattr(
+        rp, "fetch_report_html", lambda bucket, key, **kw: seen.append(key) or b"<h1>report</h1>"
+    )
+    _patch_presign(monkeypatch, _FAKE_PRESIGNED)
+    r = client.get(f"/r/{encode_report_token(_BUCKET, _KEY)}", follow_redirects=False)
+    assert r.status_code == 200 and r.content == b"<h1>report</h1>"
+    assert seen == [_KEY]
+    assert r.headers["content-type"].startswith("text/html")
+    assert r.headers["cache-control"] == "no-store"
+    assert r.headers["content-security-policy"].startswith("sandbox ")
+    assert "allow-same-origin" not in r.headers["content-security-policy"]
+    assert r.headers["x-content-type-options"] == "nosniff"
+
+
+def test_non_html_still_redirects(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    import teamagent.adapters.report_publish as rp
+    from teamagent.adapters.report_link_token import encode_report_token
+
+    monkeypatch.setattr(
+        rp,
+        "fetch_report_html",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("PPTX は本文を取らない")),
+    )
+    _patch_presign(monkeypatch, _FAKE_PRESIGNED)
+    token = encode_report_token(_BUCKET, "vseo-proposals/deck.pptx")
+    assert client.get(f"/r/{token}", follow_redirects=False).status_code == 302
+
+
+def test_fetch_report_html_rejects_oversize(monkeypatch: pytest.MonkeyPatch) -> None:
+    import io
+
+    import boto3
+
+    import teamagent.adapters.report_publish as rp
+
+    class _S3:
+        def __init__(self, n: int) -> None:
+            self.n = n
+
+        def get_object(self, **kw: object) -> dict[str, object]:
+            return {"ContentLength": self.n, "Body": io.BytesIO(b"x" * self.n)}
+
+    class _Sess:
+        def __init__(self, n: int) -> None:
+            self.n = n
+
+        def client(self, *a: object, **k: object) -> _S3:
+            return _S3(self.n)
+
+    monkeypatch.setattr(boto3.session, "Session", lambda: _Sess(rp.INLINE_REPORT_MAX_BYTES + 1))
+    assert rp.fetch_report_html("b", "vseo-reports/x.html") is None
+    monkeypatch.setattr(boto3.session, "Session", lambda: _Sess(10))
+    assert rp.fetch_report_html("b", "vseo-reports/x.html") == b"x" * 10

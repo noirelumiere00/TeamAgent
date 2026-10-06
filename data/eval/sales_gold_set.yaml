@@ -109,11 +109,14 @@ cases:
     expect_keywords: ["UGC"]
 
   - id: 14
-    query: "失注した案件と失注理由"
+    # 2026-10-01 案件検索 v3 PR 3a: 旧クエリ「失注した案件と失注理由」は BANT C を正解にしていたが、
+    # BANT C は検討止まりの評価で正式な失注ではない。正式状態の評価（受注・失注）とは分け、
+    # この行は「検討止まり（BANT C）の列挙」を測る行として明示的な言い方に改めた。
+    query: "検討止まりの案件と止まった理由"
     expect_keywords: []
     expect_metadata:
-      bant_score: "C"  # C 評価 = 検討止まりに近い
-    notes: "BANT C 案件のレビュー、推奨アクション抽出を期待"
+      bant_score: "C"  # C 評価 = 検討止まり
+    notes: "BANT C 案件のレビュー、推奨アクション抽出を期待（正式な失注の評価ではない）"
 
   - id: 15
     query: "BANT A の前向きな案件一覧"

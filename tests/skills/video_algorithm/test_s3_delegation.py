@@ -164,3 +164,133 @@ def test_search_uses_s3_searcher_override() -> None:
         return sentinel
 
     assert skill._search("q", 5, "req", searcher=fake_searcher) is sentinel
+
+
+# ---- 複数 KW 入りの取得ジョブ: 分析する KW の投稿だけを読む ------------------------------
+# tiktok_acquire は KW の数や本数によって、1ジョブに複数 KW をまとめることがある。
+# 先頭から読むと別 KW の上位投稿でこの KW を分析してしまう（黙って別の結果になる）。
+
+
+def _kw_post(kw: str, rank: int) -> dict[str, Any]:
+    return {
+        **_POST,
+        "id": f"{kw}-{rank}",
+        "kw": kw,
+        "rank_display": rank,
+        "url": f"https://www.tiktok.com/@u/video/{hashlib.sha256(f'{kw}:{rank}'.encode()).hexdigest()[:12]}",
+    }
+
+
+class _PostsOnlyMediaClient:
+    """posts.json だけを返す取得結果（manifest なし＝指標だけの取得と同じ形）。"""
+
+    def __init__(self, posts: list[dict[str, Any]]) -> None:
+        body = json.dumps({"posts": posts}, ensure_ascii=False).encode()
+        self._ref = _ref("posts.normalized.json", body, "application/json")
+        self._body = body
+
+    def get_result(
+        self,
+        job_id: str,
+        *,
+        deadline_epoch_s: int,
+        expected_audit_principal_hash: str | None = None,
+    ) -> MediaJobResult:
+        return MediaJobResult(
+            job_id=job_id,
+            status="done",
+            artifacts=(MediaArtifact(name="posts.json", object=self._ref),),
+        )
+
+    def download(self, ref: S3ObjectRef, *, deadline_epoch_s: int) -> bytes:
+        return self._body
+
+
+def _run_with_job(
+    monkeypatch: pytest.MonkeyPatch,
+    posts: list[dict[str, Any]],
+    query: str,
+) -> tuple[Any, list[list[str]]]:
+    """本物の TikTokS3Source で run し、分析に渡った上位ボードの URL を記録する。
+
+    深掘り（DL・Gemini）に進ませないよう、記録したあと空の結果を返して打ち切る。
+    """
+
+    from teamagent.adapters import tiktok_s3_source
+    from teamagent.skills.base import SkillContext
+    from teamagent.skills.video_algorithm.schema import VideoAlgorithmInput
+
+    real_source = tiktok_s3_source.TikTokS3Source
+    client = _PostsOnlyMediaClient(posts)
+    monkeypatch.setattr(
+        tiktok_s3_source,
+        "TikTokS3Source",
+        lambda job_id, *, audit_principal_hash: real_source(
+            job_id,
+            audit_principal_hash=audit_principal_hash,
+            client=client,  # type: ignore[arg-type]
+            clock=lambda: 100,
+        ),
+    )
+    skill = VideoAlgorithmSkill(gemini=None)
+    boards: list[list[str]] = []
+    original_search = skill._search
+
+    def _spy(query: str, n: int, request_id: str, searcher: Any = None) -> list[Any]:
+        boards.append([meta.url for meta in original_search(query, n, request_id, searcher)])
+        return []
+
+    monkeypatch.setattr(skill, "_search", _spy)
+    out = skill.run(
+        VideoAlgorithmInput(query=query, acquire_job_id=_JOB_ID),
+        ctx=SkillContext(metadata={"user_email": "a@vectorinc.co.jp"}),
+    )
+    return out, boards
+
+
+def test_multi_keyword_job_reads_only_the_queried_keyword(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seven = [_kw_post("セブン", rank) for rank in (1, 2)]
+    famima = [_kw_post("ファミマ", rank) for rank in (1, 2)]
+
+    _out, boards = _run_with_job(monkeypatch, seven + famima, "ファミマ")
+
+    assert boards == [[post["url"] for post in famima]]
+
+
+def test_keyword_match_absorbs_width_case_and_space() -> None:
+    from teamagent.skills.video_algorithm.skill import _posts_for_query
+
+    posts = [_kw_post("ＵＮＩＱＬＯ 新作", 1), _kw_post("GU", 1)]
+
+    selected, job_keywords = _posts_for_query(posts, " uniqlo  新作 ")
+
+    assert [post["kw"] for post in selected] == ["ＵＮＩＱＬＯ 新作"]
+    assert job_keywords == ["ＵＮＩＱＬＯ 新作", "GU"]
+
+
+def test_keyword_absent_from_multi_keyword_job_is_not_substituted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    posts = [_kw_post("セブン", 1), _kw_post("ファミマ", 1)]
+
+    out, boards = _run_with_job(monkeypatch, posts, "ローソン")
+
+    assert boards == [[]]  # 別 KW の投稿で代用しない
+    assert out.videos == []
+    assert "「ローソン」は渡された取得結果に入っていません" in out.slack_summary
+    assert "入っているKW: セブン・ファミマ" in out.slack_summary
+    # slack_summary は利用者へそのまま出る。引数名・内部IDは出さない（SOUL の禁止語）。
+    assert "job_id" not in out.slack_summary and _JOB_ID not in out.slack_summary
+
+
+def test_single_keyword_job_still_reads_all_posts_when_phrasing_differs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # 1KW のジョブは従来どおり（依頼の言い回しがジョブの KW と少し違っても読む）。
+    posts = [_kw_post("セブン", rank) for rank in (1, 2, 3)]
+
+    _out, boards = _run_with_job(monkeypatch, posts, "セブンイレブン 新作")
+
+    assert boards == [[post["url"] for post in posts]]

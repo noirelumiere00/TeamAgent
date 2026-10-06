@@ -83,11 +83,14 @@ _WORK_TYPE_TOOLS: dict[str, tuple[str, ...]] = {
 # 「仕様で決まった分」と「実装側で補った分」を後から見分けられるようにするため。
 #   - tiktok_acquire / x_buzz_measure とその *_status: 収集・計測＝調べる
 #   - recommend: 過去提案のベクトル近傍提示＝調べる
+#   - slack_search: Slack 全体のキーワード検索（slack_summary の兄弟だが中身は検索）＝調べる
 #   - proposal_builder / proposal_deck / proposal_campaign: 成果物生成＝作る
 #   - video_approval: 納品動画の一次FB。proposal_review と同型の「レビュー」＝作る
 #   - operation_log: Slack 会話を CRM 転記用に構造化＝整える
 #   - mail_constraints / workspace_search: 本人の受信箱・予定を引く秘書業務＝秘書
 #   - digest_ack: 朝ダイジェストの「確認済み」ボタン押下＝morning_digest の別入口＝秘書
+#   - digest_settings: 朝ダイジェストの本人ごとの設定＝morning_digest の設定口＝秘書
+#   - meeting_prep: 社外商談の準備レポート（本人の予定・メール・金庫・公開情報を引く）＝秘書
 #   - search_surface_check_video: 検索上位チェックの 2 段目（上位の動画の中身）。
 #     mcp が usage_events に別の skill 名で記録する（factory 登録のツールではない）＝調べる
 _SIBLING_WORK_TYPE_TOOLS: dict[str, tuple[str, ...]] = {
@@ -98,6 +101,7 @@ _SIBLING_WORK_TYPE_TOOLS: dict[str, tuple[str, ...]] = {
         "x_buzz_measure_status",
         "recommend",
         "search_surface_check_video",
+        "slack_search",
     ),
     WORK_TYPE_CREATE: (
         "proposal_builder",
@@ -110,6 +114,8 @@ _SIBLING_WORK_TYPE_TOOLS: dict[str, tuple[str, ...]] = {
         "mail_constraints",
         "workspace_search",
         "digest_ack",
+        "digest_settings",
+        "meeting_prep",
     ),
 }
 

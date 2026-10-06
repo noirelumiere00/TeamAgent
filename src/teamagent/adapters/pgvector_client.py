@@ -388,6 +388,7 @@ class PgVectorClient:
         *,
         strict_industry: bool = False,
         metadata_filters: dict[str, str] | None = None,
+        metadata_filters_allow_missing: bool = False,
         sticky_filters: dict[str, str] | None = None,
         metadata_contains: dict[str, str] | None = None,
         exclude_boilerplate: bool = False,
@@ -415,6 +416,16 @@ class PgVectorClient:
             ``d.metadata->>%s = %s`` の追加 AND 条件として bind される（厳密一致のみ）。
             filter_industry とは独立に AND 結合する。key / value は placeholder 化される
             ため SQL injection から保護される。
+
+        metadata_filters_allow_missing:
+            True のとき metadata_filters の各キーを soft 化し、
+            ``(d.metadata->>%s = %s OR d.metadata->>%s IS NULL)`` にする（filter_industry の
+            soft と同じ考え方）。キーを持たない文書＝**分類が付いていない文書**を「不明」として
+            通し、別の値が付いた文書だけを外す。呼び側（SearchSkill）は質問文から**自動推定**した
+            分類フィルタにだけ立てる（2026-10-02: Bedrock の費用上限で分類が失敗した取り込み分
+            143 件・Slack 投稿の 1/3 が「受注」「動画広告」等の自動フィルタで一律に消え、
+            #proj-01案件決定-同行依頼 の 65 件が検索に一度も出なかった）。既定 False＝従来の
+            厳密一致と完全一致。sticky_filters（ユーザー明示）には効かない。
 
         sticky_filters:
             metadata_filters と同じ ``d.metadata->>%s = %s`` 等価 AND だが、**呼び側
@@ -530,8 +541,13 @@ class PgVectorClient:
 
         if metadata_filters:
             for key, value in metadata_filters.items():
-                where_parts.append("d.metadata->>%s = %s")
-                params.extend([key, value])
+                if metadata_filters_allow_missing:
+                    # soft: 指定値 OR 未分類（キー無し）。別の値が付いた文書だけを外す。
+                    where_parts.append("(d.metadata->>%s = %s OR d.metadata->>%s IS NULL)")
+                    params.extend([key, value, key])
+                else:
+                    where_parts.append("d.metadata->>%s = %s")
+                    params.extend([key, value])
 
         # sticky（ユーザー明示・等価）— metadata_filters と同じ AND だが、呼び側
         # _pool_search が fail-open / exclusion_rescue 再検索でも必ず再注入する点だけが違う。
@@ -1391,6 +1407,84 @@ class PgVectorClient:
             request_id=request_id,
             client_names=clean_names,
             limit=limit,
+            hit_count=len(hits),
+        )
+        return hits
+
+    def search_topic_by_terms(
+        self,
+        conn: psycopg.Connection[dict[str, Any]],
+        embedding: list[float],
+        *,
+        topic: str,
+        terms: list[str],
+        limit: int = 5,
+        embedding_col: str = "embedding",
+        request_id: str | None = None,
+    ) -> list[SearchHit]:
+        """topic の文書のうち、本文か題名に terms のどれかを含むチャンク（意味の近い順）。
+
+        10-05: 「ADK経由で受注した〜」で、#proj-01 の案件決定投稿（本文に「代理店：ADK」）が
+        意味の近さだけでは候補に入らない。代理店名・社名のような固有名は文字で探す。
+        RLS は conn 側で設定済み前提（本人が見られる文書だけ）。メタデータは文書の metadata を
+        そのまま載せる（channel_name・client_name 等を後段の表示がそのまま使える）。
+        """
+        clean = [t.strip() for t in terms if t and t.strip()]
+        if not clean or not topic or embedding_col not in ("embedding", "embedding_ctx"):
+            return []
+        patterns = [f"%{self._escape_like(t)}%" for t in clean]
+        sql = f"""
+            SELECT
+                abs(hashtext(c.id::text)::bigint) AS chunk_id,
+                COALESCE(c.contextualized, c.content) AS content,
+                1 - (c.{embedding_col} <=> %s::vector) AS score,
+                c.page_num,
+                d.source_uri,
+                d.source_type::text AS source_type,
+                d.title,
+                d.metadata AS doc_metadata,
+                to_char(d.modified_at AT TIME ZONE 'Asia/Tokyo', 'YYYY-MM-DD') AS updated_at
+            FROM chunks c
+            JOIN documents d ON d.id = c.document_id
+            WHERE d.metadata->>'topic' = %s
+              AND (c.content ILIKE ANY(%s) OR d.title ILIKE ANY(%s))
+            ORDER BY c.{embedding_col} <=> %s::vector
+            LIMIT %s
+        """  # nosec B608 — embedding_col は上の許可リストで縛っている
+        params: list[Any] = [embedding, topic, patterns, patterns, embedding, limit]
+        with conn.cursor() as cur:
+            cur.execute(sql, params)
+            rows = cur.fetchall()
+        hits: list[SearchHit] = []
+        for r in rows:
+            meta: dict[str, Any] = {
+                k: v for k, v in dict(r.get("doc_metadata") or {}).items() if isinstance(k, str)
+            }
+            meta.update(
+                {
+                    "source_uri": r.get("source_uri"),
+                    "source_type": r.get("source_type"),
+                    "title": r.get("title"),
+                }
+            )
+            if r.get("page_num") is not None:
+                meta["page_num"] = r["page_num"]
+            if r.get("updated_at"):
+                meta["updated_at"] = str(r["updated_at"])
+                meta["date_basis"] = "modified_at"
+            hits.append(
+                SearchHit(
+                    chunk_id=int(r["chunk_id"]),
+                    content=str(r["content"]),
+                    score=max(0.0, min(1.0, float(r["score"]))),
+                    metadata=meta,
+                )
+            )
+        logger.info(
+            "pgvector_search_topic_by_terms",
+            request_id=request_id,
+            topic=topic,
+            terms=len(clean),
             hit_count=len(hits),
         )
         return hits

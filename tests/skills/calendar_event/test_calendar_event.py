@@ -168,6 +168,74 @@ def test_title_is_trimmed_rather_than_issuing_an_unusable_token() -> None:
     )
 
 
+# 件名に来る書記素クラスタ（見た目の 1 文字）。途中で切ると片割れがカレンダーの件名に残るもの。
+_FAMILY = "\U0001f468\u200d\U0001f469\u200d\U0001f467"  # 👨 ZWJ 👩 ZWJ 👧
+_FLAG_JP = "\U0001f1ef\U0001f1f5"  # 地域指示子 2 個
+_THUMBS_SKIN = "\U0001f44d\U0001f3fd"  # 👍 肌色
+_KEYCAP_1 = "1\ufe0f\u20e3"  # 1 VS16 囲み
+_ENGLAND = "\U0001f3f4\U000e0067\U000e0062\U000e0065\U000e006e\U000e0067\U000e007f"  # タグ列
+_IVS_KANJI = "葛\U000e0100"  # 異体字セレクタ付きの漢字
+_GA_DECOMPOSED = "か\u3099"  # か＋結合濁点
+_TITLE_CLUSTERS = {
+    "family": _FAMILY,
+    "flag": _FLAG_JP,
+    "skin_tone": _THUMBS_SKIN,
+    "keycap": _KEYCAP_1,
+    "tag_flag": _ENGLAND,
+    "ivs_kanji": _IVS_KANJI,
+    "decomposed_kana": _GA_DECOMPOSED,
+    "cjk": "定",
+}
+
+
+@pytest.mark.parametrize("name", sorted(_TITLE_CLUSTERS))
+def test_title_cut_at_60_chars_does_not_split_a_cluster(name: str) -> None:
+    """60 字の上限がクラスタの途中に来たら、そのクラスタを丸ごと落とす（割れた絵文字を件名に残さない）。"""
+    cluster = _TITLE_CLUSTERS[name]
+    for inside in range(1, len(cluster)):
+        head = "定" * (60 - inside)
+        payload = decode_event_token(_token(title=head + cluster + "例"), ME)
+        assert payload is not None
+        assert payload.title == head
+    head = "例" * (60 - len(cluster))
+    payload = decode_event_token(_token(title=head + cluster + "例"), ME)
+    assert payload is not None
+    assert payload.title == head + cluster  # 境界ちょうどなら残す
+
+
+def _fits_whole(title: str) -> bool:
+    """件名を削らずに 1 回で収まるか（縮めループを通らない＝削り方と独立した正解）。"""
+    payload = decode_event_token(_token(title=title), ME)
+    assert payload is not None
+    return payload.title == title
+
+
+@pytest.mark.parametrize("name", sorted(_TITLE_CLUSTERS))
+def test_shrink_loop_drops_whole_clusters(name: str) -> None:
+    """500 字に収めるための縮めループも 1 クラスタずつ削る。4 バイト絵文字の詰め物の数を
+    ずらして、コードポイント単位だと切り口がクラスタの途中に来る並びを網羅する。
+    結果は「丸ごとのクラスタだけの先頭部分」のうち収まる最長のもの。"""
+    cluster = _TITLE_CLUSTERS[name]
+    shrunk = 0
+    for filler in range(60):
+        count = (60 - filler) // len(cluster)
+        clusters = ["😀"] * filler + [cluster] * count
+        title = "".join(clusters)
+        if not count or _fits_whole(title):
+            continue
+        shrunk += 1
+        token = _token(title=title)
+        assert len(token) <= EVENT_TOKEN_MAX_LENGTH
+        payload = decode_event_token(token, ME)
+        assert payload is not None
+        prefixes = ["".join(clusters[:i]) for i in range(len(clusters) + 1)]
+        assert payload.title in prefixes, (filler, payload.title)
+        kept = prefixes.index(payload.title)
+        assert _fits_whole(payload.title)
+        assert not _fits_whole(prefixes[kept + 1]), filler  # 削りすぎていない
+    assert shrunk  # 縮めループを実際に通っている
+
+
 def test_event_token_expiry_is_exclusive_and_ttl_is_bounded() -> None:
     token = _token(now=1000, ttl_s=60)
     assert decode_event_token(token, ME, now=1059) is not None
@@ -480,6 +548,106 @@ def test_triage_to_event_token_integration(monkeypatch: pytest.MonkeyPatch) -> N
     ).mail_digest[0]
     assert invalid.draft_token == ""
     assert invalid.event_token == ""
+
+
+def _digest_item(*, meeting_title: str, subject: str) -> Any:
+    """fake Bedrock/Gmail で朝ダイジェストを 1 件分通し、MailDigestItem を返す。"""
+    import base64 as _b64
+    import datetime as _dt
+    import json as _json
+
+    from teamagent.skills.morning_digest.schema import MorningDigestInput
+    from teamagent.skills.morning_digest.skill import MorningDigestSkill
+
+    future = (
+        (_dt.datetime.now(_dt.timezone(_dt.timedelta(hours=9))) + _dt.timedelta(days=2))
+        .replace(minute=0, second=0, microsecond=0)
+        .isoformat()
+    )
+    triage_json = _json.dumps(
+        [
+            {
+                "id": "5feceb66",  # _short_hash(0)
+                "importance": "high",
+                "summary": "定例の確定連絡",
+                "deadline": None,
+                "ask": "",
+                "next_step": "",
+                "meeting_start": future,
+                "meeting_end": None,
+                "meeting_title": meeting_title,
+                "scheduling_request": True,
+            }
+        ]
+    )
+
+    class _Resp:
+        def __init__(self, text: str) -> None:
+            self.text = text
+            self.usage = type("U", (), {"cost_usd": 0.001})()
+
+    class _Bedrock:
+        def converse(self, **kw: Any) -> _Resp:
+            return _Resp(triage_json)
+
+    class _Msg:
+        def __init__(self) -> None:
+            self.headers = {"From": "c@x.com", "To": ME, "Subject": subject}
+            self.payload = {
+                "mimeType": "text/plain",
+                "body": {"data": _b64.urlsafe_b64encode("7/15 14:00 確定です".encode()).decode()},
+            }
+            self.internal_date_ms = 1000
+            self.thread_id = "T1"
+            self.id = "m1"
+            self.label_ids = ()
+
+    class _Gmail:
+        def list_messages(self, q: str, rid: str, max_results: int = 30) -> Any:
+            ref = type("R", (), {"id": "m1", "thread_id": "T1"})()
+            return ([ref], None)
+
+        def get_thread(self, tid: str, rid: str, **_: Any) -> list[Any]:
+            return [_Msg()]
+
+        def list_drafts(self, rid: str, **_: Any) -> list[Any]:
+            return []
+
+    class _Tokens:
+        def get(self, e: str) -> Any:
+            return object()
+
+    skill = MorningDigestSkill(token_store=_Tokens(), gmail=_Gmail(), bedrock=_Bedrock())
+    skill._draft_on_demand_only = True
+    skill._gcalendar = object()
+    out = skill.run(
+        MorningDigestInput(max_drafts=0),
+        SkillContext(request_id="r", metadata={"user_email": ME}),
+    )
+    return out.mail_digest[0]
+
+
+@pytest.mark.parametrize("name", sorted(_TITLE_CLUSTERS))
+def test_digest_meeting_title_cut_does_not_split_a_cluster(name: str) -> None:
+    """ダイジェスト側の 60 字切り（event_token より先に走る）もクラスタを割らない。
+    LLM の meeting_title と、それが空のときの件名フォールバックの両方。"""
+    cluster = _TITLE_CLUSTERS[name]
+    for inside in range(1, len(cluster)):
+        head = "定" * (60 - inside)
+        item = _digest_item(meeting_title=head + cluster + "例", subject="定例の件")
+        assert item.meeting_title == head  # 本人 DM の表示と 📅 の文言
+        payload = decode_event_token(item.event_token, ME)
+        assert payload is not None
+        assert payload.title == head  # カレンダーの件名
+
+        fallback = _digest_item(meeting_title="", subject=head + cluster + "例")
+        assert fallback.meeting_title == ""
+        payload = decode_event_token(fallback.event_token, ME)
+        assert payload is not None
+        assert payload.title == head
+    head = "例" * (60 - len(cluster))
+    item = _digest_item(meeting_title=head + cluster + "例", subject="定例の件")
+    assert item.meeting_title == head + cluster  # 境界ちょうどなら残す
 
 
 def test_meeting_iso_rejects_date_only_and_past() -> None:

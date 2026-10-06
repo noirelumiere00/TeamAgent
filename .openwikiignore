@@ -1,0 +1,22 @@
+# OpenWiki が読まない・書き写さないパス（.gitignore と同じ書式）
+
+# 秘密情報と鍵（雛形も含め、値や鍵名の一覧を wiki に写さない）
+.env*
+**/.env*
+*.pem
+*.key
+secrets/
+**/secrets/
+*.tfvars
+*.tfvars.json
+*.tfvars.example
+
+# クライアント名・社内フォルダ ID などを含むデータ（先頭の / でリポジトリ直下だけに限定。
+# 付けないと wiki 内の openwiki/data/ まで除外されてページが提出できなくなる）
+/data/
+/assets/deck_specs/
+
+# ロックファイルと生成物
+uv.lock
+requirements-worker.lock
+**/*.b64

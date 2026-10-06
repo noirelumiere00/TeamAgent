@@ -9,12 +9,7 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, model_validator
-
-from teamagent.media.contracts import (
-    TIKTOK_OPERATION_EXECUTION_LIMIT_SECONDS,
-    estimate_tiktok_operation_seconds,
-)
+from pydantic import BaseModel, Field
 
 
 class TikTokAcquireInput(BaseModel):
@@ -25,9 +20,20 @@ class TikTokAcquireInput(BaseModel):
         default="keyword",
         description="keyword検索、またはhashtag検索（空振り時はkeywordへフォールバック）",
     )
-    n_per_kw: int = Field(default=10, ge=1, le=30, description="各KWの取得本数(最大30)")
+    n_per_kw: int = Field(
+        default=10,
+        ge=1,
+        le=30,
+        description=(
+            "各KWの取得本数(最大30)。1回の実行時間に収まらない組み合わせは断らずに"
+            "組み直して取得する（動画なしは指標だけの取得・動画ありはKWごとに分割）"
+        ),
+    )
     videos_per_kw: int = Field(
-        default=2, ge=0, le=10, description="各KWで動画本体(mp4)を保存する上位本数"
+        default=2,
+        ge=0,
+        le=10,
+        description="各KWで動画本体(mp4)を保存する上位本数。0=指標だけ（検索面チェック用）",
     )
     sort: Literal["display", "save_rate", "recent"] = Field(
         default="display",
@@ -39,29 +45,38 @@ class TikTokAcquireInput(BaseModel):
     industry: str | None = Field(default=None, description="業種(任意)")
     competitors: list[str] = Field(default_factory=list, description="競合名(任意・SoV分析用)")
 
-    @model_validator(mode="after")
-    def _fits_worker_deadline(self) -> TikTokAcquireInput:
-        estimated_seconds = estimate_tiktok_operation_seconds(
-            keyword_count=len(self.keywords),
-            n_per_kw=self.n_per_kw,
-            videos_per_kw=self.videos_per_kw,
-            artifact_mode="full",
-        )
-        if estimated_seconds > TIKTOK_OPERATION_EXECUTION_LIMIT_SECONDS:
-            raise ValueError(
-                "1ジョブの安全な実行時間を超えます。キーワード数・各KW取得本数・"
-                "動画保存本数を減らしてください"
-            )
-        return self
+
+class TikTokAcquireJob(BaseModel):
+    """分割したときの1ジョブ分（どの KW をどの job_id で取ったか）。"""
+
+    job_id: str
+    keywords: list[str]
+    n_per_kw: int
+    videos_per_kw: int
+    artifact_mode: Literal["metadata_only", "full"] = Field(
+        description="full=指標+サムネ+動画 / metadata_only=表示順と指標だけ"
+    )
 
 
 class TikTokAcquireOutput(BaseModel):
-    job_id: str
+    job_id: str = Field(description="最初のジョブの job_id（1ジョブならこれだけ）")
     status: str = Field(description="queued 等。実取得は数分かかる(非同期)")
     poll_after_s: int = Field(
         default=75, description="この秒数後に tiktok_acquire_status を呼ぶ目安"
     )
     message: str
+    job_ids: list[str] = Field(
+        default_factory=list,
+        description="投函した全ジョブの job_id。複数あるときは job_id ごとに status を照会する",
+    )
+    jobs: list[TikTokAcquireJob] = Field(
+        default_factory=list,
+        description="ジョブごとの KW と本数（KW 単位で後工程に渡す job_id の対応表）",
+    )
+    adjustments: list[str] = Field(
+        default_factory=list,
+        description="1回の実行時間に収めるため要求から変えた点（利用者にそのまま伝える）",
+    )
 
 
 class TikTokAcquireStatusInput(BaseModel):

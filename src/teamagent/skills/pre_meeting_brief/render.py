@@ -4,7 +4,7 @@
   1. NFKC 正規化
   2. 制御文字・改行の除去
   3. ``<`` ``>`` ``@`` を全角へ
-  4. 字数上限
+  4. 字数上限（絵文字などの書記素クラスタは割らない）
 
 これで ``<!channel>`` ``<@U…>`` ``<url|text>`` を **組み立て不能** にする。URL は
 ``source_uri`` の実値だけをリンク化し、文字列連結で URL を作らない。
@@ -30,6 +30,7 @@ import unicodedata
 from typing import Any
 
 from teamagent.skills.morning_digest import calendar_window as _calwin
+from teamagent.util.grapheme_cut import truncate_graphemes
 
 # 社外 MTG が 0 件の日の 1 行（節ごと消さない＝「予定が無い日」と区別できるようにする）。
 NO_EXTERNAL_LINE = "📌 本日は社外MTGなし"
@@ -52,7 +53,8 @@ def harden(raw: str | None, limit: int) -> str:
     text = "".join(ch for ch in text if ch >= " " and ch != "\x7f")
     text = text.replace("<", "＜").replace(">", "＞").replace("@", "＠")
     text = text.replace("&", "＆")  # &amp; 由来の実体参照も潰す
-    return text.strip()[:limit]
+    # 上限が絵文字（🇯🇵・ZWJ 連結など）の途中に来ても片割れを DM に残さない。
+    return truncate_graphemes(text.strip(), limit)
 
 
 def _fmt_time_range(start_at: str | None, end_at: str | None) -> str:

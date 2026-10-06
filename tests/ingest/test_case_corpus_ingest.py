@@ -534,6 +534,7 @@ def test_real_yaml_case_entry_is_skipped_when_env_unset(
     assert [s.sheet_id for s in sources.gsheets] == [
         "1jRmoUPo0kAhOGA6secGcwGHILH5LHt7lYvEuxJ5uupo",
         "1VukC1Qv0MRqxSvgxuSqDwzpPsM_K1FJNTpTXs10KQhY",
+        "1UNicjhmAPYzlY4TBTgTn92dqRkVYPqAmYh1c3oxcsYU",  # 2026-10-02 案件決定v2（純加算）
     ]
     assert all(s.extra_metadata.get("case_corpus") is None for s in sources.gsheets)
 
@@ -565,7 +566,7 @@ def test_default_mode_skips_only_the_unconfigured_entry(
     monkeypatch.delenv("CASE_CORPUS_SHEET_ID", raising=False)
     monkeypatch.delenv("CASE_CORPUS_SHEET_GID", raising=False)
     sources = load_ingest_sources(REAL_YAML)
-    assert len(sources.gsheets) == 2
+    assert len(sources.gsheets) == 3  # 既存 2＋案件決定v2（10-02）
     assert len(sources.slack_channels) >= 1
     assert len(sources.gdrive_folders) >= 1
 
@@ -583,7 +584,7 @@ def test_case_sheet_id_colliding_with_an_existing_sheet_is_rejected(
     並び順だけで黙って変わる）＋ ingest_source_health の行も衝突する。
     実見メモ case_corpus_columns_20260911.md が「そのシートを母集団に使え」と結論して
     いるため、この ID が貼られる確率は現実的に高い。
-    変異: loader の重複 sheet_id 検査を外すと gsheets が 3 件になって赤。
+    変異: loader の重複 sheet_id 検査を外すと gsheets が 4 件（案件決定v2 を含む）になって赤。
     """
     knowledge_sheet_id = "1jRmoUPo0kAhOGA6secGcwGHILH5LHt7lYvEuxJ5uupo"
     monkeypatch.setenv("CASE_CORPUS_SHEET_ID", knowledge_sheet_id)
@@ -593,6 +594,7 @@ def test_case_sheet_id_colliding_with_an_existing_sheet_is_rejected(
     assert [s.sheet_id for s in sources.gsheets] == [
         knowledge_sheet_id,
         "1VukC1Qv0MRqxSvgxuSqDwzpPsM_K1FJNTpTXs10KQhY",
+        "1UNicjhmAPYzlY4TBTgTn92dqRkVYPqAmYh1c3oxcsYU",  # 2026-10-02 案件決定v2（事例集ではない）
     ]
     assert _real_case_entry(sources) is None
     # 既存エントリが勝つ＝case_corpus フラグは 1 つも立たない
@@ -648,6 +650,7 @@ def test_case_entry_is_dropped_when_gid_env_is_unset_or_invalid(
     assert [s.sheet_id for s in sources.gsheets] == [
         "1jRmoUPo0kAhOGA6secGcwGHILH5LHt7lYvEuxJ5uupo",
         "1VukC1Qv0MRqxSvgxuSqDwzpPsM_K1FJNTpTXs10KQhY",
+        "1UNicjhmAPYzlY4TBTgTn92dqRkVYPqAmYh1c3oxcsYU",  # 2026-10-02 案件決定v2（純加算）
     ]
 
 

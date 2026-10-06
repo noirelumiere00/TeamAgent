@@ -147,3 +147,25 @@ def test_accepted_message_states_computed_duration_not_seconds() -> None:
     assert "秒後" not in message
     assert "完成予定" not in message
     assert "omiyage_" not in message
+
+
+def test_keyword_delegation_is_offered_only_when_keywords_are_needed() -> None:
+    """10-05 実測: 「おまかせで」と返したのに回答欄をもう一度埋めさせられた。
+
+    KW が足りない／直す必要があるときだけ「おまかせ」の逃げ道を 1 行出し、description にも
+    「任されたら聞き返さず 3 語選んで再 submit」を書く。
+    変異: preflight の KEYWORD_DELEGATE_LINE 追加を外すと赤。
+    """
+    from teamagent.skills.omiyage_report.preflight import KEYWORD_DELEGATE_LINE
+
+    needs_kw = OmiyageReportSubmitInput(brand="JTB", competitors=["HIS"])
+    message = build_needs_input_message(needs_kw, run_preflight(needs_kw))
+    assert KEYWORD_DELEGATE_LINE in message
+    assert message.index(KEYWORD_DELEGATE_LINE) < message.index("以下をコピーしてご返信ください。")
+
+    has_kw = OmiyageReportSubmitInput(brand="JTB", keywords=["国内旅行"])
+    message = build_needs_input_message(has_kw, run_preflight(has_kw))
+    assert KEYWORD_DELEGATE_LINE not in message  # 競合だけ足りないときは出さない
+
+    description = OmiyageReportSubmitSkill.description
+    assert "おまかせ" in description and "聞き返さず" in description

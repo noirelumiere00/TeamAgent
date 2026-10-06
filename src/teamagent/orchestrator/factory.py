@@ -75,6 +75,7 @@ def resolve_search_skill_config() -> dict[str, Any]:
         # 提案 PDF による枠の占有で rerank へ届かない。実績を聞く意図のときだけ、プール内の
         # 施策実績がこの件数未満なら施策実績限定の検索を 1 回足す。0 で無効。
         "campaign_pool_floor": _envint("SEARCH_CAMPAIGN_POOL_FLOOR", 3),
+        "deal_pool_floor": _envint("SEARCH_DEAL_POOL_FLOOR", 5),
         "min_relevance": _envfloat("SEARCH_MIN_RELEVANCE", 0.0),
         # 2段階しきい値の fallback（既定 0.0 = 無効＝従来挙動）。
         "min_relevance_fallback": _envfloat("SEARCH_MIN_RELEVANCE_FALLBACK", 0.0),
@@ -118,6 +119,11 @@ def build_search_skill_from_env() -> Any:
 _build_search_skill = build_search_skill_from_env
 
 
+def karte_prompt_version_from_env() -> str:
+    """clientkarte の system prompt の版（env ``KARTE_PROMPT_VERSION``・既定 v1）。"""
+    return os.environ.get("KARTE_PROMPT_VERSION", "v1").strip() or "v1"
+
+
 def build_production_tools() -> list[ToolSpec]:
     """本番 Skill を ToolSpec 群へ束ねる（Phase 1-2: search + clientkarte + proposal_draft/review）.
 
@@ -140,7 +146,15 @@ def build_production_tools() -> list[ToolSpec]:
         _research_persister = ResearchPersister(pgvector=search.pgvector, embedder=search.embedder)
     specs = [
         ToolSpec(SearchSkill.name, SearchSkill.description, SearchSkill, factory=lambda: search),
-        ToolSpec(ClientKarteSkill.name, ClientKarteSkill.description, ClientKarteSkill),
+        # 案件検索 v3 PR 1（2026-10-01）: カルテのプロンプトの版を env で選べるようにする。
+        # 旧 runtime/slack_bot.py は KARTE_PROMPT_VERSION を読んでいたが、本番の MCP 経路は
+        # 引数なし生成で常に v1 だった（戻し先の v1 は既定のまま）。
+        ToolSpec(
+            ClientKarteSkill.name,
+            ClientKarteSkill.description,
+            ClientKarteSkill,
+            factory=lambda: ClientKarteSkill(prompt_version=karte_prompt_version_from_env()),
+        ),
         ToolSpec(
             ProposalDraftSkill.name,
             ProposalDraftSkill.description,
@@ -167,6 +181,22 @@ def build_production_tools() -> list[ToolSpec]:
                 KnowledgeDeliverSkill.description,
                 KnowledgeDeliverSkill,
                 factory=lambda: KnowledgeDeliverSkill(search=search),
+            )
+        )
+
+    # 社外商談の準備レポート（v1＝DM でのオンデマンド・10-05）。今日の社外商談 1 件について
+    # 公開情報（web_research）・金庫（共有 search・CRM の代わり）・相手とのメール（metadata のみ）を
+    # 集めて出典つきで短く整理する。**既定 OFF**（USE_MEETING_PREP_TOOL=1）。
+    # DM 限定（DM_ONLY_TOOLS）。段階公開は MEETING_PREP_ALLOWED_EMAILS（空＝全員）。
+    if _envflag("USE_MEETING_PREP_TOOL"):
+        from teamagent.skills.meeting_prep.skill import MeetingPrepSkill
+
+        specs.append(
+            ToolSpec(
+                MeetingPrepSkill.name,
+                MeetingPrepSkill.description,
+                MeetingPrepSkill,
+                factory=lambda: MeetingPrepSkill(search=search),
             )
         )
 
@@ -474,6 +504,21 @@ def build_production_tools() -> list[ToolSpec]:
             )
         )
 
+    # 朝ダイジェストの本人ごとの設定（「Slack の欄はいらない」「来週まで止めて」）を DM で
+    # 見る/変える/戻すツール。触るのは本人の digest_preferences 行だけ（DM 限定・外部送信ゼロ）。
+    # 毎朝の配信が MORNING_DIGEST_PREFERENCES=true のときにこの行を読む。**既定 OFF**。
+    if _envflag("USE_DIGEST_SETTINGS_TOOL"):
+        from teamagent.skills.digest_settings.skill import DigestSettingsSkill
+
+        specs.append(
+            ToolSpec(
+                DigestSettingsSkill.name,
+                DigestSettingsSkill.description,
+                DigestSettingsSkill,
+                factory=lambda: DigestSettingsSkill(),
+            )
+        )
+
     # 自由文の空き時間照会ツール（「空いてる？」「◯分どこに入る？」）。read-only＝
     # freebusy 読み取りのみで書込 API は一切呼ばない。**既定 OFF**。
     if _envflag("USE_CALENDAR_FREEBUSY_TOOL"):
@@ -502,6 +547,22 @@ def build_production_tools() -> list[ToolSpec]:
                 SlackSummarySkill.description,
                 SlackSummarySkill,
                 factory=lambda: SlackSummarySkill(slack_store=summary_slack_store),
+            )
+        )
+
+    # Slack 全体のキーワード検索ツール（「Slack で〜を探して」）。検索は **依頼者本人の xoxp のみ**
+    # （search.messages・bot token は経路に一切登場しない）。チャンネルからの依頼には公開
+    # チャンネルの一致だけを返し、非公開・DM の一致は件数だけ出す。**既定 OFF**。
+    if _envflag("USE_SLACK_SEARCH_TOOL"):
+        from teamagent.skills.slack_search.skill import SlackSearchSkill
+
+        search_slack_store = _build_slack_store()
+        specs.append(
+            ToolSpec(
+                SlackSearchSkill.name,
+                SlackSearchSkill.description,
+                SlackSearchSkill,
+                factory=lambda: SlackSearchSkill(slack_store=search_slack_store),
             )
         )
 
@@ -634,7 +695,10 @@ def build_production_tools() -> list[ToolSpec]:
             )
         )
 
-    # TikTok取得ツール（30本/KW・上位N本は動画本体DL→S3）。**既定 OFF**（USE_TIKTOK_ACQUIRE=1）。
+    # TikTok取得ツール（既定10本/KW・最大30本、上位N本は動画本体DL→S3）。**既定 OFF**
+    # （USE_TIKTOK_ACQUIRE=1）。1ジョブの実行上限（870秒見積り）を超える要求は断らず、
+    # 動画なし→指標だけの取得・動画あり→KWごとのジョブ分割へ組み直す
+    # （skills/tiktok_acquire/plan.py）。
     # video_algorithm/tiktok_search が bot プロセス内でスクレイプするのと違い、submit は SQS 投函
     # のみ（RunTask/PassRole 非保有）で、実取得は使い捨て Fargate に隔離（A′トポロジ）。
     # env: TIKTOK_TASK_QUEUE / TIKTOK_JOBS_TABLE / TIKTOK_S3_BUCKET（tiktok_acquire.tf）。
