@@ -74,6 +74,7 @@ def test_knowledge_deliver_records_drive_file_ids_but_not_urls() -> None:
             KnowledgeRef(title="A社 提案書", url="https://drive.google.com/file/d/FILEID_A/view"),
             KnowledgeRef(title="B社", url="https://docs.google.com/presentation/d/FILEID_B/edit"),
             KnowledgeRef(title="外部", url="https://example.com/d/NOT_DRIVE"),
+            KnowledgeRef(title="URL 無し", url="gdrive://FILEID_C"),  # url 欄に内部 URI
         ],
     )
 
@@ -83,6 +84,7 @@ def test_knowledge_deliver_records_drive_file_ids_but_not_urls() -> None:
         "source_ids": [
             {"external_id": "FILEID_A", "source_type": "gdrive"},
             {"external_id": "FILEID_B", "source_type": "gdrive"},
+            {"external_id": "FILEID_C", "source_type": "gdrive"},
         ],
         "answer_chars": len("資料の要約"),
     }

@@ -94,11 +94,17 @@ def _source_entry(item: Any) -> dict[str, str] | None:
             source_type = source_type or parsed[1]
     if entry is None:
         url = _text(_field(item, "url"), 2000)
-        host = (urlsplit(url).hostname or "").lower() if url else ""
-        file_id = extract_drive_file_id(url) if url and host in _DRIVE_HOSTS else None
-        if file_id:
-            entry = {"external_id": file_id}
-            source_type = source_type or "gdrive"
+        # knowledge_deliver は url 欄に内部 URI（gdrive://…）を入れることがある
+        parsed = _from_source_uri(url)
+        if parsed is not None:
+            entry = {"external_id": parsed[0]}
+            source_type = source_type or parsed[1]
+        else:
+            host = (urlsplit(url).hostname or "").lower() if url else ""
+            file_id = extract_drive_file_id(url) if url and host in _DRIVE_HOSTS else None
+            if file_id:
+                entry = {"external_id": file_id}
+                source_type = source_type or "gdrive"
     if entry is None:
         value = _text(_field(item, "chunk_id"), _MAX_ID_CHARS)
         if value:
