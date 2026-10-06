@@ -169,4 +169,4 @@ def test_plain_answer_is_unchanged() -> None:
     out = _skill(_bedrock("採用ショート動画は1日密着型が効果的です。")).run(
         input=SearchInput(query="採用動画"), ctx=SkillContext()
     )
-    assert out.answer == "採用ショート動画は1日密着型が効果的です。"
+    assert out.answer.split("\n\n探した範囲:", 1)[0] == "採用ショート動画は1日密着型が効果的です。"

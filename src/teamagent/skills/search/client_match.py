@@ -16,6 +16,7 @@
 from __future__ import annotations
 
 import re
+import unicodedata
 from collections.abc import Iterable
 
 from teamagent.adapters.pgvector_client import SearchHit
@@ -47,7 +48,7 @@ def normalize_client(name: str | None) -> str:
     """クライアント名を照合用に正規化する（法人格・記号・空白を落として小文字化）。"""
     if not name:
         return ""
-    out = _LEGAL_SUFFIX_RE.sub("", str(name))
+    out = _LEGAL_SUFFIX_RE.sub("", unicodedata.normalize("NFKC", str(name)))
     out = _NOISE_RE.sub("", out)
     return out.casefold()
 
@@ -89,7 +90,7 @@ def normalize_filter_client(value: str | None) -> str | None:
     """
     if value is None:
         return None
-    raw = value.strip()
+    raw = unicodedata.normalize("NFKC", value).strip()
     if not raw:
         return None
     # 法人格 → 括弧 → 法人格 の順。括弧を先に剥ぐと「（株）」「(株)」の括弧だけが消えて
@@ -138,7 +139,7 @@ def _hit_matches_client(h: SearchHit, client: str) -> bool:
 
     def _bidi(s: str | None) -> bool:
         s = str(s or "").strip()
-        return bool(s) and (needle in s or s in needle)
+        return bool(s) and names_overlap(needle, s)
 
     # 単値メタ + タイトル（双方向部分一致）
     for k in ("cls_project", "client_name", "title"):
@@ -152,7 +153,9 @@ def _hit_matches_client(h: SearchHit, client: str) -> bool:
         if any(_bidi(e) for e in ents):
             return True
     # 本文出現（片方向・2 文字以上でノイズ抑制）
-    if len(needle) >= 2 and needle in (h.content or ""):
+    if len(normalize_client(needle)) >= 2 and normalize_client(needle) in normalize_client(
+        h.content
+    ):
         return True
     return False
 
@@ -189,6 +192,8 @@ def hit_is_about_client(
 __all__ = [
     "_MIN_CLIENT_LEN",
     "_hit_matches_client",
+    "alias_pairs",
+    "aliases",
     "clients_match",
     "hit_entities",
     "hit_is_about_client",
@@ -196,3 +201,50 @@ __all__ = [
     "normalize_client",
     "normalize_filter_client",
 ]
+
+
+# ブランド↔法人・カナ↔英字・略称の別名辞書（**静的 seed のみ**・対称・推移展開しない）。
+#
+# 本番実測（2026-09-02〜03）で「同じ取引先なのに別会社扱い」になった対:
+#   - 「（アース製薬）の社内資料」→ top1 cls_project=ハビットプロ（アース製薬のブランド）
+#   - 「ホーユー株式会社」→ top1 cls_project=SOMARCA（ホーユーのブランド）
+#   - 「エリスショーツの提案」→ top1 cls_project=大王製紙株式会社（エリスは同社ブランド）
+# 2026-10-06 の全 DM 判定（テーマ P2）で、利用者の言葉のままでは空振りした対を追加
+# （インペックス/INPEX・ファミマ・エムキュア・エリクシール・トップバリュ・ホンダ・サンギ）。
+# DB（title / cls_entities の共起）や LLM から自動生成はしない: 一般社員の投稿 1 件で
+# 競合ペア（花王↔資生堂）が別名に入り、全員の警告を無効化できてしまうため。
+# 運用追加はこのタプルへ明示的に足し、テストで固定する。データファイルにしないのは、
+# 読めないと検索全体が import で落ちるため。未確認の SPE・西友フーズは推測で足さない。
+_ALIAS_SEED: tuple[tuple[str, str], ...] = (
+    ("アース製薬", "ハビットプロ"),
+    ("ホーユー", "SOMARCA"),
+    ("エリス", "大王製紙"),
+    ("花王", "花王グループカスタマーマーケティング"),
+    ("インペックス", "INPEX"),
+    ("ファミマ", "ファミリーマート"),
+    ("エムキュア", "ネイチャーラボ"),
+    ("エリクシール", "資生堂"),
+    ("トップバリュ", "イオントップバリュ"),
+    ("トップバリュ", "イオン"),
+    ("ホンダ", "HONDA"),
+    ("ホンダ", "本田技研工業"),
+    ("サンギ", "SANGI"),
+)
+
+
+def alias_pairs() -> tuple[tuple[str, str], ...]:
+    """検索候補・該当なし判定・不一致警告で共用する明示的な別名の対。"""
+    return _ALIAS_SEED
+
+
+def aliases(asked: str | None) -> set[str]:
+    """名寄せ後の双方向部分一致で明示的な対だけ返す（推移展開しない）。"""
+    if not asked:
+        return set()
+    out: set[str] = set()
+    for a, b in alias_pairs():
+        if names_overlap(asked, a):
+            out.add(b)
+        if names_overlap(asked, b):
+            out.add(a)
+    return {name for name in out if normalize_client(name) != normalize_client(asked)}

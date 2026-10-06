@@ -15,11 +15,12 @@ CLAUDE.md 6-bis ルール準拠：
 from __future__ import annotations
 
 import asyncio
+import math
 import os
 import re
 import threading
 import time
-from concurrent.futures import Future, ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor, wait
 from concurrent.futures import TimeoutError as FutureTimeoutError
 from typing import Any, ClassVar
 
@@ -42,6 +43,7 @@ from teamagent.skills._shared.next_step import (
 from teamagent.skills._shared.source_url import hit_doc_url
 from teamagent.skills.base import BaseSkill, SkillContext, register
 from teamagent.skills.search.aggregation import extract_aggregation_filter
+from teamagent.skills.search.alias_expansion import retry_inputs, scope_footer
 from teamagent.skills.search.answer_mode import MODE_INSTRUCTIONS, classify_answer_mode
 from teamagent.skills.search.campaign_files import (
     advertiser_pattern,
@@ -426,6 +428,13 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
         #   差は 0.15〜0.17 と薄い（gold で合わせた値）＝本番の 👍👎 で見直す。0 以下で無効。
         # - SEARCH_NOT_FOUND_SUBJECT_BELOW: 主題語の照合は top1 がこれ未満のときだけ（既定 0.5＝
         #   gold set の実ヒット最低値。確信の高いヒットを語の表記ゆれで落とさない）。0 以下で無効。
+        # 金庫のRLS・読み取りソースは同じ。検索語を広げるだけなので既定ON。
+        self._alias_expansion = self._envflag("SEARCH_ALIAS_EXPANSION", default="true")
+        self._scope_footer = self._envflag("SEARCH_SCOPE_FOOTER", default="true")
+        retry_timeout = self._envfloat("SEARCH_ALIAS_TIMEOUT_S", 8.0)
+        self._alias_timeout_s = (
+            min(retry_timeout, 20.0) if math.isfinite(retry_timeout) and retry_timeout > 0 else 8.0
+        )
         self._not_found_answer = self._envflag("SEARCH_NOT_FOUND_ANSWER", default="true")
         self._not_found_threshold = self._envfloat("SEARCH_NOT_FOUND_THRESHOLD", 0.16)
         self._not_found_subject_below = self._envfloat("SEARCH_NOT_FOUND_SUBJECT_BELOW", 0.5)
@@ -526,6 +535,17 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
 
         # 2-a. 「該当なし」の判定（retrieval の実数値とメタだけ・LLM に任せない）。
         found_decision = self._judge_found(input.query, hits, probe)
+        searched_queries = [input.query]
+        retries_incomplete = False
+        # 「探した範囲」は 1 回目で見つからなかったときだけ付ける（見つかった答えには足さない）。
+        show_scope = self._scope_footer and not found_decision.found
+        if self._alias_expansion and not found_decision.found:
+            _t = time.perf_counter()
+            hits, searched_queries, retries_incomplete = self._retry_aliases(
+                input, ctx, hits, probe
+            )
+            timings["alias_ms"] = (time.perf_counter() - _t) * 1000
+            found_decision = self._judge_found(input.query, hits, probe)
         found = found_decision.found
         if not found and self._not_found_answer:
             log.info(
@@ -636,6 +656,13 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
                 ctx,
                 slack_items=slack_items,
                 asked_industry=asked_industry,
+                searched_scope=(
+                    scope_footer(
+                        searched_queries, slack=slack_lookup, incomplete=retries_incomplete
+                    )
+                    if show_scope
+                    else ""
+                ),
             )
             cost_usd = 0.0
             deferred = True
@@ -694,6 +721,11 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
             query_client=self._asked_client(probe),
             requester=str(ctx.metadata.get("user_email") or "") or None,
         )
+
+        if input.include_answer and show_scope:
+            answer += "\n\n" + scope_footer(
+                searched_queries, slack=slack_lookup, incomplete=retries_incomplete
+            )
 
         # 4. 出力スキーマに整形。資料名解決はヒットごとに一度だけ行い、
         #    正準 URL と配信用の内部ファイル名で同じ結果を使う。
@@ -777,6 +809,7 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
             "search_latency_breakdown",
             embed_ms=int(timings.get("embed_ms", 0.0)),
             retrieve_ms=int(timings.get("retrieve_ms", 0.0)),
+            alias_ms=int(timings.get("alias_ms", 0.0)),
             rerank_ms=int(timings.get("rerank_ms", 0.0)),
             resolve_urls_ms=int(timings.get("resolve_urls_ms", 0.0)),
             converse_ms=int(timings.get("converse_ms", 0.0)),
@@ -921,7 +954,76 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
             subject_check_below=self._not_found_subject_below,
             query_client=asked,
             client_aliases=sorted(aliases(asked)) if asked else (),
+            expand_subject_aliases=self._alias_expansion,
         )
+
+    def _retry_aliases(
+        self,
+        input: SearchInput,
+        ctx: SkillContext,
+        hits: list[SearchHit],
+        probe: dict[str, str] | None,
+    ) -> tuple[list[SearchHit], list[str], bool]:
+        """既存retrievalを最大2本並行で再利用。共通期限後は待たず、初回の結果を守る。"""
+        candidates = retry_inputs(input)
+
+        def searched_label(candidate: SearchInput) -> str:
+            if candidate.filter_client and candidate.filter_client != input.filter_client:
+                return f"{candidate.query}（取引先: {candidate.filter_client}）"
+            return candidate.query
+
+        queries = [input.query, *[searched_label(candidate) for candidate in candidates]]
+        if not candidates:
+            return hits, queries, False
+        started = time.perf_counter()
+
+        def search(candidate: SearchInput) -> list[SearchHit]:
+            # 接続/RLSは既存の経路へ。probe・timingsを共有せず初回の依頼先を維持する。
+            return self._retrieve(self._embed(candidate.query), candidate, ctx, probe={})
+
+        executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="search-alias")
+        futures = [executor.submit(search, candidate) for candidate in candidates]
+        try:
+            done, pending = wait(
+                futures, timeout=max(0.0, self._alias_timeout_s - (time.perf_counter() - started))
+            )
+            incomplete = bool(pending)
+            rescued: dict[int, SearchHit] = {}
+            for future in futures:
+                if future not in done:
+                    future.cancel()
+                    continue
+                try:
+                    retry_hits = future.result()
+                except Exception:
+                    incomplete = True
+                    continue
+                # 言い換えた問いでなく元の問いで判定。弱い・別取引先の結果は救出しない。
+                if self._judge_found(input.query, retry_hits, probe).found:
+                    for hit in retry_hits:
+                        if hit.chunk_id not in rescued or hit.score > rescued[hit.chunk_id].score:
+                            rescued[hit.chunk_id] = hit
+            logger.info(
+                "search_alias_retry",
+                request_id=ctx.request_id,
+                attempts=len(candidates),
+                incomplete=incomplete,
+                rescued=len(rescued),
+            )
+            if rescued:
+                # retrievalで関連付けたDrive（固定score=1）で主検索結果を押し出さない。
+                main = [hit for hit in rescued.values() if not hit.metadata.get("is_related_drive")]
+                related = [hit for hit in rescued.values() if hit.metadata.get("is_related_drive")]
+                merged = sorted(main, key=lambda hit: -hit.score)[: input.top_k]
+                if self._budget_sort and input.sort_budget_near:
+                    merged = sort_by_budget_proximity(merged, input.sort_budget_near)
+                if self._client_match_sort and (asked := self._asked_client(probe)):
+                    merged = sort_by_client_match(merged, asked)
+                return merged + related, queries, incomplete
+            return hits, queries, incomplete
+        finally:
+            # 実行中のread-only処理は強制終了できないが、回答は期限で返す。
+            executor.shutdown(wait=False, cancel_futures=True)
 
     def _embed(self, text: str) -> list[float]:
         """クエリを埋め込みベクトルに変換する。
@@ -1980,6 +2082,7 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
         *,
         slack_items: tuple[SlackItem, ...] = (),
         asked_industry: str | None = None,
+        searched_scope: str = "",
     ) -> str:
         """回答生成をバックグラウンドへ逃がし、ツール応答に載せる定型文を返す。
 
@@ -2000,6 +2103,8 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
             followup_kwargs["slack_items"] = tuple(slack_items)
         if asked_industry:  # 施策実績を業種で絞ったときだけ（無ければ従来の引数のまま）
             followup_kwargs["asked_industry"] = asked_industry
+        if searched_scope:
+            followup_kwargs["searched_scope"] = searched_scope
         thread = threading.Thread(
             target=self.deliver_followup_answer,
             kwargs=followup_kwargs,
@@ -2026,6 +2131,7 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
         target: FollowupTarget,
         slack_items: tuple[SlackItem, ...] = (),
         asked_industry: str | None = None,
+        searched_scope: str = "",
     ) -> bool:
         """要約を生成して後追い投稿する（同期）。例外は握って False（fail-open）。
 
@@ -2039,6 +2145,8 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
             answer = self._append_campaign_footer(answer, hits)
             if _source_links_enabled():
                 answer += self._source_links_block(hits, file_urls=file_urls)
+            if searched_scope:
+                answer += "\n\n" + searched_scope
             converse_ms = (time.perf_counter() - started) * 1000
             posted = asyncio.run(self._post_followup(to_slack_mrkdwn(answer), target, request_id))
         except Exception as exc:
@@ -2136,6 +2244,8 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
             return ("該当する資料が見つかりませんでした。", 0.0)
 
         system = load_prompt("search", self._prompt_version, "system")
+        if self._alias_expansion:
+            system += "\n" + load_prompt("search", "retry", "system")
 
         # 主検索結果と関連 Drive 資料を分離 (Phase 2 新機能)
         primary_hits = [h for h in hits if not (h.metadata or {}).get("is_related_drive")]

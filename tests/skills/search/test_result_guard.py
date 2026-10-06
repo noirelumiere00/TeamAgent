@@ -330,7 +330,11 @@ def test_suggestion_fires_when_a_real_file_is_resolved(
     fake_bedrock: MagicMock, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("USE_KNOWLEDGE_DELIVER", "true")
-    assert _run_with_resolved_file(fake_bedrock, monkeypatch).endswith(DELIVER_SUGGESTION)
+    assert (
+        _run_with_resolved_file(fake_bedrock, monkeypatch)
+        .split("\n\n探した範囲:", 1)[0]
+        .endswith(DELIVER_SUGGESTION)
+    )
 
 
 def test_suggestion_is_silent_when_receiving_tool_is_off(
@@ -378,7 +382,7 @@ def test_suggestion_does_not_execute_anything(
 
     out = skill.run(input=SearchInput(query="花王の提案書"), ctx=SkillContext(metadata={}))
 
-    assert out.answer.endswith(DELIVER_SUGGESTION)
+    assert out.answer.split("\n\n探した範囲:", 1)[0].endswith(DELIVER_SUGGESTION)
     slack.post_message.assert_not_called()
     slack.upload_file.assert_not_called()
     # 検索以外の SQL は 1 本も走らない（配信は起きていない）。
@@ -494,7 +498,7 @@ def test_alias_seed_is_symmetric_and_static() -> None:
     assert aliases("花王") == {"花王グループカスタマーマーケティング"}
     # 競合ペアは seed に無い（title / cls_entities の共起から作らない）
     assert "資生堂" not in aliases("花王")
-    assert aliases("資生堂") == set()
+    assert aliases("資生堂") == {"エリクシール"}
     assert aliases(None) == set()
 
 

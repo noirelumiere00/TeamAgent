@@ -85,7 +85,7 @@ def test_default_true_generates_answer_backward_compatible(
 
     fake_bedrock.converse.assert_called_once()
     # _strip_internal_markers が [chunk_id: N] を除去した本文が answer になる（従来どおり）
-    assert out.answer == "要約テキスト"
+    assert out.answer.split("\n\n探した範囲:", 1)[0] == "要約テキスト"
     assert out.total_cost_usd == pytest.approx(0.0018)
     assert len(out.hits) == 1
 

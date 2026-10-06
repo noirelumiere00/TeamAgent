@@ -33,7 +33,12 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from teamagent.adapters.pgvector_client import SearchHit
-from teamagent.skills.search.client_match import _hit_matches_client, hit_entities, names_overlap
+from teamagent.skills.search.client_match import (
+    _hit_matches_client,
+    aliases,
+    hit_entities,
+    names_overlap,
+)
 from teamagent.util.grapheme_cut import truncate_graphemes
 
 #: 該当なしの回答の書き出し（固定文言・テストと下流の判定がこの文字列を見る）。
@@ -175,6 +180,7 @@ def judge_found(
     subject_check_below: float,
     query_client: str | None = None,
     client_aliases: Sequence[str] = (),
+    expand_subject_aliases: bool = False,
 ) -> FoundDecision:
     """金庫のヒットが問いに「該当する」と言えるかを決める（判定の詳細はモジュール docstring）。
 
@@ -194,7 +200,11 @@ def judge_found(
         return FoundDecision(found=False, reason="client_mismatch")
     if subject_check_below > 0.0 and top_score < subject_check_below:
         terms = query_subject_terms(query)
-        if _subject_mismatch(terms, hits):
+        checked_terms = list(terms)
+        if expand_subject_aliases:
+            for term in terms:
+                checked_terms.extend(sorted(aliases(term)))
+        if _subject_mismatch(checked_terms, hits):
             return FoundDecision(found=False, reason="subject_mismatch", terms=tuple(terms))
     return FoundDecision(found=True, reason="ok")
 

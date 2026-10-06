@@ -87,7 +87,10 @@ def _load_gold_set() -> list[dict[str, Any]]:
     """gold set YAML を読み込む。"""
     with GOLD_SET_PATH.open(encoding="utf-8") as f:
         data = yaml.safe_load(f)
-    return list(data["cases"])
+    # 未確認の正例案を空の期待条件で採点すると任意のヒットが正解になる。
+    return [
+        case for case in data["cases"] if case.get("validation_status") != "pending_db_confirmation"
+    ]
 
 
 def _match_hit(hit_content: str, hit_metadata: dict[str, Any], case: dict[str, Any]) -> bool:

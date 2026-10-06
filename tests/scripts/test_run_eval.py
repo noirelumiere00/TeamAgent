@@ -223,3 +223,9 @@ def test_said_not_found_counts_as_a_correct_negative_and_flags_false_negatives()
     summary = run_eval._summarize(results, "t", {})
     assert (summary.zero_hit_correct, summary.zero_hit_total) == (1, 2)
     assert summary.false_not_found == 1
+
+
+def test_pending_gold_drafts_are_not_scored() -> None:
+    cases = run_eval._load_gold_set()
+    assert len(cases) == 50
+    assert all(case["id"] < 51 for case in cases)

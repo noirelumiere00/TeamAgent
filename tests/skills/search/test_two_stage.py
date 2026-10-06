@@ -177,7 +177,7 @@ def test_flag_off_is_byte_identical(
     )
 
     assert marked.model_dump_json() == plain.model_dump_json()
-    assert marked.answer == "要約テキスト"  # 従来どおり同期要約
+    assert marked.answer.split("\n\n探した範囲:", 1)[0] == "要約テキスト"  # 従来どおり同期要約
     assert marked.total_cost_usd == pytest.approx(0.0018)
     slack.post_message.assert_not_awaited()
 
@@ -192,7 +192,7 @@ def test_flag_on_without_gateway_mark_stays_synchronous(
         input=SearchInput(query="PR代行の実績"),
         ctx=SkillContext(metadata={"channel_id": "C1", "user_email": "u@vectorinc.co.jp"}),
     )
-    assert out.answer == "要約テキスト"
+    assert out.answer.split("\n\n探した範囲:", 1)[0] == "要約テキスト"
     assert out.total_cost_usd == pytest.approx(0.0018)
     slack.post_message.assert_not_awaited()
 
@@ -206,7 +206,7 @@ def test_flag_on_without_target_stays_synchronous(
     out = _skill(fake_bedrock, fake_pgvector, slack).run(
         input=SearchInput(query="PR代行の実績"), ctx=_ctx()
     )
-    assert out.answer == "要約テキスト"
+    assert out.answer.split("\n\n探した範囲:", 1)[0] == "要約テキスト"
     slack.post_message.assert_not_awaited()
 
 
@@ -274,7 +274,7 @@ def test_two_stage_returns_hits_before_summary_and_posts_followup(
     )
 
     # 第一報: ヒットは全部載っている・回答は「続きを投げる」定型文・コストは 0
-    assert out.answer == TWO_STAGE_NOTICE
+    assert out.answer.split("\n\n探した範囲:", 1)[0] == TWO_STAGE_NOTICE
     assert "詳細な考察" in out.answer  # OpenClaw に自作させないための一文
     assert len(out.hits) == 1
     assert out.hits[0].chunk_id == 1
@@ -286,8 +286,9 @@ def test_two_stage_returns_hits_before_summary_and_posts_followup(
     slack.post_message.assert_awaited_once()
     args, kwargs = slack.post_message.await_args
     assert args[0] == "C1"
-    assert args[1] == "要約テキスト"  # _strip_internal_markers 済み
+    assert args[1].split("\n\n探した範囲:", 1)[0] == "要約テキスト"  # _strip_internal_markers 済み
     assert kwargs["thread_ts"] == "111.222"
+    assert "探した範囲:" not in args[1]  # 見つかった答えには足さない
 
 
 def test_followup_posts_to_dm_when_no_channel(
@@ -394,6 +395,6 @@ def test_two_stage_failure_does_not_break_the_first_response(
         input=SearchInput(query="PR代行の実績"), ctx=_ctx(channel_id="C1")
     )
 
-    assert out.answer == TWO_STAGE_NOTICE
+    assert out.answer.split("\n\n探した範囲:", 1)[0] == TWO_STAGE_NOTICE
     assert len(out.hits) == 1
     assert done.wait(timeout=10)
