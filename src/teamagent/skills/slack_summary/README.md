@@ -9,16 +9,20 @@
 
 ## 権限と名前解決
 
-現行 `SLACK_USER_SCOPES` に `channels:read` / `groups:read` が無いため、
-`conversations.list` は呼ばない。本人の `search.messages` を
+`SLACK_USER_SCOPES` に `channels:read` / `groups:read` を追加済み。
+Slack アプリ側にも User Token Scopes の設定が必要で、既存トークンの権限は自動では増えない。
+追加権限は本人が再連携した時点から有効になる。
+
+現在の名前解決は `conversations.list` を呼ばず、本人の `search.messages` を
 `in:#正規化した名前`、次に部分名の検索 `in:#部分名*` で呼び、返されたチャンネル名を
 NFKC・小文字化して照合する。完全一致を優先し、複数候補や取り切れない部分一致は選ばない。
 部分一致は Slack 検索が返した候補の範囲に限る。投稿が検索に出ないチャンネルや
 中間部分だけの名前は解決できない場合がある。未解決は一様の拒否文とし、ID・リンク・
 投稿の貼り付けを要求しない。
 
-空チャンネルも含む確実な名前・部分名解決には `channels:read` / `groups:read` の追加と
-再連携の判断が必要。今回 OAuth scopes は変更しない。
+空チャンネルも含む確実な名前・部分名解決に必要な読み取り権限は追加済みだが、
+`conversations.list` を使う名前解決は別途実装が必要。今回の権限追加だけでは上記の
+検索による名前解決の制約は解消しない。
 
 期間の `conversations.history` / `conversations.replies` は oldest/latest と cursor で
 ページ送りする。半開区間 `[oldest, latest)` に ts を再検査し、親の重複を除く。

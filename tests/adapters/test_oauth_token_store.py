@@ -10,9 +10,11 @@ from typing import Any
 import pytest
 
 from teamagent.adapters.oauth_token_store import (
+    InMemorySlackTokenStore,
     InMemoryTokenStore,
     OAuthToken,
     RdsTokenStore,
+    SlackOAuthToken,
     SlackTokenStore,
     TokenStore,
 )
@@ -51,6 +53,36 @@ def test_email_normalization() -> None:
 def test_satisfies_protocol() -> None:
     # InMemoryTokenStore が TokenStore Protocol を満たす（runtime_checkable）。
     assert isinstance(InMemoryTokenStore(), TokenStore)
+
+
+def test_in_memory_slack_token_store_normalizes_email_and_returns_scopes() -> None:
+    token = SlackOAuthToken(
+        access_token="xoxp-test",
+        scopes=("search:read", "files:read"),
+        slack_user_id="U123",
+    )
+    store = InMemorySlackTokenStore({" A@X.COM ": token})
+
+    assert store.has("a@x.com")
+    assert store.get(" A@X.com ") is token
+    assert store.slack_user_id(" A@X.com ") == "U123"
+    assert store.scopes(" A@X.com ") == ("search:read", "files:read")
+
+    replacement = SlackOAuthToken(access_token="xoxp-replacement", scopes=("users:read",))
+    store.put(" A@X.COM ", replacement)
+    assert store.get("a@x.com") is replacement
+    assert store.scopes("a@x.com") == ("users:read",)
+
+
+def test_in_memory_slack_token_store_preserves_empty_and_missing() -> None:
+    store = InMemorySlackTokenStore({"empty@x.com": SlackOAuthToken(access_token="xoxp-test")})
+
+    assert store.scopes(" EMPTY@X.COM ") == ()
+    assert store.slack_user_id("empty@x.com") == ""
+    assert not store.has("missing@x.com")
+    assert store.get("missing@x.com") is None
+    assert store.slack_user_id("missing@x.com") is None
+    assert store.scopes("missing@x.com") is None
 
 
 # ── RdsTokenStore（fake pgvector + fake cipher・課金0）────────────────────────
@@ -273,3 +305,30 @@ def test_slack_token_store_slack_user_id_preserves_empty_and_missing() -> None:
 
     assert store.slack_user_id("empty@x.com") == ""
     assert store.slack_user_id("missing@x.com") is None
+
+
+def test_slack_token_store_scopes_reads_only_scopes_without_decrypting() -> None:
+    pg = _FakePgvector()
+    pg.rows["a@x.com"] = {"scopes": ["search:read", "files:read"]}
+    cipher = _FakeCipher()
+    store = SlackTokenStore(pg, cipher, app_role="test_role")
+
+    assert store.scopes(" A@X.COM ") == ("search:read", "files:read")
+    assert cipher.dec_context is None
+    assert pg.statements == [
+        (
+            "SELECT scopes FROM slack_oauth_tokens WHERE user_email = %s",
+            ("a@x.com",),
+        )
+    ]
+    assert pg.last_user_email == "a@x.com"
+
+
+@pytest.mark.parametrize("scopes", [[], None])
+def test_slack_token_store_scopes_preserves_empty_and_missing(scopes: Any) -> None:
+    pg = _FakePgvector()
+    pg.rows["empty@x.com"] = {"scopes": scopes}
+    store = SlackTokenStore(pg, _FakeCipher())
+
+    assert store.scopes("empty@x.com") == ()
+    assert store.scopes("missing@x.com") is None

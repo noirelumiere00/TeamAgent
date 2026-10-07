@@ -10,9 +10,11 @@
   - 片方だけ未連携 → その未連携の方だけ
   - 両方連携済み → リンクを出さず「連携済み」と返す
   連携状態は per-user トークンストアで判定。Slack は保存済み user ID と検証済み caller ID
-  も比較し、不一致なら本人が復旧できるよう再連携リンクを返す。
-  判定に失敗した場合は fail-safe で「未連携扱い」＝リンクを出す（連携フローを絶対に塞がない。
-  過剰にリンクを出すのは従来挙動と同じで安全側）。
+  も比較し、不一致なら本人が復旧できるよう再連携リンクを返す。Google / Slack とも保存済みの
+  権限が必要な権限を満たさない場合は、権限追加の説明つきで再連携リンクを返す。
+  Slack の権限取得が未実装・失敗の場合は従来の本人確認結果を維持する。
+  連携の有無も判定できない場合は fail-safe で「未連携扱い」＝リンクを出す
+  （連携フローを絶対に塞がない。過剰にリンクを出すのは従来挙動と同じで安全側）。
 
 セキュリティ:
   - 対象は常に「呼び出した本人」。user_email は SkillContext.metadata から取得し、
@@ -20,7 +22,8 @@
     slack_user_id → 本人 user_email を解決して metadata に載せている前提。
   - Slack URL の state は MCP 境界で検証済みの Slack user/team ID に束縛する。
     検証済み ID が無い経路では Slack URL を発行せず、Slack 内の安全な代替導線を案内する。
-  - トークンストアは RLS（本人行のみ）越しに has() するだけで、生トークンは扱わない。
+  - 通常の連携判定は RLS（本人行のみ）越しに連携状態・本人 ID・権限だけを読み、
+    生トークンは扱わない。
 
 リンクの形（USE_OAUTH_START_LINKS・既定 OFF）:
   @Aico(openclaw) の LLM は約 600 字の Google 認可 URL（``?state=…&scope=…``）を再タイプして
@@ -54,7 +57,7 @@ import structlog
 from pydantic import BaseModel
 
 from teamagent.adapters.google_oauth_flow import WORKSPACE_SCOPES, OAuthConsentFlow
-from teamagent.adapters.slack_oauth_flow import SlackOAuthConsentFlow
+from teamagent.adapters.slack_oauth_flow import SLACK_USER_SCOPES, SlackOAuthConsentFlow
 from teamagent.connect_diagnostics import ConnectDiag, format_user_message, mask_email, now_jst
 from teamagent.skills.base import BaseSkill, SkillContext, register
 from teamagent.skills.oauth_connect.schema import OAuthConnectInput, OAuthConnectOutput
@@ -286,40 +289,62 @@ class OAuthConnectSkill(BaseSkill[OAuthConnectInput, OAuthConnectOutput]):
 
     def _slack_status(
         self, requester: str, verified_uid: str | None, log: Any
-    ) -> tuple[bool, bool]:
-        """Slack の連携状態を ``(connected, rebind_needed)`` で返す。
+    ) -> tuple[bool, bool, bool]:
+        """Slack の連携状態を ``(connected, rebind_needed, scope_upgrade_needed)`` で返す。
 
         保存済み Slack user ID と検証済み caller ID がともにあり、不一致なら誤紐付けから
         本人が復旧できるよう未連携扱いにする。旧テストダブル等で ``slack_user_id()`` が未実装、
         または判定中に例外が出た場合だけ従来の ``has()`` 判定へフォールバックする。
-        フォールバックも失敗した場合はリンクを出す側（False）に倒す。
+        本人確認後、保存済み scopes が SLACK_USER_SCOPES を満たさなければ再連携対象にする。
+        scopes() 未実装・例外なら本人確認までの従来判定を維持する。
+        has() のフォールバックも失敗した場合はリンクを出す側（False）に倒す。
         """
         try:
             store = self._slack_store if self._slack_store is not None else _build_slack_store()
             slack_user_id_fn = getattr(store, "slack_user_id", None)
             if not callable(slack_user_id_fn):
-                return bool(store.has(requester)), False
+                connected = bool(store.has(requester))
+            else:
+                try:
+                    stored_uid_raw = slack_user_id_fn(requester)
+                except Exception as e:
+                    log.warning(
+                        "oauth_connect_slack_uid_check_failed",
+                        error=type(e).__name__,
+                    )
+                    connected = bool(store.has(requester))
+                else:
+                    if stored_uid_raw is None:
+                        return False, False, False
+                    stored_uid = stored_uid_raw.strip() if isinstance(stored_uid_raw, str) else ""
+                    if not stored_uid:
+                        log.info("oauth_connect_slack_rebind_needed", reason="stored_uid_missing")
+                        return False, True, False
+                    if verified_uid and stored_uid != verified_uid:
+                        log.info("oauth_connect_slack_rebind_needed", reason="uid_mismatch")
+                        return False, True, False
+                    connected = True
+            if not connected:
+                return False, False, False
             try:
-                stored = slack_user_id_fn(requester)
+                scopes_fn = getattr(store, "scopes", None)
+                if callable(scopes_fn):
+                    stored_scopes = scopes_fn(requester)
+                    if stored_scopes is None:
+                        return False, False, False
+                    missing = set(SLACK_USER_SCOPES) - set(stored_scopes)
+                    if missing:
+                        log.info(
+                            "oauth_connect_slack_scope_upgrade_needed",
+                            missing_count=len(missing),
+                        )
+                        return False, False, True
             except Exception as e:
-                log.warning(
-                    "oauth_connect_slack_uid_check_failed",
-                    error=type(e).__name__,
-                )
-                return bool(store.has(requester)), False
-            if stored is None:
-                return False, False
-            stored_uid = stored.strip() if isinstance(stored, str) else ""
-            if not stored_uid:
-                log.info("oauth_connect_slack_rebind_needed", reason="stored_uid_missing")
-                return False, True
-            if verified_uid and stored_uid != verified_uid:
-                log.info("oauth_connect_slack_rebind_needed", reason="uid_mismatch")
-                return False, True
-            return True, False
+                log.warning("oauth_connect_slack_scope_check_failed", error=type(e).__name__)
+            return True, False, False
         except Exception as e:  # fail-safe: 判定不能は未連携扱い（リンクを出す＝安全側）
             log.warning("oauth_connect_conn_check_failed", kind="slack", error=type(e).__name__)
-            return False, False
+            return False, False, False
 
     def run(self, _input: OAuthConnectInput, ctx: SkillContext) -> OAuthConnectOutput:
         log = ctx.bind_logger(self.name)
@@ -338,7 +363,7 @@ class OAuthConnectSkill(BaseSkill[OAuthConnectInput, OAuthConnectOutput]):
             )
         requester = requester.strip()
 
-        # 連携状態（未連携のものだけ案内する）。Google はスコープ不足も「要再連携」として検知。
+        # 連携状態（未連携のものだけ案内する）。Google / Slack は権限不足も再連携対象にする。
         # フラグ ON のときは、連携済みと判定した人のトークンの生存も確かめる（reauth_reason）。
         google_connected, google_scope_upgrade, google_reauth_reason = self._google_status(
             requester, log
@@ -356,8 +381,10 @@ class OAuthConnectSkill(BaseSkill[OAuthConnectInput, OAuthConnectOutput]):
             else None
         )
         slack_configured = bool(os.environ.get("SLACK_OAUTH_REDIRECT_URI", "").strip())
-        slack_connected, slack_rebind_needed = (
-            self._slack_status(requester, verified_uid, log) if slack_configured else (False, False)
+        slack_connected, slack_rebind_needed, slack_scope_upgrade = (
+            self._slack_status(requester, verified_uid, log)
+            if slack_configured
+            else (False, False, False)
         )
 
         # Google 認可URL（未連携時のみ生成）。state は path 形式リンクへの差し替えに使う。
@@ -464,6 +491,7 @@ class OAuthConnectSkill(BaseSkill[OAuthConnectInput, OAuthConnectOutput]):
             slack_connected,
             google_scope_upgrade=google_scope_upgrade,
             slack_rebind_needed=slack_rebind_needed,
+            slack_scope_upgrade=slack_scope_upgrade,
             slack_url_suppressed=slack_url_suppressed,
             slack_url_failed=slack_url_failed,
             diag_notes=diag_notes,
@@ -479,6 +507,7 @@ class OAuthConnectSkill(BaseSkill[OAuthConnectInput, OAuthConnectOutput]):
             slack_connected=slack_connected,
             google_scope_upgrade=google_scope_upgrade,
             slack_rebind_needed=slack_rebind_needed,
+            slack_scope_upgrade=slack_scope_upgrade,
             slack_url_suppressed=slack_url_suppressed,
             slack_url_failed=slack_url_failed,
             start_links=start_links,
@@ -497,6 +526,7 @@ def _compose_message(
     *,
     google_scope_upgrade: bool = False,
     slack_rebind_needed: bool = False,
+    slack_scope_upgrade: bool = False,
     slack_url_suppressed: bool = False,
     slack_url_failed: bool = False,
     diag_notes: list[str] | None = None,
@@ -516,6 +546,7 @@ def _compose_message(
         slack_connected,
         google_scope_upgrade=google_scope_upgrade,
         slack_rebind_needed=slack_rebind_needed,
+        slack_scope_upgrade=slack_scope_upgrade,
         slack_url_suppressed=slack_url_suppressed,
         slack_url_failed=slack_url_failed,
         google_reauth_reason=google_reauth_reason,
@@ -534,6 +565,7 @@ def _compose_body(
     *,
     google_scope_upgrade: bool,
     slack_rebind_needed: bool,
+    slack_scope_upgrade: bool,
     slack_url_suppressed: bool,
     slack_url_failed: bool,
     google_reauth_reason: str | None = None,
@@ -593,6 +625,11 @@ def _compose_body(
         already.append("Slack")
     if already:
         lines.append(f"（{' と '.join(already)} は連携済みのため省略しています）\n")
+    if slack_url and slack_scope_upgrade:
+        lines.append(
+            "Slack の連携に新しい権限（添付ファイルとチャンネル名の読み取り）が増えたため、"
+            "下のリンクからもう一度連携してください。\n"
+        )
     lines.append("開いて、表示される権限を *許可* してください:\n")
 
     if len(targets) == 1:
