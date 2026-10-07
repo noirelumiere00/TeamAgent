@@ -5,6 +5,7 @@
 // （上流 OpenClaw 2026.7.1 の実測: 本番の順は before_tool_call → agent_end → reply_payload_sending）。
 // 押下の ctx は tests/scripts/openclaw_button_direct_probe.mjs と同じ形（interactions.block-actions の実測）。
 // Slack Web API だけ偽物（conversations.open / chat.postMessage / chat.update を記録して ok を返す）。
+import {createHmac} from "node:crypto";
 const input = JSON.parse(process.env.PROBE_INPUT);
 const { createCallerIdentityPlugin } = await import(input.pluginUrl);
 
@@ -81,14 +82,17 @@ let runCounter = 0;
 
 // DM の 1 ターン（本番の順）: message_received → before_model_resolve → [before_tool_call] →
 // agent_end → reply_payload_sending（final）。返り値は reply_payload_sending の戻り値。
-async function dmTurn(plugin, user, { tools = [], text = "回答本文です", kind = "final" } = {}) {
+async function dmTurn(plugin, user, {
+  tools = [], text = "回答本文です", kind = "final", content = "JAL の過去提案ある？",
+  repeatReply = true, payloadExtra = {},
+} = {}) {
   const runId = `run-${++runCounter}`;
   const messageId = nextTs();
   const sessionKey = `agent:teamagent:slack:direct:${user.toLowerCase()}`;
   plugin.handlers.get("message_received")(
     {
       from: `slack:${user}`,
-      content: "JAL の過去提案ある？",
+      content,
       senderId: user,
       messageId,
       metadata: { guildId: input.teamId, to: `user:${user}`, originatingTo: `user:${user}` },
@@ -116,14 +120,16 @@ async function dmTurn(plugin, user, { tools = [], text = "回答本文です", k
   );
   plugin.handlers.get("agent_end")({ runId, messages: [], success: true, durationMs: 1 }, agentCtx);
   const delivered = plugin.handlers.get("reply_payload_sending")(
-    { payload: { text }, kind, channel: "slack", sessionKey, runId },
+    { payload: { text, ...payloadExtra }, kind, channel: "slack", sessionKey, runId },
     { channelId: "slack", conversationId: `user:${user}`, sessionKey, runId },
   );
   // 分割 payload の 2 通目（同じ run）。評価は 1 回だけ。
-  plugin.handlers.get("reply_payload_sending")(
-    { payload: { text: "続き" }, kind, channel: "slack", sessionKey, runId },
-    { channelId: "slack", conversationId: `user:${user}`, sessionKey, runId },
-  );
+  if (repeatReply) {
+    plugin.handlers.get("reply_payload_sending")(
+      { payload: { text: "続き" }, kind, channel: "slack", sessionKey, runId },
+      { channelId: "slack", conversationId: `user:${user}`, sessionKey, runId },
+    );
+  }
   await plugin.settle();
   return { runId, messageId, delivered: delivered ?? null, toolResults };
 }
@@ -185,6 +191,17 @@ function feedbackPosts(plugin) {
 
 function tokenOf(post) {
   return post.body.blocks[1].elements[0].value;
+}
+
+function payloadOf(post) {
+  return JSON.parse(Buffer.from(tokenOf(post).split(".")[0], "base64url").toString("utf8"));
+}
+
+function signFeedbackPayload(payload) {
+  const key = createHmac("sha256", input.secret).update("teamagent-answer-feedback-key-v1").digest();
+  const segment = Buffer.from(JSON.stringify(payload)).toString("base64url");
+  const sig = createHmac("sha256", key).update(segment).digest().subarray(0, 16).toString("base64url");
+  return `${segment}.${sig}`;
 }
 
 // 押下（interactions.block-actions の形）。presser は押した人、channel / messageTs は評価メッセージ。
@@ -280,12 +297,110 @@ const B = input.userB;
   };
 }
 
-// 6. search を使わない返信（別のツール・ツール無し）には付かない
+// 6. search を使わない返信（別のツール・ツール無し）も、分割 payload につき評価は 1 通。
 {
   const p = makePlugin();
-  await dmTurn(p, A, { tools: [["teamagent__knowledge_deliver", { query: "x" }]] });
-  await dmTurn(p, A, { tools: [] });
-  report.noSearch = { posts: feedbackPosts(p), mcpCalls: p.mcpCalls };
+  const turns = [];
+  turns.push(await dmTurn(p, A, {
+    tools: [["teamagent__knowledge_deliver", { query: "tool の引数は採用しない" }]],
+    content: "  元の発言\n資料を送って\u0000  ",
+  }));
+  turns.push(await dmTurn(p, A, { tools: [], content: "こんにちは" }));
+  turns.push(await dmTurn(p, A, { tools: [], content: "😀".repeat(301) }));
+  const posts = feedbackPosts(p);
+  for (const post of posts.slice(0, 2)) {
+    await press(p, {
+      channel: post.body.channel, messageTs: nextTs(), value: tokenOf(post),
+      actionId: "answer_feedback_up", presser: A,
+    });
+  }
+  report.noSearch = { turns, posts, mcpCalls: p.mcpCalls, logs: p.logs };
+}
+
+// 6b. 空・NO_REPLY・中間出力・評価ボタン自身の返信には付けない。
+{
+  const results = {};
+  for (const [name, options] of Object.entries({
+    empty: {text: " \n "},
+    silent: {text: " NO_REPLY \n"},
+    commentary: {kind: "commentary"},
+    reasoning: {payloadExtra: {isReasoning: true}},
+    payloadCommentary: {payloadExtra: {isCommentary: true}},
+    feedbackPrompt: {text: "この回答は役に立ちましたか？"},
+    feedbackThanks: {text: "ありがとうございます（👍 を記録しました）"},
+    feedbackFailed: {text: "評価を記録できませんでした。時間をおいてもう一度押してください。"},
+    feedbackNotOwner: {text: "この評価ボタンは質問した方だけが押せます。"},
+    feedbackStale: {text: "この評価ボタンは使えなくなっています（7 日を過ぎました）。"},
+    feedbackBlocks: {payloadExtra: {blocks: [{type: "actions", block_id: "aico_answer_feedback"}]}},
+  })) {
+    const p = makePlugin();
+    await dmTurn(p, A, {repeatReply: false, ...options});
+    results[name] = feedbackPosts(p);
+  }
+  report.excluded = results;
+  const p = makePlugin();
+  await dmTurn(p, A, {text: "処理に失敗しました", payloadExtra: {isError: true}});
+  report.errorReply = {posts: feedbackPosts(p)};
+}
+
+// 6c. ボタン押下は直接処理され、評価の押下を起点にした run の返信にも評価を付けない。
+{
+  const p = makePlugin();
+  await dmTurn(p, A, {content: "評価対象の発言", tools: [["teamagent__search", {query: "action 検証用"}]]});
+  const post = feedbackPosts(p)[0];
+  const before = feedbackPosts(p).length;
+  const pressed = await press(p, {
+    channel: post.body.channel, messageTs: nextTs(), value: tokenOf(post),
+    actionId: "answer_feedback_up", presser: A,
+  });
+  const runId = `action-run-${++runCounter}`;
+  const sessionKey = `agent:teamagent:slack:direct:${A.toLowerCase()}`;
+  const ctx = {
+    runId, sessionKey, channelId: dmFor(A), channel: "slack", messageProvider: "slack", trigger: "heartbeat",
+  };
+  p.handlers.get("before_model_resolve")({prompt: "Slack button action: answer_feedback_up"}, ctx);
+  p.handlers.get("agent_end")({runId}, ctx);
+  p.handlers.get("reply_payload_sending")(
+    {payload: {text: "ボタン押下への返信"}, kind: "final", channel: "slack", sessionKey, runId},
+    {...ctx, conversationId: dmFor(A)},
+  );
+  await p.settle();
+  report.action = {pressed, postsAdded: feedbackPosts(p).length - before, logs: p.logs};
+}
+
+// 6d. 最初の search の検索語を優先し、ツール名は重複除去して最大 5 個。
+{
+  const p = makePlugin();
+  await dmTurn(p, A, {
+    content: "元の発言より検索語を優先",
+    tools: [
+      ["teamagent__knowledge_deliver", {}], ["teamagent__search", {query: "最初の検索"}],
+      ["teamagent__search", {query: "次の検索"}], ["teamagent__oauth_connect", {}],
+      ["teamagent__calendar_event", {}], ["teamagent__lookup", {}], ["teamagent__extra", {}],
+    ],
+  });
+  report.toolLimit = {posts: feedbackPosts(p)};
+  const long = makePlugin();
+  await dmTurn(long, A, {
+    content: "😀".repeat(300),
+    tools: Array.from({length: 5}, (_, i) => [`teamagent__${"a".repeat(63)}${i}`, {}]),
+  });
+  report.tokenLimit = {posts: feedbackPosts(long)};
+}
+
+// 6e. k の無い旧 v1 も plugin と MCP の両方で通る。
+{
+  const p = makePlugin();
+  await dmTurn(p, A, {tools: [["teamagent__search", {query: "旧 v1 の検索"}]]});
+  const post = feedbackPosts(p)[0];
+  const payload = payloadOf(post);
+  delete payload.k;
+  const oldToken = signFeedbackPayload(payload);
+  const pressed = await press(p, {
+    channel: post.body.channel, messageTs: nextTs(), value: oldToken,
+    actionId: "answer_feedback_up", presser: A,
+  });
+  report.oldV1 = {pressed, token: oldToken, mcpCalls: p.mcpCalls};
 }
 
 // 7. チャンネル: 本流の発言 → 受信メッセージのスレッドへ・スレッド内の発言 → そのスレッドへ

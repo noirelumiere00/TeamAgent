@@ -1733,6 +1733,9 @@ async def dispatch_answer_feedback_tool(
                 rating=payload.rating,
                 answer_id=claim.answer_id,
                 search_session_id=answer_feedback.slack_search_session_id(claim.answer_id),
+                note=json.dumps({"tools": claim.tools}, separators=(",", ":"))
+                if claim.tools
+                else None,
             )
             target = store if store is not None else _default_answer_feedback_store()
             await asyncio.to_thread(target.insert, row)

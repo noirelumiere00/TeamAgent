@@ -57,6 +57,7 @@ def _token(
     query: str = QUERY,
     expires_at: int = TEST_NOW + 3600,
     secret: str = TEST_CALLER_CLAIM_SECRET,
+    tools: tuple[str, ...] | None = None,
 ) -> str:
     return afb.encode_feedback_token(
         key=_key(secret),
@@ -65,6 +66,7 @@ def _token(
         slack_user_id=owner,
         slack_team_id=team,
         expires_at=expires_at,
+        tools=tools,
     )
 
 
@@ -165,9 +167,14 @@ def _code(payload: dict[str, Any]) -> str | None:
 # --- トークン（純関数） --------------------------------------------------------------------
 
 
-def test_token_roundtrip() -> None:
+def test_legacy_v1_token_without_tools_roundtrip() -> None:
+    """旧 v1 の必須フィールドだけで署名したトークンを引き続き受け付ける。"""
+    token = _token()
+    payload = json.loads(afb._b64d(token.split(".")[0]))
+    assert payload["v"] == 1
+    assert set(payload) == {"v", "typ", "q", "a", "u", "t", "e"}
     claim = afb.verify_feedback_token(
-        _token(),
+        token,
         key=_key(),
         now=TEST_NOW,
         presser_user_id=TEST_SLACK_USER_ID,
@@ -175,6 +182,76 @@ def test_token_roundtrip() -> None:
     )
     assert claim.query == QUERY
     assert claim.answer_id == ANSWER_ID
+    assert claim.tools == ()
+
+
+@pytest.mark.parametrize(
+    "tools",
+    [
+        (),
+        ("calendar", "personal_memory"),
+        ("x" * afb.MAX_TOOL_NAME_CHARS, "a.b", "c-d", "e_f", "G5"),
+    ],
+)
+def test_token_roundtrip_with_tools(tools: tuple[str, ...]) -> None:
+    claim = afb.verify_feedback_token(
+        _token(tools=tools),
+        key=_key(),
+        now=TEST_NOW,
+        presser_user_id=TEST_SLACK_USER_ID,
+        team_id=TEST_SLACK_TEAM_ID,
+    )
+    assert claim.query == QUERY
+    assert claim.tools == tools
+
+
+def _resign_payload(token: str, **changes: Any) -> str:
+    """署名が正しくても業務 payload の形が不正なら拒否されることを検証する。"""
+    payload = json.loads(afb._b64d(token.split(".")[0]))
+    payload.update(changes)
+    segment = afb._b64e(json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode())
+    return f"{segment}.{afb._b64e(afb._signature(_key(), segment))}"
+
+
+@pytest.mark.parametrize(
+    "tools",
+    [
+        pytest.param(None, id="null"),
+        pytest.param("search", id="string"),
+        pytest.param({}, id="object"),
+        pytest.param(["search"] * 6, id="too_many"),
+        pytest.param(["x" * 65], id="too_long"),
+        pytest.param([""], id="empty_name"),
+        pytest.param([1], id="number"),
+        pytest.param([True], id="boolean"),
+        pytest.param(["検索"], id="non_ascii"),
+        pytest.param([" calendar"], id="whitespace"),
+        pytest.param(["x\n"], id="control"),
+        pytest.param(["x/y"], id="punctuation"),
+    ],
+)
+def test_signed_token_with_invalid_tools_rejected(tools: Any) -> None:
+    with pytest.raises(afb.AnswerFeedbackTokenError) as excinfo:
+        afb.verify_feedback_token(
+            _resign_payload(_token(), k=tools),
+            key=_key(),
+            now=TEST_NOW,
+            presser_user_id=TEST_SLACK_USER_ID,
+            team_id=TEST_SLACK_TEAM_ID,
+        )
+    assert excinfo.value.code == "AFB_TOKEN_INVALID"
+
+
+def test_signed_token_with_unknown_field_rejected() -> None:
+    with pytest.raises(afb.AnswerFeedbackTokenError) as excinfo:
+        afb.verify_feedback_token(
+            _resign_payload(_token(tools=("calendar",)), extra="unexpected"),
+            key=_key(),
+            now=TEST_NOW,
+            presser_user_id=TEST_SLACK_USER_ID,
+            team_id=TEST_SLACK_TEAM_ID,
+        )
+    assert excinfo.value.code == "AFB_TOKEN_INVALID"
 
 
 def _tamper_payload(token: str, **changes: Any) -> str:
@@ -192,6 +269,9 @@ def _tamper_payload(token: str, **changes: Any) -> str:
         pytest.param(_tamper_payload(_token(), q="別の質問"), id="query_tampered"),
         pytest.param(_tamper_payload(_token(), u=OTHER_USER), id="owner_tampered"),
         pytest.param(_tamper_payload(_token(), e=TEST_NOW + 10**6), id="expiry_tampered"),
+        pytest.param(
+            _tamper_payload(_token(tools=("calendar",)), k=["search"]), id="tools_tampered"
+        ),
         pytest.param(_token(secret="another-secret-that-is-at-least-32-bytes!"), id="wrong_key"),
         pytest.param(_token()[:-2] + "AA", id="signature_changed"),
         pytest.param("not-a-token", id="shape"),
@@ -301,6 +381,44 @@ async def test_records_thumb_up_and_overwrite_by_append(store: _Store) -> None:
     assert row.query == QUERY
     assert row.answer_id == ANSWER_ID
     assert row.search_session_id == f"slack-{ANSWER_ID}"
+    assert row.note is None  # k がない旧 v1 の保存内容は変えない。
+
+
+async def test_records_non_search_reply_with_tools_in_existing_note(store: _Store) -> None:
+    query = "今日の予定を教えて"
+    tools = ("calendar", "personal_memory")
+    payload = await _call(
+        _server(store),
+        _signed({"feedback_token": _token(query=query, tools=tools), "rating": 1}),
+    )
+    assert payload == {"ok": True, "rating": 1}
+    assert len(store.rows) == 1
+    row = store.rows[0]
+    assert row.query == query
+    assert row.answer_id == ANSWER_ID
+    assert row.search_session_id == f"slack-{ANSWER_ID}"
+    assert json.loads(row.note or "null") == {"tools": list(tools)}
+
+
+async def test_records_reply_without_tools(store: _Store) -> None:
+    query = "こんにちは"
+    payload = await _call(
+        _server(store),
+        _signed({"feedback_token": _token(query=query, tools=()), "rating": 1}),
+    )
+    assert payload == {"ok": True, "rating": 1}
+    assert len(store.rows) == 1
+    assert store.rows[0].query == query
+    assert store.rows[0].note is None
+
+
+async def test_invalid_tools_rejected_and_not_saved(store: _Store) -> None:
+    payload = await _call(
+        _server(store),
+        _signed({"feedback_token": _resign_payload(_token(), k=["x/y"]), "rating": 1}),
+    )
+    assert _code(payload) == "AFB_TOKEN_INVALID"
+    assert store.rows == []
 
 
 async def test_other_presser_rejected_and_not_saved(store: _Store) -> None:
@@ -471,7 +589,25 @@ def test_pg_store_inserts_with_app_role_and_no_conflict_clause() -> None:
     sql, params = pg.executed[0]
     assert sql == INSERT_SQL
     assert "ON CONFLICT" not in sql.upper() and "RETURNING" not in sql.upper()
-    assert params == ["member@vectorinc.co.jp", QUERY, -1, f"slack-{ANSWER_ID}", ANSWER_ID]
+    assert params == ["member@vectorinc.co.jp", QUERY, -1, f"slack-{ANSWER_ID}", ANSWER_ID, None]
+
+
+def test_pg_store_inserts_tools_note_with_parameter() -> None:
+    pg = _Pg()
+    note = '{"tools":["calendar"]}'
+    row = AnswerFeedbackRow(
+        user_email="member@vectorinc.co.jp",
+        query=QUERY,
+        rating=1,
+        answer_id=ANSWER_ID,
+        search_session_id=f"slack-{ANSWER_ID}",
+        note=note,
+    )
+    PgAnswerFeedbackStore(pg).insert(row)
+    sql, params = pg.executed[0]
+    assert sql == INSERT_SQL
+    assert "answer_id, note)" in sql
+    assert params[-1] == note
 
 
 def test_pg_store_wraps_errors_without_row_content() -> None:
