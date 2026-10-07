@@ -599,27 +599,35 @@ resource "aws_ecs_task_definition" "mcp" {
       { name = "OMIYAGE_SEARCH_DEPTH", value = var.omiyage_search_depth },
       { name = "SEARCH_MIN_RELEVANCE_FALLBACK", value = var.search_min_relevance_fallback },
       { name = "USE_TIKTOK_APIFY_FALLBACK", value = var.use_tiktok_apify_fallback },
+      # 2026-10-07: Apify 補完 1 本ぶんの期限秒（既定 115＝live）。コード既定 150 だと 150+30（S3 の余裕）
+      # が下の壁時計 150 秒を超え、動画分析の補完が 1 本も走らなかった。
+      { name = "TIKTOK_APIFY_FALLBACK_DEADLINE_S", value = var.tiktok_apify_fallback_deadline_s },
       { name = "VIDEO_ALGORITHM_APIFY_WALLCLOCK_S", value = var.video_algorithm_apify_wallclock_s },
       { name = "VIDEO_ALGORITHM_RESULT_CACHE_ENABLED", value = var.video_algorithm_result_cache_enabled },
       # 2026-09-28: 動画分析の切り離し（既定 OFF＝今と同じ・mcp_gateway/detached_jobs.py）。
-      # ON にしても allowlist が空なら誰にも適用しない。段階は TD の env 差し替えで進める。
+      # 段階は TD の env 差し替えで進める。
       { name = "USE_VIDEO_ALGORITHM_DETACH", value = var.use_video_algorithm_detach },
       { name = "VIDEO_ALGORITHM_DETACH_AFTER_S", value = var.video_algorithm_detach_after_s },
-      { name = "VIDEO_ALGORITHM_DETACH_ALLOWED_EMAILS", value = var.video_algorithm_detach_allowed_emails },
+      # 下の 3 つの *_ALLOWED_EMAILS は 2026-10-06 小俣さん指示「私だけに限定している機能は全員に
+      # 使えるように」で全員（"*"＝本人確認済みの全員・mcp_gateway/allowlist.py）に開いた（live と同じ）。
+      # WEB_RESEARCH_ALLOWED_EMAILS と同じく var をやめて直接焼く: git 管理外の tfvars（正本）に第 1 段階の値
+      # （小俣さんのみ）が残っていても、全員開放の裁定が黙って無効化されないようにするため。
+      # 再び絞るときは var を復活させず、ここの値を明示的に変える（誰に開いているかを git で読めるように）。
+      { name = "VIDEO_ALGORITHM_DETACH_ALLOWED_EMAILS", value = "*" },
       { name = "VIDEO_ALGORITHM_DETACH_DM_ONLY", value = var.video_algorithm_detach_dm_only },
       { name = "VIDEO_ALGORITHM_MAX_BACKGROUND", value = var.video_algorithm_max_background },
       { name = "VIDEO_ALGORITHM_CACHE_LEASE_SECONDS", value = var.video_algorithm_cache_lease_seconds },
       # 2026-09-28: 検索上位チェックの 2 段目（既定 OFF＝今と同じ・mcp_gateway/surface_video_followup.py）。
-      # ON にしても allowlist が空なら誰にも適用しない。同時実行の上限は上の MAX_BACKGROUND と共有。
+      # 同時実行の上限は上の MAX_BACKGROUND と共有。allowlist は上と同じ理由で "*" を直接焼く。
       { name = "USE_SURFACE_VIDEO_FOLLOWUP", value = var.use_surface_video_followup },
-      { name = "SURFACE_VIDEO_FOLLOWUP_ALLOWED_EMAILS", value = var.surface_video_followup_allowed_emails },
+      { name = "SURFACE_VIDEO_FOLLOWUP_ALLOWED_EMAILS", value = "*" },
       { name = "SURFACE_VIDEO_FOLLOWUP_MAX_VIDEOS", value = var.surface_video_followup_max_videos },
       # 2026-10-05: 全部そろえてから 1 通・全 KW の動画・取得前の確認（既定 OFF＝上の 2 段構え）。
       { name = "SURFACE_VIDEO_ONE_SHOT", value = var.surface_video_one_shot },
       # 2026-09-28: 検索上位チェックの結果を mcp が DM へ直接投稿（既定 OFF・mcp_gateway/direct_summary.py）。
-      # Aico が文面を組み直して URL を落とすのを止める。ON にしても allowlist が空なら誰にも適用しない。
+      # Aico が文面を組み直して URL を落とすのを止める。allowlist は上と同じ理由で "*" を直接焼く。
       { name = "USE_DIRECT_SUMMARY_POST", value = var.use_direct_summary_post },
-      { name = "DIRECT_SUMMARY_POST_ALLOWED_EMAILS", value = var.direct_summary_post_allowed_emails },
+      { name = "DIRECT_SUMMARY_POST_ALLOWED_EMAILS", value = "*" },
       # Conditional PutItemでrolling taskを跨いだnonce one-useを保証。障害時は認可fail-closed。
       { name = "TEAMAGENT_CALLER_CLAIM_REPLAY_TABLE", value = aws_dynamodb_table.mcp_caller_claim_nonces.name },
       # v0.3 Task6: AiLaVault リンク注入の発火条件（未設定だと build_search_web_links が
@@ -628,8 +636,9 @@ resource "aws_ecs_task_definition" "mcp" {
       { name = "CONNECT_BASE_URL", value = var.connect_base_url },
       # レポート短縮リンク(/r)の段階ゲート。connect-web に /r+vseo-s3-read が揃うまで false=従来 presigned。
       { name = "USE_REPORT_SHORTURL", value = var.enable_report_shorturl ? "1" : "0" },
-      # §レポート配信: 検索系ツールの結果を HTML 化して /r で配る段階ゲート（既定 OFF）。
-      # OFF の間は S3 を一切触らず、従来どおり構造化結果だけを返す（挙動は1バイトも変わらない）。
+      # §レポート配信: 検索系ツールの結果を HTML 化して /r で配る段階ゲート。
+      # OFF（空）の間は S3 を一切触らず、従来どおり構造化結果だけを返す。2026-10-06 夜の TD 差し替えで
+      # tiktok_search・サムネ・見出しを本番 ON にしたので、既定もそれに合わせた（variables_fargate.tf）。
       { name = "USE_HTML_REPORTS", value = var.html_reports_tools },
       { name = "USE_HTML_REPORT_THUMBS", value = var.enable_html_report_thumbs ? "1" : "0" },
       { name = "USE_HTML_REPORT_HEADLINE", value = var.enable_html_report_headline ? "1" : "0" },
@@ -705,6 +714,8 @@ resource "aws_ecs_task_definition" "mcp" {
       { name = "USE_CALENDAR_FREEBUSY_TOOL", value = var.use_calendar_freebusy_tool ? "true" : "false" },
       # slack_summary: Slack スレッド要約（read-only・本人 xoxp のみ・bot token 不使用・既定 false）。
       { name = "USE_SLACK_SUMMARY_TOOL", value = var.use_slack_summary_tool ? "true" : "false" },
+      # 2026-10-07: slack_summary の「チャンネル名＋期間」読み取り（#545・skills/slack_summary・既定 "1"＝live）。
+      { name = "SLACK_SUMMARY_NAMED_PERIOD_ENABLED", value = var.slack_summary_named_period_enabled },
       # digest_settings: 朝のサマリーの本人ごとの設定を DM で見る/変える（本人の digest_preferences 行
       # だけ・DM 限定）。migration 0030 の本番適用と、朝の配信側 MORNING_DIGEST_PREFERENCES=true が
       # 前提。TD の env で小俣さんが試験し、10-01 の mcp 便 r42 から本番 true（CLI の TD 差し替え）。
@@ -715,9 +726,18 @@ resource "aws_ecs_task_definition" "mcp" {
       # 10-01 の mcp 便 r42 から本番 true（CLI の TD 差し替え）。ここを本番の実態に合わせる
       # （false のまま apply すると機能が消える・変数化はしない）。
       { name = "USE_SLACK_SEARCH_TOOL", value = "true" },
-      # 社外商談の準備レポート（meeting_prep・v1＝DM でのオンデマンド・10-05）。まず小俣さんだけで試す。
+      # 2026-10-07: 複合検索（search が金庫と本人の Slack を並行で探す・skills/search/composite.py）。
+      # 読取は本人 xoxp のみ。10-06 夜の TD 差し替えで本番 ON（既定 "1"＝live）。
+      { name = "USE_COMPOSITE_SEARCH", value = var.use_composite_search },
+      # 2026-10-07: 回答評価ボタン（👍/👎）の記録口（隠しツール answer_feedback_record・
+      # mcp_gateway/answer_feedback.py）。ボタンを出すのは OpenClaw 側の TEAMAGENT_ANSWER_FEEDBACK
+      # （OC の TD・oc16 で投入予定）で、こちらは押下を search_feedback へ書く側（既定 "1"＝live）。
+      { name = "USE_ANSWER_FEEDBACK_TOOL", value = var.use_answer_feedback_tool },
+      # 社外商談の準備レポート（meeting_prep・v1＝DM でのオンデマンド・10-05）。
+      # 2026-10-06 小俣さん指示で全員に開いた（live と同じ）。この env は skills/_shared/rollout.py の
+      # 「空＝全員」の解釈（上の *_ALLOWED_EMAILS の "*" とは逆）なので空文字を焼く。
       { name = "USE_MEETING_PREP_TOOL", value = "true" },
-      { name = "MEETING_PREP_ALLOWED_EMAILS", value = "s-komata@vectorinc.co.jp" },
+      { name = "MEETING_PREP_ALLOWED_EMAILS", value = "" },
       # attachment_assist: 会話に添付されたファイルの読取・加工（要約/修正案/議事録FMT/集計/英訳）。
       # 読取のみ（テキスト返答だけ・ファイル生成/再配信は P2 の別フラグ）。既定 false。
       # 解禁は 4 点セット: この env / effective-tool-scope.json / 契約テスト / OC イメージ再ビルド。
@@ -856,7 +876,10 @@ resource "aws_ecs_task_definition" "mcp" {
       # （レポート署名URL発行先）は enable_scrape_tools 側で定義済み＝両フラグ併用が前提。
       { name = "USE_X_RESEARCH_TOOLS", value = "1" },
       { name = "USE_SEARCH_SURFACE_TOOL", value = "1" },
-      { name = "USE_TIKTOK_COMMENT_TOOLS", value = "1" },
+      # 2026-10-07: コメント欄マイニングは 30 日で 0 回のため道具の一覧から外した（live と同じ "false"・
+      # USE_MAIL_LINK_TOOL の #491 と同じ扱い＝ツール定義の固定トークンを減らす）。guard の env 照合は
+      # 文字列の完全一致なので live の表記 "false" のまま焼く（"0" にしない）。
+      { name = "USE_TIKTOK_COMMENT_TOOLS", value = "false" },
       # Part4 X投稿者の界隈マルチラベル分類。既定 false=bio送信も分類も表示もしない（完全no-op）。
       # 分類品質を実データ(apidojo の bio 取得率含む)で検証してから true にする。
       { name = "USE_KAIWAI_CLASSIFY", value = var.enable_kaiwai_classify ? "1" : "0" },

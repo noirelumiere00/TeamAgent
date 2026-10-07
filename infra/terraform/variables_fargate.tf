@@ -242,23 +242,25 @@ variable "html_reports_tools" {
   description = <<-EOT
     検索系ツールの結果を HTML レポート化して /r で配布する対象（env USE_HTML_REPORTS）。
     空文字＝OFF（従来どおり構造化結果のみ）。"tiktok_search" のようにツール名をカンマ区切りで
-    列挙するとそのツールだけ、"1"/"true" なら全ツール。段階的に開けるため既定は空。
-    ON の前提: enable_report_shorturl=true（/r 実機 200 確認済み）であること。
+    列挙するとそのツールだけ、"1"/"true" なら全ツール。
+    既定 "tiktok_search"＝本番（2026-10-06 夜の mcp TD 差し替え）と同じ。本番が唯一の利用者なので、
+    既定を本番に合わせても既存の利用者への影響は無く、tfvars に行が無くても apply で OFF に戻らない。
+    ON の前提: enable_report_shorturl=true（/r 実機 200 確認済み・本番 tfvars は true）であること。
   EOT
   type        = string
-  default     = ""
+  default     = "tiktok_search"
 }
 
 variable "enable_html_report_thumbs" {
-  description = "HTML レポートにサムネイルを載せるか（env USE_HTML_REPORT_THUMBS）。TikTok CDN の署名URLは数日で失効するため、取得して自社S3へ再ホストしてから貼る。既定 false。"
+  description = "HTML レポートにサムネイルを載せるか（env USE_HTML_REPORT_THUMBS）。TikTok CDN の署名URLは数日で失効するため、取得して自社S3へ再ホストしてから貼る。既定 true＝本番（2026-10-06 夜の mcp TD 差し替え）と同じ。"
   type        = bool
-  default     = false
+  default     = true
 }
 
 variable "enable_html_report_headline" {
-  description = "HTML レポート冒頭の一行見出しを Bedrock で生成するか（env USE_HTML_REPORT_HEADLINE）。入力1800字・max_tokens 80・40字上限で、規約違反の出力は採用しない。既定 false。"
+  description = "HTML レポート冒頭の一行見出しを Bedrock で生成するか（env USE_HTML_REPORT_HEADLINE）。入力1800字・max_tokens 80・40字上限で、規約違反の出力は採用しない。既定 true＝本番（2026-10-06 夜の mcp TD 差し替え）と同じ。"
   type        = bool
-  default     = false
+  default     = true
 }
 
 variable "enable_html_report_pptx" {
@@ -562,7 +564,7 @@ variable "video_algorithm_detach_after_s" {
 }
 
 variable "video_algorithm_detach_allowed_emails" {
-  description = "切り離しを使う人（VIDEO_ALGORITHM_DETACH_ALLOWED_EMAILS・カンマ区切り）。空なら誰にも適用しない。⚠️ TD で ON/変更したら activation 版 tfvars（正本・~/dev/worktrees/teamagent-activation/infra/terraform/terraform.tfvars）へ同じ値を必ず追記。guard 経由の apply で既定に戻るため（手順: docs/runbooks/video_algorithm_detach.md）。"
+  description = "【退役・2026-10-06 小俣さん指示で全員開放】切り離しの段階公開 allowlist だったもの（VIDEO_ALGORITHM_DETACH_ALLOWED_EMAILS）。fargate.tf は本変数を参照せず \"*\"（本人確認済みの全員）を直接焼く。宣言だけ残すのは、git 管理外の tfvars（正本）に本キーが残っていても `-var-file` が undeclared variable で警告/失敗しないようにするため。再び絞る場合は変数を復活させず、fargate.tf の値を明示的に変える（誰に開いているかを git で読めるように・web_research_allowed_emails と同じ扱い）。"
   type        = string
   default     = ""
 }
@@ -601,7 +603,7 @@ variable "use_surface_video_followup" {
 }
 
 variable "surface_video_followup_allowed_emails" {
-  description = "2 段目を使う人（SURFACE_VIDEO_FOLLOWUP_ALLOWED_EMAILS・カンマ区切り）。空なら誰にも適用しない。DM・署名検証済みの依頼だけが対象。⚠️ TD で ON/変更したら activation 版 tfvars（正本・~/dev/worktrees/teamagent-activation/infra/terraform/terraform.tfvars）へ同じ値を必ず追記。guard 経由の apply で既定に戻るため。"
+  description = "【退役・2026-10-06 小俣さん指示で全員開放】2 段目（と SURFACE_VIDEO_ONE_SHOT）の段階公開 allowlist だったもの（SURFACE_VIDEO_FOLLOWUP_ALLOWED_EMAILS）。fargate.tf は本変数を参照せず \"*\"（本人確認済みの全員）を直接焼く。宣言だけ残すのは、git 管理外の tfvars（正本）に本キーが残っていても `-var-file` が undeclared variable で警告/失敗しないようにするため。再び絞る場合は fargate.tf の値を明示的に変える。"
   type        = string
   default     = ""
 }
@@ -633,7 +635,7 @@ variable "use_direct_summary_post" {
 }
 
 variable "direct_summary_post_allowed_emails" {
-  description = "直接投稿を使う人（DIRECT_SUMMARY_POST_ALLOWED_EMAILS・カンマ区切り）。空なら誰にも適用しない。1 対 1 DM・署名検証済みの依頼だけが対象。⚠️ TD で ON/変更したら activation 版 tfvars（正本・~/dev/worktrees/teamagent-activation/infra/terraform/terraform.tfvars）へ同じ値を必ず追記。guard 経由の apply で既定に戻るため。"
+  description = "【退役・2026-10-06 小俣さん指示で全員開放】直接投稿の段階公開 allowlist だったもの（DIRECT_SUMMARY_POST_ALLOWED_EMAILS）。fargate.tf は本変数を参照せず \"*\"（本人確認済みの全員）を直接焼く。宣言だけ残すのは、git 管理外の tfvars（正本）に本キーが残っていても `-var-file` が undeclared variable で警告/失敗しないようにするため。再び絞る場合は fargate.tf の値を明示的に変える。"
   type        = string
   default     = ""
 }
@@ -659,4 +661,38 @@ variable "connect_store_granted_scopes" {
   description = "Google が実際に許可した範囲を保存し、一部許可なら完了画面で伝える（CONNECT_STORE_GRANTED_SCOPES・connect-web）。既定 0＝要求した範囲を保存（今と同じ）。⚠️ TD で ON/変更したら activation 版 tfvars（正本・~/dev/worktrees/teamagent-activation/infra/terraform/terraform.tfvars）へ同じ値を必ず追記。guard 経由の apply で既定に戻るため。"
   type        = string
   default     = "0"
+}
+
+# ============================================================
+# 2026-10-07: 10-06 夜〜10-07 の mcp TD 差し替え（register_mcp_td_image_env.sh）で live にだけ入った env の取り込み
+# ============================================================
+# 既定値は live（mcp TD）の実値に合わせる（2026-09-15 の 8 key と同じ方針）。tfvars（正本）に行が無くても
+# tf 描画の TD が live と同じになり、guard 経由の apply で OFF に戻らない。この terraform を使う環境は
+# 本番（teamagent-dev）だけなので、既定を本番の値にしても既存の利用者への影響は無い。
+# 型は string: guard の env 照合（validate_plan）は文字列の完全一致なので、live の表記をそのまま描く。
+# ⚠️ TD 差し替えでまた値を変えたら、activation 版 tfvars（正本・
+#    ~/dev/worktrees/teamagent-activation/infra/terraform/terraform.tfvars）へ同じ値を必ず追記する
+#    （terraform_runtime_guard.sh の live→tfvars 導出はこの 4 変数を列挙していない）。
+variable "use_composite_search" {
+  description = "複合検索（USE_COMPOSITE_SEARCH）: search が金庫と本人の Slack を並行で探す（読取は本人 xoxp のみ・skills/search/composite.py）。コードの既定は OFF。既定 \"1\"＝本番（10-06 夜に TD で ON）と同じ。\"0\" で金庫だけの検索に戻る。"
+  type        = string
+  default     = "1"
+}
+
+variable "use_answer_feedback_tool" {
+  description = "回答評価ボタン（👍/👎）の押下を記録する隠しツール answer_feedback_record（USE_ANSWER_FEEDBACK_TOOL・mcp_gateway/answer_feedback.py）。ボタンを出すのは OpenClaw の TEAMAGENT_ANSWER_FEEDBACK（OC の TD）で、こちらは記録する側。既定 \"1\"＝本番（10-06 夜に TD で ON）と同じ。"
+  type        = string
+  default     = "1"
+}
+
+variable "tiktok_apify_fallback_deadline_s" {
+  description = "Apify 補完 1 本ぶんの期限秒（TIKTOK_APIFY_FALLBACK_DEADLINE_S・adapters/tiktok_video_fallback.py・アプリ側で 30〜240 に丸める）。コード既定 150 だと動画分析は 150+30（S3 の余裕）秒の枠を要求し、壁時計 VIDEO_ALGORITHM_APIFY_WALLCLOCK_S（150）から 1 本も取れずに補完が飛ばされていた。既定 \"115\"＝本番（10-07 に TD で設定）と同じ（115+30=145 秒で 1 本が壁時計に収まる）。壁時計を変えるときはこちらも合わせて見直す。"
+  type        = string
+  default     = "115"
+}
+
+variable "slack_summary_named_period_enabled" {
+  description = "slack_summary の「チャンネル名＋期間」指定の読み取り（SLACK_SUMMARY_NAMED_PERIOD_ENABLED・#545・skills/slack_summary）。コードの既定は OFF。既定 \"1\"＝本番（10-07 に TD で ON）と同じ。\"0\" で名前・期間指定の追加読み取りを止める。"
+  type        = string
+  default     = "1"
 }
