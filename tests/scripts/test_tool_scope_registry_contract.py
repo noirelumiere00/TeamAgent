@@ -67,6 +67,20 @@ DELIVERY_SYMBOLS = frozenset({"deliver_files", "upload_all", "prepare_drive_file
 # この集合との差分で必ず赤くなる＝申告漏れのままマージできない。
 FILE_DELIVERY_SKILLS = frozenset({"clientkarte", "knowledge_deliver"})
 DELIVERY_EFFECT_MARKER = "slack-file-delivery"
+# 共通部品を通さず ``<slack>.upload_file(...)`` を直接呼んで Slack にファイルを投下する
+# skill（module 単位で検出するので、同じ module の @register は 1 組として扱う）。
+# 共通部品の import だけを見る検出器は、attachment_assist の投稿リンク経路（files.upload v2 を
+# 直接呼ぶ）を「読むだけ」の申告のまま素通しした（2026-10-07 のレビューで実測）。
+DIRECT_UPLOAD_SKILL_GROUPS = frozenset(
+    {
+        frozenset({"attachment_assist"}),
+        frozenset({"video_capture"}),
+        frozenset({"proposal_builder", "proposal_builder_submit", "proposal_builder_status"}),
+        frozenset({"omiyage_report_submit", "omiyage_report_status"}),
+    }
+)
+# 配信（ファイル投下）の申告として認める effect の目印。
+UPLOAD_EFFECT_MARKERS = (DELIVERY_EFFECT_MARKER, "slack-file-write")
 
 
 def _parse(path: Path) -> ast.Module:
@@ -160,6 +174,22 @@ def _file_delivering_skill_names() -> set[str]:
                 delivering |= names
                 break
     return delivering
+
+
+def _direct_upload_skill_groups() -> set[frozenset[str]]:
+    """``*.upload_file(...)`` を直接呼んでいる module の skill 名の組を集める。"""
+    groups: set[frozenset[str]] = set()
+    for path, names in _skill_names_by_module().items():
+        tree = _parse(path)
+        for node in ast.walk(tree):
+            if (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and node.func.attr == "upload_file"
+            ):
+                groups.add(frozenset(names))
+                break
+    return groups
 
 
 def _tool_spec_name(call: ast.Call, class_to_skill: dict[str, str]) -> str:
@@ -652,4 +682,33 @@ def test_file_delivering_skills_declare_the_side_effect_in_the_scope_ledger() ->
         assert DELIVERY_EFFECT_MARKER in effect_by_name[name], (
             f"{name} は Slack に実ファイルを投下するのに "
             f"effect='{effect_by_name[name]}' が配信を申告していない"
+        )
+
+
+def test_direct_slack_upload_skills_declare_the_side_effect_in_the_scope_ledger() -> None:
+    """共通部品を通さず upload_file を直接呼ぶ skill も、台帳で配信を申告していること。
+
+    共通部品の import だけを見る上の検出器は、``slack.upload_file`` を直接呼ぶ skill
+    （attachment_assist の投稿リンク経路など）を見逃す。module 単位で直接呼び出しを拾い、
+    その module の skill のうち台帳に載るものが 1 つは配信（ファイル投下）を申告していることを
+    突き合わせる（status 系は job の状態を読むだけなので、組の中の 1 つで足りる）。
+    """
+    detected = _direct_upload_skill_groups()
+    assert detected, "upload_file を直接呼ぶ skill が 1 つも検出できていない（検出器の空振り）"
+    assert detected == DIRECT_UPLOAD_SKILL_GROUPS, (
+        "Slack へ直接ファイルを投下する skill が増減した。"
+        "DIRECT_UPLOAD_SKILL_GROUPS と effective-tool-scope.json の effect を人間が裁定して更新すること: "
+        f"{sorted(sorted(g) for g in detected ^ DIRECT_UPLOAD_SKILL_GROUPS)}"
+    )
+
+    scope = json.loads(SCOPE.read_text(encoding="utf-8"))
+    effect_by_name = {tool["name"]: tool["effect"] for tool in scope["tools"]}
+    for group in sorted(DIRECT_UPLOAD_SKILL_GROUPS, key=sorted):
+        in_scope = sorted(name for name in group if name in effect_by_name)
+        assert in_scope, f"{sorted(group)} が effective-tool-scope.json に 1 つも無い"
+        assert any(
+            marker in effect_by_name[name] for name in in_scope for marker in UPLOAD_EFFECT_MARKERS
+        ), (
+            f"{in_scope} は Slack に実ファイルを投下するのに、effect が配信を申告していない: "
+            f"{[effect_by_name[n] for n in in_scope]}"
         )

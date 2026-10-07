@@ -308,7 +308,7 @@
     },
     {
       "name": "attachment_assist",
-      "effect": "slack-file-read-analysis",
+      "effect": "slack-file-read-analysis-slack-file-delivery",
       "terraformGate": "use_attachment_tools",
       "defaultEnabledByTerraform": false,
       "enabledBy": { "kind": "envAllTrue", "names": ["USE_ATTACHMENT_TOOLS"] }

@@ -1748,7 +1748,8 @@ def test_effective_tool_scope_matches_config_and_deployment_gates() -> None:
     assert "slack-thread-channel-read-analysis" in effects
     assert "slack-search-read-analysis" in effects
     assert "digest-preferences-state-write" in effects
-    assert "slack-file-read-analysis" in effects
+    # 投稿リンク経路（ATTACHMENT_PERMALINK_ENABLED）で元ファイルを添付し直す＝配信も申告する。
+    assert "slack-file-read-analysis-slack-file-delivery" in effects
     assert "external-video-read-slack-file-delivery" in effects
     assert "external-web-search-read-only" in effects
     tools_by_name = {tool["name"]: tool for tool in scope["tools"]}

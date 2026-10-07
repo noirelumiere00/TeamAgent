@@ -64,6 +64,13 @@ class AttachmentCandidate:
     # ⚠️ url_private とは別物（permalink はブラウザで本人の権限で開く画面 URL で、
     #    bot token を載せて GET する取得用 URL ではない）。取れなければ空文字。
     permalink: str = ""
+    # Slack file の ``is_public``（公開チャンネルに共有済み）。bool の True だけを公開とみなす
+    # （欠損・文字列は非公開扱い＝fail-closed）。投稿リンク経路の情報漏れ判定に使う。
+    is_public: bool = False
+    # Slack file の ``channels``（このファイルが共有されている**公開チャンネル**の ID 一覧）。
+    # 非公開チャンネルは ``groups``、DM は ``ims`` に入るので、ここに元チャンネルが含まれれば
+    # 「元は公開チャンネル」と言える。欠損・型違いは空（＝公開と確かめられない・fail-closed）。
+    public_channels: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -129,6 +136,13 @@ def _safe_permalink(raw: Any) -> str:
     return url if host == "slack.com" or host.endswith(".slack.com") else ""
 
 
+def _str_tuple(raw: Any) -> tuple[str, ...]:
+    """list[str] だけを tuple にする（欠損・型違い・str 以外の要素は捨てる）。"""
+    if not isinstance(raw, list):
+        return ()
+    return tuple(x for x in raw if isinstance(x, str) and x)
+
+
 def evaluate_file(
     file: dict[str, Any],
     *,
@@ -181,6 +195,8 @@ def evaluate_file(
             url=url,
             ts=ts,
             permalink=_safe_permalink(file.get("permalink")),
+            is_public=file.get("is_public") is True,
+            public_channels=_str_tuple(file.get("channels")),
         ),
         None,
     )
