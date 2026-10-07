@@ -101,6 +101,13 @@ RUN set -eux; \
 # advisories, so the zero-Critical/High gate is unaffected.
 #   https-proxy-agent 5.0.1 (new)     required by axios 1.20.0 (same ^5.0.1 range as 1.18.0)
 #   agent-base        6.0.2 (new)     required by https-proxy-agent 5.0.1
+# 2026-10-07: 新しく公表された 2 件で重大/高の門が落ちた（oc16 のビルド a1e0626c）。
+#   proxy-addr 2.0.7 → 2.0.8  CVE-2026-90711 / GHSA-jqcg-44mw-7w3h（critical・IPv4-mapped IPv6 の信頼サブネットで IP 偽装）
+#     /app と slack プラグインの 2 か所。依存（forwarded 0.2.0・ipaddr.js 1.9.1）は 2.0.7 と同じ。
+#   @modelcontextprotocol/sdk 1.29.0 → 1.31.0  CVE-2026-104850 / GHSA-6qxp-vccf-f47h（high・OAuth クライアントが
+#     MCP サーバの選んだ認可サーバへ資格情報を送りうる）。1.31.0 が最小の修正版。依存は同じ（@hono/node-server の
+#     範囲が広がっただけ）。1.30/1.31 の変更は SSE keep-alive と OAuth の issuer 束縛で、Aico の mcp への接続
+#     （ベアラートークン・OAuth 不使用）には影響しない。
 RUN set -eux; \
     chmod -R u+w /opt/teamagent; \
     patch_dir=/tmp/openclaw-vulnerability-patches; \
@@ -114,6 +121,8 @@ RUN set -eux; \
     npm pack tar@7.5.21 --ignore-scripts --pack-destination "$patch_dir"; \
     npm pack https-proxy-agent@5.0.1 --ignore-scripts --pack-destination "$patch_dir"; \
     npm pack agent-base@6.0.2 --ignore-scripts --pack-destination "$patch_dir"; \
+    npm pack proxy-addr@2.0.8 --ignore-scripts --pack-destination "$patch_dir"; \
+    npm pack @modelcontextprotocol/sdk@1.31.0 --ignore-scripts --pack-destination "$patch_dir"; \
     rm -rf \
       /opt/teamagent/plugins/slack/node_modules/axios \
       /opt/teamagent/plugins/slack/node_modules/https-proxy-agent \
@@ -122,7 +131,10 @@ RUN set -eux; \
       /app/node_modules/fast-uri \
       /app/node_modules/ip-address \
       /app/node_modules/undici \
-      /app/node_modules/tar; \
+      /app/node_modules/tar \
+      /app/node_modules/proxy-addr \
+      /opt/teamagent/plugins/slack/node_modules/proxy-addr \
+      /app/node_modules/@modelcontextprotocol/sdk; \
     mkdir -p \
       /opt/teamagent/plugins/slack/node_modules/axios \
       /opt/teamagent/plugins/slack/node_modules/https-proxy-agent \
@@ -131,7 +143,10 @@ RUN set -eux; \
       /app/node_modules/fast-uri \
       /app/node_modules/ip-address \
       /app/node_modules/undici \
-      /app/node_modules/tar; \
+      /app/node_modules/tar \
+      /app/node_modules/proxy-addr \
+      /opt/teamagent/plugins/slack/node_modules/proxy-addr \
+      /app/node_modules/@modelcontextprotocol/sdk; \
     tar -xzf "$patch_dir/axios-1.20.0.tgz" --strip-components=1 -C /opt/teamagent/plugins/slack/node_modules/axios; \
     tar -xzf "$patch_dir/https-proxy-agent-5.0.1.tgz" --strip-components=1 -C /opt/teamagent/plugins/slack/node_modules/https-proxy-agent; \
     tar -xzf "$patch_dir/agent-base-6.0.2.tgz" --strip-components=1 -C /opt/teamagent/plugins/slack/node_modules/agent-base; \
@@ -140,9 +155,12 @@ RUN set -eux; \
     tar -xzf "$patch_dir/ip-address-10.3.1.tgz" --strip-components=1 -C /app/node_modules/ip-address; \
     tar -xzf "$patch_dir/undici-8.10.2.tgz" --strip-components=1 -C /app/node_modules/undici; \
     tar -xzf "$patch_dir/tar-7.5.21.tgz" --strip-components=1 -C /app/node_modules/tar; \
+    tar -xzf "$patch_dir/proxy-addr-2.0.8.tgz" --strip-components=1 -C /app/node_modules/proxy-addr; \
+    tar -xzf "$patch_dir/proxy-addr-2.0.8.tgz" --strip-components=1 -C /opt/teamagent/plugins/slack/node_modules/proxy-addr; \
+    tar -xzf "$patch_dir/modelcontextprotocol-sdk-1.31.0.tgz" --strip-components=1 -C /app/node_modules/@modelcontextprotocol/sdk; \
     cd /tmp; \
     rm -rf "$patch_dir"; \
-    node -e 'const fs=require("fs");const want={"/app/node_modules/brace-expansion":"5.0.11","/app/node_modules/fast-uri":"3.1.7","/app/node_modules/ip-address":"10.3.1","/app/node_modules/undici":"8.10.2","/app/node_modules/tar":"7.5.21","/opt/teamagent/plugins/slack/node_modules/agent-base":"6.0.2","/opt/teamagent/plugins/slack/node_modules/axios":"1.20.0","/opt/teamagent/plugins/slack/node_modules/https-proxy-agent":"5.0.1"};for(const [dir,v] of Object.entries(want)){const got=JSON.parse(fs.readFileSync(dir+"/package.json")).version;if(got!==v)throw new Error(`vulnerability patch mismatch: ${dir} is ${got}, expected ${v}`)}'; \
+    node -e 'const fs=require("fs");const want={"/app/node_modules/brace-expansion":"5.0.11","/app/node_modules/fast-uri":"3.1.7","/app/node_modules/ip-address":"10.3.1","/app/node_modules/undici":"8.10.2","/app/node_modules/tar":"7.5.21","/app/node_modules/proxy-addr":"2.0.8","/opt/teamagent/plugins/slack/node_modules/proxy-addr":"2.0.8","/app/node_modules/@modelcontextprotocol/sdk":"1.31.0","/opt/teamagent/plugins/slack/node_modules/agent-base":"6.0.2","/opt/teamagent/plugins/slack/node_modules/axios":"1.20.0","/opt/teamagent/plugins/slack/node_modules/https-proxy-agent":"5.0.1"};for(const [dir,v] of Object.entries(want)){const got=JSON.parse(fs.readFileSync(dir+"/package.json")).version;if(got!==v)throw new Error(`vulnerability patch mismatch: ${dir} is ${got}, expected ${v}`)}'; \
     chmod -R a-w /opt/teamagent
 
 # The upstream release contains its complete development workspace. Resolve the
