@@ -9,7 +9,7 @@
   - Slack Web API は偽物（chat.postMessage / chat.update を記録）
 
 固定すること:
-  - search を使った返信にだけ評価メッセージが 1 通付く（使わない返信・flag OFF には付かない）
+  - メッセージ起点の返信にはツール有無によらず評価が 1 通付く（silent・action・flag OFF は除外）
   - 押下で mcp が呼ばれ、search_feedback に記録され、メッセージが「ありがとうございます」に置き換わる
   - 二度押しは追記（最後の値で上書き）・別の人・改ざん・保存失敗は記録も置き換えもしない
   - チャンネルでは返信と同じスレッドへ出す・モデル経路から評価のツールは呼べない
@@ -161,6 +161,7 @@ def test_search_reply_gets_one_feedback_message_after_the_reply(
     assert dm["sleeps"] and dm["sleeps"][0] >= 2000
     payload = _token_payload(actions[0]["value"])
     assert payload["q"] == "JAL 過去提案 事例"  # 改行は空白へ
+    assert payload["k"] == ["search"]
     assert payload["u"] == USER_A
     assert payload["e"] == TEST_NOW + afb.TOKEN_TTL_S
     # G7: 検索語はログに出さない
@@ -172,11 +173,14 @@ def test_owner_press_records_and_replaces_message(e2e: tuple[dict[str, Any], _St
     pressed = report["pressOwner"]
     assert [call["name"] for call in pressed["mcpCalls"]] == [afb.ANSWER_FEEDBACK_TOOL_NAME] * 2
     assert [call["arguments"]["rating"] for call in pressed["mcpCalls"]] == [1, -1]
-    member_rows = [row for row in store.rows if row.user_email == MEMBER]
+    member_rows = [
+        row for row in store.rows if row.user_email == MEMBER and row.query == "JAL 過去提案 事例"
+    ]
     assert [row.rating for row in member_rows] == [1, -1]  # 追記＝最後の値が有効
     assert member_rows[0].query == "JAL 過去提案 事例"
     assert member_rows[0].answer_id == member_rows[1].answer_id
     assert member_rows[0].search_session_id == f"slack-{member_rows[0].answer_id}"
+    assert member_rows[0].note == '{"tools":["search"]}'
     updates = pressed["updates"]
     assert [u["body"]["text"] for u in updates] == [
         "ありがとうございます（👍 を記録しました）",
@@ -213,10 +217,118 @@ def test_store_failure_keeps_buttons_and_tells_presser(e2e: tuple[dict[str, Any]
     assert all(row.user_email != FAIL_EMAIL for row in store.rows)
 
 
-def test_reply_without_search_gets_no_buttons(e2e: tuple[dict[str, Any], _Store]) -> None:
+def test_reply_with_non_search_tool_gets_one_button_and_original_message(
+    e2e: tuple[dict[str, Any], _Store],
+) -> None:
     report, _ = e2e
-    assert report["noSearch"]["posts"] == []
-    assert report["noSearch"]["mcpCalls"] == []
+    no_search = report["noSearch"]
+    assert len(no_search["posts"]) == len(no_search["turns"]) == 3
+    assert no_search["turns"][0]["toolResults"][0].get("block") is not True
+    payload = _token_payload(no_search["posts"][0]["body"]["blocks"][1]["elements"][0]["value"])
+    assert payload["q"] == "元の発言 資料を送って"
+    assert payload["k"] == ["knowledge_deliver"]
+    assert not any("元の発言" in line for line in no_search["logs"])
+
+
+def test_tool_free_reply_gets_one_button_and_normalizes_original_message(
+    e2e: tuple[dict[str, Any], _Store],
+) -> None:
+    report, _ = e2e
+    posts = report["noSearch"]["posts"]
+    assert len(posts) == 3
+    for post, expected in zip(posts[1:], ["こんにちは", "😀" * 300], strict=True):
+        token = post["body"]["blocks"][1]["elements"][0]["value"]
+        payload = _token_payload(token)
+        assert payload["q"] == expected
+        assert "k" not in payload
+        assert len(token) <= afb.MAX_TOKEN_CHARS
+
+
+def test_non_search_and_tool_free_votes_are_recorded(e2e: tuple[dict[str, Any], _Store]) -> None:
+    report, store = e2e
+    assert len(report["noSearch"]["mcpCalls"]) == 2
+    rows = {row.query: row for row in store.rows}
+    assert rows["元の発言 資料を送って"].note == '{"tools":["knowledge_deliver"]}'
+    assert rows["こんにちは"].note is None
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        "empty",
+        "silent",
+        "commentary",
+        "reasoning",
+        "payloadCommentary",
+        "feedbackPrompt",
+        "feedbackThanks",
+        "feedbackFailed",
+        "feedbackNotOwner",
+        "feedbackStale",
+        "feedbackBlocks",
+    ],
+)
+def test_non_answer_payload_gets_no_feedback(e2e: tuple[dict[str, Any], _Store], case: str) -> None:
+    report, _ = e2e
+    assert report["excluded"][case] == []
+
+
+def test_visible_final_error_reply_also_gets_one_feedback(
+    e2e: tuple[dict[str, Any], _Store],
+) -> None:
+    report, _ = e2e
+    assert len(report["errorReply"]["posts"]) == 1
+
+
+def test_action_origin_reply_and_vote_get_no_feedback(e2e: tuple[dict[str, Any], _Store]) -> None:
+    report, _ = e2e
+    assert report["action"]["pressed"]["result"] == {"handled": True}
+    assert report["action"]["postsAdded"] == 0
+    assert any(
+        "heartbeat has no exact authoritative Slack button action" in line
+        for line in report["action"]["logs"]
+    )
+
+
+def test_first_search_query_and_up_to_five_unique_short_tools(
+    e2e: tuple[dict[str, Any], _Store],
+) -> None:
+    report, _ = e2e
+    post = report["toolLimit"]["posts"][0]
+    payload = _token_payload(post["body"]["blocks"][1]["elements"][0]["value"])
+    assert payload["q"] == "最初の検索"
+    assert payload["k"] == [
+        "knowledge_deliver",
+        "search",
+        "oauth_connect",
+        "calendar_event",
+        "lookup",
+    ]
+
+
+def test_optional_tools_fit_existing_token_size_limit(e2e: tuple[dict[str, Any], _Store]) -> None:
+    report, _ = e2e
+    token = report["tokenLimit"]["posts"][0]["body"]["blocks"][1]["elements"][0]["value"]
+    assert len(token) <= afb.MAX_TOKEN_CHARS
+    claim = afb.verify_feedback_token(
+        token,
+        key=make_verifier().derive_purpose_key(afb.KEY_LABEL),
+        now=TEST_NOW,
+        presser_user_id=USER_A,
+        team_id=TEST_SLACK_TEAM_ID,
+    )
+    assert claim.query == "😀" * 300
+    assert 0 < len(claim.tools) < 5
+
+
+def test_old_v1_without_tools_passes_plugin_and_mcp(e2e: tuple[dict[str, Any], _Store]) -> None:
+    report, store = e2e
+    legacy = report["oldV1"]
+    assert "k" not in _token_payload(legacy["token"])
+    assert len(legacy["mcpCalls"]) == 1
+    rows = [row for row in store.rows if row.query == "旧 v1 の検索"]
+    assert len(rows) == 1
+    assert rows[0].note is None
 
 
 def test_channel_feedback_goes_to_the_reply_thread(e2e: tuple[dict[str, Any], _Store]) -> None:
@@ -289,4 +401,6 @@ def test_plugin_and_mcp_share_the_token_contract() -> None:
     assert f'ANSWER_FEEDBACK_TOOL = "{afb.ANSWER_FEEDBACK_TOOL_NAME}"' in source
     assert 'AF_INVOCATION_PREFIX = "aico-fb-"' in source
     assert f"ANSWER_FEEDBACK_QUERY_MAX = {afb.MAX_QUERY_CHARS}" in source
+    assert f"ANSWER_FEEDBACK_TOOLS_MAX = {afb.MAX_TOOL_NAMES}" in source
+    assert f"ANSWER_FEEDBACK_TOOL_NAME_MAX = {afb.MAX_TOOL_NAME_CHARS}" in source
     assert f'ANSWER_FEEDBACK_SEARCH_TOOL = "{mcp_server.SEARCH_TOOL_NAME}"' in source

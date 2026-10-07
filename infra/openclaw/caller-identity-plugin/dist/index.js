@@ -346,7 +346,7 @@ export function isReservedMemoryInvocation(value) {
 }
 
 // ── (AF) 回答評価ボタン（2026-10-06・上司の重要事項「回答に良い／悪いの評価を付ける」）──────────
-// 資料検索（search）を使った返信だけに、返信の直後に「この回答は役に立ちましたか？ 👍 / 👎」の小さな
+// メッセージ起点の返信すべてに、返信の直後に「この回答は役に立ちましたか？ 👍 / 👎」の小さな
 // メッセージを同じスレッド／DM へ投稿する。押下は Socket Mode でこの plugin に届き、mcp の隠しツール
 // answer_feedback_record を予約 ID（aico-fb-<32hex>・run_id == tool_call_id）と署名済み claim で直接呼んで
 // search_feedback へ記録する。押した後はメッセージを「ありがとうございます（👍 を記録しました）」に置き換える。
@@ -363,14 +363,15 @@ export function isReservedMemoryInvocation(value) {
 // 確かめられない経路に載せず、この plugin が既に使っている chat.postMessage（保証経路・ボタン直接実行と同じ）で
 // 返信の直後に別の 1 通として出す。
 //
-// ボタンの value は質問の情報を直接は載せず、この plugin が鋳造する署名トークンにする:
-//   base64url(JSON {v:1, typ:"afb", q:検索語(≤300字), a:回答ID(16hex), u:質問者 U…, t:team, e:失効}) "."
+// ボタンの value は、この plugin が鋳造する署名トークン（秘匿ではない）にする:
+//   base64url(JSON {v:1, typ:"afb", q:検索語／元の発言(≤300字), a:回答ID(16hex), u:質問者 U…, t:team,
+//                      e:失効, k:使用ツール名(任意・最大5個)}) "."
 //   base64url(HMAC-SHA256(key, payload_segment) の先頭 16 バイト)
 //   key = HMAC-SHA256(TEAMAGENT_CALLER_CLAIM_SECRET, ANSWER_FEEDBACK_KEY_LABEL)（claim の署名とは鍵を分ける）
 // mcp 側（src/teamagent/mcp_gateway/answer_feedback.py）が同じ鍵で検証し、押した人＝質問した人・期限・team を確かめる。
 const ANSWER_FEEDBACK_ENV = "TEAMAGENT_ANSWER_FEEDBACK";
 export const ANSWER_FEEDBACK_TOOL = "answer_feedback_record";
-// この tool を使った run の返信にだけ評価ボタンを付ける（mcp の SEARCH_TOOL_NAME と同じ）。
+// この tool の検索語は元の発言より優先する（mcp の SEARCH_TOOL_NAME と同じ）。
 export const ANSWER_FEEDBACK_SEARCH_TOOL = "search";
 export const AF_INVOCATION_PREFIX = "aico-fb-";
 // mcp の answer_feedback.KEY_LABEL と同じ値（変えるときは両方）。
@@ -378,6 +379,8 @@ export const ANSWER_FEEDBACK_KEY_LABEL = "teamagent-answer-feedback-key-v1";
 // 評価は後から押されることがあるので 7 日（mcp の TOKEN_TTL_S と同じ）。
 export const ANSWER_FEEDBACK_TOKEN_TTL_S = 7 * 24 * 60 * 60;
 export const ANSWER_FEEDBACK_QUERY_MAX = 300;
+export const ANSWER_FEEDBACK_TOOLS_MAX = 5;
+export const ANSWER_FEEDBACK_TOOL_NAME_MAX = 64;
 // action_id（＝上流の namespace）ごとの評価値。
 export const ANSWER_FEEDBACK_ACTIONS = Object.freeze({
   answer_feedback_up: 1,
@@ -399,6 +402,7 @@ export const ANSWER_FEEDBACK_FAILED_TEXT =
   "評価を記録できませんでした。時間をおいてもう一度押してください。";
 const ANSWER_FEEDBACK_TOKEN_RE = /^([A-Za-z0-9_-]{1,1977})\.([A-Za-z0-9_-]{22})$/u;
 const ANSWER_FEEDBACK_PAYLOAD_FIELDS = ["a", "e", "q", "t", "typ", "u", "v"];
+const ANSWER_FEEDBACK_TOOL_RE = /^[A-Za-z0-9_.-]{1,64}$/u;
 const ANSWER_ID_RE = /^[0-9a-f]{16}$/u;
 const FEEDBACK_CONTROL_RE = /[\u0000-\u001f\u007f]+/gu;
 
@@ -423,7 +427,7 @@ export function isReservedFeedbackInvocation(value) {
   return typeof value === "string" && value.trim().toLowerCase().startsWith(AF_INVOCATION_PREFIX);
 }
 
-// search の query 引数をボタンのトークンに載せる形にする（制御文字を空白へ・前後の空白を落とす・300 字まで）。
+// 検索語／元の発言をトークンに載せる形にする（制御文字を空白へ・前後の空白を落とす・300 字まで）。
 export function normalizeFeedbackQuery(value) {
   if (typeof value !== "string") return null;
   const cleaned = value.replace(FEEDBACK_CONTROL_RE, " ").trim();
@@ -2327,14 +2331,16 @@ export function createCallerIdentityPlugin({
   const answerFeedbackKey = createHmac("sha256", secret)
     .update(ANSWER_FEEDBACK_KEY_LABEL, "utf8")
     .digest();
-  // run → {query, ingress, updatedAtMs, scheduled}。search を呼んだ run だけを覚える（検索語は
-  // トークンに載せるためだけに持ち、ログには出さない）。agent_end では消さない（返信の配信＝
+  // 評価用の元の発言は署名 claim に混ぜず、pendingKey ごとの別台帳に正規化して持つ。
+  // run → {query, searchQuery, tools, ingress, updatedAtMs, scheduled}。メッセージ起点の run を
+  // 覚える（発言・検索語はトークン用だけでログには出さない）。agent_end では消さない（返信の配信＝
   // reply_payload_sending は agent_end の後に走る）。TTL と上限は pruneConnectGuardState に相乗り。
-  const searchByRun = new Map();
+  const feedbackQueryByPending = new Map();
+  const feedbackByRun = new Map();
   // 新しい会話の 1 通目を戻す（FM）。既定 ON・"0" のときだけ OFF。mcp も Slack も使わない。
   const firstMessageRestoreEnabled =
     String(env[FIRST_MESSAGE_RESTORE_ENV] ?? "").trim() !== "0";
-  // pendingKey（= 送信者×会話の受信）→ { text, atMs }。本文を持つ唯一の台帳（120 秒・ログに出さない）。
+  // pendingKey（= 送信者×会話の受信）→ { text, atMs }。復元用の本文（120 秒・ログに出さない）。
   // ingress には載せない（ingress は mintCallerClaim の trusted に丸ごと spread される）。
   const firstMessageByPending = new Map();
   // 送信者 → { text, atMs }。差し込み文だけ（発話本文は持たない）。コマンドで即時に捨てる。
@@ -2415,7 +2421,8 @@ export function createCallerIdentityPlugin({
       connectRevisionsByRun,
       connectFallbackByRun,
       videoRevisionsByRun,
-      searchByRun,
+      feedbackQueryByPending,
+      feedbackByRun,
     ]) {
       for (const [runId, entry] of ledger) {
         if (nowMs - entry.updatedAtMs > INBOUND_CONTEXT_TTL_MS) {
@@ -2554,6 +2561,7 @@ export function createCallerIdentityPlugin({
     ingressByRun.delete(runId);
     // 拒否した run の束縛は抑止にも使わない（拒否＝この run の受信を権威的に決められない）。
     connectIngressByRun.delete(runId);
+    feedbackByRun.delete(runId);
     rejectedRuns.set(runId, rejectedAtMs);
   }
 
@@ -2597,6 +2605,7 @@ export function createCallerIdentityPlugin({
         // 再通知でも抑止用台帳を確実に持つ（agent_end 後に ingressByRun 側が消えた後、
         // 同じ受信の再通知が来る順序でも判定が失われないように）。
         rememberConnectIngress(runId, existing);
+        rememberAnswerFeedbackRun(runId, existing, now());
         removePending(ingress);
       } else rejectRun(runId, now(), ingress);
       return matches;
@@ -2606,6 +2615,7 @@ export function createCallerIdentityPlugin({
     }
     ingressByRun.set(runId, ingress);
     rememberConnectIngress(runId, ingress);
+    rememberAnswerFeedbackRun(runId, ingress, now());
     removePending(ingress);
     return true;
   }
@@ -2692,7 +2702,7 @@ export function createCallerIdentityPlugin({
     const pendingKey = JSON.stringify([sessionKey, messageId]);
     // event.content は上流が BodyForCommands ?? RawBody ?? Body から作る利用者の生本文
     // （message-hook-mappers:23 / Slack は commandBody ?? rawBody = 封筒無しの本文）。
-    // 本文そのものは保持せず、判定結果の真偽だけを ingress に載せる（G7）。
+    // ingress には判定結果だけを載せる（G7）。評価用の正規化発言は別台帳へ保存する。
     const connectRequestRule =
       typeof event?.content === "string" ? classifyConnectRequest(event.content) : null;
     const connectRequest = connectRequestRule !== null;
@@ -2762,13 +2772,20 @@ export function createCallerIdentityPlugin({
       ingress.videoUrlKind = existing.videoUrlKind;
       ingress.videoRequestIntent = existing.videoRequestIntent === true;
     }
+    if (answerFeedbackEnabled && answerFeedbackTargets(senderId)) {
+      const query = normalizeFeedbackQuery(event?.content);
+      if (query !== null) {
+        feedbackQueryByPending.delete(pendingKey);
+        feedbackQueryByPending.set(pendingKey, {query, updatedAtMs: nowMs});
+      }
+    }
     pendingByMessage.set(pendingKey, ingress);
     if (runId && !bindRun(runId, ingress)) {
       pendingByMessage.delete(pendingKey);
       emitPluginLog(logger, "warn", "inbound rejected reason=conflicting_run_binding");
       return null;
     }
-    // (FM) 新しい会話の 1 通目を戻すための控え（本文を持つのはここだけ・120 秒・ログに出さない）。
+    // (FM) 新しい会話の 1 通目を戻すための控え（復元用本文・120 秒・ログに出さない）。
     // 本文を伴わない再通知では上書きしない（先に控えた本文を落とさない）。
     if (firstMessageRestoreEnabled) {
       const firstMessage = normalizeFirstMessage(event?.content);
@@ -4700,14 +4717,24 @@ export function createCallerIdentityPlugin({
     if (trusted.ingressKind === "action") {
       trusted.actionToolCallId = eventToolCallId;
     }
-    // 回答評価: 署名できた search 呼び出しの run を覚える（この run の返信にだけボタンを付ける）。
+    // 回答評価: 署名できたツール名と、最初の search の検索語を記録する。
     if (
       answerFeedbackEnabled &&
-      tool === ANSWER_FEEDBACK_SEARCH_TOOL &&
       trusted.ingressKind === "message" &&
       answerFeedbackTargets(trusted.senderId)
     ) {
-      rememberSearchRun(eventRunId, trusted, params, nowMs);
+      rememberAnswerFeedbackRun(eventRunId, trusted, nowMs);
+      const entry = feedbackByRun.get(eventRunId);
+      if (tool === ANSWER_FEEDBACK_SEARCH_TOOL && entry.searchQuery === null) {
+        entry.searchQuery = normalizeFeedbackQuery(params?.query);
+      }
+      if (
+        entry.tools.length < ANSWER_FEEDBACK_TOOLS_MAX &&
+        ANSWER_FEEDBACK_TOOL_RE.test(tool) &&
+        !entry.tools.includes(tool)
+      ) {
+        entry.tools.push(tool);
+      }
     }
     return { params: reconcileReturnedParams(event?.params, signed.params, unwrapDepth, logger) };
   }
@@ -5204,13 +5231,20 @@ export function createCallerIdentityPlugin({
     return typeof senderId === "string" && answerFeedbackAllowlist.has(senderId.toUpperCase());
   }
 
-  // search を呼んだ run の記録。検索語は最初の search のもの（利用者の質問に最も近い）を使う。
-  function rememberSearchRun(runId, ingress, params, nowMs) {
-    const existing = searchByRun.get(runId);
-    const query = existing?.query ?? normalizeFeedbackQuery(params?.query);
-    searchByRun.delete(runId);
-    searchByRun.set(runId, {
+  // 信頼済みのメッセージと run の束縛時に記録するので、ツール無しの返信も対象になる。
+  function rememberAnswerFeedbackRun(runId, ingress, nowMs) {
+    if (
+      !answerFeedbackEnabled ||
+      ingress.ingressKind !== "message" ||
+      !answerFeedbackTargets(ingress.senderId)
+    ) return;
+    const existing = feedbackByRun.get(runId);
+    const query = existing?.query ?? feedbackQueryByPending.get(ingress.pendingKey)?.query ?? null;
+    feedbackByRun.delete(runId);
+    feedbackByRun.set(runId, {
       query,
+      searchQuery: existing?.searchQuery ?? null,
+      tools: existing?.tools ?? [],
       ingress,
       updatedAtMs: nowMs,
       scheduled: existing?.scheduled ?? false,
@@ -5229,7 +5263,7 @@ export function createCallerIdentityPlugin({
       .subarray(0, 16);
   }
 
-  function mintAnswerFeedbackToken({runId, query, senderId, teamId, nowMs}) {
+  function mintAnswerFeedbackToken({runId, query, tools, senderId, teamId, nowMs}) {
     const payload = {
       v: 1,
       typ: "afb",
@@ -5239,7 +5273,14 @@ export function createCallerIdentityPlugin({
       t: teamId,
       e: Math.floor(nowMs / 1000) + ANSWER_FEEDBACK_TOKEN_TTL_S,
     };
-    const segment = base64url(JSON.stringify(payload));
+    if (tools.length > 0) payload.k = [...tools];
+    let segment = base64url(JSON.stringify(payload));
+    // Slack value／MCP の既存 2000 字上限を守る。発言は削らず、任意のツール名を末尾から落とす。
+    while (segment.length > 1977 && payload.k?.length > 0) {
+      payload.k.pop();
+      if (payload.k.length === 0) delete payload.k;
+      segment = base64url(JSON.stringify(payload));
+    }
     return `${segment}.${signAnswerFeedbackSegment(segment).toString("base64url")}`;
   }
 
@@ -5261,7 +5302,13 @@ export function createCallerIdentityPlugin({
     }
     if (
       !isPlainObject(payload) ||
-      Object.keys(payload).toSorted().join(",") !== ANSWER_FEEDBACK_PAYLOAD_FIELDS.join(",") ||
+      Object.keys(payload).filter(key => key !== "k").toSorted().join(",") !==
+        ANSWER_FEEDBACK_PAYLOAD_FIELDS.join(",") ||
+      (Object.hasOwn(payload, "k") && (
+        !Array.isArray(payload.k) ||
+        payload.k.length > ANSWER_FEEDBACK_TOOLS_MAX ||
+        payload.k.some(tool => typeof tool !== "string" || !ANSWER_FEEDBACK_TOOL_RE.test(tool))
+      )) ||
       payload.v !== 1 ||
       payload.typ !== "afb" ||
       !Number.isSafeInteger(payload.e) ||
@@ -5278,15 +5325,16 @@ export function createCallerIdentityPlugin({
     return {ok: true, reason: "ok", owner: payload.u};
   }
 
-  // reply_payload_sending の後段。search を呼んだ run の最終返信が実際に配信される（cancel されない）
+  // reply_payload_sending の後段。メッセージ起点の最終返信が実際に配信される（cancel されない）
   // ときだけ、評価メッセージの投稿を 1 回だけ予約する（分割 payload の 2 通目以降は何もしない）。
   function maybeScheduleAnswerFeedback(event, ctx, result, logger) {
     if (!answerFeedbackEnabled) return;
     if (result?.cancel === true) return;
     const runId = canonicalInvocationId(event?.runId);
     if (!runId || runId !== canonicalInvocationId(ctx?.runId)) return;
-    const entry = searchByRun.get(runId);
-    if (!entry || entry.scheduled) return;
+    pruneConnectGuardState(now());
+    const entry = feedbackByRun.get(runId);
+    if (!entry || entry.ingress.ingressKind !== "message" || entry.scheduled) return;
     if (event?.kind !== undefined && event.kind !== "final") return;
     const payload = result?.payload ?? event?.payload;
     if (
@@ -5294,14 +5342,25 @@ export function createCallerIdentityPlugin({
       typeof payload !== "object" ||
       typeof payload.text !== "string" ||
       !payload.text.trim() ||
-      payload.isError === true ||
+      payload.text.trim() === "NO_REPLY" ||
+      payload.text.trim() === ANSWER_FEEDBACK_PROMPT_TEXT ||
+      Object.values(ANSWER_FEEDBACK_THANKS_TEXT).includes(payload.text.trim()) ||
+      payload.text.trim() === ANSWER_FEEDBACK_NOT_OWNER_TEXT ||
+      payload.text.trim() === ANSWER_FEEDBACK_STALE_TEXT ||
+      payload.text.trim() === ANSWER_FEEDBACK_FAILED_TEXT ||
+      (Array.isArray(payload.blocks) && payload.blocks.some(block =>
+        block?.block_id === "aico_answer_feedback" ||
+        (Array.isArray(block?.elements) && block.elements.some(element =>
+          Object.hasOwn(ANSWER_FEEDBACK_ACTIONS, element?.action_id),
+        )),
+      )) ||
       payload.isReasoning === true ||
       payload.isCommentary === true
     ) {
       return;
     }
     entry.scheduled = true;
-    if (entry.query === null) {
+    if ((entry.searchQuery ?? entry.query) === null) {
       emitPluginLog(logger, "warn", `answer feedback skipped runId=${runId} reason=no_query`);
       return;
     }
@@ -5342,7 +5401,8 @@ export function createCallerIdentityPlugin({
     }
     const token = mintAnswerFeedbackToken({
       runId,
-      query: entry.query,
+      query: entry.searchQuery ?? entry.query,
+      tools: entry.tools,
       senderId: ingress.senderId,
       teamId: ingress.teamId,
       nowMs: now(),
@@ -5681,7 +5741,7 @@ export function createCallerIdentityPlugin({
       );
       observe("reply_payload_sending", (event, ctx) => {
         const result = replaceExhaustedConnectReply(event, ctx, api.logger);
-        // 返信の中身は変えない。配信される search の返信の後に評価メッセージを予約するだけ。
+        // 配信されるメッセージ起点の返信の後に、評価メッセージを予約する。
         maybeScheduleAnswerFeedback(event, ctx, result, api.logger);
         return result;
       });

@@ -4,7 +4,7 @@
   ON CONFLICT・RETURNING は使わない（最小権限ロールでは落ちる・0024 の地雷）。
 - 「同じ人の二度押しは最後の値で上書き」は追記で表し、集計側（dashboard の
   ``answer_feedback_summary``）が (user_email, answer_id) ごとに最新の 1 行だけを数える。
-- 本文（回答）は保存しない。query は検索語だけ（0015 の契約）。
+- 本文（回答）は保存しない。query は検索語または利用者の元の発言、note は使用ツール名。
 - 例外は ``AnswerFeedbackStoreError`` に包む（例外文に行の中身を載せない）。
 """
 
@@ -20,8 +20,8 @@ _SESSION_RE: Final = re.compile(r"[A-Za-z0-9-]{1,64}")
 # 列名は固定。値はすべてプレースホルダ。
 INSERT_SQL: Final = (
     "INSERT INTO search_feedback "
-    "(user_email, query, target_type, rating, search_session_id, answer_id) "
-    "VALUES (%s, %s, 'answer', %s, %s, %s)"
+    "(user_email, query, target_type, rating, search_session_id, answer_id, note) "
+    "VALUES (%s, %s, 'answer', %s, %s, %s, %s)"
 )
 
 
@@ -42,6 +42,7 @@ class AnswerFeedbackRow:
     rating: int
     answer_id: str
     search_session_id: str
+    note: str | None = None
 
     def __post_init__(self) -> None:
         email = self.user_email.strip()
@@ -86,6 +87,7 @@ class PgAnswerFeedbackStore:
                             row.rating,
                             row.search_session_id,
                             row.answer_id,
+                            row.note,
                         ],
                     )
         except Exception as error:
