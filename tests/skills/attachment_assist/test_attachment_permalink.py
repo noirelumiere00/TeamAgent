@@ -1084,3 +1084,31 @@ def test_factory_uses_switch_dependent_description() -> None:
     source = Path(factory.__file__).read_text(encoding="utf-8")
     assert "AttachmentAssistSkill.tool_description()" in source
     assert "AttachmentAssistSkill.description," not in source
+
+
+def test_extraction_scans_far_beyond_llm_cap_to_find_late_case(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """抽出の上限が LLM 上限の 2 倍のままだと、後半（14 万字目あたり）の事例は抜かれもしない。
+
+    pypdf 抽出器の本物の打ち切り（max_total_chars に達したら走査をやめる）を再現する。
+    """
+    big = [(n, t + "詳細" * 1600) for n, t in _case_book_pages(target_page=35)]
+
+    def _capped(data: bytes, *, max_pages: int, max_total_chars: int) -> list[tuple[int, str]]:
+        out: list[tuple[int, str]] = []
+        total = 0
+        for n, text in big[:max_pages]:
+            if total + len(text) > max_total_chars:
+                out.append((n, text[: max_total_chars - total]))
+                break
+            out.append((n, text))
+            total += len(text)
+        return out
+
+    monkeypatch.setattr("teamagent.ingest.pdf_extract.extract_pdf_pages", _capped)
+    skill, _, _, bedrock, _ = _skill()
+    out = _run(skill, mode="summary", file_name=PDF_NAME, instruction=PROD_REQUEST)
+    assert out.error == ""
+    assert "紅茶花伝" in bedrock.last_user_text
+    assert "35 ページ目" in out.message
