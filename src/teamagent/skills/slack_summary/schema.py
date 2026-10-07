@@ -104,7 +104,13 @@ class SlackSummaryInput(BaseModel):
         default="", max_length=100, description="対象のチャンネル名・部分名。"
     )
     period: str = Field(
-        default="", max_length=80, description="昨日・今週・先月・YYYY-MM-DD（〜で日付範囲）。"
+        default="",
+        max_length=80,
+        description=(
+            "今日・昨日・一昨日・今週・先週・先々週・今月・先月・直近N日（過去N日間）・"
+            "M月D日〜D日（10月1日〜5日・10/1〜10/5・年は省略可）・YYYY-MM-DD（〜で日付範囲）。"
+            "利用者の言葉をそのまま渡す（例: 先週、直近7日、10/1〜10/5）。"
+        ),
     )
     thread_ts: str = Field(
         default="",
