@@ -208,6 +208,7 @@ versioning＋SSE-KMS有効の非公開S3を推奨する。Secrets Managerには�
 - account DBを同じ保護方式でS3へ置く。
 - `proposal_builder` gateを有効化する前にasset pin、channel metadata、Terraformによる専用DynamoDB tableの作成とtaskへの注入を確認する。
 - submitでjob_idを即返し、statusでqueued/running/done/failedを照会する。
+- submit の入口は `PROPOSAL_BUILDER_ALLOWED_EMAILS`（空＝全員拒否・`*`＝本人確認済みの全員・カンマ区切り＝その人だけ）で誰が使えるかを決める。リスト外には例外ではなく `status=failed` と「準備中」の文を返し、job row も thread も作らない（2026-10-07・小俣さんだけで E2E する段階は本人のメール 1 件）。
 - background threadでGemini v3＋D→RAG/account→95枠→PPTX→Slackを一回で通す。
 - screenshotは対象外、draftは外部配送しない。
 - queued/runningの更新がstale閾値を超えた場合は `MCP_RESTARTED` でfail-closeする。job rowはTTLで7日後に削除する。

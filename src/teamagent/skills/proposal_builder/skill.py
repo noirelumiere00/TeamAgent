@@ -28,6 +28,7 @@ from teamagent.adapters.tiktok_scraper import (
     TikTokVideo,
     search_tiktok,
 )
+from teamagent.mcp_gateway.allowlist import email_allowed
 from teamagent.skills._shared.long_jobs import enabled as long_jobs_enabled
 from teamagent.skills._shared.long_jobs import latest_job, origin
 from teamagent.skills._shared.text_safety import sanitize_llm_text
@@ -84,6 +85,33 @@ _PROPOSAL_JOB_RESULT_ERROR_CODE = "RESULT_INVALID"
 _PROPOSAL_JOB_RETRY_SECONDS = 30
 _PROPOSAL_JOB_HEARTBEAT_SECONDS = 30
 _PROPOSAL_JOB_STALE_SECONDS = 180
+
+# 83 枚提案書の段階公開（2026-10-07）。submit の入口で「誰が使えるか」を env で決める。
+# - 空・未設定: 全員拒否（今の本番と同じ＝使えない）
+# - ``*``: 本人確認済みの全員
+# - カンマ区切り: その人だけ（小俣さんだけで E2E する段階）
+# 照合は mcp_gateway/allowlist.email_allowed（#554 の search_surface_check/confirm.py と同じ）。
+# 照合する email は resolver が解決した値だけで、未検証（identity_verified が真でない）は
+# 個人指定でも ``*`` でも拒否する。
+ALLOWED_EMAILS_ENV = "PROPOSAL_BUILDER_ALLOWED_EMAILS"
+# 拒否の文（Aico がそのまま利用者へ伝える。内部語を載せない）。
+NOT_READY_MESSAGE = (
+    "83枚の提案書の自動生成は準備中のため、まだお使いいただけません。"
+    "使えるようになったらお知らせします。"
+)
+
+
+def _allowed_emails_from_env() -> frozenset[str]:
+    return frozenset(
+        e.strip().lower() for e in os.environ.get(ALLOWED_EMAILS_ENV, "").split(",") if e.strip()
+    )
+
+
+def submit_allowed(metadata: dict[str, Any]) -> bool:
+    """この依頼者は提案書生成を受け付けてよいか（呼び出しごとに env を読む）。"""
+    if metadata.get("identity_verified") is not True:
+        return False
+    return email_allowed(metadata.get("user_email"), _allowed_emails_from_env())
 
 
 @dataclass(frozen=True)
@@ -1289,9 +1317,19 @@ class ProposalBuilderSubmitSkill(
         input: ProposalBuilderSubmitInput,
         ctx: SkillContext,
     ) -> ProposalBuilderSubmitOutput:
+        log = ctx.bind_logger(self.name)
+        if not submit_allowed(ctx.metadata):
+            # 許可リスト外は入力検証より前に止める（job row も thread も作らない）。
+            # 例外にせず返り値で「準備中」を返し、呼んだ側がそのまま利用者へ伝えられるようにする。
+            log.info("proposal_builder_submit_not_allowed")
+            return ProposalBuilderSubmitOutput(
+                job_id="",
+                status="failed",
+                retry_after_seconds=0,
+                message=NOT_READY_MESSAGE,
+            )
         self._input_validator(input)
         job_id = new_proposal_job_id()
-        log = ctx.bind_logger(self.name)
         request_summary = {
             "request_id": ctx.request_id,
             "posting_start_date": input.posting_start_date.isoformat(),
@@ -1702,7 +1740,10 @@ class ProposalBuilderStatusSkill(
 
 
 __all__ = [
+    "ALLOWED_EMAILS_ENV",
+    "NOT_READY_MESSAGE",
     "ProposalBuilderSkill",
     "ProposalBuilderStatusSkill",
     "ProposalBuilderSubmitSkill",
+    "submit_allowed",
 ]
