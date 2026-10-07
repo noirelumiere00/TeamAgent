@@ -710,6 +710,11 @@ def test_search_attribution_rule_is_present(soul: str, label: str, phrase: str) 
             "**コマンド実行・設定変更・再起動・管理画面操作を利用者に頼まない。**",
         ),
         ("口約束の禁止", "**口約束は禁止**"),
+        ("未確認の事実を言い切らない", "ツールの結果に書いていないこと"),
+        ("未配信の断定禁止", "「届いているはず」「Drive にあるかも」「保存されていない」"),
+        ("断定を禁止", "を言い切らない"),
+        ("不明を正直に伝える", "分からなければ分からないと言い"),
+        ("確認手段を 1 つ", "確かめる手段（対応する status の照会・作り直し）を 1 つだけ示す"),
         # 2026-09-24 本番: SOUL を直して再起動しても、同じ DM で先に誤って断った履歴
         # （「今後は YouTube は即座にお断りします」）に従って断り続けた。
         ("過去の自分の断りを根拠にしない", "**過去の自分の断りを根拠にしない**"),
@@ -763,8 +768,9 @@ def test_no_unbacked_promises_remain(soul: str, label: str, phrase: str) -> None
         ("KW だけは即答", "`search_surface_check` の即答に留め"),
         ("事例集は search", "「事例集／まとめて／一覧」は `search` のまま"),
         ("骨子は proposal_draft", "`proposal_draft`（すぐ返る）"),
-        ("proposal_builder は準備中", "準備中＝呼ばない・約束しない"),
-        ("現在形の事実", "「いまは骨子（文章）までです」"),
+        ("proposal_builder は依頼で呼ぶ", "`proposal_builder_submit`）: 依頼されたら呼んでよい"),
+        ("準備中はツールの文面を伝える", "ツールが「準備中」と返したらその文をそのまま伝え"),
+        ("準備中の代替案内", "骨子（`proposal_draft`）＋お土産資料を案内する"),
         (
             "このDM は scope=channel",
             '**DM 内で「このDM」「ここまでのやり取り」と言われたら `scope="channel"`**',
@@ -774,6 +780,12 @@ def test_no_unbacked_promises_remain(soul: str, label: str, phrase: str) -> None
 def test_deliverable_routing_rule_is_present(soul: str, label: str, phrase: str) -> None:
     """dump 実測: 「提案資料作成して」に『作成はできません』／調査連鎖が先に走った。"""
     assert phrase in soul, f"資料生成の振り分け規約が欠けている: {label}"
+
+
+def test_proposal_builder_is_not_unconditionally_blocked(soul: str) -> None:
+    """利用対象の判定はツールに任せ、SOUL が一律に呼び出しを止めない。"""
+    assert "準備中＝呼ばない・約束しない" not in soul
+    assert "「いまは骨子（文章）までです」" not in soul
 
 
 def test_long_job_completion_is_only_claimed_from_tool_message(soul: str) -> None:

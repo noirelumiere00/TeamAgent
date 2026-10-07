@@ -24,6 +24,223 @@ const SLACK_INTERACTION_EVENT_PREFIX = "Slack interaction: ";
 const SLACK_INTERACTION_VALUE_MAX_LENGTH = 160;
 const SLACK_INTERACTION_VALUE_ELLIPSIS = "…";
 
+// ── 送信直前の本文洗浄（OC17・2026-10-07）─────────────────────────────────
+// MCP の tools/list は orchestrator/factory.py が Skill.name から組み立てるため、独立した
+// 静的一覧はない。skills/**/*.py の name: ClassVar[str] を機械抽出し、ゲートの予約ツールも
+// 含めた集合をここへ固定する（追加漏れは source と照合する契約テストで検知）。実行時 I/O はない。
+export const OUTBOUND_TOOL_NAMES = Object.freeze([
+  "answer_feedback_record",
+  "attachment_assist",
+  "calendar_event",
+  "calendar_freebusy",
+  "chitchat",
+  "clientkarte",
+  "clip_proposal_status",
+  "clip_proposal_submit",
+  "digest_ack",
+  "digest_settings",
+  "knowledge_deliver",
+  "knowledge_search_url",
+  "mail_constraints",
+  "mail_draft",
+  "mail_followup",
+  "mail_reply",
+  "mail_summary",
+  "mail_to_internal_context",
+  "meeting_prep",
+  "morning_digest",
+  "oauth_connect",
+  "omiyage_report_status",
+  "omiyage_report_submit",
+  "operation_log",
+  "personal_memory_command",
+  "personal_memory_context",
+  "personal_memory_observe",
+  "pre_meeting_brief",
+  "proposal_builder",
+  "proposal_builder_status",
+  "proposal_builder_submit",
+  "proposal_campaign",
+  "proposal_deck",
+  "proposal_draft",
+  "proposal_review",
+  "recommend",
+  "run_agent",
+  "schedule_propose",
+  "search",
+  "search_surface_check",
+  "slack_search",
+  "slack_summary",
+  "tiktok_acquire",
+  "tiktok_acquire_status",
+  "tiktok_comment_mining",
+  "tiktok_search",
+  "video_algorithm",
+  "video_algorithm_status",
+  "video_analysis",
+  "video_approval",
+  "video_capture",
+  "web_research",
+  "workspace_search",
+  "x_buzz_measure",
+  "x_buzz_measure_status",
+  "x_needs_mining",
+  "x_voice_search",
+]);
+const OUTBOUND_SIGNED_URL_RE = /X-Amz-(?:Signature|Credential)=/iu;
+const OUTBOUND_SIGNED_URL_TEXT = "（社内リンクは省略しました）";
+const OUTBOUND_URL_EDGE_RE = /[）」』、。！？]/u;
+// リンクの始点だけを拾い、括弧は深さを追う（regex の固定段数では署名 URL を取りこぼす）。
+// URL 自体とメンションはツール名の消去から保護する。表示ラベルだけは内部名を取り除く。
+const OUTBOUND_LINK_START_RE =
+  /<https?:\/\/|<[@!#][^<>\n]*>|\[[^\]\n]*\]\(https?:\/\/|https?:\/\//giu;
+const OUTBOUND_BARE_URL_STOP_RE = /[\s<>"`|）」』、。！？]/u;
+const OUTBOUND_TOOL_SOURCE =
+  `(?:teamagent__[a-z0-9_]*|${OUTBOUND_TOOL_NAMES.join("|")})`;
+// コードスパンの外（素の文）では、_ を含む識別子と teamagent__ だけを消す。search・recommend・
+// chitchat・clientkarte のような普通の語と同じ綴りの名前まで消すと「Google search で調べました」が
+// 「Google 調べました」に化ける（2026-10-07 Claude のレビューで発見）。
+const OUTBOUND_BARE_TOOL_SOURCE =
+  `(?:teamagent__[a-z0-9_]*|${OUTBOUND_TOOL_NAMES.filter((name) => name.includes("_")).join("|")})`;
+// ASCII 識別子の境界（和文の助詞との接続を許す）。コードスパンはバッククォートごと消す。
+// 付随する助詞と「を呼んで、」だけを除き、後続の利用者向け説明は残す。
+const OUTBOUND_TOOL_RE = new RegExp(
+  `(?:\`[ \\t　]*${OUTBOUND_TOOL_SOURCE}[ \\t　]*\`|` +
+    `(?<![a-z0-9_])${OUTBOUND_BARE_TOOL_SOURCE}(?![a-z0-9_]))` +
+    `[ \\t　]*(?:を[ \\t　]*呼(?:び出して|んで|び出し|び)[ \\t　]*[、,]?` +
+    `|では?[ \\t　]*|[をにのがはへと][ \\t　]*)?[、,]?[ \\t　]*`,
+  "giu",
+);
+
+// 純関数: 本文と変更件数だけ返す。payload の blocks/value/ファイル情報には触れない。
+export function scrubOutboundReplyText(text) {
+  const counts = { signedUrls: 0, toolNames: 0, urlSeparators: 0 };
+  const parts = [];
+  let end = 0;
+  function scrubTools(plain) {
+    return plain.replace(OUTBOUND_TOOL_RE, () => {
+      counts.toolNames += 1;
+      return "";
+    });
+  }
+  function scrubLabel(label) {
+    const cleaned = scrubLinkText(label);
+    return cleaned === label ? label : cleaned.trim() || "リンク";
+  }
+  function scrubLinkText(value) {
+    // href が通常 URL でも、表示ラベルや Markdown タイトルへ署名 URL を書くことがある。
+    if (!OUTBOUND_SIGNED_URL_RE.test(value)) return scrubTools(value);
+    const nested = scrubOutboundReplyText(value);
+    counts.signedUrls += nested.counts.signedUrls;
+    counts.toolNames += nested.counts.toolNames;
+    counts.urlSeparators += nested.counts.urlSeparators;
+    return nested.text;
+  }
+  function markdownEnd(start) {
+    let depth = 1;
+    let quote = null;
+    for (let i = start; i < text.length && text[i] !== "\n"; i += 1) {
+      const ch = text[i];
+      if (ch === "\\") { i += 1; continue; }
+      if (quote) {
+        if (ch === quote) quote = null;
+      } else if ((ch === '"' || ch === "'") && /\s/u.test(text[i - 1] ?? "")) {
+        quote = ch; // 任意の Markdown タイトル中の括弧は URL の括弧ではない。
+      } else if (ch === "(") {
+        depth += 1;
+      } else if (ch === ")" && --depth === 0) {
+        return i + 1;
+      }
+    }
+    return null;
+  }
+  // 退避用の番兵文字列は使わず、リンク単位で区切る（本文との番兵衝突を避ける）。
+  const starts = new RegExp(OUTBOUND_LINK_START_RE);
+  for (let match; (match = starts.exec(text)) !== null;) {
+    let start = match.index;
+    let urlStart = start;
+    let linkEnd = null;
+    let url = null;
+    let rendered = null;
+    if (/^<[@!#]/u.test(match[0])) {
+      parts.push(scrubTools(text.slice(end, start)), match[0]);
+      end = start + match[0].length;
+      starts.lastIndex = end;
+      continue;
+    }
+    if (match[0].startsWith("<")) {
+      urlStart = start + 1;
+      const close = text.indexOf(">", urlStart);
+      const token = close === -1 ? "" : text.slice(start, close + 1);
+      const slack = token.match(/^<(https?:\/\/[^\s<>|]+)(?:\|([^<>\n]*))?>$/iu);
+      if (slack) {
+        linkEnd = close + 1;
+        url = slack[1];
+        // 署名 URL のラベルは丸ごと消すので、内部名として二重計数しない。
+        rendered = OUTBOUND_SIGNED_URL_RE.test(url) || slack[2] === undefined
+          ? token : `<${url}|${scrubLabel(slack[2])}>`;
+      }
+    } else if (match[0].startsWith("[")) {
+      const labelEnd = start + match[0].indexOf("](");
+      urlStart = labelEnd + 2;
+      linkEnd = markdownEnd(urlStart);
+      if (linkEnd !== null) {
+        url = text.slice(urlStart, linkEnd - 1).split(/\s/u, 1)[0];
+        const token = text.slice(start, linkEnd);
+        rendered = OUTBOUND_SIGNED_URL_RE.test(url)
+          ? token : `[${scrubLabel(text.slice(start + 1, labelEnd))}](` +
+            url + scrubLinkText(text.slice(urlStart + url.length, linkEnd));
+      }
+    }
+    if (linkEnd === null) {
+      // 未閉鎖のマークアップでも、URL を裸の候補として検査する。
+      start = urlStart;
+      linkEnd = urlStart;
+      while (linkEnd < text.length && !OUTBOUND_BARE_URL_STOP_RE.test(text[linkEnd])) linkEnd += 1;
+      url = text.slice(urlStart, linkEnd);
+      // 文の外側の ASCII 括弧を判別する。署名検査は候補全体へ先に掛け、
+      // path/query 内の括弧より後ろにある署名パラメータも取りこぼさない。
+      const signed = OUTBOUND_SIGNED_URL_RE.test(url);
+      const depths = { "(": 0, "[": 0 };
+      const outerClosers = new Set();
+      for (let i = urlStart; i < linkEnd; i += 1) {
+        const ch = text[i];
+        if (ch === "(" || ch === "[") depths[ch] += 1;
+        if (ch === ")" || ch === "]") {
+          const open = ch === ")" ? "(" : "[";
+          if (depths[open] === 0) {
+            if (!signed) { linkEnd = i; break; }
+            outerClosers.add(i);
+          } else {
+            depths[open] -= 1;
+          }
+        }
+      }
+      // 署名 URL は途中で切らず、末尾の外括弧だけを本文側に残す。
+      while (outerClosers.has(linkEnd - 1)) linkEnd -= 1;
+      // apostrophe は URL 内の合法文字。URL 全体を引用した末尾のものだけ本文側へ戻す。
+      if (text[urlStart - 1] === "'" && text[linkEnd - 1] === "'") linkEnd -= 1;
+      url = text.slice(urlStart, linkEnd);
+      rendered = url;
+      if (!OUTBOUND_SIGNED_URL_RE.test(url) && OUTBOUND_URL_EDGE_RE.test(text[linkEnd] ?? "")) {
+        counts.urlSeparators += 1;
+        rendered += " ";
+      }
+    }
+    parts.push(scrubTools(text.slice(end, start)));
+    if (OUTBOUND_SIGNED_URL_RE.test(url)) {
+      counts.signedUrls += 1;
+      parts.push(OUTBOUND_SIGNED_URL_TEXT);
+    } else {
+      parts.push(rendered);
+    }
+    end = linkEnd;
+    starts.lastIndex = end;
+  }
+  parts.push(scrubTools(text.slice(end)));
+  return { text: parts.join(""), counts };
+}
+
 // ── 第3層防御: 連携 URL 捏造の封鎖 ──────────────────────────────────────
 // 背景（本番実測 2026-08-31）: LLM がツールを 1 つも呼ばないまま
 // https://connect.openclaw.ai/oauth/google?user_id=... を捏造し、利用者へ届いた。
@@ -5740,7 +5957,25 @@ export function createCallerIdentityPlugin({
           guardVideoZeroTool(event, ctx, api.logger),
       );
       observe("reply_payload_sending", (event, ctx) => {
-        const result = replaceExhaustedConnectReply(event, ctx, api.logger);
+        let result = replaceExhaustedConnectReply(event, ctx, api.logger);
+        // 抑止・層3・overflow・deai の処理が終わった本文を最後に洗浄する。cancel は維持する。
+        const payload = result?.payload ?? event?.payload;
+        if (
+          !result?.cancel && payload && typeof payload === "object" &&
+          !Array.isArray(payload) && typeof payload.text === "string"
+        ) {
+          const scrubbed = scrubOutboundReplyText(payload.text);
+          if (scrubbed.text !== payload.text) {
+            const { signedUrls, toolNames, urlSeparators } = scrubbed.counts;
+            emitPluginLog(
+              api.logger,
+              "info",
+              `outbound scrubbed signed_urls=${signedUrls} tool_names=${toolNames}` +
+                ` url_separators=${urlSeparators}`,
+            );
+            result = { ...result, payload: { ...payload, text: scrubbed.text } };
+          }
+        }
         // 配信されるメッセージ起点の返信の後に、評価メッセージを予約する。
         maybeScheduleAnswerFeedback(event, ctx, result, api.logger);
         return result;
