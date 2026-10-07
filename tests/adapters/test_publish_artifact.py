@@ -41,3 +41,38 @@ def test_theme_constants() -> None:
     assert "contenteditable" in theme.CONTENTEDITABLE_CSS
     assert ":hover" in theme.CONTENTEDITABLE_CSS and ":focus" in theme.CONTENTEDITABLE_CSS
     assert "data-noexport" in theme.EDIT_TIP_HTML
+
+
+def test_publish_text_result_goes_through_put_and_presign() -> None:
+    """publish_text(_result) は独自 put+presign を持たず _put_and_presign に寄せる（P8①）。
+
+    bucket/key/region が返らないと /r 短縮リンクにできず、presigned を渡すしかなくなる。
+    """
+    obj = report_publish.PublishedObject(
+        url="https://b.s3.amazonaws.com/payload-offload/x.json?X-Amz-Signature=s",
+        bucket="b",
+        key="payload-offload/x.json",
+        region="ap-northeast-1",
+    )
+    with patch.object(report_publish, "_put_and_presign", return_value=obj) as mock:
+        got = report_publish.publish_text_result(
+            '{"a": 1}', prefix="payload-offload/", bucket="b", request_id="rid"
+        )
+    assert got is obj
+    kwargs = mock.call_args.kwargs
+    assert mock.call_args.args[0] == b'{"a": 1}'
+    assert kwargs["content_type"].startswith("application/json")
+    assert kwargs["ext"] == ".json"
+    assert kwargs["prefix"] == "payload-offload/"
+    assert kwargs["bucket"] == "b"
+    assert kwargs["request_id"] == "rid"
+    assert kwargs["query"] == ""  # 本文は CloudWatch に残さない
+
+
+def test_publish_text_wrapper_returns_url_only() -> None:
+    obj = report_publish.PublishedObject(url="https://s3/x?sig", bucket="b", key="k")
+    with patch.object(report_publish, "_put_and_presign", return_value=obj):
+        assert report_publish.publish_text("body") == "https://s3/x?sig"
+    with patch.object(report_publish, "_put_and_presign", return_value=None):
+        assert report_publish.publish_text("body") is None
+    assert report_publish.publish_text_result("") is None  # 空文字は put しない

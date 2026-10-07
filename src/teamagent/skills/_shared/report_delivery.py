@@ -19,6 +19,8 @@
 対象と残件（誇張しないこと）:
     通る  : x_research(声集め/ニーズ/バズ)・tiktok_comment_mining・search_surface_check・
             video_algorithm._publish（いずれも publish_html_file_result → delivery_url）。
+            mcp_gateway/payload_offload（長文退避 JSON・publish_text_result → short_url_or_none。
+            LLM へ返す値なので presigned へは落とさず fail-closed）。
     未対応: pptx/pdf 等のバイナリ成果物（video_algorithm._publish_artifact・proposal_deck）。
             report_publish に *_result 版（bucket/key/region を返す発行関数）が無く、そのままでは
             トークン化できないため本対応の対象外。key prefix は allowlist 済み
@@ -53,9 +55,17 @@ def short_url_enabled() -> bool:
     return os.environ.get("USE_REPORT_SHORTURL", "").strip().lower() in ("1", "true", "yes", "on")
 
 
-def _missing_prereqs(base: str, key: str) -> list[str]:
-    """短縮URL化に足りていない前提を名指しで返す（空リスト＝全て充足）。"""
-    from teamagent.adapters.report_link_token import has_secret, is_allowed_key
+def _missing_prereqs(base: str, key: str, bucket: str = "") -> list[str]:
+    """短縮URL化に足りていない前提を名指しで返す（空リスト＝全て充足）。
+
+    bucket は省略可（空なら検査しない＝従来呼び出しの互換）。渡されたら decode 側と同じ
+    allowlist（VSEO_REPORT_BUCKET）で検査する。
+    """
+    from teamagent.adapters.report_link_token import (
+        has_secret,
+        is_allowed_bucket,
+        is_allowed_key,
+    )
 
     missing: list[str] = []
     if not base:
@@ -70,6 +80,10 @@ def _missing_prereqs(base: str, key: str) -> list[str]:
         # 空 key もここで弾く（`key and ...` で条件化すると空 key が allowlist を素通りして
         # decode 不能なトークンを発行してしまい、旧実装より弱くなる）。
         missing.append("key_prefix_not_allowed")
+    if bucket and not is_allowed_bucket(bucket):
+        # decode 側は VSEO_REPORT_BUCKET 以外の bucket を拒否する。別バケット（例:
+        # PAYLOAD_OFFLOAD_BUCKET の設定違い）にトークンを出すと 404 になるので発行しない。
+        missing.append("bucket_not_allowed")
     return missing
 
 
@@ -92,32 +106,30 @@ def _warn_if_shortlived(url: str, *, request_id: str, reason: str) -> None:
         )
 
 
-def delivery_url(result: PublishedObject, *, request_id: str) -> str:
-    """公開済み成果物の配信URLを返す。条件が揃えば /r 短縮URL、揃わなければ presigned。
+# short_url_or_none が None を返した理由（delivery_url の shortlived 警告の reason に使う）。
+# ログの理由ラベルを実態と一致させるため、呼び出し側で推測し直さない。
+_REASON_DISABLED = "short_url_disabled"
+_REASON_PREREQ = "prereq_missing"
+_REASON_ENCODE = "encode_failed"
 
-    **前提が欠けている時は黙って presigned へ落とさず、欠けた前提を名指しで warning する。**
-    これが無いと「USE_REPORT_SHORTURL=1 にしたのに直らない」が無言で起き、原因究明が事実上
-    不能になる（専用 REPORT_LINK_HMAC_SECRET が無く、フラグだけ立てても不発になる）。
-    配信自体は止めない（fail-open）＝ presigned は返す。
-    """
+
+def _short_url_with_reason(result: PublishedObject, *, request_id: str) -> tuple[str | None, str]:
+    """(短縮URL, 理由) を返す。URL が作れたら理由は "ok"。"""
     from teamagent.skills.knowledge_search_url.skill import connect_base_url
 
     if not short_url_enabled():
-        _warn_if_shortlived(result.url, request_id=request_id, reason="short_url_disabled")
-        return result.url  # 機能OFF＝意図した無言（後方互換）
+        return None, _REASON_DISABLED  # 機能OFF＝意図した無言（後方互換）
 
     base = connect_base_url()
-    missing = _missing_prereqs(base, result.key)
+    missing = _missing_prereqs(base, result.key, result.bucket)
     if missing:
-        _warn_if_shortlived(result.url, request_id=request_id, reason="prereq_missing")
         logger.warning(
             "report_short_url_prereq_missing",
             request_id=request_id,
             missing=",".join(missing),
-            hint="USE_REPORT_SHORTURL=1 だが前提が未充足のため presigned へフォールバック"
-            "（openclaw がクエリを落として壊す既知事象が再発する）",
+            hint="USE_REPORT_SHORTURL=1 だが前提が未充足のため短縮URLを発行できない",
         )
-        return result.url
+        return None, _REASON_PREREQ
 
     from teamagent.adapters.report_link_token import encode_report_token
 
@@ -125,8 +137,36 @@ def delivery_url(result: PublishedObject, *, request_id: str) -> str:
         token = encode_report_token(result.bucket, result.key, region=result.region)
     except Exception:
         logger.warning("report_short_url_encode_failed", request_id=request_id)
-        return result.url
+        return None, _REASON_ENCODE
     if token is None:
         logger.warning("report_short_url_encode_failed", request_id=request_id)
-        return result.url
-    return f"{base}/r/{token}"
+        return None, _REASON_ENCODE
+    return f"{base}/r/{token}", "ok"
+
+
+def short_url_or_none(result: PublishedObject, *, request_id: str) -> str | None:
+    """条件が揃えば /r 短縮URL、揃わなければ **None**（presigned を返さない＝fail-closed）。
+
+    delivery_url の中核。LLM へ返す値（mcp_gateway/payload_offload）のように「署名付き URL を
+    構造的に出してはいけない」呼び出し側はこちらを使う。欠けた前提・発行失敗は名指しで
+    warning する（無言で None にしない）。
+    """
+    return _short_url_with_reason(result, request_id=request_id)[0]
+
+
+def delivery_url(result: PublishedObject, *, request_id: str) -> str:
+    """公開済み成果物の配信URLを返す。条件が揃えば /r 短縮URL、揃わなければ presigned。
+
+    **前提が欠けている時は黙って presigned へ落とさず、欠けた前提を名指しで warning する。**
+    これが無いと「USE_REPORT_SHORTURL=1 にしたのに直らない」が無言で起き、原因究明が事実上
+    不能になる（専用 REPORT_LINK_HMAC_SECRET が無く、フラグだけ立てても不発になる）。
+    配信自体は止めない（fail-open）＝ presigned は返す。LLM へ返す値には使わない
+    （presigned を構造的に出してはいけない所は short_url_or_none を使う）。
+    """
+    short, reason = _short_url_with_reason(result, request_id=request_id)
+    if short is not None:
+        return short
+    # reason は short_url_disabled / prereq_missing / encode_failed のいずれか（実態と一致させる。
+    # ここで推測し直すと encode 失敗が prereq_missing と記録され、原因究明用のログが嘘をつく）。
+    _warn_if_shortlived(result.url, request_id=request_id, reason=reason)
+    return result.url

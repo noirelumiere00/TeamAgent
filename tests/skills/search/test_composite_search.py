@@ -577,13 +577,13 @@ def test_offload_never_publishes_slack_hits(monkeypatch: pytest.MonkeyPatch) -> 
     monkeypatch.setenv("TEAMAGENT_SHARED_COMPANY_DOMAINS", "vectorinc.co.jp")
     uploaded: list[str] = []
 
-    def _pub(text: str, **_: Any) -> str:
-        uploaded.append(text)
-        return "https://s3/full"
-
     import teamagent.adapters.report_publish as rp
 
-    monkeypatch.setattr(rp, "publish_text", _pub)
+    def _pub(text: str, **_: Any) -> rp.PublishedObject:
+        uploaded.append(text)
+        return rp.PublishedObject(url="https://s3/full?X-Amz-Signature=s", bucket="b", key="k")
+
+    monkeypatch.setattr(rp, "publish_text_result", _pub)
     data = _payload(content_chars=2_000, answer_chars=2_500, long_slack=True).model_dump()
     out = po.maybe_offload("search", data, request_id="r")
     assert out["offloaded"] is True

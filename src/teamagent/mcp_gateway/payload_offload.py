@@ -1,11 +1,19 @@
 """MCP 返却ペイロードの長文退避（v0.3 Task 8）— 純関数群＋S3退避。
 
 dispatch_tool の返却直前に適用する。ペイロード全体が閾値を超えたら:
-  1. 全文 JSON を非公開 S3 へ退避（署名付き URL・7日）
+  1. 全文 JSON を非公開 S3 へ退避（payload-offload/・7日で自動失効）
   2. 構造は保ったまま長い文字列フィールドだけを切り詰め（引用・出典キーは保持）
-  3. トップレベルに offloaded/full_url/offload_note を付与
-L0 は「切り詰め済みの構造化結果＋全文 URL」を受け取る＝Slack の長文制限を構造的に回避
-しつつ、hits の引用等の機能を殺さない（丸ごと URL 化は機能退行＝監査指摘）。
+  3. トップレベルに offloaded/offload_note（＋作れたときだけ full_url）を付与
+L0 は「切り詰め済みの構造化結果＋全文の社内短縮リンク」を受け取る＝Slack の長文制限を
+構造的に回避しつつ、hits の引用等の機能を殺さない（丸ごと URL 化は機能退行＝監査指摘）。
+
+full_url は **/r 短縮リンク（クエリ無し・HMAC トークン）だけ**を入れる。署名付き S3 URL
+（presigned・?X-Amz-Signature…）はモデルへ渡さない:
+  - presigned は STS 一時認証で署名されるため実効 30 分前後で失効し、OpenClaw はクエリ付き
+    長 URL を壊す（%2B→空白）＝漏洩リスクだけあって使い物にならない（P8①・2026-10-07）。
+  - 短縮リンクが作れない（USE_REPORT_SHORTURL 無効・CONNECT_BASE_URL/HMAC 鍵欠落・prefix や
+    bucket が allowlist 外・token None）ときは **full_url を出さない**（fail-closed）。退避自体と
+    切り詰めは行う（Slack 長文制限の回避は維持）。bucket/key はログにだけ残す。
 
 安全設計:
   - **allowlist 方式**: 退避対象は会社共有ナレッジ系 tool のみ（下記 OFFLOAD_TOOLS）。
@@ -24,6 +32,8 @@ import os
 from typing import Any
 
 import structlog
+
+from teamagent.adapters.report_publish import PublishedObject
 
 logger = structlog.get_logger(__name__)
 
@@ -52,7 +62,7 @@ _DEFAULT_MAX_CHARS = 10_000
 # 切り詰め後の各文字列フィールド上限（answer 等の要約系はこの5倍まで許容）。
 _DEFAULT_FIELD_CHARS = 500
 _SUMMARY_KEYS = frozenset({"answer", "summary", "message", "note"})
-_TRUNC_MARK = "…〔省略・全文は offload URL へ〕"
+_TRUNC_MARK = "…〔省略・全文は退避済み〕"
 
 
 def _env_int(name: str, default: int) -> int:
@@ -79,7 +89,7 @@ def _trim_str(v: str, key_lower: str, field_chars: int) -> str:
     if v.startswith("data:"):
         # base64 埋め込み（動画/画像）は「リンク」ではなく本体＝最優先で落とす（レビュー F2。
         # 温存すると video_algorithm の数MBが素通りし退避が無意味になる）。
-        return "<data URI は省略・全文は full_url へ>"
+        return "<data URI は省略・全文は退避済み>"
     if key_lower.endswith(("url", "uri", "permalink", "link")):
         return v  # 実リンクは切らない
     cap = field_chars * 5 if key_lower in _SUMMARY_KEYS else field_chars
@@ -138,6 +148,56 @@ def _shrink_lists_to_fit(data: dict[str, Any], max_chars: int) -> dict[str, Any]
     return data
 
 
+def _short_url(stored: PublishedObject, *, request_id: str, tool: str) -> str | None:
+    """退避した JSON の /r 短縮リンク。作れなければ None（presigned は絶対に返さない）。
+
+    short_url_or_none が前提欠落・発行失敗を名指しで warning するので、ここでは「full_url を
+    出さなかった」事実と bucket/key（人が S3 で探す手掛かり）だけを残す。
+    """
+    from teamagent.skills._shared.report_delivery import short_url_or_none
+
+    try:
+        url = short_url_or_none(stored, request_id=request_id)
+    except Exception:
+        url = None
+    if url is None:
+        logger.warning(
+            "payload_offload_no_short_url",
+            request_id=request_id,
+            tool=tool,
+            bucket=stored.bucket,
+            key=stored.key,
+            hint="短縮リンクを発行できないため full_url を出さない（署名付き URL は渡さない）",
+        )
+        return None
+    if "X-Amz-" in url or "amazonaws.com" in url.lower():
+        # 多層防御: short_url_or_none が将来 presigned を返す改変を受けても、ここで止める。
+        logger.warning("payload_offload_presigned_blocked", request_id=request_id, tool=tool)
+        return None
+    return url
+
+
+def _offload_note(*, has_report_url: bool, has_full_url: bool) -> str:
+    """モデル向けの注記。full_url の有無・HTML レポートの有無で文言を変える。"""
+    if has_full_url:
+        link = (
+            "full_url は全項目を含む生データの社内短縮リンク（最長7日）で、機械的な再取得用"
+            "（人へ渡さない）。社外共有不可。"
+        )
+    else:
+        link = "全文は社内に退避済みだがリンクは発行できなかった（本結果に全文リンクは無い）。"
+    if has_report_url:
+        # HTML レポートは**人が読む用**。ただし表に出ない実数値（いいね/コメント/シェア/タグ等）は
+        # 落ちているので、全文の正本は退避した JSON のままにする。
+        # ここを「レポートがあるから JSON は要らない」にすると、切り詰めで消えた値がどこからも
+        # 復元できなくなる（レビュー指摘）。
+        return (
+            "本文が長いため要点のみに切り詰めました。"
+            "**利用者にはレポート(report_url)のリンクを提示すること**。" + link
+        )
+    return "本文が長いため全文を退避しました。以下は要点のみの切り詰め版です。" + link
+
+
 def maybe_offload(tool: str, data: dict[str, Any], *, request_id: str) -> dict[str, Any]:
     """必要なら長文ペイロードを S3 退避し、切り詰め済み dict を返す（それ以外は原文のまま）。
 
@@ -154,7 +214,7 @@ def maybe_offload(tool: str, data: dict[str, Any], *, request_id: str) -> dict[s
     if len(raw) <= max_chars:
         return data
 
-    from teamagent.adapters.report_publish import publish_text
+    from teamagent.adapters.report_publish import publish_text_result
 
     published = raw
     if any(key in data for key in PER_USER_KEYS):
@@ -166,13 +226,13 @@ def maybe_offload(tool: str, data: dict[str, Any], *, request_id: str) -> dict[s
             )
         except Exception:
             return data
-    url = publish_text(
+    stored = publish_text_result(
         published,
         prefix=os.environ.get("PAYLOAD_OFFLOAD_PREFIX") or "payload-offload/",
         bucket=os.environ.get("PAYLOAD_OFFLOAD_BUCKET") or None,
         request_id=request_id,
     )
-    if not url:
+    if not stored:
         # fail-open: 退避できないなら切り詰めもしない（引用全損より従来挙動を選ぶ）。
         logger.warning("payload_offload_failed", request_id=request_id, tool=tool)
         return data
@@ -180,23 +240,14 @@ def maybe_offload(tool: str, data: dict[str, Any], *, request_id: str) -> dict[s
     trimmed = _truncate_strings(data, field_chars)
     trimmed = _shrink_lists_to_fit(trimmed, max_chars)
     trimmed["offloaded"] = True
-    trimmed["full_url"] = url
+    short_url = _short_url(stored, request_id=request_id, tool=tool)
+    if short_url:
+        trimmed["full_url"] = short_url
     report_url = data.get("report_url") if isinstance(data, dict) else None
-    if isinstance(report_url, str) and report_url:
-        # HTML レポートは**人が読む用**。ただし表に出ない実数値（いいね/コメント/シェア/タグ等）は
-        # 落ちているので、全文の正本は退避した JSON（full_url）のままにする。
-        # ここを「レポートがあるから JSON は要らない」にすると、切り詰めで消えた値がどこからも
-        # 復元できなくなる（レビュー指摘）。
-        trimmed["offload_note"] = (
-            "本文が長いため要点のみに切り詰めました。"
-            "**利用者にはレポート(report_url)のリンクを提示すること**。"
-            "full_url は全項目を含む生データで、機械的な再取得用（人へ渡さない）。社外共有不可。"
-        )
-    else:
-        trimmed["offload_note"] = (
-            "本文が長いため全文を退避しました（リンクは最長7日・実行環境により短くなる場合あり。"
-            "社外共有不可）。以下は要点のみの切り詰め版です。"
-        )
+    trimmed["offload_note"] = _offload_note(
+        has_report_url=isinstance(report_url, str) and bool(report_url),
+        has_full_url=short_url is not None,
+    )
     logger.info(
         "payload_offloaded",
         request_id=request_id,
