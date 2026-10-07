@@ -2755,6 +2755,53 @@ async function contextOverflowCases() {
 }
 const contextOverflowReport = await contextOverflowCases();
 
+// ── 送信直前の本文洗浄（2026-10-07） ─────────────────────────────────────────────
+// 既存の makePlugin / deliverPayload と本番形状の event/ctx を使う。blocks・value・ファイル名は
+// 本文と同じ内部名／署名 URL を含め、本文以外へ置換が広がらないことも記録する。
+function outboundScrubCase() {
+  const { handlers, logs } = makePlugin();
+  const signedUrl = "https://internal.example.test/report.pptx?X-Amz-Signature=probe-secret";
+  const payload = {
+    text: "`omiyage_report_submit` を呼んで、確認します。資料: " +
+      `<${signedUrl}|お土産資料> （http://aicheck.newstv.co.jp/app）への貼り付け。 ` +
+      "<https://example.test/search|検索> <@U0123456789>",
+    blocks: [{
+      type: "actions",
+      elements: [{
+        type: "button",
+        action_id: "probe",
+        text: { type: "plain_text", text: "omiyage_report_submit" },
+        value: `teamagent__omiyage_report_submit ${signedUrl}`,
+      }],
+    }],
+    fileName: "omiyage_report_submit.pptx",
+    files: [{ name: "teamagent__proposal_builder_submit.pptx", url: signedUrl }],
+  };
+  const beforePayload = JSON.stringify(payload);
+  const beforeLogs = logs.length;
+  const captured = captureConsole(() =>
+    deliverPayload(handlers, payload, { runId: "outbound-scrub" }),
+  );
+  const scrubLogs = logs.slice(beforeLogs).filter((line) => line.includes("outbound scrubbed"));
+  const beforeUnchanged = logs.length;
+  const unchangedResult = deliverPayload(
+    handlers,
+    { text: "こんにちは。資料を確認します。" },
+    { runId: "outbound-unchanged" },
+  );
+  return {
+    input: payload,
+    result: captured.value,
+    inputUnchanged: JSON.stringify(payload) === beforePayload,
+    blocksSameReference: captured.value?.payload?.blocks === payload.blocks,
+    logs: scrubLogs,
+    console: captured.console.filter((entry) => entry.text.includes("outbound scrubbed")),
+    unchangedResult,
+    unchangedLogs: logs.slice(beforeUnchanged).filter((line) => line.includes("outbound scrubbed")),
+  };
+}
+const outboundScrubReport = outboundScrubCase();
+
 const report = {
   // チャンネルの app_mention。run ctx は `c0b0pqd83n2:thread:<ts>`（本番実測）。
   channel_threaded: scenario({
@@ -3066,6 +3113,8 @@ const report = {
   deai: deaiReport,
   // ── context overflow の英語の固定文を日本語の案内へ（2026-09-30） ──────────────
   context_overflow: contextOverflowReport,
+  // ── 本文だけの送信前洗浄（2026-10-07） ────────────────────────────────────────
+  outbound_scrub: outboundScrubReport,
 };
 
 process.stdout.write(JSON.stringify(report, null, 2) + "\n");
