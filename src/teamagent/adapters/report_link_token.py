@@ -17,9 +17,15 @@ verifier-first 移行期間だけ検証する。新規tokenはレポート専用
 他資格情報/用途と同じ・previous 設定不正の環境でも fail-closed。
 
 多層防御: たとえ有効な署名でも、用途タグ ``typ`` 不一致・key が許可プレフィックス
-（``vseo-reports/`` / ``vseo-proposals/``）以外・bucket が許可バケット以外なら decode は None を
-返す（他用途トークン(draft/event)の転用・任意 S3 オブジェクトの読み取り転用を封じる）。
-draft_token.py の作法を踏襲。
+（``vseo-reports/`` / ``vseo-proposals/`` / ``payload-offload/``）以外・bucket が許可バケット
+以外なら decode は None を返す（他用途トークン(draft/event)の転用・任意 S3 オブジェクトの
+読み取り転用を封じる）。draft_token.py の作法を踏襲。
+
+``payload-offload/`` は mcp_gateway/payload_offload.py（長文ツール結果の S3 退避）の既定
+prefix（env ``PAYLOAD_OFFLOAD_PREFIX`` の既定値）。**env で別の prefix に変えると allowlist から
+外れ**、発行側は短縮URLを出さず（fail-closed）・decode 側は 404 になる。変えるならここも揃える。
+bucket も同様に ``VSEO_REPORT_BUCKET``（既定 teamagent-dev-raw-files）と一致している必要がある
+（``PAYLOAD_OFFLOAD_BUCKET`` を別バケットにすると decode が拒否する）。
 """
 
 from __future__ import annotations
@@ -41,7 +47,8 @@ _TOKEN_TYPE = "r"  # 用途タグ（同一鍵の draft/event 等とドメイン�
 _TOKEN_VERSION = 2
 _LEGACY_FIELDS = frozenset({"typ", "b", "k", "r", "e"})
 _DEFAULT_BUCKET = "teamagent-dev-raw-files"  # report_publish._DEFAULT_BUCKET と一致
-_ALLOWED_KEY_PREFIXES = ("vseo-reports/", "vseo-proposals/")  # 発行しうる prefix のみ許可
+# 発行しうる prefix のみ許可（payload-offload/ は PAYLOAD_OFFLOAD_PREFIX の既定値と一致させる）。
+_ALLOWED_KEY_PREFIXES = ("vseo-reports/", "vseo-proposals/", "payload-offload/")
 # 既定 7日（旧 presigned と同等の露出窓）。トークンはアクセスログに残りうる capability なので
 # 恒久寿命にしない（過去施策の恒久記録は Aico Vault(Part1)側が担う）。REPORT_LINK_TTL_S で調整可。
 _SIG_LEN = 16  # HMAC-SHA256 の先頭16バイト（トークンを短く保つ・draft_token と同じ）
@@ -77,6 +84,15 @@ def is_allowed_key(key: str) -> bool:
 
 def _allowed_bucket() -> str:
     return os.environ.get("VSEO_REPORT_BUCKET") or _DEFAULT_BUCKET
+
+
+def is_allowed_bucket(bucket: str) -> bool:
+    """短縮リンクを発行してよい bucket か（decode と同一 allowlist）。
+
+    発行側の事前チェック用。PAYLOAD_OFFLOAD_BUCKET 等で VSEO_REPORT_BUCKET と別のバケットに
+    置かれた成果物に /r トークンを出すと decode が拒否して 404 になるため、発行前に弾く。
+    """
+    return bool(bucket) and str(bucket) == _allowed_bucket()
 
 
 def _b64e(b: bytes) -> str:

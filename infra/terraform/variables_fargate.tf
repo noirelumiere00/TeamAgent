@@ -276,7 +276,7 @@ variable "enable_html_report_frames" {
 }
 
 variable "enable_report_shorturl" {
-  description = "レポート短縮リンク(/r)を発行するか（Part2 段階ゲート＝env USE_REPORT_SHORTURL）。既定 false＝従来 presigned。ON の前提: connect-web が同一新イメージ(/r ルート)＋vseo-s3-read(bootstrap_vseo_s3_iam.sh)を持ち、実機で /r→302 を確認済みであること。揃う前に true にすると受信者側で 404/403 に劣化する。"
+  description = "レポート短縮リンク(/r)を発行するか（Part2 段階ゲート＝env USE_REPORT_SHORTURL）。既定 false＝従来 presigned。ON の前提: connect-web が同一新イメージ(/r ルート)＋vseo-s3-read(bootstrap_vseo_s3_iam.sh・vseo-reports/ vseo-proposals/ payload-offload/ の 3 prefix)を持ち、実機で /r をリダイレクト追従して最終 200 を確認済みであること（302 だけでは GetObject 権限を証明しない）。揃う前に true にすると受信者側で 404/403 に劣化する。"
   type        = bool
   default     = false
 }
@@ -312,7 +312,7 @@ variable "enable_research_persist" {
 }
 
 variable "use_payload_offload" {
-  description = "MCP 長文ペイロードの S3 退避（v0.3 Task8）。既定 false。対象は会社共有ナレッジ系 tool のみ（allowlist・per-user PII 系は対象外）。"
+  description = "MCP 長文ペイロードの S3 退避（v0.3 Task8）。既定 false。対象は会社共有ナレッジ系 tool のみ（allowlist・per-user PII 系は対象外）。full_url は /r 短縮リンクだけを出す（presigned は渡さない）ため、enable_scrape_tools=true（VSEO_REPORT_BUCKET＝bucket allowlist の注入元・precondition で強制）と enable_report_shorturl=true、connect-web 側の payload-offload/ GetObject（VseoReportS3Read / bootstrap_vseo_s3_iam.sh）が揃うまで full_url は出ない。"
   type        = bool
   default     = false
 }

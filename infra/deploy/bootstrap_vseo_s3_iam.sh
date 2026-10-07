@@ -4,7 +4,10 @@
 #   connect-web の /r/<token> がレポートの presigned を「都度再生成」して 302 する。
 #   presigned はローカル署名だが、URL は署名プリンシパル(=connect-web task role)に対象keyの
 #   GetObject 権限が無いとブラウザ取得時に 403 になる。これを付与する。
-#   対象 prefix: vseo-reports/（x_research 等のカード集HTML）・vseo-proposals/（提案 PPTX/PDF）。
+#   対象 prefix: vseo-reports/（x_research 等のカード集HTML）・vseo-proposals/（提案 PPTX/PDF）・
+#               payload-offload/（長文ツール結果の退避 JSON＝P8 full_url。.json は /r が
+#               presign→302 するので、ここに無いと token は通るのに S3 で 403 になる）。
+#   prefix の正本は report_link_token._ALLOWED_KEY_PREFIXES（tests/infra が一致を固定）。
 #   put-role-policy は冪等（同名 policy を上書き）なので何度実行しても安全。
 #   ※terraform 非経由（別名 inline policy＝apply で剥がれない）。tf 側の真実源は
 #     connect_web.tf の VseoReportS3Read statement（apply 取込時はこの inline と重複しても無害）。
@@ -33,7 +36,7 @@ echo "== connect-web task role: vseo-s3-read（/r 短縮リンクの presigned �
 CW_ROLE=$(role_name_of "$CW_TD")
 [ -n "$CW_ROLE" ] || { echo "★td($CW_TD) に taskRoleArn が無い"; exit 1; }
 aws iam put-role-policy --role-name "$CW_ROLE" --policy-name vseo-s3-read \
-  --policy-document "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\",\"Action\":\"s3:GetObject\",\"Resource\":[\"arn:aws:s3:::$BUCKET/vseo-reports/*\",\"arn:aws:s3:::$BUCKET/vseo-proposals/*\"]}]}"
+  --policy-document "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\",\"Action\":\"s3:GetObject\",\"Resource\":[\"arn:aws:s3:::$BUCKET/vseo-reports/*\",\"arn:aws:s3:::$BUCKET/vseo-proposals/*\",\"arn:aws:s3:::$BUCKET/payload-offload/*\"]}]}"
 echo "  OK（${CW_ROLE}）"
 
 # ── 検証: connect-web role が両 prefix を GetObject 認可されるか実証する ────────────
@@ -41,7 +44,7 @@ echo "  OK（${CW_ROLE}）"
 # 対象 key の GetObject 権限が無くても 302 は返る（実際の GetObject はブラウザが 302 を追って
 # S3 に当たった時に初めて評価され、権限が無ければ 403 に劣化する）。put-role-policy の反映を
 # simulate-principal-policy で実プリンシパル（connect-web task role）に対し評価し、
-# 両 prefix で allowed を確認できなければ fail-close する（ここで落ちれば ON にしてはいけない）。
+# 全 prefix で allowed を確認できなければ fail-close する（ここで落ちれば ON にしてはいけない）。
 # 注意: simulate は **アイデンティティポリシーのみ**を評価する。バケットポリシーの Deny・
 # SSE-KMS の kms:Decrypt・SCP・permissions boundary は評価しない（現状 raw_files は SSE-S3・
 # バケットポリシー無し・制限SCP無しなので乖離しないが、将来 KMS 化/Deny 追加時は allowed でも
@@ -65,7 +68,9 @@ verify_get() {
 }
 verify_get "arn:aws:s3:::$BUCKET/vseo-reports/_probe.html" "vseo-reports/"
 verify_get "arn:aws:s3:::$BUCKET/vseo-proposals/_probe.pptx" "vseo-proposals/"
+verify_get "arn:aws:s3:::$BUCKET/payload-offload/_probe.json" "payload-offload/"
 
 echo "✅ 完了（冪等・以後不要）。IAM 認可を実証済み。"
 echo "ℹ️  最終フリップ判定は実機 /r をリダイレクト追従して 200 を確認する:"
 echo "    curl -sSL -o /dev/null -w '%{http_code}\\n' \"\$CONNECT_BASE_URL/r/<token>\"  # 302 ではなく最終 200"
+echo "    （payload-offload/ の .json は presign→302 経路なので、HTML だけでなく .json の token でも 200 を確認する）"

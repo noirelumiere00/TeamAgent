@@ -14,7 +14,11 @@ import pytest
 from structlog.testing import capture_logs
 
 from teamagent.adapters.report_publish import PublishedObject
-from teamagent.skills._shared.report_delivery import delivery_url, short_url_enabled
+from teamagent.skills._shared.report_delivery import (
+    delivery_url,
+    short_url_enabled,
+    short_url_or_none,
+)
 
 _OBJ = PublishedObject(
     url="https://b.s3.amazonaws.com/vseo-reports/x.html?AWSAccessKeyId=A&Signature=S&Expires=1",
@@ -41,6 +45,8 @@ def _clean_env(monkeypatch: pytest.MonkeyPatch) -> None:
         "CONNECT_BASE_URL",
     ):
         monkeypatch.delenv(k, raising=False)
+    # _OBJ の bucket "b" を decode 側 allowlist（VSEO_REPORT_BUCKET）と一致させる。
+    monkeypatch.setenv("VSEO_REPORT_BUCKET", "b")
 
 
 def _prereq_warnings(logs: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -122,6 +128,30 @@ def test_all_prereqs_met_returns_short_url(monkeypatch: pytest.MonkeyPatch) -> N
     url = delivery_url(_OBJ, request_id="r1")
     assert url.startswith("https://connect.example/r/")
     assert "?" not in url  # ← クエリが無いことが本質（LLMが削る対象を作らない）
+
+
+def test_bucket_outside_allowlist_warns_and_falls_back(monkeypatch: pytest.MonkeyPatch) -> None:
+    """decode 側は VSEO_REPORT_BUCKET 以外を拒否するので、別 bucket には発行せず警告。"""
+    monkeypatch.setenv("USE_REPORT_SHORTURL", "1")
+    monkeypatch.setenv("REPORT_LINK_HMAC_SECRET", _REPORT_SECRET)
+    monkeypatch.setenv("CONNECT_BASE_URL", "https://connect.example")
+    monkeypatch.setenv("VSEO_REPORT_BUCKET", "other")
+    with capture_logs() as logs:
+        assert delivery_url(_OBJ, request_id="r1") == _OBJ.url
+    assert "bucket_not_allowed" in _prereq_warnings(logs)[0]["missing"]
+
+
+def test_short_url_or_none_is_fail_closed(monkeypatch: pytest.MonkeyPatch) -> None:
+    """LLM へ返す側（payload_offload）用: 前提が欠けたら presigned ではなく None。"""
+    assert short_url_or_none(_OBJ, request_id="r1") is None  # フラグ OFF
+    monkeypatch.setenv("USE_REPORT_SHORTURL", "1")
+    monkeypatch.setenv("CONNECT_BASE_URL", "https://connect.example")
+    with capture_logs() as logs:
+        assert short_url_or_none(_OBJ, request_id="r1") is None  # 鍵なし
+    assert "REPORT_LINK_HMAC_CONFIG" in _prereq_warnings(logs)[0]["missing"]
+    monkeypatch.setenv("REPORT_LINK_HMAC_SECRET", _REPORT_SECRET)
+    url = short_url_or_none(_OBJ, request_id="r1")
+    assert url is not None and url.startswith("https://connect.example/r/") and "?" not in url
 
 
 def _report_skills() -> list[tuple[str, Any]]:
@@ -219,6 +249,61 @@ def test_encode_none_falls_back_to_presigned(monkeypatch: pytest.MonkeyPatch) ->
     with capture_logs() as logs:
         assert delivery_url(_OBJ, request_id="r1") == _OBJ.url
     assert any(e["event"] == "report_short_url_encode_failed" for e in logs)
+
+
+def _shortlived_reasons(logs: list[dict[str, Any]]) -> list[str]:
+    return [e["reason"] for e in logs if e["event"] == "report_delivery_shortlived_url"]
+
+
+def test_shortlived_warning_reason_is_encode_failed_on_encode_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """encode 例外で presigned へ落ちた時、shortlived 警告の reason は encode_failed。
+
+    以前は delivery_url 側で「フラグ ON なら prereq_missing」と推測し直していたため、前提は
+    全部揃っているのに prereq_missing と記録され、原因究明用のログが嘘をついていた。
+    """
+
+    def _boom(*a: Any, **k: Any) -> str:
+        raise RuntimeError("boom")
+
+    monkeypatch.setenv("USE_REPORT_SHORTURL", "1")
+    monkeypatch.setenv("REPORT_LINK_HMAC_SECRET", _REPORT_SECRET)
+    monkeypatch.setenv("CONNECT_BASE_URL", "https://connect.example")
+    monkeypatch.setattr("teamagent.adapters.report_link_token.encode_report_token", _boom)
+    with capture_logs() as logs:
+        assert delivery_url(_OBJ, request_id="r1") == _OBJ.url  # _OBJ.url は Expires=1＝短命
+    assert _shortlived_reasons(logs) == ["encode_failed"]
+    assert _prereq_warnings(logs) == []  # 前提は揃っている＝prereq_missing を出さない
+
+
+def test_shortlived_warning_reason_is_encode_failed_on_encode_none(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("USE_REPORT_SHORTURL", "1")
+    monkeypatch.setenv("REPORT_LINK_HMAC_SECRET", _REPORT_SECRET)
+    monkeypatch.setenv("CONNECT_BASE_URL", "https://connect.example")
+    monkeypatch.setattr(
+        "teamagent.adapters.report_link_token.encode_report_token", lambda *a, **k: None
+    )
+    with capture_logs() as logs:
+        assert delivery_url(_OBJ, request_id="r1") == _OBJ.url
+    assert _shortlived_reasons(logs) == ["encode_failed"]
+
+
+def test_shortlived_warning_reason_matches_disabled_and_prereq(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """既存 2 経路の reason は従来どおり（short_url_disabled / prereq_missing）。"""
+    with capture_logs() as logs:
+        delivery_url(_OBJ, request_id="r1")
+    assert _shortlived_reasons(logs) == ["short_url_disabled"]
+
+    monkeypatch.setenv("USE_REPORT_SHORTURL", "1")
+    monkeypatch.setenv("CONNECT_BASE_URL", "https://connect.example")  # 鍵なし
+    with capture_logs() as logs:
+        delivery_url(_OBJ, request_id="r1")
+    assert _shortlived_reasons(logs) == ["prereq_missing"]
 
 
 def test_invalid_present_ttl_warns_and_falls_back(monkeypatch: pytest.MonkeyPatch) -> None:

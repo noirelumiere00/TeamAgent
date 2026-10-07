@@ -764,6 +764,9 @@ resource "aws_ecs_task_definition" "mcp" {
       # v0.3 Task8: 長文ペイロードの S3 退避（既定 false・allowlist対象のみ・PII系は対象外）。
       { name = "USE_PAYLOAD_OFFLOAD", value = var.use_payload_offload ? "true" : "false" },
       # 退避先 bucket（scrape 系の VSEO_REPORT_BUCKET と独立に指定＝両立時のキー衝突なし）。
+      # ただし /r 短縮リンク（full_url）の bucket allowlist は VSEO_REPORT_BUCKET（enable_scrape_tools
+      # ブロックで注入）なので、scrape 無効で offload だけ ON にすると発行側が bucket_not_allowed で
+      # full_url を一切出さなくなる。下の precondition で片方だけ ON を apply 前に落とす。
       { name = "PAYLOAD_OFFLOAD_BUCKET", value = var.use_payload_offload ? aws_s3_bucket.raw_files.bucket : "" },
       # v0.3 Task10: 月間クォータ（既定 false・**migration 0017 の本番適用が前提**）。
       { name = "VIDEO_QUOTA_ENABLED", value = var.video_quota_enabled ? "true" : "false" },
@@ -985,6 +988,14 @@ resource "aws_ecs_task_definition" "mcp" {
     precondition {
       condition     = !var.use_web_research_tool || var.enable_scrape_tools
       error_message = "use_web_research_tool requires enable_scrape_tools=true (Gemini Vertex env + VERTEX_SA_JSON are wired in that block)."
+    }
+
+    # payload_offload の full_url（/r 短縮リンク）は VSEO_REPORT_BUCKET を bucket allowlist に使う。
+    # その env は enable_scrape_tools ブロックが供給しているため、offload だけ ON にすると
+    # 発行側が bucket_not_allowed（既定 teamagent-dev-raw-files と不一致）で full_url を出さない。
+    precondition {
+      condition     = !var.use_payload_offload || var.enable_scrape_tools
+      error_message = "use_payload_offload requires enable_scrape_tools=true (VSEO_REPORT_BUCKET, the /r short-link bucket allowlist, is wired in that block)."
     }
 
     precondition {

@@ -282,7 +282,11 @@ data "aws_iam_policy_document" "connect_web_task" {
   }
   # レポート短縮リンク(/r)が presigned を再生成するため、署名プリンシパル(=connect-web task role)に
   # 当該 prefix の GetObject が必要（無いとブラウザ取得時 403）。vseo-reports/=x_research 等、
-  # vseo-proposals/=提案 PPTX/PDF。バケット全体でなく2 prefix に限定（最小権限）。
+  # vseo-proposals/=提案 PPTX/PDF、payload-offload/=長文ツール結果の退避 JSON（P8 の full_url。
+  # .json は /r が presign→302 する経路なので、ここに無いと token は通るのに S3 で AccessDenied）。
+  # バケット全体でなく prefix に限定（最小権限）。prefix の正本は
+  # report_link_token._ALLOWED_KEY_PREFIXES＝tests/infra/test_report_shortlink_iam_terraform.py が
+  # 両者の一致を固定する（片方だけ足すと 403 か 404 に劣化する）。
   # ※即時ロールアウトは bootstrap_vseo_s3_iam.sh の別名 inline policy で付与（apply で剥がれない）。
   statement {
     sid     = "VseoReportS3Read"
@@ -290,6 +294,7 @@ data "aws_iam_policy_document" "connect_web_task" {
     resources = [
       "${aws_s3_bucket.raw_files.arn}/vseo-reports/*",
       "${aws_s3_bucket.raw_files.arn}/vseo-proposals/*",
+      "${aws_s3_bucket.raw_files.arn}/payload-offload/*",
     ]
   }
   statement {

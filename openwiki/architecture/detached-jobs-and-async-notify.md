@@ -41,7 +41,7 @@ OpenClaw は 1 回のツール実行を約 6 分（360 秒）で打ち切る。�
 | 非同期ジョブの完了通知 | `async_job_notify.py` | `tiktok_acquire` / `proposal_builder_submit` | `USE_ASYNC_JOB_NOTIFY`（OFF） | job_id を 30 秒間隔で status 照会し、完了を submit 元へ通知 |
 | 進捗表示 | `progress_notify.py` | 重いツールだけ | `ENABLE_PROGRESS_NOTIFY`（OFF） | 実行中に「検索しています…」を出し、終わったら削除 |
 | 直接投稿 | `direct_summary.py` | `search_surface_check` | `USE_DIRECT_SUMMARY_POST`（OFF） | 結果を Block Kit で DM に出し、Aico には「投稿済み」だけ返す |
-| 長文退避 | `payload_offload.py` | 会社共有ナレッジ系 | `USE_PAYLOAD_OFFLOAD`（OFF） | 大きな返却を S3 に退避し、切り詰め版＋署名 URL を返す |
+| 長文退避 | `payload_offload.py` | 会社共有ナレッジ系 | `USE_PAYLOAD_OFFLOAD`（OFF） | 大きな返却を S3 に退避し、切り詰め版＋社内短縮リンク（/r・署名付き S3 URL はモデルへ渡さない）を返す |
 
 たとえるなら、窓口（OpenClaw）は 6 分しか待てないので、時間のかかる注文は厨房（MCP）が「できたら席までお持ちします」と番号札を渡して引き取る。
 
@@ -94,7 +94,7 @@ OpenClaw は 1 回のツール実行を約 6 分（360 秒）で打ち切る。�
 
 ## payload_offload: 長文の S3 退避
 
-返却 JSON が閾値（既定 10,000 文字）を超えたら、全文を非公開 S3 に退避（署名 URL・7 日）し、構造を保ったまま長い文字列だけを切り詰め、`offloaded` / `full_url` を付ける。URL 系フィールドは切らない。
+返却 JSON が閾値（既定 10,000 文字）を超えたら、全文を非公開 S3 に退避（`payload-offload/`・7 日で失効）し、構造を保ったまま長い文字列だけを切り詰め、`offloaded` / `offload_note` を付ける。`full_url` は `/r` 短縮リンク（HMAC トークン・クエリ無し）が作れたときだけ付け、`USE_REPORT_SHORTURL`・`CONNECT_BASE_URL`・`REPORT_LINK_HMAC_SECRET` のどれかが無ければ付けない（署名付き S3 URL はモデルへ渡さない＝fail-closed）。URL 系フィールドは切らない。
 
 - **allowlist 方式**: 対象は `search`・`clientkarte`・`knowledge_deliver`・`proposal_draft`・`proposal_review`・`tiktok_search`・`video_analysis`・`video_algorithm` だけ。メールや朝ダイジェストのような本人限定データを署名 URL にすると RLS をバイパスする漏洩経路になるため、足してはいけない。
 - `USE_PAYLOAD_OFFLOAD` に加え、会社共有モード（`TEAMAGENT_SHARED_COMPANY_DOMAINS` 設定時）でしか発動しない。

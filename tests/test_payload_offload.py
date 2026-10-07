@@ -13,6 +13,7 @@ from typing import Any, ClassVar
 import pytest
 from pydantic import BaseModel
 
+from teamagent.adapters.report_publish import PublishedObject
 from teamagent.mcp_gateway import payload_offload as po
 from teamagent.mcp_gateway.server import SEARCH_TOOL_NAME, USER_CONTEXT_KEY, dispatch_tool
 from teamagent.orchestrator.tools import ToolSpec
@@ -26,19 +27,35 @@ def _on(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("TEAMAGENT_SHARED_COMPANY_DOMAINS", "vectorinc.co.jp")
     monkeypatch.setenv("PAYLOAD_OFFLOAD_MAX_CHARS", "1000")
     monkeypatch.setenv("PAYLOAD_OFFLOAD_FIELD_CHARS", "100")
+    for name in ("USE_REPORT_SHORTURL", "CONNECT_BASE_URL", "REPORT_LINK_HMAC_SECRET"):
+        monkeypatch.delenv(name, raising=False)
+
+
+_PRESIGNED = "https://s3/full?X-Amz-Signature=sig"
 
 
 def _fake_publish(monkeypatch: pytest.MonkeyPatch, url: str | None) -> list[str]:
+    """S3 退避のフェイク。本番どおり presigned 入りの PublishedObject（None=退避失敗）を返す。"""
     uploaded: list[str] = []
 
-    def _pub(text: str, **kw: Any) -> str | None:
+    def _pub(text: str, **kw: Any) -> PublishedObject | None:
         uploaded.append(text)
-        return url
+        if url is None:
+            return None
+        return PublishedObject(
+            url=url, bucket="teamagent-dev-raw-files", key="payload-offload/x.json", region="r"
+        )
 
     import teamagent.adapters.report_publish as rp
 
-    monkeypatch.setattr(rp, "publish_text", _pub)
+    monkeypatch.setattr(rp, "publish_text_result", _pub)
     return uploaded
+
+
+def _shortlink_ready(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("USE_REPORT_SHORTURL", "1")
+    monkeypatch.setenv("CONNECT_BASE_URL", "https://connect.example.co.jp")
+    monkeypatch.setenv("REPORT_LINK_HMAC_SECRET", "report-offload-secret-" + "r" * 32)
 
 
 def test_flag_off_is_noop(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -62,7 +79,8 @@ def test_under_threshold_untouched(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_offload_trims_structure_preserving(monkeypatch: pytest.MonkeyPatch) -> None:
-    uploaded = _fake_publish(monkeypatch, "https://s3/full")
+    _shortlink_ready(monkeypatch)
+    uploaded = _fake_publish(monkeypatch, _PRESIGNED)
     data = {
         "answer": "要約" * 300,  # summary キー: 5倍上限（500字）まで
         "hits": [
@@ -74,9 +92,11 @@ def test_offload_trims_structure_preserving(monkeypatch: pytest.MonkeyPatch) -> 
         ],
     }
     out = po.maybe_offload("search", data, request_id="r")
-    assert out["offloaded"] is True and out["full_url"] == "https://s3/full"
+    assert out["offloaded"] is True
+    assert out["full_url"].startswith("https://connect.example.co.jp/r/")  # presigned は出さない
+    assert "X-Amz-" not in json.dumps(out, ensure_ascii=False)
     assert len(out["hits"]) == 1 and out["hits"][0]["score"] == 0.9  # 構造は保持
-    assert out["hits"][0]["content"].endswith("〔省略・全文は offload URL へ〕")
+    assert out["hits"][0]["content"].endswith("〔省略・全文は退避済み〕")
     assert len(out["hits"][0]["content"]) <= 100 + 30
     assert out["hits"][0]["source_uri"] == data["hits"][0]["source_uri"]  # リンク温存
     assert len(out["answer"]) <= 500 + 30  # 要約キーは5倍許容
@@ -114,8 +134,8 @@ class _BigSearchSkill(BaseSkill[_QIn, _BigSearchOut]):
 
 
 async def test_dispatch_offloads_then_injects_links(monkeypatch: pytest.MonkeyPatch) -> None:
-    _fake_publish(monkeypatch, "https://s3/full")
-    monkeypatch.setenv("CONNECT_BASE_URL", "https://connect.example.co.jp")
+    _shortlink_ready(monkeypatch)
+    _fake_publish(monkeypatch, _PRESIGNED)
     by_name = {SEARCH_TOOL_NAME: ToolSpec(SEARCH_TOOL_NAME, "t", _BigSearchSkill)}
     resp = await dispatch_tool(
         by_name,
@@ -124,7 +144,9 @@ async def test_dispatch_offloads_then_injects_links(monkeypatch: pytest.MonkeyPa
         require_rls=True,
     )
     out = json.loads(resp[0].text)
-    assert out["offloaded"] is True and out["full_url"] == "https://s3/full"
+    assert out["offloaded"] is True
+    assert out["full_url"].startswith("https://connect.example.co.jp/r/")
+    assert "X-Amz-" not in resp[0].text and "amazonaws.com" not in resp[0].text
     # リンク注入は offload の後＝注入キーは切り詰められず完全な URL のまま（順序契約）。
     assert out["web_url"] == "https://connect.example.co.jp/search"
     assert len(out["web_url"]) < 100  # 切り詰めマークが付いていない
@@ -147,8 +169,8 @@ def test_data_uri_is_dropped_not_preserved(monkeypatch: pytest.MonkeyPatch) -> N
         "frames": [{"data_uri": "data:image/png;base64," + "B" * 3000}],
     }
     out = po.maybe_offload("video_algorithm", data, request_id="r")
-    assert out["video_data_uri"] == "<data URI は省略・全文は full_url へ>"
-    assert out["frames"][0]["data_uri"] == "<data URI は省略・全文は full_url へ>"
+    assert out["video_data_uri"] == "<data URI は省略・全文は退避済み>"
+    assert out["frames"][0]["data_uri"] == "<data URI は省略・全文は退避済み>"
 
 
 def test_post_trim_size_is_bounded_by_list_shrink(monkeypatch: pytest.MonkeyPatch) -> None:

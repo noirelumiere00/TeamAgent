@@ -14,6 +14,7 @@ from teamagent.adapters.report_link_token import (
     decode_report_token,
     encode_report_token,
     has_secret,
+    is_allowed_bucket,
     is_allowed_key,
 )
 from teamagent.hmac_keyring import (
@@ -127,11 +128,39 @@ def test_proposals_prefix_ok() -> None:
     assert decode_report_token(token) == (_BUCKET, "vseo-proposals/d.pdf", "")
 
 
+def test_payload_offload_prefix_round_trip() -> None:
+    """mcp_gateway/payload_offload の退避先（payload-offload/）も /r 短縮リンクにできる（P8①）。"""
+    key = "payload-offload/0123456789abcdef0123456789abcdef.json"
+    token = _require_token(encode_report_token(_BUCKET, key, region="ap-northeast-1"))
+    assert "?" not in token and "/" not in token
+    assert decode_report_token(token) == (_BUCKET, key, "ap-northeast-1")
+
+
+def test_payload_offload_custom_prefix_still_rejected() -> None:
+    """PAYLOAD_OFFLOAD_PREFIX を既定から変えた先は allowlist 外のまま（任意 key 転用は封じる）。"""
+    token = _require_token(encode_report_token(_BUCKET, "custom-offload/x.json"))
+    assert decode_report_token(token) is None
+    assert not is_allowed_key("custom-offload/x.json")
+
+
 def test_is_allowed_key() -> None:
     assert is_allowed_key("vseo-reports/a.html")
     assert is_allowed_key("vseo-proposals/d.pdf")
+    assert is_allowed_key("payload-offload/a.json")
     assert not is_allowed_key("custom-prefix/a.html")
+    assert not is_allowed_key("payload-offload")  # prefix はスラッシュ込み
     assert not is_allowed_key("")
+
+
+def test_is_allowed_bucket_matches_decode_allowlist(monkeypatch: pytest.MonkeyPatch) -> None:
+    """発行側の bucket 検査は decode と同じ allowlist（VSEO_REPORT_BUCKET・既定バケット）。"""
+    monkeypatch.delenv("VSEO_REPORT_BUCKET", raising=False)
+    assert is_allowed_bucket(_BUCKET)
+    assert not is_allowed_bucket("other-bucket")
+    assert not is_allowed_bucket("")
+    monkeypatch.setenv("VSEO_REPORT_BUCKET", "other-bucket")
+    assert is_allowed_bucket("other-bucket")
+    assert not is_allowed_bucket(_BUCKET)
 
 
 def test_tamper_rejected() -> None:
