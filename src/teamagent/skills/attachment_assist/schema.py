@@ -4,6 +4,11 @@
 「署名済み caller claim 由来の会話（``ctx.metadata`` の channel_id / thread_ts）」に
 添付されたファイルだけで、LLM 申告で対象を移動できないことを **スキーマの形**で保証する。
 
+例外は ``permalink``（Slack 投稿リンク・``ATTACHMENT_PERMALINK_ENABLED`` が ON のときだけ有効）。
+リンク先の投稿は **依頼者本人の xoxp** で読むので、本人が見られない投稿へは移動できない
+（Slack API が本人の可視範囲を強制する）。OFF のときは何も読まずに ``permalink_disabled``
+（会話内の別の添付をリンク先と取り違えて要約しないため）。permalink が空なら従来どおり。
+
 ``message`` は LLM がそのまま返す決定的日本語文（言い換え・再要約をさせない）。
 """
 
@@ -24,6 +29,7 @@ class AttachmentAssistInput(BaseModel):
 
     対象ファイルは「いま話しているスレッド / チャンネル」の添付から選ぶ。
     ファイル ID・URL・チャンネル ID を **受け付けない**（会話外は構造的に読めない）。
+    唯一の例外 ``permalink`` は本人の xoxp で読む（本人の可視範囲を超えない）。
     """
 
     mode: AttachmentMode = Field(
@@ -44,6 +50,14 @@ class AttachmentAssistInput(BaseModel):
         description=(
             "対象ファイル名（会話に複数添付があるときの指定用・部分一致可）。"
             "省略時は会話内の最新の対応ファイルを使う。"
+        ),
+    )
+    permalink: str = Field(
+        default="",
+        max_length=500,
+        description=(
+            "Slack 投稿のリンク（https://<ws>.slack.com/archives/…）を示されたときだけ渡す。"
+            "その投稿の添付を読み、元ファイルをこの会話に添付し直す。"
         ),
     )
 
@@ -67,12 +81,18 @@ class AttachmentAssistOutput(BaseModel):
         default="",
         description=(
             "失敗種別（no_attachment/external_file/too_large/unsupported_type/"
-            "download_failed/extract_failed/empty_text/llm_failed/no_conversation・"
+            "download_failed/extract_failed/empty_text/llm_failed/no_conversation/"
+            "bad_permalink/other_workspace/not_found/read_failed/not_connected/"
+            "bot_cannot_fetch/permalink_disabled・"
             "無ければ空）"
         ),
     )
     message: str = Field(
         default="",
         description="LLM がそのまま返す決定的日本語文（言い換え・再要約・追記をしないこと）",
+    )
+    attached: bool = Field(
+        default=False,
+        description="投稿リンク経路で元ファイルをこの会話に添付し直せたら True",
     )
     total_cost_usd: float = Field(default=0.0, ge=0.0, description="Bedrock 実費")

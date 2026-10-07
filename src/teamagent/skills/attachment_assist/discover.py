@@ -64,6 +64,9 @@ class AttachmentCandidate:
     # ⚠️ url_private とは別物（permalink はブラウザで本人の権限で開く画面 URL で、
     #    bot token を載せて GET する取得用 URL ではない）。取れなければ空文字。
     permalink: str = ""
+    # Slack file の ``is_public``（公開チャンネルに共有済み）。bool の True だけを公開とみなす
+    # （欠損・文字列は非公開扱い＝fail-closed）。投稿リンク経路の情報漏れ判定に使う。
+    is_public: bool = False
 
 
 @dataclass(frozen=True)
@@ -181,6 +184,7 @@ def evaluate_file(
             url=url,
             ts=ts,
             permalink=_safe_permalink(file.get("permalink")),
+            is_public=file.get("is_public") is True,
         ),
         None,
     )

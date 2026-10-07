@@ -17,6 +17,7 @@ CLAUDE.md 6-bis Adapter 層。Skill から slack_sdk を直接呼ばない。
   - **fail-closed 用の別口**: `read_thread_checked` / `read_channel_checked` は error code を返す
     （not_in_channel / channel_not_found 等）。「空スレッド」と「権限なし」を区別しないと
     いけない用途（slack_summary）はこちらを使う。既存メソッドの挙動は変えない。
+    `read_message_checked` は投稿リンクの先の 1 件だけを同じ流儀で読む（attachment_assist）。
     `search_checked` も同じ考え方で、「0 件」と「トークン切れ・API 障害」を区別する
     （slack_search 用。一致ごとに channel の is_private / is_mpim 等も写す）。
   - **G8**: ログは件数・latency・error code のみ。本文 / permalink / channel 名は出さない。
@@ -326,6 +327,63 @@ class SlackUserReader:
             latency_ms=int((time.perf_counter() - start) * 1000),
         )
         return SlackThreadRead(messages=msgs)
+
+    def read_message_checked(
+        self, channel_id: str, ts: str, request_id: str, *, thread_ts: str = ""
+    ) -> SlackThreadRead:
+        """投稿 1 件を **本人の権限で** 取得する（error code つき・読み取り専用）。
+
+        投稿リンク（permalink）の先を読む用途。``oldest == latest == ts`` の inclusive 取得で
+        その 1 件だけを狙う（スレッド返信なら conversations.replies、それ以外は history）。
+        replies は親を常に先頭に含めるので ts 一致で絞る。見つからなければ
+        ``message_not_found``（権限エラーと同じく呼び出し側で一様の文へ潰す前提）。
+        """
+        if not channel_id or not ts:
+            return SlackThreadRead(error="bad_target")
+        start = time.perf_counter()
+        params: dict[str, Any] = {
+            "channel": channel_id,
+            "oldest": ts,
+            "latest": ts,
+            "inclusive": True,
+            "limit": 2,
+        }
+        method: Any = self._client.conversations_history
+        if thread_ts:
+            params["ts"] = thread_ts
+            method = self._client.conversations_replies
+
+        async def fetch() -> Any:
+            return await asyncio.wait_for(method(**params), timeout=15)
+
+        try:
+            resp = _run_sync(fetch)
+        except Exception as e:  # fail-closed（error code を上へ返す）
+            code = _slack_error_code(e)
+            logger.warning(
+                "slack_user_read_message_checked_failed",
+                request_id=request_id,
+                error=type(e).__name__,
+                slack_error=code,  # G8: channel 名・本文は出さない
+            )
+            return SlackThreadRead(error=code)
+        if resp.get("ok") is False:
+            return SlackThreadRead(error=str(resp.get("error") or "api_error"))
+        raw = resp.get("messages")
+        if not isinstance(raw, list):
+            return SlackThreadRead(error="bad_response")
+        hits = tuple(
+            _message_from_raw(m) for m in raw if isinstance(m, dict) and str(m.get("ts")) == ts
+        )
+        logger.info(
+            "slack_user_read_message_checked",
+            request_id=request_id,
+            returned=len(hits),
+            latency_ms=int((time.perf_counter() - start) * 1000),
+        )
+        if not hits:
+            return SlackThreadRead(error="message_not_found")
+        return SlackThreadRead(messages=hits[:1])
 
     def resolve_channel_checked(self, name: str, request_id: str) -> SlackChannelResolution:
         """現在の scope で in:#名前 を検索する（list の read scopes は未付与）。

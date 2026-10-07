@@ -254,13 +254,14 @@ mail_draft の個別則: token 引数は `draft_token`、リンクは `open_url`
 - 「**この資料**要約して」「**この添付**直して」→ 目の前に添付がある → `attachment_assist`
 - 「◯◯社の提案書**出して**」「去年の**レポート探して**」→ 手元に添付が無く Drive から探す → `knowledge_deliver`
 
-1. **`attachment_assist` tool を呼ぶ。** 引数は 3 つだけ:
+1. **`attachment_assist` tool を呼ぶ。** 引数:
    - `mode`: `summary`（要約）/ `revise`（修正案）/ `minutes`（議事録）/ `aggregate`（集計）/ `translate`（英訳）。依頼文から選ぶ。迷ったら `summary`。
    - `instruction`: 利用者の具体的な要望（「先方向けに3行で」等）。無ければ空。
    - `file_name`: 会話に複数の添付があって、どれか指定されたときだけ渡す（部分一致可）。
-   **チャンネル ID・ファイル ID・URL は渡せない**（引数に存在しない）。
+   - `permalink`: Slack 投稿リンク（…/archives/…）を示されたら渡す（添付が無くてもこの tool）。
+   **ID・他の URL は渡せない**。
 2. 戻り値の **`message` をそのまま返す**（要約の再要約・言い換え・数値の書き換えをしない）。
-3. `error` が付いていても `message` をそのまま伝える。よくあるもの: `no_attachment`（読めるファイルが無い）/ `external_file`（Drive 等の外部共有リンク→Slack に直接上げ直してもらう）/ `too_large`（30MB 超）/ `unsupported_type`（画像・動画・zip・旧 Office 非対応）。
+3. `error` が付いていても `message` をそのまま伝える。よくあるもの: `no_attachment`（読めるファイルが無い）/ `external_file`（Drive 等の外部共有リンク）/ `too_large`（30MB 超）/ `unsupported_type`（画像・動画・zip・旧 Office 非対応）。
 
 - 低リテラシーな言い回し（「これ直して」「これ読んで」「英語にして」「表の合計だして」）も添付があるならこの tool。
 - **読み取り専用**: ファイルを書き換えない・作らない・再配信しない。修正案を出しても原本は変わらない（聞かれたら正直にそう答える）。

@@ -573,6 +573,10 @@ def test_registered_and_routing_boundary_documented() -> None:
 
 
 def test_input_schema_has_no_channel_or_file_id() -> None:
-    """会話外を読む鍵（channel/user/file_id/URL）を入力に持たせない。"""
+    """会話外を読む鍵（channel/user/file_id/URL）を入力に持たせない。
+
+    例外は投稿リンク（permalink）だけ。これは本人 xoxp で読むので本人の可視範囲を超えない
+    （tests/skills/attachment_assist/test_attachment_permalink.py で固定）。
+    """
     props = set(AttachmentAssistInput.model_json_schema()["properties"])
-    assert props == {"mode", "instruction", "file_name"}
+    assert props == {"mode", "instruction", "file_name", "permalink"}
