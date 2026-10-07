@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 from collections.abc import Iterator
+from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, Literal
 
 import pytest
 
@@ -14,10 +15,16 @@ from teamagent.mcp_gateway import detached_jobs, server
 from teamagent.skills._shared import long_jobs
 from teamagent.skills._shared.long_jobs import _OWNER_KEY, ORIGIN_KEY, Origin
 from teamagent.skills.base import SkillContext
+from teamagent.skills.omiyage_report.schema import (
+    OmiyageReportStatusInput,
+    OmiyageReportStatusOutput,
+)
 from teamagent.skills.proposal_builder.schema import ProposalBuilderStatusInput
 from teamagent.skills.proposal_builder.skill import ProposalBuilderStatusSkill
 from teamagent.skills.tiktok_acquire.schema import TikTokAcquireStatusInput
 from teamagent.skills.tiktok_acquire.skill import TikTokAcquireStatusSkill
+
+_OMIYAGE_TEST_JOB_ID = "omy_" + "6" * 32
 
 
 @pytest.fixture
@@ -108,6 +115,180 @@ def test_long_running_job_gets_notice_then_saved_result(
     assert "まだ完了していません" in notices[0]["text"]
     assert "保存済みの結果" in notices[1]["text"]
     assert all("job_id" not in item["text"] for item in notices)
+
+
+def _patch_omiyage_status(
+    monkeypatch: pytest.MonkeyPatch, output: OmiyageReportStatusOutput
+) -> None:
+    import teamagent.skills.omiyage_report.skill as module
+
+    class Status:
+        def run(
+            self, input: OmiyageReportStatusInput, context: SkillContext
+        ) -> OmiyageReportStatusOutput:
+            return output
+
+    monkeypatch.setattr(module, "OmiyageReportStatusSkill", Status)
+
+
+@pytest.mark.parametrize("status", ["queued", "running"])
+@pytest.mark.parametrize("has_origin", [False, True])
+def test_omiyage_in_progress_without_pending_delivery_keeps_watching(
+    notices: list[dict[str, Any]],
+    monkeypatch: pytest.MonkeyPatch,
+    status: Literal["queued", "running"],
+    has_origin: bool,
+) -> None:
+    """本番の running・未配信・配信待ちなしを再現し、誤った終端判定を防ぐ。"""
+    output = OmiyageReportStatusOutput(job_id=_OMIYAGE_TEST_JOB_ID, status=status)
+    assert not output.slack_delivered
+    _patch_omiyage_status(monkeypatch, output)
+    context = ctx()
+    if has_origin:
+        destination = target()
+        assert not destination.pending
+        context.metadata[ORIGIN_KEY] = destination
+
+    poll = server._build_async_job_poll("omiyage_report_submit", output.job_id, context)
+    assert poll() == (status, "処理中です。")
+    assert notices == []
+
+
+@pytest.mark.parametrize(
+    ("pending", "delivered", "expected_status"),
+    [(True, False, "done"), (False, False, "failed"), (False, True, "done")],
+)
+def test_omiyage_done_checks_delivery_only_after_completion(
+    notices: list[dict[str, Any]],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    pending: bool,
+    delivered: bool,
+    expected_status: str,
+) -> None:
+    output = OmiyageReportStatusOutput(
+        job_id=_OMIYAGE_TEST_JOB_ID,
+        status="done",
+        slack_delivered=delivered,
+        result_message="資料が完成しました。",
+        summary_lines=["検索結果の要点"],
+        next_step="次の一手",
+    )
+    _patch_omiyage_status(monkeypatch, output)
+    destination = target()
+    if pending:
+        path = tmp_path / "report.pptx"
+        path.write_bytes(b"generated result")
+        destination.defer(object(), str(path), "資料", "完了", "req-omiyage")
+    context = ctx()
+    context.metadata[ORIGIN_KEY] = destination
+    poll = server._build_async_job_poll("omiyage_report_submit", output.job_id, context)
+    try:
+        state, text = poll()
+        assert state == expected_status
+        assert text == (
+            "資料は生成・保存できましたが、結果の配信が中断されました。"
+            if expected_status == "failed"
+            else "資料が完成しました。\n検索結果の要点\n次の一手"
+        )
+        assert destination.pending == pending
+        assert notices == []
+    finally:
+        destination.discard()
+
+
+@pytest.mark.parametrize(
+    ("error_code", "reason"),
+    [
+        ("OMIYAGE_SEARCH_FAILED", "TikTok検索がすべて失敗しました。"),
+        ("OMIYAGE_BUILD_FAILED", "資料の組み立てで止まりました。"),
+    ],
+)
+def test_omiyage_failed_keeps_the_existing_failure_reason(
+    notices: list[dict[str, Any]],
+    monkeypatch: pytest.MonkeyPatch,
+    error_code: str,
+    reason: str,
+) -> None:
+    output = OmiyageReportStatusOutput(
+        job_id=_OMIYAGE_TEST_JOB_ID, status="failed", error_code=error_code
+    )
+    _patch_omiyage_status(monkeypatch, output)
+    poll = server._build_async_job_poll("omiyage_report_submit", output.job_id, ctx())
+    assert poll() == ("failed", "お土産資料は作成に失敗しました。" + reason)
+    assert notices == []
+
+
+def test_omiyage_watcher_waits_through_running_and_delivers_once_on_done(
+    notices: list[dict[str, Any]],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    import teamagent.skills.omiyage_report.skill as module
+
+    destination = target()
+    path = tmp_path / "report.pptx"
+    path.write_bytes(b"generated result")
+    seen: list[str] = []
+    uploads: list[tuple[Any, ...]] = []
+    deliveries: list[str] = []
+    statuses = iter(["running", "running", "done"])
+
+    class Slack:
+        async def upload_file(self, *args: Any, **kwargs: Any) -> bool:
+            assert seen == ["running", "running", "done"]
+            uploads.append(args)
+            return True
+
+    class Status:
+        def run(
+            self, input: OmiyageReportStatusInput, context: SkillContext
+        ) -> OmiyageReportStatusOutput:
+            status = next(statuses)
+            seen.append(status)
+            assert not destination.pending
+            if status == "done":
+                destination.defer(Slack(), str(path), "資料", "資料が完成しました。", "req-omiyage")
+            return OmiyageReportStatusOutput(job_id=input.job_id, status=status)
+
+    deliver = destination.deliver
+
+    def record_delivery() -> bool:
+        deliveries.append(seen[-1])
+        return deliver()
+
+    monkeypatch.setattr(destination, "deliver", record_delivery)
+    monkeypatch.setattr(module, "OmiyageReportStatusSkill", Status)
+    clock = [0.0]
+    monkeypatch.setattr(notify, "_monotonic", lambda: clock[0])
+    monkeypatch.setattr(notify, "_INITIAL_DELAY_SECONDS", 0)
+    monkeypatch.setattr(notify, "_POLL_INTERVAL_SECONDS", 0.01)
+    monkeypatch.setattr(notify, "_TIMEOUT_SECONDS", 1)
+    monkeypatch.setattr(notify, "_MAX_WATCH_SECONDS", 2)
+    monkeypatch.setattr(
+        notify,
+        "_wait_until_next_poll",
+        lambda deadline, interval: clock.__setitem__(0, clock[0] + interval),
+    )
+    context = ctx()
+    context.metadata[ORIGIN_KEY] = destination
+    try:
+        notify._run_completion_notice(
+            job_id=_OMIYAGE_TEST_JOB_ID,
+            origin=destination,
+            request_id="req-omiyage",
+            poll=server._build_async_job_poll(
+                "omiyage_report_submit", _OMIYAGE_TEST_JOB_ID, context
+            ),
+        )
+        assert seen == ["running", "running", "done"]
+        assert deliveries == ["done"]
+        assert len(uploads) == 1
+        assert uploads[0][0] == destination.channel_id
+        assert not destination.pending
+        assert notices == []  # 添付で完了を届け、中断文の投稿はしない。
+    finally:
+        destination.discard()
 
 
 def test_poll_failure_does_not_invent_running_or_completion(
