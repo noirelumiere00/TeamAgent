@@ -442,9 +442,17 @@ def _build_async_job_poll(
                 from teamagent.skills._shared.long_jobs import origin
 
                 target = origin(poll_ctx)
-                if not output.slack_delivered and not (target is not None and target.pending):
+                if (
+                    output.status == "done"
+                    and not output.slack_delivered
+                    and not (target is not None and target.pending)
+                ):
                     return "failed", "資料は生成・保存できましたが、結果の配信が中断されました。"
-                text = "\n".join([output.result_message, *output.summary_lines, output.next_step])
+                text = (
+                    "\n".join([output.result_message, *output.summary_lines, output.next_step])
+                    if output.status == "done"
+                    else "処理中です。"
+                )
             return output.status, text
 
         from teamagent.skills.proposal_builder.schema import ProposalBuilderStatusInput
