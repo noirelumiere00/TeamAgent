@@ -10,7 +10,7 @@ user_email / channel_id / thread_ts を注入（mcp_gateway/server.py の注入�
      channel_id は本来「配信先ルーティング hint（identity ではない）」であり、LEGACY 経路
      （resolver 未注入）では **LLM 申告の channel_id がそのまま metadata に入る**。
      読取の認可鍵に昇格させてよいのは署名 claim 由来（identity_verified=True）だけなので、
-     真でなければ PermissionError で即座に閉じる。
+     真でなければ即座に閉じる（投稿リンクは OFF と同じ返答、会話添付は PermissionError）。
   A2 **会話内の添付のみ**。file_id / URL / channel を入力に持たない（schema.py 参照）。
      例外は投稿リンク（permalink・既定 OFF）で、本人 xoxp で読めた投稿の添付だけ（L1〜L4）。
   A3 **外部共有ファイルは触らない**。url_private へは bot token を載せて GET するため、
@@ -25,6 +25,7 @@ P1 スコープ: **テキスト返答のみ**。docx/xlsx/pdf/pptx を作って�
 （USE_ATTACHMENT_RENDER・別フラグ・別リリース）。
 
 投稿リンク経路（``permalink``・``ATTACHMENT_PERMALINK_ENABLED``・既定 OFF）:
+  利用にはスイッチ ON と ``ATTACHMENT_PERMALINK_ALLOWED_EMAILS`` による本人の許可が必要。
   L1 リンク先の投稿は **依頼者本人の xoxp** で読む（見えなければ中身も存在も言わない一様文）。
      他ワークスペースのリンクは拒否（permalink.parse_permalink）。
   L2 ファイル本体は bot で取得（既存 download_file_guarded・A3〜A5 はそのまま効く）。
@@ -52,6 +53,7 @@ import structlog
 from pydantic import BaseModel
 
 from teamagent.adapters.slack_file_guard import SlackFileGuardError, slack_file_allowed_hosts
+from teamagent.mcp_gateway.allowlist import email_allowed
 from teamagent.observability import redact_secrets
 from teamagent.skills._shared.drive_slack_delivery import safe_filename
 from teamagent.skills._shared.next_step import (
@@ -112,6 +114,7 @@ MAX_PDF_PAGES = 300
 HISTORY_LOOKBACK = 20
 # 投稿リンク経路のスイッチ（読む範囲が会話の外へ広がるので既定 OFF）。
 PERMALINK_FLAG = "ATTACHMENT_PERMALINK_ENABLED"
+PERMALINK_ALLOWED_EMAILS_ENV = "ATTACHMENT_PERMALINK_ALLOWED_EMAILS"
 # 本人の権限で見えない・存在しない・出してはいけない、を区別しない error code。
 _UNIFORM_DENY_CODES = frozenset(
     {
@@ -197,6 +200,18 @@ _UNIT_LABEL: dict[str, str] = {
 }
 
 
+def _permalink_allowed(metadata: dict[str, Any]) -> bool:
+    """検証済み本人が投稿リンクを利用できるか（呼び出しごとに env を読む・空は全員拒否）。"""
+    if metadata.get("identity_verified") is not True:
+        return False
+    allowed = frozenset(
+        e.strip().lower()
+        for e in os.environ.get(PERMALINK_ALLOWED_EMAILS_ENV, "").split(",")
+        if e.strip()
+    )
+    return email_allowed(metadata.get("user_email"), allowed)
+
+
 @register
 class AttachmentAssistSkill(BaseSkill[AttachmentAssistInput, AttachmentAssistOutput]):
     """会話に添付されたファイルを読んで要約・修正案・議事録化・集計・英訳する Skill。"""
@@ -228,7 +243,10 @@ class AttachmentAssistSkill(BaseSkill[AttachmentAssistInput, AttachmentAssistOut
 
     @classmethod
     def tool_description(cls) -> str:
-        """MCP に出す説明。投稿リンク経路のスイッチが ON のときだけ例外の文を含める。"""
+        """MCP に出す説明。投稿リンク経路のスイッチが ON のときだけ例外の文を含める。
+
+        説明は全員共通なので、許可リストによらず ATTACHMENT_PERMALINK_ENABLED だけで決める。
+        """
         if tool_enabled(PERMALINK_FLAG):
             return cls.description_with_permalink
         return cls.description
@@ -262,6 +280,13 @@ class AttachmentAssistSkill(BaseSkill[AttachmentAssistInput, AttachmentAssistOut
     def run(self, input: AttachmentAssistInput, ctx: SkillContext) -> AttachmentAssistOutput:
         log = ctx.bind_logger(self.name)
 
+        # 投稿リンクの対象外・未検証は、スイッチ OFF と同じ返答で何も読まずに閉じる。
+        if input.permalink.strip() and (
+            not tool_enabled(PERMALINK_FLAG) or not _permalink_allowed(ctx.metadata)
+        ):
+            log.info("attachment_assist_permalink_disabled")
+            return self._permalink_fail("permalink_disabled", input.mode)
+
         # ── A1: 署名済み本人でなければ即閉じる（LEGACY の channel_id を認可鍵にしない）──
         if ctx.metadata.get("identity_verified") is not True:
             raise PermissionError(
@@ -279,14 +304,11 @@ class AttachmentAssistSkill(BaseSkill[AttachmentAssistInput, AttachmentAssistOut
         thread_ts = ctx.metadata.get("thread_ts")
         thread_ts = thread_ts.strip() if isinstance(thread_ts, str) else ""
 
-        # ── 投稿リンク経路（既定 OFF）。OFF のときは何も読まずに正直に断る。
+        # ── 投稿リンク経路（既定 OFF）。スイッチと許可リストは上の入口で確認済み。
         #    リンクを無視して会話内を読むと、会話にある**別の添付**を「リンク先の資料」として
         #    要約してしまう（10-06 の本番スレッドには無関係な PDF が 3 件あった）。
         #    permalink が空の依頼は OFF/ON とも従来どおり。
         if input.permalink.strip():
-            if not tool_enabled(PERMALINK_FLAG):
-                log.info("attachment_assist_permalink_disabled")
-                return self._permalink_fail("permalink_disabled", input.mode)
             return self._run_permalink(
                 input, ctx, log, requester=requester, origin=channel_id, origin_thread=thread_ts
             )
