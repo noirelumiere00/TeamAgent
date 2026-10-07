@@ -126,5 +126,51 @@ replaceOnce(
 //#region extensions/slack/src/interactive-dispatch.ts`,
 );
 
+// ── ③ エージェント画面（Agents & AI Apps）の「提案されたプロンプト」を Aico 仕様へ ────────
+// 上流は新しいアシスタントスレッドが開くたびに英語の固定 3 件（"Try asking"・"What can you do?" 等）を
+// assistant.threads.setSuggestedPrompts で送る（設定では変えられない）。Slack の提案は押すとその文が
+// そのまま送られるので、書き換え不要で Aico が答えられる 4 件にする（Slack の上限は 4 件）。
+// 2026-10-07 小俣さん依頼「エージェントの機能を Slack で使って」。
+replaceOnce(
+  "アシスタントの提案の見出し",
+  `title: "Try asking",`,
+  `title: "Aico にこう頼めます",`,
+);
+replaceOnce(
+  "アシスタントの提案の中身",
+  `const DEFAULT_ASSISTANT_PROMPTS = [
+	{
+		title: "What can you do?",
+		message: "What can you help me with?"
+	},
+	{
+		title: "Summarize this channel",
+		message: "Summarize the recent activity in this channel."
+	},
+	{
+		title: "Draft a reply",
+		message: "Help me draft a reply."
+	}
+];`,
+  `const DEFAULT_ASSISTANT_PROMPTS = [
+	{
+		title: "今日の予定とメール",
+		message: "今日の予定と、返信が必要なメールをまとめて"
+	},
+	{
+		title: "次の商談の準備",
+		message: "次の商談の準備をして"
+	},
+	{
+		title: "最近の事例をさがす",
+		message: "最近のショート動画施策の事例を3件、出典リンクつきで出して"
+	},
+	{
+		title: "Aico でできること",
+		message: "Aico で何ができるか、頼み方の例つきで教えて"
+	}
+];`,
+);
+
 writeFileSync(path, src);
 console.log(`patched: ${path}`);
