@@ -197,7 +197,9 @@ def _rendered_default(mcp: str, variables: str, env_name: str) -> str:
     plain = re.fullmatch(r"var\.([a-z0-9_]+)", expr)
     assert plain, f"{env_name} の値の式を評価できない: {expr}"
     default = _variable_default(variables, plain.group(1))
-    assert isinstance(default, str), f"{plain.group(1)} は string のはず（live の表記をそのまま描く）"
+    assert isinstance(default, str), (
+        f"{plain.group(1)} は string のはず（live の表記をそのまま描く）"
+    )
     return default
 
 
@@ -216,9 +218,7 @@ def test_mcp_task_renders_live_env_from_20261007_td_swap() -> None:
 
 
 def test_retired_allowlist_variables_are_not_read_by_terraform() -> None:
-    terraform = "\n".join(
-        path.read_text(encoding="utf-8") for path in sorted(TF_ROOT.glob("*.tf"))
-    )
+    terraform = "\n".join(path.read_text(encoding="utf-8") for path in sorted(TF_ROOT.glob("*.tf")))
     for name in RETIRED_ALLOWLIST_VARIABLES:
         assert f'variable "{name}" {{' in terraform, (
             f"{name} の宣言は残す（tfvars に行が残っていても -var-file が警告/失敗しないように）"
