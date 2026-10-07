@@ -311,7 +311,10 @@ def test_prod_low_confidence_rescue_no_longer_summarizes() -> None:
     )
     bedrock.converse.assert_not_called()
     assert out.found is False
-    assert out.answer == f"{NOT_FOUND_HEAD}（近いもの: 『花王_提案書.pptx』『ライオン報告.pdf』）。"
+    assert (
+        out.answer.split("\n\n探した範囲:", 1)[0]
+        == f"{NOT_FOUND_HEAD}（近いもの: 『花王_提案書.pptx』『ライオン報告.pdf』）。"
+    )
     assert out.total_cost_usd == 0.0
     assert not out.answer.startswith(WEAK_RESULT_NOTICE)
     # 近いものは参考として hits に残す（knowledge_deliver 等の下流は従来どおり score で判断）。
@@ -328,14 +331,14 @@ def test_prod_real_hit_still_summarizes() -> None:
     )
     bedrock.converse.assert_called_once()
     assert out.found is True
-    assert out.answer == "もっともらしい要約"
+    assert out.answer.split("\n\n探した範囲:", 1)[0] == "もっともらしい要約"
 
 
 def test_zero_hits_answer_and_found_false() -> None:
     bedrock = MagicMock()
     out = _prod_skill(bedrock, _pg([])).run(SearchInput(query="何か"), SkillContext(metadata={}))
     assert out.found is False
-    assert out.answer == f"{NOT_FOUND_HEAD}。"
+    assert out.answer.split("\n\n探した範囲:", 1)[0] == f"{NOT_FOUND_HEAD}。"
     bedrock.converse.assert_not_called()
 
 

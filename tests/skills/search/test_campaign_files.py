@@ -322,7 +322,7 @@ def test_no_footer_when_summary_already_cites_links() -> None:
         f"ハルカ茶園は{SHEET_ONLY_NOTE}。"
     )
     out = _run(_skill(_Pg(CAMPAIGNS, DRIVE_DOCS), answer=text))
-    assert out.answer == text
+    assert out.answer.split("\n\n探した範囲:", 1)[0] == text
 
 
 def test_files_invisible_under_rls_are_not_attached() -> None:

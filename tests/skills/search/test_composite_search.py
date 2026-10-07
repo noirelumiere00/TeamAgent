@@ -396,7 +396,8 @@ def test_both_empty_no_llm_call() -> None:
     skill, _ = _skill(b, _pg([]), client=_slack_client([]))
     out = skill.run(SearchInput(query="x"), SkillContext(metadata=dict(MCP, channel_id="D1")))
     assert out.found is False and out.slack_status == "ok" and out.slack_hits == []
-    assert out.answer == f"{NOT_FOUND_HEAD}。"
+    assert out.answer.split("\n\n探した範囲:", 1)[0] == f"{NOT_FOUND_HEAD}。"
+    assert out.answer.endswith("探した範囲: 金庫を『x』で検索・Slack も確認")
     b.converse.assert_not_called()
 
 
@@ -406,7 +407,8 @@ def test_vault_weak_and_slack_failed_is_not_found_and_cannot_search() -> None:
     out = skill.run(SearchInput(query="x"), SkillContext(metadata=dict(MCP, channel_id="D1")))
     assert out.found is False
     assert out.answer.startswith(NOT_FOUND_HEAD)
-    assert out.answer.endswith(STATUS_NOTES["error"])
+    assert out.answer.split("\n\n探した範囲:", 1)[0].endswith(STATUS_NOTES["error"])
+    assert out.answer.endswith("・Slack は確認できませんでした")
 
 
 # ── 並行実行（逐次なら必ず赤）──────────────────────────────────────────────

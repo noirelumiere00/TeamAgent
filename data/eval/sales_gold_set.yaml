@@ -30,8 +30,8 @@
 #       45〜46: Drive 資料系 (gdrive source_type 切り分け)
 #       47〜50: ネガティブ追加 (hallucination 防止強化、雑談弾き)
 
-version: 2
-description: "検索精度 評価セット v2 (50 ケース)。v1=Day8 baseline 25 + v2=Day10 miss類型狙撃 25"
+version: 3
+description: "検索精度 評価セット v3 (50件 + P2の正例案9件・期待条件は確認待ち)"
 
 cases:
   # ==========================================
@@ -336,3 +336,50 @@ cases:
     expect_keywords: []
     expect_zero_hits: true
     notes: "業務無関係の雑談。検索対象外として弾けるか"
+
+  # P2: 利用者の空振り発話を元にした正例案。期待キーワードは未確認なので採点から除外。
+  - id: 51
+    query: "サンギの提案資料を探して"
+    expect_zero_hits: false
+    validation_status: pending_db_confirmation
+    notes: "TODO: 本番DBで確認が要る。正解資料・期待キーワード・出典を確定してから採点に含める。DB未接続。"
+  - id: 52
+    query: "インペックスの資料を探して"
+    expect_zero_hits: false
+    validation_status: pending_db_confirmation
+    notes: "TODO: 本番DBで確認が要る。正解資料・期待キーワード・出典を確定してから採点に含める。DB未接続。"
+  - id: 53
+    query: "エムキュアの資料を探して"
+    expect_zero_hits: false
+    validation_status: pending_db_confirmation
+    notes: "TODO: 本番DBで確認が要る。正解資料・期待キーワード・出典を確定してから採点に含める。DB未接続。"
+  - id: 54
+    query: "エリクシールの施策実績を探して"
+    expect_zero_hits: false
+    validation_status: pending_db_confirmation
+    notes: "TODO: 本番DBで確認が要る。正解資料・期待キーワード・出典を確定してから採点に含める。DB未接続。"
+  - id: 55
+    query: "めかぶとトップバリュの資料を探して"
+    expect_zero_hits: false
+    validation_status: pending_db_confirmation
+    notes: "TODO: 本番DBで確認が要る。正解資料・期待キーワード・出典を確定してから採点に含める。DB未接続。"
+  - id: 56
+    query: "ファミマのおにぎりの資料を探して"
+    expect_zero_hits: false
+    validation_status: pending_db_confirmation
+    notes: "TODO: 本番DBで確認が要る。正解資料・期待キーワード・出典を確定してから採点に含める。DB未接続。"
+  - id: 57
+    query: "西友フーズの麻辣湯の資料を探して"
+    expect_zero_hits: false
+    validation_status: pending_db_confirmation
+    notes: "TODO: 本番DBで確認が要る。正解資料・期待キーワード・出典を確定してから採点に含める。DB未接続。"
+  - id: 58
+    query: "SPEの資料を探して"
+    expect_zero_hits: false
+    validation_status: pending_db_confirmation
+    notes: "TODO: 本番DBで確認が要る。正解資料・期待キーワード・出典を確定してから採点に含める。DB未接続。"
+  - id: 59
+    query: "ホンダの提案資料を探して"
+    expect_zero_hits: false
+    validation_status: pending_db_confirmation
+    notes: "TODO: 本番DBで確認が要る。正解資料・期待キーワード・出典を確定してから採点に含める。DB未接続。"

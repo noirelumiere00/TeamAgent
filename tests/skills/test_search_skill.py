@@ -787,7 +787,8 @@ def test_prompt_version_default_is_v1(fake_bedrock: MagicMock, fake_pgvector: Ma
         )
         skill.run(input=SearchInput(query="x"), ctx=SkillContext())
 
-        mock_load.assert_called_with("search", "v1", "system")
+        mock_load.assert_any_call("search", "v1", "system")
+        mock_load.assert_any_call("search", "retry", "system")
 
 
 def test_prompt_version_v2_is_used_when_specified(
@@ -807,7 +808,8 @@ def test_prompt_version_v2_is_used_when_specified(
         )
         skill.run(input=SearchInput(query="x"), ctx=SkillContext())
 
-        mock_load.assert_called_with("search", "v2", "system")
+        mock_load.assert_any_call("search", "v2", "system")
+        mock_load.assert_any_call("search", "retry", "system")
 
 
 def test_prompt_v2_file_exists_and_has_insight_keywords() -> None:

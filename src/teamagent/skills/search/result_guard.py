@@ -36,9 +36,9 @@ from teamagent.ingest.industry_taxonomy import normalize_industry
 from teamagent.skills.search.client_match import (
     _LEGAL_SUFFIX_RE,
     _MIN_CLIENT_LEN,
+    aliases,
     clients_match,
     hit_is_about_client,
-    names_overlap,
     normalize_client,
 )
 
@@ -89,22 +89,6 @@ _SELF_ORG_NAMES: tuple[str, ...] = (
     "アイコ",
 )
 
-# ブランド↔法人の別名辞書（**静的 seed のみ**・対称）。
-#
-# 本番実測（2026-09-02〜03）で「同じ取引先なのに別会社扱い」になった対:
-#   - 「（アース製薬）の社内資料」→ top1 cls_project=ハビットプロ（アース製薬のブランド）
-#   - 「ホーユー株式会社」→ top1 cls_project=SOMARCA（ホーユーのブランド）
-#   - 「エリスショーツの提案」→ top1 cls_project=大王製紙株式会社（エリスは同社ブランド）
-# DB（title / cls_entities の共起）から自動生成はしない: 一般社員の投稿 1 件で
-# 競合ペア（花王↔資生堂）が別名に入り、全員の警告を無効化できてしまうため。
-# 運用追加はこのタプルへ明示的に足し、テストで固定する（gsheet overrides と同じ流儀）。
-_ALIAS_SEED: tuple[tuple[str, str], ...] = (
-    ("アース製薬", "ハビットプロ"),
-    ("ホーユー", "SOMARCA"),
-    ("エリス", "大王製紙"),
-    ("花王", "花王グループカスタマーマーケティング"),
-)
-
 
 def is_self_org_name(name: str | None) -> bool:
     """``name`` が自社・自社プロダクト名か（＝クライアント指定として扱わない）。
@@ -115,25 +99,6 @@ def is_self_org_name(name: str | None) -> bool:
     if not normalized:
         return False
     return any(normalized == normalize_client(own) for own in _SELF_ORG_NAMES)
-
-
-def aliases(asked: str | None) -> set[str]:
-    """``asked`` の別名（ブランド↔法人）。seed のキー照合は名寄せ後の双方向部分一致。
-
-    「エリスショーツ」で「エリス」の対（大王製紙）が引ける。対称なので
-    「ハビットプロ」から「アース製薬」も引ける。無ければ空集合。
-    """
-    if not asked:
-        return set()
-    out: set[str] = set()
-    for a, b in _ALIAS_SEED:
-        if names_overlap(asked, a):
-            out.add(b)
-        if names_overlap(asked, b):
-            out.add(a)
-    # asked そのもの（正規化後に同一）は「別名」ではない。
-    asked_norm = normalize_client(asked)
-    return {alias for alias in out if normalize_client(alias) != asked_norm}
 
 
 def hit_client_name(hit: SearchHit) -> str:

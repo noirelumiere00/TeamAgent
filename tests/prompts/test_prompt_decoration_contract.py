@@ -88,6 +88,9 @@ HUMAN_FACING_PROMPTS = (
 EXEMPT_PROMPTS = {
     # 本番で読まれない版。装飾を直しても誰にも届かず、差分だけ増える。
     "search/v1/system.md": "本番既定は v2d（旧版は触らない）",
+    # 別名で探し直す機能（SEARCH_ALIAS_EXPANSION）が search の system に足す 1 行。装飾の決まりは
+    # 本体（v2d/v3）側にあり、この追記は作業を利用者に戻さない指示だけ。
+    "search/retry/system.md": "search の system への 1 行の追記（装飾の決まりは本体の v2d 側）",
     "search/v2/system.md": "本番既定は v2d（旧版は触らない）",
     "search/v2c/system.md": "本番既定は v2d（旧版は触らない）",
     "search/v2e/system.md": "本番既定は v2d（v2e は env 切替時のみ・別便で扱う）",
