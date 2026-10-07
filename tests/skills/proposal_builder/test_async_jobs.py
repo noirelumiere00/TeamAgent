@@ -97,11 +97,22 @@ def _proposal_output() -> ProposalBuilderOutput:
     )
 
 
+@pytest.fixture(autouse=True)
+def _everyone_allowed(monkeypatch: pytest.MonkeyPatch) -> None:
+    """ここは job 境界の試験。許可リストは「本人確認済みの全員」に開く（判定は test_allowlist.py）。"""
+    monkeypatch.setenv("PROPOSAL_BUILDER_ALLOWED_EMAILS", "*")
+
+
 def _ctx() -> SkillContext:
     return SkillContext(
         request_id="proposal-async-test",
         user_id="U123",
-        metadata={"channel_id": "C123", "thread_ts": "123.456"},
+        metadata={
+            "channel_id": "C123",
+            "thread_ts": "123.456",
+            "identity_verified": True,
+            "user_email": "someone@vectorinc.co.jp",
+        },
     )
 
 
