@@ -229,6 +229,7 @@ def _ctx(channel: str = DM, thread: str = DM_THREAD, **over: Any) -> SkillContex
 def _env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("SLACK_WORKSPACE_DOMAIN", WS)
     monkeypatch.setenv("ATTACHMENT_PERMALINK_ENABLED", "1")
+    monkeypatch.setenv("ATTACHMENT_PERMALINK_ALLOWED_EMAILS", ME)
     # 「この会話に添付済み」の記憶はプロセス内で共有される＝テストごとに空にする。
     skill_mod._REPOSTED.clear()
 
@@ -523,7 +524,91 @@ def test_may_repost_requires_verified_identity_for_dm() -> None:
     )
 
 
-# ── ③ スイッチ（既定 OFF）─────────────────────────────────────────────────
+# ── ③ スイッチ（既定 OFF）と本人の許可リスト ──────────────────────────────
+
+
+@pytest.mark.parametrize(
+    ("allowed_emails", "verified", "email", "allowed"),
+    [
+        pytest.param(None, True, ME, False, id="allowlist-unset"),
+        pytest.param("", True, ME, False, id="allowlist-empty"),
+        pytest.param(" , , ", True, ME, False, id="allowlist-blank-entries"),
+        pytest.param(ME, True, ME, True, id="individual-match"),
+        pytest.param(
+            f" other@example.com, {ME.upper()} , ",
+            True,
+            f" {ME.upper()} ",
+            True,
+            id="comma-separated-case-and-spaces",
+        ),
+        pytest.param("other@example.com", True, ME, False, id="individual-mismatch"),
+        pytest.param("*", True, "other@example.com", True, id="wildcard-verified"),
+        pytest.param(ME, False, ME, False, id="individual-unverified"),
+        pytest.param("*", False, ME, False, id="wildcard-unverified"),
+        pytest.param("*", "true", ME, False, id="truthy-string-unverified"),
+        pytest.param("*", 1, ME, False, id="truthy-integer-unverified"),
+        pytest.param("*", None, ME, False, id="verification-unset"),
+        pytest.param("*", True, "", False, id="wildcard-email-empty"),
+        pytest.param("*", True, None, False, id="wildcard-email-unset"),
+        pytest.param("*", True, "unresolved", False, id="wildcard-email-unresolved"),
+    ],
+)
+def test_permalink_allowlist_requires_verified_allowed_email(
+    monkeypatch: pytest.MonkeyPatch,
+    allowed_emails: str | None,
+    verified: Any,
+    email: Any,
+    allowed: bool,
+) -> None:
+    """拒否は OFF と同じ出力で、本人トークン・Slack・LLM・会話履歴へ触れない。"""
+    store = _FakeStore()
+    skill, reader, slack, bedrock, ingest = _skill(store=store)
+    monkeypatch.delenv("ATTACHMENT_PERMALINK_ENABLED", raising=False)
+    disabled = _run(skill)
+    assert disabled.error == "permalink_disabled"
+
+    monkeypatch.setenv("ATTACHMENT_PERMALINK_ENABLED", "1")
+    if allowed_emails is None:
+        monkeypatch.delenv("ATTACHMENT_PERMALINK_ALLOWED_EMAILS", raising=False)
+    else:
+        monkeypatch.setenv("ATTACHMENT_PERMALINK_ALLOWED_EMAILS", allowed_emails)
+    ctx = _ctx(user_email=email, identity_verified=verified)
+    if verified is None:
+        ctx.metadata.pop("identity_verified")
+    out = _run(skill, ctx=ctx)
+
+    if allowed:
+        assert out.error == ""
+        assert len(store.calls) == 1
+        assert reader.calls == [(SRC_CH, SRC_TS, "")]
+        assert slack.downloads == [OK_URL]
+        assert len(slack.uploads) == 1 and len(bedrock.calls) == 1
+        assert ingest.calls == 0
+    else:
+        assert out == disabled
+        assert store.calls == [] and reader.calls == [] and ingest.calls == 0
+        assert slack.downloads == [] and slack.uploads == [] and bedrock.calls == []
+
+
+def test_permalink_allowlist_is_read_on_each_call(monkeypatch: pytest.MonkeyPatch) -> None:
+    """同じ Skill インスタンスでも許可リストの変更を直ちに反映する。"""
+    store = _FakeStore()
+    skill, reader, slack, bedrock, ingest = _skill(store=store)
+    monkeypatch.setenv("ATTACHMENT_PERMALINK_ALLOWED_EMAILS", "")
+    denied = _run(skill)
+    assert denied.error == "permalink_disabled"
+    assert store.calls == [] and reader.calls == [] and ingest.calls == 0
+    assert slack.downloads == [] and slack.uploads == [] and bedrock.calls == []
+
+    monkeypatch.setenv("ATTACHMENT_PERMALINK_ALLOWED_EMAILS", ME)
+    assert _run(skill).error == ""
+    calls = (len(store.calls), len(reader.calls), len(slack.downloads), len(slack.uploads))
+    assert calls == (1, 1, 1, 1) and len(bedrock.calls) == 1
+
+    monkeypatch.setenv("ATTACHMENT_PERMALINK_ALLOWED_EMAILS", "other@example.com")
+    assert _run(skill) == denied
+    assert (len(store.calls), len(reader.calls), len(slack.downloads), len(slack.uploads)) == calls
+    assert len(bedrock.calls) == 1 and ingest.calls == 0
 
 
 def test_switch_off_by_default_reads_nothing(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -533,12 +618,14 @@ def test_switch_off_by_default_reads_nothing(monkeypatch: pytest.MonkeyPatch) ->
     3 件あった）を「リンク先の資料」として要約してしまう。
     """
     monkeypatch.delenv("ATTACHMENT_PERMALINK_ENABLED", raising=False)
+    monkeypatch.setenv("ATTACHMENT_PERMALINK_ALLOWED_EMAILS", ME)
     other = _file(id="FOTHER", name="提案_東洋水産.pdf", is_public=True)
     ingest = _NoIngest(messages=[SlackMessage(ts="1", user="U1", text="", files=(other,))])
-    skill, reader, slack, bedrock, _ = _skill(ingest=ingest)
+    store = _FakeStore()
+    skill, reader, slack, bedrock, _ = _skill(ingest=ingest, store=store)
     out = _run(skill)
     assert out.error == "permalink_disabled"
-    assert reader.calls == [] and ingest.calls == 0
+    assert store.calls == [] and reader.calls == [] and ingest.calls == 0
     assert slack.downloads == [] and slack.uploads == [] and bedrock.calls == []
     _assert_no_punt(out.message)
 
@@ -1074,6 +1161,19 @@ def test_description_off_is_unchanged_and_on_states_permalink_exception(
     assert "添付が無くても" in on
     assert "slack_summary" in on  # スレッドの要約は別ツール
     assert "1 回添付し直す" in on
+
+
+@pytest.mark.parametrize("enabled", ["0", "1"])
+def test_description_does_not_depend_on_allowlist(
+    monkeypatch: pytest.MonkeyPatch, enabled: str
+) -> None:
+    """全員共通の説明は ENABLED だけで決まり、本人の許可判定とは独立する。"""
+    monkeypatch.setenv("ATTACHMENT_PERMALINK_ENABLED", enabled)
+    monkeypatch.delenv("ATTACHMENT_PERMALINK_ALLOWED_EMAILS", raising=False)
+    expected = AttachmentAssistSkill.tool_description()
+    for allowed_emails in ("", ME, "other@example.com", "*"):
+        monkeypatch.setenv("ATTACHMENT_PERMALINK_ALLOWED_EMAILS", allowed_emails)
+        assert AttachmentAssistSkill.tool_description() == expected
 
 
 def test_factory_uses_switch_dependent_description() -> None:
