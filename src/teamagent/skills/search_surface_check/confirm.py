@@ -15,6 +15,7 @@ from __future__ import annotations
 import os
 from typing import Any
 
+from teamagent.mcp_gateway.allowlist import email_allowed
 from teamagent.skills._shared.private_surface import is_private_surface
 from teamagent.skills.search_surface_check.schema import SearchSurfaceCheckInput
 
@@ -46,7 +47,9 @@ def one_shot_enabled(user_email: str | None) -> bool:
         for e in os.environ.get(FOLLOWUP_ALLOWED_EMAILS_ENV, "").split(",")
         if e.strip()
     }
-    return bool(user_email) and str(user_email).strip().lower() in allowed
+    # 2 段目の本体（surface_video_followup）と同じ照合にする。「*」＝本人確認済みの全員
+    # （10-06 夜の全員開放で、ここだけ完全一致のままだったため確認と 1 通化が誰にも効かなかった）。
+    return email_allowed(user_email, allowed)
 
 
 def confirm_required(input: SearchSurfaceCheckInput, metadata: dict[str, Any]) -> bool:

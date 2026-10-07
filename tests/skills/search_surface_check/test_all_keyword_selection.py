@@ -123,6 +123,23 @@ def test_confirm_required_only_for_the_pilot_in_dm(on: None, monkeypatch: Any) -
     assert not confirm.confirm_required(inp, _meta())
 
 
+def test_wildcard_opens_confirm_and_one_shot_to_everyone(on: None, monkeypatch: Any) -> None:
+    """本番の値「*」（10-06 夜の全員開放）で、確認と 1 通化が本人確認済みの全員に効く。
+
+    以前は完全一致の照合で「*」を誰とも一致させず、小俣さんを含む全員で確認も 1 通化も止まっていた。
+    """
+    monkeypatch.setenv(confirm.FOLLOWUP_ALLOWED_EMAILS_ENV, "*")
+    inp = SearchSurfaceCheckInput(keywords=["A"])
+    assert confirm.one_shot_enabled("someone@vectorinc.co.jp")
+    assert confirm.confirm_required(inp, {**_meta(), "user_email": "someone@vectorinc.co.jp"})
+    # 本人を解決できていない（email が無い・形がおかしい）なら「*」でも開かない
+    assert not confirm.one_shot_enabled("")
+    assert not confirm.one_shot_enabled("not-an-email")
+    # チャンネル・本人確認なしでは従来どおり確認を返さない
+    assert not confirm.confirm_required(inp, _meta(channel="C0123"))
+    assert not confirm.confirm_required(inp, _meta(verified=False))
+
+
 def test_env_names_match_the_gateway() -> None:
     from teamagent.mcp_gateway import surface_video_followup as g
 
