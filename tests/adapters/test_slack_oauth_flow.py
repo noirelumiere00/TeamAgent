@@ -81,9 +81,10 @@ def test_verify_state_rejects_future_issued() -> None:
 
 
 def test_slack_user_scopes_read_only() -> None:
-    # 最小権限・読み取り先行。書込系(chat:write 等)は当初含めない。
+    # 添付・チャンネル名の読み取りを含めても、本人名義の書込系(chat:write 等)は含めない。
     assert "search:read" in SLACK_USER_SCOPES
     assert "users:read" in SLACK_USER_SCOPES
+    assert {"files:read", "channels:read", "groups:read"} <= set(SLACK_USER_SCOPES)
     assert all(s.endswith(":read") or s.endswith(":history") for s in SLACK_USER_SCOPES)
     assert not any("write" in s for s in SLACK_USER_SCOPES)
 

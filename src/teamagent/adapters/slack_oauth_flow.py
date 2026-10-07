@@ -27,12 +27,16 @@ from urllib.parse import urlencode
 
 from teamagent.adapters.oauth_token_store import SlackOAuthToken
 
-# Slack User Token Scopes（最小権限・読み取り先行）。本人としての横断検索・巡回要約に必要な
-# read 系のみ。本人として投稿する chat:write(user) 等の書込系は当初付与しない（誤爆リスク大・
-# 要件は横断Q&A/巡回が主）。scope 追加は Slack app 設定の Reinstall を伴うため段階的に。
+# Slack User Token Scopes（最小権限・読み取り限定）。本人としての横断検索・巡回要約、
+# 添付ファイルとチャンネル名の読み取りに必要な read 系のみ。
+# 本人として投稿する chat:write(user) 等の書込系は付与しない。
+# 追加権限は Slack app 側の設定と本人の再連携で既存トークンに反映する。
 SLACK_USER_SCOPES: tuple[str, ...] = (
     "search:read",
+    "files:read",
+    "channels:read",
     "channels:history",
+    "groups:read",
     "groups:history",
     "im:history",
     "mpim:history",

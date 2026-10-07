@@ -6,7 +6,12 @@ from urllib.parse import parse_qs, urlparse
 
 import pytest
 
-from teamagent.adapters.slack_oauth_flow import expected_bind_tag, verify_state_detailed
+from teamagent.adapters.oauth_token_store import InMemorySlackTokenStore, SlackOAuthToken
+from teamagent.adapters.slack_oauth_flow import (
+    SLACK_USER_SCOPES,
+    expected_bind_tag,
+    verify_state_detailed,
+)
 from teamagent.skills.base import SkillContext
 from teamagent.skills.oauth_connect.schema import OAuthConnectInput
 from teamagent.skills.oauth_connect.skill import OAuthConnectSkill
@@ -164,7 +169,7 @@ def test_no_slack_link_when_verified_team_unavailable(
 def test_connected_user_gets_no_link_when_uid_matches(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """保存済み uid が検証済み caller と一致すれば従来どおり連携済み扱い。"""
+    """scopes() 未実装の旧ストアでも、uid が一致すれば従来どおり連携済み扱い。"""
     for k, v in {**_OAUTH_ENV, **_SLACK_ENV}.items():
         monkeypatch.setenv(k, v)
     skill = OAuthConnectSkill(
@@ -177,6 +182,168 @@ def test_connected_user_gets_no_link_when_uid_matches(
     assert out.url is None
     assert out.slack_url is None
     assert "連携済み" in out.message
+    assert "新しい権限" not in out.message
+
+
+@pytest.mark.parametrize(
+    "missing_scopes",
+    [
+        ("files:read",),
+        ("channels:read",),
+        ("groups:read",),
+        ("files:read", "channels:read", "groups:read"),
+        SLACK_USER_SCOPES,
+    ],
+)
+@pytest.mark.parametrize("start_links", [False, True])
+def test_slack_scope_upgrade_issues_reconnect_link(
+    monkeypatch: pytest.MonkeyPatch,
+    missing_scopes: tuple[str, ...],
+    start_links: bool,
+) -> None:
+    """本人 ID が一致しても権限不足なら、説明と本人に束縛した再連携リンクを返す。"""
+    from structlog.testing import capture_logs
+
+    for k, v in {**_OAUTH_ENV, **_SLACK_ENV}.items():
+        monkeypatch.setenv(k, v)
+    monkeypatch.setenv("USE_OAUTH_START_LINKS", "1" if start_links else "0")
+    monkeypatch.setenv("CONNECT_BASE_URL", "https://connect.example.com")
+    old_scopes = tuple(s for s in SLACK_USER_SCOPES if s not in missing_scopes)
+    store = InMemorySlackTokenStore(
+        {
+            "taro@vectorinc.co.jp": SlackOAuthToken(
+                access_token="test-slack-token",
+                scopes=old_scopes,
+                slack_user_id=_VERIFIED_SLACK_USER_ID,
+                team_id=_VERIFIED_SLACK_TEAM_ID,
+            )
+        }
+    )
+    skill = OAuthConnectSkill(google_store=_FakeStore(True), slack_store=store)
+
+    with capture_logs() as logs:
+        out = skill.run(OAuthConnectInput(), _ctx("taro@vectorinc.co.jp"))
+
+    assert out.url is None
+    assert out.slack_url is not None and out.slack_url in out.message
+    assert (
+        "Slack の連携に新しい権限（添付ファイルとチャンネル名の読み取り）が増えたため、"
+        "下のリンクからもう一度連携してください。"
+    ) in out.message
+    assert "CONNECT-I03" not in out.message
+    prose = out.message.replace(out.slack_url, "")
+    for internal_term in ("oauth_connect", "scope", "xoxp", "SLACK_USER_SCOPES"):
+        assert internal_term not in prose
+    state = out.slack_url.rsplit("/", 1)[1] if start_links else _slack_state(out.slack_url)
+    detailed = verify_state_detailed(state)
+    assert detailed is not None
+    assert detailed.bind_tag == expected_bind_tag(_VERIFIED_SLACK_TEAM_ID, _VERIFIED_SLACK_USER_ID)
+    events = {e["event"]: e for e in logs}
+    upgrade = events["oauth_connect_slack_scope_upgrade_needed"]
+    assert upgrade["missing_count"] == len(missing_scopes)
+    assert "stored_count" not in upgrade
+    assert "test-slack-token" not in str(logs)
+    assert events["oauth_connect_url_issued"]["slack_connected"] is False
+    assert events["oauth_connect_url_issued"]["slack_scope_upgrade"] is True
+
+
+@pytest.mark.parametrize(
+    "stored_scopes",
+    [
+        SLACK_USER_SCOPES,
+        tuple(reversed(SLACK_USER_SCOPES)),
+        (*SLACK_USER_SCOPES, "users:read.email"),
+    ],
+)
+def test_slack_full_scopes_returns_connected_without_link(
+    monkeypatch: pytest.MonkeyPatch, stored_scopes: tuple[str, ...]
+) -> None:
+    """必要な権限の上位集合なら順序によらず従来の連携済み案内を維持する。"""
+    for k, v in {**_OAUTH_ENV, **_SLACK_ENV}.items():
+        monkeypatch.setenv(k, v)
+    store = InMemorySlackTokenStore(
+        {
+            "taro@vectorinc.co.jp": SlackOAuthToken(
+                access_token="test-slack-token",
+                scopes=stored_scopes,
+                slack_user_id=_VERIFIED_SLACK_USER_ID,
+            )
+        }
+    )
+    out = OAuthConnectSkill(google_store=_FakeStore(True), slack_store=store).run(
+        OAuthConnectInput(), _ctx("taro@vectorinc.co.jp")
+    )
+
+    assert out.url is None and out.slack_url is None
+    assert out.message == (
+        "✅ *taro@vectorinc.co.jp* は既に Google と Slack を連携済みです。追加の操作は不要です。"
+        "そのまま話しかけてください。"
+    )
+
+
+def test_slack_noncallable_scopes_keeps_identity_status(monkeypatch: pytest.MonkeyPatch) -> None:
+    """scopes 属性が呼べない旧ストアは、本人 ID 照合の結果をそのまま使う。"""
+    for k, v in {**_OAUTH_ENV, **_SLACK_ENV}.items():
+        monkeypatch.setenv(k, v)
+    store = _FakeSlackIdentityStore(_VERIFIED_SLACK_USER_ID)
+    monkeypatch.setattr(store, "scopes", None, raising=False)
+
+    out = OAuthConnectSkill(google_store=_FakeStore(True), slack_store=store).run(
+        OAuthConnectInput(), _ctx("taro@vectorinc.co.jp")
+    )
+
+    assert out.slack_url is None
+    assert "Google と Slack を連携済み" in out.message
+
+
+def test_slack_scopes_failure_keeps_identity_status(monkeypatch: pytest.MonkeyPatch) -> None:
+    """権限読み取りの例外で本人確認済みの連携状態を変えず、token にも触れない。"""
+    from structlog.testing import capture_logs
+
+    class _BrokenScopesStore(_FakeSlackIdentityStore):
+        def scopes(self, _user_email: str) -> tuple[str, ...] | None:
+            raise RuntimeError("scope lookup failed")
+
+        def has(self, _user_email: str) -> bool:
+            raise AssertionError("本人 ID 確認済みなので has() の token 読取は不要")
+
+    for k, v in {**_OAUTH_ENV, **_SLACK_ENV}.items():
+        monkeypatch.setenv(k, v)
+    skill = OAuthConnectSkill(
+        google_store=_FakeStore(True),
+        slack_store=_BrokenScopesStore(_VERIFIED_SLACK_USER_ID),
+    )
+    with capture_logs() as logs:
+        out = skill.run(OAuthConnectInput(), _ctx("taro@vectorinc.co.jp"))
+
+    assert out.slack_url is None
+    assert "Google と Slack を連携済み" in out.message
+    assert "新しい権限" not in out.message
+    events = {e["event"]: e for e in logs}
+    assert events["oauth_connect_slack_scope_check_failed"]["error"] == "RuntimeError"
+
+
+def test_slack_uid_mismatch_precedes_scope_check(monkeypatch: pytest.MonkeyPatch) -> None:
+    """別人との紐付けでは権限の取得へ進まず、従来の本人確認の再連携を案内する。"""
+
+    class _OtherUserStore(_FakeSlackIdentityStore):
+        scopes_called = False
+
+        def scopes(self, _user_email: str) -> tuple[str, ...] | None:
+            self.scopes_called = True
+            return ()
+
+    for k, v in {**_OAUTH_ENV, **_SLACK_ENV}.items():
+        monkeypatch.setenv(k, v)
+    store = _OtherUserStore("U9999999999")
+    out = OAuthConnectSkill(google_store=_FakeStore(True), slack_store=store).run(
+        OAuthConnectInput(), _ctx("taro@vectorinc.co.jp")
+    )
+
+    assert not store.scopes_called
+    assert out.slack_url is not None
+    assert "連携し直す" in out.message
+    assert "新しい権限" not in out.message
 
 
 def test_mismatched_uid_user_gets_a_bound_relink(

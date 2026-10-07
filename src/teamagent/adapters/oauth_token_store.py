@@ -101,6 +101,39 @@ class InMemoryTokenStore:
         return None if token is None else token.scopes
 
 
+class InMemorySlackTokenStore:
+    """dev/test 用の Slack user token 保管器（email 正規化・Pg 実装と対称）。"""
+
+    def __init__(self, initial: dict[str, SlackOAuthToken] | None = None) -> None:
+        self._tokens: dict[str, SlackOAuthToken] = {}
+        if initial:
+            for email, token in initial.items():
+                self._tokens[self._norm(email)] = token
+
+    @staticmethod
+    def _norm(email: str) -> str:
+        return email.strip().lower()
+
+    def get(self, user_email: str) -> SlackOAuthToken | None:
+        return self._tokens.get(self._norm(user_email))
+
+    def put(self, user_email: str, token: SlackOAuthToken) -> None:
+        self._tokens[self._norm(user_email)] = token
+
+    def has(self, user_email: str) -> bool:
+        return self._norm(user_email) in self._tokens
+
+    def slack_user_id(self, user_email: str) -> str | None:
+        """保存済み Slack user ID だけを返す（行なしは None）。"""
+        token = self._tokens.get(self._norm(user_email))
+        return None if token is None else token.slack_user_id
+
+    def scopes(self, user_email: str) -> tuple[str, ...] | None:
+        """認可済みスコープのみ返す（行なしは None）。SlackTokenStore と対称。"""
+        token = self._tokens.get(self._norm(user_email))
+        return None if token is None else token.scopes
+
+
 @runtime_checkable
 class TokenCipher(Protocol):
     """refresh token の暗号化/復号（at-rest 暗号化・G8）。本番は KMS 実装を注入する。"""
@@ -254,6 +287,23 @@ class SlackTokenStore:
             return None
         return str(row["slack_user_id"] or "")
 
+    def scopes(self, user_email: str) -> tuple[str, ...] | None:
+        """認可済みスコープ列のみ読む（xoxp の KMS 復号なし・行なしは None）。
+
+        oauth_connect の再連携判定用。トークンを復号せずに権限の不足を確認する。
+        """
+        email = self._norm(user_email)
+        with self._pgvector.connection(app_role=self._app_role, user_email=email) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT scopes FROM slack_oauth_tokens WHERE user_email = %s",
+                    (email,),
+                )
+                row = cur.fetchone()
+        if not row:
+            return None
+        return tuple(row["scopes"] or ())
+
     def get(self, user_email: str) -> SlackOAuthToken | None:
         email = self._norm(user_email)
         with self._pgvector.connection(app_role=self._app_role, user_email=email) as conn:
@@ -299,6 +349,7 @@ class SlackTokenStore:
 
 
 __all__ = [
+    "InMemorySlackTokenStore",
     "InMemoryTokenStore",
     "KmsCipher",
     "OAuthToken",
