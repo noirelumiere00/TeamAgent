@@ -51,7 +51,7 @@ from teamagent.skills._shared.slack_context import _neutralize
 from teamagent.skills._shared.source_url import slack_permalink
 from teamagent.skills._shared.user_context import USER_CONTEXT_RULE
 from teamagent.skills.base import BaseSkill, SkillContext, register
-from teamagent.skills.slack_summary.period import resolve_period
+from teamagent.skills.slack_summary.period import PERIOD_WORDS, resolve_period
 from teamagent.skills.slack_summary.schema import SlackSummaryInput, SlackSummaryOutput
 
 logger = structlog.get_logger(__name__)
@@ -81,7 +81,9 @@ _ERR_MSG: dict[str, str] = {
     "empty_thread": "要約対象にメッセージが見つかりませんでした。",
     "feature_disabled": "名前・期間指定の Slack 要約は現在無効です。"
     "Slack 検索で名前と期間を指定できます。",
-    "bad_period": "期間を判定できませんでした。昨日・今週・先月・日付で指定してください。",
+    "bad_period": "期間を判定できませんでした。"
+    + "・".join(PERIOD_WORDS)
+    + " のように指定してください（例: 先週、直近7日、10/1〜10/5）。",
     "ambiguous_channel": "チャンネル名を一意に特定できませんでした。"
     "名前をもう少し具体的にしてください。",
     "not_member": "本人がその公開チャンネルに参加していないため読めません。"

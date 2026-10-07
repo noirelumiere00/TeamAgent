@@ -319,20 +319,76 @@ def test_not_connected_link_is_identity_bound_and_only_in_dm(
     assert "https://slack.example/connect" not in out.message and len(calls) == 1
 
 
+# 検証日は 2026-10-07（水）12:00 JST。今週月曜は 10/5。
+_NOW = datetime(2026, 10, 7, 12, tzinfo=JST)
+
+
 @pytest.mark.parametrize(
     ("period", "start", "end"),
     [
-        ("昨日", "2026-10-05T00:00", "2026-10-06T00:00"),
-        ("今週", "2026-10-05T00:00", "2026-10-06T12:00"),
+        ("今日", "2026-10-07T00:00", "2026-10-07T12:00"),
+        ("昨日", "2026-10-06T00:00", "2026-10-07T00:00"),
+        ("一昨日", "2026-10-05T00:00", "2026-10-06T00:00"),
+        ("今週", "2026-10-05T00:00", "2026-10-07T12:00"),
+        ("先週", "2026-09-28T00:00", "2026-10-05T00:00"),
+        ("先々週", "2026-09-21T00:00", "2026-09-28T00:00"),
+        ("今月", "2026-10-01T00:00", "2026-10-07T12:00"),
         ("先月", "2026-09-01T00:00", "2026-10-01T00:00"),
+        ("直近7日", "2026-09-30T00:00", "2026-10-07T12:00"),
+        ("過去7日間", "2026-09-30T00:00", "2026-10-07T12:00"),
+        ("直近３日", "2026-10-04T00:00", "2026-10-07T12:00"),
+        ("10月1日〜5日", "2026-10-01T00:00", "2026-10-06T00:00"),
+        ("10月1日〜10月5日", "2026-10-01T00:00", "2026-10-06T00:00"),
+        ("10/1〜10/5", "2026-10-01T00:00", "2026-10-06T00:00"),
+        ("１０／１～１０／５", "2026-10-01T00:00", "2026-10-06T00:00"),
+        ("9月29日から10月2日まで", "2026-09-29T00:00", "2026-10-03T00:00"),
+        ("10月6日", "2026-10-06T00:00", "2026-10-07T00:00"),
+        # 未来の月日は昨年（12月28日は今年ならまだ来ていない）
+        ("12月28日〜1月3日", "2025-12-28T00:00", "2026-01-04T00:00"),
+        ("11/1〜11/3", "2025-11-01T00:00", "2025-11-04T00:00"),
         ("2026-09-01〜2026-09-30", "2026-09-01T00:00", "2026-10-01T00:00"),
+        ("２０２６－１０－０５", "2026-10-05T00:00", "2026-10-06T00:00"),
     ],
 )
 def test_jst_period_bounds(period: str, start: str, end: str) -> None:
-    bounds = resolve_period(period, now=datetime(2026, 10, 6, 12, tzinfo=JST))
+    bounds = resolve_period(period, now=_NOW)
     assert bounds == tuple(
         str(datetime.fromisoformat(value).replace(tzinfo=JST).timestamp()) for value in (start, end)
     )
+
+
+def test_last_week_is_monday_to_monday_even_on_monday() -> None:
+    # 月曜に「先週」と言ったら今日（今週月曜 00:00）で終わる 7 日ぶん。
+    bounds = resolve_period("先週", now=datetime(2026, 10, 5, 9, tzinfo=JST))
+    assert bounds == (
+        str(datetime(2026, 9, 28, tzinfo=JST).timestamp()),
+        str(datetime(2026, 10, 5, tzinfo=JST).timestamp()),
+    )
+
+
+@pytest.mark.parametrize(
+    "period",
+    [
+        "直近0日",
+        "直近400日",
+        "2月30日",
+        "10/5〜10/1",
+        "10/5〜9/1",
+        "13月1日",
+        "先週の",
+        "来週",
+        "2026-99-01",
+    ],
+)
+def test_unresolvable_period_words_raise_bad_period(period: str) -> None:
+    with pytest.raises(ValueError, match="bad_period"):
+        resolve_period(period, now=_NOW)
+
+
+def test_bad_period_message_lists_every_accepted_word() -> None:
+    message = mod._ERR_MSG["bad_period"]
+    assert "先週" in message and "今月" in message and "直近N日" in message
+    assert "YYYY-MM-DD" in message and "M月D日" in message
 
 
 def test_partial_warning_survives_max_length_focus(monkeypatch: pytest.MonkeyPatch) -> None:
