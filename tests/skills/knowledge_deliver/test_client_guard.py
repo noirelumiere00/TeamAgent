@@ -457,3 +457,51 @@ def test_end_to_end_search_detects_client_and_deliver_attaches_nothing() -> None
     assert out.delivered_count == 0
     slack.upload_file.assert_not_awaited()
     assert "日本コカ・コーラの資料のファイル本体は見つかりませんでした" in out.note
+
+
+# ── 取引先が既知の語彙に無いとき（10-06 実データ QA）────────────────────────────
+
+
+def _itoen_report(**kw: Any) -> SearchHitOut:
+    """本物の金庫で事故の質問に返った候補の形（別の会社の報告書・問いの固有名詞を含まない）。"""
+    base: dict[str, Any] = {
+        "chunk_id": 9,
+        "score": 0.9,
+        "source_type": "gdrive",
+        "source_uri": "gdrive://ITOEN",
+        "url": "https://drive.google.com/file/d/ITOEN/view",
+        "title": "レポート_0622_伊藤園様_ショート動画施策報告書.pptx",
+        "project": "伊藤園",
+        "content": "お茶飲料のショート動画施策の報告。ペットボトル飲料の再生数と保存数。",
+    }
+    base.update(kw)
+    return _hit(**base)
+
+
+def test_unknown_client_other_company_report_is_not_attached() -> None:
+    """取引先（日本コカ・コーラ）が語彙に無く名指しを検出できなくても、問いの固有名詞
+    （コーラ・アールグレイアイスティー・サンリオ）を含まない別会社の報告書は添付しない。"""
+    out, slack, _ = _run([_itoen_report()])
+    assert slack.upload_file.await_count == 0
+    assert out.delivered_count == 0
+    assert out.references == []
+    assert "伊藤園" not in out.note
+    assert "「コーラ」の資料のファイル本体は見つかりませんでした" in out.note
+
+
+def test_unknown_client_report_that_mentions_the_subject_is_attached() -> None:
+    """問いの固有名詞を本文に含む資料は、語彙に無い取引先でも添付する。"""
+    hit = _itoen_report(
+        title="紅茶花伝_サンリオ限定ボトル_ショート動画報告.pdf",
+        project="",
+        content="日本コカ・コーラ 紅茶花伝 サンリオ限定ボトルのショート動画施策",
+    )
+    out, slack, _ = _run([hit])
+    assert slack.upload_file.await_count == 1
+    assert out.delivered_count == 1
+
+
+def test_unknown_client_guard_follows_the_flag(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv(GUARD_ENV, "0")
+    _, slack, _ = _run([_itoen_report()])
+    assert slack.upload_file.await_count == 1

@@ -806,8 +806,10 @@ def test_knowledge_deliver_fukuda_initial_comment_has_no_client_warning(
     from teamagent.skills.knowledge_deliver.schema import KnowledgeDeliverInput
     from teamagent.skills.knowledge_deliver.skill import KnowledgeDeliverSkill
 
-    top = _hit(
+    # 本物の検索で当たる資料は問いの語（ユニークユーザー）を本文に含む（添付の主題照合の前提）。
+    top = _hit_full(
         0.8,
+        content="ユニークユーザー数の推移と施策の効果",
         cls_project="エスエス製薬株式会社",
         source_type="gdrive",
         source_uri="gdrive://F1",

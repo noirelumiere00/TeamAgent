@@ -51,6 +51,7 @@ from teamagent.skills.search.client_match import (
     normalize_filter_client,
 )
 from teamagent.skills.search.knowledge_query import extract_query_industry
+from teamagent.skills.search.not_found import _haystack, _term_in_hit, query_subject_terms
 from teamagent.skills.search.result_guard import (
     aliases,
     detect_query_client,
@@ -104,6 +105,21 @@ def _as_search_hit(h: SearchHitOut) -> SearchHit:
     if h.entities:
         meta["cls_entities"] = list(h.entities)
     return SearchHit(chunk_id=h.chunk_id, content="", score=h.score, metadata=meta)
+
+
+def _mentions_subject(h: SearchHitOut, terms: list[str]) -> bool:
+    """資料（本文の抜粋・題名・取引先・分類）に問いの主題語が 1 つでも出るか（search の部品）。"""
+    meta: dict[str, Any] = {
+        "client_name": h.client_name,
+        "cls_project": h.project,
+        "title": h.title,
+        "file_name": h.file_name,
+    }
+    if h.entities:
+        meta["cls_entities"] = list(h.entities)
+    hit = SearchHit(chunk_id=h.chunk_id, content=h.content or "", score=h.score, metadata=meta)
+    haystack = _haystack(hit)
+    return any(_term_in_hit(term, hit, haystack) for term in terms)
 
 
 def _resolve_asked_client(
@@ -237,6 +253,12 @@ class KnowledgeDeliverSkill(BaseSkill[KnowledgeDeliverInput, KnowledgeDeliverOut
             _resolve_asked_client(input, s_out) if client_guard else (None, "off")
         )
         asked_aliases = sorted(aliases(asked_client)) if asked_client else []
+        # 取引先が既知の語彙に無い（＝名指しを検出できない）質問でも、別の資料を根拠にしない:
+        # 問いの主題語（固有名詞のカタカナ・英字）を 1 つも含まない資料は添付しない
+        # （10-06 実データ QA: 「日本コカ・コーラの紅茶花伝…」で伊藤園の報告書が候補になった）。
+        subject_terms = (
+            query_subject_terms(input.query) if client_guard and asked_client is None else []
+        )
         not_found_block = client_guard and not s_out.found
         client_excluded = 0  # 配信基準は満たしたが別取引先（または取引先不明）で外した件数
         other_client_urls: set[str] = set()
@@ -268,11 +290,15 @@ class KnowledgeDeliverSkill(BaseSkill[KnowledgeDeliverInput, KnowledgeDeliverOut
             refs.append(ref)
             if file_id:
                 ref_by_fid.setdefault(file_id, []).append(ref)
-            about_client = (
-                asked_client is None
-                or hit_is_about_client(_as_search_hit(h), asked_client, aliases=asked_aliases)
-                is not None
-            )
+            if asked_client is not None:
+                about_client = (
+                    hit_is_about_client(_as_search_hit(h), asked_client, aliases=asked_aliases)
+                    is not None
+                )
+            elif subject_terms:
+                about_client = _mentions_subject(h, subject_terms)
+            else:
+                about_client = True
             hit_urls = {u for u in (h.url, h.drive_url) if u}
             if about_client:
                 evidence_refs.append(ref)
@@ -303,7 +329,7 @@ class KnowledgeDeliverSkill(BaseSkill[KnowledgeDeliverInput, KnowledgeDeliverOut
         # 根拠に使わない（別取引先の）リンクを回答末尾の「📎 資料リンク」から外す。
         # 同じ URL を名指しの取引先のヒットも持っていれば残す。
         answer = s_out.answer
-        if asked_client:
+        if asked_client or subject_terms:
             answer = _drop_link_lines(answer, other_client_urls - kept_urls)
         # ガードが無ければ添付していた（＝ガードが 0 件の原因）なら、従来の理由文ではなく
         # 「名指しの取引先の資料は無い」とそのまま言う。
@@ -374,6 +400,8 @@ class KnowledgeDeliverSkill(BaseSkill[KnowledgeDeliverInput, KnowledgeDeliverOut
                     # 取引先を外すと別取引先の資料が根拠の顔で戻るため）。
                     if asked_client:
                         reason = f"{asked_client}の資料のファイル本体は見つかりませんでした"
+                    elif subject_terms:
+                        reason = f"「{subject_terms[0]}」の資料のファイル本体は見つかりませんでした"
                     else:
                         reason = "問いに該当する資料は見つかりませんでした"
                 elif not ref_by_fid:
@@ -387,8 +415,12 @@ class KnowledgeDeliverSkill(BaseSkill[KnowledgeDeliverInput, KnowledgeDeliverOut
                     reason = "該当資料の取得に失敗しました"
                 if refs and (guard_emptied or not_found_block):
                     note = f"{reason}（要約のみお返しします）。"
-                    if client_excluded:
+                    if client_excluded and asked_client:
                         note += "別の取引先の資料は根拠にならないため、お送りしていません。"
+                    elif client_excluded:
+                        note += (
+                            "問いの内容が出てこない資料は根拠にならないため、お送りしていません。"
+                        )
                 elif applied:
                     note = (
                         f"{applied} で{reason}"
@@ -437,7 +469,7 @@ class KnowledgeDeliverSkill(BaseSkill[KnowledgeDeliverInput, KnowledgeDeliverOut
         # 名指しの取引先があればその取引先の資料だけ（別取引先を根拠として並べない）。
         if not_found_block:
             out_refs: list[KnowledgeRef] = []
-        elif asked_client:
+        elif asked_client or subject_terms:
             out_refs = evidence_refs
         else:
             out_refs = refs
