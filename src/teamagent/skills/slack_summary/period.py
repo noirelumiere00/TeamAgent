@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import re
 import unicodedata
-from datetime import datetime, timedelta
-from zoneinfo import ZoneInfo
+from datetime import datetime, timedelta, timezone
 
-JST = ZoneInfo("Asia/Tokyo")
+# 本番の実行環境（chainguard python）には時間帯のデータ（tzdata）が無く、IANA 名での指定は
+# import の時点で落ちて mcp 全体が起動しない（2026-10-07 r48 で発生）。日本は夏時間が無いので
+# 固定の +9 時間で表す（slack_unreplied 等と同じ）。
+JST = timezone(timedelta(hours=9))
 
 
 def resolve_period(period: str, *, now: datetime | None = None) -> tuple[str, str]:
