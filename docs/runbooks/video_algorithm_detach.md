@@ -20,7 +20,7 @@
 | env | tfvars 変数 | 既定（今と同じ） | 第 1 段階 |
 |---|---|---|---|
 | `USE_VIDEO_ALGORITHM_DETACH` | `use_video_algorithm_detach` | `0` | `1` |
-| `VIDEO_ALGORITHM_DETACH_ALLOWED_EMAILS` | `video_algorithm_detach_allowed_emails` | 空（誰にも適用しない） | 小俣さん本人のみ |
+| `VIDEO_ALGORITHM_DETACH_ALLOWED_EMAILS` | （退役・fargate.tf が `"*"` を直接焼く） | `"*"`（2026-10-06 全員開放） | 小俣さん本人のみ（済） |
 | `VIDEO_ALGORITHM_DETACH_DM_ONLY` | `video_algorithm_detach_dm_only` | `1` | `1` |
 | `VIDEO_ALGORITHM_DETACH_AFTER_S` | `video_algorithm_detach_after_s` | `30` | `30` |
 | `VIDEO_ALGORITHM_MAX_BACKGROUND` | `video_algorithm_max_background` | `2` | `2` |
@@ -35,7 +35,9 @@
    - 理由: `infra/deploy/terraform_runtime_guard.sh` の live→tfvars 導出は、この 6 変数を
      列挙していない（guard は凍結対象なので今回は変えていない）。tfvars に無いと、guard 経由の
      terraform apply（次の mcp便など）で既定（OFF・allowlist 空・LEASE 1800）に黙って戻る。
-   - 値を変えたとき（allowlist を広げる・DM_ONLY を外す・OFF に戻す）も毎回同じく追記する。
+   - 値を変えたとき（DM_ONLY を外す・OFF に戻す）も毎回同じく追記する。
+   - allowlist だけは 2026-10-06 の全員開放で tfvars から外した（fargate.tf が `"*"` を直接焼く）。
+     絞り直すときは fargate.tf の値を変える PR を出す。
 4. 小俣さんの DM で実機確認: 30 秒で受付文が返る／完了が同じ会話に届く／
    2 本同時の後の 3 本目が「順番待ち」になり、後から届く。
 

@@ -145,6 +145,89 @@ def test_blas_thread_pinning_matches_the_ec2_base_env() -> None:
         assert f"{name}=1" in base_env, f"EC2 base env の {name}=1 が消えている"
 
 
+# 2026-10-06 夜〜10-07 に mcp の TD 差し替え（register_mcp_td_image_env.sh）で live に入れた値。
+# guard の env 照合は文字列の完全一致なので、"false" と "0" も区別して固定する。
+LIVE_MCP_ENV_20261007 = {
+    "USE_COMPOSITE_SEARCH": "1",
+    "USE_ANSWER_FEEDBACK_TOOL": "1",
+    "USE_HTML_REPORTS": "tiktok_search",
+    "USE_HTML_REPORT_THUMBS": "1",
+    "USE_HTML_REPORT_HEADLINE": "1",
+    "DIRECT_SUMMARY_POST_ALLOWED_EMAILS": "*",
+    "VIDEO_ALGORITHM_DETACH_ALLOWED_EMAILS": "*",
+    "SURFACE_VIDEO_FOLLOWUP_ALLOWED_EMAILS": "*",
+    "MEETING_PREP_ALLOWED_EMAILS": "",
+    "TIKTOK_APIFY_FALLBACK_DEADLINE_S": "115",
+    "SLACK_SUMMARY_NAMED_PERIOD_ENABLED": "1",
+    "USE_TIKTOK_COMMENT_TOOLS": "false",
+}
+
+# 全員開放で tfvars から外した allowlist（fargate.tf が "*" を直接焼く）。tfvars（正本）には第 1 段階の
+# 値が残っているので、fargate.tf が再びこの var を読むと全員開放が黙って小俣さんだけに戻る。
+RETIRED_ALLOWLIST_VARIABLES = (
+    "video_algorithm_detach_allowed_emails",
+    "surface_video_followup_allowed_emails",
+    "direct_summary_post_allowed_emails",
+)
+
+
+def _variable_default(variables: str, name: str) -> str | bool:
+    start = variables.index(f'variable "{name}" {{')
+    block = variables[start : variables.index("\n}\n", start)]
+    match = re.search(r'(?m)^\s*default\s*=\s*(".*"|true|false)\s*$', block)
+    assert match, f"{name} の既定値が読めない"
+    raw = match.group(1)
+    if raw in ("true", "false"):
+        return raw == "true"
+    return json.loads(raw)
+
+
+def _rendered_default(mcp: str, variables: str, env_name: str) -> str:
+    """mcp TD の env 1 行を、tfvars に行が無いとき（＝変数の既定）の値として評価する。"""
+    lines = re.findall(rf'\{{ name = "{env_name}", value = (.+?) \}},?$', mcp, flags=re.MULTILINE)
+    assert len(lines) == 1, f"{env_name} は mcp TD にちょうど 1 回だけ描く（実際 {len(lines)} 回）"
+    expr = lines[0]
+    if expr.startswith('"'):
+        return json.loads(expr)
+    ternary = re.fullmatch(r'var\.([a-z0-9_]+) \? ("[^"]*") : ("[^"]*")', expr)
+    if ternary:
+        default = _variable_default(variables, ternary.group(1))
+        assert isinstance(default, bool), f"{ternary.group(1)} は bool のはず"
+        return json.loads(ternary.group(2) if default else ternary.group(3))
+    plain = re.fullmatch(r"var\.([a-z0-9_]+)", expr)
+    assert plain, f"{env_name} の値の式を評価できない: {expr}"
+    default = _variable_default(variables, plain.group(1))
+    assert isinstance(default, str), (
+        f"{plain.group(1)} は string のはず（live の表記をそのまま描く）"
+    )
+    return default
+
+
+def test_mcp_task_renders_live_env_from_20261007_td_swap() -> None:
+    """10-06 夜〜10-07 の TD 差し替えの値を、tfvars に行が無くても tf が描く。
+
+    tfvars（正本）は git 管理外で、guard の live→tfvars 導出もこれらのキーを列挙しない。
+    tf 側が live と違う値を描くと、次の guard 経由の apply で機能が OFF に戻る（または plan が止まる）。
+    """
+    mcp = _block(TF_ROOT / "fargate.tf", "aws_ecs_task_definition", "mcp")
+    variables = (TF_ROOT / "variables_fargate.tf").read_text(encoding="utf-8")
+    for env_name, live_value in LIVE_MCP_ENV_20261007.items():
+        assert _rendered_default(mcp, variables, env_name) == live_value, (
+            f"{env_name} が live（{live_value!r}）と違う値を描く"
+        )
+
+
+def test_retired_allowlist_variables_are_not_read_by_terraform() -> None:
+    terraform = "\n".join(path.read_text(encoding="utf-8") for path in sorted(TF_ROOT.glob("*.tf")))
+    for name in RETIRED_ALLOWLIST_VARIABLES:
+        assert f'variable "{name}" {{' in terraform, (
+            f"{name} の宣言は残す（tfvars に行が残っていても -var-file が警告/失敗しないように）"
+        )
+        assert f"var.{name}" not in terraform, (
+            f"{name} を読むと tfvars（正本）に残る第 1 段階の値で全員開放が黙って戻る"
+        )
+
+
 @pytest.mark.parametrize(
     ("filename", "task_definition"),
     [
