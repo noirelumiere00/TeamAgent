@@ -9,7 +9,10 @@
      ``cid`` が付いていて本体の channel と違えば拒否（どちらを読むか曖昧にしない）。
   P3 情報漏れの規則（``may_repost``）: 本人 DM での依頼は本人が見えるものを返してよい。
      チャンネル（公開・非公開・グループ DM）での依頼は、同じチャンネルの投稿か、
-     ファイルが公開（``is_public`` が bool の True）のときだけ。判定できなければ不可。
+     **元が公開チャンネル**で、ファイルも公開（``is_public`` が bool の True）のときだけ。
+     元が公開チャンネルかは Slack file の ``channels``（公開チャンネルの ID 一覧）に元の
+     channel が入っているかで確かめる（``is_public`` だけだと、別の公開チャンネルにも
+     共有済みの「非公開チャンネル・DM の投稿の添付」まで通ってしまう）。判定できなければ不可。
 """
 
 from __future__ import annotations
@@ -87,22 +90,30 @@ def may_repost(
     identity_verified: bool,
     source_channel: str,
     file_is_public: bool,
+    file_public_channels: tuple[str, ...] | list[str] = (),
 ) -> bool:
     """リンク先のファイルの中身と原本を、依頼が来た場所へ出してよいか（P3）。
 
     - 本人 DM（D…・署名済み本人）: 宛先は本人だけ＝本人の可視範囲を出ない → 可
     - 同じチャンネルの投稿: その場にいる人は元から見られる → 可
-    - それ以外のチャンネル: ファイルが公開（全メンバーが見られる）ときだけ可
-      （非公開チャンネル・DM・グループ DM のファイルを、見られない人のいる場所へ出さない）
+    - それ以外のチャンネル: **元が公開チャンネル**（``C…`` で、ファイルの ``channels`` に
+      元の channel が入っている）かつファイルが公開のときだけ可。元が非公開チャンネル・
+      DM（``D…``）・グループ DM（``G…``）なら、ファイルが別の場所で公開されていても不可
+      （その投稿が実在し本人が見られることを、見られない人のいる場所へ漏らさない）。
     """
     origin = (origin_channel or "").strip()
     if not origin:
         return False
     if is_private_surface(origin, identity_verified):
         return True
-    if origin == source_channel:
+    source = (source_channel or "").strip()
+    if origin == source:
         return True
-    return file_is_public is True
+    if not source.startswith("C"):
+        return False
+    if not isinstance(file_public_channels, (tuple, list)):
+        return False
+    return file_is_public is True and source in file_public_channels
 
 
 __all__ = [

@@ -56,8 +56,8 @@ class AttachmentAssistInput(BaseModel):
         default="",
         max_length=500,
         description=(
-            "Slack 投稿のリンク（https://<ws>.slack.com/archives/…）を示されたときだけ渡す。"
-            "その投稿の添付を読み、元ファイルをこの会話に添付し直す。"
+            "Slack 投稿のリンク（https://<ws>.slack.com/archives/…）の先の**添付ファイル**を"
+            "読む・添付してと頼まれたときだけ渡す（スレッドの要約は slack_summary）。"
         ),
     )
 

@@ -34,6 +34,7 @@ from slack_sdk.errors import SlackApiError
 from teamagent.adapters.slack_channel_ingest_client import HistoryBatch, SlackMessage
 from teamagent.adapters.slack_file_guard import SlackFileGuardError
 from teamagent.adapters.slack_user_reader import SlackThreadRead, SlackUserReader
+from teamagent.skills.attachment_assist import skill as skill_mod
 from teamagent.skills.attachment_assist.permalink import may_repost, parse_permalink
 from teamagent.skills.attachment_assist.schema import AttachmentAssistInput
 from teamagent.skills.attachment_assist.skill import AttachmentAssistSkill
@@ -228,6 +229,8 @@ def _ctx(channel: str = DM, thread: str = DM_THREAD, **over: Any) -> SkillContex
 def _env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("SLACK_WORKSPACE_DOMAIN", WS)
     monkeypatch.setenv("ATTACHMENT_PERMALINK_ENABLED", "1")
+    # 「この会話に添付済み」の記憶はプロセス内で共有される＝テストごとに空にする。
+    skill_mod._REPOSTED.clear()
 
 
 def _skill(
@@ -407,12 +410,46 @@ def test_truthy_string_is_public_is_not_public() -> None:
 
 
 def test_public_file_may_be_reposted_to_public_channel() -> None:
-    skill, _, slack, _, _ = _skill(_post([_file(is_public=True)]))
+    """元が公開チャンネル（file.channels に元の channel がある）で公開ファイルなら出してよい。"""
+    skill, _, slack, _, _ = _skill(_post([_file(is_public=True, channels=[SRC_CH])]))
     thread = "1791278520.000900"
     out = _run(skill, ctx=_ctx(channel=PUBLIC_ORIGIN, thread=thread))
     assert out.error == ""
     assert slack.uploads[0]["channel"] == PUBLIC_ORIGIN
     assert slack.uploads[0]["thread_ts"] == thread
+
+
+@pytest.mark.parametrize(
+    ("source", "file_over"),
+    [
+        # 非公開チャンネル（C… でも非公開はあり得る）の投稿。添付は別の公開チャンネルにも共有済み
+        # ＝is_public=True だが、元の channel は channels（公開）ではなく groups にいる。
+        (SRC_CH, {"is_public": True, "channels": ["C0OTHERPUB1"], "groups": [SRC_CH]}),
+        # channels が無い（message 内の file に載らない形）＝公開チャンネルと確かめられない。
+        (SRC_CH, {"is_public": True}),
+        # channels の型が違う。
+        (SRC_CH, {"is_public": True, "channels": SRC_CH}),
+        # 元が DM・グループ DM。ファイルが公開でも、別チャンネルからの依頼では出さない。
+        ("D0SOMEONE1", {"is_public": True, "channels": ["D0SOMEONE1"]}),
+        ("G0PRIVATE1", {"is_public": True, "channels": ["G0PRIVATE1"]}),
+    ],
+)
+def test_public_file_from_private_source_not_reposted_to_other_channel(
+    source: str, file_over: dict[str, Any]
+) -> None:
+    """非公開チャンネル・DM の投稿の添付は、ファイルが is_public でも別チャンネルへ出さない。
+
+    出すと、依頼元の全員に「その非公開の投稿が実在し、本人が見られ、このファイルが付いている」
+    ことが伝わる（要約も添付もせず、見えないときと同じ一様文）。
+    """
+    link = f"https://{WS}.slack.com/archives/{source}/p1782437516047339"
+    skill, _, slack, bedrock, _ = _skill(_post([_file(**file_over)]))
+    out = _run(skill, ctx=_ctx(channel=PUBLIC_ORIGIN, thread="1791278520.000900"), permalink=link)
+    assert out.error == "not_found"
+    assert slack.downloads == [] and slack.uploads == [] and bedrock.calls == []
+    assert PDF_NAME not in out.message
+    invisible, *_ = _skill(SlackThreadRead(error="not_in_channel"))
+    assert out.message == _run(invisible, ctx=_ctx(channel=PUBLIC_ORIGIN), permalink=link).message
 
 
 def test_same_channel_post_may_be_reposted() -> None:
@@ -434,7 +471,7 @@ def test_group_dm_origin_is_treated_as_shared_surface() -> None:
 def test_restricted_listing_hides_private_file_names() -> None:
     """別チャンネルからの依頼で名前が合わないとき、非公開ファイルの名前を並べない。"""
     files = [
-        _file(id="F1", name="公開資料.pdf", is_public=True),
+        _file(id="F1", name="公開資料.pdf", is_public=True, channels=[SRC_CH]),
         _file(id="F2", name="社外秘_単価表.pdf", is_public=False),
     ]
     skill, _, _, _, _ = _skill(_post(files))
@@ -444,23 +481,34 @@ def test_restricted_listing_hides_private_file_names() -> None:
 
 
 @pytest.mark.parametrize(
-    ("origin", "source", "public", "expected"),
+    ("origin", "source", "public", "public_channels", "expected"),
     [
-        (DM, SRC_CH, False, True),
-        (PUBLIC_ORIGIN, SRC_CH, False, False),
-        (PUBLIC_ORIGIN, SRC_CH, True, True),
-        (PUBLIC_ORIGIN, "D0SOMEONE1", False, False),
-        (SRC_CH, SRC_CH, False, True),
-        ("", SRC_CH, True, False),
+        (DM, SRC_CH, False, (), True),
+        (PUBLIC_ORIGIN, SRC_CH, False, (), False),
+        (PUBLIC_ORIGIN, SRC_CH, False, (SRC_CH,), False),
+        # 元が公開チャンネル（channels に元がいる）× 公開ファイル → 可
+        (PUBLIC_ORIGIN, SRC_CH, True, (SRC_CH,), True),
+        # 元が非公開チャンネル × ファイルは別の公開チャンネルで公開 × 依頼元は公開チャンネル → 不可
+        (PUBLIC_ORIGIN, SRC_CH, True, ("C0OTHERPUB1",), False),
+        # 公開かどうか確かめられない（channels 無し）→ 不可
+        (PUBLIC_ORIGIN, SRC_CH, True, (), False),
+        (PUBLIC_ORIGIN, "D0SOMEONE1", False, (), False),
+        (PUBLIC_ORIGIN, "D0SOMEONE1", True, ("D0SOMEONE1",), False),
+        (PUBLIC_ORIGIN, "G0PRIVATE1", True, ("G0PRIVATE1",), False),
+        (SRC_CH, SRC_CH, False, (), True),
+        ("", SRC_CH, True, (SRC_CH,), False),
     ],
 )
-def test_may_repost_matrix(origin: str, source: str, public: bool, expected: bool) -> None:
+def test_may_repost_matrix(
+    origin: str, source: str, public: bool, public_channels: tuple[str, ...], expected: bool
+) -> None:
     assert (
         may_repost(
             origin_channel=origin,
             identity_verified=True,
             source_channel=source,
             file_is_public=public,
+            file_public_channels=public_channels,
         )
         is expected
     )
@@ -794,3 +842,245 @@ def test_reader_missing_message_is_not_found() -> None:
 def test_reader_bad_target() -> None:
     reader = SlackUserReader("xoxp-test", client=_FakeAsyncClient())  # type: ignore[arg-type]
     assert reader.read_message_checked("", SRC_TS, "r").error == "bad_target"
+
+
+# ── レビュー指摘（2026-10-07）の回帰 ─────────────────────────────────────
+
+
+def test_bot_cannot_fetch_in_other_channel_uses_uniform_denial() -> None:
+    """別チャンネルからの依頼では「投稿は確認できました」と言わない（投稿の実在を漏らさない）。"""
+    skill, _, slack, bedrock, _ = _skill(
+        _post([_file(is_public=True, channels=[SRC_CH])]),
+        slack=_FakeSlack(boom=_http_error(403)),
+    )
+    origin = _ctx(channel=PUBLIC_ORIGIN, thread="1791278520.000900")
+    out = _run(skill, ctx=origin)
+    assert out.error == "not_found"
+    assert "確認できました" not in out.message
+    assert slack.uploads == [] and bedrock.calls == []
+    invisible, *_ = _skill(SlackThreadRead(error="not_in_channel"))
+    assert out.message == _run(invisible, ctx=origin).message
+
+
+@pytest.mark.parametrize("status", [429, 500, 503])
+def test_transient_http_errors_are_download_failed_not_permission(status: int) -> None:
+    """429・5xx は待てば取れる＝「Aico が参加していない場所」と権限の問題にしない。"""
+    skill, _, slack, _, _ = _skill(slack=_FakeSlack(boom=_http_error(status)))
+    out = _run(skill)
+    assert out.error == "download_failed"
+    assert "時間をおいて" in out.message
+    assert "参加していない" not in out.message
+    assert slack.uploads == []
+
+
+_LOGIN_HTML = b"<!DOCTYPE html><html><head><title>Slack</title></head><body>sign in</body></html>"
+
+
+@pytest.mark.parametrize(
+    ("name", "mime", "filetype"),
+    [("memo.csv", "text/csv", "csv"), ("note.txt", "text/plain", "text"), ("a.md", "", "markdown")],
+)
+def test_login_page_html_for_text_file_is_bot_cannot_fetch(
+    name: str, mime: str, filetype: str
+) -> None:
+    """テキスト系の添付でも、200 で返ったログイン画面の HTML を原本として要約・添付しない。"""
+    skill, _, slack, bedrock, _ = _skill(
+        _post([_file(name=name, mimetype=mime, filetype=filetype, size=len(_LOGIN_HTML))]),
+        slack=_FakeSlack(payload=_LOGIN_HTML),
+    )
+    out = _run(skill)
+    assert out.error == "bot_cannot_fetch"
+    assert slack.uploads == [] and bedrock.calls == []
+
+
+def test_real_html_file_is_not_mistaken_for_login_page() -> None:
+    """元から HTML のファイル（.html・text/html）は中身が HTML で当然＝弾かない。"""
+    skill, _, slack, bedrock, _ = _skill(
+        _post([_file(name="page.html", mimetype="text/html", filetype="html", size=100)]),
+        slack=_FakeSlack(payload=_LOGIN_HTML),
+    )
+    out = _run(skill)
+    assert out.error == ""
+    assert len(slack.uploads) == 1 and bedrock.calls
+
+
+def test_other_files_note_points_to_linked_post_not_this_conversation() -> None:
+    """others はリンク先の投稿の別ファイル＝「この会話には他に…」と案内しない。"""
+    files = [_file(), _file(id="F2", name="別紙_単価.pdf")]
+    skill, *_ = _skill(_post(files))
+    out = _run(skill, file_name=PDF_NAME)
+    assert out.error == ""
+    assert "リンク先の投稿には他に 別紙_単価.pdf もあります" in out.message
+    assert "この会話には他に" not in out.message
+
+
+def test_repeated_call_in_same_conversation_does_not_duplicate_upload() -> None:
+    """同じ会話で同じリンクを聞き直しても、原本は 1 回しか投下しない。"""
+    skill, _, slack, _, _ = _skill()
+    first = _run(skill)
+    second = _run(skill, mode="translate")
+    assert first.attached is True
+    assert len(slack.uploads) == 1
+    assert second.error == "" and second.attached is False
+    assert "添付済み" in second.message
+    _assert_no_punt(second.message)
+    # 別の会話（別スレッド）へは添付する。
+    _run(skill, ctx=_ctx(thread="1791278520.000777"))
+    assert len(slack.uploads) == 2
+
+
+def test_failed_upload_is_retried_on_next_call() -> None:
+    """添付に失敗した回は「添付済み」と覚えない（次の呼び出しで添付し直す）。"""
+    slack = _FakeSlack(upload_ok=False)
+    skill, *_ = _skill(slack=slack)
+    _run(skill)
+    slack.upload_ok = True
+    out = _run(skill)
+    assert out.attached is True
+    assert len(slack.uploads) == 2
+
+
+def test_link_to_post_in_this_very_thread_is_not_reuploaded() -> None:
+    """リンク先がいま話しているスレッドの投稿なら、同じ原本を複製して投下しない。"""
+    skill, _, slack, bedrock, _ = _skill()
+    out = _run(skill, ctx=_ctx(channel=SRC_CH, thread=SRC_TS))
+    assert out.error == ""
+    assert slack.uploads == [] and out.attached is False
+    assert bedrock.calls
+    assert "添付されています" in out.message
+
+
+# ── 長い資料: 依頼の語を含むページを優先して読む ─────────────────────────
+
+
+def _case_book_pages(target_page: int, total: int = 40) -> list[tuple[int, str]]:
+    """事例集の形（1 ページ 1 事例・どのページにも「ショート動画」「実績」が出る）。"""
+    pages = []
+    for n in range(1, total + 1):
+        if n == target_page:
+            body = (
+                "【事例】日本コカ・コーラ 紅茶花伝 無糖 アールグレイアイスティー"
+                "（サンリオ限定ボトル）ショート動画施策。実績: 総再生 812 万回・保存率 4.1%。"
+            )
+        else:
+            body = f"【事例】ブランド{n:02d} の新商品ショート動画施策。実績: 再生 {n} 万回。"
+        pages.append((n, body + "詳細" * 400))
+    return pages
+
+
+def test_long_case_book_reads_requested_case_from_late_page(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """本番の依頼（事例集の後半にある紅茶花伝の事例）が要約器に届き、作業を戻さない。"""
+    pages = _case_book_pages(target_page=35)
+    monkeypatch.setattr(skill_mod, "_extract_pages", lambda *a, **kw: pages)
+    skill, _, _, bedrock, _ = _skill()
+    out = _run(skill, mode="summary", file_name=PDF_NAME, instruction=PROD_REQUEST)
+    assert out.error == ""
+    assert out.truncated is True
+    assert "紅茶花伝" in bedrock.last_user_text
+    assert "812 万回" in bedrock.last_user_text
+    assert "語を含むページと" in bedrock.last_user_text
+    # 該当ページを優先しつつ、余りは先頭から埋める（冒頭の文脈も失わない）。
+    assert "ブランド01" in bedrock.last_user_text
+    assert "冒頭部分のみ" not in bedrock.last_user_text
+    assert "35 ページ目" in out.message
+    assert "該当箇所を指定" not in out.message
+    _assert_no_punt(out.message)
+
+
+def test_long_document_without_matching_terms_says_so_honestly(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """依頼の語が資料に無ければ、冒頭だけ読んだ・見当たらなかったと正直に書く（作業を戻さない）。"""
+    pages = [(p, t.replace("紅茶花伝", "別商品")) for p, t in _case_book_pages(target_page=35)]
+    pages = [(p, t.replace("日本コカ・コーラ", "別会社")) for p, t in pages]
+    monkeypatch.setattr(skill_mod, "_extract_pages", lambda *a, **kw: pages)
+    skill, _, _, bedrock, _ = _skill()
+    out = _run(skill, mode="summary", file_name=PDF_NAME, instruction=PROD_REQUEST)
+    assert out.truncated is True
+    assert "冒頭" in out.message and "見当たりませんでした" in out.message
+    assert "該当箇所を指定" not in out.message
+    assert "冒頭部分のみ" in bedrock.last_user_text
+
+
+# ── adapter: thread_ts の無いスレッド返信リンク ─────────────────────────
+
+
+class _SplitAsyncClient(_FakeAsyncClient):
+    """本番の形: history はスレッド返信を返さない・replies は返信の ts でもスレッドを返す。"""
+
+    def __init__(self, history: list[dict[str, Any]], replies: list[dict[str, Any]]) -> None:
+        super().__init__()
+        self.history_msgs = history
+        self.replies_msgs = replies
+
+    async def conversations_history(self, **kw: Any) -> dict[str, Any]:
+        self.calls.append(("history", kw))
+        return {"ok": True, "messages": self.history_msgs}
+
+    async def conversations_replies(self, **kw: Any) -> dict[str, Any]:
+        self.calls.append(("replies", kw))
+        return {"ok": True, "messages": self.replies_msgs}
+
+
+def test_reader_reply_link_without_thread_ts_falls_back_to_replies() -> None:
+    """?thread_ts= が落ちた返信リンク: history で 0 件なら replies(ts=リンクの ts) で取り直す。"""
+    reply_ts = "1782437600.000200"
+    client = _SplitAsyncClient(
+        history=[],
+        replies=[
+            {"ts": SRC_TS, "text": "parent", "files": [_file(id="FPARENT")]},
+            {"ts": reply_ts, "text": "reply", "files": [_file(id="FREPLY")]},
+        ],
+    )
+    reader = SlackUserReader("xoxp-test", client=client)  # type: ignore[arg-type]
+    out = reader.read_message_checked(SRC_CH, reply_ts, "r")
+    assert out.error == ""
+    assert [m.files[0]["id"] for m in out.messages] == ["FREPLY"]
+    assert [name for name, _ in client.calls] == ["history", "replies"]
+    assert client.calls[1][1]["ts"] == reply_ts
+
+
+def test_reader_top_level_hit_does_not_call_replies() -> None:
+    client = _SplitAsyncClient(history=[{"ts": SRC_TS, "text": "x"}], replies=[])
+    reader = SlackUserReader("xoxp-test", client=client)  # type: ignore[arg-type]
+    assert reader.read_message_checked(SRC_CH, SRC_TS, "r").error == ""
+    assert [name for name, _ in client.calls] == ["history"]
+
+
+def test_reader_history_permission_error_is_not_retried_with_replies() -> None:
+    """history が権限エラーなら replies で取り直さない（error code をそのまま返す）。"""
+    client = _FakeAsyncClient(error="not_in_channel")
+    reader = SlackUserReader("xoxp-test", client=client)  # type: ignore[arg-type]
+    assert reader.read_message_checked(SRC_CH, SRC_TS, "r").error == "not_in_channel"
+    assert [name for name, _ in client.calls] == ["history"]
+
+
+# ── 説明文: スイッチで切り替える ─────────────────────────────────────────
+
+
+def test_description_off_is_unchanged_and_on_states_permalink_exception(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """OFF の説明はリンクへ誘導しない。ON は「添付がある時だけ」「再配信しない」の例外を明記する。"""
+    monkeypatch.setenv("ATTACHMENT_PERMALINK_ENABLED", "0")
+    off = AttachmentAssistSkill.tool_description()
+    assert "permalink" not in off and "リンク" not in off
+    assert off == AttachmentAssistSkill.description
+    monkeypatch.setenv("ATTACHMENT_PERMALINK_ENABLED", "1")
+    on = AttachmentAssistSkill.tool_description()
+    assert "permalink" in on
+    assert "添付が無くても" in on
+    assert "slack_summary" in on  # スレッドの要約は別ツール
+    assert "1 回添付し直す" in on
+
+
+def test_factory_uses_switch_dependent_description() -> None:
+    from pathlib import Path
+
+    import teamagent.orchestrator.factory as factory
+
+    source = Path(factory.__file__).read_text(encoding="utf-8")
+    assert "AttachmentAssistSkill.tool_description()" in source
+    assert "AttachmentAssistSkill.description," not in source

@@ -594,7 +594,9 @@ def build_production_tools() -> list[ToolSpec]:
         specs.append(
             ToolSpec(
                 AttachmentAssistSkill.name,
-                AttachmentAssistSkill.description,
+                # 投稿リンク経路のスイッチ（ATTACHMENT_PERMALINK_ENABLED）で説明を切り替える
+                # ＝OFF の説明はこの経路を足す前と同じ（リンクを attachment_assist へ誘導しない）。
+                AttachmentAssistSkill.tool_description(),
                 AttachmentAssistSkill,
                 # 依存（Slack / ingest / Bedrock）は初回利用時に遅延生成する
                 # ＝フラグ ON だけで env 不足の起動 crash を作らない。

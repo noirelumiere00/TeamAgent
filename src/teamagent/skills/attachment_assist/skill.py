@@ -41,6 +41,7 @@ from __future__ import annotations
 import asyncio
 import os
 import tempfile
+import threading
 import time
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
@@ -71,6 +72,11 @@ from teamagent.skills.attachment_assist.discover import (
     collect_candidates,
     select_candidate,
 )
+from teamagent.skills.attachment_assist.focus import (
+    focus_pages,
+    focus_terms,
+    format_page_list,
+)
 from teamagent.skills.attachment_assist.permalink import (
     ERR_BAD_PERMALINK,
     ERR_OTHER_WORKSPACE,
@@ -97,6 +103,9 @@ MAX_ATTACHMENT_BYTES = 30 * 1024 * 1024  # 30MB
 MAX_INPUT_CHARS = 20_000
 # 抽出（pypdf / OOXML パース）の壁時計上限。
 EXTRACT_TIMEOUT_S = 45.0
+# 抽出（本文化）で保持する字数の上限 = LLM へ渡す上限の何倍か。長い資料でも、依頼の語を
+# 含むページを後半から拾えるように広めに抜く（LLM へ渡すのは MAX_INPUT_CHARS まで）。
+EXTRACT_SCAN_FACTOR = 10
 # PDF の走査ページ数上限（高圧縮 PDF の decompression bomb 対策）。
 MAX_PDF_PAGES = 300
 # スレッドが無い（DM 直投げ等）ときに遡るチャンネル履歴の件数。
@@ -115,6 +124,8 @@ _UNIFORM_DENY_CODES = frozenset(
         "bad_target",
     }
 )
+# bot がファイルを取れない＝権限の問題とみなす HTTP 状態（429・5xx は一時的な失敗）。
+_BOT_DENIED_STATUSES = frozenset({403, 404})
 # 本人の連携（xoxp）を作り直せば直る error code。
 _RECONNECT_CODES = frozenset(
     {
@@ -191,17 +202,36 @@ class AttachmentAssistSkill(BaseSkill[AttachmentAssistInput, AttachmentAssistOut
     """会話に添付されたファイルを読んで要約・修正案・議事録化・集計・英訳する Skill。"""
 
     name: ClassVar[str] = "attachment_assist"
+    # スイッチ OFF（既定）の説明＝この経路を足す前と同じ文。投稿リンクへ誘導しない。
     description: ClassVar[str] = (
         "いま話しているスレッド/チャンネルに**添付されたファイル**（PDF/Word/PowerPoint/"
         "Excel/テキスト）を読んで、要約・修正案・議事録フォーマット化・集計・英訳を返す"
         "読み取り専用ツール。ファイルが実際に添付されている時だけ使う。"
         "Drive 内の資料を探して取り出す依頼は knowledge_deliver を使うこと（別ツール）。"
-        "ファイルの書き換え・生成・再配信はしない。"
-        "Slack 投稿のリンクを示されたら permalink に渡す（本人が見られる投稿の添付を読み、"
-        "元ファイルをこの会話に添付し直す）。" + USER_CONTEXT_RULE
+        "ファイルの書き換え・生成・再配信はしない。" + USER_CONTEXT_RULE
+    )
+    # スイッチ ON の説明。「添付がある時だけ」「再配信しない」に投稿リンクの例外を明記する
+    # （例外を書かないと、LLM が「添付が無いので使えない」「添付し直しはできない」と読む）。
+    # スレッド・会話の要約は slack_summary（添付ファイルを読む依頼だけをここへ回す）。
+    description_with_permalink: ClassVar[str] = (
+        "いま話しているスレッド/チャンネルに**添付されたファイル**（PDF/Word/PowerPoint/"
+        "Excel/テキスト）を読んで、要約・修正案・議事録フォーマット化・集計・英訳を返す"
+        "ツール。ファイルが実際に添付されている時だけ使う（Slack 投稿リンクの先の**添付"
+        "ファイル**を読む・添付してと頼まれた時は例外で、添付が無くても permalink に渡す。"
+        "スレッドや会話の要約は slack_summary）。"
+        "Drive 内の資料を探して取り出す依頼は knowledge_deliver を使うこと（別ツール）。"
+        "ファイルの書き換え・生成はしない。再配信もしない（投稿リンクの場合だけ、元ファイルを"
+        "この会話に 1 回添付し直す）。" + USER_CONTEXT_RULE
     )
     input_schema: ClassVar[type[BaseModel]] = AttachmentAssistInput
     output_schema: ClassVar[type[BaseModel]] = AttachmentAssistOutput
+
+    @classmethod
+    def tool_description(cls) -> str:
+        """MCP に出す説明。投稿リンク経路のスイッチが ON のときだけ例外の文を含める。"""
+        if tool_enabled(PERMALINK_FLAG):
+            return cls.description_with_permalink
+        return cls.description
 
     def __init__(
         self,
@@ -326,8 +356,12 @@ class AttachmentAssistSkill(BaseSkill[AttachmentAssistInput, AttachmentAssistOut
         target: AttachmentCandidate,
         others: list[str],
         data: bytes,
+        others_in_link: bool = False,
     ) -> AttachmentAssistOutput:
-        """取得済みのファイルを本文化 → mode 別に処理 → 決定的な文面に整える（両経路で共有）。"""
+        """取得済みのファイルを本文化 → mode 別に処理 → 決定的な文面に整える（両経路で共有）。
+
+        ``others_in_link`` は投稿リンク経路（others はリンク先の投稿にある別ファイル）。
+        """
         # ── 本文化（既存抽出器の zip-bomb / 文字数 cap を活かす）───────────
         try:
             pages = self._extract(target, data)
@@ -345,7 +379,16 @@ class AttachmentAssistSkill(BaseSkill[AttachmentAssistInput, AttachmentAssistOut
         # シークレットだけ落とす（scrub_value は 2000 字 hard cap を持つので使わない）。
         body = redact_secrets(body_raw)
         truncated = len(body) > self._max_input_chars
+        # 長いときは、依頼文に出てくる語を含むページ（と前後）を優先して詰める。
+        # 先頭から切るだけだと、事例集の後半にある指定事例が LLM に届かない（10-06 本番）。
+        terms: list[str] = []
+        hit_pages: tuple[int, ...] = ()
         if truncated:
+            terms = focus_terms(input.instruction, exclude=[input.file_name, target.name])
+            focused = focus_pages(pages, terms, budget=self._max_input_chars)
+            if focused is not None:
+                body = redact_secrets(focused.body)
+                hit_pages = focused.hit_pages
             body = body[: self._max_input_chars]
 
         # ── aggregate は数値を Python で決定的に出し、LLM には整形だけさせる ──
@@ -365,6 +408,7 @@ class AttachmentAssistSkill(BaseSkill[AttachmentAssistInput, AttachmentAssistOut
             truncated=truncated,
             precomputed=precomputed,
             ctx=ctx,
+            focused=bool(hit_pages),
         )
         if not answer:
             return self._fail("llm_failed", input.mode, file_name=target.name, others=others)
@@ -378,6 +422,9 @@ class AttachmentAssistSkill(BaseSkill[AttachmentAssistInput, AttachmentAssistOut
             answer=answer,
             others=others,
             aggregated=bool(precomputed),
+            searched_terms=bool(terms),
+            hit_pages=hit_pages,
+            others_in_link=others_in_link,
         )
         log.info(
             "attachment_assist_done",
@@ -461,6 +508,7 @@ class AttachmentAssistSkill(BaseSkill[AttachmentAssistInput, AttachmentAssistOut
                     identity_verified=True,
                     source_channel=link.channel_id,
                     file_is_public=c.is_public,
+                    file_public_channels=c.public_channels,
                 )
             ]
             rejected = []
@@ -492,39 +540,70 @@ class AttachmentAssistSkill(BaseSkill[AttachmentAssistInput, AttachmentAssistOut
         others = [c.name for c in candidates if c.file_id != target.file_id]
 
         # ── L2: 本体は bot で取得（ホスト検証・逐次サイズ検査は既存のまま）───
+        # 「投稿は確認できました」は、別チャンネルからの依頼では投稿の実在を漏らすので
+        # 一様文に置き換える（restricted のときは中身も存在も言わない）。
+        def cannot_fetch() -> AttachmentAssistOutput:
+            if restricted:
+                return self._permalink_fail(deny_key, mode, error="not_found")
+            return self._permalink_fail(
+                "bot_cannot_fetch", mode, file_name=target.name, others=others
+            )
+
         try:
             data = self._download(target, ctx.request_id, allowed_hosts)
         except SlackFileGuardError as e:
             code = str(e).split(":", 1)[0]
             log.warning("attachment_assist_permalink_download_blocked", err=code)
-            key = REASON_TOO_LARGE if "TOO_LARGE" in code else "bot_cannot_fetch"
-            return self._permalink_fail(key, mode, file_name=target.name, others=others)
+            if "TOO_LARGE" in code:
+                return self._permalink_fail(
+                    REASON_TOO_LARGE, mode, file_name=target.name, others=others
+                )
+            return cannot_fetch()
         except httpx.HTTPStatusError as e:
-            log.warning(
-                "attachment_assist_permalink_download_denied", status=e.response.status_code
-            )
-            return self._permalink_fail(
-                "bot_cannot_fetch", mode, file_name=target.name, others=others
-            )
+            status = e.response.status_code
+            log.warning("attachment_assist_permalink_download_denied", status=status)
+            if status in _BOT_DENIED_STATUSES:
+                return cannot_fetch()
+            # 429・5xx は一時的な失敗＝権限の問題と言わない（時間をおいて再度）。
+            return self._fail("download_failed", mode, file_name=target.name, others=others)
         except Exception as e:
             log.warning("attachment_assist_permalink_download_failed", err=type(e).__name__)
             return self._fail("download_failed", mode, file_name=target.name, others=others)
         if _looks_like_login_page(target, data):
             # 権限の無い bot に Slack はログイン画面の HTML を 200 で返すことがある。
             log.warning("attachment_assist_permalink_download_denied", status="html")
-            return self._permalink_fail(
-                "bot_cannot_fetch", mode, file_name=target.name, others=others
-            )
+            return cannot_fetch()
 
         # ── L4: 依頼元へ原本を添付し直す（唯一の書き込み）→ 読んで答える ───
-        attached = self._repost(target, data, origin, origin_thread, ctx.request_id, log)
-        out = self._answer(input, ctx, log, target=target, others=others, data=data)
-        note = (
-            f"📎 元ファイル（{target.name}）をこの会話に添付しました。"
-            if attached
-            else "※ 元ファイルをこの会話へ添付できませんでした（Slack への添付に失敗しました）。"
+        #    同じ会話に既にある（リンク先がこのスレッドの投稿・直前に Aico が添付済み）なら
+        #    添付し直さない＝聞き直しのたびに同じ原本を重複して投下しない。
+        repost_key = (origin, origin_thread, target.file_id)
+        if _same_conversation(link, origin, origin_thread):
+            attached, skipped = False, "here"
+        elif _recently_reposted(repost_key):
+            attached, skipped = False, "already"
+        else:
+            attached = self._repost(target, data, origin, origin_thread, ctx.request_id, log)
+            skipped = ""
+            if attached:
+                _remember_repost(repost_key)
+        out = self._answer(
+            input, ctx, log, target=target, others=others, data=data, others_in_link=True
         )
-        log.info("attachment_assist_permalink_done", attached=attached, failed=bool(out.error))
+        if skipped == "here":
+            note = f"📎 元ファイル（{target.name}）は、この会話のリンク先の投稿に添付されています。"
+        elif skipped == "already":
+            note = f"📎 元ファイル（{target.name}）は、この会話に添付済みです。"
+        elif attached:
+            note = f"📎 元ファイル（{target.name}）をこの会話に添付しました。"
+        else:
+            note = "※ 元ファイルをこの会話へ添付できませんでした（Slack への添付に失敗しました）。"
+        log.info(
+            "attachment_assist_permalink_done",
+            attached=attached,
+            skipped=skipped,
+            failed=bool(out.error),
+        )
         return out.model_copy(update={"attached": attached, "message": f"{out.message}\n\n{note}"})
 
     def _permalink_fail(
@@ -688,7 +767,12 @@ class AttachmentAssistSkill(BaseSkill[AttachmentAssistInput, AttachmentAssistOut
         deadline = time.monotonic() + self._extract_timeout_s
 
         def _work() -> list[tuple[int, str]]:
-            return _extract_pages(target, data, max_chars=self._max_input_chars, deadline=deadline)
+            return _extract_pages(
+                target,
+                data,
+                max_chars=self._max_input_chars * EXTRACT_SCAN_FACTOR // 2,
+                deadline=deadline,
+            )
 
         pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="attach-extract")
         try:
@@ -707,6 +791,7 @@ class AttachmentAssistSkill(BaseSkill[AttachmentAssistInput, AttachmentAssistOut
         truncated: bool,
         precomputed: str,
         ctx: SkillContext,
+        focused: bool = False,
     ) -> tuple[str, float]:
         if self._bedrock is None:
             from teamagent.adapters.bedrock_client import BedrockClient
@@ -720,6 +805,7 @@ class AttachmentAssistSkill(BaseSkill[AttachmentAssistInput, AttachmentAssistOut
             body=body,
             truncated=truncated,
             precomputed=precomputed,
+            focused=focused,
         )
         try:
             resp = self._bedrock.converse(
@@ -749,6 +835,34 @@ class AttachmentAssistSkill(BaseSkill[AttachmentAssistInput, AttachmentAssistOut
 
 
 # ── モジュール関数（純粋・テスト容易）──────────────────────────────────────
+
+# 投稿リンク経路で「この会話にこの原本を添付済み」を覚える時間（同じ mcp プロセス内だけ）。
+# 聞き直し（「同じPDFの他の事例も」）で同じ原本が何度も投下されるのを防ぐ。プロセスが
+# 替われば忘れる（その場合は 1 回だけ重複し得る）。
+REPOST_MEMORY_S = 6 * 60 * 60
+_REPOSTED: dict[tuple[str, str, str], float] = {}
+_REPOSTED_LOCK = threading.Lock()
+
+
+def _recently_reposted(key: tuple[str, str, str]) -> bool:
+    now = time.monotonic()
+    with _REPOSTED_LOCK:
+        for k, at in list(_REPOSTED.items()):
+            if now - at > REPOST_MEMORY_S:
+                del _REPOSTED[k]
+        return key in _REPOSTED
+
+
+def _remember_repost(key: tuple[str, str, str]) -> None:
+    with _REPOSTED_LOCK:
+        _REPOSTED[key] = time.monotonic()
+
+
+def _same_conversation(link: Any, origin: str, origin_thread: str) -> bool:
+    """リンク先の投稿が、いま話しているスレッドそのものにあるか（添付し直す必要が無い）。"""
+    if origin != link.channel_id or not origin_thread:
+        return False
+    return origin_thread in (link.ts, link.thread_ts)
 
 
 def _deadline_callback(deadline: float | None) -> Callable[[], None] | None:
@@ -799,16 +913,24 @@ def _extract_pages(
 
 
 _HTML_PREFIXES = (b"<!doctype html", b"<html")
+_HTML_EXTENSIONS = (".html", ".htm", ".xhtml")
 
 
 def _looks_like_login_page(target: AttachmentCandidate, data: bytes) -> bool:
-    """バイナリ形式なのに HTML が返ってきた＝権限が無くログイン画面を返された、とみなす。
+    """HTML の原本でないのに HTML が返ってきた＝権限が無くログイン画面を返された、とみなす。
 
-    テキスト系は HTML の中身があり得るので判定しない（誤検知で正当な取得を潰さない）。
+    テキスト系（csv / txt / md 等）も対象にする（ログイン画面の HTML を原本として要約・
+    添付し直さない）。元から HTML のファイル（名前が .html 等・mimetype が text/html）だけは
+    中身が HTML で当然なので判定しない。
     """
-    if target.kind == "text":
+    if not data[:512].lstrip().lower().startswith(_HTML_PREFIXES):
         return False
-    return data[:512].lstrip().lower().startswith(_HTML_PREFIXES)
+    if target.kind == "text":
+        name = target.name.strip().lower()
+        mime = target.mime.split(";", 1)[0].strip().lower()
+        if mime in ("text/html", "application/xhtml+xml") or name.endswith(_HTML_EXTENSIONS):
+            return False
+    return True
 
 
 def _worst_reason(reasons: list[str]) -> str:
@@ -832,8 +954,18 @@ def _compose_message(
     answer: str,
     others: list[str],
     aggregated: bool,
+    searched_terms: bool = False,
+    hit_pages: tuple[int, ...] = (),
+    others_in_link: bool = False,
 ) -> str:
-    """決定的な見出し＋LLM 本文＋注記。LLM にこの整形をさせない。"""
+    """決定的な見出し＋LLM 本文＋注記。LLM にこの整形をさせない。
+
+    長い資料の注記は 3 通り。依頼に語があれば「該当箇所を指定して」と作業を戻さない
+    （利用者は依頼文で既に指定している）:
+      - 語を含むページを優先して詰めた → どのページを読んだかを書く
+      - 語はあったが資料に見当たらない → 冒頭だけ読んだ・見当たらなかった、と正直に書く
+      - 語が無い（「要約して」だけ）→ 従来どおり冒頭だけ・続きは指定を、と書く
+    """
     spec = MODE_SPECS[mode]
     unit = _UNIT_LABEL.get(target.kind, "ページ")
     kind_label = _KIND_LABEL.get(target.kind, target.kind)
@@ -844,7 +976,17 @@ def _compose_message(
     # Slack が返した permalink をそのまま使う（自作・推測はしない。無ければ省略）。
     if target.permalink:
         parts.extend(["", f"🔗 出典: {target.permalink}"])
-    if truncated:
+    if truncated and hit_pages:
+        notes.append(
+            f"※ 資料が長いため、ご依頼の語を含む {format_page_list(hit_pages)} {unit}目と"
+            f"その前後を優先して、{chars:,} 文字ぶんを処理しました。"
+        )
+    elif truncated and searched_terms:
+        notes.append(
+            f"※ 資料が長いため冒頭 {chars:,} 文字ぶんのみを処理しました"
+            "（ご依頼の語は、読み取れた範囲には見当たりませんでした）。"
+        )
+    elif truncated:
         notes.append(
             f"※ 資料が長いため冒頭 {chars:,} 文字ぶんのみを処理しました"
             "（続きが必要なら該当箇所を指定してください）。"
@@ -855,7 +997,12 @@ def _compose_message(
         )
     if spec.footer:
         notes.append(spec.footer)
-    if others:
+    if others and others_in_link:
+        notes.append(
+            f"※ リンク先の投稿には他に {'、'.join(others)} もあります"
+            "（ファイル名を指定していただければ、そちらを読みます）。"
+        )
+    elif others:
         notes.append(
             f"※ この会話には他に {'、'.join(others)} もあります"
             "（file_name で指定すると切り替えられます）。"

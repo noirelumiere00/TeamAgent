@@ -52,6 +52,9 @@
 P2（docx/xlsx/pdf/pptx を作って Slack に添付し返す）を足すときは
 `slack-file-read-analysis` → `slack-file-read-analysis-and-delivery` に更新し、
 契約テストの effect アサーションも**同じ変更単位で**揃えること。
+（2026-10-07 追記: 投稿リンク経路（`ATTACHMENT_PERMALINK_ENABLED`）が元ファイルを添付し直す
+ため、台帳は `slack-file-read-analysis-slack-file-delivery` に更新済み。直接 `upload_file` を
+呼ぶ skill は `tests/scripts/test_tool_scope_registry_contract.py` が台帳と突き合わせる。）
 
 ## 2. `infra/openclaw/openclaw.config.json5`
 

@@ -337,21 +337,54 @@ class SlackUserReader:
         その 1 件だけを狙う（スレッド返信なら conversations.replies、それ以外は history）。
         replies は親を常に先頭に含めるので ts 一致で絞る。見つからなければ
         ``message_not_found``（権限エラーと同じく呼び出し側で一様の文へ潰す前提）。
+
+        ⚠️ スレッド返信のリンクから ``?thread_ts=&cid=`` が落ちた形（コピーの仕方・他の AI
+        経由で落ちる）では thread_ts が分からない。history はスレッド返信を返さない
+        （broadcast を除く）ので、history で一致しなければ ``replies(ts=<リンクの ts>)`` で
+        取り直す（Slack の replies は返信の ts を渡してもそのスレッドを返す）。
         """
         if not channel_id or not ts:
             return SlackThreadRead(error="bad_target")
         start = time.perf_counter()
-        params: dict[str, Any] = {
+        window: dict[str, Any] = {
             "channel": channel_id,
             "oldest": ts,
             "latest": ts,
             "inclusive": True,
             "limit": 2,
         }
-        method: Any = self._client.conversations_history
         if thread_ts:
-            params["ts"] = thread_ts
-            method = self._client.conversations_replies
+            attempts: list[tuple[Any, dict[str, Any]]] = [
+                (self._client.conversations_replies, {**window, "ts": thread_ts})
+            ]
+        else:
+            attempts = [
+                (self._client.conversations_history, window),
+                (self._client.conversations_replies, {**window, "ts": ts}),
+            ]
+
+        hits: tuple[SlackMessage, ...] = ()
+        for method, params in attempts:
+            got = self._fetch_message_hits(method, params, ts, request_id)
+            if isinstance(got, SlackThreadRead):
+                return got  # error（fail-closed で上へ返す）
+            hits = got
+            if hits:
+                break
+        logger.info(
+            "slack_user_read_message_checked",
+            request_id=request_id,
+            returned=len(hits),
+            latency_ms=int((time.perf_counter() - start) * 1000),
+        )
+        if not hits:
+            return SlackThreadRead(error="message_not_found")
+        return SlackThreadRead(messages=hits[:1])
+
+    def _fetch_message_hits(
+        self, method: Any, params: dict[str, Any], ts: str, request_id: str
+    ) -> tuple[SlackMessage, ...] | SlackThreadRead:
+        """1 回の取得で ts が一致したものを返す。失敗は error つきの SlackThreadRead。"""
 
         async def fetch() -> Any:
             return await asyncio.wait_for(method(**params), timeout=15)
@@ -372,18 +405,9 @@ class SlackUserReader:
         raw = resp.get("messages")
         if not isinstance(raw, list):
             return SlackThreadRead(error="bad_response")
-        hits = tuple(
+        return tuple(
             _message_from_raw(m) for m in raw if isinstance(m, dict) and str(m.get("ts")) == ts
         )
-        logger.info(
-            "slack_user_read_message_checked",
-            request_id=request_id,
-            returned=len(hits),
-            latency_ms=int((time.perf_counter() - start) * 1000),
-        )
-        if not hits:
-            return SlackThreadRead(error="message_not_found")
-        return SlackThreadRead(messages=hits[:1])
 
     def resolve_channel_checked(self, name: str, request_id: str) -> SlackChannelResolution:
         """現在の scope で in:#名前 を検索する（list の read scopes は未付与）。
