@@ -1,5 +1,114 @@
 {
   "schema_version": 1,
   "stale_exception_policy": "fail",
-  "exceptions": []
+  "exceptions": [
+    {
+      "cve": "CVE-2026-8674",
+      "severity": "MEDIUM",
+      "package": "glibc-2.44",
+      "version": "2.44-r7",
+      "owner": "s-komata@vectorinc.co.jp",
+      "reason": "2026-10-08 mcp 便 r51 の image-builder 段3 で新規検出（Chainguard python:latest 同梱の glibc 2.44-r7・MEDIUM 3 件／LOW 1 件。OpenClaw の #568 と同じ CVE）。同日朝の r50 では未検出で、その後に検査データが更新された。Chainguard には修正版 2.44-r8 があるが、python ベース digest のバンプは契約の確認を伴うため、9/14（#408）・10/08（#568）と同じく MEDIUM/LOW は期限つき例外で段を通し、恒久対応はベースのバンプで行う。その着地時に stale=fail で本例外の撤去が強制される。",
+      "expires_on": "2026-10-22"
+    },
+    {
+      "cve": "CVE-2026-8674",
+      "severity": "MEDIUM",
+      "package": "glibc-2.44-locale-posix",
+      "version": "2.44-r7",
+      "owner": "s-komata@vectorinc.co.jp",
+      "reason": "2026-10-08 mcp 便 r51 の image-builder 段3 で新規検出（Chainguard python:latest 同梱の glibc 2.44-r7・MEDIUM 3 件／LOW 1 件。OpenClaw の #568 と同じ CVE）。同日朝の r50 では未検出で、その後に検査データが更新された。Chainguard には修正版 2.44-r8 があるが、python ベース digest のバンプは契約の確認を伴うため、9/14（#408）・10/08（#568）と同じく MEDIUM/LOW は期限つき例外で段を通し、恒久対応はベースのバンプで行う。その着地時に stale=fail で本例外の撤去が強制される。",
+      "expires_on": "2026-10-22"
+    },
+    {
+      "cve": "CVE-2026-8674",
+      "severity": "MEDIUM",
+      "package": "ld-linux-2.44",
+      "version": "2.44-r7",
+      "owner": "s-komata@vectorinc.co.jp",
+      "reason": "2026-10-08 mcp 便 r51 の image-builder 段3 で新規検出（Chainguard python:latest 同梱の glibc 2.44-r7・MEDIUM 3 件／LOW 1 件。OpenClaw の #568 と同じ CVE）。同日朝の r50 では未検出で、その後に検査データが更新された。Chainguard には修正版 2.44-r8 があるが、python ベース digest のバンプは契約の確認を伴うため、9/14（#408）・10/08（#568）と同じく MEDIUM/LOW は期限つき例外で段を通し、恒久対応はベースのバンプで行う。その着地時に stale=fail で本例外の撤去が強制される。",
+      "expires_on": "2026-10-22"
+    },
+    {
+      "cve": "CVE-2026-86805",
+      "severity": "MEDIUM",
+      "package": "glibc-2.44",
+      "version": "2.44-r7",
+      "owner": "s-komata@vectorinc.co.jp",
+      "reason": "2026-10-08 mcp 便 r51 の image-builder 段3 で新規検出（Chainguard python:latest 同梱の glibc 2.44-r7・MEDIUM 3 件／LOW 1 件。OpenClaw の #568 と同じ CVE）。同日朝の r50 では未検出で、その後に検査データが更新された。Chainguard には修正版 2.44-r8 があるが、python ベース digest のバンプは契約の確認を伴うため、9/14（#408）・10/08（#568）と同じく MEDIUM/LOW は期限つき例外で段を通し、恒久対応はベースのバンプで行う。その着地時に stale=fail で本例外の撤去が強制される。",
+      "expires_on": "2026-10-22"
+    },
+    {
+      "cve": "CVE-2026-86805",
+      "severity": "MEDIUM",
+      "package": "glibc-2.44-locale-posix",
+      "version": "2.44-r7",
+      "owner": "s-komata@vectorinc.co.jp",
+      "reason": "2026-10-08 mcp 便 r51 の image-builder 段3 で新規検出（Chainguard python:latest 同梱の glibc 2.44-r7・MEDIUM 3 件／LOW 1 件。OpenClaw の #568 と同じ CVE）。同日朝の r50 では未検出で、その後に検査データが更新された。Chainguard には修正版 2.44-r8 があるが、python ベース digest のバンプは契約の確認を伴うため、9/14（#408）・10/08（#568）と同じく MEDIUM/LOW は期限つき例外で段を通し、恒久対応はベースのバンプで行う。その着地時に stale=fail で本例外の撤去が強制される。",
+      "expires_on": "2026-10-22"
+    },
+    {
+      "cve": "CVE-2026-86805",
+      "severity": "MEDIUM",
+      "package": "ld-linux-2.44",
+      "version": "2.44-r7",
+      "owner": "s-komata@vectorinc.co.jp",
+      "reason": "2026-10-08 mcp 便 r51 の image-builder 段3 で新規検出（Chainguard python:latest 同梱の glibc 2.44-r7・MEDIUM 3 件／LOW 1 件。OpenClaw の #568 と同じ CVE）。同日朝の r50 では未検出で、その後に検査データが更新された。Chainguard には修正版 2.44-r8 があるが、python ベース digest のバンプは契約の確認を伴うため、9/14（#408）・10/08（#568）と同じく MEDIUM/LOW は期限つき例外で段を通し、恒久対応はベースのバンプで行う。その着地時に stale=fail で本例外の撤去が強制される。",
+      "expires_on": "2026-10-22"
+    },
+    {
+      "cve": "CVE-2026-89092",
+      "severity": "MEDIUM",
+      "package": "glibc-2.44",
+      "version": "2.44-r7",
+      "owner": "s-komata@vectorinc.co.jp",
+      "reason": "2026-10-08 mcp 便 r51 の image-builder 段3 で新規検出（Chainguard python:latest 同梱の glibc 2.44-r7・MEDIUM 3 件／LOW 1 件。OpenClaw の #568 と同じ CVE）。同日朝の r50 では未検出で、その後に検査データが更新された。Chainguard には修正版 2.44-r8 があるが、python ベース digest のバンプは契約の確認を伴うため、9/14（#408）・10/08（#568）と同じく MEDIUM/LOW は期限つき例外で段を通し、恒久対応はベースのバンプで行う。その着地時に stale=fail で本例外の撤去が強制される。",
+      "expires_on": "2026-10-22"
+    },
+    {
+      "cve": "CVE-2026-89092",
+      "severity": "MEDIUM",
+      "package": "glibc-2.44-locale-posix",
+      "version": "2.44-r7",
+      "owner": "s-komata@vectorinc.co.jp",
+      "reason": "2026-10-08 mcp 便 r51 の image-builder 段3 で新規検出（Chainguard python:latest 同梱の glibc 2.44-r7・MEDIUM 3 件／LOW 1 件。OpenClaw の #568 と同じ CVE）。同日朝の r50 では未検出で、その後に検査データが更新された。Chainguard には修正版 2.44-r8 があるが、python ベース digest のバンプは契約の確認を伴うため、9/14（#408）・10/08（#568）と同じく MEDIUM/LOW は期限つき例外で段を通し、恒久対応はベースのバンプで行う。その着地時に stale=fail で本例外の撤去が強制される。",
+      "expires_on": "2026-10-22"
+    },
+    {
+      "cve": "CVE-2026-89092",
+      "severity": "MEDIUM",
+      "package": "ld-linux-2.44",
+      "version": "2.44-r7",
+      "owner": "s-komata@vectorinc.co.jp",
+      "reason": "2026-10-08 mcp 便 r51 の image-builder 段3 で新規検出（Chainguard python:latest 同梱の glibc 2.44-r7・MEDIUM 3 件／LOW 1 件。OpenClaw の #568 と同じ CVE）。同日朝の r50 では未検出で、その後に検査データが更新された。Chainguard には修正版 2.44-r8 があるが、python ベース digest のバンプは契約の確認を伴うため、9/14（#408）・10/08（#568）と同じく MEDIUM/LOW は期限つき例外で段を通し、恒久対応はベースのバンプで行う。その着地時に stale=fail で本例外の撤去が強制される。",
+      "expires_on": "2026-10-22"
+    },
+    {
+      "cve": "CVE-2026-95818",
+      "severity": "LOW",
+      "package": "glibc-2.44",
+      "version": "2.44-r7",
+      "owner": "s-komata@vectorinc.co.jp",
+      "reason": "2026-10-08 mcp 便 r51 の image-builder 段3 で新規検出（Chainguard python:latest 同梱の glibc 2.44-r7・MEDIUM 3 件／LOW 1 件。OpenClaw の #568 と同じ CVE）。同日朝の r50 では未検出で、その後に検査データが更新された。Chainguard には修正版 2.44-r8 があるが、python ベース digest のバンプは契約の確認を伴うため、9/14（#408）・10/08（#568）と同じく MEDIUM/LOW は期限つき例外で段を通し、恒久対応はベースのバンプで行う。その着地時に stale=fail で本例外の撤去が強制される。",
+      "expires_on": "2026-10-22"
+    },
+    {
+      "cve": "CVE-2026-95818",
+      "severity": "LOW",
+      "package": "glibc-2.44-locale-posix",
+      "version": "2.44-r7",
+      "owner": "s-komata@vectorinc.co.jp",
+      "reason": "2026-10-08 mcp 便 r51 の image-builder 段3 で新規検出（Chainguard python:latest 同梱の glibc 2.44-r7・MEDIUM 3 件／LOW 1 件。OpenClaw の #568 と同じ CVE）。同日朝の r50 では未検出で、その後に検査データが更新された。Chainguard には修正版 2.44-r8 があるが、python ベース digest のバンプは契約の確認を伴うため、9/14（#408）・10/08（#568）と同じく MEDIUM/LOW は期限つき例外で段を通し、恒久対応はベースのバンプで行う。その着地時に stale=fail で本例外の撤去が強制される。",
+      "expires_on": "2026-10-22"
+    },
+    {
+      "cve": "CVE-2026-95818",
+      "severity": "LOW",
+      "package": "ld-linux-2.44",
+      "version": "2.44-r7",
+      "owner": "s-komata@vectorinc.co.jp",
+      "reason": "2026-10-08 mcp 便 r51 の image-builder 段3 で新規検出（Chainguard python:latest 同梱の glibc 2.44-r7・MEDIUM 3 件／LOW 1 件。OpenClaw の #568 と同じ CVE）。同日朝の r50 では未検出で、その後に検査データが更新された。Chainguard には修正版 2.44-r8 があるが、python ベース digest のバンプは契約の確認を伴うため、9/14（#408）・10/08（#568）と同じく MEDIUM/LOW は期限つき例外で段を通し、恒久対応はベースのバンプで行う。その着地時に stale=fail で本例外の撤去が強制される。",
+      "expires_on": "2026-10-22"
+    }
+  ]
 }
