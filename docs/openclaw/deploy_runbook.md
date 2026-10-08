@@ -311,3 +311,9 @@ receipt が揃うまで contract は closed のままです。手動実行を pr
 - 実環境の CodeBuild/ECR/ECS/Slack/Bedrock/MCP/CloudWatch 検証が全緑
 
 ローカル合格、merge、CI全緑のいずれも単独では production GO ではありません。
+
+## 撃ち直しの規則（2026-10-08 追記）
+
+- **同じコミットで OC 便を撃ち直せない。** provenance builder は `teamagent-openclaw-quarantine:candidate-<commit>-core`（と `-media`）を ECR に push するが、quarantine リポジトリのタグは immutable。1 回目のビルドが成功していれば、同じコミットの 2 回目は BUILD 段の `FATAL: immutable quarantine tag already exists` で止まる（2026-10-08 oc17 で発生）。
+- 撃ち直すには dev に新しいコミットを 1 つ入れ（docs だけでもよい）、発射台を ff してから撃つ。mcp 便の昇格タグ（`verified-<commit>-<name>`）と同じ考え方。
+- 発射のドライバは build_openclaw_image.sh の出力を `/tmp` に書くので、再起動や掃除で消える。失敗の調査に要るので、撃つときはログを `~/Documents/Claude/Artifacts/aico-inputs-20260911/logs/` へ写しておく。
