@@ -175,13 +175,28 @@ def test_registry_contents_are_exactly_the_adjudicated_exceptions() -> None:
     # Trivy 側では HIGH 判定（4サブパッケージに計上）で attestor の C/H ゼロゲートを
     # 通せないと実測で確定。fix 版 3.14.7-r0 が存在したため python バンプで根治し、
     # 例外は同時に撤去した（残すと finding 消滅で stale=fail が発火する）。media は空へ復帰。
+    # 2026-10-08: r51 の撃ち直しで media に CVE-2026-85091（ECR は HIGH・Trivy は MEDIUM・
+    # Alpine v3.24 base 同梱の zlib 1.3.2-r0・修正版 1.3.2-r1）。9/14（#411）と同じく小俣さんの裁定で
+    # 1 件限りの期限つき例外（stale=fail・expires 2026-10-22）。恒久対応は zlib の明示 pin（#518 型）で、
+    # その PR で media を空へ戻す。HIGH を黙って増やす・期限を延ばす変更はここで赤になる。
     media_payload = json.loads(media.read_text(encoding="utf-8"))
-    assert media_payload == {
-        "schema_version": 1,
-        "stale_exception_policy": "fail",
-        "exceptions": [],
-    }
-    assert gate.load_exceptions(media, today=TODAY) == {}
+    assert media_payload["schema_version"] == 1
+    assert media_payload["stale_exception_policy"] == "fail"
+    assert [
+        (e["cve"], e["severity"], e["package"], e["version"], e["expires_on"], e["owner"])
+        for e in media_payload["exceptions"]
+    ] == [
+        (
+            "CVE-2026-85091",
+            "HIGH",
+            "zlib",
+            "1.3.2-r0",
+            "2026-10-22",
+            "s-komata@vectorinc.co.jp",
+        )
+    ]
+    assert "2026-10-08" in media_payload["exceptions"][0]["reason"]
+    assert len(gate.load_exceptions(media, today=date(2026, 10, 8))) == 1
 
 
 def test_exact_synthetic_exception_set_passes(tmp_path: Path) -> None:

@@ -1,5 +1,15 @@
 {
   "schema_version": 1,
   "stale_exception_policy": "fail",
-  "exceptions": []
+  "exceptions": [
+    {
+      "cve": "CVE-2026-85091",
+      "severity": "HIGH",
+      "package": "zlib",
+      "version": "1.3.2-r0",
+      "owner": "s-komata@vectorinc.co.jp",
+      "reason": "2026-10-08 mcp 便 r51（撃ち直し・4c5811a6）の image-builder 段3 で media に新規検出（Alpine v3.24 の base 同梱 zlib 1.3.2-r0）。ECR は HIGH、段4 の Trivy は MEDIUM と判定（手元で確認・修正版 1.3.2-r1）。Alpine secdb v3.24 main は 1.3.2-r1 を fixed とする。修正版の明示 pin は lock・release 契約・buildspec 世代 4 本・adopt の再導出と本番反映を伴うため、9/14（#411）の裁定と同じく1 件限りの期限つき例外で今日の便を通し、恒久対応は zlib 1.3.2-r1 の明示 pin（#518 と同型）で行う。その着地時に stale=fail で撤去が強制される。10-08 小俣さんの裁定で登録。",
+      "expires_on": "2026-10-22"
+    }
+  ]
 }
