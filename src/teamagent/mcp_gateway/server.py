@@ -439,14 +439,10 @@ def _build_async_job_poll(
                 }.get(output.error_code, failure_reason(output.error_code))
                 text = "お土産資料は作成に失敗しました。" + reason
             else:
-                from teamagent.skills._shared.long_jobs import origin
+                from teamagent.skills._shared.long_jobs import completed_delivery_failed, origin
 
                 target = origin(poll_ctx)
-                if (
-                    output.status == "done"
-                    and not output.slack_delivered
-                    and not (target is not None and target.pending)
-                ):
+                if completed_delivery_failed(output.status, output.slack_delivered, target):
                     return "failed", "資料は生成・保存できましたが、結果の配信が中断されました。"
                 text = (
                     "\n".join([output.result_message, *output.summary_lines, output.next_step])
