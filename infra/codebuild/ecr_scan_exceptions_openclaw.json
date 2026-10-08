@@ -1,5 +1,150 @@
 {
   "schema_version": 1,
   "stale_exception_policy": "fail",
-  "exceptions": []
+  "exceptions": [
+    {
+      "cve": "CVE-2026-8674",
+      "severity": "MEDIUM",
+      "package": "glibc-2.44",
+      "version": "2.44-r7",
+      "owner": "s-komata@vectorinc.co.jp",
+      "reason": "2026-10-08 OC 便 oc17 の provenance builder 段で新規検出（Chainguard node:latest 同梱の glibc 2.44-r7・MEDIUM 3 件＝nscd のスタック溢れ・ld の TOCTOU・DNS stub resolver／LOW 1 件）。10-07 19:39 の同コミット系ビルドでは未検出で、その後に公開された CVE。Wolfi には修正候補の 2.44-r8（2026-10-06）があるが、runtime ベース digest のバンプは契約の node probe・世代の再導出を伴うため、9/14（#408）と同じく MEDIUM/LOW は期限つき例外で段を通し、恒久対応はベースのバンプで行う。その着地時に stale=fail で本例外の撤去が強制される。",
+      "expires_on": "2026-10-22"
+    },
+    {
+      "cve": "CVE-2026-8674",
+      "severity": "MEDIUM",
+      "package": "glibc-2.44-locale-posix",
+      "version": "2.44-r7",
+      "owner": "s-komata@vectorinc.co.jp",
+      "reason": "2026-10-08 OC 便 oc17 の provenance builder 段で新規検出（Chainguard node:latest 同梱の glibc 2.44-r7・MEDIUM 3 件＝nscd のスタック溢れ・ld の TOCTOU・DNS stub resolver／LOW 1 件）。10-07 19:39 の同コミット系ビルドでは未検出で、その後に公開された CVE。Wolfi には修正候補の 2.44-r8（2026-10-06）があるが、runtime ベース digest のバンプは契約の node probe・世代の再導出を伴うため、9/14（#408）と同じく MEDIUM/LOW は期限つき例外で段を通し、恒久対応はベースのバンプで行う。その着地時に stale=fail で本例外の撤去が強制される。",
+      "expires_on": "2026-10-22"
+    },
+    {
+      "cve": "CVE-2026-8674",
+      "severity": "MEDIUM",
+      "package": "ld-linux-2.44",
+      "version": "2.44-r7",
+      "owner": "s-komata@vectorinc.co.jp",
+      "reason": "2026-10-08 OC 便 oc17 の provenance builder 段で新規検出（Chainguard node:latest 同梱の glibc 2.44-r7・MEDIUM 3 件＝nscd のスタック溢れ・ld の TOCTOU・DNS stub resolver／LOW 1 件）。10-07 19:39 の同コミット系ビルドでは未検出で、その後に公開された CVE。Wolfi には修正候補の 2.44-r8（2026-10-06）があるが、runtime ベース digest のバンプは契約の node probe・世代の再導出を伴うため、9/14（#408）と同じく MEDIUM/LOW は期限つき例外で段を通し、恒久対応はベースのバンプで行う。その着地時に stale=fail で本例外の撤去が強制される。",
+      "expires_on": "2026-10-22"
+    },
+    {
+      "cve": "CVE-2026-8674",
+      "severity": "MEDIUM",
+      "package": "libcrypt1-2.44",
+      "version": "2.44-r7",
+      "owner": "s-komata@vectorinc.co.jp",
+      "reason": "2026-10-08 OC 便 oc17 の provenance builder 段で新規検出（Chainguard node:latest 同梱の glibc 2.44-r7・MEDIUM 3 件＝nscd のスタック溢れ・ld の TOCTOU・DNS stub resolver／LOW 1 件）。10-07 19:39 の同コミット系ビルドでは未検出で、その後に公開された CVE。Wolfi には修正候補の 2.44-r8（2026-10-06）があるが、runtime ベース digest のバンプは契約の node probe・世代の再導出を伴うため、9/14（#408）と同じく MEDIUM/LOW は期限つき例外で段を通し、恒久対応はベースのバンプで行う。その着地時に stale=fail で本例外の撤去が強制される。",
+      "expires_on": "2026-10-22"
+    },
+    {
+      "cve": "CVE-2026-86805",
+      "severity": "MEDIUM",
+      "package": "glibc-2.44",
+      "version": "2.44-r7",
+      "owner": "s-komata@vectorinc.co.jp",
+      "reason": "2026-10-08 OC 便 oc17 の provenance builder 段で新規検出（Chainguard node:latest 同梱の glibc 2.44-r7・MEDIUM 3 件＝nscd のスタック溢れ・ld の TOCTOU・DNS stub resolver／LOW 1 件）。10-07 19:39 の同コミット系ビルドでは未検出で、その後に公開された CVE。Wolfi には修正候補の 2.44-r8（2026-10-06）があるが、runtime ベース digest のバンプは契約の node probe・世代の再導出を伴うため、9/14（#408）と同じく MEDIUM/LOW は期限つき例外で段を通し、恒久対応はベースのバンプで行う。その着地時に stale=fail で本例外の撤去が強制される。",
+      "expires_on": "2026-10-22"
+    },
+    {
+      "cve": "CVE-2026-86805",
+      "severity": "MEDIUM",
+      "package": "glibc-2.44-locale-posix",
+      "version": "2.44-r7",
+      "owner": "s-komata@vectorinc.co.jp",
+      "reason": "2026-10-08 OC 便 oc17 の provenance builder 段で新規検出（Chainguard node:latest 同梱の glibc 2.44-r7・MEDIUM 3 件＝nscd のスタック溢れ・ld の TOCTOU・DNS stub resolver／LOW 1 件）。10-07 19:39 の同コミット系ビルドでは未検出で、その後に公開された CVE。Wolfi には修正候補の 2.44-r8（2026-10-06）があるが、runtime ベース digest のバンプは契約の node probe・世代の再導出を伴うため、9/14（#408）と同じく MEDIUM/LOW は期限つき例外で段を通し、恒久対応はベースのバンプで行う。その着地時に stale=fail で本例外の撤去が強制される。",
+      "expires_on": "2026-10-22"
+    },
+    {
+      "cve": "CVE-2026-86805",
+      "severity": "MEDIUM",
+      "package": "ld-linux-2.44",
+      "version": "2.44-r7",
+      "owner": "s-komata@vectorinc.co.jp",
+      "reason": "2026-10-08 OC 便 oc17 の provenance builder 段で新規検出（Chainguard node:latest 同梱の glibc 2.44-r7・MEDIUM 3 件＝nscd のスタック溢れ・ld の TOCTOU・DNS stub resolver／LOW 1 件）。10-07 19:39 の同コミット系ビルドでは未検出で、その後に公開された CVE。Wolfi には修正候補の 2.44-r8（2026-10-06）があるが、runtime ベース digest のバンプは契約の node probe・世代の再導出を伴うため、9/14（#408）と同じく MEDIUM/LOW は期限つき例外で段を通し、恒久対応はベースのバンプで行う。その着地時に stale=fail で本例外の撤去が強制される。",
+      "expires_on": "2026-10-22"
+    },
+    {
+      "cve": "CVE-2026-86805",
+      "severity": "MEDIUM",
+      "package": "libcrypt1-2.44",
+      "version": "2.44-r7",
+      "owner": "s-komata@vectorinc.co.jp",
+      "reason": "2026-10-08 OC 便 oc17 の provenance builder 段で新規検出（Chainguard node:latest 同梱の glibc 2.44-r7・MEDIUM 3 件＝nscd のスタック溢れ・ld の TOCTOU・DNS stub resolver／LOW 1 件）。10-07 19:39 の同コミット系ビルドでは未検出で、その後に公開された CVE。Wolfi には修正候補の 2.44-r8（2026-10-06）があるが、runtime ベース digest のバンプは契約の node probe・世代の再導出を伴うため、9/14（#408）と同じく MEDIUM/LOW は期限つき例外で段を通し、恒久対応はベースのバンプで行う。その着地時に stale=fail で本例外の撤去が強制される。",
+      "expires_on": "2026-10-22"
+    },
+    {
+      "cve": "CVE-2026-89092",
+      "severity": "MEDIUM",
+      "package": "glibc-2.44",
+      "version": "2.44-r7",
+      "owner": "s-komata@vectorinc.co.jp",
+      "reason": "2026-10-08 OC 便 oc17 の provenance builder 段で新規検出（Chainguard node:latest 同梱の glibc 2.44-r7・MEDIUM 3 件＝nscd のスタック溢れ・ld の TOCTOU・DNS stub resolver／LOW 1 件）。10-07 19:39 の同コミット系ビルドでは未検出で、その後に公開された CVE。Wolfi には修正候補の 2.44-r8（2026-10-06）があるが、runtime ベース digest のバンプは契約の node probe・世代の再導出を伴うため、9/14（#408）と同じく MEDIUM/LOW は期限つき例外で段を通し、恒久対応はベースのバンプで行う。その着地時に stale=fail で本例外の撤去が強制される。",
+      "expires_on": "2026-10-22"
+    },
+    {
+      "cve": "CVE-2026-89092",
+      "severity": "MEDIUM",
+      "package": "glibc-2.44-locale-posix",
+      "version": "2.44-r7",
+      "owner": "s-komata@vectorinc.co.jp",
+      "reason": "2026-10-08 OC 便 oc17 の provenance builder 段で新規検出（Chainguard node:latest 同梱の glibc 2.44-r7・MEDIUM 3 件＝nscd のスタック溢れ・ld の TOCTOU・DNS stub resolver／LOW 1 件）。10-07 19:39 の同コミット系ビルドでは未検出で、その後に公開された CVE。Wolfi には修正候補の 2.44-r8（2026-10-06）があるが、runtime ベース digest のバンプは契約の node probe・世代の再導出を伴うため、9/14（#408）と同じく MEDIUM/LOW は期限つき例外で段を通し、恒久対応はベースのバンプで行う。その着地時に stale=fail で本例外の撤去が強制される。",
+      "expires_on": "2026-10-22"
+    },
+    {
+      "cve": "CVE-2026-89092",
+      "severity": "MEDIUM",
+      "package": "ld-linux-2.44",
+      "version": "2.44-r7",
+      "owner": "s-komata@vectorinc.co.jp",
+      "reason": "2026-10-08 OC 便 oc17 の provenance builder 段で新規検出（Chainguard node:latest 同梱の glibc 2.44-r7・MEDIUM 3 件＝nscd のスタック溢れ・ld の TOCTOU・DNS stub resolver／LOW 1 件）。10-07 19:39 の同コミット系ビルドでは未検出で、その後に公開された CVE。Wolfi には修正候補の 2.44-r8（2026-10-06）があるが、runtime ベース digest のバンプは契約の node probe・世代の再導出を伴うため、9/14（#408）と同じく MEDIUM/LOW は期限つき例外で段を通し、恒久対応はベースのバンプで行う。その着地時に stale=fail で本例外の撤去が強制される。",
+      "expires_on": "2026-10-22"
+    },
+    {
+      "cve": "CVE-2026-89092",
+      "severity": "MEDIUM",
+      "package": "libcrypt1-2.44",
+      "version": "2.44-r7",
+      "owner": "s-komata@vectorinc.co.jp",
+      "reason": "2026-10-08 OC 便 oc17 の provenance builder 段で新規検出（Chainguard node:latest 同梱の glibc 2.44-r7・MEDIUM 3 件＝nscd のスタック溢れ・ld の TOCTOU・DNS stub resolver／LOW 1 件）。10-07 19:39 の同コミット系ビルドでは未検出で、その後に公開された CVE。Wolfi には修正候補の 2.44-r8（2026-10-06）があるが、runtime ベース digest のバンプは契約の node probe・世代の再導出を伴うため、9/14（#408）と同じく MEDIUM/LOW は期限つき例外で段を通し、恒久対応はベースのバンプで行う。その着地時に stale=fail で本例外の撤去が強制される。",
+      "expires_on": "2026-10-22"
+    },
+    {
+      "cve": "CVE-2026-95818",
+      "severity": "LOW",
+      "package": "glibc-2.44",
+      "version": "2.44-r7",
+      "owner": "s-komata@vectorinc.co.jp",
+      "reason": "2026-10-08 OC 便 oc17 の provenance builder 段で新規検出（Chainguard node:latest 同梱の glibc 2.44-r7・MEDIUM 3 件＝nscd のスタック溢れ・ld の TOCTOU・DNS stub resolver／LOW 1 件）。10-07 19:39 の同コミット系ビルドでは未検出で、その後に公開された CVE。Wolfi には修正候補の 2.44-r8（2026-10-06）があるが、runtime ベース digest のバンプは契約の node probe・世代の再導出を伴うため、9/14（#408）と同じく MEDIUM/LOW は期限つき例外で段を通し、恒久対応はベースのバンプで行う。その着地時に stale=fail で本例外の撤去が強制される。",
+      "expires_on": "2026-10-22"
+    },
+    {
+      "cve": "CVE-2026-95818",
+      "severity": "LOW",
+      "package": "glibc-2.44-locale-posix",
+      "version": "2.44-r7",
+      "owner": "s-komata@vectorinc.co.jp",
+      "reason": "2026-10-08 OC 便 oc17 の provenance builder 段で新規検出（Chainguard node:latest 同梱の glibc 2.44-r7・MEDIUM 3 件＝nscd のスタック溢れ・ld の TOCTOU・DNS stub resolver／LOW 1 件）。10-07 19:39 の同コミット系ビルドでは未検出で、その後に公開された CVE。Wolfi には修正候補の 2.44-r8（2026-10-06）があるが、runtime ベース digest のバンプは契約の node probe・世代の再導出を伴うため、9/14（#408）と同じく MEDIUM/LOW は期限つき例外で段を通し、恒久対応はベースのバンプで行う。その着地時に stale=fail で本例外の撤去が強制される。",
+      "expires_on": "2026-10-22"
+    },
+    {
+      "cve": "CVE-2026-95818",
+      "severity": "LOW",
+      "package": "ld-linux-2.44",
+      "version": "2.44-r7",
+      "owner": "s-komata@vectorinc.co.jp",
+      "reason": "2026-10-08 OC 便 oc17 の provenance builder 段で新規検出（Chainguard node:latest 同梱の glibc 2.44-r7・MEDIUM 3 件＝nscd のスタック溢れ・ld の TOCTOU・DNS stub resolver／LOW 1 件）。10-07 19:39 の同コミット系ビルドでは未検出で、その後に公開された CVE。Wolfi には修正候補の 2.44-r8（2026-10-06）があるが、runtime ベース digest のバンプは契約の node probe・世代の再導出を伴うため、9/14（#408）と同じく MEDIUM/LOW は期限つき例外で段を通し、恒久対応はベースのバンプで行う。その着地時に stale=fail で本例外の撤去が強制される。",
+      "expires_on": "2026-10-22"
+    },
+    {
+      "cve": "CVE-2026-95818",
+      "severity": "LOW",
+      "package": "libcrypt1-2.44",
+      "version": "2.44-r7",
+      "owner": "s-komata@vectorinc.co.jp",
+      "reason": "2026-10-08 OC 便 oc17 の provenance builder 段で新規検出（Chainguard node:latest 同梱の glibc 2.44-r7・MEDIUM 3 件＝nscd のスタック溢れ・ld の TOCTOU・DNS stub resolver／LOW 1 件）。10-07 19:39 の同コミット系ビルドでは未検出で、その後に公開された CVE。Wolfi には修正候補の 2.44-r8（2026-10-06）があるが、runtime ベース digest のバンプは契約の node probe・世代の再導出を伴うため、9/14（#408）と同じく MEDIUM/LOW は期限つき例外で段を通し、恒久対応はベースのバンプで行う。その着地時に stale=fail で本例外の撤去が強制される。",
+      "expires_on": "2026-10-22"
+    }
+  ]
 }
