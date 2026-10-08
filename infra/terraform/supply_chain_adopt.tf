@@ -112,7 +112,9 @@ locals {
     # 2026-10-05 publish 世代（Chainguard python ベースのバンプ）。r44 段4 の Trivy が core の py3-pip-wheel 26.2.1-r1（HIGH 2）で停止したため
     # ベースを上げ python 3.14.7→3.14.8。runtime 契約と release 契約の両方が動いた再レンダリング（apply_mcp_base_bump.py）。
     # 2026-10-06 publish 世代（初回リリース免除の延長 2026-10-15→2026-11-15・campaign expiry 2026-10-22→2026-11-22）。release_evidence.py だけが動いた再レンダリング（apply_release_exemption_extend.py）。
-    "2bab59f8232e62a5d85e29b6bd25a39db702ffbba7a44c50d6a9a1487d991dd2" = {
+    # 2026-10-08 publish 世代（apk ロック追随）。Alpine 上流の入替（zlib 1.3.2-r0→1.3.2-r1）で段 3 の media ビルドが
+    # 解決不能になるため media-apk.lock と契約 artifact.apk-lock.sha256 を追随させた再レンダリング（apply_apklock.sh）。
+    "edd62315abb487f4da01fbd8356409bcee0307cd88f55f81c00cdabbe41ed825" = {
       content_type                  = "text/yaml"
       object_lock_retain_until_date = "2099-12-31T00:00:00Z"
     }
@@ -186,7 +188,9 @@ locals {
     # 2026-10-05 publish 世代（Chainguard python ベースのバンプ）。r44 段4 の Trivy が core の py3-pip-wheel 26.2.1-r1（HIGH 2）で停止したため
     # ベースを上げ python 3.14.7→3.14.8。runtime 契約と release 契約の両方が動いた再レンダリング（apply_mcp_base_bump.py）。
     # 2026-10-06 publish 世代（初回リリース免除の延長 2026-10-15→2026-11-15・campaign expiry 2026-10-22→2026-11-22）。release_evidence.py だけが動いた再レンダリング（apply_release_exemption_extend.py）。
-    "27f147f0ce6e0bfb1a63d67d75b316af50d80afebe1db1228d86f4f1c086d5a6" = {
+    # 2026-10-08 publish 世代（apk ロック追随）。Alpine 上流の入替（zlib 1.3.2-r0→1.3.2-r1）で段 3 の media ビルドが
+    # 解決不能になるため media-apk.lock と契約 artifact.apk-lock.sha256 を追随させた再レンダリング（apply_apklock.sh）。
+    "ca132227a1fa7b71f74d4e95e266f9162ead8439e37a748986981386f2e53c5b" = {
       content_type                  = "text/yaml"
       object_lock_retain_until_date = "2099-12-31T00:00:00Z"
     }
@@ -258,7 +262,9 @@ locals {
     # 2026-10-05 publish 世代（Chainguard python ベースのバンプ）。r44 段4 の Trivy が core の py3-pip-wheel 26.2.1-r1（HIGH 2）で停止したため
     # ベースを上げ python 3.14.7→3.14.8。runtime 契約と release 契約の両方が動いた再レンダリング（apply_mcp_base_bump.py）。
     # 2026-10-06 publish 世代（初回リリース免除の延長 2026-10-15→2026-11-15・campaign expiry 2026-10-22→2026-11-22）。release_evidence.py だけが動いた再レンダリング（apply_release_exemption_extend.py）。
-    "7981b9a43b31743f9720ac6efc63190fe338f04e7f992af05cae60d5dea310e4" = {
+    # 2026-10-08 publish 世代（apk ロック追随）。Alpine 上流の入替（zlib 1.3.2-r0→1.3.2-r1）で段 3 の media ビルドが
+    # 解決不能になるため media-apk.lock と契約 artifact.apk-lock.sha256 を追随させた再レンダリング（apply_apklock.sh）。
+    "0d5d925052229d912f16d6cfd6f68e55bd8923502638a89c5a04f859719e447c" = {
       content_type                  = "text/yaml"
       object_lock_retain_until_date = "2099-12-31T00:00:00Z"
     }
@@ -457,18 +463,18 @@ removed {
 }
 
 import {
-  to = aws_s3_object.mcp_source_publisher_buildspec_generation["2bab59f8232e62a5d85e29b6bd25a39db702ffbba7a44c50d6a9a1487d991dd2"]
-  id = "teamagent-dev-image-release-evidence/codebuild-buildspecs/teamagent-dev-mcp-source-publisher/2bab59f8232e62a5d85e29b6bd25a39db702ffbba7a44c50d6a9a1487d991dd2.yml"
+  to = aws_s3_object.mcp_source_publisher_buildspec_generation["edd62315abb487f4da01fbd8356409bcee0307cd88f55f81c00cdabbe41ed825"]
+  id = "teamagent-dev-image-release-evidence/codebuild-buildspecs/teamagent-dev-mcp-source-publisher/edd62315abb487f4da01fbd8356409bcee0307cd88f55f81c00cdabbe41ed825.yml"
 }
 
 import {
-  to = aws_s3_object.image_attestor_buildspec_generation["27f147f0ce6e0bfb1a63d67d75b316af50d80afebe1db1228d86f4f1c086d5a6"]
-  id = "teamagent-dev-image-release-evidence/codebuild-buildspecs/teamagent-dev-image-attestor/27f147f0ce6e0bfb1a63d67d75b316af50d80afebe1db1228d86f4f1c086d5a6.yml"
+  to = aws_s3_object.image_attestor_buildspec_generation["ca132227a1fa7b71f74d4e95e266f9162ead8439e37a748986981386f2e53c5b"]
+  id = "teamagent-dev-image-release-evidence/codebuild-buildspecs/teamagent-dev-image-attestor/ca132227a1fa7b71f74d4e95e266f9162ead8439e37a748986981386f2e53c5b.yml"
 }
 
 import {
-  to = aws_s3_object.image_promoter_buildspec_generation["7981b9a43b31743f9720ac6efc63190fe338f04e7f992af05cae60d5dea310e4"]
-  id = "teamagent-dev-image-release-evidence/codebuild-buildspecs/teamagent-dev-image-promoter/7981b9a43b31743f9720ac6efc63190fe338f04e7f992af05cae60d5dea310e4.yml"
+  to = aws_s3_object.image_promoter_buildspec_generation["0d5d925052229d912f16d6cfd6f68e55bd8923502638a89c5a04f859719e447c"]
+  id = "teamagent-dev-image-release-evidence/codebuild-buildspecs/teamagent-dev-image-promoter/0d5d925052229d912f16d6cfd6f68e55bd8923502638a89c5a04f859719e447c.yml"
 }
 
 import {

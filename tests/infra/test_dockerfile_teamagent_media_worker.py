@@ -39,7 +39,8 @@ UV_DIGEST = "9941e2d8e06ff884d328905091eac0a6bc1e40e5ce12e6dd0de4ef4ee26baac4"
 # 2026-10-02: Alpine 上流への追随（font-noto 2026.09.01-r0→2026.10.01-r0）。apk 段の実ビルドで lock 差分 -5 +5（240→240 行）。
 # 2026-10-02: Alpine 上流への追随（pcre2 10.47-r1→10.49-r0）。apk 段の実ビルドで lock 差分 -1 +1（240→240 行）。
 # 2026-10-05: Alpine 上流への追随（削除: ffmpeg-libavdevice-8.1.2-r1、ffmpeg-libavfilter-8.1.2-r1、ffmpeg-libswscale-8.1.2-r1 / 追加: ffmpeg-libavdevice-8.1.2-r3、ffmpeg-libavfilter-8.1.2-r3、ffmpeg-libswscale-8.1.2-r3、ほか 1 行）。apk 段の実ビルドで lock 差分 -3 +4（240→241 行）。
-APK_LOCK_SHA256 = "5c3ddddbcdf80a0c5ddf90eab62050ff487a063f803ec607e06098107578c0b7"
+# 2026-10-08: Alpine 上流への追随（zlib 1.3.2-r0→1.3.2-r1）。apk 段の実ビルドで lock 差分 -1 +1（241→241 行）。
+APK_LOCK_SHA256 = "1fd858f83ffb0d0cf06f1d4de98259c93f0af272cc8933aa4c806fdf0a335786"
 CHROMIUM_PATH = "/usr/lib/chromium/chromium"
 
 
@@ -147,6 +148,8 @@ def test_base_bundled_cve_packages_are_pinned_to_the_fixed_versions() -> None:
         "LIBEXPAT_PACKAGE_VERSION": ("libexpat", "2.8.5-r0"),
         # 2026-10-02 便 r43 段3: base(v3.24)同梱の pcre2 10.47-r1 に公開済み CVE 8 件（HIGH 4）。secdb v3.24 main で 10.48-r0 が 7 件・10.49-r0 が CVE-2026-103111 を fixed。glib 等の依存で外せないため修正版を明示 pin。
         "PCRE2_PACKAGE_VERSION": ("pcre2", "10.49-r0"),
+        # Alpine v3.24 の base 同梱 zlib 1.3.2-r0 に CVE-2026-85091（ECR は HIGH・Trivy は MEDIUM）。Alpine secdb v3.24 main が 1.3.2-r1 を fixed とする。r51 撃ち直し（4c5811a6）の段3 で media が停止
+        "ZLIB_PACKAGE_VERSION": ("zlib", "1.3.2-r1"),
         "LIBSSL3_PACKAGE_VERSION": ("libssl3", "3.5.9-r0"),
     }
     lock = APK_LOCK.read_text(encoding="utf-8").splitlines()
