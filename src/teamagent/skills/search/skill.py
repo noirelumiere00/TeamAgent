@@ -53,6 +53,7 @@ from teamagent.skills.search.campaign_files import (
     is_campaign_hit,
     links_footer,
     scope_by_industry,
+    video_stats_footer,
 )
 from teamagent.skills.search.client_match import (
     hit_entities,
@@ -730,7 +731,7 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
                 asked_industry=asked_industry,
             )
             timings["converse_ms"] = (time.perf_counter() - _t) * 1000
-            # 施策の数字に資料リンク・「シートのみ」を要約が落としたらコードで足す。
+            # 資料リンク・「シートのみ」と、動画ごとの数字・リンクをコードで足す。
             answer = self._append_campaign_footer(answer, summary_hits)
             # 要約は資料名を挙げてもURLを出さないため回答末尾に「資料リンク」を決定論で付与。
             # markdown [label](url) は openclaw(@Aico) が Slack 装飾リンクへ変換する。ただし
@@ -979,10 +980,12 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
         )
 
     def _append_campaign_footer(self, answer: str, hits: list[SearchHit]) -> str:
-        """要約が施策の資料リンク・「シートのみ」を落としたとき、末尾へ足す（OFF なら素通し）。"""
+        """施策の資料リンク・「シートのみ」と動画ごとの数字を末尾へ足す（OFF なら素通し）。"""
         if not self._campaign_files or not answer:
             return answer
-        footer = links_footer(hits, answer)
+        footer = "\n\n".join(
+            part for part in (links_footer(hits, answer), video_stats_footer(hits, answer)) if part
+        )
         return f"{answer}\n\n{footer}" if footer else answer
 
     def _scope_to_client(self, hits: list[SearchHit], asked: str) -> list[SearchHit]:
