@@ -326,3 +326,50 @@ def test_high_finding_without_exact_package_metadata_cannot_pass(tmp_path: Path)
             expected_image_digest=DIGEST,
             expected_repository=REPOSITORY,
         )
+
+
+# 2026-10-08 に OpenClaw へ登録した glibc 2.44-r7 の例外（4 サブパッケージ共通の CVE 4 件）。
+# gitleaks(generic-api-key) の誤検知を避けるため、CVE ID は定数へ逃がし識別子 key を使わない。
+OC_GLIBC_2_44_R7_CVES = (
+    ("CVE-2026-8674", "MEDIUM"),
+    ("CVE-2026-86805", "MEDIUM"),
+    ("CVE-2026-89092", "MEDIUM"),
+    ("CVE-2026-95818", "LOW"),
+)
+OC_GLIBC_2_44_PACKAGES = (
+    "glibc-2.44",
+    "glibc-2.44-locale-posix",
+    "ld-linux-2.44",
+    "libcrypt1-2.44",
+)
+
+
+def test_openclaw_registry_is_exactly_the_2026_10_08_glibc_exceptions() -> None:
+    """OpenClaw の例外レジストリを 10-08 裁定の集合そのものに固定する。
+
+    2026-10-08: oc17 の provenance builder 段で Chainguard node:latest 同梱の glibc 2.44-r7 に
+    MEDIUM 3 件・LOW 1 件が新規検出（10-07 19:39 のビルドでは未検出）。Wolfi には 2.44-r8 が
+    あるが、runtime ベースのバンプは契約の node probe と世代の再導出を伴うため、9/14（#408）と
+    同じく MEDIUM/LOW は期限つき例外（stale=fail・expires 2026-10-22）で段を通す。HIGH/CRITICAL
+    を黙って足す変更、パッケージや版をずらす変更、期限を延ばす変更はすべてここで赤になる。
+    """
+    path = ROOT / "infra/codebuild/ecr_scan_exceptions_openclaw.json"
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    assert payload["schema_version"] == 1
+    assert payload["stale_exception_policy"] == "fail"
+    expected = sorted(
+        (cve, severity, package, "2.44-r7", "2026-10-22")
+        for cve, severity in OC_GLIBC_2_44_R7_CVES
+        for package in OC_GLIBC_2_44_PACKAGES
+    )
+    actual = sorted(
+        (e["cve"], e["severity"], e["package"], e["version"], e["expires_on"])
+        for e in payload["exceptions"]
+    )
+    assert actual == expected
+    for entry in payload["exceptions"]:
+        assert entry["owner"] == "s-komata@vectorinc.co.jp"
+        assert "2026-10-08" in entry["reason"]
+        assert entry["severity"] in {"MEDIUM", "LOW"}
+    loaded = gate.load_exceptions(path, today=date(2026, 10, 8))
+    assert len(loaded) == 16
