@@ -17,6 +17,7 @@
      （別の業種は外す・業種が分からないものは「業種不明」として末尾へ）。
   4. 施策の数字を言うときに資料のリンクを併記させ、無い施策は「シートのみ」と書かせる。
      要約が落としたときはコードで末尾に足す（プロンプトだけに任せない）。
+  5. 上位の投稿の再生数・保存数・動画 URL を本文から取り、回答末尾へ機械的に並べる。
 
 本モジュールは env を読まない・DB を引かない（SQL は adapter・env と配線は skill 側）。
 """
@@ -51,6 +52,20 @@ _KIND_OTHER = "資料"
 _TITLE_PREFIX = "施策実績 "
 _SEP_RE = re.compile(r"[\s　_\-‐‑–—－−・/／|｜()（）\[\]【】「」『』.,，、。:：#＃]+")
 _FOOTER_MAX = 3
+_MAX_VIDEOS_PER_CAMPAIGN = 5
+_VIDEO_PREVIEW_CHARS = 28
+_COUNT_PATTERN = r"(?:不明|[0-9]{1,3}(?:,[0-9]{3})+|[0-9]+)"
+_TOP_POSTS_RE = re.compile(r"^上位の投稿\s*[（(]再生数順[）)]\s*[:：][^\S\n]*$", re.MULTILINE)
+_VIDEO_ROW_RE = re.compile(
+    rf"^\s*(?P<rank>[1-9][0-9]*)[.．]\s*再生\s*(?P<plays>{_COUNT_PATTERN})\s*、\s*"
+    rf"保存\s*(?P<saves>{_COUNT_PATTERN})\s*、\s*[^、\n]+、\s*(?P<preview>\S.*?)\s*$"
+)
+_VIDEO_URL_RE = re.compile(r"(?:^|\s)(?P<url>https?://[^\s<>]+)$")
+_POST_COUNT_RE = re.compile(rf"^投稿本数[:：]\s*({_COUNT_PATTERN})\s*本", re.MULTILINE)
+_AD_COUNT_RE = re.compile(
+    rf"^投稿本数[^\n]*?広告配信あり[:：]\s*({_COUNT_PATTERN})\s*本", re.MULTILINE
+)
+_TOTAL_PLAYS_RE = re.compile(rf"^再生数[:：]\s*合計\s*({_COUNT_PATTERN})\s*(?=、|$)", re.MULTILINE)
 #: 添える資料名の表示上限（ツール結果の字数予算・OC のツール結果上限 2 万字の内側に収める）。
 TITLE_CHARS = 60
 
@@ -282,6 +297,83 @@ def links_footer(hits: Sequence[SearchHit], answer: str) -> str:
     return "\n\n".join(parts)
 
 
+def _plain_video_text(text: str) -> str:
+    """動画節の表示文は装飾を付けない。リンク先はこの処理に渡さない。"""
+    return text.replace("###", "").replace("**", "").replace("—", "、").strip()
+
+
+def _video_lines(content: str) -> list[tuple[str, str]]:
+    """本文の上位投稿だけを表示行と URL にする。崩れた行は飛ばし、URL 無しは数字を残す。"""
+    heading = _TOP_POSTS_RE.search(content)
+    if heading is None:
+        return []
+    rows: list[tuple[str, str]] = []
+    for line in content[heading.end() :].splitlines():
+        if re.match(r"^\s*投稿文の特徴[:：]", line):
+            break
+        match = _VIDEO_ROW_RE.fullmatch(line)
+        if match is None:
+            continue
+        preview = match["preview"]
+        url_match = _VIDEO_URL_RE.search(preview)
+        url = url_match["url"] if url_match else ""
+        if url_match:
+            preview = preview[: url_match.start()].strip()
+        preview = _plain_video_text(preview)
+        shown = truncate_graphemes(preview, _VIDEO_PREVIEW_CHARS)
+        if len(shown) < len(preview):
+            shown += "…"
+        text = f"{match['rank']}. {match['plays']} 再生・保存 {match['saves']}"
+        if shown:
+            text += f"　{shown}"
+        if url:
+            text += f" {url}"
+        rows.append((text, url))
+        if len(rows) >= _MAX_VIDEOS_PER_CAMPAIGN:
+            break
+    return rows
+
+
+def _video_campaign_label(hit: SearchHit) -> str:
+    """施策の集計値も本文から取る。欠けた項目は推測せず省く。"""
+    key = campaign_key(hit)
+    label = f"{key[0]} / {key[1]}" if key else str((hit.metadata or {}).get("title") or "施策")
+    label = _plain_video_text(label)
+    facts: list[str] = []
+    if count := _POST_COUNT_RE.search(hit.content):
+        facts.append(f"投稿 {count[1]} 本")
+    if ads := _AD_COUNT_RE.search(hit.content):
+        facts.append("広告なし" if ads[1] == "0" else f"広告配信 {ads[1]} 本")
+    if plays := _TOTAL_PLAYS_RE.search(hit.content):
+        facts.append(f"合計 {plays[1]} 再生")
+    return f"{label}（{'・'.join(facts)}）" if facts else label
+
+
+def video_stats_footer(hits: Sequence[SearchHit], answer: str) -> str:
+    """要約に使った施策の上位動画を最大 3 施策・各 5 本、数字とリンク付きで並べる。"""
+    blocks: list[str] = []
+    urls: list[str] = []
+    seen: set[tuple[str, str] | int] = set()
+    for hit in hits:
+        if not is_campaign_hit(hit) or "related_files" not in (hit.metadata or {}):
+            continue
+        key: tuple[str, str] | int = campaign_key(hit) or hit.chunk_id
+        if key in seen:
+            continue
+        rows = _video_lines(hit.content)
+        if not rows:
+            continue
+        seen.add(key)
+        blocks.append(_video_campaign_label(hit) + "\n" + "\n".join(row[0] for row in rows))
+        urls.extend(row[1] for row in rows)
+        if len(blocks) >= _FOOTER_MAX:
+            break
+    # URL 無しの行まで空集合の all() で省かない。部分的な引用なら全行を残す。
+    if not blocks or all(url and url in answer for url in urls):
+        return ""
+    return "📊 動画ごとの数字（ショート動画データベース）\n" + "\n\n".join(blocks)
+
+
 __all__ = [
     "MAX_FILES_PER_CAMPAIGN",
     "SHEET_ONLY_NOTE",
@@ -298,4 +390,5 @@ __all__ = [
     "links_footer",
     "pick_related_files",
     "scope_by_industry",
+    "video_stats_footer",
 ]

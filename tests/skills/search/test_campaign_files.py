@@ -15,6 +15,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import Any
 from unittest.mock import MagicMock
 
@@ -27,6 +28,11 @@ from teamagent.adapters.bedrock_client import (
     TokenUsage,
 )
 from teamagent.adapters.pgvector_client import PgVectorClient, SearchHit
+from teamagent.ingest.campaign_aggregate import (
+    CampaignAggregate,
+    CampaignVideo,
+    format_campaign_document,
+)
 from teamagent.skills.base import SkillContext
 from teamagent.skills.search.campaign_files import (
     SHEET_ONLY_NOTE,
@@ -35,6 +41,7 @@ from teamagent.skills.search.campaign_files import (
     campaign_similarity,
     file_kind,
     pick_related_files,
+    video_stats_footer,
 )
 from teamagent.skills.search.not_found import NOT_FOUND_HEAD
 from teamagent.skills.search.schema import SearchInput
@@ -390,6 +397,302 @@ def test_lookup_failure_is_fail_open_and_claims_nothing() -> None:
     assert out.found is True
     assert all("related_files" not in h for h in out.model_dump()["hits"])
     assert SHEET_ONLY_NOTE not in out.answer  # 照会できていないのに「無い」とは言わない
+
+
+# ── 動画ごとの数字（本番の文書 formatter を通した本文）──────────────────────
+
+
+VIDEO_STATS_HEADING = "📊 動画ごとの数字（ショート動画データベース）"
+HAM_VIDEO_URLS = [f"https://www.tiktok.com/@example/video/{n}" for n in range(1, 7)]
+
+
+def _video(
+    url: str,
+    text: str,
+    plays: float | None,
+    saves: float | None,
+    *,
+    cost: float | None = None,
+) -> CampaignVideo:
+    return CampaignVideo(
+        url=url,
+        account="たべもの",
+        text=text,
+        plays=plays,
+        likes=None,
+        shares=None,
+        comments=None,
+        saves=saves,
+        cost=cost,
+        impressions=None,
+        ctr=None,
+        ad_name="",
+    )
+
+
+def _video_campaign(
+    chunk_id: int, advertiser: str, campaign: str, videos: list[CampaignVideo]
+) -> SearchHit:
+    hit = _campaign(chunk_id, advertiser, campaign)
+    return SearchHit(
+        hit.chunk_id,
+        format_campaign_document(
+            CampaignAggregate(videos=tuple(videos), advertiser=advertiser, campaign=campaign)
+        ),
+        hit.score,
+        hit.metadata,
+    )
+
+
+@pytest.fixture
+def ham_campaign() -> tuple[SearchHit, list[dict[str, Any]]]:
+    hit = _video_campaign(
+        10,
+        "伊藤ハム",
+        "ハンバーグ",
+        [
+            _video(
+                HAM_VIDEO_URLS[0],
+                "デミグラスをパスタに混ぜるだけで濃厚な洋食ランチになるアレンジ",
+                507_000,
+                120,
+            ),
+            _video(HAM_VIDEO_URLS[1], "チーズ入りをご飯にのせて簡単なランチ", 331_000, 80),
+            _video(HAM_VIDEO_URLS[2], "目玉焼きと一緒にお弁当へ", 180_000, 50),
+            _video(HAM_VIDEO_URLS[3], "パンに挟んでハンバーグサンド", 100_000, 30),
+            _video(HAM_VIDEO_URLS[4], "野菜と煮込む夜ごはん", 70_000, 20),
+            _video(HAM_VIDEO_URLS[5], "そのまま味わう朝ごはん", 42_000, 10),
+        ],
+    )
+    docs = [
+        {
+            "title": "伊藤ハム_ハンバーグ_レポート.pptx",
+            "source_uri": "gdrive://HAM_REPORT",
+            "cls_industry": "食品",
+            "cls_project": "伊藤ハム",
+            "cls_doc_type": "報告書",
+            "updated_at": "2026-10-01",
+            "acl": {ME},
+        }
+    ]
+    return hit, docs
+
+
+def test_video_lines_with_numbers_and_links_follow_the_report_footer(
+    ham_campaign: tuple[SearchHit, list[dict[str, Any]]],
+) -> None:
+    hit, docs = ham_campaign
+    out = _run(
+        _skill(_Pg([hit], docs), answer="伊藤ハムのハンバーグは食事のアレンジが伸びた。"),
+        query="食品メーカーのショート動画の事例",
+    )
+    assert out.answer.split("\n\n探した範囲:", 1)[0] == (
+        "伊藤ハムのハンバーグは食事のアレンジが伸びた。\n\n"
+        "📎 施策のレポート・提案書\n"
+        "- 伊藤ハム ハンバーグ: 『伊藤ハム_ハンバーグ_レポート.pptx』 "
+        "https://drive.google.com/file/d/HAM_REPORT/view\n\n"
+        "📊 動画ごとの数字（ショート動画データベース）\n"
+        "伊藤ハム / ハンバーグ（投稿 6 本・広告なし・合計 1,230,000 再生）\n"
+        "1. 507,000 再生・保存 120　デミグラスをパスタに混ぜるだけで濃厚な洋食ランチになるア… "
+        "https://www.tiktok.com/@example/video/1\n"
+        "2. 331,000 再生・保存 80　チーズ入りをご飯にのせて簡単なランチ "
+        "https://www.tiktok.com/@example/video/2\n"
+        "3. 180,000 再生・保存 50　目玉焼きと一緒にお弁当へ "
+        "https://www.tiktok.com/@example/video/3\n"
+        "4. 100,000 再生・保存 30　パンに挟んでハンバーグサンド "
+        "https://www.tiktok.com/@example/video/4\n"
+        "5. 70,000 再生・保存 20　野菜と煮込む夜ごはん "
+        "https://www.tiktok.com/@example/video/5"
+    )
+    assert "###" not in out.answer and "**" not in out.answer and "—" not in out.answer
+
+
+@pytest.mark.parametrize("answer", ["試食の施策。", "https://example.test/unknown-plays"])
+def test_video_rows_without_urls_keep_unknown_numbers_and_no_link(answer: str) -> None:
+    hit = _video_campaign(
+        20,
+        "食品メーカー",
+        "試食",
+        [
+            _video("", "保存数が未入力", 3_100, None),
+            _video("https://example.test/unknown-plays", "再生数が未入力", None, 4),
+        ],
+    )
+    out = _run(_skill(_Pg([hit], []), answer=answer), query="食品メーカーの事例")
+    assert out.answer.split(VIDEO_STATS_HEADING, 1)[1].split("\n\n探した範囲:", 1)[0] == (
+        "\n食品メーカー / 試食（投稿 2 本・広告なし・合計 3,100 再生）\n"
+        "1. 3,100 再生・保存 不明　保存数が未入力\n"
+        "2. 不明 再生・保存 4　再生数が未入力 https://example.test/unknown-plays"
+    )
+
+
+def test_video_footer_caps_campaigns_and_videos_at_three_and_five() -> None:
+    hits = [
+        _video_campaign(
+            n,
+            f"食品メーカー{n}",
+            f"試食{n}",
+            [_video(f"https://example.test/{n}/{v}", f"投稿{v}", 100 - v, v) for v in range(1, 7)],
+        )
+        for n in range(1, 5)
+    ]
+    # formatter 自体の上限だけに依存せず、検索結果の本文に 6 行目があっても 5 本に収める。
+    hits = [
+        replace(
+            hit,
+            content=hit.content.replace(
+                "投稿文の特徴:",
+                "6. 再生 94、保存 6、たべもの、上限外 https://example.test/extra-video\n投稿文の特徴:",
+            ),
+        )
+        for hit in hits
+    ]
+    out = _run(_skill(_Pg(hits, []), answer="食品の施策事例。"), query="食品メーカーの事例")
+    section = out.answer.split(VIDEO_STATS_HEADING, 1)[1]
+    assert section.count(" / 試食") == 3
+    assert section.count(" https://") == 15
+    assert "食品メーカー4" not in section and "extra-video" not in section
+    assert "6. " not in section
+
+
+def test_video_footer_excludes_campaigns_from_other_industries(
+    ham_campaign: tuple[SearchHit, list[dict[str, Any]]],
+) -> None:
+    food, docs = ham_campaign
+    non_food = _video_campaign(
+        30,
+        "ヒノデ化学株式会社",
+        "あまみシロップ",
+        [_video("https://example.test/non-food", "業種違いの投稿", 990_000, 90)],
+    )
+    out = _run(
+        _skill(_Pg([food, non_food], docs + DRIVE_DOCS), answer="食品の事例。"),
+        query="食品メーカーのショート動画の事例",
+    )
+    assert VIDEO_STATS_HEADING in out.answer and HAM_VIDEO_URLS[0] in out.answer
+    assert "ヒノデ化学" not in out.answer and "non-food" not in out.answer
+    assert "990,000" not in out.answer
+
+
+def test_video_footer_is_omitted_only_when_summary_includes_all_displayed_urls(
+    ham_campaign: tuple[SearchHit, list[dict[str, Any]]],
+) -> None:
+    hit, docs = ham_campaign
+    # 表示対象は 5 本。集計文書に出ない 6 本目の URL は省略判定に不要。
+    answer = "動画はこちら。 " + " ".join(HAM_VIDEO_URLS[:5])
+    out = _run(_skill(_Pg([hit], docs), answer=answer), query="食品メーカーの事例")
+    assert VIDEO_STATS_HEADING not in out.answer
+    assert "📎 施策のレポート・提案書" in out.answer
+
+
+def test_video_footer_keeps_all_rows_when_summary_includes_only_some_urls(
+    ham_campaign: tuple[SearchHit, list[dict[str, Any]]],
+) -> None:
+    hit, docs = ham_campaign
+    out = _run(
+        _skill(_Pg([hit], docs), answer=f"代表動画はこちら。 {HAM_VIDEO_URLS[0]}"),
+        query="食品メーカーの事例",
+    )
+    section = out.answer.split(VIDEO_STATS_HEADING, 1)[1]
+    assert section.count(" https://") == 5
+    assert all(url in section for url in HAM_VIDEO_URLS[:5])
+
+
+def test_video_footer_is_added_even_when_summary_already_cites_report_link(
+    ham_campaign: tuple[SearchHit, list[dict[str, Any]]],
+) -> None:
+    hit, docs = ham_campaign
+    answer = "レポートはこちら。 https://drive.google.com/file/d/HAM_REPORT/view"
+    out = _run(_skill(_Pg([hit], docs), answer=answer), query="食品メーカーの事例")
+    assert "📎 施策のレポート・提案書" not in out.answer
+    assert VIDEO_STATS_HEADING in out.answer
+    assert out.answer.count("https://drive.google.com/file/d/HAM_REPORT/view") == 1
+
+
+def test_video_footer_skips_malformed_rows_and_only_reads_the_top_posts_section() -> None:
+    hit = _video_campaign(
+        40,
+        "食品メーカー",
+        "試食",
+        [_video("https://example.test/valid", "正しい投稿", 10, 2)],
+    )
+    heading, tail = hit.content.split("上位の投稿（再生数順）:\n", 1)
+    _, features = tail.split("\n投稿文の特徴:", 1)
+    hit = replace(
+        hit,
+        content=(
+            heading
+            + "9. 再生 900、保存 90、たべもの、節の外 https://example.test/outside\n"
+            + "上位の投稿（再生数順）:\n"
+            + "1. 再生 12,34、保存 2、たべもの、桁区切りが壊れた https://example.test/bad-comma\n"
+            + "2. 再生 4万、保存 2、たべもの、数値が壊れた https://example.test/bad-number\n"
+            + "3. 再生 10、保存 2、たべもの、正しい投稿 https://example.test/valid\n"
+            + "4. 再生 10、保存 2、アカウントだけ\n"
+            + "5. 再生 10 保存 2、たべもの、区切りが壊れた https://example.test/bad-separator\n"
+            + "投稿文の特徴:"
+            + features
+            + "\n10. 再生 900、保存 90、たべもの、後の節 https://example.test/after"
+        ),
+    )
+    out = _run(_skill(_Pg([hit], []), answer="食品の事例。"), query="食品メーカーの事例")
+    section = out.answer.split(VIDEO_STATS_HEADING, 1)[1]
+    assert "3. 10 再生・保存 2　正しい投稿 https://example.test/valid" in section
+    assert section.count(" https://") == 1
+    for invalid in ("bad-comma", "bad-number", "bad-separator", "outside", "/after"):
+        assert invalid not in section
+
+
+def test_video_footer_with_no_parseable_rows_is_omitted() -> None:
+    hit = _video_campaign(
+        41,
+        "食品メーカー",
+        "試食",
+        [_video("https://example.test/invalid", "投稿", 10, 2)],
+    )
+    hit = replace(
+        hit,
+        content=hit.content.replace("1. 再生 10、保存 2", "1. 再生 多い、保存 たくさん"),
+    )
+    out = _run(_skill(_Pg([hit], []), answer="食品の事例。"), query="食品メーカーの事例")
+    assert VIDEO_STATS_HEADING not in out.answer and "/invalid" not in out.answer
+
+
+def test_video_footer_preserves_unknown_total_and_advertising_count() -> None:
+    hit = _video_campaign(
+        42,
+        "食品メーカー",
+        "試食",
+        [_video("", "広告の投稿", None, None, cost=100)],
+    )
+    out = _run(_skill(_Pg([hit], []), answer="食品の事例。"), query="食品メーカーの事例")
+    assert "食品メーカー / 試食（投稿 1 本・広告配信 1 本・合計 不明 再生）" in out.answer
+    assert "1. 不明 再生・保存 不明　広告の投稿" in out.answer
+
+
+def test_video_footer_strips_forbidden_decoration_from_names_and_post_text() -> None:
+    hit = _video_campaign(
+        43,
+        "###食品**メーカー—",
+        "**試食###—施策",
+        [_video("https://example.test/###**—", "###簡単**アレンジ—お弁当", 100, 5)],
+    )
+    out = _run(_skill(_Pg([hit], []), answer="食品の事例。"), query="食品メーカーの事例")
+    section = out.answer.split(VIDEO_STATS_HEADING, 1)[1]
+    assert "食品メーカー、 / 試食、施策（投稿 1 本・広告なし・合計 100 再生）" in section
+    assert "1. 100 再生・保存 5　簡単アレンジ、お弁当 https://example.test/###**—" in section
+    display = section.replace("https://example.test/###**—", "")
+    assert "###" not in display and "**" not in display and "—" not in display
+
+
+@pytest.mark.parametrize("eligible", ["not_campaign", "attachment_not_attempted"])
+def test_video_footer_only_uses_campaigns_where_related_file_lookup_was_attempted(
+    ham_campaign: tuple[SearchHit, list[dict[str, Any]]], eligible: str
+) -> None:
+    hit, _ = ham_campaign
+    if eligible == "not_campaign":
+        hit.metadata["campaign_aggregate"] = "false"
+        hit.metadata["related_files"] = []
+    assert video_stats_footer([hit], "事例。") == ""
 
 
 # ── 純関数 ────────────────────────────────────────────────────────────────
