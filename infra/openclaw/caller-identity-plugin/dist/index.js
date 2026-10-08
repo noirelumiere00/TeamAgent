@@ -63,6 +63,7 @@ export const OUTBOUND_TOOL_NAMES = Object.freeze([
   "proposal_campaign",
   "proposal_deck",
   "proposal_draft",
+  "proposal_research",
   "proposal_review",
   "recommend",
   "run_agent",
