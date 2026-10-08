@@ -268,12 +268,15 @@ class ProposalJobStore:
         result_json = string_value("result_json")
         error_code = string_value("error_code")
         error_summary = string_value("error_summary")
+        stage = string_value("stage")
         if result_json is not None:
             row["result_json"] = result_json
         if error_code is not None:
             row["error_code"] = error_code
         if error_summary is not None:
             row["error_summary"] = error_summary
+        if stage is not None:
+            row["stage"] = stage
         return row
 
     def mark_running(self, job_id: str) -> bool:
@@ -316,6 +319,42 @@ class ProposalJobStore:
                 return False
             raise
 
+    def mark_stage(self, job_id: str, stage: str) -> bool:
+        """Persist a running proposal's phase and refresh its heartbeat."""
+        if stage not in {"researching", "building"}:
+            raise ValueError("invalid proposal job stage")
+        now_text = _isoformat(self._clock())
+        if not self.uses_dynamodb:
+            with self._memory_lock:
+                row = self._memory.get(job_id)
+                if row is None or row.get("status") != "running":
+                    return False
+                row["stage"] = stage
+                row["updated_at"] = now_text
+                return True
+        try:
+            self._client().update_item(
+                TableName=self._table_name,
+                Key={"job_id": {"S": job_id}},
+                UpdateExpression="SET #stage = :stage, #updated_at = :updated_at",
+                ConditionExpression="#status = :running",
+                ExpressionAttributeNames={
+                    "#stage": "stage",
+                    "#status": "status",
+                    "#updated_at": "updated_at",
+                },
+                ExpressionAttributeValues={
+                    ":stage": {"S": stage},
+                    ":running": {"S": "running"},
+                    ":updated_at": {"S": now_text},
+                },
+            )
+            return True
+        except Exception as exc:
+            if _is_conditional_failure(exc):
+                return False
+            raise
+
     def mark_done(self, job_id: str, result_json: str) -> bool:
         if len(result_json.encode("utf-8")) > _MAX_RESULT_BYTES:
             raise ValueError("proposal job result exceeds the DynamoDB row boundary")
@@ -336,8 +375,12 @@ class ProposalJobStore:
         if not isinstance(result, dict) or "slack_delivered" not in result:
             return False
         result["slack_delivered"] = True
-        result["delivery_target"] = "thread"
-        result["message"] = str(result.get("message") or "") + " この会話へ添付しました。"
+        summary = json.loads(row.get("request_summary") or "{}")
+        research_auto = isinstance(summary, dict) and summary.get("research_auto") is True
+        target = "dm" if research_auto and result.get("delivery_target") == "dm" else "thread"
+        result["delivery_target"] = target
+        suffix = " DMへ添付しました。" if target == "dm" else " この会話へ添付しました。"
+        result["message"] = str(result.get("message") or "") + suffix
         serialized = json.dumps(result, ensure_ascii=False)
         if len(serialized.encode("utf-8")) > _MAX_RESULT_BYTES:
             return False

@@ -484,12 +484,19 @@ class GeminiClient:
             )
 
     def generate_text(
-        self, prompt: str, request_id: str, *, system: str | None = None
+        self,
+        prompt: str,
+        request_id: str,
+        *,
+        system: str | None = None,
+        json_mode: bool = False,
     ) -> GeminiResponse:
         """テキストのみの生成 (複数動画分析の横断まとめ等)。動画 part は含めない。"""
         from google.genai import types
 
-        return self._generate_video([types.Part(text=prompt)], request_id, system=system)
+        return self._generate_video(
+            [types.Part(text=prompt)], request_id, system=system, json_mode=json_mode
+        )
 
     def generate_with_google_search(
         self,

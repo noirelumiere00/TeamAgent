@@ -7,13 +7,15 @@ import copy
 import json
 import os
 import re
+import tempfile
 import threading
 import traceback
 import unicodedata
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Any, ClassVar, Literal
+from pathlib import Path
+from typing import TYPE_CHECKING, Any, ClassVar, Literal, Protocol
 from urllib.parse import urlsplit
 
 from pydantic import BaseModel
@@ -67,6 +69,10 @@ from teamagent.skills.proposal_deck.contract import EvidenceImage
 from teamagent.skills.proposal_deck.provenance import iter_quantitative_claims
 from teamagent.skills.proposal_deck.schema import ProposalDeckInput, ProposalDeckOutput
 from teamagent.skills.proposal_deck.skill import ProposalDeckSkill
+from teamagent.skills.proposal_research.brief import ResearchBrief
+
+if TYPE_CHECKING:
+    from teamagent.skills.proposal_research.schema import ProposalResearchOutput
 
 _SAFE_NAME = re.compile(r"[^\w\-]+", re.UNICODE)
 _HTTP_URL = re.compile(r"https?://[^\s<>{}\\^`\"']+", re.IGNORECASE)
@@ -85,6 +91,9 @@ _PROPOSAL_JOB_RESULT_ERROR_CODE = "RESULT_INVALID"
 _PROPOSAL_JOB_RETRY_SECONDS = 30
 _PROPOSAL_JOB_HEARTBEAT_SECONDS = 30
 _PROPOSAL_JOB_STALE_SECONDS = 180
+_RESEARCH_OUTPUT_KEY = "_proposal_research_output"
+RESEARCH_AUTO_ENV = "PROPOSAL_RESEARCH_AUTO"
+RESEARCH_NOT_READY_MESSAGE = "調査からの自動作成は準備中です。Gemini v3 の JSON を渡してください"
 
 # 83 枚提案書の段階公開（2026-10-07）。submit の入口で「誰が使えるか」を env で決める。
 # - 空・未設定: 全員拒否（今の本番と同じ＝使えない）
@@ -139,6 +148,36 @@ _ProposalInputValidator = Callable[[ProposalBuilderInput], None]
 _ThreadLauncher = Callable[[Callable[[], None], str], None]
 
 
+class _ResearchRunner(Protocol):
+    def run(self, input: ResearchBrief, ctx: SkillContext) -> ProposalResearchOutput: ...
+
+
+_ResearchFactory = Callable[[], _ResearchRunner]
+
+
+def _build_research_skill() -> _ResearchRunner:
+    from teamagent.skills.proposal_research.skill import ProposalResearchSkill
+
+    return ProposalResearchSkill()
+
+
+def _research_output(ctx: SkillContext) -> ProposalResearchOutput | None:
+    value = ctx.metadata.get(_RESEARCH_OUTPUT_KEY)
+    if value is None:
+        return None
+    from teamagent.skills.proposal_research.schema import ProposalResearchOutput
+
+    return value if isinstance(value, ProposalResearchOutput) else None
+
+
+def _research_summary_lines(output: ProposalResearchOutput) -> str:
+    return (
+        f"調査: 出典 {output.summary.source_count} 件（すべて実在を確認）・"
+        f"出典が確かめられず外した主張 {output.summary.discarded_count} 件\n"
+        "調査の JSON を添付しました。直して渡せば、その JSON から作り直せます"
+    )
+
+
 def _utc_now() -> datetime:
     return datetime.now(UTC)
 
@@ -162,7 +201,8 @@ def _parse_job_timestamp(value: object) -> datetime | None:
 def _validate_submit_input(input: ProposalBuilderInput) -> None:
     # ProposalBuilderInput bounds the outer MCP payload; the A-H research
     # contract is intentionally parsed at the Skill boundary.
-    parse_gemini_research(input.gemini_json)
+    if input.gemini_json is not None:
+        parse_gemini_research(input.gemini_json)
 
 
 def _envflag(name: str, default: str = "false") -> bool:
@@ -785,7 +825,10 @@ class ProposalBuilderSkill(BaseSkill[ProposalBuilderInput, ProposalBuilderOutput
         enrichment_lease: list[_TikTokEnrichment],
     ) -> ProposalBuilderOutput:
         log = ctx.bind_logger(self.name)
+        if input.gemini_json is None:
+            raise ValueError("research_brief requires background proposal submission")
         research = parse_gemini_research(input.gemini_json)
+        automatic_research = _research_output(ctx)
         sanitized = sanitize_unverified_numbers(research)
         meta = research.product_meta
 
@@ -857,11 +900,16 @@ class ProposalBuilderSkill(BaseSkill[ProposalBuilderInput, ProposalBuilderOutput
             confidential=input.confidential_product_name,
             brand=research.brand,
         )
-        tiktok_enrichment = self._collect_tiktok_enrichment(
-            keywords=tiktok_keywords,
-            confidential_term=(research.brand if input.confidential_product_name else ""),
-            ctx=ctx,
-            log=log,
+        # 自動調査は段Cで実測済み。既存Gemini JSON経路だけ追加取得を行う。
+        tiktok_enrichment = (
+            _TikTokEnrichment(evidence_images={}, measurements=())
+            if automatic_research is not None
+            else self._collect_tiktok_enrichment(
+                keywords=tiktok_keywords,
+                confidential_term=(research.brand if input.confidential_product_name else ""),
+                ctx=ctx,
+                log=log,
+            )
         )
         enrichment_lease.append(tiktok_enrichment)
         tiktok_material, tiktok_summaries, tiktok_quantitative_evidence = (
@@ -1081,13 +1129,16 @@ class ProposalBuilderSkill(BaseSkill[ProposalBuilderInput, ProposalBuilderOutput
                     if status == "draft"
                     else "提案書を生成しました。数値出典・95枠・統合FMTを検証済みです。"
                 )
+                if automatic_research is not None:
+                    comment += "\n" + _research_summary_lines(automatic_research)
                 try:
                     slack_delivered, delivery_target = asyncio.run(
-                        self._deliver(
+                        self._deliver_artifacts(
                             path=deck_output.pptx_path,
                             title=f"{prefix}{safe_name}_{deck_output.version_id}.pptx",
                             comment=comment,
                             ctx=ctx,
+                            research=automatic_research,
                         )
                     )
                 except Exception as exc:
@@ -1118,6 +1169,10 @@ class ProposalBuilderSkill(BaseSkill[ProposalBuilderInput, ProposalBuilderOutput
                 message += " 外部提出防止のためSlack添付は行っていません。"
             elif slack_delivered:
                 message += " 依頼元Slackへ添付しました。"
+            if automatic_research is not None and (
+                slack_delivered or ((target := origin(ctx)) is not None and target.pending)
+            ):
+                message += "\n" + _research_summary_lines(automatic_research)
 
             output = ProposalBuilderOutput(
                 status=status,
@@ -1157,7 +1212,8 @@ class ProposalBuilderSkill(BaseSkill[ProposalBuilderInput, ProposalBuilderOutput
                 warnings=warnings,
                 slack_delivered=slack_delivered,
                 delivery_target=delivery_target,
-                total_cost_usd=deck_output.total_cost_usd,
+                total_cost_usd=deck_output.total_cost_usd
+                + (automatic_research.summary.gemini_cost_usd if automatic_research else 0.0),
             )
             with self._owned_outputs_lock:
                 self._owned_outputs[output.version_id] = deck_output
@@ -1175,6 +1231,44 @@ class ProposalBuilderSkill(BaseSkill[ProposalBuilderInput, ProposalBuilderOutput
                 self._deck.cleanup_output(deck_output)
             raise
 
+    async def _deliver_artifacts(
+        self,
+        *,
+        path: str,
+        title: str,
+        comment: str,
+        ctx: SkillContext,
+        research: ProposalResearchOutput | None,
+    ) -> tuple[bool, Literal["thread", "dm", "none"]]:
+        delivered, destination = await self._deliver(
+            path=path,
+            title=title,
+            comment=comment,
+            ctx=ctx,
+            force_dm=research is not None,
+        )
+        if research is None:
+            return delivered, destination
+        if not delivered and not ((target := origin(ctx)) is not None and target.pending):
+            return False, "none"
+        with tempfile.TemporaryDirectory(prefix="proposal-research-json-") as workdir:
+            json_path = Path(workdir) / "research.json"
+            json_path.write_text(
+                json.dumps(research.research_json, ensure_ascii=False, indent=2), encoding="utf-8"
+            )
+            json_delivered, json_destination = await self._deliver(
+                path=str(json_path),
+                title=Path(title).stem + "_調査.json",
+                comment="",
+                ctx=ctx,
+                force_dm=True,
+            )
+        if json_destination != "dm":
+            if (target := origin(ctx)) is not None and target.pending:
+                target.discard()
+            raise RuntimeError("research JSON could not be attached")
+        return delivered and json_delivered, "dm"
+
     async def _deliver(
         self,
         *,
@@ -1182,6 +1276,7 @@ class ProposalBuilderSkill(BaseSkill[ProposalBuilderInput, ProposalBuilderOutput
         title: str,
         comment: str,
         ctx: SkillContext,
+        force_dm: bool = False,
     ) -> tuple[bool, Literal["thread", "dm", "none"]]:
         if long_jobs_enabled() and origin(ctx) is None:
             return False, "none"
@@ -1200,6 +1295,31 @@ class ProposalBuilderSkill(BaseSkill[ProposalBuilderInput, ProposalBuilderOutput
             self._slack = slack
 
         target = origin(ctx)
+        if force_dm:
+            user_id = target.user_id if target is not None else None
+            if user_id is None:
+                requester = ctx.metadata.get("user_email")
+                if isinstance(requester, str) and requester.strip():
+                    user_id = await slack.lookup_user_id_by_email(requester.strip(), ctx.request_id)
+            if not user_id:
+                return False, "none"
+            dm = await slack.open_dm(user_id, ctx.request_id)
+            if not dm:
+                return False, "none"
+            if target is not None and target.deferred:
+                target.defer(
+                    slack, path, title, comment, ctx.request_id, channel_id=dm, thread_ts=None
+                )
+                return False, "dm"
+            ok = await slack.upload_file(
+                dm,
+                path,
+                ctx.request_id,
+                title=title,
+                filename=title,
+                initial_comment=comment or None,
+            )
+            return bool(ok), "dm" if ok else "none"
         if target is not None and target.deferred:
             target.defer(slack, path, title, comment, ctx.request_id)
             return False, "none"
@@ -1272,9 +1392,13 @@ class ProposalBuilderSubmitSkill(
 
     name: ClassVar[str] = "proposal_builder_submit"
     description: ClassVar[str] = (
-        "Gemini v3 JSONと投稿開始日Dを検証して提案書生成jobを受け付け、即job_idを返す。"
+        "83枚の提案書を作成する。商材名・公式URL・与件・投稿開始日があれば、"
+        "PROPOSAL_RESEARCH_AUTOが有効なときはresearch_briefで調査から作成でき、JSONは不要。"
+        "従来のGemini v3 JSONと投稿開始日Dからの作成にも対応し、どちらか一方を指定する。"
+        "重い処理を待たずにjob_idを返す。"
         "生成はMCP内のバックグラウンドthreadで継続するため、返された秒数後に"
         "proposal_builder_statusで同じjob_idを照会する。queued/running中は再submitしない。"
+        "利用者へは調査・作成の状況と返されたmessageを伝え、ツール名や内部語は出さない。"
     )
     input_schema: ClassVar[type[BaseModel]] = ProposalBuilderSubmitInput
     output_schema: ClassVar[type[BaseModel]] = ProposalBuilderSubmitOutput
@@ -1286,6 +1410,7 @@ class ProposalBuilderSubmitSkill(
         self,
         *,
         builder_factory: _ProposalBuilderFactory | None = None,
+        research_factory: _ResearchFactory = _build_research_skill,
         store: ProposalJobStore | None = None,
         thread_launcher: _ThreadLauncher = _launch_daemon_thread,
         input_validator: _ProposalInputValidator = _validate_submit_input,
@@ -1293,6 +1418,7 @@ class ProposalBuilderSubmitSkill(
         retry_after_seconds: int | None = None,
     ) -> None:
         self._builder_factory = builder_factory
+        self._research_factory = research_factory
         self._store = store or ProposalJobStore()
         self._thread_launcher = thread_launcher
         self._input_validator = input_validator
@@ -1328,6 +1454,13 @@ class ProposalBuilderSubmitSkill(
                 retry_after_seconds=0,
                 message=NOT_READY_MESSAGE,
             )
+        if input.research_brief is not None and not _envflag(RESEARCH_AUTO_ENV):
+            return ProposalBuilderSubmitOutput(
+                job_id="",
+                status="failed",
+                retry_after_seconds=0,
+                message=RESEARCH_NOT_READY_MESSAGE,
+            )
         self._input_validator(input)
         job_id = new_proposal_job_id()
         request_summary = {
@@ -1337,6 +1470,8 @@ class ProposalBuilderSubmitSkill(
             "case_limit": input.case_limit,
             "max_repair": input.max_repair,
         }
+        if input.research_brief is not None:
+            request_summary["research_auto"] = True
         self._store.create_job(job_id, request_summary)
 
         job_input = input.model_copy(deep=True)
@@ -1420,6 +1555,33 @@ class ProposalBuilderSubmitSkill(
         try:
             if self._builder_factory is None:
                 raise RuntimeError("proposal builder factory is not configured")
+            if input.research_brief is not None:
+                if not self._store.mark_stage(job_id, "researching"):
+                    raise RuntimeError("proposal research stage could not be saved")
+                researched = self._research_factory().run(input.research_brief, ctx)
+                # 調査の完了が確認された入力だけを従来の組み立てに渡す。
+                parse_gemini_research(researched.research_json)
+                brief = input.research_brief
+                input = type(input).model_validate(
+                    input.model_dump(mode="python")
+                    | {
+                        "gemini_json": researched.research_json,
+                        "research_brief": None,
+                        "proposal_brief": input.proposal_brief or brief.brief,
+                        "category_term": input.category_term or brief.category_term or "",
+                        "confidential_product_name": input.confidential_product_name
+                        or brief.unreleased,
+                        "official_urls": input.official_urls
+                        or (
+                            [brief.official_url]
+                            if brief.official_url and brief.official_url != "なし"
+                            else []
+                        ),
+                    },
+                )
+                ctx.metadata[_RESEARCH_OUTPUT_KEY] = researched
+                if not self._store.mark_stage(job_id, "building"):
+                    raise RuntimeError("proposal build stage could not be saved")
             builder = self._builder_factory()
             execute = getattr(builder, "_execute", None)
             if not callable(execute):
@@ -1648,14 +1810,21 @@ class ProposalBuilderStatusSkill(
                 message=message,
             )
         if status in ("queued", "running"):
+            stage = row.get("stage")
+            safe_stage: Literal["researching", "building"] | None = (
+                stage if stage in {"researching", "building"} else None
+            )
             message = (
                 "提案書生成は順番待ちです。"
                 if status == "queued"
+                else "調査中です。出典を確認しています。"
+                if safe_stage == "researching"
                 else "提案書を生成・検証しています。"
             )
             return ProposalBuilderStatusOutput(
                 job_id=input.job_id,
                 status=status,
+                stage=safe_stage,
                 retry_after_seconds=self._retry_after_seconds,
                 message=message,
             )
@@ -1742,6 +1911,8 @@ class ProposalBuilderStatusSkill(
 __all__ = [
     "ALLOWED_EMAILS_ENV",
     "NOT_READY_MESSAGE",
+    "RESEARCH_AUTO_ENV",
+    "RESEARCH_NOT_READY_MESSAGE",
     "ProposalBuilderSkill",
     "ProposalBuilderStatusSkill",
     "ProposalBuilderSubmitSkill",

@@ -1,0 +1,35 @@
+{
+  "model_id": "gemini-3.5-flash",
+  "input_tokens": 320,
+  "output_tokens": 1439,
+  "thoughts_tokens": 5048,
+  "cost_usd": 0.094,
+  "latency_ms": 41000,
+  "search_queries": ["チョコレート ご褒美 調査", "冬 チョコレート 生活者 インサイト"],
+  "sources": [
+    {
+      "title": "ロイヤリティ マーケティング ご褒美に関する調査",
+      "uri": "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIYQmeijiGood",
+      "domain": "loyalty.co.jp",
+      "resolved_url": "https://biz.loyalty.co.jp/report/141/"
+    },
+    {
+      "title": "季節商品の実測サンプル（削除済み記事）",
+      "uri": "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIYQmeijiGone",
+      "domain": "prtimes.jp",
+      "resolved_url": "https://prtimes.jp/main/html/rd/p/000000504.000046400.html"
+    }
+  ],
+  "sections": {
+    "A_market_data": "### A1-main 市場・インサイト\n**ご褒美需要**\n調査では『ご褒美』への関心が高まった。\n### A1-alt1\n掲載が削除された調査では回答者の割合は３割だった。\nモデル本文だけの出典: https://unregistered.example/invented-study\n",
+    "B_social_trend": "### B1-main ソーシャルの動き\n**チョコレートの楽しみ方**\n調査では『ご褒美』への関心が高まった。\n### B1-alt1\n掲載が削除された調査では回答者の割合は３割だった。\n",
+    "F_competitor": "### F 主要競合\n**公式コンセプト**\n調査では『ご褒美』への関心が高まった。\n掲載が削除された調査では回答者の割合は３割だった。\n",
+    "G_insight_H_event": "### G 不満と欲求\n調査では『ご褒美』への関心が高まった。\n### H 季節・イベント\n掲載が削除された調査では回答者の割合は３割だった。\n",
+    "D_publicity": "### D 文脈語\n**ご褒美・冬限定**\n調査では『ご褒美』への関心が高まった。\n掲載が削除された調査では回答者の割合は３割だった。\n",
+    "E_community": "### E 界隈\n**おやつ・食べ比べ**\n調査では『ご褒美』への関心が高まった。\n掲載が削除された調査では回答者の割合は３割だった。\n"
+  },
+  "supports": [
+    {"text": "調査では『ご褒美』への関心が高まった。", "source_indices": [0]},
+    {"text": "掲載が削除された調査では回答者の割合は３割だった。", "source_indices": [1]}
+  ]
+}

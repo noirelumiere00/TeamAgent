@@ -54,7 +54,9 @@ class Origin:
     _lock: Any = field(default_factory=threading.Lock, repr=False)
     _notices: set[str] = field(default_factory=set, repr=False)
     cancelled: bool = False
-    _uploads: list[tuple[Any, str, str, str, str]] = field(default_factory=list, repr=False)
+    _uploads: list[tuple[Any, str, str, str, str, str, str | None]] = field(
+        default_factory=list, repr=False
+    )
 
     def __deepcopy__(self, memo: dict[int, Any]) -> Origin:
         # 背景ジョブの ctx と見張りで同じ配信の錠を共有する。
@@ -72,7 +74,17 @@ class Origin:
         with self._lock:
             return bool(self._uploads)
 
-    def defer(self, slack: Any, path: str, title: str, comment: str, request_id: str) -> None:
+    def defer(
+        self,
+        slack: Any,
+        path: str,
+        title: str,
+        comment: str,
+        request_id: str,
+        *,
+        channel_id: str | None = None,
+        thread_ts: str | None = None,
+    ) -> None:
         if self.cancelled:
             return
         workdir = tempfile.mkdtemp(prefix="long-job-delivery-")
@@ -80,7 +92,17 @@ class Origin:
         try:
             shutil.copyfile(path, copied)
             with self._lock:
-                self._uploads.append((slack, copied, title, comment, request_id))
+                self._uploads.append(
+                    (
+                        slack,
+                        copied,
+                        title,
+                        comment,
+                        request_id,
+                        channel_id or self.channel_id,
+                        self.thread_ts if channel_id is None else thread_ts,
+                    )
+                )
         except BaseException:
             shutil.rmtree(workdir, ignore_errors=True)
             raise
@@ -88,7 +110,7 @@ class Origin:
     def discard(self) -> None:
         with self._lock:
             uploads, self._uploads = self._uploads, []
-        for _, path, _, _, _ in uploads:
+        for _, path, _, _, _, _, _ in uploads:
             shutil.rmtree(Path(path).parent, ignore_errors=True)
 
     def deliver(self) -> bool:
@@ -99,15 +121,17 @@ class Origin:
             return False
 
         async def send() -> bool:
-            for index, (slack, path, title, comment, request_id) in enumerate(uploads):
+            for index, (slack, path, title, comment, request_id, channel, thread) in enumerate(
+                uploads
+            ):
                 ok = await asyncio.wait_for(
                     slack.upload_file(
-                        self.channel_id,
+                        channel,
                         path,
                         request_id,
                         title=title,
                         initial_comment=comment if index == 0 else None,
-                        thread_ts=self.thread_ts,
+                        thread_ts=thread,
                     ),
                     timeout=250,
                 )
@@ -118,7 +142,7 @@ class Origin:
         try:
             return bool(asyncio.run(send()))
         finally:
-            for _, path, _, _, _ in uploads:
+            for _, path, _, _, _, _, _ in uploads:
                 shutil.rmtree(Path(path).parent, ignore_errors=True)
 
 
