@@ -32,9 +32,14 @@ def _emu(px: float) -> int:
     return round(px * EMU_PER_PX)
 
 
+#: 1pt = 12700 EMU。座標と同じ EMU_PER_PX から換算する（1920px＝13.333in＝144dpi なので 1px＝0.5pt）。
+#: 10-09 まで 96dpi 前提の 0.75 を掛けており、文字だけが枠に対して 1.5 倍の大きさになっていた。
+_EMU_PER_PT = 12700
+
+
 def _sz(px: float) -> int:
-    """フォント px → OOXML sz（pt×100）。96dpi 換算 pt = px × 0.75。"""
-    return max(100, round(px * 0.75 * 100))
+    """フォント px → OOXML sz（pt×100）。座標と同じ縮尺（pt = px × EMU_PER_PX / 12700）。"""
+    return max(100, round(px * EMU_PER_PX / _EMU_PER_PT * 100))
 
 
 @dataclass(frozen=True)
