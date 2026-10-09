@@ -110,3 +110,14 @@ def test_special_tokens_keep_template_format(token: str) -> None:
     )
     assert "{{" not in frame.text
     assert set(_sizes(frame)) == {7.0}
+
+
+def test_line_breaks_carry_the_same_format() -> None:
+    frame = _frame(("｛7:箇条｝", {"size": 10, "bold": True}))
+    _replace_placeholders(frame, {7: "一つ目\v二つ目"})
+    breaks = frame.paragraphs[0]._p.findall(
+        "{http://schemas.openxmlformats.org/drawingml/2006/main}br"
+    )
+    assert len(breaks) == 1
+    props = breaks[0].find("{http://schemas.openxmlformats.org/drawingml/2006/main}rPr")
+    assert props is not None and props.get("sz") == "1000"

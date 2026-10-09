@@ -872,3 +872,24 @@ def test_explicit_single_spacing_equals_default(tmp_path: Path, explicit: bool) 
         p.line_spacing = 1.0
     # 20pt × 1.2 = 24pt は 0.3in（21.6pt）× 1.1 を超える。
     assert "text_overflow" in kinds(prs, tmp_path)
+
+
+@pytest.mark.parametrize("break_size", [None, 20])
+def test_line_break_size_follows_its_own_or_previous_run(
+    tmp_path: Path, break_size: int | None
+) -> None:
+    # python-pptx の改行（a:br）は rPr を持たない。段落の既定（18pt）で数えると 10pt の 3 行が
+    # 高く見積もられ、収まる枠を「あふれ」と誤る。改行に字の大きさがあればそれを使う。
+    prs, slide = deck()
+    frame = slide.shapes.add_textbox(0, 0, Inches(3), Pt(10 * 1.2 * 3)).text_frame
+    frame.margin_top = frame.margin_bottom = 0
+    frame.auto_size = MSO_AUTO_SIZE.NONE
+    frame.text = "説明\v説明\v説明"
+    for run in frame.paragraphs[0].runs:
+        run.font.size = Pt(10)
+    if break_size is not None:
+        ns = "{http://schemas.openxmlformats.org/drawingml/2006/main}"
+        for br in frame.paragraphs[0]._p.findall(f"{ns}br"):
+            props = br.makeelement(f"{ns}rPr", {"sz": str(break_size * 100)})
+            br.insert(0, props)
+    assert ("text_overflow" in kinds(prs, tmp_path)) is (break_size is not None)
