@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+import time
 from collections import Counter
 from dataclasses import replace
 from datetime import datetime
@@ -17,6 +18,7 @@ from teamagent.adapters.gemini_client import GeminiGroundedResponse, GroundingSu
 from teamagent.adapters.tiktok_scraper import TikTokSearchResult
 from teamagent.skills.base import SkillContext
 from teamagent.skills.proposal_builder.research import parse_gemini_research
+from teamagent.skills.proposal_research import skill as skill_module
 from teamagent.skills.proposal_research.brief import ResearchBrief
 from teamagent.skills.proposal_research.schema import ProposalResearchOutput
 from teamagent.skills.proposal_research.skill import _SECTION_LABELS, ProposalResearchSkill
@@ -313,3 +315,45 @@ def test_unreleased_product_is_omitted_from_search_prompts() -> None:
 def test_invalid_brief_fails_before_network(values: dict[str, Any]) -> None:
     with pytest.raises(ValidationError):
         ResearchBrief.model_validate(values)
+
+
+class _SlowConcurrentSearcher(FakeTikTokSearcher):
+    """検索 1 回ごとに media のタスクを起動する本番と同じく、1 回が遅い検索器。"""
+
+    def __init__(self, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self.active = 0
+        self.peak = 0
+        self.first_query: str | None = None
+
+    def __call__(self, query: str, *, search_type: str = "keyword", **kwargs: Any) -> Any:
+        with self._lock:
+            self.first_query = self.first_query or query
+            self.active += 1
+            self.peak = max(self.peak, self.active)
+            slow = query == self.first_query
+        try:
+            # 最初の語だけ遅くして、終わる順と並べる順が違うときも結果の順が変わらないことを見る。
+            time.sleep(0.15 if slow else 0.03)
+            return super().__call__(query, search_type=search_type, **kwargs)
+        finally:
+            with self._lock:
+                self.active -= 1
+
+
+def test_tiktok_terms_are_searched_in_parallel_but_kept_in_order(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # 10-09 本番: 検索 7 回を順次に回して段 C が 16 分かかった。
+    with monkeypatch.context() as patched:
+        patched.setattr(skill_module, "_TIKTOK_PARALLEL", 1)
+        sequential = run_research(searcher=FakeTikTokSearcher(empty_hashtag=True))
+    # 並列の側は本番と同じ既定値のまま回す。
+    searcher = _SlowConcurrentSearcher(empty_hashtag=True)
+    parallel = run_research(searcher=searcher)
+    assert 2 <= searcher.peak <= 3
+    order = [entry["related_tag"] for entry in parallel.research_json["C_tiktok"]]
+    assert order == [entry["related_tag"] for entry in sequential.research_json["C_tiktok"]]
+    for query in {call["query"] for call in searcher.calls}:
+        types = [call["search_type"] for call in searcher.calls if call["query"] == query]
+        assert types == ["hashtag", "keyword"]
