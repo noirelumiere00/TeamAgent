@@ -51,6 +51,26 @@ def test_deferred_dm_delivery_keeps_dm_destination_in_job_result() -> None:
     assert result["message"] == "生成済み DMへ添付しました。"
 
 
+def test_delivery_note_follows_the_status_line_not_the_research_or_warning_lines() -> None:
+    store = ProposalJobStore(table_name="", memory={})
+    store.create_job("pb_lines", {"research_auto": True})
+    assert store.mark_running("pb_lines")
+    message = (
+        "下書きです。\n調査: 出典 33 件\nPowerPoint の左の一覧で 7枚目に『要確認』が残っています"
+    )
+    assert store.mark_done(
+        "pb_lines",
+        json.dumps({"slack_delivered": False, "delivery_target": "dm", "message": message}),
+    )
+    assert store.mark_delivered("pb_lines")
+    row = store.get_job("pb_lines")
+    assert row is not None
+    assert json.loads(row["result_json"])["message"] == (
+        "下書きです。 DMへ添付しました。\n調査: 出典 33 件\n"
+        "PowerPoint の左の一覧で 7枚目に『要確認』が残っています"
+    )
+
+
 def test_primary_delivery_failure_never_touches_omiyage_or_plain_proposal_rows() -> None:
     """通知の部品はお土産と共用。お土産の結果は strict 検証なので、余分なキーを書くと次の照会で失敗になる。"""
     store = ProposalJobStore(table_name="", memory={})

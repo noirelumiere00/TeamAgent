@@ -264,4 +264,7 @@ class ProposalDeckOutput(BaseModel):
     skipped_count: int = Field(ge=0, description="要確認（データ未検出）の placeholder 数")
     coverage_ratio: float = Field(ge=0.0, le=1.0, description="埋め率（filled / 95）")
     skipped_ids: list[int] = Field(default_factory=list, description="要確認の placeholder ID")
+    review_slides: list[int] | None = Field(
+        default=None, description="『要確認』が残る枚目（表示順・1始まり）。None は未検査"
+    )
     total_cost_usd: float = Field(ge=0.0, description="この実行の概算コスト")

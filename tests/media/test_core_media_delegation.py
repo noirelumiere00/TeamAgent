@@ -79,6 +79,7 @@ def test_proposal_render_and_image_normalization_fail_at_media_boundary(
 
 def test_core_skill_modules_have_no_top_level_heavy_media_imports() -> None:
     paths = (
+        ROOT / "src/teamagent/skills/_shared/deck_review.py",
         ROOT / "src/teamagent/skills/proposal_deck/skill.py",
         ROOT / "src/teamagent/skills/proposal_campaign/skill.py",
         ROOT / "src/teamagent/skills/video_algorithm/skill.py",

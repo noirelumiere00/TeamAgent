@@ -27,6 +27,7 @@ from pydantic import BaseModel, ValidationError
 
 from teamagent.adapters.bedrock_client import BedrockClient
 from teamagent.prompts.loader import load_prompt
+from teamagent.skills._shared.deck_review import review_slides
 from teamagent.skills.base import BaseSkill, SkillContext, register
 from teamagent.skills.proposal_deck.confidentiality import contains_forbidden_term
 from teamagent.skills.proposal_deck.contract import ComposerOutput, SkippedPlaceholder
@@ -190,6 +191,12 @@ class ProposalDeckSkill(BaseSkill[ProposalDeckInput, ProposalDeckOutput]):
                 request_id=ctx.request_id,
             )
 
+            try:
+                review = review_slides(Path(rendered).read_bytes(), template.read_bytes())
+            except Exception as exc:
+                review = None
+                log.warning("proposal_deck_review_scan_failed", error_type=type(exc).__name__)
+
             pptx_url = self._publish_if_enabled(
                 str(rendered),
                 input.product_name,
@@ -222,6 +229,7 @@ class ProposalDeckSkill(BaseSkill[ProposalDeckInput, ProposalDeckOutput]):
                 skipped_count=len(skipped_ids),
                 coverage_ratio=composer_out.coverage_ratio,
                 skipped_ids=skipped_ids,
+                review_slides=review,
                 total_cost_usd=cost_usd,
             )
         except Exception:

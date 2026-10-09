@@ -31,6 +31,7 @@ from teamagent.adapters.tiktok_scraper import (
     search_tiktok,
 )
 from teamagent.mcp_gateway.allowlist import email_allowed
+from teamagent.skills._shared.deck_review import UNAVAILABLE_WARNING, warning_lines
 from teamagent.skills._shared.long_jobs import enabled as long_jobs_enabled
 from teamagent.skills._shared.long_jobs import latest_job, open_dm_once_more, origin
 from teamagent.skills._shared.text_safety import sanitize_llm_text
@@ -1137,6 +1138,21 @@ class ProposalBuilderSkill(BaseSkill[ProposalBuilderInput, ProposalBuilderOutput
             if not os.environ.get("PROPOSAL_BUILDER_NEWS_CHANNEL_ID", "").strip():
                 warnings.append("general_news-tvはchannel_nameメタデータ一致のみで絞込")
 
+            try:
+                deck_lines = warning_lines(deck_output.review_slides)
+                deck_warning = "\n" + "\n".join(deck_lines) if deck_lines else ""
+            except Exception as exc:
+                deck_output.review_slides = None
+                deck_lines = [UNAVAILABLE_WARNING]
+                deck_warning = "\n" + UNAVAILABLE_WARNING
+                log.warning("proposal_builder_review_format_failed", error_type=type(exc).__name__)
+            warnings.extend(deck_lines)
+            ready_message = (
+                "提案書を生成しました。出典の無い数値は『要確認』に置き換えています。"
+                if deck_output.review_slides
+                else "提案書を生成しました。数値出典・95枠・統合FMTを検証済みです。"
+            )
+
             pptx_url = deck_output.pptx_url
             if status == "ready" and _envflag("PROPOSAL_BUILDER_PUBLISH_READY"):
                 pptx_url = ProposalDeckSkill._publish_if_enabled(
@@ -1158,10 +1174,11 @@ class ProposalBuilderSkill(BaseSkill[ProposalBuilderInput, ProposalBuilderOutput
                 comment = (
                     "⚠️ ドラフト（裏取り前）です。外部提出しないでください。"
                     if status == "draft"
-                    else "提案書を生成しました。数値出典・95枠・統合FMTを検証済みです。"
+                    else ready_message
                 )
                 if automatic_research is not None:
                     comment += "\n" + _research_summary_lines(automatic_research)
+                comment += deck_warning
                 try:
                     slack_delivered, delivery_target = asyncio.run(
                         self._deliver_artifacts(
@@ -1205,7 +1222,11 @@ class ProposalBuilderSkill(BaseSkill[ProposalBuilderInput, ProposalBuilderOutput
                 )
 
             message = (
-                "提案書を生成し、検証を通過しました。"
+                (
+                    ready_message
+                    if deck_output.review_slides
+                    else "提案書を生成し、検証を通過しました。"
+                )
                 if status == "ready"
                 else "提案書は生成しましたが、未解決項目があるためドラフト（裏取り前）です。"
             )
@@ -1219,6 +1240,8 @@ class ProposalBuilderSkill(BaseSkill[ProposalBuilderInput, ProposalBuilderOutput
                 )
             elif research_delivery == "failed":
                 message += " 調査JSONの添付に失敗しました。再度調査をご依頼ください。"
+
+            message += deck_warning
 
             output = ProposalBuilderOutput(
                 status=status,
