@@ -268,13 +268,53 @@ class ProposalJobStore:
         result_json = string_value("result_json")
         error_code = string_value("error_code")
         error_summary = string_value("error_summary")
+        stage = string_value("stage")
         if result_json is not None:
             row["result_json"] = result_json
         if error_code is not None:
             row["error_code"] = error_code
         if error_summary is not None:
             row["error_summary"] = error_summary
+        if stage is not None:
+            row["stage"] = stage
+        for name in ("research_delivery_status", "research_delivery_error"):
+            value = string_value(name)
+            if value is not None:
+                row[name] = value
         return row
+
+    def record_research_delivery(self, job_id: str, status: str, *, error: str = "") -> bool:
+        """JSON添付の成否を資料の生成状態とは別に記録する。本文は保存しない。"""
+        if status not in {"pending", "delivered", "failed"}:
+            raise ValueError("invalid research delivery status")
+        if not self.uses_dynamodb:
+            with self._memory_lock:
+                row = self._memory.get(job_id)
+                if row is None:
+                    return False
+                row["research_delivery_status"] = status
+                row["research_delivery_error"] = error
+                return True
+        try:
+            self._client().update_item(
+                TableName=self._table_name,
+                Key={"job_id": {"S": job_id}},
+                UpdateExpression="SET #delivery = :delivery, #error = :error",
+                ConditionExpression="attribute_exists(job_id)",
+                ExpressionAttributeNames={
+                    "#delivery": "research_delivery_status",
+                    "#error": "research_delivery_error",
+                },
+                ExpressionAttributeValues={
+                    ":delivery": {"S": status},
+                    ":error": {"S": error},
+                },
+            )
+            return True
+        except Exception as exc:
+            if _is_conditional_failure(exc):
+                return False
+            raise
 
     def mark_running(self, job_id: str) -> bool:
         return self._transition(
@@ -316,6 +356,42 @@ class ProposalJobStore:
                 return False
             raise
 
+    def mark_stage(self, job_id: str, stage: str) -> bool:
+        """Persist a running proposal's phase and refresh its heartbeat."""
+        if stage not in {"researching", "building"}:
+            raise ValueError("invalid proposal job stage")
+        now_text = _isoformat(self._clock())
+        if not self.uses_dynamodb:
+            with self._memory_lock:
+                row = self._memory.get(job_id)
+                if row is None or row.get("status") != "running":
+                    return False
+                row["stage"] = stage
+                row["updated_at"] = now_text
+                return True
+        try:
+            self._client().update_item(
+                TableName=self._table_name,
+                Key={"job_id": {"S": job_id}},
+                UpdateExpression="SET #stage = :stage, #updated_at = :updated_at",
+                ConditionExpression="#status = :running",
+                ExpressionAttributeNames={
+                    "#stage": "stage",
+                    "#status": "status",
+                    "#updated_at": "updated_at",
+                },
+                ExpressionAttributeValues={
+                    ":stage": {"S": stage},
+                    ":running": {"S": "running"},
+                    ":updated_at": {"S": now_text},
+                },
+            )
+            return True
+        except Exception as exc:
+            if _is_conditional_failure(exc):
+                return False
+            raise
+
     def mark_done(self, job_id: str, result_json: str) -> bool:
         if len(result_json.encode("utf-8")) > _MAX_RESULT_BYTES:
             raise ValueError("proposal job result exceeds the DynamoDB row boundary")
@@ -336,8 +412,12 @@ class ProposalJobStore:
         if not isinstance(result, dict) or "slack_delivered" not in result:
             return False
         result["slack_delivered"] = True
-        result["delivery_target"] = "thread"
-        result["message"] = str(result.get("message") or "") + " この会話へ添付しました。"
+        summary = json.loads(row.get("request_summary") or "{}")
+        research_auto = isinstance(summary, dict) and summary.get("research_auto") is True
+        target = "dm" if research_auto and result.get("delivery_target") == "dm" else "thread"
+        result["delivery_target"] = target
+        suffix = " DMへ添付しました。" if target == "dm" else " この会話へ添付しました。"
+        result["message"] = str(result.get("message") or "") + suffix
         serialized = json.dumps(result, ensure_ascii=False)
         if len(serialized.encode("utf-8")) > _MAX_RESULT_BYTES:
             return False
@@ -346,6 +426,35 @@ class ProposalJobStore:
             expected_statuses=("done",),
             next_status="done",
             result_json=serialized,
+        )
+
+    def record_primary_delivery_failure(self, job_id: str, *, uncertain: bool = False) -> bool:
+        """生成済み資料の配信失敗を、JSONの添付状態とは別に保存する。"""
+        row = self.get_job(job_id)
+        if row is None or row.get("status") != "done":
+            return False
+        raw = row.get("result_json")
+        result = json.loads(raw) if isinstance(raw, str) else None
+        if not isinstance(result, dict) or "slack_delivered" not in result:
+            return False
+        # 通知の部品はお土産資料と共用。お土産の結果は strict に検証されるため、余分なキーを
+        # 書くと次の状態照会で RESULT_INVALID になる（10-09 の検証で発覚）。
+        # 調査からの自動作成だけに限る。
+        summary = json.loads(row.get("request_summary") or "{}")
+        if not (isinstance(summary, dict) and summary.get("research_auto") is True):
+            return False
+        warning = "提案書の添付結果を確認できません" if uncertain else "Slackファイル添付に失敗"
+        result["warnings"] = list(dict.fromkeys([*result.get("warnings", []), warning]))
+        result["message"] = str(result.get("message") or "") + (
+            " 提案書の添付結果を確認できませんでした。DMをご確認ください。"
+            if uncertain
+            else " 提案書の添付に失敗しました。"
+        )
+        serialized = json.dumps(result, ensure_ascii=False)
+        if len(serialized.encode("utf-8")) > _MAX_RESULT_BYTES:
+            return False
+        return self._transition(
+            job_id, expected_statuses=("done",), next_status="done", result_json=serialized
         )
 
     def mark_failed(

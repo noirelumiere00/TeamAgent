@@ -464,9 +464,12 @@ def _build_async_job_poll(
             and output.proposal_status == "ready"
             and not output.slack_delivered
             and not output.pptx_url
-            and not (target is not None and target.pending)
+            and not (target is not None and target.primary_pending)
         ):
-            return "failed", "資料は生成・保存できましたが、結果の配信が中断されました。"
+            message = "資料は生成・保存できましたが、結果の配信が中断されました。"
+            if output.research_delivery_status == "failed":
+                message += " 調査JSONの添付に失敗しました。再度調査をご依頼ください。"
+            return "failed", message
         return output.status, _format_proposal_completion(output)
 
     return _poll

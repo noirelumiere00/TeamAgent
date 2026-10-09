@@ -196,5 +196,7 @@ def retry_long_job_once(fn: Callable[[], T]) -> T:
     return call_with_retry(
         fn,
         is_retryable=is_transient_job_error,
-        policy=RetryPolicy(max_attempts=2 if enabled else 1, base_delay_s=0, max_delay_s=0),
+        policy=RetryPolicy(max_attempts=2 if enabled else 1, base_delay_s=1, max_delay_s=4),
+        sleep=time.sleep,
+        jitter=lambda cap: max(1.0, _full_jitter(cap)),
     )

@@ -30,7 +30,7 @@ _CODE_FENCE_RE = re.compile(
     r"\A\s*```(?:json)?[ \t]*\r?\n?(.*?)\r?\n?```\s*\Z",
     flags=re.IGNORECASE | re.DOTALL,
 )
-_URL_RE = re.compile(r"https?://[^\s<>{}\\^`\"']+", flags=re.IGNORECASE)
+_URL_RE = re.compile(r"https?://[^\s<>{}()（）\\^`\"']+", flags=re.IGNORECASE)
 _URL_TRAILING_PUNCTUATION = ".,;:!?)]}、。；：！？）】」』＞"
 _UNVERIFIED_REPLACEMENT = "要確認（出典URL未取得）"
 

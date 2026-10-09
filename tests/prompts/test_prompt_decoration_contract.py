@@ -79,6 +79,7 @@ HUMAN_FACING_PROMPTS = (
     "video_algorithm_cover/v1/system.md",
     "video_approval/v1/system.md",
     "x_research/v1/buzz.md",
+    "proposal_research/v1/structure.md",
 )
 
 # 対象外。値は「なぜ触らないか」の理由（レビューで読む前提で書く）。
@@ -100,6 +101,13 @@ EXEMPT_PROMPTS = {
     "tiktok_comment_mining/v1/classify.md": "内部 JSON 分類器",
     "x_research/v1/needs.md": "内部 JSON 分類器（値は enum とスコア）",
     "x_research/v1/noise_filter.md": "内部 JSON 分類器（値は真偽値とラベル）",
+    "proposal_research/v1/search.md": "提案書の自動調査・段 A の内部メモ（人に届かない。値の装飾は structure.md で禁止）",
+    "proposal_research/v1/A_market_data.md": "提案書の自動調査・段 A の内部メモ（人に届かない。値の装飾は structure.md で禁止）",
+    "proposal_research/v1/B_social_trend.md": "提案書の自動調査・段 A の内部メモ（人に届かない。値の装飾は structure.md で禁止）",
+    "proposal_research/v1/D_publicity.md": "提案書の自動調査・段 A の内部メモ（人に届かない。値の装飾は structure.md で禁止）",
+    "proposal_research/v1/E_community.md": "提案書の自動調査・段 A の内部メモ（人に届かない。値の装飾は structure.md で禁止）",
+    "proposal_research/v1/F_competitor.md": "提案書の自動調査・段 A の内部メモ（人に届かない。値の装飾は structure.md で禁止）",
+    "proposal_research/v1/G_insight_H_event.md": "提案書の自動調査・段 A の内部メモ（人に届かない。値の装飾は structure.md で禁止）",
 }
 
 # ── 対象リスト（.py インライン）──────────────────────────────────────────────
@@ -167,6 +175,7 @@ _JSON_VALUE_PROMPTS = (
     "search_surface_check/v1/scene_detail.md",
     "search_surface_check/v1/video_digest.md",
     "search_surface_check/v1/video_notes.md",
+    "proposal_research/v1/structure.md",
 )
 _BAN_JSON = (
     "- `**` による太字。強調が要るなら語順と言い切りで示す。",

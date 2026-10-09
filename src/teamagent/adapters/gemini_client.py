@@ -21,6 +21,7 @@ import time
 from dataclasses import dataclass
 from typing import Any
 
+import httpx
 import structlog
 
 from teamagent.adapters.retry import RateLimitPolicy, RetryPolicy, call_with_retry
@@ -58,13 +59,27 @@ def _is_retryable_vertex(exc: BaseException) -> bool:
 
     URL 取得不能（Cannot fetch content / ROBOTED）等の恒久エラーはリトライしない（即上げ）。
     """
-    msg = str(exc).lower()
-    if "cannot fetch content" in msg or "roboted" in msg:
-        return False
-    code = getattr(exc, "code", None) or getattr(exc, "status_code", None)
-    if code in (429, 500, 503):
-        return True
-    return any(marker in msg for marker in _VERTEX_RETRYABLE_MARKERS)
+    seen: set[int] = set()
+    while id(exc) not in seen:
+        seen.add(id(exc))
+        msg = str(exc).lower().replace("_", " ")
+        if "cannot fetch content" in msg or "roboted" in msg:
+            return False
+        if isinstance(exc, (TimeoutError, ConnectionError, httpx.TransportError)):
+            return True
+        statuses = (getattr(exc, key, None) for key in ("code", "status_code", "status"))
+        if any(
+            str(status).upper()
+            in {"429", "500", "503", "RESOURCE_EXHAUSTED", "UNAVAILABLE", "INTERNAL"}
+            for status in statuses
+        ):
+            return True
+        if any(marker in msg for marker in _VERTEX_RETRYABLE_MARKERS):
+            return True
+        if exc.__cause__ is None:
+            break
+        exc = exc.__cause__
+    return False
 
 
 _VERTEX_RATE_LIMIT_MARKERS = (
@@ -141,6 +156,9 @@ class GroundingSupport:
 
     text: str
     source_indices: tuple[int, ...]
+    # Gemini の segment は文字位置ではなく UTF-8 のバイト位置。
+    start_byte: int | None = None
+    end_byte: int | None = None
 
 
 @dataclass(frozen=True)
@@ -209,6 +227,15 @@ def _parse_grounding(
             )
         )
 
+    parts = _as_list(_pick(_pick(candidate, "content"), "parts"))
+    part_offsets: dict[int, int] = {}
+    total = 0
+    for index, part in enumerate(parts):
+        text = _pick(part, "text")
+        if isinstance(text, str) and not _pick(part, "thought"):
+            part_offsets[index] = total
+            total += len(text.encode("utf-8"))
+
     supports: list[GroundingSupport] = []
     for support in _as_list(_pick(meta, "grounding_supports", "groundingSupports")):
         segment = _pick(support, "segment")
@@ -221,10 +248,20 @@ def _parse_grounding(
                 continue
             if 0 <= idx < len(sources):
                 clean.append(idx)
+        part_index = _segment_byte_index(segment, "part_index", "partIndex") or 0
+        offset = part_offsets.get(part_index) if parts else (0 if part_index == 0 else None)
+        start = _segment_byte_index(segment, "start_index", "startIndex")
+        end = _segment_byte_index(segment, "end_index", "endIndex")
+        if parts and part_index in part_offsets:
+            part_text = _pick(parts[part_index], "text")
+            if end is not None and end > len(str(part_text).encode("utf-8")):
+                offset = None
         supports.append(
             GroundingSupport(
                 text=str(_pick(segment, "text") or "") if segment is not None else "",
                 source_indices=tuple(clean),
+                start_byte=start + offset if start is not None and offset is not None else None,
+                end_byte=end + offset if end is not None and offset is not None else None,
             )
         )
 
@@ -232,6 +269,11 @@ def _parse_grounding(
         str(q) for q in _as_list(_pick(meta, "web_search_queries", "webSearchQueries")) if q
     )
     return (tuple(sources), tuple(supports), queries)
+
+
+def _segment_byte_index(segment: Any, *names: str) -> int | None:
+    value = _pick(segment, *names)
+    return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else None
 
 
 # 既定モデルと Vertex ロケーション（2026-09-24 更新）。
@@ -484,12 +526,19 @@ class GeminiClient:
             )
 
     def generate_text(
-        self, prompt: str, request_id: str, *, system: str | None = None
+        self,
+        prompt: str,
+        request_id: str,
+        *,
+        system: str | None = None,
+        json_mode: bool = False,
     ) -> GeminiResponse:
         """テキストのみの生成 (複数動画分析の横断まとめ等)。動画 part は含めない。"""
         from google.genai import types
 
-        return self._generate_video([types.Part(text=prompt)], request_id, system=system)
+        return self._generate_video(
+            [types.Part(text=prompt)], request_id, system=system, json_mode=json_mode
+        )
 
     def generate_with_google_search(
         self,

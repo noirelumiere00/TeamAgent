@@ -12,7 +12,9 @@ from types import MappingProxyType
 from typing import Any, Final, Literal
 from urllib.parse import urlsplit
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+
+from teamagent.skills.proposal_research.brief import ResearchBrief
 
 
 class _StrictModel(BaseModel):
@@ -329,11 +331,20 @@ class ProposalBuilderInput(_StrictModel):
     # 残り、MCP 経由の全呼び出しが date 文字列で必ず ValidationError になる（実測）。
     model_config = ConfigDict(extra="forbid", strict=False)
 
-    gemini_json: dict[str, Any] | str = Field(
+    gemini_json: dict[str, Any] | str | None = Field(
+        default=None,
         description=(
             "Gemini v3の統合JSONオブジェクト、またはそのJSON文字列。"
             "文字列は構文のみ限定修復し、内容は補完しない。"
-        )
+            "調査からの自動作成が有効なときはresearch_briefを渡せば不要。両方の指定は不可。"
+        ),
+    )
+    research_brief: ResearchBrief | None = Field(
+        default=None,
+        description=(
+            "商材名・公式URL・与件から調査して提案書を作る入力。"
+            "PROPOSAL_RESEARCH_AUTOが有効なときのみ利用でき、gemini_jsonとの同時指定は不可。"
+        ),
     )
     posting_start_date: date = Field(description="投稿開始日D（YYYY-MM-DD）")
     client_name: str = Field(
@@ -381,7 +392,11 @@ class ProposalBuilderInput(_StrictModel):
 
     @field_validator("gemini_json")
     @classmethod
-    def _gemini_payload_bounded(cls, value: dict[str, Any] | str) -> dict[str, Any] | str:
+    def _gemini_payload_bounded(
+        cls, value: dict[str, Any] | str | None
+    ) -> dict[str, Any] | str | None:
+        if value is None:
+            return None
         encoded = (
             value.encode("utf-8")
             if isinstance(value, str)
@@ -390,6 +405,12 @@ class ProposalBuilderInput(_StrictModel):
         if not encoded or len(encoded) > 256 * 1024:
             raise ValueError("gemini_json must be between 1 byte and 256 KiB")
         return value
+
+    @model_validator(mode="after")
+    def _exactly_one_research_input(self) -> ProposalBuilderInput:
+        if (self.gemini_json is None) == (self.research_brief is None):
+            raise ValueError("exactly one of gemini_json or research_brief is required")
+        return self
 
     @field_validator("constraints")
     @classmethod
@@ -469,6 +490,8 @@ class ProposalBuilderStatusOutput(_StrictModel):
 
     job_id: str
     status: Literal["queued", "running", "done", "failed"]
+    stage: Literal["researching", "building"] | None = None
+    research_delivery_status: Literal["pending", "delivered", "failed"] | None = None
     retry_after_seconds: int = Field(default=0, ge=0)
     proposal_status: Literal["ready", "draft"] | None = None
     result_message: str = ""
