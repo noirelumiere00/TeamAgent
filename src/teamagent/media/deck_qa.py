@@ -10,7 +10,6 @@ import zipfile
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Literal
-from xml.etree import ElementTree as ET
 
 # EMU 丸めや影・裁ち落としの微差を許す。縦横それぞれスライド寸法の 0.5%。
 BOUNDS_TOLERANCE = 0.005
@@ -159,32 +158,44 @@ def _signature(data: bytes) -> str | None:
     return None  # SVG/EMF/WMF は bitmap のシグネチャ比較の対象外。
 
 
+def _xml(data: bytes) -> Any:
+    """python-pptx が Presentation() で同じ部品を読むときと同じ parser（entity を展開しない）。"""
+    from pptx.oxml import parse_xml
+
+    return parse_xml(data)
+
+
+def _tagged(node: Any) -> list[Any]:
+    """lxml はコメント・処理命令も子に含めるので、要素だけを返す。"""
+    return [child for child in node if isinstance(child.tag, str)]
+
+
 def _package(path: str | Path, report: DeckQaReport) -> None:
     with zipfile.ZipFile(path) as package:
         names = set(package.namelist())
-        types = ET.fromstring(package.read("[Content_Types].xml"))
+        types = _xml(package.read("[Content_Types].xml"))
         defaults = {
             e.attrib["Extension"].lower(): e.attrib["ContentType"]
-            for e in types
+            for e in _tagged(types)
             if e.tag.endswith("Default")
         }
         overrides = {
             e.attrib["PartName"].lstrip("/"): e.attrib["ContentType"]
-            for e in types
+            for e in _tagged(types)
             if e.tag.endswith("Override")
         }
         contexts: dict[str, list[tuple[int, str]]] = {}
         # slideN.xml の番号は削除・並び替え後の表示順とは限らない。
         slide_order: dict[str, int] = {}
         if "ppt/presentation.xml" in names and "ppt/_rels/presentation.xml.rels" in names:
-            rel_tree = ET.fromstring(package.read("ppt/_rels/presentation.xml.rels"))
+            rel_tree = _xml(package.read("ppt/_rels/presentation.xml.rels"))
             targets = {
                 r.get("Id"): posixpath.normpath(posixpath.join("ppt", r.get("Target", ""))).lstrip(
                     "/"
                 )
-                for r in rel_tree
+                for r in _tagged(rel_tree)
             }
-            tree = ET.fromstring(package.read("ppt/presentation.xml"))
+            tree = _xml(package.read("ppt/presentation.xml"))
             for ordinal, node in enumerate(tree.findall("./p:sldIdLst/p:sldId", NS), 1):
                 rid = node.get(
                     "{http://schemas.openxmlformats.org/officeDocument/2006/relationships}id"
@@ -196,12 +207,12 @@ def _package(path: str | Path, report: DeckQaReport) -> None:
             owner = posixpath.join(
                 posixpath.dirname(posixpath.dirname(name)), posixpath.basename(name)[:-5]
             )
-            rels = ET.fromstring(package.read(name))
+            rels = _xml(package.read(name))
             match = re.fullmatch(r"ppt/slides/slide(\d+)\.xml", owner)
             slide = slide_order.get(owner, int(match[1]) if match else 1)
             shape_names: dict[str, str] = {}
             if match and owner in names:
-                tree = ET.fromstring(package.read(owner))
+                tree = _xml(package.read(owner))
                 for pic in tree.findall(".//p:pic", NS):
                     nv = pic.find(".//p:cNvPr", NS)
                     blip = pic.find(".//a:blip", NS)
@@ -209,11 +220,11 @@ def _package(path: str | Path, report: DeckQaReport) -> None:
                         for key, value in blip.attrib.items():
                             if key.endswith("}embed"):
                                 shape_names[value] = nv.get("name", "image")
-            rel_ids = {rel.get("Id") for rel in rels}
+            rel_ids = {rel.get("Id") for rel in _tagged(rels)}
             for rid, shape in shape_names.items():
                 if rid not in rel_ids:
                     report.add(slide, shape, "image_missing", "error", relationship=rid)
-            for rel in rels:
+            for rel in _tagged(rels):
                 if rel.get("TargetMode") == "External" or not rel.get("Type", "").endswith(
                     "/image"
                 ):
@@ -428,7 +439,7 @@ def _inherited_style(shape: Any, slide: Any) -> tuple[float, str]:
         master = slide.slide_layout.slide_master.part
         for rel in master.rels.values():
             if rel.reltype.endswith("/theme"):
-                theme = ET.fromstring(rel.target_part.blob)
+                theme = _xml(rel.target_part.blob)
                 family = "majorFont" if font.startswith("+mj") else "minorFont"
                 node = (
                     theme.find(f".//a:{family}/a:font[@script='Jpan']", NS)

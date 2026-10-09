@@ -638,3 +638,22 @@ def test_inherited_paragraph_level_size(tmp_path: Path) -> None:
         for f in inspect_pptx(path).findings
         if f.shape == shape.name and f.kind == "text_overflow"
     ]
+
+
+@pytest.mark.parametrize("registered", [True, False])
+def test_xml_comments_do_not_hide_registration(tmp_path: Path, registered: bool) -> None:
+    # lxml はコメントも子として返す。コメント入りの部品でも落ちず、登録漏れを見逃さない。
+    prs, slide = deck()
+    slide.shapes.add_picture(image(), 0, 0, width=Inches(2))
+    path = tmp_path / "test.pptx"
+    prs.save(path)
+    with zipfile.ZipFile(path) as archive:
+        types = archive.read("[Content_Types].xml")
+        rels = archive.read("ppt/slides/_rels/slide1.xml.rels")
+    if not registered:
+        types = types.replace(b'<Default Extension="png" ContentType="image/png"/>', b"")
+    types = types.replace(b"<Default ", b"<!-- note --><Default ", 1)
+    rels = rels.replace(b"<Relationship ", b"<!-- note --><Relationship ", 1)
+    rewrite_package(path, {"[Content_Types].xml": types, "ppt/slides/_rels/slide1.xml.rels": rels})
+    found = [f for f in inspect_pptx(path).findings if f.kind == "image_registration"]
+    assert bool(found) is not registered
