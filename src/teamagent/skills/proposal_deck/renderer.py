@@ -368,17 +368,16 @@ def _iter_image_slots(prs: Any) -> Iterator[tuple[Any, Any]]:
 
 
 def _add_picture_fit(slide: Any, img_bytes: bytes, shape: Any) -> None:
-    """空枠の高さに等比で合わせて add_picture（歪み無し）。左上は枠に合わせる。"""
+    """縦横の小さい倍率で枠内に等比配置し、余白は中央に寄せる。"""
     from pptx.util import Emu
 
-    left, top, box_h = int(shape.left), int(shape.top), int(shape.height)
+    left, top, box_w, box_h = map(int, (shape.left, shape.top, shape.width, shape.height))
     pic = slide.shapes.add_picture(io.BytesIO(img_bytes), Emu(left), Emu(top))
     if pic.width and pic.height:
-        scale = box_h / pic.height
-        pic.height = Emu(int(box_h))
-        pic.width = Emu(int(pic.width * scale))
-        pic.left = Emu(left)
-        pic.top = Emu(top)
+        scale = min(box_w / pic.width, box_h / pic.height)
+        pic.width, pic.height = Emu(int(pic.width * scale)), Emu(int(pic.height * scale))
+        pic.left = Emu(left + (box_w - pic.width) // 2)
+        pic.top = Emu(top + (box_h - pic.height) // 2)
 
 
 def _inject_evidence_images(prs: Any, evidence_images: dict[int, list[EvidenceImage]]) -> int:
