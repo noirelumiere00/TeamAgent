@@ -7,6 +7,7 @@
 !src/teamagent/media/__init__.py
 !src/teamagent/media/contracts.py
 !src/teamagent/media/deadline.py
+!src/teamagent/media/deck_qa.py
 !src/teamagent/media/operations.py
 !src/teamagent/media/render_child.py
 !src/teamagent/media/security.py
