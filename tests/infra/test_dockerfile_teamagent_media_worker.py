@@ -250,6 +250,7 @@ def test_media_image_copies_only_worker_media_code_and_no_core_secrets_stack() -
         "__init__.py",
         "contracts.py",
         "deadline.py",
+        "deck_qa.py",
         "operations.py",
         "render_child.py",
         "security.py",
@@ -420,3 +421,23 @@ def test_no_vulnerability_suppression_or_package_database_deletion_contract() ->
     assert "--ignore-unfixed" not in docker_sources
     assert "rm -rf /lib/apk/db" not in docker_sources
     assert not re.search(r"\bVEX\b", docker_sources, re.IGNORECASE)
+
+
+def test_every_media_module_render_child_imports_is_copied_into_the_image() -> None:
+    """render_child が import する teamagent.media の部品は、イメージに必ず入っていること（10-09: deck_qa の入れ忘れ）。"""
+    import re
+
+    imported = set(
+        re.findall(
+            r"from teamagent\.media\.([a-z_]+) import", RENDER_CHILD.read_text(encoding="utf-8")
+        )
+    )
+    ignore = DOCKERIGNORE.read_text(encoding="utf-8")
+    assert imported, "render_child の import を読めていない"
+    for module in sorted(imported):
+        assert f"  src/teamagent/media/{module}.py \\" in TEXT, (
+            f"Dockerfile の COPY に {module}.py が無い"
+        )
+        assert f"!src/teamagent/media/{module}.py\n" in ignore, (
+            f".dockerignore の許可に {module}.py が無い"
+        )

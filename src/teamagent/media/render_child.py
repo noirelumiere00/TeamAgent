@@ -67,6 +67,15 @@ def _path(root: Path, value: Any, *, output: bool = False) -> Path:
     return path
 
 
+def _deck_qa(path: Path, *, expected_slides: int) -> dict[str, Any]:
+    try:
+        from teamagent.media.deck_qa import inspect_pptx
+
+        return {"deck_qa": inspect_pptx(path, expected_slides=expected_slides).summary()}
+    except Exception as exc:
+        return {"qa_error": type(exc).__name__ + ": " + str(exc)}
+
+
 def _slides(root: Path, manifest: dict[str, Any]) -> dict[str, Any]:
     spec = _exact(
         manifest,
@@ -153,7 +162,8 @@ def _slides(root: Path, manifest: dict[str, Any]) -> dict[str, Any]:
             height=presentation.slide_height,
         )
     presentation.save(str(destination))
-    return {"slides": len(images), "network_requests_allowed": 0}
+    qa = _deck_qa(destination, expected_slides=len(presentation.slides))
+    return {"slides": len(images), "network_requests_allowed": 0, **qa}
 
 
 def _replace_proposal_special_tokens(
@@ -320,12 +330,18 @@ def _proposal(root: Path, manifest: dict[str, Any]) -> dict[str, Any]:
         except Exception:
             continue
         if picture.width and picture.height:
-            scale = int(shape.height) / picture.height
-            picture.height = Emu(int(shape.height))
-            picture.width = Emu(int(picture.width * scale))
+            scale = min(int(shape.width) / picture.width, int(shape.height) / picture.height)
+            picture.width, picture.height = (
+                Emu(int(picture.width * scale)),
+                Emu(int(picture.height * scale)),
+            )
+            picture.left = Emu(int(shape.left) + (int(shape.width) - picture.width) // 2)
+            picture.top = Emu(int(shape.top) + (int(shape.height) - picture.height) // 2)
         injected += 1
     presentation.save(str(destination))
+    qa = _deck_qa(destination, expected_slides=len(presentation.slides))
     return {
+        **qa,
         "filled": len(placeholders),
         "skipped": len(skipped),
         "evidence_images": injected,

@@ -53,7 +53,9 @@ def test_render_child_hides_noexport_before_screenshots(
     calls: list[tuple[str, object]] = []
     install_fake_playwright(monkeypatch, FakePlaywright(calls))
     meta = render_child._slides(tmp_path.resolve(), _manifest(tmp_path))
-    assert meta == {"slides": 2, "network_requests_allowed": 0}
+    assert meta["slides"] == 2
+    assert meta["network_requests_allowed"] == 0
+    assert "deck_qa" in meta
     assert_hidden_before_shots(calls)
     assert render_child._NOEXPORT_CSS == "[data-noexport]{display:none!important}"
 
