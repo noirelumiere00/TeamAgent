@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import io
 import json
 import logging
@@ -1265,20 +1266,67 @@ def _iter_text_frames(presentation: Any) -> Iterator[Any]:
         yield from walk(slide.shapes)
 
 
+_DRAWING_NS = "{http://schemas.openxmlformats.org/drawingml/2006/main}"
+
+
+def _token_run_properties(paragraphs: list[Any], start: int) -> Any | None:
+    """置き換える最初の印が始まる run の書式（a:rPr）。無ければ最初に書式を持つ run のもの。
+
+    offset は ``paragraph.text`` を区切りなしで繋いだ文字列と揃える（a:br は 1 文字 "\v"）。
+    """
+    offset = 0
+    fallback = None
+    for paragraph in paragraphs:
+        for child in paragraph._p:
+            tag = child.tag.rsplit("}", 1)[-1]
+            if tag == "br":
+                offset += 1
+                continue
+            if tag not in {"r", "fld"}:
+                continue
+            node = child.find(f"{_DRAWING_NS}t")
+            text = (node.text or "") if node is not None else ""
+            props = child.find(f"{_DRAWING_NS}rPr")
+            if props is not None and fallback is None:
+                fallback = props
+            if props is not None and offset <= start < offset + len(text):
+                return copy.deepcopy(props)
+            offset += len(text)
+    return copy.deepcopy(fallback) if fallback is not None else None
+
+
+def _set_text_keeping_format(paragraphs: list[Any], replaced: str, start: int) -> None:
+    """置き換えた文を 1 段落目に入れ、印のあった run の書式（字の大きさ・太字・書体・色）を保つ。
+
+    python-pptx の ``paragraph.text = ...`` は run を作り直して rPr を捨てるため、テンプレの
+    6pt・太字などが既定の大きさに戻り、小さな枠からあふれていた（10-09 本番 83 枚の 53 枚目）。
+    """
+    props = _token_run_properties(paragraphs, start)
+    paragraphs[0].text = replaced
+    for paragraph in paragraphs[1:]:
+        paragraph.text = ""
+    if props is None:
+        return
+    for run in paragraphs[0]._p.findall(f"{_DRAWING_NS}r"):
+        old = run.find(f"{_DRAWING_NS}rPr")
+        if old is not None:
+            run.remove(old)
+        run.insert(0, copy.deepcopy(props))
+
+
 def _replace_placeholders(text_frame: Any, placeholders: dict[int, str]) -> None:
     paragraphs = list(text_frame.paragraphs)
     combined = "".join(paragraph.text for paragraph in paragraphs)
     if not combined:
         return
+    first = _PLACEHOLDER.search(combined)
     replaced = _PLACEHOLDER.sub(
         lambda match: placeholders.get(int(match.group(1)), match.group(0)),
         combined,
     )
-    if replaced == combined:
+    if replaced == combined or first is None:
         return
-    paragraphs[0].text = replaced
-    for paragraph in paragraphs[1:]:
-        paragraph.text = ""
+    _set_text_keeping_format(paragraphs, replaced, first.start())
 
 
 def _iter_proposal_image_slots(presentation: Any) -> Iterator[tuple[Any, Any]]:
