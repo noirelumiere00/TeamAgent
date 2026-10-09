@@ -1,0 +1,12 @@
+{
+  "B_social_trend": {
+    "title": "ソーシャルの独立した調査",
+    "uri": "https://vertexaisearch.cloud.google.com/grounding-api-redirect/SECOND",
+    "resolved_url": "https://second.example/social-report"
+  },
+  "G_insight_H_event": {
+    "title": "不満と季節の独立した調査",
+    "uri": "https://vertexaisearch.cloud.google.com/grounding-api-redirect/THIRD",
+    "resolved_url": "https://third.example/insight-report"
+  }
+}

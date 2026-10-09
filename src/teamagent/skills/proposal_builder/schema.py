@@ -491,6 +491,7 @@ class ProposalBuilderStatusOutput(_StrictModel):
     job_id: str
     status: Literal["queued", "running", "done", "failed"]
     stage: Literal["researching", "building"] | None = None
+    research_delivery_status: Literal["pending", "delivered", "failed"] | None = None
     retry_after_seconds: int = Field(default=0, ge=0)
     proposal_status: Literal["ready", "draft"] | None = None
     result_message: str = ""

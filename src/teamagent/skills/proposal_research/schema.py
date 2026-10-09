@@ -106,6 +106,7 @@ class IntermediateResearch(StrictModel):
 
 class ResearchSummary(StrictModel):
     source_count: int = Field(ge=0)
+    unconfirmed_count: int = Field(ge=0, default=0)
     discarded_count: int = Field(ge=0)
     discarded_by_section: dict[str, int] = Field(default_factory=dict)
     elapsed_seconds: float = Field(ge=0)

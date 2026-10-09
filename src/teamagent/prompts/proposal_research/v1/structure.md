@@ -7,6 +7,7 @@ G_insight にはURL欄が無い。4つの文字列それぞれの末尾に [S12]
 product_meta.purpose は1つ以上。kaiwai_keywords は実際のSNSの細かい語8〜12個。
 Aは3テーマ×主張1件＋補足3件、Bは3テーマ×主張1件＋補足0〜3件、
 Dは文脈語6〜8個、Eは3界隈、F_competitorは主要な異なる3社を必ず埋める。
+F_competitor の name は「会社名 商品名」の形にし、3 件とも別の会社にする（同じ会社の別商品は 1 社と数える）。
 A、B、D、E、F、G、Hは空にしない。未確認の件数や人口は「要確認」と書く。
 C_tiktok は空配列にする。E_community の tiktok_tags はタグ候補だけを入れ、
 representative_post_url は空文字列にする。投稿URLと数値はコードが実データで埋める。

@@ -124,9 +124,7 @@ def load_mapping(path: Path) -> list[dict[str, Any]]:
         if missing:
             raise AdoptValidationError(f"adoptions[{index}] is missing fields: {missing}")
         if entry["resource_type"] != "aws_s3_object":
-            raise AdoptValidationError(
-                f"adoptions[{index}] resource_type must be aws_s3_object"
-            )
+            raise AdoptValidationError(f"adoptions[{index}] resource_type must be aws_s3_object")
         sha = entry["expected_content_sha256"]
         if not SHA256_RE.match(sha):
             raise AdoptValidationError(f"adoptions[{index}] expected_content_sha256 is malformed")

@@ -32,7 +32,7 @@ from teamagent.adapters.tiktok_scraper import (
 )
 from teamagent.mcp_gateway.allowlist import email_allowed
 from teamagent.skills._shared.long_jobs import enabled as long_jobs_enabled
-from teamagent.skills._shared.long_jobs import latest_job, origin
+from teamagent.skills._shared.long_jobs import latest_job, open_dm_once_more, origin
 from teamagent.skills._shared.text_safety import sanitize_llm_text
 from teamagent.skills.base import BaseSkill, SkillContext, register
 from teamagent.skills.proposal_builder.research import (
@@ -92,6 +92,10 @@ _PROPOSAL_JOB_RETRY_SECONDS = 30
 _PROPOSAL_JOB_HEARTBEAT_SECONDS = 30
 _PROPOSAL_JOB_STALE_SECONDS = 180
 _RESEARCH_OUTPUT_KEY = "_proposal_research_output"
+_RESEARCH_DELIVERY_KEY = "_proposal_research_delivery"
+_RESEARCH_JOB_KEY = "_proposal_research_job"
+_RESEARCH_STORE_KEY = "_proposal_research_store"
+_DM_CHANNEL_KEY = "_proposal_delivery_dm"
 RESEARCH_AUTO_ENV = "PROPOSAL_RESEARCH_AUTO"
 RESEARCH_NOT_READY_MESSAGE = "調査からの自動作成は準備中です。Gemini v3 の JSON を渡してください"
 
@@ -170,12 +174,39 @@ def _research_output(ctx: SkillContext) -> ProposalResearchOutput | None:
     return value if isinstance(value, ProposalResearchOutput) else None
 
 
-def _research_summary_lines(output: ProposalResearchOutput) -> str:
-    return (
-        f"調査: 出典 {output.summary.source_count} 件（すべて実在を確認）・"
-        f"出典が確かめられず外した主張 {output.summary.discarded_count} 件\n"
-        "調査の JSON を添付しました。直して渡せば、その JSON から作り直せます"
+def _research_summary_lines(
+    output: ProposalResearchOutput, *, delivery_status: str = "delivered"
+) -> str:
+    confirmation = (
+        f"{output.summary.unconfirmed_count} 件はサイトが自動の確認を拒否"
+        if output.summary.unconfirmed_count
+        else "リンク切れ・転送失敗の出典は除外済み、本文の内容確認は含みません"
     )
+    attachment = (
+        "調査の JSON を添付予定です。配信完了後、その JSON を直して渡せば作り直せます"
+        if delivery_status == "pending"
+        else "調査の JSON を添付しました。直して渡せば、その JSON から作り直せます"
+    )
+    return (
+        f"調査: 出典 {output.summary.source_count} 件（{confirmation}）・"
+        f"出典が確かめられず外した主張 {output.summary.discarded_count} 件\n" + attachment
+    )
+
+
+def _record_research_delivery(ctx: SkillContext, status: str) -> None:
+    ctx.metadata[_RESEARCH_DELIVERY_KEY] = status
+    store = ctx.metadata.get(_RESEARCH_STORE_KEY)
+    job_id = ctx.metadata.get(_RESEARCH_JOB_KEY)
+    if isinstance(store, ProposalJobStore) and isinstance(job_id, str):
+        try:
+            if not store.record_research_delivery(
+                job_id, status, error="SLACK_JSON_DELIVERY_FAILED" if status == "failed" else ""
+            ):
+                raise RuntimeError("research delivery record rejected")
+        except Exception as exc:
+            ctx.bind_logger("proposal_builder").warning(
+                "proposal_research_delivery_record_failed", error_type=type(exc).__name__
+            )
 
 
 def _utc_now() -> datetime:
@@ -1147,14 +1178,27 @@ class ProposalBuilderSkill(BaseSkill[ProposalBuilderInput, ProposalBuilderOutput
                         error_type=type(exc).__name__,
                     )
                 if not slack_delivered and not (
-                    (target := origin(ctx)) is not None and target.pending
+                    (target := origin(ctx)) is not None and target.primary_pending
                 ):
                     warnings.append("Slackファイル添付に失敗")
+            if automatic_research is not None and status == "draft" and not draft_delivery:
+                asyncio.run(
+                    self._deliver_research_only(
+                        ctx=ctx,
+                        research=automatic_research,
+                        title=f"{_SAFE_NAME.sub('_', product_name)}_調査.json",
+                        comment="提案書はドラフトのため添付していません。\n"
+                        + _research_summary_lines(automatic_research),
+                    )
+                )
+            research_delivery = ctx.metadata.get(_RESEARCH_DELIVERY_KEY)
+            if research_delivery == "failed":
+                warnings.append("調査JSONの添付に失敗（再度調査をご依頼ください）")
             if (
                 status == "ready"
                 and not slack_delivered
                 and not pptx_url
-                and not ((target := origin(ctx)) is not None and target.pending)
+                and not ((target := origin(ctx)) is not None and target.primary_pending)
             ):
                 raise RuntimeError(
                     "ready proposal has neither Slack delivery nor a published fallback URL"
@@ -1166,13 +1210,15 @@ class ProposalBuilderSkill(BaseSkill[ProposalBuilderInput, ProposalBuilderOutput
                 else "提案書は生成しましたが、未解決項目があるためドラフト（裏取り前）です。"
             )
             if status == "draft" and not draft_delivery:
-                message += " 外部提出防止のためSlack添付は行っていません。"
+                message += " 外部提出防止のため提案書のSlack添付は行っていません。"
             elif slack_delivered:
                 message += " 依頼元Slackへ添付しました。"
-            if automatic_research is not None and (
-                slack_delivered or ((target := origin(ctx)) is not None and target.pending)
-            ):
-                message += "\n" + _research_summary_lines(automatic_research)
+            if automatic_research is not None and research_delivery in {"pending", "delivered"}:
+                message += "\n" + _research_summary_lines(
+                    automatic_research, delivery_status=str(research_delivery)
+                )
+            elif research_delivery == "failed":
+                message += " 調査JSONの添付に失敗しました。再度調査をご依頼ください。"
 
             output = ProposalBuilderOutput(
                 status=status,
@@ -1240,34 +1286,67 @@ class ProposalBuilderSkill(BaseSkill[ProposalBuilderInput, ProposalBuilderOutput
         ctx: SkillContext,
         research: ProposalResearchOutput | None,
     ) -> tuple[bool, Literal["thread", "dm", "none"]]:
-        delivered, destination = await self._deliver(
-            path=path,
-            title=title,
-            comment=comment,
-            ctx=ctx,
-            force_dm=research is not None,
-        )
+        try:
+            delivered, destination = await self._deliver(
+                path=path,
+                title=title,
+                comment=comment,
+                ctx=ctx,
+                force_dm=research is not None,
+            )
+        except Exception:
+            if research is None:
+                raise
+            delivered, destination = False, "none"
         if research is None:
             return delivered, destination
-        if not delivered and not ((target := origin(ctx)) is not None and target.pending):
-            return False, "none"
-        with tempfile.TemporaryDirectory(prefix="proposal-research-json-") as workdir:
-            json_path = Path(workdir) / "research.json"
-            json_path.write_text(
-                json.dumps(research.research_json, ensure_ascii=False, indent=2), encoding="utf-8"
+        await self._deliver_research_only(
+            ctx=ctx,
+            research=research,
+            title=Path(title).stem + "_調査.json",
+            comment=_research_summary_lines(research),
+        )
+        # PPTXの成功はJSON添付の成否から独立して返す。
+        return delivered, destination
+
+    async def _deliver_research_only(
+        self,
+        *,
+        ctx: SkillContext,
+        research: ProposalResearchOutput,
+        title: str,
+        comment: str,
+    ) -> bool:
+        _record_research_delivery(ctx, "pending")
+        try:
+            with tempfile.TemporaryDirectory(prefix="proposal-research-json-") as workdir:
+                json_path = Path(workdir) / "research.json"
+                json_path.write_text(
+                    json.dumps(research.research_json, ensure_ascii=False, indent=2),
+                    encoding="utf-8",
+                )
+                json_delivered, json_destination = await self._deliver(
+                    path=str(json_path),
+                    title=title,
+                    comment=comment,
+                    ctx=ctx,
+                    force_dm=True,
+                    deliver_on_failure=True,
+                    on_result=lambda ok: _record_research_delivery(
+                        ctx, "delivered" if ok else "failed"
+                    ),
+                )
+        except Exception as exc:
+            ctx.bind_logger(self.name).warning(
+                "proposal_research_json_delivery_failed", error_type=type(exc).__name__
             )
-            json_delivered, json_destination = await self._deliver(
-                path=str(json_path),
-                title=Path(title).stem + "_調査.json",
-                comment="",
-                ctx=ctx,
-                force_dm=True,
-            )
-        if json_destination != "dm":
-            if (target := origin(ctx)) is not None and target.pending:
-                target.discard()
-            raise RuntimeError("research JSON could not be attached")
-        return delivered and json_delivered, "dm"
+            _record_research_delivery(ctx, "failed")
+            return False
+        if json_delivered:
+            _record_research_delivery(ctx, "delivered")
+        elif json_destination != "dm":
+            _record_research_delivery(ctx, "failed")
+        return json_delivered
 
     async def _deliver(
         self,
@@ -1277,8 +1356,10 @@ class ProposalBuilderSkill(BaseSkill[ProposalBuilderInput, ProposalBuilderOutput
         comment: str,
         ctx: SkillContext,
         force_dm: bool = False,
+        deliver_on_failure: bool = False,
+        on_result: Callable[[bool], None] | None = None,
     ) -> tuple[bool, Literal["thread", "dm", "none"]]:
-        if long_jobs_enabled() and origin(ctx) is None:
+        if long_jobs_enabled() and origin(ctx) is None and not force_dm:
             return False, "none"
         slack = self._slack
         if slack is None:
@@ -1303,14 +1384,25 @@ class ProposalBuilderSkill(BaseSkill[ProposalBuilderInput, ProposalBuilderOutput
                     user_id = await slack.lookup_user_id_by_email(requester.strip(), ctx.request_id)
             if not user_id:
                 return False, "none"
-            dm = await slack.open_dm(user_id, ctx.request_id)
-            if not dm:
-                return False, "none"
             if target is not None and target.deferred:
                 target.defer(
-                    slack, path, title, comment, ctx.request_id, channel_id=dm, thread_ts=None
+                    slack,
+                    path,
+                    title,
+                    comment,
+                    ctx.request_id,
+                    dm_user_id=user_id,
+                    thread_ts=None,
+                    deliver_on_failure=deliver_on_failure,
+                    on_result=on_result,
                 )
                 return False, "dm"
+            dm = ctx.metadata.get(_DM_CHANNEL_KEY)
+            if not isinstance(dm, str) or not dm:
+                dm = await open_dm_once_more(slack, user_id, ctx.request_id)
+                if not dm:
+                    return False, "none"
+                ctx.metadata[_DM_CHANNEL_KEY] = dm
             ok = await slack.upload_file(
                 dm,
                 path,
@@ -1508,7 +1600,15 @@ class ProposalBuilderSubmitSkill(
             job_id=job_id,
             status="queued",
             retry_after_seconds=self._retry_after_seconds,
-            message="提案書生成を受け付けました。実測の目安は40〜50分です。完了・失敗をこの会話にお届けします。",
+            message=(
+                "提案書生成を受け付けました。実測の目安は40〜50分です。"
+                "完成した資料と調査JSONはDMにお届けします。失敗はこの会話でお知らせします。"
+                if input.research_brief is not None
+                else (
+                    "提案書生成を受け付けました。実測の目安は40〜50分です。"
+                    "完了・失敗をこの会話にお届けします。"
+                )
+            ),
         )
 
     def _run_background(
@@ -1559,6 +1659,9 @@ class ProposalBuilderSubmitSkill(
                 if not self._store.mark_stage(job_id, "researching"):
                     raise RuntimeError("proposal research stage could not be saved")
                 researched = self._research_factory().run(input.research_brief, ctx)
+                ctx.metadata[_RESEARCH_OUTPUT_KEY] = researched
+                ctx.metadata[_RESEARCH_JOB_KEY] = job_id
+                ctx.metadata[_RESEARCH_STORE_KEY] = self._store
                 # 調査の完了が確認された入力だけを従来の組み立てに渡す。
                 parse_gemini_research(researched.research_json)
                 brief = input.research_brief
@@ -1579,7 +1682,6 @@ class ProposalBuilderSubmitSkill(
                         ),
                     },
                 )
-                ctx.metadata[_RESEARCH_OUTPUT_KEY] = researched
                 if not self._store.mark_stage(job_id, "building"):
                     raise RuntimeError("proposal build stage could not be saved")
             builder = self._builder_factory()
@@ -1612,6 +1714,29 @@ class ProposalBuilderSubmitSkill(
                 else:
                     log.warning("proposal_builder_terminal_write_rejected", job_id=job_id)
         except Exception as exc:
+            if (completed_research := _research_output(ctx)) is not None and not ctx.metadata.get(
+                _RESEARCH_DELIVERY_KEY
+            ):
+                try:
+                    if builder is None and self._builder_factory is not None:
+                        builder = self._builder_factory()
+                    if builder is not None:
+                        asyncio.run(
+                            builder._deliver_research_only(
+                                ctx=ctx,
+                                research=completed_research,
+                                title="完了済み調査.json",
+                                comment="提案書の組み立ては失敗しました。\n"
+                                + _research_summary_lines(completed_research),
+                            )
+                        )
+                except Exception as delivery_exc:
+                    _record_research_delivery(ctx, "failed")
+                    log.warning(
+                        "proposal_research_recovery_delivery_failed",
+                        job_id=job_id,
+                        error_type=type(delivery_exc).__name__,
+                    )
             # 2026-09-16 本番: error_type=TypeError だけでは原因が分からず、ログ再読とローカル
             # 再現に半日を要した。要約（本文なし）と発生箇所を残す。
             log.warning(
@@ -1748,6 +1873,15 @@ class ProposalBuilderStatusSkill(
             )
 
         raw_status = row.get("status")
+        target = origin(ctx)
+        if (
+            row.get("research_delivery_status") == "pending"
+            and raw_status in {"done", "failed"}
+            and not (target is not None and target.pending)
+            and self._is_stale(row.get("updated_at"))
+        ):
+            self._store.record_research_delivery(input.job_id, "failed")
+            row = self._store.get_job(input.job_id) or row
         if raw_status in ("queued", "running"):
             error_code = self._active_failure_code(row)
             if error_code is not None:
@@ -1765,6 +1899,13 @@ class ProposalBuilderStatusSkill(
                     )
                 row = self._store.get_job(input.job_id) or row
                 if (
+                    row.get("status") == "failed"
+                    and row.get("stage") == "building"
+                    and row.get("research_delivery_status") != "delivered"
+                ):
+                    self._store.record_research_delivery(input.job_id, "failed")
+                    row = self._store.get_job(input.job_id) or row
+                if (
                     row.get("status") in ("queued", "running")
                     and (latest_error_code := self._active_failure_code(row)) is not None
                 ):
@@ -1776,6 +1917,15 @@ class ProposalBuilderStatusSkill(
                     raise RuntimeError("proposal job state could not be terminalized")
 
         raw_status = row.get("status")
+        target = origin(ctx)
+        if (
+            row.get("research_delivery_status") == "pending"
+            and raw_status in {"done", "failed"}
+            and not (target is not None and target.pending)
+            and self._is_stale(row.get("updated_at"))
+        ):
+            self._store.record_research_delivery(input.job_id, "failed")
+            row = self._store.get_job(input.job_id) or row
         status = raw_status if raw_status in ("queued", "running", "done", "failed") else None
         if status is None:
             return ProposalBuilderStatusOutput(
@@ -1785,8 +1935,13 @@ class ProposalBuilderStatusSkill(
                 message="jobの状態を判定できません。",
             )
         log.info("proposal_builder_status", job_id=input.job_id, status=status)
+        raw_delivery = row.get("research_delivery_status")
+        research_delivery: Literal["pending", "delivered", "failed"] | None = (
+            raw_delivery if raw_delivery in {"pending", "delivered", "failed"} else None
+        )
         if status == "done":
-            return self._done_output(input.job_id, row)
+            result = self._done_output(input.job_id, row)
+            return result.model_copy(update={"research_delivery_status": research_delivery})
         if status == "failed":
             error_code = row.get("error_code")
             raw_summary = row.get("error_summary")
@@ -1802,11 +1957,18 @@ class ProposalBuilderStatusSkill(
                 if error_summary
                 else "提案書生成に失敗しました。資料の組み立てで止まりました。"
             )
+            if research_delivery == "delivered":
+                message += " 完了済みの調査JSONはDMへ添付しました。"
+            elif research_delivery == "pending":
+                message += " 完了済みの調査JSONはDMへ添付予定です。"
+            elif research_delivery == "failed":
+                message += " 調査JSONの添付に失敗しました。再度調査をご依頼ください。"
             return ProposalBuilderStatusOutput(
                 job_id=input.job_id,
                 status="failed",
                 error_code=error_code if isinstance(error_code, str) else "JOB_STATE_INVALID",
                 error_summary=error_summary,
+                research_delivery_status=research_delivery,
                 message=message,
             )
         if status in ("queued", "running"):
@@ -1886,11 +2048,29 @@ class ProposalBuilderStatusSkill(
                 error_code=_PROPOSAL_JOB_RESULT_ERROR_CODE,
                 message="完了結果を検証できませんでした。",
             )
+        result_message = result.message
+        warnings = list(result.warnings)
+        pending_attachment = (
+            "調査の JSON を添付予定です。配信完了後、その JSON を直して渡せば作り直せます"
+        )
+        if row.get("research_delivery_status") == "delivered":
+            result_message = result_message.replace(
+                pending_attachment,
+                "調査の JSON を添付しました。直して渡せば、その JSON から作り直せます",
+            )
+        elif row.get("research_delivery_status") == "failed":
+            result_message = result_message.replace(
+                pending_attachment,
+                "調査JSONの添付に失敗しました。再度調査をご依頼ください。",
+            )
+            if "調査JSONの添付に失敗" not in result_message:
+                result_message += " 調査JSONの添付に失敗しました。再度調査をご依頼ください。"
+            warnings.append("調査JSONの添付に失敗（再度調査をご依頼ください）")
         return ProposalBuilderStatusOutput(
             job_id=job_id,
             status="done",
             proposal_status=result.status,
-            result_message=result.message,
+            result_message=result_message,
             pptx_url=result.pptx_url,
             version_id=result.version_id,
             filled_count=result.filled_count,
@@ -1900,7 +2080,7 @@ class ProposalBuilderStatusSkill(
             selected_account_names=result.selected_account_names,
             case_references=result.case_references,
             verification_issues=result.verification_issues,
-            warnings=result.warnings,
+            warnings=warnings,
             slack_delivered=result.slack_delivered,
             delivery_target=result.delivery_target,
             total_cost_usd=result.total_cost_usd,

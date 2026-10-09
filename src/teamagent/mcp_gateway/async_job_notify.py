@@ -51,31 +51,97 @@ def publish_notice(
     ).hexdigest()
     store = ProposalJobStore()
     key = f"dedup_notice_{digest}"
+
+    def record_primary_failure(*, uncertain: bool = False) -> None:
+        try:
+            store.record_primary_delivery_failure(job_id, uncertain=uncertain)
+        except Exception as exc:
+            logger.warning(
+                "long_job_delivery_record_failed", request_id=request_id, error=type(exc).__name__
+            )
+
     try:
         if not store.put_dedup_lock(key, "claimed", expected_target=None):
             return False
         if kind == "terminal" and not completed:
-            origin.discard()
-        if kind == "terminal" and completed and origin.pending:
+            # 組み立てに失敗しても、完了済み調査JSONは依頼者へ届ける。
+            origin.discard(keep_failure_uploads=True)
+        if kind == "terminal" and origin.pending:
+            delivered = False
             try:
-                if origin.deliver():
-                    try:
-                        store.mark_delivered(job_id)
-                    except Exception as exc:
-                        logger.warning(
-                            "long_job_delivery_record_failed",
-                            request_id=request_id,
-                            error=type(exc).__name__,
+                delivered = origin.deliver()
+                if origin.primary_expected and not origin.primary_delivered:
+                    delivered = False
+                if delivered:
+                    if completed and origin.primary_delivered:
+                        try:
+                            store.mark_delivered(job_id)
+                        except Exception as exc:
+                            logger.warning(
+                                "long_job_delivery_record_failed",
+                                request_id=request_id,
+                                error=type(exc).__name__,
+                            )
+                    if origin.research_delivery_failed:
+                        json_note = (
+                            "調査JSONの添付に失敗しました。"
+                            "調査JSONが必要な場合は再度調査をご依頼ください。"
                         )
-                    return True
+                        # 失敗したジョブは元の失敗の知らせを残す（上書きすると失敗が伝わらない）。
+                        message = (
+                            "資料はDMへお届けしましたが、" + json_note
+                            if completed
+                            else f"{message} {json_note}"
+                        )
+                    elif completed:
+                        if origin.redirected:
+                            detached_jobs.post_to_origin(
+                                "資料をDMへお届けしました。"
+                                if origin.primary_delivered
+                                else "調査JSONをDMへお届けしました。提案書の添付は行っていません。",
+                                detached_jobs.Destination(origin.channel_id, origin.thread_ts),
+                                request_id=request_id,
+                                fallback_user_id=origin.user_id,
+                            )
+                        return True
+                    else:
+                        message += " 完了済みの調査JSONはDMへお届けしました。"
             except TimeoutError:
-                # ファイルが届いた可能性がある。二通目の通知を作らない。
-                return False
+                # 添付の自動再送はしない。DMへ振り替えた場合は依頼元へ結果の不確実性を知らせる。
+                if not origin.redirected:
+                    return False
+                record_primary_failure(uncertain=True)
+                message = "提案書の添付結果を確認できませんでした。DMをご確認ください。"
+                message += (
+                    " 完了済みの調査JSONはDMへお届けしました。"
+                    if origin.research_delivered
+                    else " 調査JSONの添付に失敗しました。再度調査をご依頼ください。"
+                    if origin.research_delivery_failed
+                    else ""
+                )
+                delivered = True  # 下の確定失敗の文には置き換えない。
             except Exception as exc:
                 logger.warning(
                     "long_job_upload_failed", request_id=request_id, error=type(exc).__name__
                 )
-            message = "資料は生成・保存できましたが、Slackへの添付に失敗しました。"
+            if not delivered:
+                if origin.primary_expected and not origin.primary_delivered:
+                    record_primary_failure()
+                notes = []
+                if origin.primary_expected and not origin.primary_delivered:
+                    notes.append("提案書の添付に失敗しました。")
+                if origin.research_delivered:
+                    notes.append("完了済みの調査JSONはDMへお届けしました。")
+                elif origin.research_delivery_failed:
+                    notes.append("調査JSONの添付に失敗しました。再度調査をご依頼ください。")
+                if not completed:
+                    # 失敗したジョブは元の失敗の知らせに添付の結果を書き足す（上書きしない）。
+                    message = " ".join([message, *notes]).strip()
+                else:
+                    message = (
+                        " ".join(notes)
+                        or "資料は生成・保存できましたが、Slackへの添付に失敗しました。"
+                    )
         return detached_jobs.post_to_origin(
             message,
             detached_jobs.Destination(origin.channel_id, origin.thread_ts),

@@ -49,3 +49,30 @@ def test_deferred_dm_delivery_keeps_dm_destination_in_job_result() -> None:
     result = json.loads(row["result_json"])
     assert result["slack_delivered"] is True and result["delivery_target"] == "dm"
     assert result["message"] == "生成済み DMへ添付しました。"
+
+
+def test_primary_delivery_failure_never_touches_omiyage_or_plain_proposal_rows() -> None:
+    """通知の部品はお土産と共用。お土産の結果は strict 検証なので、余分なキーを書くと次の照会で失敗になる。"""
+    store = ProposalJobStore(table_name="", memory={})
+    result = json.dumps({"status": "done", "slack_delivered": False, "message": "完成"})
+    for job_id, summary in (("om_job", {"tool": "omiyage_report_submit"}), ("pb_plain", {})):
+        store.create_job(job_id, summary)
+        assert store.mark_running(job_id) is True
+        assert store.mark_done(job_id, result) is True
+        assert store.record_primary_delivery_failure(job_id) is False
+        assert store.record_primary_delivery_failure(job_id, uncertain=True) is False
+        row = store.get_job(job_id)
+        assert row is not None and json.loads(row["result_json"]) == json.loads(result)
+
+
+def test_primary_delivery_failure_is_recorded_for_research_jobs() -> None:
+    store = ProposalJobStore(table_name="", memory={})
+    store.create_job("pb_research", {"research_auto": True})
+    assert store.mark_running("pb_research") is True
+    assert store.mark_done(
+        "pb_research", json.dumps({"status": "ready", "slack_delivered": False, "message": "完成"})
+    )
+    assert store.record_primary_delivery_failure("pb_research") is True
+    row = store.get_job("pb_research")
+    assert row is not None
+    assert "Slackファイル添付に失敗" in json.loads(row["result_json"])["warnings"]

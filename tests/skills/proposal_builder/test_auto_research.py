@@ -291,7 +291,7 @@ def test_auto_job_attaches_pptx_and_research_json_to_dm_with_summary(
     assert slack.uploads[1][1].endswith(".json")
     assert json.loads(slack.uploads[1][2]) == _result().research_json
     expected = (
-        "調査: 出典 7 件（すべて実在を確認）・出典が確かめられず外した主張 2 件\n"
+        "調査: 出典 7 件（リンク切れ・転送失敗の出典は除外済み、本文の内容確認は含みません）・出典が確かめられず外した主張 2 件\n"
         "調査の JSON を添付しました。直して渡せば、その JSON から作り直せます"
     )
     assert expected in (slack.uploads[0][3] or "")

@@ -8,8 +8,8 @@ import time
 import unicodedata
 from collections import Counter
 from collections.abc import Callable
-from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass
+from concurrent.futures import ThreadPoolExecutor, wait
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from typing import Any, ClassVar, Protocol
 from urllib.parse import urlsplit
@@ -20,6 +20,8 @@ from teamagent.adapters.gemini_client import (
     GeminiClient,
     GeminiGroundedResponse,
     GeminiResponse,
+    GroundingSupport,
+    _is_retryable_vertex,
 )
 from teamagent.adapters.retry import retry_long_job_once
 from teamagent.adapters.source_url_check import (
@@ -75,11 +77,16 @@ def _prompt(name: str) -> str:
     return load_prompt("proposal_research", "v1", name)
 
 
-_URL = re.compile(r"https?://[^\s<>\"'`]+", re.IGNORECASE)
+_URL = re.compile(
+    r"https?://(?:\[[0-9a-fA-F:]+\]|[^\s/\[\]（）()<>\x00、。；：！？\"']+)"
+    r"[A-Za-z0-9\-._~:/?#@!$&*+,;=%]*",
+    re.IGNORECASE,
+)
 _REF = re.compile(r"\[S([1-9][0-9]*)\]")
 _TOTAL_UNAVAILABLE = "取得不可（UI非表示）"
 _POST_PATH = re.compile(r"^/@[^/]+/video/[1-9][0-9]*/?$")
 _TIKTOK_TERMS = 6
+SOURCE_STAGE_DEADLINE_S = 60.0
 
 
 class ResearchError(ValueError):
@@ -118,11 +125,56 @@ class _Source:
     url: str
     title: str
     usable: bool
+    confirmed: bool
 
 
 def _memo_text(text: str) -> str:
     # 本文のURL/モデル自作の番号は証拠にしない。supportsも同じ変換で照合する。
     return _REF.sub("", _URL.sub("", text))
+
+
+def _contains_name(text: str, name: str) -> bool:
+    """未発表商材名の簡易な照合（NFKC・casefold・空白無視）。
+
+    止めるためではなく、TikTok の検索語を飛ばす防御用。
+    """
+
+    def fold(value: str) -> str:
+        return "".join(unicodedata.normalize("NFKC", value).casefold().split())
+
+    needle = fold(name)
+    return bool(needle) and needle in fold(text)
+
+
+def _support_span(raw: str, support: GroundingSupport) -> tuple[int, int] | None:
+    """UTF-8 境界と本文の一致を確認し、位置が信頼できる場合だけ採用する。"""
+    if support.end_byte is None:
+        return None
+    encoded = raw.encode("utf-8")
+    if support.end_byte < 0 or support.end_byte > len(encoded):
+        return None
+    try:
+        prefix = encoded[: support.end_byte].decode("utf-8")
+        if support.start_byte is not None:
+            if support.start_byte < 0 or support.start_byte > support.end_byte:
+                return None
+            segment = encoded[support.start_byte : support.end_byte].decode("utf-8")
+            if segment.strip() != support.text.strip():
+                return None
+    except UnicodeDecodeError:
+        return None
+    prefix = prefix.rstrip()
+    fragment = support.text.strip()
+    if not fragment or not prefix.endswith(fragment):
+        return None
+    return len(prefix) - len(fragment), len(prefix)
+
+
+def _retryable_check(result: UrlCheckResult) -> bool:
+    return not result.ok and (
+        result.reason in {"timeout", "http_error", "dns_failed", "deadline_exceeded"}
+        or (result.status_code or 0) >= 500
+    )
 
 
 class _Sources:
@@ -131,7 +183,7 @@ class _Sources:
         self.by_url: dict[str, _Source] = {}
         self.by_number: dict[str, _Source] = {}
         self._resolved: dict[str, tuple[str, bool]] = {}
-        self._checks: dict[str, bool] = {}
+        self._checks: dict[str, UrlCheckResult] = {}
 
     def prepare(
         self,
@@ -153,48 +205,85 @@ class _Sources:
             except Exception:
                 return uri, False
 
-        with ThreadPoolExecutor(max_workers=8) as pool:
-            new_uris = [uri for uri in uris if uri not in self._resolved]
-            self._resolved.update(zip(new_uris, pool.map(resolve, new_uris), strict=True))
+        deadline = time.monotonic() + SOURCE_STAGE_DEADLINE_S
+        pool = ThreadPoolExecutor(max_workers=8)
+        try:
+            new_uris = [uri for uri in uris if not self._resolved.get(uri, ("", False))[1]]
+            resolving = {uri: pool.submit(resolve, uri) for uri in new_uris}
+            resolved_done, _ = wait(resolving.values(), timeout=max(0, deadline - time.monotonic()))
+            self._resolved.update(
+                (uri, future.result() if future in resolved_done else (uri, False))
+                for uri, future in resolving.items()
+            )
             resolved = {uri: self._resolved[uri] for uri in uris}
             urls = list(
                 dict.fromkeys(
-                    url for url, ok in resolved.values() if ok and url not in self._checks
+                    url
+                    for url, ok in resolved.values()
+                    if ok and (url not in self._checks or _retryable_check(self._checks[url]))
                 )
             )
 
-            def verify(url: str) -> bool:
+            def verify(url: str) -> UrlCheckResult:
                 try:
-                    return self.checker.verify_public_url(url).ok
+                    return self.checker.verify_public_url(url)
                 except Exception:
-                    return False
+                    return UrlCheckResult(url=url, final_url=url, ok=False, reason="http_error")
 
-            self._checks.update(zip(urls, pool.map(verify, urls), strict=True))
+            verifying = {url: pool.submit(verify, url) for url in urls}
+            verified_done, _ = wait(verifying.values(), timeout=max(0, deadline - time.monotonic()))
+            self._checks.update(
+                (
+                    url,
+                    future.result()
+                    if future in verified_done
+                    else UrlCheckResult(url=url, final_url=url, ok=False, reason="timeout"),
+                )
+                for url, future in verifying.items()
+            )
+        finally:
+            pool.shutdown(wait=False, cancel_futures=True)
 
         for response in responses.values():
             for source in response.sources:
                 if not source.uri:
                     continue
                 url, resolved_ok = resolved[source.uri]
+                result = self._checks.get(url)
+                usable = resolved_ok and result is not None and result.ok
+                confirmed = usable and result is not None and not result.bot_blocked
                 if url not in self.by_url:
                     record = _Source(
                         number=f"S{len(self.by_url) + 1}",
                         url=url,
                         title=_memo_text(source.title),
-                        usable=resolved_ok and self._checks.get(url, False),
+                        usable=usable,
+                        confirmed=confirmed,
                     )
+                    self.by_url[url] = record
+                    self.by_number[record.number] = record
+                elif usable:
+                    record = replace(self.by_url[url], usable=usable, confirmed=confirmed)
                     self.by_url[url] = record
                     self.by_number[record.number] = record
 
         memos: dict[str, str] = {}
         memo_refs: dict[str, set[str]] = {}
         for section, response in responses.items():
-            text = _memo_text(response.text)
+            raw = response.text
+            marker = "\0grounding:"
+            while marker in raw:
+                marker += ":"
             insertions: dict[int, list[str]] = {}
+            occupied: list[tuple[int, int]] = []
             refs: set[str] = set()
-            for support in response.supports:
-                fragment = _memo_text(support.text).strip()
-                if not fragment:
+            for support in sorted(
+                response.supports,
+                key=lambda item: (_support_span(raw, item) is not None, len(item.text)),
+                reverse=True,
+            ):
+                fragment = support.text.strip()
+                if not _memo_text(fragment).strip():
                     continue
                 records = [
                     self.by_url[resolved[response.sources[index].uri][0]]
@@ -202,14 +291,36 @@ class _Sources:
                     if 0 <= index < len(response.sources)
                     and response.sources[index].uri in resolved
                 ]
-                for match in re.finditer(re.escape(fragment), text):
-                    suffix = insertions.setdefault(match.end(), [])
-                    for record in records:
-                        refs.add(record.number)
-                        if record.number not in suffix:
-                            suffix.append(record.number)
+                span = _support_span(raw, support)
+                if span is None:
+                    positions = [
+                        match.start()
+                        for match in re.finditer(re.escape(fragment), raw)
+                        if not any(
+                            match.start() < end and start < match.end() for start, end in occupied
+                        )
+                    ]
+                    if len(positions) == 1:
+                        position = positions[0]
+                        end = position + len(fragment)
+                        if not any(
+                            position < used_end and used_start < end
+                            for used_start, used_end in occupied
+                        ):
+                            span = position, end
+                if span is None:
+                    continue
+                occupied.append(span)
+                suffix = insertions.setdefault(span[1], [])
+                for record in records:
+                    refs.add(record.number)
+                    if record.number not in suffix:
+                        suffix.append(record.number)
             for end in sorted(insertions, reverse=True):
-                text = text[:end] + "".join(f"[{ref}]" for ref in insertions[end]) + text[end:]
+                raw = raw[:end] + "".join(f"{marker}{ref}\0" for ref in insertions[end]) + raw[end:]
+            text = _memo_text(raw)
+            for ref in refs:
+                text = text.replace(f"{marker}{ref}\0", f"[{ref}]")
             memos[section] = text
             memo_refs[section] = refs if response.grounded else set()
         return memos, memo_refs
@@ -225,6 +336,16 @@ def _strip_urls(value: Any) -> Any:
         return [_strip_urls(item) for item in value]
     if isinstance(value, dict):
         return {key: _strip_urls(item) for key, item in value.items()}
+    return value
+
+
+def _strip_urls_and_refs(value: Any) -> Any:
+    if isinstance(value, str):
+        return _REF.sub("", _URL.sub("", value)).strip()
+    if isinstance(value, list):
+        return [clean for item in value if (clean := _strip_urls_and_refs(item)) != ""]
+    if isinstance(value, dict):
+        return {key: _strip_urls_and_refs(item) for key, item in value.items()}
     return value
 
 
@@ -245,7 +366,7 @@ def _materialize(
 ) -> tuple[dict[str, Any], Counter[str], set[str]]:
     data: dict[str, Any] = intermediate.model_dump(by_alias=True)
     data["product_meta"] = IntermediateProductMeta.model_validate(
-        _strip_urls(data["product_meta"]), strict=True
+        _strip_urls_and_refs(data["product_meta"]), strict=True
     ).model_dump()
     discarded: Counter[str] = Counter()
     used: set[str] = set()
@@ -267,11 +388,11 @@ def _materialize(
             section: str = section,
         ) -> dict[str, Any] | None:
             ref = item[key]
-            inline = {f"S{number}" for number in _REF.findall(json.dumps(item))}
+            result: dict[str, Any] = _strip_urls(item)
+            inline = {f"S{number}" for number in _REF.findall(json.dumps(result))}
             if ref not in allowed or not inline.issubset(allowed):
                 discarded[section] += 1
                 return None
-            result: dict[str, Any] = _strip_urls(item)
             if any(
                 not _REF.sub("", value).strip()
                 for value in result.values()
@@ -279,6 +400,11 @@ def _materialize(
             ):
                 discarded[section] += 1
                 return None
+            # 名前・タグは検索や対応付けの識別子なので引用文に書き換えない。
+            if "name" in result:
+                result["name"] = _strip_urls_and_refs(result["name"])
+            if section == "E_community":
+                result["tiktok_tags"] = _strip_urls_and_refs(result["tiktok_tags"])
             result = _replace_inline_refs(result, sources)
             result[key] = sources.by_number[ref].url
             used.update({ref} | inline)
@@ -308,13 +434,14 @@ def _materialize(
     allowed_g = sources.allowed(memo_refs["G_insight_H_event"])
     insight: dict[str, str] = {}
     for key, text in data["G_insight"].items():
+        text = _URL.sub("", text)
         refs = {f"S{number}" for number in _REF.findall(text)}
-        if not refs or not refs.issubset(allowed_g) or not _REF.sub("", _URL.sub("", text)).strip():
+        if not refs or not refs.issubset(allowed_g) or not _REF.sub("", text).strip():
             discarded["G_insight"] += 1
             continue
         insight[key] = _REF.sub(
             lambda match: f"(出典: {sources.by_number['S' + match[1]].url})",
-            _URL.sub("", text),
+            text,
         )
         used.update(refs)
     data["G_insight"] = insight if len(insight) == 4 else {}
@@ -339,9 +466,20 @@ def _missing_sections(data: dict[str, Any]) -> list[str]:
         if not data[section]
     ]
     competitors = data["F_competitor"]
-    if len(competitors) < 3 or len({item["name"].strip() for item in competitors}) < 3:
+    # v3 の決まりは「主要 3 社」。名前が 3 種類でも同じ会社の別商品なら足りない
+    # （10-09 実測でロッテ 2 件）。
+    if len(competitors) < 3 or len({_company_of(item["name"]) for item in competitors}) < 3:
         missing.append("F_competitor")
     return missing
+
+
+_COMPANY_SPLIT = re.compile(r"[\s　「『（(／/・]")
+
+
+def _company_of(name: str) -> str:
+    """「会社名 商品名」の先頭を会社名とみなす（区切りが無ければ名前全体）。"""
+    head = _COMPANY_SPLIT.split(unicodedata.normalize("NFKC", name).strip(), maxsplit=1)[0]
+    return head.casefold() or name.strip().casefold()
 
 
 class ProposalResearchSkill(BaseSkill[ResearchBrief, ProposalResearchOutput]):
@@ -367,14 +505,15 @@ class ProposalResearchSkill(BaseSkill[ResearchBrief, ProposalResearchOutput]):
     def _search_brief(brief: ResearchBrief) -> dict[str, Any]:
         if not brief.unreleased:
             return brief.model_dump()
-        # 検索モデルへは商品名・公式URLを渡さず、与件中の商品名もカテゴリへ置換する。
-        data = brief.model_dump()
-        data["product_name"] = brief.category_term
-        data["official_url"] = "なし"
-        data["brief"] = unicodedata.normalize("NFKC", brief.brief).replace(
-            brief.product_name, brief.category_term or ""
-        )
-        return data
+        # 未発表商材は「消す」のではなく「渡さない」（10-09 方針変更）。自由文の与件は表記ゆれで
+        # 名前が漏れるので、検索（段 A）にもまとめ（段 B）にも渡さず、カテゴリ語だけで調べる。
+        return {
+            "product_name": brief.category_term,
+            "official_url": "なし",
+            "brief": "",
+            "unreleased": True,
+            "category_term": brief.category_term,
+        }
 
     def run(self, input: ResearchBrief, ctx: SkillContext) -> ProposalResearchOutput:
         start = self._clock()
@@ -399,13 +538,25 @@ class ProposalResearchSkill(BaseSkill[ResearchBrief, ProposalResearchOutput]):
 
         def search(section: str) -> GeminiGroundedResponse:
             task = _prompt(section)
+            search_prompt = f"SECTION: {section}\n{task}\n{brief_json}"
+            # 固定の指示・JSONキーは商材名の照合対象にしない。与件の値は上で確認済み。
+
+            def generate() -> GeminiGroundedResponse:
+                try:
+                    return self._gemini.generate_with_google_search(
+                        search_prompt,
+                        ctx.request_id,
+                        system=search_instruction,
+                        timeout_s=90,
+                    )
+                except Exception as exc:
+                    # Vertex の一時エラーを長いジョブ共通の1回再試行へ渡す。
+                    if _is_retryable_vertex(exc):
+                        raise ConnectionError("temporary research search failure") from exc
+                    raise
+
             try:
-                return self._gemini.generate_with_google_search(
-                    f"SECTION: {section}\n{task}\n{brief_json}",
-                    ctx.request_id,
-                    system=search_instruction,
-                    timeout_s=90,
-                )
+                return retry_long_job_once(generate)
             except Exception:
                 raise ResearchError(f"調査に失敗しました: {_label(section)}") from None
 
@@ -506,13 +657,14 @@ class ProposalResearchSkill(BaseSkill[ResearchBrief, ProposalResearchOutput]):
         log.info("proposal_research_stage", stage="C")
         searches = self._fill_tiktok(data, intermediate, brief, ctx)
         data["research_date"] = datetime.now(_JST).date().isoformat()
-        data["brand"] = brief.product_name
+        data["brand"] = unicodedata.normalize("NFKC", brief.product_name)
         try:
             validated = parse_gemini_research(data)
         except (ValidationError, ValueError, TypeError):
             raise ResearchError("調査結果の最終確認に失敗しました") from None
         summary = ResearchSummary(
             source_count=len(used),
+            unconfirmed_count=sum(not sources.by_number[ref].confirmed for ref in used),
             discarded_count=sum(discarded.values()),
             discarded_by_section=dict(discarded),
             elapsed_seconds=max(0, self._clock() - start),
@@ -524,7 +676,8 @@ class ProposalResearchSkill(BaseSkill[ResearchBrief, ProposalResearchOutput]):
             source_count=summary.source_count,
             discarded_count=summary.discarded_count,
             latency_ms=int(summary.elapsed_seconds * 1000),
-            cost_usd=summary.gemini_cost_usd,
+            # 呼び出し別 adapter ログの cost_usd と日次警報で二重計上しない。
+            research_cost_usd=summary.gemini_cost_usd,
             tiktok_search_count=searches,
             token_usage={
                 "input_tokens": sum(r.input_tokens for r in all_responses),
@@ -546,24 +699,28 @@ class ProposalResearchSkill(BaseSkill[ResearchBrief, ProposalResearchOutput]):
         candidates: dict[str, list[str]] = {}
         kept_names = {community["name"] for community in data["E_community"]}
         for community in intermediate.e_community:
-            if community.name not in kept_names:
+            community_name = _strip_urls_and_refs(community.name)
+            if community_name not in kept_names:
                 continue
-            candidates[community.name] = [
-                tag.tag.lstrip("#").strip()
+            candidates[community_name] = [
+                cleaned
                 for tag in community.tiktok_tags
                 if not _URL.search(tag.tag)
+                and (cleaned := _strip_urls_and_refs(tag.tag).lstrip("#").strip())
             ]
         # 界隈ごとに少なくとも1候補を先に選び、その後を細かい検索語で埋める。
         terms = [tags[0] for tags in candidates.values() if tags]
         terms.extend(data["product_meta"]["kaiwai_keywords"])
         terms.extend(tag for tags in candidates.values() for tag in tags)
-        terms = list(dict.fromkeys(term.lstrip("#").strip() for term in terms if term.strip()))
-        if brief.unreleased:
-            terms = [
-                term
+        terms = list(
+            dict.fromkeys(
+                cleaned
                 for term in terms
-                if brief.product_name not in unicodedata.normalize("NFKC", term)
-            ]
+                if (cleaned := _strip_urls_and_refs(term).lstrip("#").strip())
+            )
+        )
+        if brief.unreleased:
+            terms = [term for term in terms if not _contains_name(term, brief.product_name)]
         terms = terms[:_TIKTOK_TERMS]
         searches = 0
         results: dict[str, dict[str, Any]] = {}
