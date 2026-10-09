@@ -67,13 +67,30 @@ def _path(root: Path, value: Any, *, output: bool = False) -> Path:
     return path
 
 
+# 結果の metadata は 32KB・NaN 不可（contracts.MediaJobResult）。検査の結果で依頼全体を
+# 失敗させないよう、要約はこの大きさに収め、収まらなければ件数だけを返す。
+_DECK_QA_MAX_BYTES = 8 * 1024
+
+
 def _deck_qa(path: Path, *, expected_slides: int) -> dict[str, Any]:
     try:
         from teamagent.media.deck_qa import inspect_pptx
 
-        return {"deck_qa": inspect_pptx(path, expected_slides=expected_slides).summary()}
+        summary = inspect_pptx(path, expected_slides=expected_slides).summary()
     except Exception as exc:
-        return {"qa_error": type(exc).__name__ + ": " + str(exc)}
+        # 例外の文は長さも中身も制御できないので型名だけ。
+        return {"qa_error": type(exc).__name__[:80]}
+    try:
+        encoded = json.dumps(summary, ensure_ascii=False, allow_nan=False)
+    except (TypeError, ValueError):
+        encoded = None
+    if encoded is None or len(encoded.encode("utf-8")) > _DECK_QA_MAX_BYTES:
+        summary = {
+            "error_count": int(summary.get("error_count", 0)),
+            "warn_count": int(summary.get("warn_count", 0)),
+            "top_findings_dropped": True,
+        }
+    return {"deck_qa": summary}
 
 
 def _slides(root: Path, manifest: dict[str, Any]) -> dict[str, Any]:
