@@ -708,3 +708,167 @@ def test_qa_metadata_never_breaks_the_media_result(
     if case != "huge_exception":
         assert metadata["deck_qa"]["top_findings_dropped"] is True
         assert metadata["deck_qa"]["error_count"] == payload["error_count"]
+
+
+@pytest.mark.parametrize("placement", ["fits", "outside", "collision"])
+def test_table_grows_as_whole(tmp_path: Path, placement: str) -> None:
+    prs, slide = deck()
+    top = prs.slide_height - Inches(0.5) if placement == "outside" else Inches(1)
+    shape = slide.shapes.add_table(2, 2, Inches(1), top, Inches(4), Inches(0.4))
+    for row in shape.table.rows:
+        for cell in row.cells:
+            cell.text = "説明\v" * 3 + "説明"
+            cell.text_frame.paragraphs[0].runs[0].font.size = Pt(16)
+    if placement == "collision":
+        slide.shapes.add_shape(MSO_SHAPE.RECTANGLE, Inches(1), Inches(2), Inches(4), Inches(1))
+    path = tmp_path / "table.pptx"
+    prs.save(path)
+    findings = inspect_pptx(path).findings
+    assert not [f for f in findings if f.kind == "text_overflow"]
+    found = [f for f in findings if f.kind == "table_overflow"]
+    assert len(found) == (0 if placement == "fits" else 1)
+    if found:
+        assert found[0].severity == ("error" if placement == "outside" else "warn")
+        assert bool(found[0].details["collisions"]) is (placement == "collision")
+
+
+@pytest.mark.parametrize("merged", [False, True])
+@pytest.mark.parametrize("wide", [False, True])
+def test_table_grid_width_and_span(tmp_path: Path, merged: bool, wide: bool) -> None:
+    prs, slide = deck()
+    shape = slide.shapes.add_table(1, 3, 0, prs.slide_height - Inches(0.8), Inches(6), Inches(0.2))
+    table = shape.table
+    table.columns[0].width = Inches(3 if wide else 0.5)
+    table.columns[1].width = Inches(2 if wide else 0.5)
+    table.columns[2].width = Inches(1 if wide else 5)
+    cell = table.cell(0, 0)
+    if merged:
+        cell.merge(table.cell(0, 1))
+    cell.text = "あ" * (45 if merged else 25)
+    cell.text_frame.paragraphs[0].runs[0].font.size = Pt(16)
+    assert ("table_overflow" in kinds(prs, tmp_path)) is (not wide)
+
+
+@pytest.mark.parametrize("source", ["layout", "master"])
+@pytest.mark.parametrize("overflow", [False, True])
+@pytest.mark.parametrize("property_name", ["size", "insets"])
+def test_inherited_text_capacity(
+    tmp_path: Path, source: str, overflow: bool, property_name: str
+) -> None:
+    from pptx.oxml.xmlchemy import OxmlElement
+
+    prs = Presentation()
+    slide = prs.slides.add_slide(prs.slide_layouts[1])
+    shape = slide.placeholders[1]
+    layout = slide.slide_layout.placeholders[1]
+    master = slide.slide_layout.slide_master.placeholders[1]
+    target = layout if source == "layout" else master
+    shape.width, shape.height = Inches(2), Inches(0.5)
+    for candidate in (shape, layout, master):
+        body = candidate.text_frame._txBody.bodyPr
+        body.attrib.clear()
+        for child in list(body):
+            body.remove(child)
+        for child in candidate._element.xpath("./p:txBody/a:p/a:pPr | ./p:txBody/a:lstStyle/*"):
+            child.getparent().remove(child)
+    target.text_frame._txBody.bodyPr.attrib.update(
+        {"lIns": "0", "rIns": "0", "tIns": "0", "bIns": "0"}
+    )
+    props = OxmlElement("a:lvl1pPr")
+    run = OxmlElement("a:defRPr")
+    run.set("sz", "3000" if overflow and property_name == "size" else "1000")
+    props.append(run)
+    target.text_frame._txBody.xpath("./a:lstStyle")[0].append(props)
+    if property_name == "insets" and overflow:
+        target.text_frame._txBody.bodyPr.set("tIns", str(Inches(0.5)))
+    shape.text = "あ" * 14
+    path = tmp_path / "inherited.pptx"
+    prs.save(path)
+    found = [
+        f
+        for f in inspect_pptx(path).findings
+        if f.shape == shape.name and f.kind == "text_overflow"
+    ]
+    assert bool(found) is overflow
+
+
+@pytest.mark.parametrize("include_edges", [False, True])
+def test_explicit_percentage_spacing_and_paragraph_edges(
+    tmp_path: Path, include_edges: bool
+) -> None:
+    prs, slide = deck()
+    # 行間 100%（spcPct）は指定なしと同じ 1 行＝字の 1.2 倍（20pt → 24pt）。0.36in（25.9pt）に収まる。
+    frame = slide.shapes.add_textbox(0, 0, Inches(2), Inches(0.36)).text_frame
+    frame.margin_top = frame.margin_bottom = 0
+    frame.auto_size = MSO_AUTO_SIZE.NONE
+    frame.text = "説明"
+    p = frame.paragraphs[0]
+    p.font.size = Pt(20)
+    p.line_spacing = 1.0
+    p.space_before = p.space_after = Pt(20)
+    frame._txBody.bodyPr.set("spcFirstLastPara", "1" if include_edges else "0")
+    assert ("text_overflow" in kinds(prs, tmp_path)) is include_edges
+
+
+@pytest.mark.parametrize("large_margin", [False, True])
+def test_table_cell_margins(tmp_path: Path, large_margin: bool) -> None:
+    prs, slide = deck()
+    shape = slide.shapes.add_table(1, 1, 0, prs.slide_height - Inches(0.5), Inches(3), Inches(0.2))
+    cell = shape.table.cell(0, 0)
+    cell.text = "説明"
+    cell.text_frame.paragraphs[0].runs[0].font.size = Pt(10)
+    cell.margin_top = Inches(0.7) if large_margin else 0
+    cell.margin_bottom = 0
+    assert ("table_overflow" in kinds(prs, tmp_path)) is large_margin
+
+
+@pytest.mark.parametrize("long", [False, True])
+def test_table_vertical_merge_capacity(tmp_path: Path, long: bool) -> None:
+    prs, slide = deck()
+    shape = slide.shapes.add_table(2, 1, 0, prs.slide_height - Inches(1), Inches(3), Inches(0.8))
+    cell = shape.table.cell(0, 0)
+    cell.merge(shape.table.cell(1, 0))
+    cell.text = "説明\v" * (12 if long else 2) + "説明"
+    for run in cell.text_frame.paragraphs[0].runs:
+        run.font.size = Pt(10)
+    assert ("table_overflow" in kinds(prs, tmp_path)) is long
+
+
+@pytest.mark.parametrize("overflow", [False, True])
+def test_footer_uses_other_master_style(tmp_path: Path, overflow: bool) -> None:
+    from pptx.oxml.xmlchemy import OxmlElement
+
+    prs, slide = deck()
+    shape = slide.shapes.add_textbox(0, 0, Inches(3), Inches(0.3))
+    ph = OxmlElement("p:ph")
+    ph.set("type", "ftr")
+    ph.set("idx", "42")
+    shape._element.xpath("./p:nvSpPr/p:nvPr")[0].append(ph)
+    shape.text_frame.auto_size = MSO_AUTO_SIZE.NONE
+    shape.text_frame.margin_top = shape.text_frame.margin_bottom = 0
+    shape.text = "説明"
+    master = slide.slide_layout.slide_master
+    for candidate in master.placeholders:
+        if int(candidate.placeholder_format.type) == 15:
+            for child in candidate._element.xpath("./p:txBody/a:lstStyle/* | ./p:txBody/a:p/a:pPr"):
+                child.getparent().remove(child)
+    style = master._element.xpath("./p:txStyles/p:otherStyle/a:lvl1pPr/a:defRPr")[0]
+    style.set("sz", "3000" if overflow else "1000")
+    master._element.xpath("./p:txStyles/p:bodyStyle/a:lvl1pPr/a:defRPr")[0].set("sz", "4000")
+    assert ("text_overflow" in kinds(prs, tmp_path)) is overflow
+
+
+@pytest.mark.parametrize("explicit", [False, True])
+def test_explicit_single_spacing_equals_default(tmp_path: Path, explicit: bool) -> None:
+    # PowerPoint では行間の指定なしと「100%」は同じ見た目。判定も同じでなければならない。
+    prs, slide = deck()
+    frame = slide.shapes.add_textbox(0, 0, Inches(2), Inches(0.3)).text_frame
+    frame.margin_top = frame.margin_bottom = 0
+    frame.auto_size = MSO_AUTO_SIZE.NONE
+    frame.text = "説明"
+    p = frame.paragraphs[0]
+    p.font.size = Pt(20)
+    if explicit:
+        p.line_spacing = 1.0
+    # 20pt × 1.2 = 24pt は 0.3in（21.6pt）× 1.1 を超える。
+    assert "text_overflow" in kinds(prs, tmp_path)
