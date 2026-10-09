@@ -92,3 +92,13 @@ def test_contain_math_and_image_size_parser() -> None:
     assert x == 0 and y == pytest.approx((420 - h) / 2, abs=0.01)
     x, y, w, h = contain_box(160, 90, 0, 0, 236, 420)
     assert w == 236 and h == pytest.approx(132.75, abs=0.01)  # 横長ソースは上下に白余白
+
+
+def test_font_size_uses_the_same_scale_as_geometry() -> None:
+    """座標は 1px＝6350 EMU（1920px＝13.333in）。文字も同じ縮尺で 1px＝0.5pt（10-09: 0.75 倍で 1.5 倍になっていた）。"""
+    from teamagent.skills.omiyage_report.fmt.ooxml import EMU_PER_PX, SLIDE_W_PX, _sz
+
+    assert SLIDE_W_PX * EMU_PER_PX == 12192000  # 13.333in
+    assert _sz(40) == 2000  # 40px の見出し → 20pt
+    assert _sz(24) == 1200  # 24px の本文 → 12pt
+    assert _sz(40) * 12700 == 40 * EMU_PER_PX * 100  # 文字の高さと枠の縮尺が一致
