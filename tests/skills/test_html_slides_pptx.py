@@ -78,13 +78,18 @@ class _Spy:
 
 
 def _install(monkeypatch: pytest.MonkeyPatch, spy: _Spy, configured: bool = True) -> None:
-    monkeypatch.setattr(
-        "teamagent.adapters.media_job.MediaJobClient.is_configured",
-        classmethod(lambda cls: configured),
-    )
-    monkeypatch.setattr(
-        "teamagent.adapters.media_job.MediaJobClient.__new__", lambda cls, *a, **k: spy
-    )
+    # MediaJobClient.__new__ を差し替えてはいけない: monkeypatch の後始末（delattr）で
+    # 本物のクラスが引数付きで生成できなくなり（CPython の既知挙動）、後続テストが壊れる。
+    # publish_pptx はモジュールから遅延 import するので、モジュール属性ごと偽クラスに替える。
+    class _FakeMediaJobClient:
+        @classmethod
+        def is_configured(cls) -> bool:
+            return configured
+
+        def __new__(cls, *a: Any, **k: Any) -> _Spy:  # type: ignore[misc]
+            return spy
+
+    monkeypatch.setattr("teamagent.adapters.media_job.MediaJobClient", _FakeMediaJobClient)
     monkeypatch.setattr(
         "teamagent.adapters.report_publish.publish_bytes_result",
         lambda body, **kw: PublishedObject(url="u", bucket="b", key="vseo-reports/x.pptx"),
