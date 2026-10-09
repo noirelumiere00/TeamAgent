@@ -19,6 +19,7 @@ from teamagent.media.operations import (
     _iter_proposal_image_slots,
     _iter_text_frames,
     _replace_placeholders,
+    _set_text_keeping_format,
 )
 
 _AUXILIARY = re.compile(r"\{\{(PB-[A-Z0-9_-]{1,60})\}\}")
@@ -209,9 +210,13 @@ def _replace_proposal_special_tokens(
     )
     if replaced == combined:
         return
-    paragraphs[0].text = replaced
-    for paragraph in paragraphs[1:]:
-        paragraph.text = ""
+    starts = [
+        match.start()
+        for pattern in (_AUXILIARY, _DATE, _TEMPLATE_VERSION)
+        for match in [pattern.search(combined)]
+        if match is not None
+    ]
+    _set_text_keeping_format(paragraphs, replaced, min(starts) if starts else 0)
 
 
 def _legacy_artifacts(text: str, *, allow_template_tokens: bool) -> list[str]:
