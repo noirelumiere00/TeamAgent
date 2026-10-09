@@ -417,7 +417,10 @@ class ProposalJobStore:
         target = "dm" if research_auto and result.get("delivery_target") == "dm" else "thread"
         result["delivery_target"] = target
         suffix = " DMへ添付しました。" if target == "dm" else " この会話へ添付しました。"
-        result["message"] = str(result.get("message") or "") + suffix
+        # 添付の報告は 1 行目（状態の文）に続ける。末尾に足すと、調査の行や要確認の警告の
+        # 後ろに付いて文がつながらない（10-09 本番:「…作り直せます DMへ添付しました。」）。
+        head, newline, rest = str(result.get("message") or "").partition("\n")
+        result["message"] = head + suffix + newline + rest
         serialized = json.dumps(result, ensure_ascii=False)
         if len(serialized.encode("utf-8")) > _MAX_RESULT_BYTES:
             return False
