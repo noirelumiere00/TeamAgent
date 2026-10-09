@@ -24,6 +24,9 @@ OVERLAP_TOLERANCE = 0.20
 TEXT_HEIGHT_TOLERANCE = 1.10
 LINE_HEIGHT = 1.2
 DEFAULT_FONT_PT = 18.0
+# 半角は平均的な欧文の advance を全角の 55% と推定する。描画なしで
+# 狭く見積もりすぎない従来値を維持し、deck_qa 内の折返しに一律適用する。
+HALFWIDTH_ADVANCE = 0.55
 # 空の小装飾・タイトル余白は除外し、スライド面積の 2% 以上を対象とする。
 EMPTY_TEXT_AREA = 0.02
 PLACEHOLDER_MARKERS = ("{{", "}}", "<<", "TODO", "xxx", "○○", "要確認（データ未検出）")
@@ -419,7 +422,8 @@ def _inherited_style(shape: Any, slide: Any) -> tuple[float, str]:
     """プレースホルダ・マスター・テーマの既定書式を辿る（描画はしない）。"""
     sources = _shape_sources(shape, slide)
     title = shape.is_placeholder and int(shape.placeholder_format.type) in {1, 3}
-    style = "titleStyle" if title else "bodyStyle" if shape.is_placeholder else "otherStyle"
+    body = shape.is_placeholder and int(shape.placeholder_format.type) not in {13, 14, 15, 16}
+    style = "titleStyle" if title else "bodyStyle" if body else "otherStyle"
     sources.extend(slide.slide_layout.slide_master._element.xpath(f"./p:txStyles/p:{style}"))
     sources.extend(slide.part.package.presentation_part._element.xpath("./p:defaultTextStyle"))
     size, font = DEFAULT_FONT_PT * 12700, ""
@@ -472,12 +476,25 @@ def _body_properties(frame: Any, shape: Any, slide: Any) -> tuple[dict[str, str]
             if nodes:
                 autofit = nodes[0].tag.rsplit("}", 1)[-1]
                 scale = int(nodes[0].get("fontScale", "100000")) / 100000
+    # 表の余白は bodyPr の insets ではなく tcPr@marL/marT/marR/marB。
+    if shape.has_table:
+        cell_properties = frame._txBody.getparent().find("a:tcPr", NS)
+        for inset, margin, default in (
+            ("lIns", "marL", "91440"),
+            ("rIns", "marR", "91440"),
+            ("tIns", "marT", "45720"),
+            ("bIns", "marB", "45720"),
+        ):
+            attrs[inset] = (
+                cell_properties.get(margin, default) if cell_properties is not None else default
+            )
     return attrs, autofit, scale
 
 
-def _paragraph_properties(paragraph: Any, shape: Any, slide: Any) -> list[Any]:
+def _paragraph_properties(paragraph: Any, shape: Any, slide: Any, frame: Any) -> list[Any]:
     level = paragraph.level + 1
     nodes = list(paragraph._p.xpath("./a:pPr"))
+    nodes.extend(frame._txBody.xpath(f"./a:lstStyle/a:lvl{level}pPr"))
     for source in _shape_sources(shape, slide):
         # paragraph properties on an inherited placeholder precede its list style.
         if source is not shape._element:
@@ -486,7 +503,8 @@ def _paragraph_properties(paragraph: Any, shape: Any, slide: Any) -> list[Any]:
                 nodes.extend(source.xpath("./p:txBody/a:p/a:pPr[not(@lvl)]"))
         nodes.extend(source.xpath(f"./p:txBody/a:lstStyle/a:lvl{level}pPr"))
     title = shape.is_placeholder and int(shape.placeholder_format.type) in {1, 3}
-    style = "titleStyle" if title else "bodyStyle" if shape.is_placeholder else "otherStyle"
+    body = shape.is_placeholder and int(shape.placeholder_format.type) not in {13, 14, 15, 16}
+    style = "titleStyle" if title else "bodyStyle" if body else "otherStyle"
     nodes.extend(
         slide.slide_layout.slide_master._element.xpath(f"./p:txStyles/p:{style}/a:lvl{level}pPr")
     )
@@ -507,8 +525,8 @@ def _text_height(
 ) -> float:
     usable = max(1.0, width - int(attrs.get("lIns", "91440")) - int(attrs.get("rIns", "91440")))
     height = float(int(attrs.get("tIns", "45720")) + int(attrs.get("bIns", "45720")))
-    for paragraph in frame.paragraphs:
-        properties = _paragraph_properties(paragraph, shape, slide)
+    for paragraph_index, paragraph in enumerate(frame.paragraphs):
+        properties = _paragraph_properties(paragraph, shape, slide, frame)
         sizes = [n.get("sz") for p in properties for n in p.findall("./a:defRPr[@sz]", NS)]
         size = (int(sizes[0]) * 127 if sizes else inherited_size) * scale
         lines, used, max_size = 1, 0.0, 0.0
@@ -531,7 +549,9 @@ def _text_height(
                 if char in "\n\v":
                     lines, used = lines + 1, 0.0
                     continue
-                advance = run_size * (1 if unicodedata.east_asian_width(char) in "WF" else 0.55)
+                advance = run_size * (
+                    1 if unicodedata.east_asian_width(char) in "WF" else HALFWIDTH_ADVANCE
+                )
                 if attrs.get("wrap", "square") != "none" and used and used + advance > usable:
                     lines, used = lines + 1, 0.0
                 used += advance
@@ -560,7 +580,13 @@ def _text_height(
             return default
 
         height += lines * spacing("lnSpc", max_size * LINE_HEIGHT)
-        height += spacing("spcBef", 0) + spacing("spcAft", 0)
+        # 通常、先頭段落の前・末尾段落の後の間隔は枠内に加算しない。
+        # bodyPr@spcFirstLastPara が指定された場合だけ含める。
+        edge_spacing = attrs.get("spcFirstLastPara") in {"1", "true"}
+        if paragraph_index or edge_spacing:
+            height += spacing("spcBef", 0)
+        if paragraph_index < len(frame.paragraphs) - 1 or edge_spacing:
+            height += spacing("spcAft", 0)
     return height
 
 
@@ -709,17 +735,35 @@ def inspect_pptx(
                 frames.append((shape.text_frame, sw, sh, rect))
             if shape.has_table:
                 for row in shape.table.rows:
-                    for cell in row.cells:
+                    for column, cell in enumerate(row.cells):
                         if not cell.is_spanned:
                             frames.append(
                                 (
                                     cell.text_frame,
-                                    float(shape.width) / len(row.cells),
+                                    float(
+                                        sum(
+                                            shape.table.columns[c].width
+                                            for c in range(column, column + cell.span_width)
+                                        )
+                                    ),
                                     float(row.height),
                                     rect,
                                 )
                             )
-            for frame, fw, fh, text_rect in frames:
+            table_heights = (
+                [float(row.height) for row in shape.table.rows] if shape.has_table else []
+            )
+            table_cells = (
+                [
+                    (r, cell.span_height)
+                    for r, row in enumerate(shape.table.rows)
+                    for cell in row.cells
+                    if not cell.is_spanned
+                ]
+                if shape.has_table
+                else []
+            )
+            for frame_index, (frame, fw, fh, text_rect) in enumerate(frames):
                 text = frame.text
                 inherited_size, inherited_font = _inherited_style(shape, slide)
                 explicit_fonts = {
@@ -773,6 +817,17 @@ def inspect_pptx(
                     continue
                 attrs, autofit, scale = _body_properties(frame, shape, slide)
                 needed = _text_height(frame, fw, inherited_size, shape, slide, attrs, scale)
+                if shape.has_table:
+                    row_index, span = table_cells[frame_index]
+                    # rowSpan の必要高さは結合した行全体に対する制約。
+                    available = sum(table_heights[row_index : row_index + span])
+                    if needed > available * TEXT_HEIGHT_TOLERANCE:
+                        # 行ごとの推定誤差を累積させないよう、通常テキストと
+                        # 同じ 10% の許容分を除いた必要高さで伸長する。
+                        table_heights[row_index + span - 1] += (
+                            needed / TEXT_HEIGHT_TOLERANCE - available
+                        )
+                    continue
                 if needed > fh * TEXT_HEIGHT_TOLERANCE:
                     if autofit == "spAutoFit":
                         grown = (
@@ -828,6 +883,34 @@ def inspect_pptx(
                         )
                 if shape.has_text_frame:
                     texts.append((name, text_rect))
+            if shape.has_table:
+                _, _, sw, sh, _ = _dimensions(shape, slide)
+                grown_height = max(sh, sum(table_heights))
+                points = [
+                    (m[0] * x + m[2] * y + m[4], m[1] * x + m[3] * y + m[5])
+                    for x, y in ((0, 0), (sw, 0), (0, grown_height), (sw, grown_height))
+                ]
+                xs, ys = zip(*points, strict=True)
+                grown = (min(xs), min(ys), max(xs), max(ys))
+                hits = [
+                    other.name
+                    for other, box, _ in entries
+                    if other is not shape
+                    and box[1] >= rect[3] - height * BOUNDS_TOLERANCE
+                    and _intersection(grown, box) > _intersection(rect, box) + 1
+                ]
+                outside = _outside(grown, width, height)
+                if outside or hits:
+                    report.add(
+                        number,
+                        name,
+                        "table_overflow",
+                        "error" if outside else "warn",
+                        needed_height=grown_height,
+                        available_height=sh,
+                        grown_rect=grown,
+                        collisions=hits,
+                    )
         for index, (name, rect) in enumerate(texts):
             for other, box in texts[index + 1 :]:
                 area = min(_area(rect), _area(box))
