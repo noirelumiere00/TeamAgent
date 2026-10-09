@@ -49,9 +49,17 @@ locals {
   openclaw_bedrock_profile_arn = (
     "arn:aws:bedrock:${var.aws_region}:${local.account_id}:inference-profile/${var.openclaw_model_id}"
   )
+  # OpenClawだけを5.5へ移行する。MCPのモデル権限は変えず、4.5は戻し用に保持する。
+  openclaw_bedrock_profile_arns = distinct([
+    local.openclaw_bedrock_profile_arn,
+    "arn:aws:bedrock:${var.aws_region}:${local.account_id}:inference-profile/jp.anthropic.claude-haiku-4-5-20251001-v1:0",
+    "arn:aws:bedrock:${var.aws_region}:${local.account_id}:inference-profile/jp.anthropic.claude-haiku-5-5",
+  ])
   openclaw_bedrock_backing_model_arns = [
     "arn:aws:bedrock:ap-northeast-1::foundation-model/anthropic.claude-haiku-4-5-20251001-v1:0",
     "arn:aws:bedrock:ap-northeast-3::foundation-model/anthropic.claude-haiku-4-5-20251001-v1:0",
+    "arn:aws:bedrock:ap-northeast-1::foundation-model/anthropic.claude-haiku-5-5",
+    "arn:aws:bedrock:ap-northeast-3::foundation-model/anthropic.claude-haiku-5-5",
   ]
   # Every MCP-family consumer receives only the two model profiles injected
   # into its environment and their fixed JP backing models. Repository-wide or
@@ -320,7 +328,7 @@ data "aws_iam_policy_document" "openclaw_task" {
   statement {
     sid       = "BedrockInferenceProfileOnly"
     actions   = ["bedrock:InvokeModel", "bedrock:InvokeModelWithResponseStream"]
-    resources = [local.openclaw_bedrock_profile_arn]
+    resources = local.openclaw_bedrock_profile_arns
   }
   statement {
     sid       = "BedrockBackingModelsViaProfileOnly"
@@ -330,7 +338,7 @@ data "aws_iam_policy_document" "openclaw_task" {
     condition {
       test     = "ArnEquals"
       variable = "bedrock:InferenceProfileArn"
-      values   = [local.openclaw_bedrock_profile_arn]
+      values   = local.openclaw_bedrock_profile_arns
     }
   }
   statement {

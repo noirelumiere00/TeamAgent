@@ -257,6 +257,17 @@ def origin(ctx: SkillContext) -> Origin | None:
     return value if enabled() and isinstance(value, Origin) else None
 
 
+def completed_delivery_failed(
+    status: str, slack_delivered: bool | None, target: Origin | None
+) -> bool:
+    """完了・未配信が確認でき、待機中の添付もない場合だけ配信失敗とする。"""
+    return (
+        status == "done"
+        and slack_delivered is False
+        and not (target is not None and target.pending)
+    )
+
+
 def owner_key(ctx: SkillContext, tool: str) -> str | None:
     owner = ctx.metadata.get(_OWNER_KEY)
     if not isinstance(owner, str) or not owner:

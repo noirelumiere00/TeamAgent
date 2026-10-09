@@ -42,8 +42,13 @@ from teamagent.adapters.proposal_job_store import ProposalJobStore
 from teamagent.adapters.retry import retry_long_job_once as retry_once
 from teamagent.adapters.tiktok_scraper import TikTokScrapeError, TikTokSearchResult
 from teamagent.media.contracts import TIKTOK_N_PER_KW_MAX
+from teamagent.skills._shared.long_jobs import (
+    completed_delivery_failed,
+    failure_reason,
+    latest_job,
+    origin,
+)
 from teamagent.skills._shared.long_jobs import enabled as long_jobs_enabled
-from teamagent.skills._shared.long_jobs import failure_reason, latest_job, origin
 from teamagent.skills.base import BaseSkill, SkillContext, register
 from teamagent.skills.omiyage_report.compose import (
     build_all_failed_message,
@@ -1497,7 +1502,7 @@ class OmiyageReportStatusSkill(BaseSkill[OmiyageReportStatusInput, OmiyageReport
             )
         log.info("omiyage_report_status", job_id=input.job_id, status=status)
         if status == "done":
-            return self._done_output(input.job_id, row)
+            return self._done_output(input.job_id, row, ctx)
         if status == "failed":
             error_code = row.get("error_code")
             code = error_code if isinstance(error_code, str) else "JOB_STATE_INVALID"
@@ -1557,7 +1562,9 @@ class OmiyageReportStatusSkill(BaseSkill[OmiyageReportStatusInput, OmiyageReport
             now = now.replace(tzinfo=UTC)
         return (now.astimezone(UTC) - updated_at).total_seconds() > self._stale_after_seconds
 
-    def _done_output(self, job_id: str, row: dict[str, Any]) -> OmiyageReportStatusOutput:
+    def _done_output(
+        self, job_id: str, row: dict[str, Any], ctx: SkillContext
+    ) -> OmiyageReportStatusOutput:
         raw_result = row.get("result_json")
         try:
             if isinstance(raw_result, str):
@@ -1581,6 +1588,14 @@ class OmiyageReportStatusSkill(BaseSkill[OmiyageReportStatusInput, OmiyageReport
                 error_code=_RESULT_INVALID,
                 message="完了結果を検証できませんでした。",
             )
+        # 古い保存結果の既定 False は配信失敗の証拠にならない。
+        delivered = result.slack_delivered if "slack_delivered" in result.model_fields_set else None
+        message = "お土産資料の生成が完了しました。"
+        if completed_delivery_failed("done", delivered, origin(ctx)):
+            message = (
+                "資料はできあがりましたが、この DM へのお届けに失敗しました。作り直しますか？"
+                "（同じ会社・キーワードでもう一度依頼してもらえれば作り直します）"
+            )
         return OmiyageReportStatusOutput(
             job_id=job_id,
             status="done",
@@ -1594,7 +1609,7 @@ class OmiyageReportStatusSkill(BaseSkill[OmiyageReportStatusInput, OmiyageReport
             video_analysis=result.video_analysis,
             deck_plan_s3_uri=result.deck_plan_s3_uri,
             audit_s3_uri=result.audit_s3_uri,
-            message="お土産資料の生成が完了しました。",
+            message=message,
         )
 
 
