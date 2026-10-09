@@ -347,15 +347,14 @@ def _pdf(root: Path, manifest: dict[str, Any]) -> dict[str, Any]:
             "MEDIA_HTML_NETWORK_REFERENCE",
             "PDF HTML references network",
         )
-    from weasyprint import HTML
+    from weasyprint import HTML, URLFetcher
 
-    def block_url_fetcher(_url: str, *_args: Any, **_kwargs: Any) -> dict[str, Any]:
-        raise MediaOperationError(
-            "MEDIA_HTML_NETWORK_REFERENCE",
-            "PDF rendering network access is blocked",
-        )
-
-    HTML(string=html, url_fetcher=block_url_fetcher).write_pdf(str(destination))
+    # weasyprint 70 以降、url_fetcher は URLFetcher のインスタンスで渡す（関数を渡すと、取得が
+    # 起きた時点で AttributeError になり PDF 全体が失敗する・10-09 にコンテナで実測）。
+    # 埋め込みの data: だけ許可し、http/https/file などは weasyprint 内部で拒否（その資源は無視）。
+    # ネットワーク参照は上の _EXTERNAL_HTML_REF でも先に止めている（二重の歯止め）。
+    fetcher = URLFetcher(allowed_protocols={"data"}, allow_redirects=False, timeout=5)
+    HTML(string=html, url_fetcher=fetcher).write_pdf(str(destination))
     if not destination.is_file() or destination.stat().st_size < 5:
         raise MediaOperationError("MEDIA_PDF_EMPTY", "weasyprint produced an empty PDF")
     return {"network_requests_allowed": 0}
