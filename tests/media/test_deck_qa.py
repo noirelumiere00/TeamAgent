@@ -232,7 +232,7 @@ def test_summary_and_failure_isolation(tmp_path: Path, monkeypatch: pytest.Monke
         raise ValueError("QA failure")
 
     monkeypatch.setattr("teamagent.media.deck_qa.inspect_pptx", fail)
-    assert "QA failure" in _deck_qa(path, expected_slides=1)["qa_error"]
+    assert _deck_qa(path, expected_slides=1)["qa_error"] == "ValueError"
 
 
 @pytest.mark.parametrize("expected", [1, 2])
@@ -657,3 +657,54 @@ def test_xml_comments_do_not_hide_registration(tmp_path: Path, registered: bool)
     rewrite_package(path, {"[Content_Types].xml": types, "ppt/slides/_rels/slide1.xml.rels": rels})
     found = [f for f in inspect_pptx(path).findings if f.kind == "image_registration"]
     assert bool(found) is not registered
+
+
+class _Summary:
+    def __init__(self, payload: dict[str, Any]) -> None:
+        self.payload = payload
+
+    def summary(self) -> dict[str, Any]:
+        return self.payload
+
+
+@pytest.mark.parametrize(
+    "case",
+    ["nan", "huge_details", "huge_exception"],
+)
+def test_qa_metadata_never_breaks_the_media_result(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, case: str
+) -> None:
+    # 検査の結果が 32KB 超・NaN だと MediaJobResult の検証（_canonical_json・allow_nan=False・
+    # 32KB）で依頼全体が失敗し、資料が届かない。
+    from teamagent.media.contracts import _canonical_json
+
+    prs, _ = deck()
+    path = tmp_path / "test.pptx"
+    prs.save(path)
+    finding = {"slide": 1, "shape": "s", "kind": "text_overflow", "severity": "warn"}
+    if case == "nan":
+        payload = {
+            "error_count": 0,
+            "warn_count": 1,
+            "top_findings": [{**finding, "details": {"x": float("nan")}}],
+        }
+    else:
+        payload = {
+            "error_count": 1,
+            "warn_count": 0,
+            "top_findings": [{**finding, "details": {"collisions": ["x" * 40] * 2000}}],
+        }
+
+    def fake(*args: Any, **kwargs: Any) -> Any:
+        if case == "huge_exception":
+            raise ValueError("x" * 100_000)
+        return _Summary(payload)
+
+    monkeypatch.setattr("teamagent.media.deck_qa.inspect_pptx", fake)
+    metadata = {"slides": 1, **_deck_qa(path, expected_slides=1)}
+    # 子プロセスの出力と同じ往復を通す（NaN はここで JSON に載る）。
+    metadata = json.loads(json.dumps(metadata))
+    assert len(_canonical_json(metadata)) <= 32 * 1024
+    if case != "huge_exception":
+        assert metadata["deck_qa"]["top_findings_dropped"] is True
+        assert metadata["deck_qa"]["error_count"] == payload["error_count"]
