@@ -93,7 +93,7 @@ def wording_problems(text: str) -> list[str]:
         match = pattern.search(bare)
         if match:
             problems.append(f"{label}「{match.group(0)}」")
-    if ORGANIC_WORD in bare:
+    if re.search(r"オーガニック(?:投稿|再生|枠|比率)", bare):
         problems.append("「PR 表記なし」の言い換え「オーガニック」")
     return problems
 

@@ -46,6 +46,7 @@ def built() -> tuple[DeckSpec, Any]:
         client_accounts=["kurashiru.com"],
         measured_epoch=NOW,
         report_id=REPORT_ID,
+        include_appendix=True,
         addressee="テスト株式会社 御中",
         covers=covers(s.posts),
     )
@@ -167,7 +168,7 @@ def test_font_sizes_follow_the_template(built: tuple[DeckSpec, Any]) -> None:
         assert _layout_size_pt(slide, title) == 28
     conclusion = _slide(spec, prs, "SS-04")
     body = next(s for s in conclusion.placeholders if s.placeholder_format.idx == 1)
-    assert _layout_size_pt(conclusion, body) == 14
+    assert _layout_size_pt(conclusion, body) == 16
 
     def table_pt(slide: Any) -> float:
         table = next(s for s in slide.shapes if getattr(s, "has_table", False)).table
@@ -234,7 +235,7 @@ def test_pictures_are_not_cropped_and_have_alt_text_and_links(
 def test_sections_and_document_properties(built: tuple[DeckSpec, Any]) -> None:
     _, prs = built
     xml = prs.part._element.xml
-    for name in ("表紙", "本編", "動画別", "付録"):
+    for name in ("表紙", "本編", "付録"):
         assert f'name="{name}"' in xml
     props = prs.core_properties
     assert props.identifier == REPORT_ID
@@ -263,3 +264,207 @@ def test_files_entry_and_missing_image_is_rejected(built: tuple[DeckSpec, Any]) 
     cover = prs.slides[0]
     frames = [s for s in cover.placeholders if s.placeholder_format.type == PP_PLACEHOLDER.PICTURE]
     assert len(frames) == 1  # 画像が無くても「枠だけ」は残す
+
+
+def _picture_package_errors(body: bytes) -> list[str]:
+    """PowerPoint が表示できる画像の関係・MIME・バイト列・形状を直接調べる。"""
+    import posixpath
+    import zipfile
+    from xml.etree import ElementTree as ET
+
+    from PIL import Image
+
+    ns = {
+        "p": "http://schemas.openxmlformats.org/presentationml/2006/main",
+        "a": "http://schemas.openxmlformats.org/drawingml/2006/main",
+        "r": "http://schemas.openxmlformats.org/officeDocument/2006/relationships",
+    }
+    errors = []
+    count = 0
+    with zipfile.ZipFile(io.BytesIO(body)) as package:
+        ct = ET.fromstring(package.read("[Content_Types].xml"))
+        defaults = {
+            c.attrib["Extension"]: c.attrib["ContentType"] for c in ct if "Extension" in c.attrib
+        }
+        overrides = {
+            c.attrib["PartName"]: c.attrib["ContentType"] for c in ct if "PartName" in c.attrib
+        }
+        for name in package.namelist():
+            if not name.startswith("ppt/slides/slide") or not name.endswith(".xml"):
+                continue
+            root = ET.fromstring(package.read(name))
+            relname = posixpath.join(
+                posixpath.dirname(name), "_rels", posixpath.basename(name) + ".rels"
+            )
+            rels = {r.attrib["Id"]: r.attrib for r in ET.fromstring(package.read(relname))}
+            for pic in root.findall(".//p:pic", ns):
+                count += 1
+                geom = pic.find("p:spPr/a:prstGeom", ns)
+                if geom is None or geom.attrib.get("prst") != "rect":
+                    errors.append("picture geometry")
+                blip = pic.find("p:blipFill/a:blip", ns)
+                rid = blip.attrib.get("{" + ns["r"] + "}embed") if blip is not None else None
+                rel = rels.get(rid, {})
+                if rel.get("TargetMode") == "External" or not rel.get("Type", "").endswith(
+                    "/image"
+                ):
+                    errors.append("image relationship")
+                    continue
+                target = posixpath.normpath(posixpath.join(posixpath.dirname(name), rel["Target"]))
+                data = package.read(target)
+                ext = target.rsplit(".", 1)[1]
+                mime = overrides.get("/" + target, defaults.get(ext))
+                expected = (
+                    "image/png"
+                    if data.startswith(b"\x89PNG\r\n\x1a\n")
+                    else "image/jpeg"
+                    if data.startswith(b"\xff\xd8")
+                    else None
+                )
+                if not expected or mime != expected:
+                    errors.append("image content type or signature")
+                with Image.open(io.BytesIO(data)) as im:
+                    im.verify()
+        if count != 6:
+            errors.append(f"picture count: {count}")
+    return errors
+
+
+def _image_deck_bytes() -> bytes:
+    from PIL import Image
+
+    from tests.skills.search_surface_check.deck_fixtures import png
+
+    s = surface(5)
+    images = covers(s.posts)
+    jpeg = io.BytesIO()
+    Image.open(io.BytesIO(png(9, 16))).save(jpeg, format="JPEG")
+    images[s.posts[0].url] = jpeg.getvalue()
+    deck = build_surface_deck(
+        [s], client_name=None, measured_epoch=NOW, report_id=REPORT_ID, covers=images
+    )
+    return render_deck_pptx(deck.spec, deck.images)
+
+
+def test_embedded_images_have_geometry_relationships_content_types_and_real_formats() -> None:
+    body = _image_deck_bytes()
+    assert _picture_package_errors(body) == []
+    assert len(Presentation(io.BytesIO(body)).slides) > 1
+
+
+@pytest.mark.parametrize("mutation", ["geometry", "content_type", "relationship"])
+def test_image_package_checker_rejects_mutations(mutation: str) -> None:
+    import zipfile
+    from xml.etree import ElementTree as ET
+
+    body = _image_deck_bytes()
+    output = io.BytesIO()
+    a = "{http://schemas.openxmlformats.org/drawingml/2006/main}"
+    with zipfile.ZipFile(io.BytesIO(body)) as source, zipfile.ZipFile(output, "w") as target:
+        for name in source.namelist():
+            data = source.read(name)
+            if mutation == "geometry" and name.endswith(".xml") and name.startswith("ppt/slide"):
+                root = ET.fromstring(data)
+                for parent in root.iter():
+                    for child in list(parent):
+                        if child.tag == a + "prstGeom":
+                            parent.remove(child)
+                data = ET.tostring(root)
+            elif mutation == "content_type" and name == "[Content_Types].xml":
+                data = data.replace(b"image/jpeg", b"image/png")
+            elif mutation == "relationship" and name.startswith("ppt/slides/_rels/"):
+                data = data.replace(b"relationships/image", b"relationships/hyperlink")
+            target.writestr(name, data)
+    assert _picture_package_errors(output.getvalue())
+    assert not _picture_package_errors(body)
+
+
+def test_empty_table_cells_have_font_size_and_safe_numeric_column_spacing(
+    built: tuple[DeckSpec, Any],
+) -> None:
+    spec, prs = built
+    empty = 0
+    for ss, slide in zip(spec.slides, prs.slides, strict=True):
+        fill = next((f for f in ss.fills if f.kind == "table"), None)
+        for shape in slide.shapes:
+            if not shape.has_table:
+                continue
+            assert fill is not None
+            for row in shape.table.rows:
+                for col, cell in enumerate(row.cells):
+                    for para in cell.text_frame.paragraphs:
+                        end = para._p.find(_A + "endParaRPr")
+                        assert end is not None and end.get("sz") == str(int(fill.font_pt * 100))
+                        assert end.get("lang") == "ja-JP"
+                        if not cell.text:
+                            empty += 1
+                            assert not para.runs
+                    if col > 0 and col - 1 in fill.numeric_cols and col not in fill.numeric_cols:
+                        assert cell.margin_left >= 182880
+    assert empty > 0
+
+
+def test_notes_theme_and_dynamic_chart_labels(built: tuple[DeckSpec, Any]) -> None:
+    from pptx.opc.constants import RELATIONSHIP_TYPE as RT
+
+    _, prs = built
+    theme = prs.notes_master.part.part_related_by(RT.THEME).blob.decode()
+    assert theme.count('typeface="游ゴシック"') == 4
+    assert not any(font in theme for font in ("Calibri", "ＭＳ", "Arial"))
+    charts = [sh.chart for sl in prs.slides for sh in sl.shapes if sh.has_chart]
+    assert charts
+    c = "{http://schemas.openxmlformats.org/drawingml/2006/chart}"
+    for chart in charts:
+        assert chart._chartSpace.find(".//" + c + "dLbl") is None
+        assert chart._chartSpace.find(".//" + c + "dLbls/" + c + "delete") is None
+        formats = chart._chartSpace.findall(".//" + c + "ser/" + c + "dLbls/" + c + "numFmt")
+        assert formats and all(f.get("formatCode").startswith('[<0.06]"";') for f in formats)
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        '=HYPERLINK("x","y")',
+        "+α",
+        "-cmd",
+        "@SUM(1+1)",
+        "\t=1+1",
+        "\r=1+1",
+        " =1+1",
+        "@普通のメンション",
+    ],
+)
+def test_csv_neutralizes_formula_cells(value: str) -> None:
+    import csv
+
+    from teamagent.media.deck_contracts import CsvSpec
+
+    s = surface(3)
+    spec = build_surface_deck([s], client_name=None, measured_epoch=NOW, report_id=REPORT_ID).spec
+    # header、全列を同じ入口で無害化する。
+    spec = spec.model_copy(
+        update={"csv": CsvSpec(columns=(value, "本文", "再生"), rows=((value, value, "123"),))}
+    )
+    data = render_deck_csv(spec)
+    assert data is not None
+    rows = list(csv.reader(io.StringIO(data.decode("utf-8-sig"))))
+    assert rows[0][0] == "\u200b" + value
+    assert rows[1] == ["\u200b" + value, "\u200b" + value, "123"]
+
+
+def test_table_has_one_row_of_editing_space_and_conclusion_fits() -> None:
+    from teamagent.skills._deck.layouts import report_template
+
+    template = report_template()
+    caption = template.layout("R_動画カード").box("caption_1")
+    assert caption.h >= int(1.8 * 914400)
+    assert caption.y + caption.h < template.layout("R_動画カード").box("footer").y
+    table = template.layout("R_表").box("table")
+    note = template.layout("R_表").box("note")
+    assert table.y + table.h + table.h // 11 <= note.y
+    body = template.layout("R_結論").box("body")
+    assert body.font_pt == 16 and body.space_before_pt == 26
+    # 全角100字/点、游ゴシック16pt、約44字/行、3行/点を保守的に見積もる。
+    height_in = (9 * 16 * 1.4 + 3 * 26) / 72
+    assert height_in <= body.h / 914400
+    assert (3 * 16 * 1.4 + 3 * 26) / 72 >= body.h / 914400 * 0.4

@@ -6,7 +6,7 @@ HTML のレポート（report.py）と同じ事実データ（SurfaceFacts・Sur
 構成（1 KW×1 媒体の要点版 8 枚・全体版は付録を足す）:
     SS-01 表紙 / SS-04 結論 / SS-05 自社・競合の名簿（名簿か言及があるときだけ）/ SS-06 数字 /
     SS-07 投稿者の構成（100% 積み上げ横棒・タイプが分かるときだけ）/ SS-08 上位 5 本の動画 /
-    SS-09 上位 10 本の表 / SS-10 切り口（無ければよく付くタグ）/ 付録 SS-11〜SS-13
+    SS-09 上位 10 本の表 / SS-10 切り口（照合済みの読みがあるときだけ）/ 付録 SS-11〜SS-13
 KW×媒体が 2 つ以上なら SS-02（比べる表）を結論の前に置き、SS-04〜SS-10 を面ごとに繰り返す。
 
 見出しは言い切り 1 行 34 字まで。照合済みの AI 見出しが無い・34 字超のときはコードが事実から
@@ -20,11 +20,16 @@ import statistics
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 
-from teamagent.media.deck_contracts import Fill, ThemeColor
+from teamagent.media.deck_contracts import (
+    MAX_DECK_IMAGES,
+    MAX_DECK_SLIDES,
+    Fill,
+    TextFill,
+    ThemeColor,
+)
 from teamagent.skills._deck.layouts import (
     APPENDIX_ROWS,
     APPENDIX_TABLE_PT,
-    BODY_MAX,
     CARDS_MAX,
     CELL_MAX,
     L_APPENDIX,
@@ -41,6 +46,7 @@ from teamagent.skills._deck.layouts import (
     TABLE_PT_FEW_ROWS,
     TITLE_MAX,
 )
+from teamagent.skills._deck.lint import duplication_problems
 from teamagent.skills._deck.spec import (
     SOURCE_AI_GROUNDED,
     SOURCE_AI_GUESS,
@@ -50,6 +56,7 @@ from teamagent.skills._deck.spec import (
     ChartSeries,
     CsvSpec,
     DeckBuilder,
+    DeckBuildError,
     DeckProperties,
     DeckSpec,
     Notes,
@@ -64,7 +71,7 @@ from teamagent.skills._deck.spec import (
     table_fill,
     text_fill,
 )
-from teamagent.skills._deck.text import clean, fit_text
+from teamagent.skills._deck.text import clean, fit_text, wording_problems
 from teamagent.skills.search_surface_check.conclusion import rule_conclusion
 from teamagent.skills.search_surface_check.display import (
     JST,
@@ -116,11 +123,30 @@ def _is_ig(surface: KwSurface) -> bool:
     return surface.platform == "instagram"
 
 
+def _order_label(surface: KwSurface) -> str:
+    return "出現回数×再生（無ければいいね）の順" if _is_ig(surface) else "検索の表示順のまま"
+
+
+def _play_median(surface: KwSurface) -> str:
+    plays = [p.play_count for p in surface.posts if p.play_count > 0]
+    return f"{fmt_count(int(statistics.median(plays)))}回" if plays else UNMEASURED
+
+
+def _play_basis(surface: KwSurface) -> str:
+    n = sum(p.play_count > 0 for p in surface.posts)
+    return f"再生が取れた {n} 本の中央値"
+
+
+def _normalize_handle(account: str) -> str:
+    return account.strip().lstrip("@").lower()
+
+
 def condition_line(surface: KwSurface, measured_epoch: int) -> str:
     day, _ = _measured(measured_epoch)
     return (
         f"「{surface.keyword}」で検索した上位 {len(surface.posts)} 本／取得日 {day}／"
         f"{_platform(surface)}・未ログイン"
+        + ("（出現回数×エンゲージ順）" if _is_ig(surface) else "")
     )
 
 
@@ -166,26 +192,15 @@ def _ai_headline(conclusion: SurfaceConclusion | None, facts: SurfaceFacts) -> s
     if fallback is not None and conclusion.headline == fallback.headline:
         return None
     headline = clean(conclusion.headline)
-    return headline if len(headline) <= TITLE_MAX else None
+    return headline if len(headline) <= TITLE_MAX and not wording_problems(headline) else None
 
 
 def _rule_headline(surface: KwSurface, facts: SurfaceFacts) -> str:
-    posts = surface.posts
     holder = facts.holders[0] if facts.holders else None
     candidates: list[str] = []
     if holder is not None and len(holder.ranks) >= 3:
-        candidates.append(f"上位 {facts.n} 本のうち {len(holder.ranks)} 本は @{holder.author}")
-    known = [c for c in facts.categories if c.category != "unknown"]
-    if known:
-        top = known[0]
-        candidates.append(
-            f"上位 {facts.n} 本の最多は{category_label(top.category)}の {top.count} 本"
-        )
-    if facts.small_in_top10 is not None:
-        candidates.append(
-            f"上位 {facts.top10_n} 本中 {facts.small_in_top10} 本はフォロワー 1 万未満"
-        )
-    candidates.append(f"上位 {len(posts)} 本の再生の中央値は {fmt_count(facts.median_plays)}回")
+        candidates.append(f"上位 {facts.n} 本のうち {len(holder.ranks)} 本は「@{holder.author}」")
+    candidates.append("検索上位の投稿と自社の位置")
     return _first_fit(*candidates)
 
 
@@ -218,9 +233,11 @@ def _common(slide_id: str, surface: KwSurface, ctx: _Ctx, source: str) -> list[F
     ]
 
 
-def _sources_of(posts: Sequence[SurfacePost], measured_at: str, limit: int = 10) -> list[str]:
+def _sources_of(
+    posts: Sequence[SurfacePost], measured_at: str, surface: KwSurface, limit: int = 10
+) -> list[str]:
     out = [f"{p.rank} 位 {_handle(p)}: {p.url}" for p in posts[:limit] if p.url]
-    out.append(f"取得時点 {measured_at}（検索の表示順のまま・未ログイン）")
+    out.append(f"取得時点 {measured_at}（{_order_label(surface)}・未ログイン）")
     return out
 
 
@@ -263,10 +280,10 @@ def _cover_slide(surfaces: Sequence[KwSurface], ctx: _Ctx, addressee: str | None
     )
     notes = Notes(
         what="検索の条件と、資料の対象（どの語・どの媒体・何本）を示す表紙。",
-        talk=[f"「{k}」で検索したときに上に出る投稿を、表示の順のまま数えた" for k in kws],
+        talk=[f"「{s.keyword}」{_platform(s)}：{_order_label(s)}で数えた" for s in surfaces],
         sources=[f"取得時点 {measured_at}"],
     )
-    ctx.builder.add_slide(
+    slide = ctx.builder.add_slide(
         slide_id="SS-01",
         layout=L_COVER,
         section=_SECTION_COVER,
@@ -274,6 +291,18 @@ def _cover_slide(surfaces: Sequence[KwSurface], ctx: _Ctx, addressee: str | None
         fills=fills,
         notes=notes,
     )
+    # 表紙だけは検索語の直後で改行し、末尾の数文字だけが次行へ落ちるのを防ぐ。
+    # 題の文字数・文言・プロパティは同じまま、表示上の段落だけ分ける。
+    if len(surfaces) == 1 and title.startswith(f"「{first.keyword}」"):
+        split = title.index("」") + 1
+        cover_title = text_fill(
+            "title",
+            [para(title[:split], bullet=False), para(title[split:].lstrip(), bullet=False)],
+            "SS-01｜題",
+        )
+        ctx.builder.slides[-1] = slide.model_copy(
+            update={"fills": tuple(cover_title if f.box == "title" else f for f in slide.fills)}
+        )
     return title
 
 
@@ -294,7 +323,7 @@ def _compare_slide(surfaces: Sequence[KwSurface], ctx: _Ctx) -> None:
                     if known
                     else UNMEASURED
                 ),
-                cell(f"{fmt_count(facts.median_plays)}回", align="r"),
+                cell(_play_median(s), align="r"),
                 cell(_ranks_text(s.client_ranks) if s.client_ranks else "無し"),
             ]
         )
@@ -354,9 +383,8 @@ def _rule_points(
         out.append(
             (
                 "最も見られている",
-                f"再生が最も多いのは {top.rank} 位の {_handle(top)}"
-                f"（{fmt_count(top.play_count)}回）。"
-                f"上位 {len(posts)} 本の再生の中央値は {fmt_count(facts.median_plays)}回",
+                f"再生が最も多いのは {top.rank} 位の「{_handle(top)}」"
+                "。数字は主要な数字と上位の一覧を参照",
                 [top.rank],
             )
         )
@@ -365,7 +393,7 @@ def _rule_points(
         out.append(
             (
                 "常連",
-                f"@{h.author} が上位 {len(posts)} 本のうち {len(h.ranks)} 枠を持つ",
+                f"「@{h.author}」が上位 {len(posts)} 本のうち {len(h.ranks)} 枠を持つ",
                 h.ranks[:3],
             )
         )
@@ -374,7 +402,7 @@ def _rule_points(
             out.append(
                 (
                     "自社",
-                    f"{ctx.client_name} の投稿は {_ranks_text(facts.client_ranks)}",
+                    f"「{ctx.client_name}」の投稿は {_ranks_text(facts.client_ranks)}",
                     facts.client_ranks[:3],
                 )
             )
@@ -387,7 +415,7 @@ def _rule_points(
             out.append(
                 (
                     "空白",
-                    f"{ctx.client_name} の公式の投稿は上位 {len(posts)} 本に無い{mention}",
+                    f"「{ctx.client_name}」の公式の投稿は上位 {len(posts)} 本に無い{mention}",
                     facts.mention_ranks[:3],
                 )
             )
@@ -396,8 +424,8 @@ def _rule_points(
         out.append(
             (
                 "保存されている",
-                f"保存率が最も高いのは {lead.rank} 位の @{lead.author}"
-                f"（{_fmt_rate(lead.save_rate_pct)}）",
+                f"保存率が最も高いのは {lead.rank} 位の「@{lead.author}」"
+                "（数字は上位 10 本の表を参照）",
                 [lead.rank],
             )
         )
@@ -419,7 +447,16 @@ def _conclusion_slide(
         if conclusion.actions:
             ai_points.append(("打ち手", conclusion.actions[0]))
     full: list[str] = []
-    per_point = BODY_MAX // POINTS_MAX
+    if conclusion and conclusion.headline and wording_problems(conclusion.headline):
+        ctx.dropped.append(f"{sid} AI の題: 言い方の検査で省略")
+    safe_points = []
+    for label, point in ai_points:
+        if wording_problems(point.text):
+            ctx.dropped.append(f"{sid} AI の文（{label}）: 言い方の検査で省略")
+        else:
+            safe_points.append((label, point))
+    ai_points = safe_points
+    per_point = 100
     paragraphs = []
     evidence: list[str] = []
     talk: list[str] = []
@@ -468,7 +505,7 @@ def _conclusion_slide(
             ),
             talk=talk,
             evidence=evidence,
-            sources=_sources_of([by_rank[r] for r in cited if r in by_rank], measured_at),
+            sources=_sources_of([by_rank[r] for r in cited if r in by_rank], measured_at, surface),
             full_text=full,
         ),
     )
@@ -479,18 +516,22 @@ def _roster_slide(
 ) -> None:
     sid = _sid(5, suffix)
     posts = surface.posts
-    roster = {a.lstrip("@").lower(): "自社" for a in ctx.client_accounts}
-    roster.update({a.lstrip("@").lower(): "競合" for a in ctx.competitor_accounts})
+    roster = {k: "自社" for a in ctx.client_accounts if (k := _normalize_handle(a))}
+    roster.update({k: "競合" for a in ctx.competitor_accounts if (k := _normalize_handle(a))})
     rows_data: list[tuple[str, str, str, str, str, str]] = []
     seen: set[str] = set()
     for p in posts:
         kind = (
-            "自社" if p.is_client else "競合" if p.is_competitor else roster.get(p.author.lower())
+            "自社"
+            if p.is_client
+            else "競合"
+            if p.is_competitor
+            else roster.get(_normalize_handle(p.author))
         )
         named = p.mentions_client or mentions(p, ctx.client_name)
         if kind is None and not named:
             continue
-        seen.add(p.author.lower())
+        seen.add(_normalize_handle(p.author))
         rows_data.append(
             (
                 _handle(p),
@@ -509,12 +550,13 @@ def _roster_slide(
     if not rows_data:
         ctx.dropped.append(f"{sid} 名簿: 自社・競合の名簿も自社名の言及も無い")
         return
-    client = ctx.client_name or "自社"
+    client = f"「{ctx.client_name}」" if ctx.client_name else "自社"
     own = [r for r in rows_data if r[1] == "自社" and not r[2].startswith("圏外")]
     rival = [r for r in rows_data if r[1] == "競合" and not r[2].startswith("圏外")]
     named_rows = [r for r in rows_data if r[3] == "あり"]
     if own:
-        head = f"{client} は {own[0][2]}に {len(own)} 本"
+        own_ranks = [int(r[2].split()[0]) for r in own]
+        head = f"{client} は {_ranks_text(own_ranks)}に {len(own)} 本"
         title = _first_fit(
             f"{head}、競合は {len(rival)} 本" if ctx.competitor_accounts else head, head
         )
@@ -584,13 +626,13 @@ def _numbers_slide(
             f"上位 {facts.top10_n} 本のうち、フォロワー 1 万人未満のアカウントの投稿",
         )
         title = f"上位 {facts.top10_n} 本中、フォロワー 1 万未満が {facts.small_in_top10} 本"
-        small.append((f"{fmt_count(facts.median_plays)}回", f"上位 {len(posts)} 本の再生の中央値"))
+        small.append((_play_median(surface), _play_basis(surface)))
     elif any(p.play_count > 0 for p in posts):
-        big = (f"{fmt_count(facts.median_plays)}回", f"上位 {len(posts)} 本の再生の中央値")
-        title = f"上位 {len(posts)} 本の再生の中央値は {fmt_count(facts.median_plays)}回"
+        big = (_play_median(surface), _play_basis(surface))
+        title = f"{_play_basis(surface)}は {_play_median(surface)}"
     else:
-        ctx.dropped.append(f"{sid} 数字: フォロワーも再生も取れていない")
-        return
+        big = (UNMEASURED, "再生の中央値（0 件ではない）")
+        title = "主要な数字と取得できた指標"
     if ig or facts.median_save_rate_pct is None:
         small.append(
             (UNMEASURED, f"保存率の中央値（{_platform(surface)}では取れない・0 件ではない）")
@@ -603,6 +645,16 @@ def _numbers_slide(
         small.append((f"{facts.reach_ratio_median} 倍", "再生÷フォロワーの中央値"))
     if len(small) < 3 and facts.median_duration_sec:
         small.append((fmt_duration(facts.median_duration_sec), "動画の長さの中央値"))
+    if ig:
+        likes = [p.like_count for p in posts]
+        small.extend(
+            [
+                (fmt_count(int(statistics.median(likes))), "いいねの中央値"),
+                (f"{sum(p.appearances for p in posts)} 回", "検索結果への出現回数の合計"),
+            ]
+        )
+    while len(small) < 3:
+        small.append((UNMEASURED, "取得できない指標（0 件ではない）"))
     fills: list[Fill] = [
         *_common(sid, surface, ctx, SOURCE_COUNTED),
         line_fill("big_number", big[0], f"{sid}｜大きな数字"),
@@ -641,41 +693,24 @@ def _composition_slide(
         ctx.dropped.append(f"{sid} 投稿者の構成: タイプが分からない（分類していない）")
         return
     cats = facts.categories
-    by_count = cats[0]
-    by_play = max(cats, key=lambda c: c.play_share)
+    by_count = max(known, key=lambda c: c.count)
+    by_play = max(known, key=lambda c: c.play_share)
+    has_plays = any(p.play_count > 0 for p in surface.posts)
     series = [
         ChartSeries(
             name=category_label(c.category),
-            values=(c.count_share, c.play_share),
+            values=(c.count_share, c.play_share) if has_plays else (c.count_share,),
             color="accent1" if c is by_count else _OTHER_COLORS[i % len(_OTHER_COLORS)],
         )
         for i, c in enumerate(cats)
     ]
 
-    def wari(share: float) -> str:
-        tenths = round(share * 10)
-        return "ほぼ全部" if tenths >= 10 else "1 割未満" if tenths == 0 else f"{tenths} 割"
-
-    def pct(share: float) -> str:
-        return f"{round(share * 100)}%"
-
     a, b = category_label(by_count.category), category_label(by_play.category)
-    if a == b:
-        title = _first_fit(
-            f"{a}が本数の {pct(by_count.count_share)}・再生の {pct(by_play.play_share)}",
-            f"本数も再生も{a}が最多",
-        )
-    else:
-        title = _first_fit(
-            f"本数は{a}が {wari(by_count.count_share)}、再生は{b}が {wari(by_play.play_share)}",
-            f"本数は{a}、再生は{b}が最多",
-        )
+    title = f"本数は{a}、再生は{b}が最多" if has_plays else f"本数は{a}が最多（再生は未計測）"
+    title = _first_fit(title, "投稿者のタイプ別の構成")
     reading = [
-        para(
-            run("本数：", bold=True),
-            run(f"{a} {by_count.count} 本（{round(by_count.count_share * 100)}%）"),
-        ),
-        para(run("再生：", bold=True), run(f"{b}が再生の {round(by_play.play_share * 100)}%")),
+        para(run("本数：", bold=True), run(f"{a}が最多")),
+        para(run("再生：", bold=True), run(f"{b}が最多" if has_plays else UNMEASURED_NOTE)),
         para(run("注意：", bold=True), run(TYPE_NOTE)),
     ]
     _, measured_at = _measured(ctx.measured_epoch)
@@ -689,7 +724,7 @@ def _composition_slide(
             chart_fill(
                 "chart",
                 chart_type="bar_stacked_100",
-                categories=["本数", "再生"],
+                categories=["本数", "再生"] if has_plays else ["本数"],
                 series=series,
                 shape_name=f"{sid}｜投稿者の構成",
                 number_format="0%",
@@ -701,11 +736,13 @@ def _composition_slide(
             what="投稿者のタイプ別に、本数の割合と再生の割合を 100% 積み上げで比べた。",
             talk=[
                 f"{a} が本数の {round(by_count.count_share * 100)}%",
-                f"再生は {b} が {round(by_play.play_share * 100)}%",
+                f"再生は {b} が {round(by_play.play_share * 100)}%"
+                if has_plays
+                else f"再生：{UNMEASURED_NOTE}",
             ],
             evidence=[
                 f"{category_label(c.category)}: {c.count} 本（{round(c.count_share * 100)}%）・"
-                f"再生の {round(c.play_share * 100)}%・中央値 {fmt_count(c.median_plays)}回"
+                + (f"再生の {round(c.play_share * 100)}%" if has_plays else f"再生：{UNMEASURED}")
                 for c in cats
             ],
             sources=[f"取得時点 {measured_at}", TYPE_NOTE, "数字は付録の表と CSV にも残している"],
@@ -749,7 +786,7 @@ def _cards_slide(surface: KwSurface, ctx: _Ctx, suffix: str, section: str) -> No
         if p.desc:
             full.append(f"{p.rank} 位 {_handle(p)}: {p.desc}")
     played = [p for p in top if p.play_count > 0]
-    if played:
+    if played and not _is_ig(surface):
         best = max(played, key=lambda p: p.play_count)
         title = _first_fit(
             f"上位 {len(top)} 本の再生最多は {best.rank} 位（{fmt_count(best.play_count)}回）",
@@ -765,13 +802,14 @@ def _cards_slide(surface: KwSurface, ctx: _Ctx, suffix: str, section: str) -> No
         title=title,
         fills=fills,
         notes=Notes(
-            what=f"検索の表示順で上から {len(top)} 本の表紙と数字。表紙と「元投稿を開く」から元の投稿へ飛べる。",  # noqa: E501
+            what=f"{_order_label(surface)}で上から {len(top)} 本の表紙と数字。表紙と「元投稿を開く」から元の投稿へ飛べる。",  # noqa: E501
             talk=[
-                f"{p.rank} 位 {_handle(p)}: 再生 {fmt_count(p.play_count)}・"
+                f"{p.rank} 位 {_handle(p)}: "
+                f"再生 {fmt_count(p.play_count) if p.play_count else UNMEASURED}・"
                 f"保存率 {_fmt_rate(_save_rate(p))}"
                 for p in top
             ],
-            sources=_sources_of(top, measured_at),
+            sources=_sources_of(top, measured_at, surface),
             full_text=full,
         ),
     )
@@ -795,7 +833,8 @@ def _top_table_slide(surface: KwSurface, ctx: _Ctx, suffix: str, section: str) -
     columns.append(("再生", 1.1, True))
     if not ig:
         columns.append(("保存率", 1.0, True))
-    columns += [("投稿日", 1.4, False), ("PR", 0.7, False)]
+    columns += [("出現回数", 1.0, True)] if ig else [("投稿日", 1.4, False)]
+    columns.append(("PR", 0.7, False))
     rows = []
     for p in top:
         row = [
@@ -810,7 +849,7 @@ def _top_table_slide(surface: KwSurface, ctx: _Ctx, suffix: str, section: str) -
         if not ig:
             row.append(cell(_fmt_rate(_save_rate(p))))
         row += [
-            cell(fmt_date(p.posted_at) or UNMEASURED),
+            cell(f"{p.appearances} 回" if ig else fmt_date(p.posted_at) or UNMEASURED),
             cell("あり" if p.is_pr or is_pr_post(p) else ""),
         ]
         rows.append(row)
@@ -824,16 +863,12 @@ def _top_table_slide(surface: KwSurface, ctx: _Ctx, suffix: str, section: str) -
         )
         emphasis = [top.index(best)]
     else:
-        plays = [p.play_count for p in top if p.play_count > 0]
-        median = int(statistics.median(plays)) if plays else 0
-        title = _first_fit(
-            f"上位 {len(top)} 本の再生の中央値は {fmt_count(median)}回", f"上位 {len(top)} 本の一覧"
-        )
+        title = f"上位 {len(top)} 本の一覧"
         emphasis = []
     note_parts = ["保存率＝保存÷再生。"]
     if ig:
         note_parts.append(
-            f"フォロワー・保存率は {_platform(surface)}では取れないため列を外した"
+            f"フォロワー・保存率・投稿日・長さは {_platform(surface)}では取れないため列を外した"
             f"（{UNMEASURED_NOTE}）。"
         )
     if not has_type:
@@ -864,12 +899,27 @@ def _top_table_slide(surface: KwSurface, ctx: _Ctx, suffix: str, section: str) -
             line_fill("note", fit_text(note, 90)[0], f"{sid}｜注記"),
         ],
         notes=Notes(
-            what="検索の表示順で上から 10 本の一覧（取得値）。アカウント名から元の投稿へ飛べる。",
+            what=(
+                f"{_order_label(surface)}で上から 10 本の一覧（取得値）。"
+                "アカウント名から元の投稿へ飛べる。"
+            ),
             talk=[title],
             evidence=[
-                f"#{p.rank} {_handle(p)} 再生 {p.play_count:,}・保存 {p.save_count:,}" for p in top
+                "よく付くタグ: "
+                + "、".join(
+                    f"#{t.tag}（{t.count} 本）"
+                    for t in (surface.facts.top_tags if surface.facts else [])
+                    if t.tag.casefold().replace(" ", "")
+                    != surface.keyword.casefold().replace(" ", "")
+                ),
+                *[
+                    f"#{p.rank} {_handle(p)} "
+                    f"再生 {fmt_count(p.play_count) if p.play_count else UNMEASURED}・"
+                    f"保存 {UNMEASURED if ig else str(p.save_count)}"
+                    for p in top
+                ],
             ],
-            sources=_sources_of(top, measured_at),
+            sources=_sources_of(top, measured_at, surface),
             full_text=[f"{p.rank} 位 {_handle(p)}: {p.desc}" for p in top if p.desc],
         ),
     )
@@ -880,76 +930,45 @@ def _angles_slide(
 ) -> None:
     sid = _sid(10, suffix)
     conclusion = surface.conclusion
-    angles = list(conclusion.angles) if conclusion and conclusion.generated_by == "llm" else []
-    tags_text = "、".join(f"#{t.tag}（{t.count} 本）" for t in facts.top_tags)
-    _, measured_at = _measured(ctx.measured_epoch)
-    if angles:
-        rows = [
-            [
-                cell(str(i)),
-                cell(_clip(a.text)),
-                cell(_ranks_text(a.ranks)),
-                cell(f"{len(a.ranks)} 本"),
-            ]
-            for i, a in enumerate(angles[:4], start=1)
-        ]
-        top = angles[0]
-        title = _first_fit(
-            f"上位に多い切り口は「{clean(top.text)}」（{len(top.ranks)} 本）",
-            f"上位に共通する切り口は {len(angles[:4])} つ",
-        )
-        ctx.builder.author(*(a.text for a in angles[:4]))
-        columns = ["#", "切り口", "順位", "本数"]
-        weights = (0.5, 4.0, 2.4, 1.0)
-        source = SOURCE_AI_GROUNDED
-        what = "上位の投稿に共通する切り口（2 本以上に出ているものだけ）。順位は照合済み。"
-        numeric: tuple[int, ...] = (3,)
-    elif facts.top_tags:
-        tags = facts.top_tags[:MAIN_TABLE_ROWS]
-        rows = [
-            [
-                cell(str(i)),
-                cell(_clip(f"#{t.tag}")),
-                cell(f"{t.count} 本"),
-                cell(f"{round(t.count / max(facts.n, 1) * 100)}%"),
-            ]
-            for i, t in enumerate(tags, start=1)
-        ]
-        title = _first_fit(
-            f"よく付くタグは #{tags[0].tag}（{len(surface.posts)} 本中 {tags[0].count} 本）",
-            f"よく付くタグは #{tags[0].tag}",
-            "上位の投稿によく付くタグ",
-        )
-        columns = ["#", "タグ", "本数", f"上位 {facts.n} 本に占める割合"]
-        weights = (0.5, 4.0, 1.4, 2.4)
-        source = SOURCE_COUNTED
-        what = "切り口（AI の読み）が無いため、上位の投稿によく付くタグを数えた（集計）。"
-        numeric = (2, 3)
-    else:
-        ctx.dropped.append(f"{sid} 切り口: 切り口もタグも無い")
+    candidates = list(conclusion.angles) if conclusion and conclusion.generated_by == "llm" else []
+    angles = []
+    for angle in candidates:
+        if wording_problems(angle.text):
+            ctx.dropped.append(f"{sid} AI の切り口: 言い方の検査で省略")
+        elif len(set(angle.ranks)) >= 2:
+            angles.append(angle)
+    if not angles:
+        ctx.dropped.append(f"{sid} 切り口: 照合済みの切り口が無い")
         return
+    _, measured_at = _measured(ctx.measured_epoch)
+    full: list[str] = []
+    ctx.builder.author(*(a.text for a in angles[:4]))
+    per_angle = 65 if len(angles) >= 4 else 100
+    title = _first_fit(
+        f"共通する切り口は「{clean(angles[0].text)}」",
+        f"上位に共通する切り口は {len(angles[:4])} つ",
+    )
     ctx.builder.add_slide(
         slide_id=sid,
-        layout=L_TABLE,
+        layout=L_CONCLUSION,
         section=section,
         title=title,
         fills=[
-            *_common(sid, surface, ctx, source),
-            table_fill(
-                "table",
-                columns,
-                rows,
-                font_pt=TABLE_PT_FEW_ROWS,
-                shape_name=f"{sid}｜切り口",
-                col_weights=weights,
-                numeric_cols=numeric,
+            *_common(sid, surface, ctx, SOURCE_AI_GROUNDED),
+            text_fill(
+                "body",
+                [
+                    para(f"{i}. {fit_body(a.text, per_angle, full)}（{_ranks_text(a.ranks, 3)}）")
+                    for i, a in enumerate(angles[:4], 1)
+                ],
+                f"{sid}｜切り口",
             ),
         ],
         notes=Notes(
-            what=what,
-            talk=[title],
-            evidence=[f"よく付くタグ: {tags_text}"] if tags_text else [],
+            what="上位の投稿に共通する切り口（2 本以上、順位は照合済み）。",
+            evidence=[f"{a.text}: {_ranks_text(a.ranks, len(a.ranks))}" for a in angles[:4]],
             sources=[f"取得時点 {measured_at}"],
+            full_text=full,
         ),
     )
 
@@ -962,7 +981,7 @@ def _appendix(surface: KwSurface, facts: SurfaceFacts, ctx: _Ctx, suffix: str) -
     premises = [
         ("検索語", surface.keyword),
         ("媒体と状態", f"{_platform(surface)}・未ログイン（個人のおすすめが混ざらない状態）"),
-        ("本数と並び", f"上位 {len(posts)} 本・検索の表示順のまま"),
+        ("本数と並び", f"上位 {len(posts)} 本・{_order_label(surface)}"),
         ("取得時点", measured_at),
         ("保存率", "保存数÷再生数" if not ig else UNMEASURED_NOTE),
         ("タイプ", TYPE_NOTE),
@@ -971,7 +990,7 @@ def _appendix(surface: KwSurface, facts: SurfaceFacts, ctx: _Ctx, suffix: str) -
     ]
     ctx.builder.add_slide(
         slide_id=sid,
-        layout=L_TABLE,
+        layout=L_APPENDIX,
         section=_SECTION_APPENDIX,
         title="付録：この資料の前提",
         fills=[
@@ -980,7 +999,7 @@ def _appendix(surface: KwSurface, facts: SurfaceFacts, ctx: _Ctx, suffix: str) -
                 "table",
                 ["項目", "内容"],
                 [[cell(k), cell(fit_text(v, 60)[0])] for k, v in premises],
-                font_pt=TABLE_PT,
+                font_pt=APPENDIX_TABLE_PT,
                 shape_name=f"{sid}｜前提",
                 col_weights=(1.6, 8.0),
             ),
@@ -996,7 +1015,8 @@ def _appendix(surface: KwSurface, facts: SurfaceFacts, ctx: _Ctx, suffix: str) -
     columns.append(("再生", 1.1, True))
     if not ig:
         columns.append(("保存率", 0.9, True))
-    columns += [("投稿日", 1.2, False), ("長さ", 0.9, True), ("PR", 0.6, False)]
+    columns += [("出現回数", 1.0, True)] if ig else [("投稿日", 1.0, False), ("長さ", 0.7, True)]
+    columns.append(("PR", 0.6, False))
     numeric = tuple(i for i, c in enumerate(columns) if c[2])
     for page, start in enumerate(range(0, len(posts), APPENDIX_ROWS), start=1):
         chunk = posts[start : start + APPENDIX_ROWS]
@@ -1013,11 +1033,14 @@ def _appendix(surface: KwSurface, facts: SurfaceFacts, ctx: _Ctx, suffix: str) -
             row.append(cell(f"{p.play_count:,}" if p.play_count > 0 else UNMEASURED))
             if not ig:
                 row.append(cell(_fmt_rate(_save_rate(p))))
-            row += [
-                cell(fmt_date(p.posted_at) or UNMEASURED),
-                cell(fmt_duration(p.duration_sec) or UNMEASURED),
-                cell("あり" if p.is_pr or is_pr_post(p) else ""),
-            ]
+            if ig:
+                row.append(cell(f"{p.appearances} 回"))
+            else:
+                row += [
+                    cell(fmt_date(p.posted_at) or UNMEASURED),
+                    cell(fmt_duration(p.duration_sec) or UNMEASURED),
+                ]
+            row.append(cell("あり" if p.is_pr or is_pr_post(p) else ""))
             rows.append(row)
         psid = f"SS-12{suffix}-{page}" if suffix else f"SS-12-{page}"
         ctx.builder.add_slide(
@@ -1038,8 +1061,8 @@ def _appendix(surface: KwSurface, facts: SurfaceFacts, ctx: _Ctx, suffix: str) -
                 ),
             ],
             notes=Notes(
-                what="検索の表示順のままの全件（取得値）。本文の全文は CSV にある。",
-                sources=_sources_of(chunk, measured_at, limit=APPENDIX_ROWS),
+                what=f"{_order_label(surface)}の全件（取得値）。本文の全文は CSV にある。",
+                sources=_sources_of(chunk, measured_at, surface, limit=APPENDIX_ROWS),
                 full_text=[f"{p.rank} 位 {_handle(p)}: {p.desc}" for p in chunk if p.desc],
             ),
         )
@@ -1069,7 +1092,14 @@ def _appendix(surface: KwSurface, facts: SurfaceFacts, ctx: _Ctx, suffix: str) -
                 cell("タイプ（推定）"),
                 cell(category_label(c.category)),
                 cell(f"{c.count} 本", align="r"),
-                cell(f"本数の {round(c.count_share * 100)}%・再生の {round(c.play_share * 100)}%"),
+                cell(
+                    f"本数の {round(c.count_share * 100)}%・"
+                    + (
+                        f"再生の {round(c.play_share * 100)}%"
+                        if any(p.play_count > 0 for p in posts)
+                        else f"再生：{UNMEASURED}"
+                    )
+                ),
             ]
         )
     if not rows:
@@ -1104,7 +1134,7 @@ def _csv(surfaces: Sequence[KwSurface]) -> CsvSpec:
         "検索語", "媒体", "順位", "アカウント", "表示名", "フォロワー", "再生", "いいね",
         "コメント",
         "シェア", "保存", "保存率(%)", "投稿日", "長さ(秒)", "タイプ(推定)", "PR表記", "自社",
-        "競合", "自社名の言及", "URL", "本文", "タグ",
+        "競合", "自社名の言及", "URL", "本文", "タグ", "出現回数",
     )  # fmt: skip
     rows = []
     for s in surfaces:
@@ -1117,16 +1147,16 @@ def _csv(surfaces: Sequence[KwSurface]) -> CsvSpec:
                     _platform(s),
                     str(p.rank),
                     p.author,
-                    p.author_name,
+                    UNMEASURED if ig else p.author_name,
                     UNMEASURED if ig or p.author_followers <= 0 else str(p.author_followers),
                     str(p.play_count) if p.play_count > 0 else UNMEASURED,
                     str(p.like_count),
                     str(p.comment_count),
-                    str(p.share_count),
+                    UNMEASURED if ig else str(p.share_count),
                     UNMEASURED if ig else str(p.save_count),
                     UNMEASURED if rate is None else f"{rate:.2f}",
-                    fmt_date(p.posted_at) or UNMEASURED,
-                    str(p.duration_sec) if p.duration_sec > 0 else UNMEASURED,
+                    UNMEASURED if ig else fmt_date(p.posted_at) or UNMEASURED,
+                    str(p.duration_sec) if not ig and p.duration_sec > 0 else UNMEASURED,
                     category_label(p.category),
                     "あり" if p.is_pr or is_pr_post(p) else "",
                     "はい" if p.is_client else "",
@@ -1134,10 +1164,86 @@ def _csv(surfaces: Sequence[KwSurface]) -> CsvSpec:
                     "はい" if p.mentions_client else "",
                     p.url,
                     p.desc,
-                    " ".join(f"#{t}" for t in p.hashtags),
+                    UNMEASURED if ig else " ".join(f"#{t}" for t in p.hashtags),
+                    str(p.appearances) if ig else UNMEASURED,
                 )
             )
     return CsvSpec(columns=columns, rows=tuple(rows))
+
+
+def _deduplicate_ai(builder: DeckBuilder, dropped: list[str]) -> None:
+    """AI 本文で数字が重複した段落を外し、数値の編集箇所を一つにする。"""
+    for index, slide in enumerate(builder.slides):
+        if slide.slide_id.split("-")[1] != "04":
+            continue
+        source = next((f for f in slide.fills if getattr(f, "box", "") == "source"), None)
+        if not isinstance(source, TextFill) or not any(
+            SOURCE_AI_GROUNDED == r.text for p in source.paragraphs for r in p.runs
+        ):
+            continue
+        body = next((f for f in slide.fills if isinstance(f, TextFill) and f.box == "body"), None)
+        if body is None:
+            continue
+        before = duplication_problems(builder.slides)
+        fallback_title = line_fill("title", "検索上位の投稿と自社の位置", f"{slide.slide_id}｜題")
+        revised = slide.model_copy(
+            update={"fills": tuple(fallback_title if f.box == "title" else f for f in slide.fills)}
+        )
+        builder.slides[index] = revised
+        if len(duplication_problems(builder.slides)) < len(before):
+            dropped.append(f"{slide.slide_id} AI の題: 題・数字の重複のため省略")
+            slide = revised
+        else:
+            builder.slides[index] = slide
+        for paragraph in body.paragraphs:
+            before = duplication_problems(builder.slides)
+            kept = tuple(p for p in body.paragraphs if p != paragraph)
+            candidate = body.model_copy(update={"paragraphs": kept})
+            revised = slide.model_copy(
+                update={"fills": tuple(candidate if f == body else f for f in slide.fills)}
+            )
+            builder.slides[index] = revised
+            if len(duplication_problems(builder.slides)) < len(before):
+                dropped.append(f"{slide.slide_id} AI の文: 数字の重複のため段落を省略")
+                body, slide = candidate, revised
+            else:
+                builder.slides[index] = slide
+        if not body.paragraphs:
+            fallback = body.model_copy(
+                update={"paragraphs": (para("取得値は主要な数字と上位の一覧を参照"),)}
+            )
+            builder.slides[index] = slide.model_copy(
+                update={"fills": tuple(fallback if f == body else f for f in slide.fills)}
+            )
+
+
+def _budget(builder: DeckBuilder, dropped: list[str]) -> None:
+    """付録、後ろの面のカード・一覧・切り口の順に上限内へ縮める。"""
+
+    def prune_images() -> None:
+        used = {f.image for s in builder.slides for f in s.fills if isinstance(f, PictureFill)}
+        builder.images = {k: v for k, v in builder.images.items() if k in used}
+        builder.image_bytes = {k: v for k, v in builder.image_bytes.items() if k in used}
+
+    def over() -> bool:
+        return len(builder.slides) > MAX_DECK_SLIDES or len(builder.images) > MAX_DECK_IMAGES
+
+    prune_images()
+    candidates = [s for s in reversed(builder.slides) if s.section == _SECTION_APPENDIX]
+    for base in (8, 9, 10):
+        candidates.extend(
+            s for s in reversed(builder.slides) if s.slide_id.split("-")[1] == f"{base:02d}"
+        )
+    for slide in candidates:
+        if not over():
+            break
+        builder.slides.remove(slide)
+        dropped.append(
+            f"{slide.slide_id}: 枚数 {MAX_DECK_SLIDES}・画像 {MAX_DECK_IMAGES} の上限のため省略"
+        )
+        prune_images()
+    if over():
+        raise DeckBuildError("検索語×媒体が多すぎて 1 ファイルに入りません。検索語を分けてください")
 
 
 def build_surface_deck(
@@ -1150,7 +1256,7 @@ def build_surface_deck(
     competitor_accounts: Sequence[str] = (),
     addressee: str | None = None,
     covers: Mapping[str, bytes] | None = None,
-    include_appendix: bool = True,
+    include_appendix: bool = False,
 ) -> SurfaceDeck:
     """検索上位チェックの結果 → DeckSpec と画像（名前 → bytes）。
 
@@ -1194,16 +1300,16 @@ def build_surface_deck(
             now_epoch=measured_epoch,
         )
         suffix = f"-{index}" if multi else ""
-        label = f"「{surface.keyword}」{_platform(surface)}" if multi else ""
+        section_kw = _clip(surface.keyword, 36 - len(str(index)) - len(_platform(surface)))
+        label = f"{index}「{section_kw}」{_platform(surface)}" if multi else ""
         main = f"本編{label}"
-        videos = f"動画別{label}"
         _conclusion_slide(surface, facts, ctx, suffix, main)
         _roster_slide(surface, facts, ctx, suffix, main)
         _numbers_slide(surface, facts, ctx, suffix, main)
         _composition_slide(surface, facts, ctx, suffix, main)
-        _cards_slide(surface, ctx, suffix, videos)
-        _top_table_slide(surface, ctx, suffix, videos)
-        _angles_slide(surface, facts, ctx, suffix, videos)
+        _cards_slide(surface, ctx, suffix, main)
+        _top_table_slide(surface, ctx, suffix, main)
+        _angles_slide(surface, facts, ctx, suffix, main)
     if include_appendix:
         for index, surface in enumerate(surfaces, start=1):
             facts = surface.facts or compute_facts(
@@ -1214,6 +1320,23 @@ def build_surface_deck(
             )
             _appendix(surface, facts, ctx, f"-{index}" if multi else "")
     builder.csv = _csv(surfaces)
+    _budget(builder, dropped)
+    _deduplicate_ai(builder, dropped)
+    for i, slide in enumerate(builder.slides):
+        omissions = [d for d in dropped if d.startswith(slide.slide_id + " ")]
+        if omissions:
+            fills = tuple(
+                line_fill("source", "AI の文を一部省略（ノート参照）", f.shape_name)
+                if isinstance(f, TextFill) and f.box == "source"
+                else f
+                for f in slide.fills
+            )
+            builder.slides[i] = slide.model_copy(
+                update={
+                    "fills": fills,
+                    "notes": slide.notes + "\n\n【省略した文】\n" + "\n".join(omissions),
+                }
+            )
     return SurfaceDeck(spec=builder.build(), images=dict(builder.image_bytes), dropped=dropped)
 
 

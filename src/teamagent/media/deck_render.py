@@ -71,7 +71,7 @@ def _scheme(color: ThemeColor | str) -> str:
     return _SCHEME_VAL.get(color, color)
 
 
-def _parse(xml: str) -> Any:
+def _parse(xml: str | bytes) -> Any:
     from pptx.oxml import parse_xml
 
     return parse_xml(xml)
@@ -189,7 +189,7 @@ def _placeholder_sp_xml(box: BoxSpec, shape_id: int, *, t: TemplateSpec) -> str:
         '<p:cNvSpPr><a:spLocks noGrp="1"/></p:cNvSpPr>'
         f"<p:nvPr><p:ph {ph_attrs}/></p:nvPr></p:nvSpPr>"
         f'<p:spPr><a:xfrm><a:off x="{box.x}" y="{box.y}"/><a:ext cx="{box.w}" cy="{box.h}"/>'
-        "</a:xfrm></p:spPr>"
+        '</a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></p:spPr>'
         f"<p:txBody>{_body_pr(box, t)}<a:lstStyle>{levels}</a:lstStyle>{para}</p:txBody></p:sp>"
     )
 
@@ -265,6 +265,8 @@ def _apply_template(prs: Any, template: TemplateSpec) -> dict[str, Any]:
     master = prs.slide_master
     theme_part = master.part.part_related_by(RT.THEME)
     theme_part._blob = _theme_xml(template.theme)
+    notes_theme = prs.notes_master.part.part_related_by(RT.THEME)
+    notes_theme._element = _parse(_theme_xml(template.theme))
     _build_master(master, template)
     layouts = list(prs.slide_layouts)
     if len(layouts) < len(template.layouts):
@@ -382,24 +384,32 @@ def _fill_table(
         row.height = Emu(row_h)
     frame.height = Emu(row_h * n_rows)
 
-    def put(cell: Any, text: str, *, bold: bool, header: bool, how: str, link: str | None) -> None:
+    def put(
+        cell: Any, text: str, *, bold: bool, header: bool, how: str, link: str | None, col: int
+    ) -> None:
         cell.margin_left = cell.margin_right = Emu(typo.table_cell_margin_emu)
+        if col > 0 and col - 1 in fill.numeric_cols and col not in fill.numeric_cols:
+            cell.margin_left = Emu(182880)
         cell.margin_top = cell.margin_bottom = Emu(typo.table_cell_margin_emu // 2)
         cell.vertical_anchor = MSO_ANCHOR.MIDDLE
         frame_ = cell.text_frame
         frame_.clear()
         paragraph = frame_.paragraphs[0]
         paragraph.alignment = align[how]
-        text_run = paragraph.add_run()
-        text_run.text = text
-        font = text_run.font
+        end = paragraph._p.get_or_add_endParaRPr()
+        end.set("sz", str(int(fill.font_pt * 100)))
+        _set_lang(end, lang)
+        text_run = paragraph.add_run() if text else None
+        if text_run is not None:
+            text_run.text = text
+        font = text_run.font if text_run is not None else paragraph.font
         font.size = Pt(fill.font_pt)
         _set_lang(font._rPr, lang)
         if bold or header:
             font.bold = True
         if header:
             font.color.theme_color = _theme_color("lt1")
-        if link:
+        if link and text_run is not None:
             text_run.hyperlink.address = link
         cell.fill.solid()
         cell.fill.fore_color.theme_color = _theme_color("accent1" if header else "lt1")
@@ -407,7 +417,7 @@ def _fill_table(
 
     for col, name in enumerate(fill.columns):
         how = "r" if col in fill.numeric_cols else "l"
-        put(table.cell(0, col), name, bold=True, header=True, how=how, link=None)
+        put(table.cell(0, col), name, bold=True, header=True, how=how, link=None, col=col)
     for r, row_cells in enumerate(fill.rows, start=1):
         for col, spec in enumerate(row_cells):
             how = "r" if col in fill.numeric_cols else spec.align
@@ -418,24 +428,10 @@ def _fill_table(
                 header=False,
                 how=how,
                 link=spec.link,
+                col=col,
             )
     frame.name = fill.shape_name
     return frame
-
-
-def _hide_small_labels(series: Any, values: tuple[float, ...], minimum: float) -> None:
-    """100% 積み上げで細すぎる区間の値ラベルを消す（重なって読めないため）。値は表と CSV に残る。"""
-    dlbls = series._element.get_or_add_dLbls()
-    inserted = 0
-    for index, value in enumerate(values):
-        if value >= minimum:
-            continue
-        xml = (
-            f'<c:dLbl xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart">'
-            f'<c:idx val="{index}"/><c:delete val="1"/></c:dLbl>'
-        )
-        dlbls.insert(inserted, _parse(xml))  # dLbl は dLbls の先頭に並べる（スキーマの順）
-        inserted += 1
 
 
 def _fill_chart(shape: Any, fill: ChartFill, *, lang: str, typo: TypographySpec) -> Any:
@@ -488,11 +484,12 @@ def _fill_chart(shape: Any, fill: ChartFill, *, lang: str, typo: TypographySpec)
             series.data_labels.font.size = Pt(typo.chart_pt)
             dark = series_spec.color in ("accent1", "accent3", "accent6", "dk1", "dk2")
             series.data_labels.font.color.theme_color = _theme_color("lt1" if dark else "dk1")
-            series.data_labels.number_format = fill.number_format
+            series.data_labels.number_format = (
+                f'[<{typo.chart_min_label_share}]"";{fill.number_format}'
+            )
             series.data_labels.number_format_is_linked = False
             series.data_labels.show_value = True
             series.data_labels.position = XL_LABEL_POSITION.CENTER
-            _hide_small_labels(series, series_spec.values, typo.chart_min_label_share)
     if fill.point_colors:
         series = plot.series[0]
         for index, color in enumerate(fill.point_colors):
@@ -519,6 +516,13 @@ def _fill_picture(
         return shape
     meta = next(img for img in spec.images if img.name == fill.image)
     picture = shape.insert_picture(io.BytesIO(images[fill.image]))
+    if picture._element.spPr.find(_q("a:prstGeom")) is None:
+        picture._element.spPr.append(
+            _parse(
+                '<a:prstGeom xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" '
+                'prst="rect"><a:avLst/></a:prstGeom>'
+            )
+        )
     # 切り取り 0・元の比率のまま枠の中央に収める（insert_picture は枠いっぱいに切り抜くため戻す）。
     picture.crop_left = picture.crop_right = picture.crop_top = picture.crop_bottom = 0.0
     scale = min(box.w / meta.width_px, box.h / meta.height_px)
@@ -678,14 +682,23 @@ def render_deck_pptx(spec: DeckSpec, images: Mapping[str, bytes]) -> bytes:
     return out.getvalue()
 
 
+def _csv_safe(value: str) -> str:
+    # 空白・制御文字で式の先頭を隠した場合も無害化する。
+    return (
+        "\u200b" + value
+        if value.lstrip(" \t\r\n")[:1] in ("=", "+", "-", "@") or value[:1] in ("\t", "\r", "\n")
+        else value
+    )
+
+
 def render_deck_csv(spec: DeckSpec) -> bytes | None:
     """同時に渡す CSV（BOM 付き UTF-8・Excel でそのまま開ける）。"""
     if spec.csv is None:
         return None
     buffer = io.StringIO()
     writer = csv.writer(buffer, lineterminator="\r\n")
-    writer.writerow(spec.csv.columns)
-    writer.writerows(spec.csv.rows)
+    writer.writerow([_csv_safe(c) for c in spec.csv.columns])
+    writer.writerows([[_csv_safe(c) for c in row] for row in spec.csv.rows])
     return ("﻿" + buffer.getvalue()).encode("utf-8")
 
 

@@ -11,6 +11,8 @@ from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Literal
 
+from pydantic import ValidationError
+
 from teamagent.media.deck_contracts import (
     ChartFill,
     ChartSeries,
@@ -30,6 +32,7 @@ from teamagent.media.deck_contracts import (
     ThemeColor,
 )
 from teamagent.skills._deck.layouts import TITLE_MAX, report_template
+from teamagent.skills._deck.lint import duplication_problems
 from teamagent.skills._deck.text import clean, fit_text, wording_problems
 from teamagent.skills.omiyage_report.fmt.ooxml import OoxmlError, image_size
 
@@ -220,14 +223,20 @@ class DeckBuilder:
         problems = [p for t in self.authored_texts for p in wording_problems(t)]
         if problems:
             raise DeckBuildError("資料に出せない言い方: " + " / ".join(sorted(set(problems))))
-        return DeckSpec(
-            template=report_template(),
-            properties=self.properties,
-            footer=self.footer,
-            slides=tuple(self.slides),
-            images=tuple(self.images.values()),
-            csv=self.csv,
-        )
+        duplicates = duplication_problems(self.slides)
+        if duplicates:
+            raise DeckBuildError(" / ".join(duplicates))
+        try:
+            return DeckSpec(
+                template=report_template(),
+                properties=self.properties,
+                footer=self.footer,
+                slides=tuple(self.slides),
+                images=tuple(self.images.values()),
+                csv=self.csv,
+            )
+        except ValidationError as exc:
+            raise DeckBuildError("資料の上限または形式を満たしていません: " + str(exc)) from exc
 
 
 def fit_body(text: str, limit: int, full_text: list[str]) -> str:

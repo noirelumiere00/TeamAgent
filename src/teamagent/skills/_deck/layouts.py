@@ -185,9 +185,9 @@ def _conclusion() -> LayoutSpec:
         name=L_CONCLUSION,
         boxes=(
             *_common(),
-            _box("body", "body", 1, "本文（3 点）", _L, _TOP, _W, 4.85, font_pt=BODY_PT,
+            _box("body", "body", 1, "本文（3 点）", _L, _TOP, _W, 4.85, font_pt=16,
                  color="dk1", bullets=True, shrink_on_overflow=True, prompt="本文",
-                 space_before_pt=BODY_SPACE_PT, line_spacing_pct=BODY_LINE_PCT),
+                 space_before_pt=26, line_spacing_pct=BODY_LINE_PCT),
         ),
     )  # fmt: skip
 
@@ -196,9 +196,9 @@ def _numbers() -> LayoutSpec:
     tile_x, tile_w, tile_h, gap = 6.6, _W - 6.1, 1.5, 0.15
     boxes: list[BoxSpec] = [
         *_common(),
-        _box("big_number", "body", 20, "大きな数字", _L, 1.9, 5.6, 1.55, font_pt=BIG_NUMBER_PT,
+        _box("big_number", "body", 20, "大きな数字", _L, 2.95, 5.6, 1.55, font_pt=BIG_NUMBER_PT,
              bold=True, color="accent1", anchor="b", prompt="数字"),
-        _box("big_label", "body", 21, "大きな数字のラベル", _L, 3.5, 5.6, 1.3, font_pt=BODY_PT,
+        _box("big_label", "body", 21, "大きな数字のラベル", _L, 4.55, 5.6, 1.3, font_pt=BODY_PT,
              color="dk1", prompt="ラベル"),
     ]  # fmt: skip
     tiles: list[TileSpec] = []
@@ -237,7 +237,7 @@ def _table() -> LayoutSpec:
         name=L_TABLE,
         boxes=(
             *_common(),
-            _box("table", "table", 40, "表", _L, _TOP, _W, 4.45, prompt="表"),
+            _box("table", "table", 40, "表", _L, _TOP, _W, 4.05, prompt="表"),
             _box("note", "body", 41, "注記", _L, 6.3, _W, 0.5, font_pt=CONDITION_PT,
                  color="accent3", prompt="注記"),
         ),
@@ -257,7 +257,7 @@ def _cards() -> LayoutSpec:
         )  # fmt: skip
         boxes.append(
             _box(f"caption_{i + 1}", "body", 51 + 2 * i, f"動画 {i + 1} の説明", slot_x + 0.05,
-                 1.7 + pic_h + 0.08, pitch - 0.1, 1.65, font_pt=CARD_PT, color="dk1",
+                 1.7 + pic_h + 0.08, pitch - 0.1, 1.8, font_pt=CARD_PT, color="dk1",
                  align="ctr", shrink_on_overflow=True, prompt="説明")
         )  # fmt: skip
     return LayoutSpec(name=L_CARDS, boxes=tuple(boxes))
