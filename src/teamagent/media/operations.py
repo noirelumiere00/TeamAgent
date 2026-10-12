@@ -1307,7 +1307,10 @@ def _set_text_keeping_format(paragraphs: list[Any], replaced: str, start: int) -
         paragraph.text = ""
     if props is None:
         return
-    for run in paragraphs[0]._p.findall(f"{_DRAWING_NS}r"):
+    # 改行（a:br）にも同じ書式を付ける。無いと改行は段落の既定の字の大きさで行の高さに効く。
+    for run in paragraphs[0]._p:
+        if run.tag not in {f"{_DRAWING_NS}r", f"{_DRAWING_NS}br"}:
+            continue
         old = run.find(f"{_DRAWING_NS}rPr")
         if old is not None:
             run.remove(old)

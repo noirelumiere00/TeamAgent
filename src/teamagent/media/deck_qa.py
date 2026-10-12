@@ -530,10 +530,20 @@ def _text_height(
         sizes = [n.get("sz") for p in properties for n in p.findall("./a:defRPr[@sz]", NS)]
         size = (int(sizes[0]) * 127 if sizes else inherited_size) * scale
         lines, used, max_size = 1, 0.0, 0.0
-        chunks = []
+        chunks: list[tuple[str, float]] = []
         for node in paragraph._p:
             if node.tag.endswith("}br"):
-                chunks.append(("\v", size))
+                # 改行の字の大きさ: 自分の rPr → 直前の run → 段落の既定。
+                # python-pptx が書く改行は rPr を持たない。
+                props = node.find("a:rPr", NS)
+                br_size = (
+                    int(props.get("sz")) * 127 * scale
+                    if props is not None and props.get("sz")
+                    else chunks[-1][1]
+                    if chunks
+                    else size
+                )
+                chunks.append(("\v", float(br_size)))
             elif node.tag.endswith(("}r", "}fld")):
                 txt = node.find("a:t", NS)
                 props = node.find("a:rPr", NS)
