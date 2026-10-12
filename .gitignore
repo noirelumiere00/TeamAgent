@@ -182,3 +182,5 @@ infra/terraform/tf.plan
 # connect-web の Obsidian風 静的HTML（機密ナレッジ埋め込み・git履歴に残さない。
 # ビルドzipには含めてイメージへ同梱する）
 src/teamagent/connect_web/static/app.html
+
+render-qa-output/

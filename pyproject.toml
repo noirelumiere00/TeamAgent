@@ -108,6 +108,14 @@ media = [
 # optional extraと内容を重ねるのは、利用者向け `teamagent[media]` と最小worker buildを
 # 同じuv.lockで両立させるため。tests/infra が版の一致を固定する。
 [dependency-groups]
+render-qa-runtime = [
+    "python-pptx==1.0.2",
+    "lxml>=5.3.0",
+    "pillow==12.3.0",
+    "pdfminer.six>=20250506",
+    "pydantic>=2.9.0",
+]
+render-qa-font-build = ["fonttools>=4.55.0"]
 dev = [
     "types-defusedxml>=0.7.0.20260504",
 ]
@@ -214,6 +222,9 @@ module = [
     "docx.*",
     "pptx",
     "pptx.*",
+    # render-qa の PDF 抽出器は core/通常 CI には導入しない。
+    "pdfminer",
+    "pdfminer.*",
     # weasyprint / playwright は重い依存で CI(--no-deps)に非導入＝import-not-found になるため
     # stub 無し扱い（遅延 import・実行時のみ必要。他の CI 非導入依存と同じ扱い）。
     "weasyprint",
