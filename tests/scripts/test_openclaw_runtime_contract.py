@@ -204,6 +204,11 @@ NODE_BINARY_SHA256_BY_RUNTIME_DIGEST = {
     "sha256:3de92bf84c6d7b43b0016be75bdbdde0d34e034288fefd6c1581bf44835fe107": (
         "1292962947b360b29891cf72be247ad19aeeeb5c3470cc2c0ef737d6f07e30ec"
     ),
+    # cgr.dev/chainguard/node:latest 2026-10-12 世代・node v26.11.1（nodejs-26 26.11.1-r0）・glibc 2.44-r8
+    # （#568 の glibc 2.44-r7 の CVE 4 件を解消）・openssl-4.0 4.0.3-r6。10-12 Claude がレイヤから実測。
+    "sha256:f99475923192f82504a29552820f26e4bb96dbf2bfdce4569e5962cd75ac055a": (
+        "5a7e0d208999f408af3c0c2e91f58bc2a0c57cfb9dfb4bf5a689979eeb970aa8"
+    ),
 }
 
 

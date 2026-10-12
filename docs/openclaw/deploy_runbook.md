@@ -96,6 +96,10 @@ contract が独立承認で active になった後だけ、次の固定経路を
 6. source-free promoter が exact subject と referrer を
    verified-candidate、承認後に release repository へ immutable copy する。
 
+2026-10-12: runtime ベースを glibc 2.44-r8 の世代（node 26.11.1）へ上げ、#568 の glibc 例外 16 件を外した。
+便の ECR 検査で新しい検出が出た場合は、#568 と同じ完全一致・期限つき例外の手順で、その分だけ登録する。
+ベースを上げるときは、/usr/bin/node を実測して契約の node probe と `test_openclaw_runtime_contract.py` の表を同じ PR で更新する（#503→#507）。
+
 build role は candidate/release repository、publisher evidence、deployment
 resource を変更できません。publisher/launcher も ECS、EventBridge、
 task definition、service を変更できません。
