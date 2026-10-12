@@ -38,7 +38,7 @@ jobs:
       matrix:
         python-version: ["3.11", "3.13", "3.14"]
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Set up Python ${{ matrix.python-version }}
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
@@ -145,7 +145,7 @@ jobs:
     env:
       TEAMAGENT_TEST_DB_DSN: postgresql://postgres:postgres@127.0.0.1:5432/teamagent_test
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Set up Python 3.14
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
@@ -212,7 +212,7 @@ jobs:
     name: activation freeze (frozen surface)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           # merge-base を解決するため full history が必要（shallow では base が引けない）
           fetch-depth: 0
@@ -239,7 +239,7 @@ jobs:
     name: gitleaks (secrets scan)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Run gitleaks (CLI, no GitHub API)
         # gitleaks-action@v2 は pull_request 時に GitHub API を叩き
         # "Resource not accessible by integration"（GITHUB_TOKEN 権限）でクラッシュし、
@@ -254,7 +254,7 @@ jobs:
     name: trivy (vuln + misconfig scan)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       # 依存脆弱性スキャン（uv.lock / package-lock.json が対象）。
       # - CRITICAL/HIGH 検出で exit 1（ゲート）。
@@ -300,7 +300,7 @@ jobs:
     env:
       TF_IN_AUTOMATION: "1"
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Set up Terraform
         uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
@@ -352,7 +352,7 @@ jobs:
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     needs: [lint-and-test, gitleaks, trivy]
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: 報告
         run: |
           echo "✅ main マージ後の smoke test 枠"
