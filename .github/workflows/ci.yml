@@ -269,7 +269,7 @@ jobs:
       #   CI では行わず、ECR scan_on_push＋CodeBuild 側での定期スキャンに分離（別チケット）。
       # - action は R17 の digest pin 文化に合わせ SHA 固定（= v0.36.0）。
       - name: Trivy fs scan (依存脆弱性)
-        uses: aquasecurity/trivy-action@a9c7b0f06e461e9d4b4d1711f154ee024b8d7ab8 # v0.36.0
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         env:
           TRIVY_DB_REPOSITORY: "public.ecr.aws/aquasecurity/trivy-db:2,mirror.gcr.io/aquasec/trivy-db:2,ghcr.io/aquasecurity/trivy-db:2"
         with:
@@ -285,7 +285,7 @@ jobs:
       # 既存 10 件（SG egress 全開 6 件等）は .trivyignore.yaml にベースライン登録済み
       # （paths スコープ＋理由＋expired_at）。新規の CRITICAL/HIGH misconfig のみ弾く。
       - name: Trivy config scan (IaC misconfig)
-        uses: aquasecurity/trivy-action@a9c7b0f06e461e9d4b4d1711f154ee024b8d7ab8 # v0.36.0
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           scan-type: config
           scan-ref: infra/
