@@ -155,21 +155,15 @@ def test_registry_contents_are_exactly_the_adjudicated_exceptions() -> None:
     # #408・#568 と同型の期限つき例外（stale=fail・expires 2026-10-22）で段3 だけを通す。
     # python ベースは libcrypt1 を同梱しないため 3 パッケージ × 4 件＝12 件（OpenClaw は 16 件）。
     # 恒久対応は python ベースの glibc 2.44-r8 へのバンプで、その PR で core を空へ戻す。
+    # 2026-10-12: Chainguard python（builder latest-dev / runtime latest）を glibc 2.44-r8 の
+    # 3.14.8 世代へ上げ、12 件を撤去した（python:latest は同日 3.15 へ動いたため 10-09 の digest で固定）。
     core_payload = json.loads(core.read_text(encoding="utf-8"))
-    assert core_payload["schema_version"] == 1
-    assert core_payload["stale_exception_policy"] == "fail"
-    assert sorted(
-        (e["cve"], e["severity"], e["package"], e["version"], e["expires_on"])
-        for e in core_payload["exceptions"]
-    ) == sorted(
-        (cve, severity, package, "2.44-r7", "2026-10-22")
-        for cve, severity in OC_GLIBC_2_44_R7_CVES
-        for package in CORE_GLIBC_2_44_PACKAGES
-    )
-    for entry in core_payload["exceptions"]:
-        assert entry["owner"] == "s-komata@vectorinc.co.jp"
-        assert "2026-10-08" in entry["reason"]
-    assert len(gate.load_exceptions(core, today=date(2026, 10, 8))) == 12
+    assert core_payload == {
+        "schema_version": 1,
+        "stale_exception_policy": "fail",
+        "exceptions": [],
+    }
+    assert gate.load_exceptions(core, today=TODAY) == {}
 
     # 2026-08-14: media の CVE-2026-7210（python3 3.14.5-r2）は一時的に例外登録したが、
     # Trivy 側では HIGH 判定（4サブパッケージに計上）で attestor の C/H ゼロゲートを
@@ -354,11 +348,6 @@ OC_GLIBC_2_44_PACKAGES = (
     "glibc-2.44-locale-posix",
     "ld-linux-2.44",
     "libcrypt1-2.44",
-)
-CORE_GLIBC_2_44_PACKAGES = (
-    "glibc-2.44",
-    "glibc-2.44-locale-posix",
-    "ld-linux-2.44",
 )
 
 
