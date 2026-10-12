@@ -1029,3 +1029,15 @@ def test_guess_first_and_retry_before_saying_missing(soul: str) -> None:
     assert "「◯◯で進めます（違えば一言で）」と先に実行する" in soul
     assert "「無い」と言う前に表記を変えて" in soul
     assert "利用者に検索や確認を頼まない" in soul
+
+
+# ── 決まった節の転記（2026-10-09 r51 の DM 実機で、📊 の 5 本がモデルの要約で上位 3 本に縮んだ） ──
+@pytest.mark.parametrize(
+    "phrase",
+    [
+        "「📊 動画ごとの数字」「📎」の節は**一字も変えず写す**",
+        "本数・欄・リンクを削らない",
+    ],
+)
+def test_fixed_blocks_are_transcribed_verbatim(soul: str, phrase: str) -> None:
+    assert phrase in soul
