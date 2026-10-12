@@ -233,17 +233,16 @@ def test_unlock_matches_the_committed_declaration() -> None:
     unlock = _freeze_doc()["unlock"]
     if unlock["active"]:
         assert unlock["scope_paths"] == [
+            "infra/codebuild/openclaw_bundle_contract.json",
+        ]
+        assert "glibc 2.44-r8" in unlock["reason"]
+        assert "#568 の例外 16 件を外す" in unlock["reason"]
+        assert "12929629… → 5a7e0d20…" in unlock["reason"]
+        assert "human gate 2026-10-12" in unlock["gate"]
+        assert unlock["previous_scope_20261012_core_python_base"]["scope_paths"] == [
             "infra/codebuild/teamagent_runtime_contract.json",
             "infra/codebuild/teamagent_core_media_release_contract.json",
         ]
-        assert "glibc 2.44-r8" in unlock["reason"]
-        assert "#573 の例外 12 件を外す" in unlock["reason"]
-        assert "human gate 2026-10-12" in unlock["gate"]
-        previous = unlock["previous_scope_20261012_core_media"]
-        assert previous["scope_paths"] == [
-            "infra/codebuild/teamagent_core_media_release_contract.json",
-        ]
-        assert "zlib 1.3.2-r0" in previous["reason"]
     else:
         assert unlock["scope_paths"] == []
         assert unlock["reason"] is None

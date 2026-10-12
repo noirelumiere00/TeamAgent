@@ -194,7 +194,9 @@ locals {
     # 解決不能になるため media-apk.lock と契約 artifact.apk-lock.sha256 を追随させた再レンダリング（apply_apklock.sh）。
     # 2026-10-12 publish 世代（Chainguard python ベースのバンプ）。r51 段3 の ECR が core の glibc 2.44-r7（CVE 4 件）を検出し #573 の期限つき例外で通していたため
     # ベースを上げ glibc 2.44-r8 で根治（python 3.14.8）。runtime 契約と release 契約の両方が動いた再レンダリング（apply_mcp_base_bump.py）。
-    "debff5daa16c96abd538d2c9e2a9037ed3438bb3521504f8237dc05c9de52640" = {
+    # 2026-10-12 publish 世代（OpenClaw の runtime ベース glibc 2.44-r8・#568 例外撤去）。node 26.11.1 の世代で
+    # /usr/bin/node が 12929629… → 5a7e0d20… に動いたため契約の base64 を差し替えた再レンダリング。
+    "65da6248bf10b9e918960f1d24d37e004bf0e21c3ebc2581183c14bd2b35bc0f" = {
       content_type                  = "text/yaml"
       object_lock_retain_until_date = "2099-12-31T00:00:00Z"
     }
@@ -474,8 +476,8 @@ import {
 }
 
 import {
-  to = aws_s3_object.image_attestor_buildspec_generation["debff5daa16c96abd538d2c9e2a9037ed3438bb3521504f8237dc05c9de52640"]
-  id = "teamagent-dev-image-release-evidence/codebuild-buildspecs/teamagent-dev-image-attestor/debff5daa16c96abd538d2c9e2a9037ed3438bb3521504f8237dc05c9de52640.yml"
+  to = aws_s3_object.image_attestor_buildspec_generation["65da6248bf10b9e918960f1d24d37e004bf0e21c3ebc2581183c14bd2b35bc0f"]
+  id = "teamagent-dev-image-release-evidence/codebuild-buildspecs/teamagent-dev-image-attestor/65da6248bf10b9e918960f1d24d37e004bf0e21c3ebc2581183c14bd2b35bc0f.yml"
 }
 
 import {
