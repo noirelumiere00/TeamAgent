@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextvars
 import json
 import re
 import time
@@ -86,6 +87,8 @@ _REF = re.compile(r"\[S([1-9][0-9]*)\]")
 _TOTAL_UNAVAILABLE = "取得不可（UI非表示）"
 _POST_PATH = re.compile(r"^/@[^/]+/video/[1-9][0-9]*/?$")
 _TIKTOK_TERMS = 6
+# 検索語を並べる本数（media のタスクを同時に起動する数）。
+_TIKTOK_PARALLEL = 3
 SOURCE_STAGE_DEADLINE_S = 60.0
 
 
@@ -722,15 +725,17 @@ class ProposalResearchSkill(BaseSkill[ResearchBrief, ProposalResearchOutput]):
         if brief.unreleased:
             terms = [term for term in terms if not _contains_name(term, brief.product_name)]
         terms = terms[:_TIKTOK_TERMS]
-        searches = 0
-        results: dict[str, dict[str, Any]] = {}
-        # お土産資料と同じ、検索軸を順次取得・一時的な失敗のみ1回再試行・深度上限。
-        for term in terms:
+
+        # 検索 1 回ごとに media のタスクを起動するため、順次だと 7 回で 16 分かかった
+        # （10-09 本番）。検索語どうしは並べ、1 語の中は hashtag → keyword の順を保つ。
+        # 一時的な失敗のみ 1 回再試行・深度上限はお土産資料と同じ。
+        def search_term(term: str) -> tuple[int, dict[str, Any] | None]:
+            count = 0
             for search_type in ("hashtag", "keyword"):
 
-                def search(term: str = term, search_type: str = search_type) -> TikTokSearchResult:
-                    nonlocal searches
-                    searches += 1
+                def search(search_type: str = search_type) -> TikTokSearchResult:
+                    nonlocal count
+                    count += 1
                     return self._tiktok_searcher(
                         term,
                         search_type=search_type,
@@ -746,7 +751,7 @@ class ProposalResearchSkill(BaseSkill[ResearchBrief, ProposalResearchOutput]):
                 videos = [video for video in result.videos if _valid_post_url(video.url)]
                 if not videos:
                     continue
-                entry = {
+                return count, {
                     "related_tag": term,
                     "representative_post_url": videos[0].url,
                     "search_demand_note": (
@@ -755,9 +760,19 @@ class ProposalResearchSkill(BaseSkill[ResearchBrief, ProposalResearchOutput]):
                     ),
                     "total_count": _TOTAL_UNAVAILABLE,
                 }
+            return count, None
+
+        with ThreadPoolExecutor(max_workers=_TIKTOK_PARALLEL) as pool:
+            futures = [
+                pool.submit(contextvars.copy_context().run, search_term, term) for term in terms
+            ]
+            outcomes = [future.result() for future in futures]
+        searches = sum(count for count, _ in outcomes)
+        results: dict[str, dict[str, Any]] = {}
+        for term, (_, entry) in zip(terms, outcomes, strict=True):
+            if entry is not None:
                 results[term] = entry
                 data["C_tiktok"].append(entry)
-                break
         if not results:
             raise ResearchError("TikTok の代表投稿を取得できませんでした")
         for community in data["E_community"]:
