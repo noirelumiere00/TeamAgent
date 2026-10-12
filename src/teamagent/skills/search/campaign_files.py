@@ -45,6 +45,7 @@ SIMILARITY_MIN = 0.6
 UNKNOWN_INDUSTRY = "業種不明"
 #: 関連ファイルが無い施策の書き方（固定語・要約が落としたらコードで足す）。
 SHEET_ONLY_NOTE = "施策の数字はシート（ショート動画データベース）のみ"
+VIDEO_METRICS_HEADING = "📊 動画ごとの数字（ショート動画データベース）"
 
 _KIND_REPORT = "レポート"
 _KIND_PROPOSAL = "提案書"
@@ -371,7 +372,7 @@ def video_stats_footer(hits: Sequence[SearchHit], answer: str) -> str:
     # URL 無しの行まで空集合の all() で省かない。部分的な引用なら全行を残す。
     if not blocks or all(url and url in answer for url in urls):
         return ""
-    return "📊 動画ごとの数字（ショート動画データベース）\n" + "\n\n".join(blocks)
+    return VIDEO_METRICS_HEADING + "\n" + "\n\n".join(blocks)
 
 
 __all__ = [
