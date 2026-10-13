@@ -64,6 +64,12 @@ jobs:
           echo "== D: without our lo-profile / fontconfig (fresh HOME)"; docker run --rm --network none -e HOME=/tmp/h -e SAL_USE_VCLPLUGIN=svp -v "$D:/in:ro" --entrypoint sh $IMG -c "mkdir -p /tmp/h; $conv" 2>&1 | tail -6 || true
           echo "== E: SAL_LOG warnings (first lines)"; docker run --rm --network none -e SAL_LOG=+WARN -v "$D:/in:ro" --entrypoint sh $IMG -c "$conv" 2>&1 | grep -v '^$' | head -25 || true
           echo "== F: vanilla alpine 3.24 + libreoffice-impress only"; docker run --rm public.ecr.aws/docker/library/alpine:3.24@sha256:294b683cb724975bec92580e1e685676bd4b50bda910ddb8c51d4cabeaec77e6 sh -c 'apk add -q --no-cache libreoffice-impress font-noto >/dev/null 2>&1; soffice --version; echo exit=$?' 2>&1 | tail -4 || true
+          A=public.ecr.aws/docker/library/alpine:3.24@sha256:294b683cb724975bec92580e1e685676bd4b50bda910ddb8c51d4cabeaec77e6
+          for pkgs in "libreoffice" "libreoffice-impress libreoffice-writer" "libreoffice-impress libreoffice-calc libreoffice-writer libreoffice-draw"; do
+            echo "== F2: vanilla + $pkgs"; docker run --rm $A sh -c "apk add -q --no-cache $pkgs font-noto >/dev/null 2>&1; soffice --version; echo exit=\$?" 2>&1 | tail -3 || true
+          done
+          echo "== F3: missing shared libraries (impress only)"; docker run --rm $A sh -c 'apk add -q --no-cache libreoffice-impress >/dev/null 2>&1; for f in /usr/lib/libreoffice/program/soffice.bin /usr/lib/libreoffice/program/*.so; do ldd "$f" 2>/dev/null | grep "not found"; done | sort -u | head -20; echo done' 2>&1 | tail -22 || true
+          echo "== F4: strace-free bootstrap log"; docker run --rm $A sh -c 'apk add -q --no-cache libreoffice-impress >/dev/null 2>&1; SAL_LOG="+INFO.cppuhelper+WARN" soffice --headless --version 2>&1 | grep -iE "fail|cannot|not found|error|exception" | head -15' 2>&1 | tail -16 || true
           echo "== G: our image with a clean environment (env -i)"; docker run --rm --entrypoint sh $IMG -c 'env -i HOME=/tmp PATH=/usr/bin:/bin soffice --version; echo exit=$?' 2>&1 | tail -4 || true
           echo "== H: our image env"; docker run --rm --entrypoint sh $IMG -c 'env | sort | grep -vE "^(HOSTNAME|SHLVL|PWD)="' 2>&1 | head -20 || true
           echo "== installed libreoffice packages"; docker run --rm --entrypoint sh $IMG -c 'ls /usr/lib/libreoffice/program | grep -iE "^(soffice|libmerged|libsdlo|libsdfilt|libsvx)" | head; ls /usr/lib/libreoffice/share/registry 2>/dev/null' || true
