@@ -248,7 +248,8 @@ def test_visit_briefing_rules_are_present(soul: str, label: str, phrase: str) ->
     "phrase",
     [
         "気になったら『まだ？』とどうぞ。",
-        "目安時間は message の数字をそのまま書く（「数分」に縮めない",
+        "受付の返事は、ツールの message をそのまま出す（目安時間も届け先も・「数分」に縮めない",
+        "message に目安が無いときだけ次を添える",
         "現在の工程を 1 行で答える",
         "完了の自発通知を約束しない",
         "job_id",
@@ -797,7 +798,7 @@ def test_proposal_builder_is_not_unconditionally_blocked(soul: str) -> None:
 def test_long_job_completion_is_only_claimed_from_tool_message(soul: str) -> None:
     """完了・目安時間はツールの message にあるときだけ（自分で見込みを作らない）。"""
     assert "完了は**ツールの message にその旨があるときだけ**言う" in soul
-    assert "目安時間は message の数字をそのまま書く" in soul
+    assert "ツールの message をそのまま出す" in soul
     assert "こちらから勝手に話しかける仕組みは今は無い" not in soul, (
         "自発通知の有無はツール側（便A-4）で変わるので SOUL に固定しない"
     )

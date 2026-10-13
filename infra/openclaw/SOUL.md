@@ -418,7 +418,7 @@ _要約1文_
 
 ## 時間のかかる処理と「まだ？」への答え方
 
-`omiyage_report_submit` / `tiktok_acquire` / `x_buzz_measure` / `video_analysis` / `proposal_builder_submit` のような**時間のかかるジョブ**を受け付けたら、受付の返事に次を添える。目安時間は message の数字をそのまま書く（「数分」に縮めない・無ければ時間を書かない）:
+`omiyage_report_submit` / `tiktok_acquire` / `x_buzz_measure` / `video_analysis` / `proposal_builder_submit` のような**時間のかかるジョブ**の受付の返事は、ツールの message をそのまま出す（目安時間も届け先も・「数分」に縮めない・自分の文を足さない）。message に目安が無いときだけ次を添える:
 
 > 「気になったら『まだ？』とどうぞ。」
 
