@@ -6,6 +6,7 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import resource
 import shutil
 import signal
@@ -21,6 +22,7 @@ CPU_SECONDS = 300
 MEMORY_BYTES = 3 << 30
 FILE_BYTES = 1 << 30
 CONVERT_SECONDS = 180
+_REASON_CODE = re.compile(r"[a-z_]+(?::[A-Za-z0-9_.+-]{1,40}){0,3}")
 TOTAL_SECONDS = 480
 PDF_FILTER = (
     'pdf:impress_pdf_Export:{"ExportHiddenSlides":{"type":"boolean","value":"true"},'
@@ -55,7 +57,8 @@ def run(command: list[str], deadline: float, *, timeout: float = CONVERT_SECONDS
         try:
             proc.wait(timeout=remaining)
             if proc.returncode:
-                raise RuntimeError("child_failed")
+                # どのコマンドが何番で落ちたかだけを残す（本文は混ざらない固定の形）。
+                raise RuntimeError(f"child_failed:{Path(command[0]).name}:{proc.returncode}")
         finally:
             # 成功時も子孫の常駐プロセスを残さない。
             try:
@@ -310,9 +313,13 @@ def execute(
                     raise TimeoutError("deadline")
                 shutil.copyfile(path, output / path.name)
     except (OSError, ValueError, RuntimeError, subprocess.SubprocessError, TimeoutError) as exc:
-        # 例外本文にはデッキの本文が紛れるため型名だけを返す。
+        # 例外本文にはデッキの本文が紛れるため型名だけを返す。自分で投げた固定の理由コード
+        # （英数字とコロンだけ）は、原因の切り分けのために添える。
         result["status"] = "unavailable"
-        result["reason"] = type(exc).__name__
+        message = str(exc)
+        result["reason"] = type(exc).__name__ + (
+            f":{message}" if _REASON_CODE.fullmatch(message) else ""
+        )
     result["elapsed_ms"] = round((time.monotonic() - started) * 1000)
     encoded = json.dumps(result, ensure_ascii=False)
     if len(encoded.encode()) > 1_000_000:

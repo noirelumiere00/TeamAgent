@@ -51,10 +51,24 @@ jobs:
             --entrypoint python teamagent-render-qa:ci /smoke.py /out
           ls -la "$RUNNER_TEMP/decks"
 
+      - name: Diagnose LibreOffice (without and with the 3 GiB address-space limit)
+        if: always()
+        run: |
+          for limit in unlimited 3145728; do
+            echo "== ulimit -v $limit"
+            docker run --rm --network none --read-only --tmpfs /tmp --cap-drop ALL \
+              -v "$RUNNER_TEMP/decks:/in:ro" --entrypoint sh teamagent-render-qa:ci -c \
+              "ulimit -v $limit; mkdir -p /tmp/o && cd /tmp && soffice --headless --nologo --norestore \
+                 -env:UserInstallation=file:///tmp/lo --convert-to pdf --outdir /tmp/o /in/clean.pptx; \
+               echo exit=\$?; ls -la /tmp/o" 2>&1 | tail -20 || true
+          done
+
       - name: The deck that fits passes
         run: |
           python3 scripts/deck_render_qa.py "$RUNNER_TEMP/decks/clean.pptx" \
             --image teamagent-render-qa:ci --json --out "$RUNNER_TEMP/out-clean" | tee "$RUNNER_TEMP/clean.json"
+          # 「確認できず（unavailable）」で素通りさせない。収まる版は ok であること。
+          grep -q '"status": "ok"' "$RUNNER_TEMP/clean.json"
 
       - name: The deck that overflows is caught
         run: |
