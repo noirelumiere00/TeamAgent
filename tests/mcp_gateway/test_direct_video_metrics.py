@@ -1,0 +1,213 @@
+"""動画数字の直接投稿。gateway・実投稿経路を通し、Slack/検索/usage はフェイク。"""
+
+from __future__ import annotations
+
+import json
+from typing import Any
+
+import pytest
+from structlog.testing import capture_logs
+
+from teamagent.mcp_gateway import detached_jobs, direct_summary, server
+from teamagent.mcp_gateway import direct_video_metrics as video
+from teamagent.skills.base import BaseSkill, SkillContext
+from teamagent.skills.search import campaign_files
+from teamagent.skills.search.schema import SearchInput, SearchOutput
+from tests.mcp_gateway.test_surface_video_followup import (
+    CHANNEL,
+    DM,
+    ME,
+    OTHER,
+    _claim,
+    _FakeSlack,
+    _resolver_for,
+    _spec,
+    _Verifier,
+)
+from tests.skills.search.test_campaign_files import _video, _video_campaign
+
+HEADING = "📊 動画ごとの数字（ショート動画データベース）"
+SECTION = (
+    HEADING + "\n食品 & 飲料 / <テーマ>\n"
+    "1. 507,000 再生・保存 120　洋食ランチ https://example.test/video/1\n\n"
+    "B社 / 夏\n2. 不明 再生・保存 80　試食 https://example.test/video/2"
+)
+PREFIX = "回答です。\n\n📎 施策のレポート・提案書\nhttps://example.test/report\n\n"
+SUFFIX = "\n\n📎 *資料リンク*\nhttps://example.test/file"
+ANSWER = PREFIX + SECTION + SUFFIX
+
+
+class _Search(BaseSkill[SearchInput, SearchOutput]):
+    input_schema = SearchInput
+    output_schema = SearchOutput
+
+    def __init__(self, answer: str = ANSWER) -> None:
+        self.answer = answer
+
+    def run(self, input: SearchInput, ctx: SkillContext) -> SearchOutput:
+        return SearchOutput(answer=self.answer, total_cost_usd=0)
+
+
+@pytest.fixture(autouse=True)
+def isolated(monkeypatch: pytest.MonkeyPatch) -> None:
+    for env in (video.ENABLED_ENV, video.ALLOWED_EMAILS_ENV, "ENABLE_PROGRESS_NOTIFY"):
+        monkeypatch.delenv(env, raising=False)
+    monkeypatch.setenv("USE_PAYLOAD_OFFLOAD", "false")
+    monkeypatch.setattr(server, "_record_usage", lambda **kwargs: None)
+    monkeypatch.setattr(server, "_inject_search_web_links", lambda data: None)
+    monkeypatch.setattr(detached_jobs, "_POST_RETRY_WAIT_S", 0)
+
+
+def _enable(monkeypatch: pytest.MonkeyPatch, emails: str = ME) -> None:
+    monkeypatch.setenv(video.ENABLED_ENV, "true")
+    monkeypatch.setenv(video.ALLOWED_EMAILS_ENV, emails)
+
+
+async def _dispatch(answer: str = ANSWER, *, email: str = ME, channel: str = DM) -> dict[str, Any]:
+    claim = _claim(channel=channel, thread_ts="123.456" if channel == CHANNEL else None)
+    contents = await server.dispatch_tool(
+        _spec(_Search(answer), "search"),
+        "search",
+        {"query": "食品の動画事例"},
+        identity_resolver=_resolver_for(email),
+        caller_claim_verifier=_Verifier(claim),  # type: ignore[arg-type]
+    )
+    return json.loads(contents[0].text)  # type: ignore[no-any-return]
+
+
+@pytest.mark.parametrize("emails", [ME, "*"])
+async def test_posts_exact_section_and_replaces_only_section(
+    monkeypatch: pytest.MonkeyPatch, emails: str
+) -> None:
+    _enable(monkeypatch, emails)
+    slack = _FakeSlack()
+    monkeypatch.setattr(detached_jobs, "_slack_client", lambda timeout_seconds: slack)
+    with capture_logs() as logs:
+        result = await _dispatch()
+    assert result["answer"] == PREFIX + video.POSTED_TEXT + SUFFIX
+    assert SECTION not in result["answer"] and HEADING not in result["answer"]
+    assert slack.posts == [
+        {
+            "channel": DM,
+            "thread_ts": None,
+            "blocks": None,
+            "text": SECTION.replace("&", "&amp;")
+            .replace("<テーマ>", "&lt;テーマ&gt;")
+            .replace("https://example.test/video/1", "<https://example.test/video/1>")
+            .replace("https://example.test/video/2", "<https://example.test/video/2>"),
+        }
+    ]
+    event = next(log for log in logs if log["event"] == "search_video_metrics_direct_post")
+    assert event["outcome"] == "posted" and event["reason"] == "post_status"
+    assert event["section_chars"] == len(SECTION)
+    assert "食品" not in json.dumps(event, ensure_ascii=False) and "https://" not in str(event)
+
+
+@pytest.mark.parametrize("failure", ["not_ok", "timeout", "exception"])
+async def test_delivery_status_preserves_or_removes_section(
+    monkeypatch: pytest.MonkeyPatch, failure: str
+) -> None:
+    _enable(monkeypatch)
+    slack = _FakeSlack()
+    calls: list[dict[str, Any]] = []
+
+    async def post_message(**kwargs: Any) -> Any:
+        calls.append(kwargs)
+        if failure == "timeout":
+            raise TimeoutError
+        if failure == "exception":
+            raise RuntimeError("本文はログに出さない")
+        return None
+
+    monkeypatch.setattr(slack, "post_message", post_message)
+    monkeypatch.setattr(detached_jobs, "_slack_client", lambda timeout_seconds: slack)
+    result = await _dispatch()
+    assert result["answer"] == (
+        PREFIX + video.POSTED_TEXT + SUFFIX if failure == "timeout" else ANSWER
+    )
+    assert len(calls) == (1 if failure == "timeout" else 2)
+
+
+@pytest.mark.parametrize("case", ["off", "outside", "empty", "channel", "no_section"])
+async def test_gateway_passthrough(monkeypatch: pytest.MonkeyPatch, case: str) -> None:
+    _enable(monkeypatch)
+    if case == "off":
+        monkeypatch.delenv(video.ENABLED_ENV)
+    if case == "empty":
+        monkeypatch.delenv(video.ALLOWED_EMAILS_ENV)
+    slack = _FakeSlack()
+    monkeypatch.setattr(detached_jobs, "_slack_client", lambda timeout_seconds: slack)
+    answer = PREFIX + SUFFIX if case == "no_section" else ANSWER
+    result = await _dispatch(
+        answer,
+        email=OTHER if case == "outside" else ME,
+        channel=CHANNEL if case == "channel" else DM,
+    )
+    assert result["answer"] == answer and slack.posts == []
+
+
+@pytest.mark.parametrize("case", ["legacy", "unverified", "no_destination"])
+def test_untrusted_caller_passthrough(monkeypatch: pytest.MonkeyPatch, case: str) -> None:
+    _enable(monkeypatch, "*")
+    slack = _FakeSlack()
+    monkeypatch.setattr(detached_jobs, "_slack_client", lambda timeout_seconds: slack)
+    data = {"answer": ANSWER}
+    video.maybe_post(
+        data,
+        verified_caller=None
+        if case == "legacy"
+        else _claim(channel="bad" if case == "no_destination" else DM),
+        metadata={"identity_verified": case != "unverified", "user_email": ME},
+        request_id="r",
+    )
+    assert data == {"answer": ANSWER} and slack.posts == []
+
+
+def test_unexpected_post_exception_preserves_result(monkeypatch: pytest.MonkeyPatch) -> None:
+    _enable(monkeypatch)
+
+    def fail(*args: Any, **kwargs: Any) -> str:
+        raise RuntimeError("本文 https://private.example")
+
+    monkeypatch.setattr(detached_jobs, "post_to_origin_status", fail)
+    data = {"answer": ANSWER}
+    with capture_logs() as logs:
+        video.maybe_post(
+            data,
+            verified_caller=_claim(),
+            metadata={"identity_verified": True, "user_email": ME},
+            request_id="r",
+        )
+    assert data["answer"] == ANSWER
+    assert logs[-1]["reason"] == "post_exception"
+    assert "private.example" not in str(logs)
+
+
+@pytest.mark.parametrize("suffix", ["", SUFFIX, "\n\n\n次の節", "\n\n探した範囲: 金庫"])
+def test_extract_preserves_all_characters_and_boundaries(suffix: str) -> None:
+    assert video.extract_section(PREFIX + SECTION + suffix) == (PREFIX, SECTION, suffix)
+
+
+@pytest.mark.parametrize("answer", ["", "数字なし", "説明文 " + SECTION, HEADING + "違う\n本文"])
+def test_extract_requires_exact_heading_line(answer: str) -> None:
+    assert video.extract_section(answer) is None
+
+
+def test_producer_heading_and_extractor_stay_in_sync() -> None:
+    hit = _video_campaign(
+        1, "食品メーカー", "試食", [_video("https://example.test/v", "試食", 100, 2)]
+    )
+    hit.metadata["related_files"] = []
+    footer = campaign_files.video_stats_footer([hit], "回答")
+    assert video.extract_section("回答\n\n" + footer) == ("回答\n\n", footer, "")
+    assert footer.startswith(HEADING + "\n")
+
+
+def test_env_defaults_and_independence(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv(direct_summary.ENABLED_ENV, "true")
+    monkeypatch.setenv(direct_summary.ALLOWED_EMAILS_ENV, "*")
+    assert video.load_policy() == direct_summary.DirectPolicy()
+    _enable(monkeypatch, f" {ME.upper()} ,, {OTHER} ")
+    assert video.load_policy() == direct_summary.DirectPolicy(True, frozenset({ME, OTHER}))
+    monkeypatch.delenv(direct_summary.ENABLED_ENV)
+    assert video.load_policy().enabled

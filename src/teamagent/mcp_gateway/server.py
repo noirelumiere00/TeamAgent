@@ -49,6 +49,7 @@ from teamagent.mcp_gateway import (
     answer_feedback,
     detached_jobs,
     direct_summary,
+    direct_video_metrics,
     surface_video_followup,
 )
 from teamagent.mcp_gateway.caller_claim import (
@@ -1470,6 +1471,14 @@ async def dispatch_tool(
                 return direct_summary.posted_response(
                     direct_status, deferred=bool(data.get("deferred"))
                 )
+    if name == SEARCH_TOOL_NAME and isinstance(data, dict):
+        await asyncio.to_thread(
+            direct_video_metrics.maybe_post,
+            data,
+            verified_caller=verified_caller,
+            metadata=metadata,
+            request_id=ctx.request_id,
+        )
     # ── 返却前ミドルウェア（順序契約・v0.3 監査 Step4-(a)）────────────────────
     # (0.5) 返す欄の絞り込み（skill の mcp_relay_fields・None＝全体）: usage 記録（total_cost_usd
     #     を読む）より後、退避・注入より前。Aico に生データを渡さず文面をそのまま返させる。

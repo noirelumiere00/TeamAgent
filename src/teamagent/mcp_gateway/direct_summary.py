@@ -69,12 +69,14 @@ class DirectPolicy:
     allowed_emails: frozenset[str] = frozenset()
 
     @classmethod
-    def from_env(cls) -> DirectPolicy:
+    def from_env(
+        cls, *, enabled_env: str = ENABLED_ENV, allowed_emails_env: str = ALLOWED_EMAILS_ENV
+    ) -> DirectPolicy:
         return cls(
-            enabled=(os.environ.get(ENABLED_ENV) or "").strip().lower() in {"1", "true", "yes"},
+            enabled=(os.environ.get(enabled_env) or "").strip().lower() in {"1", "true", "yes"},
             allowed_emails=frozenset(
                 e.strip().lower()
-                for e in os.environ.get(ALLOWED_EMAILS_ENV, "").split(",")
+                for e in os.environ.get(allowed_emails_env, "").split(",")
                 if e.strip()
             ),
         )
@@ -95,6 +97,16 @@ def decide(
     """直接投稿してよいかを決める。``(宛先, 理由)``。宛先が None なら今までどおり Aico へ返す。"""
     if tool not in DIRECT_TOOLS:
         return None, "tool"
+    return decide_destination(policy, verified_caller=verified_caller, metadata=metadata)
+
+
+def decide_destination(
+    policy: DirectPolicy,
+    *,
+    verified_caller: Any,
+    metadata: dict[str, Any],
+) -> tuple[detached_jobs.Destination | None, str]:
+    """本人確認・許可リスト・1 対 1 DM の共通判定。ツールと env は呼び出し元が選ぶ。"""
     if not policy.enabled:
         return None, "disabled"
     if verified_caller is None:
@@ -198,6 +210,7 @@ __all__ = [
     "UNCERTAIN_TEXT",
     "DirectPolicy",
     "decide",
+    "decide_destination",
     "deliver",
     "load_policy",
     "posted_response",
