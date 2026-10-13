@@ -51,17 +51,19 @@ jobs:
             --entrypoint python teamagent-render-qa:ci /smoke.py /out
           ls -la "$RUNNER_TEMP/decks"
 
-      - name: Diagnose LibreOffice (without and with the 3 GiB address-space limit)
+      - name: Diagnose LibreOffice (isolate the startup crash)
         if: always()
         run: |
-          for limit in unlimited 3145728; do
-            echo "== ulimit -v $limit"
-            docker run --rm --network none --read-only --tmpfs /tmp --cap-drop ALL \
-              -v "$RUNNER_TEMP/decks:/in:ro" --entrypoint sh teamagent-render-qa:ci -c \
-              "ulimit -v $limit; mkdir -p /tmp/o && cd /tmp && soffice --headless --nologo --norestore \
-                 -env:UserInstallation=file:///tmp/lo --convert-to pdf --outdir /tmp/o /in/clean.pptx; \
-               echo exit=\$?; ls -la /tmp/o" 2>&1 | tail -20 || true
-          done
+          IMG=teamagent-render-qa:ci
+          D="$RUNNER_TEMP/decks"
+          conv='mkdir -p /tmp/o && cd /tmp && soffice --headless --nologo --norestore --nolockcheck -env:UserInstallation=file:///tmp/lo --convert-to pdf --outdir /tmp/o /in/clean.pptx; echo exit=$?; ls /tmp/o'
+          echo "== version"; docker run --rm --entrypoint soffice $IMG --version 2>&1 | tail -3 || true
+          echo "== A: read-only + tmpfs + cap-drop (current)"; docker run --rm --network none --read-only --tmpfs /tmp --cap-drop ALL -v "$D:/in:ro" --entrypoint sh $IMG -c "$conv" 2>&1 | tail -6 || true
+          echo "== B: writable root"; docker run --rm --network none --tmpfs /tmp -v "$D:/in:ro" --entrypoint sh $IMG -c "$conv" 2>&1 | tail -6 || true
+          echo "== C: as root"; docker run --rm --network none --user 0 -v "$D:/in:ro" --entrypoint sh $IMG -c "$conv" 2>&1 | tail -6 || true
+          echo "== D: without our lo-profile / fontconfig (fresh HOME)"; docker run --rm --network none -e HOME=/tmp/h -e SAL_USE_VCLPLUGIN=svp -v "$D:/in:ro" --entrypoint sh $IMG -c "mkdir -p /tmp/h; $conv" 2>&1 | tail -6 || true
+          echo "== E: SAL_LOG warnings (first lines)"; docker run --rm --network none -e SAL_LOG=+WARN -v "$D:/in:ro" --entrypoint sh $IMG -c "$conv" 2>&1 | grep -v '^$' | head -25 || true
+          echo "== installed libreoffice packages"; docker run --rm --entrypoint sh $IMG -c 'ls /usr/lib/libreoffice/program | grep -iE "^(soffice|libmerged|libsdlo|libsdfilt|libsvx)" | head; ls /usr/lib/libreoffice/share/registry 2>/dev/null' || true
 
       - name: The deck that fits passes
         run: |
