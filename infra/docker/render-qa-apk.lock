@@ -1,5 +1,6 @@
-# Alpine 3.24 (v3.24.2-102) で apk add --simulate が解決した推移的依存の全体（287）。10-12 Claude 実測（arm64）。
-# 更新は scripts/... ではなく、同じ simulate を再実行して丸ごと置き換える。
+# Alpine 3.24 (v3.24.2) で apk add --simulate が解決した推移的依存の全体（292・arm64 と amd64 で一致）。10-13 Claude 実測。
+# libreoffice-impress だけでは soffice が起動直後に com::sun::star::uno::RuntimeException（exit 134）で落ちる。
+# libreoffice-writer を足すと起動する（CI 38337967225 で確認）。更新は同じ simulate を再実行して丸ごと置き換える。
 alsa-lib=1.2.15.3-r0
 aom-libs=3.14.1-r0
 argon2-libs=20190702-r5
@@ -75,6 +76,7 @@ iso-codes=4.20.1-r0
 lame-libs=3.100-r5
 lcms2=2.19-r0
 libSvtAv1Enc=4.1.0-r0
+libabw=0.1.3-r3
 libass=0.17.4-r1
 libassuan=3.0.2-r0
 libasyncns=0.8-r5
@@ -96,9 +98,11 @@ libdrm=2.4.134-r0
 libdvdcss=1.4.3-r0
 libdvdnav=6.1.1-r1
 libdvdread=6.1.3-r2
+libe-book=0.1.3-r26
 libeconf=0.8.3-r0
 libelf=0.195-r0
 libepoxy=1.5.10-r1
+libepubgen=0.1.1-r2
 libetonyek=0.1.12-r2
 libevdev=1.13.6-r0
 libexpat=2.8.5-r0
@@ -149,6 +153,7 @@ libraw1394=2.1.2-r5
 libreoffice-common=25.8.7.3-r0
 libreoffice-impress=25.8.7.3-r0
 libreoffice-lang-en_us=25.8.7.3-r0
+libreoffice-writer=25.8.7.3-r0
 librevenge=0.0.5-r2
 librsvg=2.62.3-r0
 librtmp=2.4_git20190330-r5
@@ -174,6 +179,7 @@ libwebp=1.6.0-r0
 libwebpmux=1.6.0-r0
 libwpd=0.10.3-r1
 libwpg=0.3.4-r0
+libwps=0.4.14-r0
 libx11=1.8.13-r0
 libxau=1.0.12-r0
 libxcb=1.17.0-r2
