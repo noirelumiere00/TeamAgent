@@ -816,3 +816,39 @@ def test_adapter_skips_query_without_advertisers() -> None:
     client = PgVectorClient.__new__(PgVectorClient)
     assert client.find_drive_files_for_advertisers(conn, ["", " a "]) == []  # type: ignore[arg-type]
     assert conn.cur.calls == []
+
+
+def test_summarizer_never_sees_numbers_that_the_video_footer_will_show(
+    ham_campaign: tuple[SearchHit, list[dict[str, Any]]],
+) -> None:
+    """10-14 本番 DM: 📊 の後でも説明に「50.7 万再生 / 保存 129 件」が並んだ（要約器が本文の数字を
+    丸めて書いた）。📊 に載る動画の数字とリンクは要約器へ渡さない。📊 の節は元の本文から作る。
+    """
+    hit, docs = ham_campaign
+    skill = _skill(_Pg([hit], docs), answer="伊藤ハムのハンバーグは食事のアレンジが伸びた。")
+    out = _run(skill, query="食品メーカーのショート動画の事例")
+    sent = _message(skill)
+    # 動画ごとの行（再生・保存）は渡さない。施策の集計（中央値・平均・最大）は 📊 に無いので残る。
+    for row in ("再生 507,000、保存 120", "再生 331,000、保存 80", "再生 70,000、保存 20"):
+        assert row not in sent, f"要約器に「{row}」が渡っている"
+    for saves in ("保存 120", "保存 80", "保存 50", "保存 30", "保存 20"):
+        assert saves not in sent
+    assert "https://www.tiktok.com/@example/video/1" not in sent
+    assert "回答の 📊 にコードで載せる" in sent
+    assert "デミグラスをパスタに混ぜる" in sent  # 投稿の中身（数字以外）は要約に使える
+    # 📊 の節は今までどおり数字とリンクを全部載せる
+    assert "1. 507,000 再生・保存 120" in out.answer
+    assert "https://www.tiktok.com/@example/video/5" in out.answer
+
+
+def test_summarizer_keeps_numbers_when_campaign_files_are_off(
+    ham_campaign: tuple[SearchHit, list[dict[str, Any]]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """📊 を出さない設定（SEARCH_CAMPAIGN_FILES=false）では、要約器が唯一の出口なので数字を残す。"""
+    monkeypatch.setenv("SEARCH_CAMPAIGN_FILES", "false")
+    hit, docs = ham_campaign
+    skill = _skill(_Pg([hit], docs), answer="要約")
+    out = _run(skill, query="食品メーカーのショート動画の事例")
+    assert "507,000" in _message(skill)
+    assert "📊" not in out.answer

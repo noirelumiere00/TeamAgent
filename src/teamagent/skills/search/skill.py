@@ -46,6 +46,7 @@ from teamagent.skills.search.aggregation import extract_aggregation_filter
 from teamagent.skills.search.alias_expansion import retry_inputs, scope_footer
 from teamagent.skills.search.answer_mode import MODE_INSTRUCTIONS, classify_answer_mode
 from teamagent.skills.search.campaign_files import (
+    VIDEO_ROWS_FOOTER_HEADING,
     advertiser_pattern,
     attach_related_files,
     campaign_header,
@@ -53,6 +54,8 @@ from teamagent.skills.search.campaign_files import (
     is_campaign_hit,
     links_footer,
     scope_by_industry,
+    strip_video_numbers,
+    video_footer_urls,
     video_stats_footer,
 )
 from teamagent.skills.search.client_match import (
@@ -2323,13 +2326,22 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
         primary_hits = [h for h in hits if not (h.metadata or {}).get("is_related_drive")]
         related_hits = [h for h in hits if (h.metadata or {}).get("is_related_drive")]
 
+        # 2026-10-14: 📊 の節（コードが本文から作る動画ごとの数字とリンク）に載る動画は、要約器へ
+        # 渡す本文から数字とリンクを抜く。抜かないと要約器が「50.7 万再生 / 保存 129 件」と丸めて
+        # 並べ直し、📊 と二重になる（10-14 本番 DM・📊 の直接投稿の後でも説明に数字が並んだ）。
+        footer_urls = video_footer_urls(primary_hits) if self._campaign_files else ""
         primary_block = "\n\n".join(
             f"[chunk_id: {h.chunk_id}, score: {h.score:.3f}"
             + ("（関連度低・参考）" if (h.metadata or {}).get("is_low_confidence") else "")
             + (self._title_header(h) if self._answer_modes else "")
             + self._date_header(h)
             + (campaign_header(h) if self._campaign_files else "")
-            + f"]\n{h.content}"
+            + "]\n"
+            + (
+                strip_video_numbers(h.content, footer_urls, heading=VIDEO_ROWS_FOOTER_HEADING)
+                if footer_urls
+                else h.content
+            )
             for h in primary_hits
         )
         if slack_items:
