@@ -51,6 +51,15 @@ jobs:
             --entrypoint python teamagent-render-qa:ci /smoke.py /out
           ls -la "$RUNNER_TEMP/decks"
 
+      - name: Diagnose fonts (fc-match)
+        if: always()
+        run: |
+          docker run --rm --entrypoint sh teamagent-render-qa:ci -c '
+            echo "== fc-list TA Palt"; fc-list | grep -i "palt" | head -4
+            echo "== conf.d"; ls /etc/fonts/conf.d | grep -i teamagent
+            for f in "ＭＳ Ｐゴシック" "Yu Gothic UI" "sans-serif:lang=ja" "sans-serif" "Noto Sans CJK JP"; do echo "== fc-match $f"; fc-match "$f"; done
+          ' 2>&1 | head -30 || true
+
       - name: The deck that fits passes
         run: |
           python3 scripts/deck_render_qa.py "$RUNNER_TEMP/decks/clean.pptx" \
