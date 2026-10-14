@@ -168,6 +168,8 @@ LIVE_MCP_ENV_20261014 = {
     "DIRECT_VIDEO_METRICS_POST_ALLOWED_EMAILS": "*",
     "ATTACHMENT_PERMALINK_ENABLED": "1",
     "ATTACHMENT_PERMALINK_ALLOWED_EMAILS": "*",
+    # 83 枚提案書（動画チェックの Gemini 切替の後・10-14 14:05 完了）
+    "PROPOSAL_BUILDER_ALLOWED_EMAILS": "*",
 }
 
 # 全員開放で tfvars から外した allowlist（fargate.tf が "*" を直接焼く）。tfvars（正本）には第 1 段階の

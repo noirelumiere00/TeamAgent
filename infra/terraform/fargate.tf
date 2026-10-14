@@ -858,6 +858,10 @@ resource "aws_ecs_task_definition" "mcp" {
       { name = "PROPOSAL_BUILDER_SLACK_UPLOAD_TIMEOUT_SECONDS", value = "240" },
       { name = "PROPOSAL_BUILDER_PUBLISH_READY", value = var.proposal_builder_publish_ready ? "1" : "0" },
       { name = "PROPOSAL_BUILDER_DELIVER_INTERNAL_DRAFTS", value = var.proposal_builder_deliver_internal_drafts ? "1" : "0" },
+      # 2026-10-14 小俣さん「動画チェックの Gemini 切替の後に全員へ」→ 切替完了（同日 14:05）で全員へ。
+      # 照合は mcp_gateway/allowlist.email_allowed（空＝誰もいない・"*"＝本人確認済みの全員）。
+      # 同時実行は PROPOSAL_MAX_CONCURRENT_JOBS（コード既定 2・#606）。live は register で同じ値。
+      { name = "PROPOSAL_BUILDER_ALLOWED_EMAILS", value = "*" },
       { name = "PROPOSAL_BUILDER_NEWS_CHANNEL_ID", value = var.proposal_builder_news_channel_id },
       { name = "PROPOSAL_BUILDER_TEMPLATE_S3_BUCKET", value = var.proposal_builder_template_s3_bucket },
       { name = "PROPOSAL_BUILDER_TEMPLATE_S3_KEY", value = var.proposal_builder_template_s3_key },
