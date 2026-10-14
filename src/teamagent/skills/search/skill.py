@@ -549,6 +549,11 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
 
     def run(self, input: SearchInput, ctx: SkillContext) -> SearchOutput:
         """検索 Skill のメインフロー。"""
+        if os.environ.get("USE_SEARCH_FANOUT", "") == "1":
+            from teamagent.skills.search.fanout import fanout_active, run_fanout
+
+            if fanout_active(ctx):
+                return run_fanout(self, input, ctx)
         log = ctx.bind_logger(self.name)
         log.info(
             "search_skill_start",
@@ -878,6 +883,7 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
             total_ms=int(total_ms),
             hit_count=len(hits),
             deferred=deferred,
+            fanout=False,
         )
         return output
 
@@ -1250,6 +1256,7 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
         *,
         timings: dict[str, float] | None = None,
         probe: dict[str, str] | None = None,
+        fanout_probe: dict[str, Any] | None = None,
     ) -> list[SearchHit]:
         """pgvector で類似検索する。
 
@@ -1304,6 +1311,10 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
                     if matched_client:
                         probe["query_client"] = matched_client
                         probe["asked_source"] = "vocab"
+            if fanout_probe is not None:
+                from teamagent.skills.search.fanout import collect_named_sources
+
+                collect_named_sources(self, conn, self._asked_client(probe), ctx, fanout_probe)
             if self._use_new_schema:
                 # Sprint 5: 集約・一覧クエリモード。「BANT A の案件一覧」「失注案件」等は
                 # 意味検索では答えられないため、メタデータフィルタで FB を列挙する。
@@ -1507,6 +1518,7 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
                         metadata_contains=mc,  # 通常 None（filter_client 未指定時のみ boost）
                         exclude_recurring=excl_recurring,  # 提案書 intent 時のみ（boost も同じ）
                         vocab_key=vocab_key,
+                        log_client=fanout_probe is None,
                     )
                 # 2026-08-27: Drive 実資料のリコール床。営業 FB クラスタがプールを占有して
                 # gdrive が 1 件も rerank へ届かない事象（実測: gdrive 最上位 78 位）への対策。
@@ -1584,6 +1596,8 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
                         timings["rerank_ms"] = timings.get("rerank_ms", 0.0) + (
                             (time.perf_counter() - _t_rerank) * 1000
                         )
+                if fanout_probe is not None:
+                    fanout_probe["candidates"] = list(hits)
                 # Sprint 5: 反ハルシネーション閾値。relevance < 閾値の hit を落とす。
                 # Rerank 後の relevance score に対して適用 (drive-match の固定 score=1.0
                 # より前に評価し、弱い根拠しか無いクエリでは drive-match も発火させない)。
@@ -1644,7 +1658,7 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
                             logger.info(
                                 "search_client_match_sort",
                                 request_id=ctx.request_id,
-                                client=client_for_sort,
+                                **({"client": client_for_sort} if fanout_probe is None else {}),
                                 pool=len(hits),
                             )
                 # Day 8 Phase 2: FB hits があれば client_name で Drive 資料を追加 retrieve
@@ -1841,6 +1855,7 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
         metadata_contains: dict[str, str] | None = None,
         exclude_recurring: bool = False,
         vocab_key: _VocabKey | None = None,
+        log_client: bool = True,
     ) -> list[SearchHit]:
         """固有名詞クエリで client_name 絞り検索を追加し rerank プールへ合流する。
 
@@ -1894,7 +1909,7 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
             logger.info(
                 "client_boost_applied",
                 request_id=request_id,
-                client_name=matched,
+                **({"client_name": matched} if log_client else {}),
                 added=len(added),
                 pool_before=len(hits),
             )
@@ -2317,6 +2332,8 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
         *,
         slack_items: tuple[SlackItem, ...] = (),
         asked_industry: str | None = None,
+        bedrock: Any | None = None,
+        karte_hits: tuple[SearchHit, ...] = (),
     ) -> tuple[str, float]:
         """Bedrock に system prompt + chunks + query を渡して要約させる。
 
@@ -2397,15 +2414,28 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
         if slack_items:
             sections.append(slack_prompt_block(slack_items))
             sections.append(load_prompt("search", "composite", "slack"))
+        if bedrock is not None:
+            system += "\n" + load_prompt("search/fanout", "v1", "sources")
+        if karte_hits:
+            sections.append(
+                "# カルテ（営業FBの時系列）\n"
+                + "\n\n".join(
+                    f"[カルテ: {h.chunk_id}{self._date_header(h)}]\n{h.content}" for h in karte_hits
+                )
+            )
         user_message = "以下の社内資料から質問に答えてください。\n\n" + "\n\n".join(sections)
 
-        resp = self._bedrock.converse(
+        resp = (bedrock if bedrock is not None else self._bedrock).converse(
             messages=[{"role": "user", "content": [{"text": user_message}]}],
             request_id=request_id,
             system=system,
             cache_system=True,  # 同じ system prompt を頻繁に呼ぶのでキャッシュで input cost 1/10
             max_tokens=self._summary_max_tokens,
         )
+        if bedrock is not None:
+            from teamagent.skills.search.fanout import shadow_grounding
+
+            shadow_grounding(resp.text, user_message, [*hits, *karte_hits], request_id)
         return _strip_internal_markers(resp.text, request_id=request_id), resp.usage.cost_usd
 
     @staticmethod

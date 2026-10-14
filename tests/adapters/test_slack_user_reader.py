@@ -154,6 +154,44 @@ def test_search_checked_empty_query_no_call() -> None:
     client.search_messages.assert_not_awaited()
 
 
+def test_search_checked_defaults_to_timestamp_sort() -> None:
+    # 既定は新しい順のまま（slack_search・複合検索・期間検索・チャンネル名解決の挙動を変えない）。
+    client = _client(search_messages=AsyncMock(return_value=_search_ok([])))
+    SlackUserReader("xoxp-x", client=client).search_checked("q", "req", count=7, page=2)
+    assert client.search_messages.await_args.kwargs == {
+        "query": "q",
+        "count": 7,
+        "sort": "timestamp",
+        "page": 2,
+    }
+
+
+def test_search_checked_passes_score_sort() -> None:
+    # 統合検索（fan-out）は関連度順で「近い投稿」を先に出す。
+    match = {"channel": {"id": "C9"}, "ts": "1.1", "text": "見積"}
+    client = _client(search_messages=AsyncMock(return_value=_search_ok([match], total=3)))
+    read = SlackUserReader("xoxp-x", client=client).search_checked("見積", "req", sort="score")
+    assert client.search_messages.await_args.kwargs["sort"] == "score"
+    assert (read.error, read.total, read.matches[0].text) == ("", 3, "見積")
+
+
+@pytest.mark.parametrize("sort", ["relevance", "", "SCORE"])
+def test_search_checked_rejects_unknown_sort_without_call(sort: str) -> None:
+    # Slack の sort の既定は score。知らない値を Slack がどう扱うかに頼らず、呼ぶ前に止める。
+    client = _client(search_messages=AsyncMock(return_value=_search_ok([])))
+    reader = SlackUserReader("xoxp-x", client=client)
+    with pytest.raises(ValueError, match="sort"):
+        reader.search_checked("q", "req", sort=sort)  # type: ignore[arg-type]
+    client.search_messages.assert_not_awaited()
+
+
+def test_search_checked_score_sort_still_surfaces_slack_error() -> None:
+    err = SlackApiError("failed (ratelimited)", {"ok": False, "error": "ratelimited"})
+    client = _client(search_messages=AsyncMock(side_effect=err))
+    read = SlackUserReader("xoxp-x", client=client).search_checked("q", "req", sort="score")
+    assert read.error == "ratelimited" and read.matches == ()
+
+
 # ── read_thread_checked（fail-closed 用・error code を返す）────────────────────
 # フェイクは本番の失敗モードを再現する: slack_sdk は ok:false で SlackApiError を投げ、
 # .response["error"] に code が入る。

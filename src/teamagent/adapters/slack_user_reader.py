@@ -33,7 +33,7 @@ from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from typing import Any
+from typing import Any, Literal, get_args
 from urllib.parse import parse_qs, urlsplit
 
 import structlog
@@ -53,6 +53,9 @@ _DISPLAY_NAME_TTL = 24 * 60 * 60.0
 _DISPLAY_NAME_TTL_MISS = 10 * 60.0
 # Slack の人間 user_id（U…= 通常メンバー / W…= Enterprise Grid）。bot（B…）は対象外。
 _SLACK_USER_ID_RE = re.compile(r"^[UW][A-Z0-9]{2,}$")
+# search.messages の並び順（Slack API の sort）。timestamp＝新しい順・score＝関連度順。
+SlackSearchSort = Literal["timestamp", "score"]
+_SEARCH_SORTS: tuple[str, ...] = get_args(SlackSearchSort)
 
 
 @dataclass(frozen=True)
@@ -722,24 +725,35 @@ class SlackUserReader:
         return out
 
     def search_checked(
-        self, query: str, request_id: str, *, count: int = 10, page: int = 1
+        self,
+        query: str,
+        request_id: str,
+        *,
+        count: int = 10,
+        page: int = 1,
+        sort: SlackSearchSort = "timestamp",
+        timeout_s: float = 15.0,
     ) -> SlackSearchRead:
         """search.messages を **error code つき** で呼ぶ（1 ページ・読み取り専用）。
 
         `search` は fail-open で「トークン切れ」「API 障害」「0 件」が全部 `[]` になる。
         利用者へ「見つかりませんでした」と答える用途（slack_search）は、失敗を 0 件と
         取り違えないようこちらを使う。既存の `search` の挙動は変えない。
+
+        ``sort`` の既定は ``"timestamp"``（新しい順・slack_search と期間検索の今の挙動）。
+        ``"score"`` は Slack の関連度順（統合検索で近い投稿を先に出す用途）。
+        それ以外の値は Slack を呼ばずに ``ValueError``（呼び出し側の実装の誤り）。
         """
+        if sort not in _SEARCH_SORTS:
+            raise ValueError(f"search_checked: sort must be one of {_SEARCH_SORTS}, got {sort!r}")
         if not query or not query.strip():
             return SlackSearchRead(error="no_query")
         start = time.perf_counter()
         try:
             resp = _run_sync(
                 lambda: asyncio.wait_for(
-                    self._client.search_messages(
-                        query=query, count=count, sort="timestamp", page=page
-                    ),
-                    timeout=15,
+                    self._client.search_messages(query=query, count=count, sort=sort, page=page),
+                    timeout=timeout_s,
                 )
             )
         except Exception as e:  # fail-closed（error code を上へ返す）
@@ -771,6 +785,7 @@ class SlackUserReader:
             "slack_user_search_checked",
             request_id=request_id,
             returned=len(out),
+            sort=sort,  # 固定語（timestamp / score）。並び順ごとの件数・latency を比べる用
             latency_ms=int((time.perf_counter() - start) * 1000),
         )
         return SlackSearchRead(matches=tuple(out), total=total)
