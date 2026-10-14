@@ -32,6 +32,8 @@ P1 スコープ: **テキスト返答のみ**。docx/xlsx/pdf/pptx を作って�
      bot が取れなければ「取り込めなかった」と正直に言う（添付し直しを頼まない）。
   L3 情報漏れの規則（permalink.may_repost）: 本人 DM での依頼か、同じチャンネルの投稿か、
      公開ファイルのときだけ中身を出し、元ファイルを依頼元へ添付し直す。それ以外は一様文。
+     別チャンネルからの依頼で、依頼元が社外と共有（Slack Connect）されていれば出さない
+     （本人の xoxp で conversations.info。確かめられなければ出さない）。
   L4 書き込みは元ファイルの添付 1 回だけ（files.upload v2）。ログは件数・error code のみ。
 
 3 層分離: 本ファイルは Skill 層。slack_sdk / boto3 は触らず adapters 経由。
@@ -520,6 +522,20 @@ class AttachmentAssistSkill(BaseSkill[AttachmentAssistInput, AttachmentAssistOut
             source_channel=link.channel_id,
             file_is_public=False,
         )
+        if restricted and not is_private_surface(origin, True):
+            # 別チャンネルからの依頼で、依頼元が社外と共有（Slack Connect）されているなら出さない。
+            # 公開チャンネルの公開ファイルでも、社外の参加者に見える場所へ添付し直すことになるため。
+            # 確かめられないときも出さない（権限不足は再連携の案内）。
+            sharing = reader.channel_sharing_checked(origin, ctx.request_id)
+            if sharing.error in _RECONNECT_CODES:
+                return self._not_connected(ctx, mode)
+            if sharing.error or sharing.external:
+                log.info(
+                    "attachment_assist_permalink_origin_shared",
+                    external=sharing.external,
+                    slack_error=sharing.error,
+                )
+                return self._permalink_fail(deny_key, mode, error="not_found")
         if restricted:
             # 別チャンネルからの依頼: 公開ファイルだけ。理由や件数も出さない（存在を言わない）。
             candidates = [
