@@ -12,7 +12,7 @@ from typing import Any
 import structlog
 
 from teamagent.mcp_gateway import detached_jobs, direct_summary
-from teamagent.skills.search.campaign_files import VIDEO_METRICS_HEADING
+from teamagent.skills.search.campaign_files import VIDEO_METRICS_HEADING, strip_video_numbers
 
 logger = structlog.get_logger(__name__)
 ENABLED_ENV = "USE_DIRECT_VIDEO_METRICS_POST"
@@ -45,6 +45,22 @@ def extract_section(answer: str) -> tuple[str, str, str] | None:
     return answer[: heading.start()], answer[heading.start() : end], answer[end:]
 
 
+def _strip_hit_numbers(data: dict[str, Any], posted: str) -> None:
+    """モデルへ返す hits の本文からも、投稿した節に載った動画の数字を抜く。
+
+    answer の置換だけでは並べ直された。
+
+    10-14 の DM 実機（r55）で、answer の節を置き換えても、モデルが hits の本文
+    （施策実績の上位投稿の行）から再生・保存を拾って並べ直した。
+    """
+    hits = data.get("hits")
+    if not isinstance(hits, list):
+        return
+    for hit in hits:
+        if isinstance(hit, dict) and isinstance(hit.get("content"), str):
+            hit["content"] = strip_video_numbers(hit["content"], posted)
+
+
 def maybe_post(
     data: dict[str, Any], *, verified_caller: Any, metadata: dict[str, Any], request_id: str
 ) -> None:
@@ -70,6 +86,7 @@ def maybe_post(
                 reason = "post_status"
             if outcome in {direct_summary.POSTED, direct_summary.UNCERTAIN}:
                 data["answer"] = section[0] + POSTED_TEXT + section[2]
+                _strip_hit_numbers(data, section[1])
     logger.info(
         "search_video_metrics_direct_post",
         request_id=request_id,
