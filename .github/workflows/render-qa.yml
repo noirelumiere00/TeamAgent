@@ -1,0 +1,93 @@
+# 描画 QA（render-qa）のイメージをビルドし、合成の見本デッキで「収まる版は通り、はみ出す版は捕まる」ことを確かめる。
+# 手元・CI 用（本番の便には入れない・2026-10-12 小俣さん判断）。社内ネットワークでは Cloudflare Gateway が
+# LibreOffice の取得を止めるため、イメージのビルドはここ（GitHub の runner）で行う。
+name: render-qa
+
+on:
+  workflow_dispatch:
+  pull_request:
+    branches: [dev]
+    paths:
+      - ".github/workflows/render-qa.yml"
+      - "infra/docker/Dockerfile.teamagent-render-qa"
+      - "infra/docker/Dockerfile.teamagent-render-qa.dockerignore"
+      - "infra/docker/render-qa-apk.lock"
+      - "infra/docker/render-qa/**"
+      - "src/teamagent/media/render_qa*"
+      - "src/teamagent/media/deck_qa.py"
+      - "scripts/deck_render_qa.py"
+      - "scripts/render_qa_smoke_decks.py"
+      - "pyproject.toml"
+      - "uv.lock"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: render-qa-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-and-smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          persist-credentials: false
+
+      - name: Build the render-qa image
+        env:
+          DOCKER_BUILDKIT: "1"
+        run: docker build -f infra/docker/Dockerfile.teamagent-render-qa -t teamagent-render-qa:ci .
+
+      - name: Make synthetic decks (inside the image, no network)
+        run: |
+          mkdir -p "$RUNNER_TEMP/decks"
+          chmod 777 "$RUNNER_TEMP/decks"
+          docker run --rm --network none \
+            -v "$PWD/scripts/render_qa_smoke_decks.py:/smoke.py:ro" \
+            -v "$RUNNER_TEMP/decks:/out" \
+            --entrypoint python teamagent-render-qa:ci /smoke.py /out
+          ls -la "$RUNNER_TEMP/decks"
+
+      - name: Diagnose fonts (which fonts LibreOffice actually embedded)
+        if: always()
+        run: |
+          docker run --rm --network none --read-only --tmpfs /tmp -v "$RUNNER_TEMP/decks:/in:ro" \
+            --entrypoint sh teamagent-render-qa:ci -c '
+              mkdir -p /tmp/o && cd /tmp && soffice --headless --nologo --norestore \
+                -env:UserInstallation=file:///tmp/lo --convert-to pdf --outdir /tmp/o /in/clean.pptx >/dev/null 2>&1
+              python -c "
+          from pdfminer.high_level import extract_pages
+          from pdfminer.layout import LTChar, LTTextContainer
+          names = set()
+          for page in extract_pages(\"/tmp/o/clean.pdf\"):
+              stack = list(page)
+              while stack:
+                  item = stack.pop()
+                  if isinstance(item, LTChar):
+                      names.add(item.fontname)
+                  elif hasattr(item, \"__iter__\"):
+                      stack.extend(item)
+          print(sorted(names))
+          "
+            ' 2>&1 | tail -5 || true
+
+      - name: The deck that fits passes
+        run: |
+          python3 scripts/deck_render_qa.py "$RUNNER_TEMP/decks/clean.pptx" \
+            --image teamagent-render-qa:ci --json --out "$RUNNER_TEMP/out-clean" | tee "$RUNNER_TEMP/clean.json"
+          # 「確認できず（unavailable）」で素通りさせない。収まる版は ok であること。
+          grep -q '"status": "ok"' "$RUNNER_TEMP/clean.json"
+
+      - name: The deck that overflows is caught
+        run: |
+          set +e
+          python3 scripts/deck_render_qa.py "$RUNNER_TEMP/decks/overflow.pptx" \
+            --image teamagent-render-qa:ci --json --out "$RUNNER_TEMP/out-overflow" > "$RUNNER_TEMP/overflow.json"
+          code=$?
+          set -e
+          cat "$RUNNER_TEMP/overflow.json"
+          test "$code" = 1
+          grep -q '"text_overflow_bottom"' "$RUNNER_TEMP/overflow.json"

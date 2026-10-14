@@ -2299,6 +2299,19 @@ wheels = [
 ]
 
 [[package]]
+name = "pdfminer-six"
+version = "20260107"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "charset-normalizer" },
+    { name = "cryptography" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/34/a4/5cec1112009f0439a5ca6afa8ace321f0ab2f48da3255b7a1c8953014670/pdfminer_six-20260107.tar.gz", hash = "sha256:96bfd431e3577a55a0efd25676968ca4ce8fd5b53f14565f85716ff363889602", size = 8512094, upload-time = "2026-01-07T13:29:12.937Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/20/8b/28c4eaec9d6b036a52cb44720408f26b1a143ca9bce76cc19e8f5de00ab4/pdfminer_six-20260107-py3-none-any.whl", hash = "sha256:366585ba97e80dffa8f00cebe303d2f381884d8637af4ce422f1df3ef38111a9", size = 6592252, upload-time = "2026-01-07T13:29:10.742Z" },
+]
+
+[[package]]
 name = "pexpect"
 version = "4.9.0"
 source = { registry = "https://pypi.org/simple" }
@@ -3911,6 +3924,16 @@ media-runtime = [
     { name = "weasyprint" },
     { name = "yt-dlp" },
 ]
+render-qa-font-build = [
+    { name = "fonttools" },
+]
+render-qa-runtime = [
+    { name = "lxml" },
+    { name = "pdfminer-six" },
+    { name = "pillow" },
+    { name = "pydantic" },
+    { name = "python-pptx" },
+]
 
 [package.metadata]
 requires-dist = [
@@ -3978,6 +4001,14 @@ media-runtime = [
     { name = "python-pptx", specifier = "==1.0.2" },
     { name = "weasyprint", specifier = ">=69.0" },
     { name = "yt-dlp", specifier = "==2026.8.19" },
+]
+render-qa-font-build = [{ name = "fonttools", specifier = ">=4.55.0" }]
+render-qa-runtime = [
+    { name = "lxml", specifier = ">=5.3.0" },
+    { name = "pdfminer-six", specifier = ">=20250506" },
+    { name = "pillow", specifier = "==12.3.0" },
+    { name = "pydantic", specifier = ">=2.9.0" },
+    { name = "python-pptx", specifier = "==1.0.2" },
 ]
 
 [[package]]
