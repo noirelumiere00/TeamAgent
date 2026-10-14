@@ -17,6 +17,7 @@ CLAUDE.md 6-bis Adapter 層。connect_web から slack_sdk を直接呼ばない
 
 from __future__ import annotations
 
+import html
 import os
 import re
 import time
@@ -45,8 +46,10 @@ _SKIP_SUBTYPES: Final = frozenset(
 # 本人専用の一回限りのリンク。連携の開始 URL（Google / Slack）と、署名付き S3 URL。
 _SECRET_URL_RES: Final = (
     re.compile(r"https?://[^\s|<>]*/(?:oauth2|slack/oauth)/start/[^\s|<>]*", re.IGNORECASE),
+    # Slack は本文の & を &amp; で返すので、区切りは ? / & / &amp; のどれでもよい。
     re.compile(
-        r"https?://[^\s|<>]*[?&](?:X-Amz-Signature|X-Amz-Credential|X-Amz-Security-Token)=[^\s|<>]*",
+        r"https?://[^\s|<>]*(?:[?&]|&amp;)"
+        r"(?:X-Amz-Signature|X-Amz-Credential|X-Amz-Security-Token)=[^\s|<>]*",
         re.IGNORECASE,
     ),
 )
@@ -112,7 +115,7 @@ class DmRead:
 
 
 def _is_secret_url(url: str) -> bool:
-    return any(r.search(url) for r in _SECRET_URL_RES)
+    return any(r.search(url) or r.search(html.unescape(url)) for r in _SECRET_URL_RES)
 
 
 def redact_secret_links(text: str) -> str:

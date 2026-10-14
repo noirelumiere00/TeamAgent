@@ -138,6 +138,17 @@ def test_one_time_links_are_masked_but_ordinary_links_stay() -> None:
     assert "<https://connect.newstv.co.jp/r/tok123|レポート>" in out
 
 
+def test_presigned_url_in_slack_entity_form_is_masked() -> None:
+    # Slack は本文の & を &amp; で返す（署名が 2 つ目以降の引数のとき）
+    text = (
+        "<https://b.s3.ap-northeast-1.amazonaws.com/x.pptx?X-Amz-Algorithm=A&amp;X-Amz-Signature=abc|資料>"
+        " と https://b.s3.amazonaws.com/y.pdf?response-content-type=a&amp;X-Amz-Credential=k"
+    )
+    out = dh.redact_secret_links(text)
+    assert "X-Amz-Signature" not in out and "X-Amz-Credential" not in out
+    assert out.count(dh.SECRET_LINK_MASK) == 2 and "資料" in out
+
+
 # ── 区切り ─────────────────────────────────────────────────────────────────
 
 

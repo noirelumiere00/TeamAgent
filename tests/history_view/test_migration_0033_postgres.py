@@ -189,13 +189,15 @@ def test_migration_avoids_on_conflict_and_returning() -> None:
 
 def _audit_adapter(env: HvDb) -> Any:
     import psycopg
+    from psycopg.rows import dict_row
 
     from teamagent.adapters.history_audit import HistoryAudit
 
     @contextmanager
     def factory(role: str) -> Any:
-        # 本番の PgVectorClient.connection(app_role=…) と同じく SET ROLE してから使う
-        with psycopg.connect(env.migrator_dsn) as conn:
+        # 本番の PgVectorClient.connection(app_role=…) と同じく SET ROLE してから使う。
+        # 行の形も本番（_connect_pg の row_factory=dict_row）に合わせる（tuple だと row[0] の誤りを見逃す）。
+        with psycopg.connect(env.migrator_dsn, row_factory=dict_row) as conn:
             with conn.cursor() as cur:
                 cur.execute(f"SET ROLE {role}")
             yield conn

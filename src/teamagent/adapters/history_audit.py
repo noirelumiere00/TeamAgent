@@ -92,13 +92,17 @@ class HistoryAudit:
             raise HistoryAuditError("bad_argument")
         with self._txn() as cur:
             cur.execute(
-                "SELECT public.history_view_record(%s, %s, %s, %s, %s)",
+                "SELECT public.history_view_record(%s, %s, %s, %s, %s) AS ok",
                 (admin_email.strip().lower(), team_id, slack_user_id, int(days), reason),
             )
             row = cur.fetchone()
-        if not (row and row[0] is True):
-            logger.error("history_audit_not_confirmed")
-            raise HistoryAuditError("not_confirmed")
+            # 本番の PgVectorClient は row_factory=dict_row（行は dict）。
+            # tuple の接続でも読めるようにする。
+            ok = row.get("ok") if isinstance(row, dict) else (row[0] if row else None)
+            if ok is not True:
+                # トランザクションの中で投げる＝監査が確定していない扱い（読みに進ませない）
+                logger.error("history_audit_not_confirmed")
+                raise HistoryAuditError("not_confirmed")
         logger.info("history_audit_recorded")
 
 
