@@ -375,11 +375,49 @@ def video_stats_footer(hits: Sequence[SearchHit], answer: str) -> str:
     return VIDEO_METRICS_HEADING + "\n" + "\n\n".join(blocks)
 
 
+#: 直接投稿の後、モデルへ返す本文の「上位の投稿」見出し（数字とリンクは別の投稿にある）。
+VIDEO_ROWS_POSTED_HEADING = "上位の投稿（再生・保存の数字とリンクは別の投稿でお届け済み）:"
+
+
+def strip_video_numbers(content: str) -> str:
+    """施策実績の本文から、動画ごとの再生・保存・リンクと合計再生数の行を抜く。
+
+    📊 の節を DM へ直接投稿した後に、モデルが同じ数字を丸めて並べ直さないようにする
+    （10-13・10-14 の DM 実機で、注意書きだけでは並べ直しが止まらなかった）。
+    投稿文の中身は残すので、「何が刺さったか」の説明はできる。上位の投稿の見出しが無い
+    本文（施策実績以外）はそのまま返す。
+    """
+    if _TOP_POSTS_RE.search(content) is None:
+        return content
+    out: list[str] = []
+    in_top = False
+    for line in content.splitlines():
+        if _TOP_POSTS_RE.fullmatch(line):
+            in_top = True
+            out.append(VIDEO_ROWS_POSTED_HEADING)
+            continue
+        if _TOTAL_PLAYS_RE.match(line):
+            continue
+        if in_top:
+            if re.match(r"^\s*投稿文の特徴[:：]", line):
+                in_top = False
+            elif row := _VIDEO_ROW_RE.fullmatch(line):
+                preview = row["preview"]
+                url = _VIDEO_URL_RE.search(preview)
+                if url:
+                    preview = preview[: url.start()].strip()
+                out.append(f"{row['rank']}. {preview}")
+                continue
+        out.append(line)
+    return "\n".join(out)
+
+
 __all__ = [
     "MAX_FILES_PER_CAMPAIGN",
     "SHEET_ONLY_NOTE",
     "SIMILARITY_MIN",
     "UNKNOWN_INDUSTRY",
+    "VIDEO_ROWS_POSTED_HEADING",
     "advertiser_pattern",
     "attach_related_files",
     "campaign_header",
@@ -391,5 +429,6 @@ __all__ = [
     "links_footer",
     "pick_related_files",
     "scope_by_industry",
+    "strip_video_numbers",
     "video_stats_footer",
 ]

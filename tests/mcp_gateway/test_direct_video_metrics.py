@@ -217,3 +217,79 @@ def test_posted_text_tells_aico_not_to_repeat_the_numbers() -> None:
     # 10-13 の DM 実機: 別の投稿の後に Aico が同じ数字を丸めて並べ直した。置き換えの 1 行で止める。
     assert video.POSTED_TEXT.startswith("📊 ")
     assert "説明では数字を並べ直しません" in video.POSTED_TEXT
+
+
+def _ham_content() -> str:
+    hit = _video_campaign(
+        10,
+        "伊藤ハム",
+        "ハンバーグ",
+        [
+            _video(
+                "https://www.tiktok.com/@a/video/1",
+                "このハンバーグ、アレンジが優秀すぎた",
+                507700,
+                129,
+            ),
+            _video("https://www.tiktok.com/@b/video/2", "チーズ好きは絶対ハマる", 331300, 73),
+        ],
+    )
+    return hit.content
+
+
+@pytest.mark.parametrize("outcome", [direct_summary.POSTED, direct_summary.UNCERTAIN])
+def test_posted_also_strips_video_numbers_from_hits(
+    monkeypatch: pytest.MonkeyPatch, outcome: str
+) -> None:
+    # 10-14 の DM 実機（r55）: answer の節を置き換えても、hits の本文から数字を拾って並べ直した
+    _enable(monkeypatch)
+    monkeypatch.setattr(detached_jobs, "post_to_origin_status", lambda *a, **k: outcome)
+    ham = _ham_content()
+    other = "普通の資料。再生 100、保存 3 と書いてあっても施策実績でなければ触らない"
+    data = {"answer": ANSWER, "hits": [{"content": ham}, {"content": other}, {"chunk_id": 3}]}
+    video.maybe_post(
+        data,
+        verified_caller=_claim(),
+        metadata={"identity_verified": True, "user_email": ME},
+        request_id="r",
+    )
+    stripped = data["hits"][0]["content"]  # type: ignore[index]
+    for gone in (
+        "再生 507,700",
+        "保存 129",
+        "再生 331,300",
+        "https://www.tiktok.com",
+        "再生数: 合計",
+    ):
+        assert gone not in stripped, gone
+    assert (
+        "このハンバーグ、アレンジが優秀すぎた" in stripped and "チーズ好きは絶対ハマる" in stripped
+    )
+    assert campaign_files.VIDEO_ROWS_POSTED_HEADING in stripped
+    assert "投稿本数: 2 本" in stripped and "投稿文の特徴" in stripped
+    assert data["hits"][1] == {"content": other} and data["hits"][2] == {"chunk_id": 3}  # type: ignore[index]
+
+
+def test_failed_post_keeps_hit_numbers(monkeypatch: pytest.MonkeyPatch) -> None:
+    _enable(monkeypatch)
+    monkeypatch.setattr(
+        detached_jobs, "post_to_origin_status", lambda *a, **k: direct_summary.FAILED
+    )
+    ham = _ham_content()
+    data = {"answer": ANSWER, "hits": [{"content": ham}]}
+    video.maybe_post(
+        data,
+        verified_caller=_claim(),
+        metadata={"identity_verified": True, "user_email": ME},
+        request_id="r",
+    )
+    assert data == {"answer": ANSWER, "hits": [{"content": ham}]}
+
+
+def test_strip_video_numbers_leaves_other_text_and_is_idempotent() -> None:
+    ham = _ham_content()
+    once = campaign_files.strip_video_numbers(ham)
+    assert campaign_files.strip_video_numbers(once) == once
+    assert campaign_files.strip_video_numbers("施策実績ではない本文\n1. 再生 5、保存 1") == (
+        "施策実績ではない本文\n1. 再生 5、保存 1"
+    )
