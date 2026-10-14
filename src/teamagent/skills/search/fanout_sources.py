@@ -511,6 +511,7 @@ def karte_lookup(
                         client_name=_escape_like(name),
                         limit=KARTE_PER_NAME_LIMIT,
                         request_id=request_id,
+                        log_client=False,
                     )
                 searched.append(name)
                 collected.extend(rows)

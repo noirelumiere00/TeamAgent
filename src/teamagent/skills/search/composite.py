@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import os
 import re
+import time
 import unicodedata
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
@@ -256,6 +257,7 @@ def lookup_slack(
     query: str,
     metadata: Mapping[str, Any],
     request_id: str,
+    fanout: bool = False,
 ) -> SlackLookup:
     """本人の Slack を search.messages で探し、表示してよい上位 5 件を返す（例外は投げない）。"""
     try:
@@ -265,6 +267,7 @@ def lookup_slack(
             query=query,
             metadata=metadata,
             request_id=request_id,
+            fanout=fanout,
         )
     except Exception as exc:  # Slack 側の想定外で金庫の検索を落とさない
         logger.warning(
@@ -280,6 +283,7 @@ def _lookup_slack(
     query: str,
     metadata: Mapping[str, Any],
     request_id: str,
+    fanout: bool = False,
 ) -> SlackLookup:
     from teamagent.skills.slack_search.skill import _partition
 
@@ -308,7 +312,31 @@ def _lookup_slack(
         reader_factory = SlackUserReader.from_user_token
     reader = reader_factory(tok.access_token)
 
-    result = reader.search_checked(slack_query_terms(query), request_id, count=SLACK_FETCH_COUNT)
+    terms = slack_query_terms(query)
+    if fanout:
+        deadline_at = time.perf_counter() + 8.0
+        sort: Literal["timestamp", "score"] = (
+            "timestamp"
+            if any(word in query for word in ("最新", "直近", "最近", "今週"))
+            else "score"
+        )
+        result = reader.search_checked(
+            terms,
+            request_id,
+            count=SLACK_FETCH_COUNT,
+            sort=sort,
+            timeout_s=max(0.001, deadline_at - time.perf_counter()),
+        )
+        if not result.error and not result.matches and len(terms.split()) == 3:
+            result = reader.search_checked(
+                " ".join(terms.split()[:2]),
+                request_id,
+                count=SLACK_FETCH_COUNT,
+                sort=sort,
+                timeout_s=max(0.001, deadline_at - time.perf_counter()),
+            )
+    else:
+        result = reader.search_checked(terms, request_id, count=SLACK_FETCH_COUNT)
     if result.error:
         if result.error in _RECONNECT_CODES:
             return SlackLookup(status="not_connected", reason="reconnect_required")

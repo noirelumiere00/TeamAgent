@@ -291,8 +291,8 @@ def test_scope_line_is_always_added_even_without_head_or_sections() -> None:
     answer = compose_answer(
         head="", sections=Sections(), lanes={"vault": LaneStatus.zero(queries=["宅配 事例"])}
     )
-    assert answer == "探した範囲: 金庫 0件（『宅配 事例』）"
-    assert compose_answer(head="", sections=Sections(), lanes={}) == "探した範囲: 記録なし"
+    assert answer == "探した範囲（まとめて検索）: 金庫 0件（『宅配 事例』）"
+    assert compose_answer(head="", sections=Sections(), lanes={}) == "探した範囲（まとめて検索）: 記録なし"
 
 
 def test_each_entry_is_one_line_with_date_industry_and_link() -> None:
@@ -558,14 +558,14 @@ def test_special_markup_in_titles_excerpts_and_names_is_neutralized() -> None:
     assert "🔎 近い業種・言い換え（『＜!everyone＞宅配』そのものの資料ではありません）" in answer
     # 問いの語の『』は外して 1 組だけで囲む。
     assert answer.endswith(
-        "探した範囲: 金庫 ✓1件（『＜!channel＞ 宅配 事例』『宅配』）・Slack ✓1件"
+        "探した範囲（まとめて検索）: 金庫 ✓1件（『＜!channel＞ 宅配 事例』『宅配』）・Slack ✓1件"
     )
 
 
 def test_query_echo_masks_pii_like_scope_footer() -> None:
     line = scope_line({"vault": LaneStatus.zero(queries=["taro.yamada@example.com の資料"])})
     assert "taro.yamada@example.com" not in line
-    assert line.startswith("探した範囲: 金庫 0件（『")
+    assert line.startswith("探した範囲（まとめて検索）: 金庫 0件（『")
 
 
 @pytest.mark.parametrize(
@@ -676,7 +676,7 @@ def test_scope_line_states(name: str, status: LaneStatus, text: str) -> None:
 def test_scope_line_order_is_fixed_and_counts_deals() -> None:
     lanes = dict(reversed(list(LANES_ALL.items())))  # 渡す順に依らない
     assert scope_line(lanes, deal_count=1) == (
-        "探した範囲: 金庫 ✓6件（『宅配 事例』・うち案件 1件）"
+        "探した範囲（まとめて検索）: 金庫 ✓6件（『宅配 事例』・うち案件 1件）"
         "・言い換え ✓1件（『物流 事例』『配送 事例』）"
         "・Slack ✓1件"
         "・カルテ ✓最新1件（『北都フーズ』）"
@@ -693,7 +693,7 @@ def test_deal_count_counts_the_same_document_once() -> None:
         vault_hits=[_deal(0.7), _hit(0.6, chunk_id=2, **_deal().metadata)], url_of=_url_of
     )
     answer = compose_answer(head="要約", sections=sections, lanes={"vault": LaneStatus.found(2)})
-    assert answer.endswith("探した範囲: 金庫 ✓2件（うち案件 1件）")
+    assert answer.endswith("探した範囲（まとめて検索）: 金庫 ✓2件（うち案件 1件）")
     assert _section_counts(answer)["deal"] == 1
 
 
@@ -709,9 +709,9 @@ def test_failed_lane_is_never_written_as_zero(reason: str) -> None:
 
 def test_unknown_reason_codes_use_fixed_words_not_the_code() -> None:
     failed = scope_line({"vault": LaneStatus.failed("psycopg.errors.QueryCanceled: secret")})
-    assert failed == "探した範囲: 金庫 ✗ 探せませんでした（金庫に無いという意味ではありません）"
+    assert failed == "探した範囲（まとめて検索）: 金庫 ✗ 探せませんでした（金庫に無いという意味ではありません）"
     skipped = scope_line({"case": LaneStatus.skipped("<!channel>")})
-    assert skipped == "探した範囲: 事例 —（条件に合わず使っていません）"
+    assert skipped == "探した範囲（まとめて検索）: 事例 —（条件に合わず使っていません）"
 
 
 def test_found_with_zero_count_is_zero() -> None:
@@ -722,7 +722,7 @@ def test_found_with_zero_count_is_zero() -> None:
 def test_queries_are_capped_and_deduplicated() -> None:
     status = LaneStatus.found(1, queries=["a", "a", "b", "c", "d", "x" * 80])
     text = scope_line({"vault": status})
-    assert text == "探した範囲: 金庫 ✓1件（『a』『b』『c』）"
+    assert text == "探した範囲（まとめて検索）: 金庫 ✓1件（『a』『b』『c』）"
 
 
 # ── Slack の状態（composite.SlackLookup の理由コード）──────────────────────────
@@ -771,7 +771,7 @@ def test_lane_from_slack_takes_over_status_note_roles() -> None:
     assert "「連携」と話しかけると一緒に探せます" in scope_line({"slack": not_connected})
     assert "Slack に無いという意味ではありません" in scope_line({"slack": failed})
     assert scope_line({"slack": hidden}) == (
-        "探した範囲: Slack 0件（『宅配』・非公開の場所の一致 2件は DM でだけ出せます）"
+        "探した範囲（まとめて検索）: Slack 0件（『宅配』・非公開の場所の一致 2件は DM でだけ出せます）"
     )
 
 

@@ -732,6 +732,7 @@ class SlackUserReader:
         count: int = 10,
         page: int = 1,
         sort: SlackSearchSort = "timestamp",
+        timeout_s: float = 15.0,
     ) -> SlackSearchRead:
         """search.messages を **error code つき** で呼ぶ（1 ページ・読み取り専用）。
 
@@ -752,7 +753,7 @@ class SlackUserReader:
             resp = _run_sync(
                 lambda: asyncio.wait_for(
                     self._client.search_messages(query=query, count=count, sort=sort, page=page),
-                    timeout=15,
+                    timeout=timeout_s,
                 )
             )
         except Exception as e:  # fail-closed（error code を上へ返す）

@@ -44,6 +44,7 @@ def suggest_next_move(
     delivery_offered: bool,
     query_client: str | None,
     requester: str | None,
+    fanout: bool = False,
 ) -> str | None:
     """結果に添える次の一手（1 個）。何も勧めないなら None。
 
@@ -57,6 +58,8 @@ def suggest_next_move(
     """
     if not suggestions_enabled():
         return None
+    if fanout:
+        return DELIVER_NEXT if found and tool_enabled("USE_KNOWLEDGE_DELIVER") else None
     if delivery_offered:
         # 本文の提案と同じ一手にそろえる（次の一手は 1 個）。
         return DELIVER_NEXT

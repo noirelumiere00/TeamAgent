@@ -116,8 +116,10 @@ CASE_NG_MARK = "社外展開NG（社内のみ）"
 CASE_UNKNOWN_MARK = "社外利用は要確認"
 #: 案件が 🤝 以外の節に出たときの印。
 DEAL_MARK = "案件（実績ではありません）"
-#: 探した範囲の書き出し（SOUL の条件「探した範囲:」を含む結果のときだけ）とこの文字列を合わせる。
-SCOPE_PREFIX = "探した範囲: "
+#: 探した範囲の書き出し。SOUL の条件はこの文字列で fan-out の答えだけを見分ける。
+#: 今の検索（alias_expansion.scope_footer）も「探した範囲: 」で始まるので、同じ書き出しにしない
+#: （同じだと SOUL の「2 本目のツールを呼ばない」が fan-out でない全員に効く・10-14 Claude 審査）。
+SCOPE_PREFIX = "探した範囲（まとめて検索）: "
 MORE = "…"
 
 _TITLE_CHARS = 50
@@ -161,6 +163,7 @@ class Sections:
     entries: Mapping[SectionKey, Sequence[Entry]] = field(default_factory=dict)
     karte_client: str = ""
     expand_subject: str = ""
+    required_counts: Mapping[SectionKey, int] = field(default_factory=dict)
 
     def of(self, key: SectionKey) -> Sequence[Entry]:
         return self.entries.get(key, ())
@@ -359,9 +362,16 @@ def _truthy(value: object) -> bool:
 
 def classify_hit(meta: Mapping[str, Any]) -> SectionKey:
     """ヒットの metadata から節を決める（事例・施策実績 → 案件 → 営業FB → 調べもの → 資料）。"""
-    if _truthy(meta.get("campaign_aggregate")) or _truthy(meta.get("case_corpus")):
+    if (
+        _truthy(meta.get("campaign_aggregate"))
+        or _truthy(meta.get("case_corpus"))
+        or meta.get("case_source") in ("deck", "sheet", "campaign_db")
+        or meta.get("cls_doc_type") == "事例"
+    ):
         return "case"
-    if str(meta.get("topic") or "").strip() == DEAL_TOPIC:
+    if str(meta.get("topic") or "").strip() == DEAL_TOPIC or DEAL_TOPIC in str(
+        meta.get("channel_name") or ""
+    ):
         return "deal"
     if _truthy(meta.get("is_sales_fb")):
         return "karte"
@@ -614,7 +624,10 @@ def _blocks(sections: Sections, caps: Mapping[SectionKey, int]) -> list[str]:
     shown: set[tuple[str, ...]] = set()
     blocks: list[str] = []
     for key in SECTION_ORDER:
-        cap = min(caps.get(key, PER_SECTION_MAX), PER_SECTION_MAX)
+        cap = min(
+            caps.get(key, PER_SECTION_MAX),
+            max(PER_SECTION_MAX, sections.required_counts.get(key, 0)),
+        )
         if cap <= 0:
             continue
         lines: list[str] = []
@@ -743,7 +756,14 @@ def compose_answer(
     """
     # 「うち案件 N件」は同じ資料（URL）の重複を 1 件と数える（描画の重複除去と同じ鍵）。
     scope = scope_line(lanes, deal_count=len({_identity(e) for e in sections.of("deal")}))
-    caps: dict[SectionKey, int] = dict.fromkeys(SECTION_ORDER, PER_SECTION_MAX)
+    caps: dict[SectionKey, int] = {
+        key: max(PER_SECTION_MAX, sections.required_counts.get(key, 0)) for key in SECTION_ORDER
+    }
+    # 名指し資料を優先する。要約が長いときは先に要約だけを切る。
+    if sections.required_counts:
+        blocks = _blocks(sections, caps)
+        budget = limit - len(_join("", blocks, tail, scope)) - 2
+        head = _clip_block(head, max(0, budget))
 
     def render(text_head: str, text_tail: str = tail) -> str:
         return _join(text_head, _blocks(sections, caps), text_tail, scope)
@@ -753,14 +773,14 @@ def compose_answer(
         return text
     # 段 1: 各節を 2→1 件（削る順に）。
     for key in TRIM_ORDER:
-        if caps[key] > 1:
-            caps[key] = 1
+        if caps[key] > max(1, sections.required_counts.get(key, 0)):
+            caps[key] = max(1, sections.required_counts.get(key, 0))
             text = render(head)
             if len(text) <= limit:
                 return text
     # 段 2・3: 🔎 を外し、残りの節も削る順に丸ごと外す。
     for key in TRIM_ORDER:
-        if caps[key] > 0:
+        if caps[key] > 0 and not sections.required_counts.get(key):
             caps[key] = 0
             text = render(head)
             if len(text) <= limit:

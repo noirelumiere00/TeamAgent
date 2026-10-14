@@ -298,7 +298,7 @@ class SlackHitOut(BaseModel):
 
 
 # 値が None のときはツール結果から落とすキー（複合検索 OFF のとき出力を 1 バイトも変えないため）。
-_OMIT_WHEN_NONE: tuple[str, ...] = ("slack_hits", "slack_status", "suggested_next")
+_OMIT_WHEN_NONE: tuple[str, ...] = ("slack_hits", "slack_status", "suggested_next", "sources")
 
 
 class SearchOutput(BaseModel):
@@ -330,6 +330,7 @@ class SearchOutput(BaseModel):
         default=None,
         description="次の一手（既存ツールを 1 つだけ・提案のみ）。無ければ出さない",
     )
+    sources: list[dict[str, Any]] | None = Field(default=None)
     query_client: str | None = Field(
         default=None,
         description=(
