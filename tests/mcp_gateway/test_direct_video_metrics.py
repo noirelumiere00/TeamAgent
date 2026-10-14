@@ -10,8 +10,10 @@ from structlog.testing import capture_logs
 
 from teamagent.mcp_gateway import detached_jobs, direct_summary, server
 from teamagent.mcp_gateway import direct_video_metrics as video
+from teamagent.skills._shared.next_step import DELIVER_SUGGESTION
 from teamagent.skills.base import BaseSkill, SkillContext
-from teamagent.skills.search import campaign_files
+from teamagent.skills.search import campaign_files, composite
+from teamagent.skills.search.alias_expansion import scope_footer
 from teamagent.skills.search.schema import SearchInput, SearchOutput
 from tests.mcp_gateway.test_surface_video_followup import (
     CHANNEL,
@@ -35,6 +37,32 @@ SECTION = (
 PREFIX = "回答です。\n\n📎 施策のレポート・提案書\nhttps://example.test/report\n\n"
 SUFFIX = "\n\n📎 *資料リンク*\nhttps://example.test/file"
 ANSWER = PREFIX + SECTION + SUFFIX
+
+
+def _posted_slack_text(section: str) -> str:
+    """投稿関数が Slack 用に 1 回だけエスケープした後の SECTION（実投稿経路の出力）。"""
+    return (
+        section.replace("&", "&amp;")
+        .replace("<テーマ>", "&lt;テーマ&gt;")
+        .replace("https://example.test/video/1", "<https://example.test/video/1>")
+        .replace("https://example.test/video/2", "<https://example.test/video/2>")
+    )
+
+
+def _slack_status_lines() -> list[str]:
+    """search が 📊 の後へ "\\n\\n" でつなぐ状態行。composite.status_note の実出力をそのまま使う。"""
+    lookups = [
+        composite.SlackLookup(status="not_connected", reason="not_connected"),
+        composite.SlackLookup(status="not_connected", reason="reconnect_required"),
+        composite.SlackLookup(status="error", reason="search_failed"),
+        composite.SlackLookup(status="ok", reason="ok", hidden_count=2),
+    ]
+    notes = [composite.status_note(lookup) for lookup in lookups]
+    assert all(notes), "状態行が空になった（テストの前提が崩れた）"
+    return notes
+
+
+STATUS_IDS = ["not_connected", "reconnect_required", "search_failed", "hidden"]
 
 
 class _Search(BaseSkill[SearchInput, SearchOutput]):
@@ -87,20 +115,26 @@ async def test_posts_exact_section_and_replaces_only_section(
     assert result["answer"] == PREFIX + video.POSTED_TEXT + SUFFIX
     assert SECTION not in result["answer"] and HEADING not in result["answer"]
     assert slack.posts == [
-        {
-            "channel": DM,
-            "thread_ts": None,
-            "blocks": None,
-            "text": SECTION.replace("&", "&amp;")
-            .replace("<テーマ>", "&lt;テーマ&gt;")
-            .replace("https://example.test/video/1", "<https://example.test/video/1>")
-            .replace("https://example.test/video/2", "<https://example.test/video/2>"),
-        }
+        {"channel": DM, "thread_ts": None, "blocks": None, "text": _posted_slack_text(SECTION)}
     ]
     event = next(log for log in logs if log["event"] == "search_video_metrics_direct_post")
     assert event["outcome"] == "posted" and event["reason"] == "post_status"
     assert event["section_chars"] == len(SECTION)
     assert "食品" not in json.dumps(event, ensure_ascii=False) and "https://" not in str(event)
+
+
+@pytest.mark.parametrize("note", _slack_status_lines(), ids=STATUS_IDS)
+async def test_slack_status_line_stays_in_answer_without_source_links(
+    monkeypatch: pytest.MonkeyPatch, note: str
+) -> None:
+    # 10-14 の穴①（本番 USE_DIRECT_VIDEO_METRICS_POST=1）: 資料リンクの節が無い回は、
+    # "\n\n" でつながる ℹ️・🔒 の状態行が 📊 の節に巻き込まれ、DM への直接投稿の側へ移っていた。
+    _enable(monkeypatch)
+    slack = _FakeSlack()
+    monkeypatch.setattr(detached_jobs, "_slack_client", lambda timeout_seconds: slack)
+    result = await _dispatch(PREFIX + SECTION + "\n\n" + note)
+    assert [post["text"] for post in slack.posts] == [_posted_slack_text(SECTION)]
+    assert result["answer"] == PREFIX + video.POSTED_TEXT + "\n\n" + note
 
 
 @pytest.mark.parametrize("failure", ["not_ok", "timeout", "exception"])
@@ -186,6 +220,70 @@ def test_unexpected_post_exception_preserves_result(monkeypatch: pytest.MonkeyPa
 @pytest.mark.parametrize("suffix", ["", SUFFIX, "\n\n\n次の節", "\n\n探した範囲: 金庫"])
 def test_extract_preserves_all_characters_and_boundaries(suffix: str) -> None:
     assert video.extract_section(PREFIX + SECTION + suffix) == (PREFIX, SECTION, suffix)
+
+
+def _producer_lines_after_metrics() -> list[str]:
+    """search が 📊 の後ろへつなぎうる実際の行（作り手の関数・定数の出力をそのまま使う）。"""
+    return [
+        *_slack_status_lines(),
+        DELIVER_SUGGESTION,
+        scope_footer(["食品 動画"], slack=None),
+        scope_footer(
+            ["食品 動画"], slack=composite.SlackLookup(status="error", reason="search_failed")
+        ),
+    ]
+
+
+@pytest.mark.parametrize(
+    "line",
+    _producer_lines_after_metrics(),
+    ids=[*STATUS_IDS, "deliver", "scope_footer", "scope_footer_slack_failed"],
+)
+def test_producer_lines_after_metrics_stay_outside_section(line: str) -> None:
+    # 作り手が行頭の記号を変えたら、ここで赤になる（📊 の節への巻き込みを防ぐ）。
+    suffix = "\n\n" + line
+    assert video.extract_section(PREFIX + SECTION + suffix) == (PREFIX, SECTION, suffix)
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        pytest.param("📎 実ファイルをお送りしますか？", id="clip"),
+        pytest.param("📁 金庫の資料（2件）", id="folder"),
+        pytest.param("🏆 事例・施策実績（1件）", id="trophy"),
+        pytest.param("🤝 案件（決定・進行中の案件。実績ではありません）", id="handshake"),
+        pytest.param("🗂 A社のカルテ（最新2件）", id="dividers"),
+        pytest.param("🗂️ A社のカルテ（異体字セレクタ付き）", id="dividers_vs16"),
+        pytest.param("💬 Slack（あなたの Slack・3件）", id="speech"),
+        pytest.param("🗃 過去の調べもの（X・TikTok の調査結果）", id="filebox"),
+        pytest.param("🗃️ 過去の調べもの（異体字セレクタ付き）", id="filebox_vs16"),
+        pytest.param("🔎 近い業種・言い換え（『宅配』そのものの資料ではありません）", id="search"),
+        pytest.param("🌐 公開Web（他社・一般の情報で、自社の実績ではありません）", id="globe"),
+        pytest.param("ℹ️ Slack は未連携のため、金庫だけを探しました", id="info_vs16"),
+        pytest.param("ℹ Slack は未連携（異体字セレクタ無し）", id="info_bare"),
+        pytest.param("🔒 Slack の非公開の場所に一致が 1 件あります", id="lock"),
+        pytest.param("探した範囲: 金庫 ✓3件", id="scope_colon"),
+        pytest.param("探した範囲（コロン無し）", id="scope_bare"),
+    ],
+)
+@pytest.mark.parametrize("sep", ["\n", "\n\n"], ids=["one_newline", "blank_line"])
+def test_extract_stops_at_every_allowed_heading(line: str, sep: str) -> None:
+    suffix = sep + line + "\n・本文"
+    assert video.extract_section(PREFIX + SECTION + suffix) == (PREFIX, SECTION, suffix)
+
+
+@pytest.mark.parametrize(
+    "label",
+    [
+        pytest.param("C社 / 秋（投稿 3 本）", id="campaign"),
+        pytest.param("1. 12 再生・保存 3", id="row"),
+        pytest.param("⭐ 星印の施策", id="unlisted_emoji"),
+    ],
+)
+def test_extract_keeps_campaign_blocks_after_one_blank_line(label: str) -> None:
+    # 施策間の 1 空行は節の内側（見出しの許可リストに無い行は次の施策のブロック）。
+    section = SECTION + "\n\n" + label + "\n3. 10 再生・保存 1"
+    assert video.extract_section(PREFIX + section + SUFFIX) == (PREFIX, section, SUFFIX)
 
 
 @pytest.mark.parametrize("answer", ["", "数字なし", "説明文 " + SECTION, HEADING + "違う\n本文"])
