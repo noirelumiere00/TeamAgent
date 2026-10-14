@@ -12,6 +12,7 @@ from pathlib import Path
 
 from pptx import Presentation
 from pptx.enum.text import MSO_AUTO_SIZE
+from pptx.oxml.ns import qn
 from pptx.util import Inches, Pt
 
 
@@ -28,6 +29,10 @@ def _deck(text: str, height_in: float) -> Presentation:
         for run in paragraph.runs:
             run.font.size = Pt(18)
             run.font.name = "Yu Gothic UI"
+            # 本番の 83 枚のテンプレと同じく、和文（ea）も Yu Gothic UI を指定する。
+            rpr = run._r.get_or_add_rPr()
+            ea = rpr.makeelement(qn("a:ea"), {"typeface": "Yu Gothic UI"})
+            rpr.append(ea)
     return prs
 
 

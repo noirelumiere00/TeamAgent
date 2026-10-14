@@ -156,6 +156,12 @@ def build(source, style, output):
             cff.fontNames = [ps_name]
             top = cff.topDictIndex[0]
             top.FamilyName, top.FullName, top.FontName = family, family + " " + style, ps_name
+            # CID-keyed の FDArray にも元の名前（NotoSansCJKjp-Regular-…）が残るので付け替える。
+            # PDF に元の名前が出ると、代用書体が使われたのか Noto へ落ちたのかを区別できない。
+            for fd in getattr(top, "FDArray", None) or []:
+                name = getattr(fd, "FontName", None)
+                if isinstance(name, str) and "-" in name:
+                    fd.FontName = ps_name + "-" + name.rsplit("-", 1)[-1]
         font.save(output / (ps_name + ".otf"))
     finally:
         font.close()

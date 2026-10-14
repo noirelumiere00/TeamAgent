@@ -51,14 +51,28 @@ jobs:
             --entrypoint python teamagent-render-qa:ci /smoke.py /out
           ls -la "$RUNNER_TEMP/decks"
 
-      - name: Diagnose fonts (fc-match)
+      - name: Diagnose fonts (which fonts LibreOffice actually embedded)
         if: always()
         run: |
-          docker run --rm --entrypoint sh teamagent-render-qa:ci -c '
-            echo "== fc-list TA Palt"; fc-list | grep -i "palt" | head -4
-            echo "== conf.d"; ls /etc/fonts/conf.d | grep -i teamagent
-            for f in "ＭＳ Ｐゴシック" "Yu Gothic UI" "sans-serif:lang=ja" "sans-serif" "Noto Sans CJK JP"; do echo "== fc-match $f"; fc-match "$f"; done
-          ' 2>&1 | head -30 || true
+          docker run --rm --network none --read-only --tmpfs /tmp -v "$RUNNER_TEMP/decks:/in:ro" \
+            --entrypoint sh teamagent-render-qa:ci -c '
+              mkdir -p /tmp/o && cd /tmp && soffice --headless --nologo --norestore \
+                -env:UserInstallation=file:///tmp/lo --convert-to pdf --outdir /tmp/o /in/clean.pptx >/dev/null 2>&1
+              python -c "
+          from pdfminer.high_level import extract_pages
+          from pdfminer.layout import LTChar, LTTextContainer
+          names = set()
+          for page in extract_pages(\"/tmp/o/clean.pdf\"):
+              stack = list(page)
+              while stack:
+                  item = stack.pop()
+                  if isinstance(item, LTChar):
+                      names.add(item.fontname)
+                  elif hasattr(item, \"__iter__\"):
+                      stack.extend(item)
+          print(sorted(names))
+          "
+            ' 2>&1 | tail -5 || true
 
       - name: The deck that fits passes
         run: |
