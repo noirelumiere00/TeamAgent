@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import os
+import re
 import time
 from collections.abc import Callable, Iterator
 from concurrent.futures import Future, ThreadPoolExecutor
@@ -19,6 +20,7 @@ from teamagent.adapters.pgvector_client import SearchHit
 from teamagent.adapters.retry import RetryPolicy
 from teamagent.mcp_gateway.allowlist import email_allowed
 from teamagent.skills.base import SkillContext
+from teamagent.skills.search.answer_mode import classify_answer_mode
 from teamagent.skills.search.answer_sections import (
     LaneStatus,
     Sections,
@@ -54,6 +56,9 @@ from teamagent.skills.search.schema import RelatedFileOut, SearchHitOut, SearchI
 SLACK_DEADLINE_S = 8.0
 EXPAND_DEADLINE_S = 10.0
 SUMMARY_DEADLINE_S = 30.0
+LIST_FAST_HEAD = "検索で見つかった範囲の資料を一覧にしました（要約は省いています）。"
+# 既存の分類器が拾わない比較・効果の問いも、一覧語との併記で要約を落とさない。
+_LIST_FAST_ANALYSIS_RE = re.compile(r"比較|何が効|どれが効")
 T = TypeVar("T")
 LaneState = Literal["ok", "empty", "skipped", "not_connected", "timeout", "error"]
 
@@ -299,7 +304,16 @@ def run_fanout(skill: Any, input: SearchInput, ctx: SkillContext) -> SearchOutpu
     head, summary_cost = ("" if found else NOT_FOUND_HEAD), 0.0
     summary_state: LaneState = "skipped"
     summary_ms = 0
-    if found and input.include_answer:
+    list_fast = (
+        found
+        and input.include_answer
+        and os.environ.get("SEARCH_FANOUT_LIST_FAST", "") == "1"
+        and classify_answer_mode(input.query) == "list"
+        and not _LIST_FAST_ANALYSIS_RE.search(input.query)
+    )
+    if list_fast:
+        head = skill._append_campaign_footer(LIST_FAST_HEAD, summary_hits)
+    elif found and input.include_answer:
         summary_started = time.perf_counter()
 
         def summarize() -> tuple[str, float, LaneState]:
@@ -506,6 +520,7 @@ def run_fanout(skill: Any, input: SearchInput, ctx: SkillContext) -> SearchOutpu
     log.info(
         "search_latency_breakdown",
         fanout=True,
+        list_fast=list_fast,
         embed_ms=int(timings.get("embed_ms", 0)),
         retrieve_ms=vault_ms,
         converse_ms=summary_ms,
