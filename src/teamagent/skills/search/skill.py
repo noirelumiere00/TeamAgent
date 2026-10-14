@@ -77,6 +77,7 @@ from teamagent.skills.search.knowledge_query import (
     extract_knowledge_filters,
     extract_query_industry,
     is_campaign_results_intent,
+    is_video_solution,
 )
 from teamagent.skills.search.next_move import suggest_next_move
 from teamagent.skills.search.not_found import FoundDecision, build_not_found_answer, judge_found
@@ -1351,7 +1352,18 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
                 if input.filter_doc_type:
                     sticky_pairs["cls_doc_type"] = input.filter_doc_type
                 if input.filter_solution:
-                    sticky_pairs["cls_solution"] = input.filter_solution
+                    if ctx.metadata.get(MCP_SURFACE_CTX_KEY) and is_video_solution(
+                        input.filter_solution
+                    ):
+                        # 2026-10-14: DM のモデルが付けた動画系の施策フィルタは使わない。金庫の
+                        # 分類が「動画広告」「ショート動画」に割れていて、厳密一致だと半分が落ちる
+                        # （knowledge_query の _SOLUTION_KEYWORDS の注記）。/app の画面で利用者が
+                        # 選んだ値（MCP の印が無い）は今までどおり使う。
+                        logger.info(
+                            "search_video_solution_filter_dropped", request_id=ctx.request_id
+                        )
+                    else:
+                        sticky_pairs["cls_solution"] = input.filter_solution
                 sticky: dict[str, str] | None = sticky_pairs or None
                 # 定期報告（cls_is_recurring）の除外は「提案書 intent」のときだけ。
                 # env OFF（既定）なら _exclude_templates=False で常に False（後方互換）。

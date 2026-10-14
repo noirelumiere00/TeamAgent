@@ -508,9 +508,9 @@ def test_campaign_results_reach_rerank_only_with_floor(use_knowledge_filters: bo
         "床なしで届いてしまう＝失敗を再現できていない"
     )
     assert all(h.doc_type != "施策実績" for h in out_red.hits)
-    if use_knowledge_filters:
-        # 原因の固定: 本検索に cls_solution=動画広告 が AND で載っている。
-        assert pg_red.calls[0]["metadata_filters"] == {"cls_solution": "動画広告"}
+    # 10-14 から動画系の語には cls_solution を自動で付けない（分類が「動画広告」「ショート動画」に
+    # 割れていて半分が落ちるため）。それでも床が無いと、枚数の多い提案 PDF が枠を埋めて施策実績は届かない。
+    assert pg_red.calls[0]["metadata_filters"] is None
     assert _campaign_calls(pg_red) == []
 
     # 緑: 床 3。
@@ -824,8 +824,8 @@ def test_auto_filters_log_only_when_filters_and_without_query() -> None:
     e = events[0]
     assert set(e) - {"event", "log_level"} == {"request_id", "keys", "values", "allow_unclassified"}
     assert e["allow_unclassified"] is True  # 既定 ON（固定語彙の真偽値だけ・クエリ原文は出さない）
-    assert e["keys"] == ["cls_doc_type", "cls_solution"]
-    assert e["values"] == ["提案書", "動画広告"]
+    assert e["keys"] == ["cls_doc_type"]  # 動画系の語には cls_solution を付けない（10-14）
+    assert e["values"] == ["提案書"]
     assert query not in repr(e) and "サラヤ" not in repr(e)
 
 
