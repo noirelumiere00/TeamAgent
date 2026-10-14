@@ -5437,10 +5437,11 @@ def slack_text_to_html(text: str) -> str:
 
 
 def _jst_label(ts: float) -> str:
-    from datetime import datetime
-    from zoneinfo import ZoneInfo
+    # 本番の実行イメージには時間帯のデータが無い（tests/runtime/test_no_iana_timezone.py）。
+    # 日本時間は固定の +9 時間で表す。
+    from datetime import datetime, timedelta, timezone
 
-    return datetime.fromtimestamp(ts, tz=ZoneInfo("Asia/Tokyo")).strftime("%m/%d %H:%M")
+    return datetime.fromtimestamp(ts, tz=timezone(timedelta(hours=9))).strftime("%m/%d %H:%M")
 
 
 def render_history_page(
