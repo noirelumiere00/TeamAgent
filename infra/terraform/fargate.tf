@@ -636,6 +636,11 @@ resource "aws_ecs_task_definition" "mcp" {
       # Aico が文面を組み直して URL を落とすのを止める。allowlist は上と同じ理由で "*" を直接焼く。
       { name = "USE_DIRECT_SUMMARY_POST", value = var.use_direct_summary_post },
       { name = "DIRECT_SUMMARY_POST_ALLOWED_EMAILS", value = "*" },
+      # 2026-10-14: 検索の「📊 動画ごとの数字」節を mcp が DM へ直接投稿（mcp_gateway/direct_video_metrics.py・
+      # #600/#601/#603）。小俣さん「実装した機能はみなさんに公開」で全員へ。live の TD 差し替えで入れた値を
+      # tf にも焼く（tfvars に行が無くても guard 経由の apply で消えない）。allowlist は上と同じ理由で "*"。
+      { name = "USE_DIRECT_VIDEO_METRICS_POST", value = "1" },
+      { name = "DIRECT_VIDEO_METRICS_POST_ALLOWED_EMAILS", value = "*" },
       # Conditional PutItemでrolling taskを跨いだnonce one-useを保証。障害時は認可fail-closed。
       { name = "TEAMAGENT_CALLER_CLAIM_REPLAY_TABLE", value = aws_dynamodb_table.mcp_caller_claim_nonces.name },
       # v0.3 Task6: AiLaVault リンク注入の発火条件（未設定だと build_search_web_links が
@@ -750,6 +755,10 @@ resource "aws_ecs_task_definition" "mcp" {
       # 読取のみ（テキスト返答だけ・ファイル生成/再配信は P2 の別フラグ）。既定 false。
       # 解禁は 4 点セット: この env / effective-tool-scope.json / 契約テスト / OC イメージ再ビルド。
       { name = "USE_ATTACHMENT_TOOLS", value = var.use_attachment_tools ? "true" : "false" },
+      # 2026-10-14: 投稿リンクの先の添付を読む・添付し直す（attachment_assist の permalink 経路・#557/#605）。
+      # 小俣さん「実装した機能はみなさんに公開」で全員へ。live の値を tf にも焼く（上と同じ理由）。
+      { name = "ATTACHMENT_PERMALINK_ENABLED", value = "1" },
+      { name = "ATTACHMENT_PERMALINK_ALLOWED_EMAILS", value = "*" },
       # video_capture: 動画の指定時刻を JPEG 切出し→依頼スレッド/本人 DM へ添付（既定 false）。
       # 前提は media worker（enable_media_worker）と MEDIA_TASK_QUEUE/MEDIA_JOBS_TABLE/
       # MEDIA_JOB_BUCKET の配線（下の media job ブロックで既に本番稼働中）。
