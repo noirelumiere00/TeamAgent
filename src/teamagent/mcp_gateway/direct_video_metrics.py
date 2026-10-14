@@ -17,7 +17,12 @@ from teamagent.skills.search.campaign_files import VIDEO_METRICS_HEADING
 logger = structlog.get_logger(__name__)
 ENABLED_ENV = "USE_DIRECT_VIDEO_METRICS_POST"
 ALLOWED_EMAILS_ENV = "DIRECT_VIDEO_METRICS_POST_ALLOWED_EMAILS"
-POSTED_TEXT = "📊 動画ごとの数字は、この会話に別の投稿でお届けしました（書き直さない）"
+# 利用者に見えても自然な文で、Aico には「説明で数字を並べ直さない」ことも伝える。
+# 10-13 の DM 実機で、別の投稿の後に Aico が同じ数字を丸めて並べ直した（重複）。
+POSTED_TEXT = (
+    "📊 動画ごとの数字（再生・保存・リンク）は、この会話に別の投稿でお届けしました。"
+    "説明では数字を並べ直しません。"
+)
 
 
 def load_policy() -> direct_summary.DirectPolicy:
