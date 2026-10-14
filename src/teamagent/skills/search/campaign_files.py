@@ -379,36 +379,53 @@ def video_stats_footer(hits: Sequence[SearchHit], answer: str) -> str:
 VIDEO_ROWS_POSTED_HEADING = "上位の投稿（再生・保存の数字とリンクは別の投稿でお届け済み）:"
 
 
-def strip_video_numbers(content: str) -> str:
-    """施策実績の本文から、動画ごとの再生・保存・リンクと合計再生数の行を抜く。
+def strip_video_numbers(content: str, posted: str) -> str:
+    """施策実績の本文から、``posted``（DM へ直接投稿した 📊 の節）に載った動画の数字とリンクを抜く。
 
-    📊 の節を DM へ直接投稿した後に、モデルが同じ数字を丸めて並べ直さないようにする
+    📊 の節を投稿した後に、モデルが同じ数字を丸めて並べ直さないようにする
     （10-13・10-14 の DM 実機で、注意書きだけでは並べ直しが止まらなかった）。
-    投稿文の中身は残すので、「何が刺さったか」の説明はできる。上位の投稿の見出しが無い
-    本文（施策実績以外）はそのまま返す。
+    - 抜くのは、その行の URL が ``posted`` にある上位の投稿の行だけ。
+      行は「順位. アカウント、投稿文」に縮める（再生・保存・URL を抜き、アカウントと投稿文は残す）。
+      📊 に載らなかった施策（4 件目以降・絞り込みで外れたもの）と、投稿アカウント実績の本文は
+      そのまま（数字を受け取れていないため）。
+    - 見出しを「お届け済み」に変え、再生数の行から「合計」だけを抜くのは、
+      その施策の行が全部載ったときだけ。中央値・平均・最大は 📊 に無いので残す。
     """
-    if _TOP_POSTS_RE.search(content) is None:
+    if not content.startswith("施策実績") or _TOP_POSTS_RE.search(content) is None:
         return content
     out: list[str] = []
+    header_at = -1
     in_top = False
+    rows = stripped = 0
     for line in content.splitlines():
         if _TOP_POSTS_RE.fullmatch(line):
             in_top = True
-            out.append(VIDEO_ROWS_POSTED_HEADING)
-            continue
-        if _TOTAL_PLAYS_RE.match(line):
+            header_at = len(out)
+            out.append(line)
             continue
         if in_top:
             if re.match(r"^\s*投稿文の特徴[:：]", line):
                 in_top = False
             elif row := _VIDEO_ROW_RE.fullmatch(line):
-                preview = row["preview"]
-                url = _VIDEO_URL_RE.search(preview)
-                if url:
-                    preview = preview[: url.start()].strip()
-                out.append(f"{row['rank']}. {preview}")
-                continue
+                rows += 1
+                url = _VIDEO_URL_RE.search(row["preview"])
+                if url and url["url"] in posted:
+                    stripped += 1
+                    rest = line[row.end("saves") :].lstrip("、 \t")
+                    rest_url = _VIDEO_URL_RE.search(rest)
+                    if rest_url:
+                        rest = rest[: rest_url.start()].strip()
+                    out.append(f"{row['rank']}. {rest}")
+                    continue
         out.append(line)
+    if rows and stripped == rows and header_at >= 0:
+        out[header_at] = VIDEO_ROWS_POSTED_HEADING
+        out = [
+            re.sub(r"合計\s*[^、]+、\s*", "", line, count=1)
+            if _TOTAL_PLAYS_RE.match(line)
+            else line
+            for line in out
+        ]
     return "\n".join(out)
 
 

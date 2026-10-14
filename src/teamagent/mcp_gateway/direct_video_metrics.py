@@ -45,8 +45,10 @@ def extract_section(answer: str) -> tuple[str, str, str] | None:
     return answer[: heading.start()], answer[heading.start() : end], answer[end:]
 
 
-def _strip_hit_numbers(data: dict[str, Any]) -> None:
-    """モデルへ返す hits の本文からも動画ごとの数字を抜く（answer の置換だけでは並べ直された）。
+def _strip_hit_numbers(data: dict[str, Any], posted: str) -> None:
+    """モデルへ返す hits の本文からも、投稿した節に載った動画の数字を抜く。
+
+    answer の置換だけでは並べ直された。
 
     10-14 の DM 実機（r55）で、answer の節を置き換えても、モデルが hits の本文
     （施策実績の上位投稿の行）から再生・保存を拾って並べ直した。
@@ -56,7 +58,7 @@ def _strip_hit_numbers(data: dict[str, Any]) -> None:
         return
     for hit in hits:
         if isinstance(hit, dict) and isinstance(hit.get("content"), str):
-            hit["content"] = strip_video_numbers(hit["content"])
+            hit["content"] = strip_video_numbers(hit["content"], posted)
 
 
 def maybe_post(
@@ -84,7 +86,7 @@ def maybe_post(
                 reason = "post_status"
             if outcome in {direct_summary.POSTED, direct_summary.UNCERTAIN}:
                 data["answer"] = section[0] + POSTED_TEXT + section[2]
-                _strip_hit_numbers(data)
+                _strip_hit_numbers(data, section[1])
     logger.info(
         "search_video_metrics_direct_post",
         request_id=request_id,

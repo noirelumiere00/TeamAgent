@@ -219,77 +219,120 @@ def test_posted_text_tells_aico_not_to_repeat_the_numbers() -> None:
     assert "説明では数字を並べ直しません" in video.POSTED_TEXT
 
 
-def _ham_content() -> str:
+def _campaign_hit(chunk: int, advertiser: str, campaign: str, base: int) -> Any:
     hit = _video_campaign(
-        10,
-        "伊藤ハム",
-        "ハンバーグ",
+        chunk,
+        advertiser,
+        campaign,
         [
             _video(
-                "https://www.tiktok.com/@a/video/1",
-                "このハンバーグ、アレンジが優秀すぎた",
+                f"https://www.tiktok.com/@a/video/{base}",
+                f"{advertiser}の投稿{base}、アレンジ",
                 507700,
                 129,
             ),
-            _video("https://www.tiktok.com/@b/video/2", "チーズ好きは絶対ハマる", 331300, 73),
+            _video(
+                f"https://www.tiktok.com/@b/video/{base + 1}",
+                f"{advertiser}の投稿{base + 1}",
+                331300,
+                73,
+            ),
         ],
     )
-    return hit.content
+    hit.metadata["related_files"] = []
+    return hit
 
 
-@pytest.mark.parametrize("outcome", [direct_summary.POSTED, direct_summary.UNCERTAIN])
-def test_posted_also_strips_video_numbers_from_hits(
+def _account_content() -> str:
+    from teamagent.ingest.campaign_aggregate import AccountAggregate, format_account_document
+
+    return format_account_document(
+        AccountAggregate(
+            account="acc0",
+            videos=(
+                _video("https://www.tiktok.com/@acc0/video/99", "通常投稿のレシピ", 400000, 10),
+            ),
+        )
+    )
+
+
+def _posted_case(
     monkeypatch: pytest.MonkeyPatch, outcome: str
-) -> None:
-    # 10-14 の DM 実機（r55）: answer の節を置き換えても、hits の本文から数字を拾って並べ直した
+) -> tuple[dict[str, Any], Any, Any, str]:
     _enable(monkeypatch)
     monkeypatch.setattr(detached_jobs, "post_to_origin_status", lambda *a, **k: outcome)
-    ham = _ham_content()
-    other = "普通の資料。再生 100、保存 3 と書いてあっても施策実績でなければ触らない"
-    data = {"answer": ANSWER, "hits": [{"content": ham}, {"content": other}, {"chunk_id": 3}]}
+    ham = _campaign_hit(10, "伊藤ハム", "ハンバーグ", 1)
+    other = _campaign_hit(11, "別の会社", "別の施策", 50)  # 📊 に載らない施策（例: 4 件目以降）
+    section = campaign_files.video_stats_footer([ham], "")
+    assert section.startswith(HEADING) and "@b/video/50" not in section
+    account = _account_content()
+    data: dict[str, Any] = {
+        "answer": PREFIX + section + SUFFIX,
+        "hits": [
+            {"content": ham.content},
+            {"content": other.content},
+            {"content": account},
+            {"chunk_id": 3},
+        ],
+    }
     video.maybe_post(
         data,
         verified_caller=_claim(),
         metadata={"identity_verified": True, "user_email": ME},
         request_id="r",
     )
-    stripped = data["hits"][0]["content"]  # type: ignore[index]
+    return data, ham, other, account
+
+
+@pytest.mark.parametrize("outcome", [direct_summary.POSTED, direct_summary.UNCERTAIN])
+def test_posted_strips_only_the_rows_in_the_posted_section(
+    monkeypatch: pytest.MonkeyPatch, outcome: str
+) -> None:
+    # 10-14 の DM 実機（r55）: answer の節を置き換えても、hits の本文から数字を拾って並べ直した
+    data, _, other, account = _posted_case(monkeypatch, outcome)
+    stripped = data["hits"][0]["content"]
     for gone in (
         "再生 507,700",
         "保存 129",
         "再生 331,300",
         "https://www.tiktok.com",
-        "再生数: 合計",
+        "合計 839,000",
     ):
         assert gone not in stripped, gone
-    assert (
-        "このハンバーグ、アレンジが優秀すぎた" in stripped and "チーズ好きは絶対ハマる" in stripped
-    )
+    assert "伊藤ハムの投稿1、アレンジ" in stripped and "伊藤ハムの投稿2" in stripped
     assert campaign_files.VIDEO_ROWS_POSTED_HEADING in stripped
+    # 📊 に無い中央値・平均・最大とアカウント名は残す
+    assert "中央値" in stripped and "最大" in stripped and "たべもの" in stripped
     assert "投稿本数: 2 本" in stripped and "投稿文の特徴" in stripped
-    assert data["hits"][1] == {"content": other} and data["hits"][2] == {"chunk_id": 3}  # type: ignore[index]
+    # 📊 に載らなかった施策と投稿アカウント実績は、数字もリンクもそのまま
+    assert data["hits"][1] == {"content": other.content}
+    assert data["hits"][2] == {"content": account}
+    assert data["hits"][3] == {"chunk_id": 3}
 
 
 def test_failed_post_keeps_hit_numbers(monkeypatch: pytest.MonkeyPatch) -> None:
-    _enable(monkeypatch)
-    monkeypatch.setattr(
-        detached_jobs, "post_to_origin_status", lambda *a, **k: direct_summary.FAILED
-    )
-    ham = _ham_content()
-    data = {"answer": ANSWER, "hits": [{"content": ham}]}
-    video.maybe_post(
-        data,
-        verified_caller=_claim(),
-        metadata={"identity_verified": True, "user_email": ME},
-        request_id="r",
-    )
-    assert data == {"answer": ANSWER, "hits": [{"content": ham}]}
+    data, ham, other, account = _posted_case(monkeypatch, direct_summary.FAILED)
+    assert [h.get("content") for h in data["hits"]] == [ham.content, other.content, account, None]
 
 
-def test_strip_video_numbers_leaves_other_text_and_is_idempotent() -> None:
-    ham = _ham_content()
-    once = campaign_files.strip_video_numbers(ham)
-    assert campaign_files.strip_video_numbers(once) == once
-    assert campaign_files.strip_video_numbers("施策実績ではない本文\n1. 再生 5、保存 1") == (
-        "施策実績ではない本文\n1. 再生 5、保存 1"
+def test_partially_posted_campaign_keeps_heading_and_total() -> None:
+    ham = _campaign_hit(10, "伊藤ハム", "ハンバーグ", 1)
+    only_first = "📊\n1. https://www.tiktok.com/@a/video/1"
+    out = campaign_files.strip_video_numbers(ham.content, only_first)
+    assert "https://www.tiktok.com/@a/video/1" not in out
+    assert "https://www.tiktok.com/@b/video/2" in out and "再生 331,300" in out
+    assert campaign_files.VIDEO_ROWS_POSTED_HEADING not in out and "合計 839,000" in out
+
+
+def test_strip_video_numbers_is_idempotent_and_leaves_other_docs() -> None:
+    ham = _campaign_hit(10, "伊藤ハム", "ハンバーグ", 1)
+    posted = campaign_files.video_stats_footer([ham], "")
+    once = campaign_files.strip_video_numbers(ham.content, posted)
+    assert campaign_files.strip_video_numbers(once, posted) == once
+    account = _account_content()
+    assert (
+        campaign_files.strip_video_numbers(
+            account, posted + " https://www.tiktok.com/@acc0/video/99"
+        )
+        == account
     )
