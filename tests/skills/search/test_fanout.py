@@ -336,7 +336,9 @@ def test_fanout_next_move_never_asks_or_contains_query(monkeypatch: pytest.Monke
 
 def test_soul_conditional_fanout_contract() -> None:
     soul = Path("infra/openclaw/SOUL.md").read_text()
-    section = soul.split("search の answer に「探した範囲（まとめて検索）:」")[1].split("## Slack")[0]
+    section = soul.split("search の answer に「探した範囲（まとめて検索）:」")[1].split("## Slack")[
+        0
+    ]
     for phrase in (
         "一字も変えず写す",
         "表記を変えた呼び直しをしない",

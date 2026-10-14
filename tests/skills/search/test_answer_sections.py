@@ -292,7 +292,10 @@ def test_scope_line_is_always_added_even_without_head_or_sections() -> None:
         head="", sections=Sections(), lanes={"vault": LaneStatus.zero(queries=["宅配 事例"])}
     )
     assert answer == "探した範囲（まとめて検索）: 金庫 0件（『宅配 事例』）"
-    assert compose_answer(head="", sections=Sections(), lanes={}) == "探した範囲（まとめて検索）: 記録なし"
+    assert (
+        compose_answer(head="", sections=Sections(), lanes={})
+        == "探した範囲（まとめて検索）: 記録なし"
+    )
 
 
 def test_each_entry_is_one_line_with_date_industry_and_link() -> None:
@@ -709,7 +712,10 @@ def test_failed_lane_is_never_written_as_zero(reason: str) -> None:
 
 def test_unknown_reason_codes_use_fixed_words_not_the_code() -> None:
     failed = scope_line({"vault": LaneStatus.failed("psycopg.errors.QueryCanceled: secret")})
-    assert failed == "探した範囲（まとめて検索）: 金庫 ✗ 探せませんでした（金庫に無いという意味ではありません）"
+    assert (
+        failed
+        == "探した範囲（まとめて検索）: 金庫 ✗ 探せませんでした（金庫に無いという意味ではありません）"
+    )
     skipped = scope_line({"case": LaneStatus.skipped("<!channel>")})
     assert skipped == "探した範囲（まとめて検索）: 事例 —（条件に合わず使っていません）"
 
