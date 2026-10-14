@@ -44,9 +44,14 @@ _PHASE_KEYWORDS: tuple[tuple[tuple[str, ...], str], ...] = (
 
 # 施策タイプキーワード → cls_solution 正規値（classify._SOLUTIONS の代表語彙と一致）。
 # 具体的・複合語を先に評価する。
+# 2026-10-14: 動画系の語（動画広告・ショート動画・リール 等）は cls_solution を付けない。
+# 金庫の分類が「動画広告」1,112 件と「ショート動画」1,024 件（＋「UGC / ショート動画」等の表記
+# 違い）に割れていて、どちらの値で厳密一致させても半分が落ちる。10-14 の本番 DM「伊藤ハムの
+# ショート動画の施策実績を教えて」で、cls_solution=動画広告 の自動フィルタが cls_solution=
+# ショート動画 の提案書 PDF・事例 PDF・営業 FB を全部落とし、分類の無い施策実績 2 件だけが残った。
+# 順位は rerank が決める（is_video_solution で明示指定側も同じ扱いにする）。
 _SOLUTION_KEYWORDS: tuple[tuple[tuple[str, ...], str], ...] = (
     (("インフルエンサー", "インフルエンサーマーケ", "タイアップ", "起用"), "インフルエンサー"),
-    (("動画広告", "動画施策", "ショート動画", "リール", "TikTok広告"), "動画広告"),
     (("SNS運用", "SNS運営", "アカウント運用", "SNS投稿"), "SNS運用"),
     (("SEO", "検索対策", "検索面"), "SEO"),
     (("Web制作", "サイト制作", "LP制作", "ホームページ制作"), "Web制作"),
@@ -93,11 +98,23 @@ def _budget_from_amount(query: str) -> str | None:
     return "500万〜"
 
 
+def is_video_solution(value: str | None) -> bool:
+    """cls_solution の値が動画系（分類が「動画広告」「ショート動画」等に割れている系統）か。
+
+    金庫の実値（10-14）: 動画広告・ショート動画・UGC / ショート動画・ショート動画・UGC・
+    動画制作・UGC動画・PR×ショート動画 など。「動画」を含む値をまとめて同じ系統とみなす。
+    """
+    if not value:
+        return False
+    folded = unicodedata.normalize("NFKC", value)
+    return "動画" in folded or "リール" in folded
+
+
 def extract_knowledge_filters(query: str) -> dict[str, str] | None:
     """クエリから資料種別・フェーズ・施策・予算・ターゲットの絞り込みを抽出する。
 
     返り値:
-        {"cls_doc_type": "提案書", "cls_solution": "動画広告", "cls_budget": "〜100万"}
+        {"cls_doc_type": "提案書", "cls_solution": "SNS運用", "cls_budget": "〜100万"}
         のような複合 dict（該当キーのみ）。該当語が無ければ None
         （= 呼び出し側は通常の意味検索にフォールバック）。
 

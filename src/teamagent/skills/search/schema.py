@@ -60,7 +60,9 @@ class SearchInput(BaseModel):
         max_length=50,
         description=(
             "施策/ソリューション種別フィルタ（cls_solution 等価）。"
-            "SNS運用 / 動画広告 / インフルエンサー / SEO / Web制作 / 広告運用 / イベント 等。"
+            "SNS運用 / インフルエンサー / SEO / Web制作 / 広告運用 / イベント 等。"
+            "動画系（動画広告・ショート動画・リール）は資料の分類が割れているため指定しない"
+            "（指定しても DM からの検索では使わない）。"
             "fail-open 再検索でも外れない sticky フィルタとして配線する。"
         ),
     )

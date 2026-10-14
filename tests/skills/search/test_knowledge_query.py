@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import pytest
+
 from teamagent.skills.search.knowledge_query import (
     extract_knowledge_filters,
     extract_query_industry,
+    is_video_solution,
 )
 
 
@@ -39,10 +42,14 @@ def test_solution_filter() -> None:
 
 
 def test_budget_amount_filter() -> None:
-    # 「予算100万くらいの動画広告の事例」→ budget と solution の両方が載る。
-    assert extract_knowledge_filters("予算100万くらいの動画広告の事例") == {
-        "cls_solution": "動画広告",
+    # 「予算100万くらいの SNS運用の事例」→ budget と solution の両方が載る。
+    assert extract_knowledge_filters("予算100万くらいのSNS運用の事例") == {
+        "cls_solution": "SNS運用",
         "cls_budget": "100〜500万",
+    }
+    # 動画系の語には solution を付けない（10-14・分類が「動画広告」「ショート動画」に割れている）。
+    assert extract_knowledge_filters("予算100万くらいの動画広告の事例") == {
+        "cls_budget": "100〜500万"
     }
     assert extract_knowledge_filters("予算は80万くらいの施策")["cls_budget"] == "〜100万"
     assert extract_knowledge_filters("予算800万のキャンペーン")["cls_budget"] == "500万〜"
@@ -80,3 +87,45 @@ def test_extract_query_industry() -> None:
     assert extract_query_industry("飲食店向けの事例") == "飲食"
     assert extract_query_industry("アース製薬の過去資料") is None  # 業界語なし
     assert extract_query_industry("") is None
+
+
+@pytest.mark.parametrize(
+    "query",
+    [
+        "伊藤ハムのショート動画の施策実績を教えて",  # 10-14 本番 DM で提案書 PDF が全部落ちた問い
+        "食品メーカーのショート動画の事例ほしい",
+        "動画広告の提案資料",
+        "リールの事例",
+        "TikTok広告の実績",
+        "動画施策の報告書",
+    ],
+)
+def test_video_words_never_add_solution_filter(query: str) -> None:
+    """金庫の分類が「動画広告」1,112 件と「ショート動画」1,024 件に割れている（10-14 実測）。
+
+    どちらの値で厳密一致させても半分が落ちるので、動画系の語では cls_solution を付けない。
+    """
+    assert "cls_solution" not in (extract_knowledge_filters(query) or {})
+
+
+@pytest.mark.parametrize(
+    ("value", "video"),
+    [
+        ("動画広告", True),
+        ("ショート動画", True),
+        ("UGC / ショート動画", True),
+        ("ショート動画・UGC", True),
+        ("動画制作", True),
+        ("UGC動画", True),
+        ("PR×ショート動画", True),
+        ("リール", True),
+        ("SNS運用", False),
+        ("インフルエンサー", False),
+        ("UGC", False),
+        ("ビデオリリース", False),
+        ("", False),
+        (None, False),
+    ],
+)
+def test_is_video_solution_matches_the_vault_values(value: str | None, video: bool) -> None:
+    assert is_video_solution(value) is video
