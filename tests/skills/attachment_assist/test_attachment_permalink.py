@@ -1262,7 +1262,7 @@ def test_missing_scope_on_sharing_check_asks_to_reconnect() -> None:
 def test_dm_and_same_channel_do_not_need_the_sharing_check() -> None:
     skill, reader, slack, _, _ = _skill(_post([_file(is_public=True, channels=[SRC_CH])]))
     reader.sharing = SlackChannelSharing(external=True)
-    assert _run(skill, ctx=_ctx(channel=DM)).error == ""
+    assert _run(skill, ctx=_ctx(channel=DM)).error == "" and len(slack.uploads) == 1
     same, same_reader, _, _, _ = _skill(_post([_file()]))
     same_reader.sharing = SlackChannelSharing(external=True)
     assert _run(same, ctx=_ctx(channel=SRC_CH)).error == ""
