@@ -350,10 +350,11 @@ def _video_campaign_label(hit: SearchHit) -> str:
     return f"{label}（{'・'.join(facts)}）" if facts else label
 
 
-def video_stats_footer(hits: Sequence[SearchHit], answer: str) -> str:
-    """要約に使った施策の上位動画を最大 3 施策・各 5 本、数字とリンク付きで並べる。"""
-    blocks: list[str] = []
-    urls: list[str] = []
+def _footer_campaigns(
+    hits: Sequence[SearchHit],
+) -> list[tuple[SearchHit, list[tuple[str, str]]]]:
+    """📊 の節に載せる施策（最大 3 施策・各 5 本）と、その表示行。表示と要約の受け渡しで共用。"""
+    picked: list[tuple[SearchHit, list[tuple[str, str]]]] = []
     seen: set[tuple[str, str] | int] = set()
     for hit in hits:
         if not is_campaign_hit(hit) or "related_files" not in (hit.metadata or {}):
@@ -365,10 +366,24 @@ def video_stats_footer(hits: Sequence[SearchHit], answer: str) -> str:
         if not rows:
             continue
         seen.add(key)
+        picked.append((hit, rows))
+        if len(picked) >= _FOOTER_MAX:
+            break
+    return picked
+
+
+def video_footer_urls(hits: Sequence[SearchHit]) -> str:
+    """📊 の節に載る動画の URL（改行区切り）。要約器へ渡す本文から同じ動画の数字を抜くのに使う。"""
+    return "\n".join(url for _, rows in _footer_campaigns(hits) for _, url in rows if url)
+
+
+def video_stats_footer(hits: Sequence[SearchHit], answer: str) -> str:
+    """要約に使った施策の上位動画を最大 3 施策・各 5 本、数字とリンク付きで並べる。"""
+    blocks: list[str] = []
+    urls: list[str] = []
+    for hit, rows in _footer_campaigns(hits):
         blocks.append(_video_campaign_label(hit) + "\n" + "\n".join(row[0] for row in rows))
         urls.extend(row[1] for row in rows)
-        if len(blocks) >= _FOOTER_MAX:
-            break
     # URL 無しの行まで空集合の all() で省かない。部分的な引用なら全行を残す。
     if not blocks or all(url and url in answer for url in urls):
         return ""
@@ -377,9 +392,13 @@ def video_stats_footer(hits: Sequence[SearchHit], answer: str) -> str:
 
 #: 直接投稿の後、モデルへ返す本文の「上位の投稿」見出し（数字とリンクは別の投稿にある）。
 VIDEO_ROWS_POSTED_HEADING = "上位の投稿（再生・保存の数字とリンクは別の投稿でお届け済み）:"
+#: 要約器へ渡す本文の「上位の投稿」見出し（数字とリンクは回答末尾の 📊 にコードが載せる）。
+VIDEO_ROWS_FOOTER_HEADING = "上位の投稿（再生・保存の数字とリンクは回答の 📊 にコードで載せる）:"
 
 
-def strip_video_numbers(content: str, posted: str) -> str:
+def strip_video_numbers(
+    content: str, posted: str, *, heading: str = VIDEO_ROWS_POSTED_HEADING
+) -> str:
     """施策実績の本文から、``posted``（DM へ直接投稿した 📊 の節）に載った動画の数字とリンクを抜く。
 
     📊 の節を投稿した後に、モデルが同じ数字を丸めて並べ直さないようにする
@@ -419,7 +438,7 @@ def strip_video_numbers(content: str, posted: str) -> str:
                     continue
         out.append(line)
     if rows and stripped == rows and header_at >= 0:
-        out[header_at] = VIDEO_ROWS_POSTED_HEADING
+        out[header_at] = heading
         out = [
             re.sub(r"合計\s*[^、]+、\s*", "", line, count=1)
             if _TOTAL_PLAYS_RE.match(line)
@@ -434,6 +453,7 @@ __all__ = [
     "SHEET_ONLY_NOTE",
     "SIMILARITY_MIN",
     "UNKNOWN_INDUSTRY",
+    "VIDEO_ROWS_FOOTER_HEADING",
     "VIDEO_ROWS_POSTED_HEADING",
     "advertiser_pattern",
     "attach_related_files",
@@ -447,5 +467,6 @@ __all__ = [
     "pick_related_files",
     "scope_by_industry",
     "strip_video_numbers",
+    "video_footer_urls",
     "video_stats_footer",
 ]
