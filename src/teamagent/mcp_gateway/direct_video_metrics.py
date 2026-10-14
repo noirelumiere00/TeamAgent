@@ -39,6 +39,7 @@ NEXT_SECTION_MARKS = (
     "🌐",
     "ℹ",
     "🔒",
+    "🕸",
     "探した範囲",
 )
 _SECTION_END_RE = re.compile(

@@ -302,3 +302,81 @@ def build_graph(
             )
 
     return {"nodes": nodes, "edges": edges}
+
+
+SEED_LIMIT = 12
+NEIGHBOR_LIMIT = 12
+VIEW_LIMIT = 200
+
+
+def parse_document_ids(raw: str, *, limit: int = SEED_LIMIT) -> list[str]:
+    """UUID だけを受け入れ、件数を検証してから重複を落とす。"""
+    from uuid import UUID
+
+    parts = raw.split(",")
+    if not raw or len(parts) > limit:
+        raise ValueError("invalid_ids")
+    ids = []
+    for part in parts:
+        if str(UUID(part)) != part.lower():
+            raise ValueError("invalid_ids")
+        ids.append(str(UUID(part)))
+    return list(dict.fromkeys(ids))
+
+
+def relation_rank(a: dict[str, Any], b: dict[str, Any]) -> tuple[int, str] | None:
+    """取引先→広告主×施策→共有分類タグの順で隣を決める。"""
+    for key in ("cls_project",):
+        value = _norm(a.get(key))
+        if value and value == _norm(b.get(key)):
+            return 0, "project:" + value
+    advertiser = _norm(a.get("advertiser"))
+    campaign = _norm(a.get("campaign"))
+    if (
+        advertiser
+        and campaign
+        and all(_norm(a.get(k)) == _norm(b.get(k)) for k in ("advertiser", "campaign"))
+    ):
+        return 1, "campaign:" + campaign
+    for key, label, _ in _REASONS[1:]:
+        value = _norm(a.get(key))
+        if value and value == _norm(b.get(key)):
+            return 2, label + ":" + value
+    return None
+
+
+def build_seed_graph(docs: list[dict[str, Any]], ids: list[str]) -> dict[str, Any]:
+    """可視資料だけから種と各12件の隣を返す。新経路はUUIDをノードキーにする。"""
+    by_id = {
+        str(d["document_id"]): d
+        for d in docs
+        if d.get("document_id") and str(d.get("suppressed", "")).lower() != "true"
+    }
+    selected = {i: by_id[i] for i in ids if i in by_id}
+    edges = {}
+    for seed in ids:
+        if seed not in by_id:
+            continue
+        ranked = []
+        for nid, doc in by_id.items():
+            rank = relation_rank(by_id[seed], doc) if nid != seed else None
+            if rank is not None:
+                ranked.append((rank[0], nid, rank[1]))
+        for priority, nid, reason in sorted(ranked)[:NEIGHBOR_LIMIT]:
+            if nid not in selected and len(selected) >= VIEW_LIMIT:
+                continue
+            selected[nid] = by_id[nid]
+            pair = tuple(sorted((seed, nid)))
+            edges[pair] = {
+                "source": pair[0],
+                "target": pair[1],
+                "reason": reason,
+                "strength": ("strong", "medium", "weak")[priority],
+            }
+    keys = sorted(selected)
+    graph = build_graph([dict(selected[k], node_id=i) for i, k in enumerate(keys)])
+    for node in graph["nodes"]:
+        node["id"] = keys[node["id"]]
+        node["seed"] = node["id"] in ids
+    graph["edges"] = [edges[k] for k in sorted(edges)]
+    return graph

@@ -64,6 +64,7 @@ from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any, Literal
 from urllib.parse import urlsplit
+from uuid import UUID
 
 from teamagent.adapters.pgvector_client import SearchHit
 from teamagent.ingest.industry_taxonomy import normalize_industry
@@ -150,6 +151,7 @@ class Entry:
     detail: str = ""
     kind: SectionKey = "vault"
     case_external_use: str | None = None
+    document_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -434,6 +436,7 @@ def _karte_detail(meta: Mapping[str, Any]) -> str:
 def entry_from_hit(hit: SearchHit, *, url: str | None) -> Entry:
     """金庫のヒット 1 件を行の材料にする（``url`` は呼び側が解いた正準 URL）。"""
     meta = hit.metadata or {}
+    document_id = str(meta.get("document_id") or "") or None
     kind = classify_hit(meta)
     title = _hit_title(meta)
     date = _hit_date(meta, title)
@@ -449,6 +452,7 @@ def entry_from_hit(hit: SearchHit, *, url: str | None) -> Entry:
             industry=_hit_industry(meta),
             detail=_clean(meta.get("case_effect"), _EFFECT_CHARS),
             kind="case",
+            document_id=document_id,
             case_external_use=str(meta.get("case_external_use") or "") or None,
         )
     if kind == "karte":
@@ -461,7 +465,14 @@ def entry_from_hit(hit: SearchHit, *, url: str | None) -> Entry:
             detail=_karte_detail(meta),
             kind="karte",
         )
-    return Entry(title=title, url=url, date=date, industry=_hit_industry(meta), kind=kind)
+    return Entry(
+        title=title,
+        url=url,
+        date=date,
+        industry=_hit_industry(meta),
+        kind=kind,
+        document_id=document_id,
+    )
 
 
 def entry_from_case_row(row: Mapping[str, Any]) -> Entry:
@@ -477,6 +488,7 @@ def entry_from_case_row(row: Mapping[str, Any]) -> Entry:
         industry=normalize_industry(str(row.get("case_industry") or "") or None),
         detail=_clean(row.get("case_effect"), _EFFECT_CHARS),
         kind="case",
+        document_id=str(row.get("document_id") or row.get("id") or "") or None,
         case_external_use=str(row.get("case_external_use") or "") or None,
     )
 
@@ -644,6 +656,44 @@ def _blocks(sections: Sections, caps: Mapping[SectionKey, int]) -> list[str]:
     return blocks
 
 
+def graph_link(sections: Sections, caps: Mapping[SectionKey, int], base: str) -> str:
+    """実際に描画した資料だけを種にする。本文・検索語はURLへ入れない。"""
+    if not base or _safe_url(base.rstrip("/")) is None:
+        return ""
+    parsed = urlsplit(base)
+    if parsed.query or parsed.fragment or parsed.username or parsed.password:
+        return ""
+    shown: set[tuple[str, ...]] = set()
+    ids: list[str] = []
+    for key in SECTION_ORDER:
+        cap = min(
+            caps.get(key, PER_SECTION_MAX),
+            max(PER_SECTION_MAX, sections.required_counts.get(key, 0)),
+        )
+        count = 0
+        for entry in sections.of(key) if cap > 0 else ():
+            ident = _identity(entry)
+            if ident in shown:
+                continue
+            shown.add(ident)
+            count += 1
+            if key in ("vault", "case", "deal") and entry.document_id:
+                try:
+                    nid = str(UUID(entry.document_id))
+                except ValueError:
+                    pass
+                else:
+                    if nid not in ids and len(ids) < 12:
+                        ids.append(nid)
+            if count >= cap:
+                break
+    if not ids:
+        return ""
+    return (
+        "🕸 関係図で見る: <" + base.rstrip("/") + "/search/graph/focus?seed=" + ",".join(ids) + ">"
+    )
+
+
 def render_sections(sections: Sections) -> str:
     """探し先ごとの節（0 件の節は出さない・各節は上位 PER_SECTION_MAX 件）。無ければ空。"""
     return "\n\n".join(_blocks(sections, {}))
@@ -746,6 +796,7 @@ def compose_answer(
     sections: Sections,
     lanes: Mapping[str, LaneStatus],
     tail: str = "",
+    graph_base_url: str = "",
     limit: int = ANSWER_MAX_CHARS,
 ) -> str:
     """答え全体（head → 節 → tail → 探した範囲）を ``limit`` 字以内で組む。
@@ -766,7 +817,9 @@ def compose_answer(
         head = _clip_block(head, max(0, budget))
 
     def render(text_head: str, text_tail: str = tail) -> str:
-        return _join(text_head, _blocks(sections, caps), text_tail, scope)
+        link = graph_link(sections, caps, graph_base_url)
+        footer = link + "\n\n" + scope if link else scope
+        return _join(text_head, _blocks(sections, caps), text_tail, footer)
 
     text = render(head)
     if len(text) <= limit:
@@ -785,6 +838,11 @@ def compose_answer(
             text = render(head)
             if len(text) <= limit:
                 return text
+    if graph_base_url:
+        graph_base_url = ""
+        text = render(head)
+        if len(text) <= limit:
+            return text
     # 段 4: head を切る（探した範囲と tail は残す）。tail だけで超える異常時は tail も切る。
     tail_budget = limit - len(_join("", (), "", scope)) - 2
     clipped_tail = _clip_block(tail.strip(), max(0, tail_budget))
