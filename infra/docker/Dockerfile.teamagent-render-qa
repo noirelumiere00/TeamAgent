@@ -32,7 +32,7 @@ COPY src/teamagent/media/deck_qa.py \
      src/teamagent/media/render_qa_baseline_proposal_builder_v1.json /app/src/teamagent/media/
 RUN mkdir -p /app/src/teamagent; touch /app/src/teamagent/__init__.py /app/src/teamagent/media/__init__.py; \
     fc-cache -f; addgroup -g 10001 renderqa; adduser -D -u 10001 -G renderqa renderqa
-ENV PYTHONPATH=/app/src PATH=/app/.venv/bin:$PATH \
+ENV PYTHONPATH=/app/src PATH=/app/.venv/bin:$PATH LANG=ja_JP.UTF-8 \
     PYTHONDONTWRITEBYTECODE=1 HOME=/tmp XDG_CACHE_HOME=/tmp/cache SAL_DISABLE_CRASH_REPORT=1
 USER 10001:10001
 ENTRYPOINT ["python", "-m", "teamagent.media.render_qa_child"]

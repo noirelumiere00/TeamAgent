@@ -5,6 +5,9 @@
  <item oor:path="/org.openoffice.Office.Common/Load"><prop oor:name="UpdateDocMode" oor:op="fuse"><value>0</value></prop></item>
  <item oor:path="/org.openoffice.Office.Common/Misc"><prop oor:name="UseJava" oor:op="fuse"><value>false</value></prop></item>
  <item oor:path="/org.openoffice.Office.Jobs/Jobs/org.openoffice.Office.Jobs:Job['UpdateCheck']/Arguments"><prop oor:name="AutoCheckEnabled" oor:op="fuse"><value>false</value></prop></item>
+ <!-- 既定のアジア言語を日本語に。言語が無い和文の字形の補いが簡体字（Noto CJK SC）に落ちないように（10-14 CI）。 -->
+ <item oor:path="/org.openoffice.Office.Linguistic/General"><prop oor:name="DefaultLocale_CJK" oor:op="fuse"><value>ja-JP</value></prop></item>
+ <item oor:path="/org.openoffice.Setup/L10N"><prop oor:name="ooSetupSystemLocale" oor:op="fuse"><value>ja-JP</value></prop></item>
  <item oor:path="/org.openoffice.Office.Common/Font/Substitution"><prop oor:name="Replacement" oor:op="fuse"><value>true</value></prop></item>
  <item oor:path="/org.openoffice.Office.Common/Font/Substitution/FontPairs">
   <node oor:name="Gothic00" oor:op="replace"><prop oor:name="Font"><value>Yu Gothic UI</value></prop><prop oor:name="ReplaceFont"><value>TA Palt Gothic</value></prop><prop oor:name="Always"><value>true</value></prop><prop oor:name="OnScreenOnly"><value>false</value></prop></node>
