@@ -168,6 +168,16 @@ class SlackChannelResolution:
     error: str = ""
 
 
+@dataclass(frozen=True)
+class SlackChannelSharing:
+    """会話が社外と共有（Slack Connect）されているか。確かめられなければ共有扱い（fail-closed）。"""
+
+    external: bool = True
+    error: str = ""
+    # missing_scope のときに Slack が返す不足 scope（再連携で直るかの判断に使う）
+    needed: str = ""
+
+
 def normalize_channel_name(name: str) -> str:
     """全半角・大小文字と利用者の「〇〇のチャンネル」表記を揃える。"""
     name = unicodedata.normalize("NFKC", name).strip().lower().lstrip("#")
@@ -188,6 +198,15 @@ def _slack_error_code(exc: BaseException) -> str:
     except Exception:
         return "api_error"
     return str(code) if code else "api_error"
+
+
+def _slack_needed_scope(exc: BaseException) -> str:
+    """missing_scope の例外から、Slack が返した不足 scope（``needed``）を取り出す（無ければ空）。"""
+    resp = getattr(exc, "response", None)
+    try:
+        return str(resp.get("needed") or "") if resp is not None else ""
+    except Exception:
+        return ""
 
 
 def _run_sync(coro_factory: Callable[[], Any]) -> Any:
@@ -408,6 +427,47 @@ class SlackUserReader:
         return tuple(
             _message_from_raw(m) for m in raw if isinstance(m, dict) and str(m.get("ts")) == ts
         )
+
+    def channel_sharing_checked(self, channel_id: str, request_id: str) -> SlackChannelSharing:
+        """会話が社外と共有されているかを **本人の権限で** 確かめる（conversations.info）。
+
+        読み取り専用。Slack Connect（is_ext_shared・招待中の is_pending_ext_shared）と、
+        組織内共有でない is_shared を社外共有とみなす。取れない・形が違うときは
+        共有扱いのまま error を返す（呼び出し側は出さない）。
+        """
+        if not re.fullmatch(r"[CG][A-Z0-9]{8,}", channel_id or ""):
+            return SlackChannelSharing(error="bad_target")
+
+        async def fetch() -> Any:
+            return await asyncio.wait_for(
+                self._client.conversations_info(channel=channel_id), timeout=15
+            )
+
+        try:
+            resp = _run_sync(fetch)
+        except Exception as e:  # fail-closed（error code を上へ返す）
+            code = _slack_error_code(e)
+            logger.warning(
+                "slack_user_channel_sharing_failed",
+                request_id=request_id,
+                error=type(e).__name__,
+                slack_error=code,  # G8: channel 名は出さない
+            )
+            return SlackChannelSharing(error=code, needed=_slack_needed_scope(e))
+        if resp.get("ok") is False:
+            return SlackChannelSharing(
+                error=str(resp.get("error") or "api_error"), needed=str(resp.get("needed") or "")
+            )
+        channel = resp.get("channel")
+        # 共有の印が無い応答（形の違い）は確かめられない扱い（社内とみなさない）
+        if not isinstance(channel, dict) or "is_ext_shared" not in channel:
+            return SlackChannelSharing(error="bad_response")
+        external = bool(
+            channel.get("is_ext_shared")
+            or channel.get("is_pending_ext_shared")
+            or (channel.get("is_shared") and not channel.get("is_org_shared"))
+        )
+        return SlackChannelSharing(external=external)
 
     def resolve_channel_checked(self, name: str, request_id: str) -> SlackChannelResolution:
         """現在の scope で in:#名前 を検索する（list の read scopes は未付与）。
