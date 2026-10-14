@@ -289,6 +289,78 @@ def test_dm_request_sees_private_matches() -> None:
     assert [h.channel for h in out.slack_hits] == ["#sales", "🔒#secret-hr", "DM"]
 
 
+AICO = "U0AICOBOT1"
+
+
+def _aico_dm_echo() -> dict[str, Any]:
+    """本人と Aico の DM（依頼元）にある、Aico の過去の答え（10-14 本番で数字ごと拾い直した形）。"""
+    return _match(
+        "1759210000.000500",
+        "D0MY",
+        AICO,
+        "見積 再生 50.8 万 / 保存 129 件 AICO_PAST_ANSWER",
+        user=AICO,
+        username="aico",
+        is_private=True,
+        match_type="im",
+    )
+
+
+def _aico_channel_post() -> dict[str, Any]:
+    return _match(
+        "1759210000.000600",
+        "C0SALES",
+        "sales",
+        "見積 AICO_CHANNEL_POST",
+        user=AICO,
+        username="aico",
+    )
+
+
+def test_dm_request_never_uses_its_own_conversation_with_aico() -> None:
+    """S7: 依頼が来た DM（本人と Aico の会話）の投稿は、設定が無くても根拠に入れない。"""
+    bedrock = _bedrock()
+    client = _slack_client([_aico_dm_echo(), PUBLIC, DM])
+    skill, _ = _skill(bedrock, _pg([_vault_hit()]), client=client)
+    out = skill.run(SearchInput(query="見積"), SkillContext(metadata=dict(MCP, channel_id="D0MY")))
+    assert out.slack_hits is not None
+    assert [h.channel for h in out.slack_hits] == ["#sales", "DM"]  # 別の人との DM は残る
+    assert "AICO_PAST_ANSWER" not in _user_message(bedrock)
+    assert "50.8" not in _user_message(bedrock)
+
+
+def test_aico_own_posts_are_dropped_everywhere_when_configured(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """S7: AICO_BOT_USER_IDS の投稿は、どの場所にあっても表示・要約・件数に使わない。"""
+    monkeypatch.setenv("AICO_BOT_USER_IDS", f" {AICO} ,U0OTHERBOT")
+    bedrock = _bedrock()
+    client = _slack_client([_aico_channel_post(), PUBLIC, PRIVATE])
+    skill, _ = _skill(bedrock, _pg([_vault_hit()]), client=client)
+    out = skill.run(SearchInput(query="見積"), SkillContext(metadata=dict(MCP, channel_id="C0X")))
+    assert out.slack_hits is not None and [h.channel for h in out.slack_hits] == ["#sales"]
+    assert "AICO_CHANNEL_POST" not in _user_message(bedrock)
+    # 件数にも入れない（非公開だけが残る面では「非公開の場所に一致が N 件」に Aico の分を数えない）
+    only_private = _slack_client([_aico_channel_post(), _aico_dm_echo(), PRIVATE])
+    skill2, _ = _skill(_bedrock(), _pg([_vault_hit()]), client=only_private)
+    out2 = skill2.run(SearchInput(query="見積"), SkillContext(metadata=dict(MCP, channel_id="C0X")))
+    assert out2.slack_hits == [] and "非公開の場所に一致が 1 件" in out2.answer
+
+
+def test_other_dm_and_unconfigured_bot_posts_are_kept(monkeypatch: pytest.MonkeyPatch) -> None:
+    """依頼元でない DM と、設定に無い投稿者は今までどおり残す（外しすぎない）。"""
+    monkeypatch.delenv("AICO_BOT_USER_IDS", raising=False)
+    client = _slack_client([_aico_channel_post(), PUBLIC])
+    skill, _ = _skill(_bedrock(), _pg([_vault_hit()]), client=client)
+    out = skill.run(
+        SearchInput(query="見積"), SkillContext(metadata=dict(MCP, channel_id="D0OTHER"))
+    )
+    assert out.slack_hits is not None and [h.channel for h in out.slack_hits] == [
+        "#sales",
+        "#sales",
+    ]
+
+
 def test_channel_with_only_private_matches_says_so_without_content() -> None:
     client = _slack_client([PRIVATE, DM])
     skill, _ = _skill(_bedrock(), _pg([_vault_hit()]), client=client)
