@@ -77,7 +77,8 @@ def test_unclassified_post_survives_auto_filters_by_default(
     skill, pools = _build(pg)
     out = skill.run(input=SearchInput(query=QUERY, top_k=5), ctx=SkillContext())
 
-    assert pg.calls[0]["metadata_filters"] == {"cls_phase": "受注", "cls_solution": "動画広告"}
+    # 10-14 から動画系の語（ショート動画）には cls_solution を自動で付けない（分類が割れているため）。
+    assert pg.calls[0]["metadata_filters"] == {"cls_phase": "受注"}
     assert pg.calls[0]["metadata_filters_allow_missing"] is True
     assert any(ADK_POST in doc for pool in pools for doc in pool), (
         "未分類の投稿が候補に入っていない"
