@@ -260,12 +260,12 @@ def test_rows_whose_expected_tool_is_not_offered_are_split_out() -> None:
         _row(id="ok", expect="search"),
         _row(id="alt", expect="mail_summary", alt_ok=["search"]),
         _row(id="ask", expect=scoring.ASK_BACK),
-        _row(id="gone", expect="mail_summary"),  # B に無い＝比べられない
-        _row(id="off", expect="tiktok_comment_mining"),  # フラグで外れたツール
+        _row(id="b_only_lost", expect="mail_summary"),  # B にだけ無い＝公開停止の影響として測る
+        _row(id="off", expect="tiktok_comment_mining"),  # どちらにも無い＝必ず落ちるので外す
     ]
     kept, skipped = scoring.split_offered(rows, offered, frozenset())
-    assert [r.id for r in kept] == ["ok", "alt", "ask"]
-    assert [r.id for r in skipped] == ["gone", "off"]
+    assert [r.id for r in kept] == ["ok", "alt", "ask", "b_only_lost"]
+    assert [r.id for r in skipped] == ["off"]
 
 
 def test_frozen_row_with_missing_tool_stops_instead_of_skipping() -> None:

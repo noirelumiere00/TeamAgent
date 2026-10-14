@@ -261,15 +261,15 @@ def expected_tool_offered(row: CorpusRow, offered: set[str]) -> bool:
 def split_offered(
     rows: list[CorpusRow], offered_by_variant: dict[str, set[str]], frozen: frozenset[str]
 ) -> tuple[list[CorpusRow], list[CorpusRow]]:
-    """全 variant で測れる行と、どれかの variant で期待ツールが出ていない行に分ける。
+    """どの variant の雛形にも期待ツールが出ていない行だけを外す。
 
-    比べる variant 同士で同じ行を使うため、1 つでも出ていなければ外す。凍結済みの本番障害行が
-    外れると必須条件（R4 全合格）を測れないので、黙って外さず止める。
+    一部の variant にだけ無い行は残す（``--disable`` で公開停止の影響を測るとき、その差が測りたいもの）。
+    凍結済みの本番障害行が外れると必須条件（R4 全合格）を測れないので、黙って外さず止める。
     """
     kept: list[CorpusRow] = []
     skipped: list[CorpusRow] = []
     for row in rows:
-        if all(expected_tool_offered(row, o) for o in offered_by_variant.values()):
+        if any(expected_tool_offered(row, o) for o in offered_by_variant.values()):
             kept.append(row)
         else:
             skipped.append(row)

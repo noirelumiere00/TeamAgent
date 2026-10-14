@@ -114,8 +114,9 @@ uv run python scripts/routing_eval/report.py runs/results_new.jsonl runs/results
 
 本番で呼べないツールを期待する既知の行（同ファイルの `CORPUS_ROWS_EXPECTING_UNWIRED_TOOLS`）は母数から外して別に数える。
 
-さらに `run_routing_eval.py` は、期待ツール（か `alt_ok`）が**どれかの variant の雛形に出ていない行**を実行前に外し、
+さらに `run_routing_eval.py` は、期待ツール（か `alt_ok`）が**どの variant の雛形にも出ていない行**を実行前に外し、
 外した行を毎回表示する（機能フラグで外れたツールを期待する行は、何を選んでも必ず落ちるため。課金もしない）。
+一部の variant にだけ無い行は残す（`--disable` で公開停止の影響を測るとき、その差が測りたいもの）。
 固定の一覧はフラグを変えると古くなるので、こちらは実際に評価する雛形から判定する。凍結済みの本番障害行が外れる場合は止まる。
 
 ### 読み方の注意
