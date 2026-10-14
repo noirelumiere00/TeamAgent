@@ -612,13 +612,24 @@ def evaluate(
             for g in chars
         ):
             add(shape, "notdef", "error", rect=list(rect))
-        if any(
-            not _font_allowed(g.font, shape.expected_fonts, font_substitute == "palt")
-            or "Helvetica Neue" in shape.expected_fonts
-            or any(ord(c) >= 0x1F000 for c in g.text)
-            for g in chars
-        ):
-            add(shape, "glyph_fallback", "warn", rect=list(rect))
+        fallback_fonts = sorted(
+            {
+                g.font.split("+", 1)[-1][:40]
+                for g in chars
+                if not _font_allowed(g.font, shape.expected_fonts, font_substitute == "palt")
+                or any(ord(c) >= 0x1F000 for c in g.text)
+            }
+        )
+        if fallback_fonts or (chars and "Helvetica Neue" in shape.expected_fonts):
+            # 書体名は資料の本文ではないので、原因の切り分けのために添える（最大 5 件）。
+            add(
+                shape,
+                "glyph_fallback",
+                "warn",
+                rect=list(rect),
+                fonts=fallback_fonts[:5],
+                expected=list(shape.expected_fonts)[:5],
+            )
     for i, shape in enumerate(shapes):
         current_rect = text_boxes.get((shape.slide, shape.key))
         if current_rect is None:

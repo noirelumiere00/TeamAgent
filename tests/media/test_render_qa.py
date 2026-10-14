@@ -99,8 +99,9 @@ def test_rotation_counts_only():
     [
         ("□", "Arial", "notdef"),
         ("(cid:0)", "Arial", "notdef"),
-        ("x", ".notdef", "notdef"),
-        ("x", "Unexpected", "glyph_fallback"),
+        # 見本の字は、結果の欄の名前（expected 等）や書体名と重ならない字にする（1 文字の x は誤検知する）。
+        ("本", ".notdef", "notdef"),
+        ("本", "Unexpected", "glyph_fallback"),
         ("😀", "Arial", "glyph_fallback"),
     ],
 )
