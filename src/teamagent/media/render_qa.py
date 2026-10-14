@@ -477,14 +477,49 @@ def _overlap(a: Rect, b: Rect) -> float:
     return max(0, min(a[2], b[2]) - max(a[0], b[0])) * max(0, min(a[3], b[3]) - max(a[1], b[1]))
 
 
+# 置き換えの表（fontconfig・LibreOffice の FontPairs）と同じ集合。
+# 和文が中国語の字形（Noto CJK SC）に落ちたら指摘する。
+JA_GOTHIC_FAMILIES = frozenset(
+    [
+        "Yu Gothic UI",
+        "Yu Gothic",
+        "游ゴシック",
+        "游ゴシック体",
+        "ＭＳ Ｐゴシック",
+        "MS PGothic",
+        "ＭＳ ゴシック",
+        "MS Gothic",
+        "メイリオ",
+        "Meiryo",
+        "Meiryo UI",
+        "Hiragino Sans",
+        "ヒラギノ角ゴ ProN",
+        "ヒラギノ角ゴシック",
+    ]
+)
+JA_MINCHO_FAMILIES = frozenset(
+    [
+        "ＭＳ Ｐ明朝",
+        "MS PMincho",
+        "ＭＳ 明朝",
+        "MS Mincho",
+        "游明朝",
+        "Yu Mincho",
+        "ヒラギノ明朝 ProN",
+    ]
+)
+
+
 def _font_allowed(font: str, expected: tuple[str, ...], palt: bool) -> bool:
     normal = font.split("+", 1)[-1].replace(" ", "").replace("-", "").lower()
     allowed = list(expected)
     for family in expected:
-        if family in {"Yu Gothic UI", "Yu Gothic", "游ゴシック", "游ゴシック体"}:
+        if family in JA_GOTHIC_FAMILIES:
             allowed.append("TA Palt Gothic")
             if not palt:
                 allowed.append("Noto Sans CJK JP")
+        if family in JA_MINCHO_FAMILIES:
+            allowed.append("Noto Serif CJK JP")
         if family in {"Arial", "Helvetica Neue"}:
             allowed.append("Liberation Sans")
     return not expected or any(

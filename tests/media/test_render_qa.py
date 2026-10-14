@@ -330,3 +330,33 @@ def test_palt_substitute_is_allowed_and_plain_noto_requires_review(family):
     assert plain["status"] == "needs_review"
     unexpected = evaluate([shape], [glyph(font="NotoSansCJKJP-Regular")], 200, 200)
     assert "glyph_fallback" in kinds(unexpected)
+
+
+@pytest.mark.parametrize(
+    "expected,font,allowed",
+    [
+        ("ＭＳ Ｐゴシック", "ABCDEF+TAPaltGothic-Regular", True),
+        ("メイリオ", "TAPaltGothic-Bold", True),
+        ("ＭＳ 明朝", "NotoSerifCJKjp-Regular", True),
+        # 10-14 CI: 和文が中国語の字形（簡体字）に落ちたら許さない。
+        ("ＭＳ Ｐゴシック", "NotoSansCJKsc-Regular", False),
+        ("Yu Gothic UI", "NotoSansCJKsc-Regular", False),
+    ],
+)
+def test_japanese_families_map_to_japanese_faces_only(expected, font, allowed):
+    from teamagent.media.render_qa import _font_allowed
+
+    assert _font_allowed(font, (expected,), True) is allowed
+
+
+def test_substitution_tables_cover_the_same_japanese_families():
+    from pathlib import Path
+
+    from teamagent.media.render_qa import JA_GOTHIC_FAMILIES, JA_MINCHO_FAMILIES
+
+    root = Path(__file__).resolve().parents[2] / "infra/docker/render-qa"
+    fontconfig = (root / "fontconfig/60-teamagent-substitutes.conf").read_text(encoding="utf-8")
+    xcu = (root / "lo-profile/registrymodifications.xcu").read_text(encoding="utf-8")
+    for family in JA_GOTHIC_FAMILIES | JA_MINCHO_FAMILIES:
+        assert f"<family>{family}</family>" in fontconfig
+        assert f"<value>{family}</value>" in xcu
