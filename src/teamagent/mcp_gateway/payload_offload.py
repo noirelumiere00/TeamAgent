@@ -56,6 +56,10 @@ OFFLOAD_TOOLS: frozenset[str] = frozenset(
 # 署名 URL は RLS/本人限定配信をバイパスする経路なので、全文 JSON から落としてから退避する。
 # 切り詰め版（依頼者本人の会話へ返す側）には残す。
 PER_USER_KEYS: frozenset[str] = frozenset({"slack_hits"})
+# 本人の Slack を材料にした要約（複合検索の answer）も、本人の非公開チャンネルや DM の中身を
+# 含みうる。PER_USER_KEYS に中身がある（＝要約器に本人の Slack を渡した）回は、これらのキーも
+# 退避先から落とす。会話へ返す切り詰め版には残す（本人の会話なので見せてよい）。
+PER_USER_DERIVED_KEYS: frozenset[str] = frozenset({"answer"})
 
 # ペイロード全体（JSON 文字列長）がこれを超えたら退避＋切り詰めを発動。
 _DEFAULT_MAX_CHARS = 10_000
@@ -218,9 +222,12 @@ def maybe_offload(tool: str, data: dict[str, Any], *, request_id: str) -> dict[s
 
     published = raw
     if any(key in data for key in PER_USER_KEYS):
+        dropped = PER_USER_KEYS
+        if any(data.get(key) for key in PER_USER_KEYS):
+            dropped = PER_USER_KEYS | PER_USER_DERIVED_KEYS
         try:
             published = json.dumps(
-                {k: v for k, v in data.items() if k not in PER_USER_KEYS},
+                {k: v for k, v in data.items() if k not in dropped},
                 ensure_ascii=False,
                 default=str,
             )
@@ -257,4 +264,4 @@ def maybe_offload(tool: str, data: dict[str, Any], *, request_id: str) -> dict[s
     return trimmed
 
 
-__all__ = ["OFFLOAD_TOOLS", "PER_USER_KEYS", "enabled", "maybe_offload"]
+__all__ = ["OFFLOAD_TOOLS", "PER_USER_DERIVED_KEYS", "PER_USER_KEYS", "enabled", "maybe_offload"]
