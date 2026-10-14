@@ -143,6 +143,20 @@ _RECONNECT_CODES = frozenset(
     }
 )
 
+
+def _reconnect_fixes(sharing: Any) -> bool:
+    """missing_scope でも、不足 scope が本人連携で付かない（例: mpim:read）なら再連携で直らない。
+
+    直らないときに「連携して」と案内すると、再連携しても同じ所で止まる行き止まりになる。
+    """
+    if sharing.error != "missing_scope" or not sharing.needed:
+        return True
+    from teamagent.adapters.slack_oauth_flow import SLACK_USER_SCOPES
+
+    needed = {s.strip() for s in str(sharing.needed).split(",") if s.strip()}
+    return needed <= set(SLACK_USER_SCOPES)
+
+
 _ERR_MSG: dict[str, str] = {
     "no_conversation": "どの会話のファイルか特定できませんでした（Slack 上でファイルを"
     "投稿したスレッドから話しかけてください）。",
@@ -498,6 +512,28 @@ class AttachmentAssistSkill(BaseSkill[AttachmentAssistInput, AttachmentAssistOut
         reader = self._resolve_reader(requester, log)
         if reader is None:
             return self._not_connected(ctx, mode)
+        # 別チャンネルからの依頼か（DM・同じチャンネル以外）。投稿を読む前に決める。
+        restricted = not may_repost(
+            origin_channel=origin,
+            identity_verified=True,
+            source_channel=link.channel_id,
+            file_is_public=False,
+        )
+        if restricted and not is_private_surface(origin, True):
+            # 依頼元が社外と共有（Slack Connect）されているなら出さない。公開チャンネルの
+            # 公開ファイルでも、社外の参加者に見える場所へ添付し直すことになるため。
+            # 確かめられないときも出さない。
+            # **リンク先を読む前に**確かめる（読めたかどうかで返事が変わると、投稿の有無が漏れる）。
+            sharing = reader.channel_sharing_checked(origin, ctx.request_id)
+            if sharing.error in _RECONNECT_CODES and _reconnect_fixes(sharing):
+                return self._not_connected(ctx, mode)
+            if sharing.error or sharing.external:
+                log.info(
+                    "attachment_assist_permalink_origin_shared",
+                    external=sharing.external,
+                    slack_error=sharing.error,
+                )
+                return self._permalink_fail(deny_key, mode, error="not_found")
         read = reader.read_message_checked(
             link.channel_id, link.ts, ctx.request_id, thread_ts=link.thread_ts
         )
@@ -516,26 +552,6 @@ class AttachmentAssistSkill(BaseSkill[AttachmentAssistInput, AttachmentAssistOut
             allowed_hosts=allowed_hosts,
             request_id=ctx.request_id,
         )
-        restricted = not may_repost(
-            origin_channel=origin,
-            identity_verified=True,
-            source_channel=link.channel_id,
-            file_is_public=False,
-        )
-        if restricted and not is_private_surface(origin, True):
-            # 別チャンネルからの依頼で、依頼元が社外と共有（Slack Connect）されているなら出さない。
-            # 公開チャンネルの公開ファイルでも、社外の参加者に見える場所へ添付し直すことになるため。
-            # 確かめられないときも出さない（権限不足は再連携の案内）。
-            sharing = reader.channel_sharing_checked(origin, ctx.request_id)
-            if sharing.error in _RECONNECT_CODES:
-                return self._not_connected(ctx, mode)
-            if sharing.error or sharing.external:
-                log.info(
-                    "attachment_assist_permalink_origin_shared",
-                    external=sharing.external,
-                    slack_error=sharing.error,
-                )
-                return self._permalink_fail(deny_key, mode, error="not_found")
         if restricted:
             # 別チャンネルからの依頼: 公開ファイルだけ。理由や件数も出さない（存在を言わない）。
             candidates = [

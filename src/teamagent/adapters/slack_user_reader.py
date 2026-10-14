@@ -174,6 +174,8 @@ class SlackChannelSharing:
 
     external: bool = True
     error: str = ""
+    # missing_scope のときに Slack が返す不足 scope（再連携で直るかの判断に使う）
+    needed: str = ""
 
 
 def normalize_channel_name(name: str) -> str:
@@ -196,6 +198,15 @@ def _slack_error_code(exc: BaseException) -> str:
     except Exception:
         return "api_error"
     return str(code) if code else "api_error"
+
+
+def _slack_needed_scope(exc: BaseException) -> str:
+    """missing_scope の例外から、Slack が返した不足 scope（``needed``）を取り出す（無ければ空）。"""
+    resp = getattr(exc, "response", None)
+    try:
+        return str(resp.get("needed") or "") if resp is not None else ""
+    except Exception:
+        return ""
 
 
 def _run_sync(coro_factory: Callable[[], Any]) -> Any:
@@ -442,11 +453,14 @@ class SlackUserReader:
                 error=type(e).__name__,
                 slack_error=code,  # G8: channel 名は出さない
             )
-            return SlackChannelSharing(error=code)
+            return SlackChannelSharing(error=code, needed=_slack_needed_scope(e))
         if resp.get("ok") is False:
-            return SlackChannelSharing(error=str(resp.get("error") or "api_error"))
+            return SlackChannelSharing(
+                error=str(resp.get("error") or "api_error"), needed=str(resp.get("needed") or "")
+            )
         channel = resp.get("channel")
-        if not isinstance(channel, dict):
+        # 共有の印が無い応答（形の違い）は確かめられない扱い（社内とみなさない）
+        if not isinstance(channel, dict) or "is_ext_shared" not in channel:
             return SlackChannelSharing(error="bad_response")
         external = bool(
             channel.get("is_ext_shared")
