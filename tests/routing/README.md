@@ -188,3 +188,12 @@ SOUL の効き目が測れないので、Haiku に「SOUL.md を system prompt �
   `boundary-02` は SOUL 込み変更前の 1 本目で 1 回 `tiktok_acquire`。
 - 限界: シミュのエージェントはそれ自体の system prompt の上で SOUL を「読む」ので、OpenClaw の実行時
   （bootstrap 注入・IDENTITY.md・会話履歴）と同一ではない。最終確認は便の後の実機 DM で行う。
+
+---
+
+## 本番と同じ条件での自動実行（2026-10-01〜）
+
+上の手動シミュは「name+description だけで 1 本選ぶルーター」に見立てたもの。本番の OpenClaw 2026.7.1 が
+Bedrock へ送る要求（SOUL・Slack DM の受信文脈・全ツール定義を含む）に本コーパスを差し込み、Haiku 4.5 で
+各ケースを複数回実行して採点するハーネスを `scripts/routing_eval/` に置いた（手動実行・課金あり）。
+ツール定義やモデルを変えたときの前後比較はこちらを使う。手順と読み方の注意は `scripts/routing_eval/README.md`。
