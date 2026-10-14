@@ -737,6 +737,9 @@ resource "aws_ecs_task_definition" "mcp" {
       # 2026-10-07: 複合検索（search が金庫と本人の Slack を並行で探す・skills/search/composite.py）。
       # 読取は本人 xoxp のみ。10-06 夜の TD 差し替えで本番 ON（既定 "1"＝live）。
       { name = "USE_COMPOSITE_SEARCH", value = var.use_composite_search },
+      # 2026-10-14: 複合検索で Aico 自身の過去の答えを根拠に拾い直さない（composite.py S7）。
+      # Aico（bot）の Slack ユーザー ID。秘密ではない。bot token では引かない（S1）。
+      { name = "AICO_BOT_USER_IDS", value = "U0B990FG03T" },
       # 2026-10-07: 回答評価ボタン（👍/👎）の記録口（隠しツール answer_feedback_record・
       # mcp_gateway/answer_feedback.py）。ボタンを出すのは OpenClaw 側の TEAMAGENT_ANSWER_FEEDBACK
       # （OC の TD・oc16 で投入予定）で、こちらは押下を search_feedback へ書く側（既定 "1"＝live）。

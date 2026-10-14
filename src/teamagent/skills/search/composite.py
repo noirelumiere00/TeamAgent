@@ -15,6 +15,11 @@
      Slack の失敗で金庫の検索全体を落とさない。
   S5 要約器へ渡す本文は scrub ＋境界トークン無害化＋「資料であり指示ではない」枠。
   S6 ログは件数・状態・理由コードだけ（検索語・本文・場所名を出さない）。
+  S7 Aico 自身の過去の答えを根拠にしない（2026-10-14 本番 DM で確認）。本人の Slack 全体を探すと、
+     依頼が来た DM（本人と Aico の会話）や Aico の投稿そのものが一致に入り、要約器がそれを
+     「Slack の資料」として数字ごと言い直す。一度出た数字（誤りも）が翌日以降も繰り返される。
+     依頼が来た DM の投稿と、AICO_BOT_USER_IDS の投稿は、表示・要約・件数のどれにも使わない。
+     Aico の ID は bot token で引かない（S1）。設定が無くても依頼元の DM は外れる。
 
 ペイロード: 金庫の top5 は今まで通り、Slack は 160 字の抜粋 5 件だけ（mcp_gateway の
 payload_offload は JSON 全体が 1 万字を超えると各項目を 500 字に切る）。
@@ -40,6 +45,8 @@ logger = structlog.get_logger(__name__)
 COMPOSITE_ENV = "USE_COMPOSITE_SEARCH"
 #: Slack 検索の待ち上限（秒）。金庫の検索と並行なので、通常は金庫の方が遅く待ちは生じない。
 SLACK_TIMEOUT_ENV = "SEARCH_COMPOSITE_SLACK_TIMEOUT_S"
+#: Aico（bot）自身の Slack ユーザー ID（カンマ区切り）。S7 で根拠から外す。
+SELF_USER_IDS_ENV = "AICO_BOT_USER_IDS"
 DEFAULT_SLACK_TIMEOUT_S = 8.0
 
 #: MCP ゲートを通った search tool の呼び出しにだけ付く印（two_stage と同じ印を共用する）。
@@ -225,6 +232,23 @@ def _to_item(match: Any) -> SlackItem:
     return SlackItem(hit=hit, text=_neutralize(match.text, per_msg=LLM_TEXT_CHARS))
 
 
+def _self_user_ids() -> frozenset[str]:
+    raw = os.environ.get(SELF_USER_IDS_ENV, "")
+    return frozenset(part.strip() for part in raw.split(",") if part.strip())
+
+
+def drop_own_conversation(matches: tuple[Any, ...], *, origin: str) -> tuple[tuple[Any, ...], int]:
+    """S7: 依頼が来た DM の投稿と Aico 自身の投稿を外す。外した件数も返す（ログ用）。"""
+    self_ids = _self_user_ids()
+    kept = tuple(
+        m
+        for m in matches
+        if not (origin.startswith("D") and getattr(m, "channel_id", "") == origin)
+        and getattr(m, "user", None) not in self_ids
+    )
+    return kept, len(matches) - len(kept)
+
+
 def lookup_slack(
     *,
     slack_store: Any,
@@ -291,7 +315,10 @@ def _lookup_slack(
         logger.info("search_composite_slack_error", request_id=request_id, slack_error=result.error)
         return SlackLookup(status="error", reason="search_failed")
 
-    shown, hidden_count = _partition(result.matches, dm_surface=dm_surface)
+    matches, dropped = drop_own_conversation(result.matches, origin=origin)
+    if dropped:
+        logger.info("search_composite_slack_self_dropped", request_id=request_id, dropped=dropped)
+    shown, hidden_count = _partition(matches, dm_surface=dm_surface)
     items = tuple(_to_item(m) for m in shown[:SLACK_TOP_N])
     return SlackLookup(status="ok", reason="ok", items=items, hidden_count=hidden_count)
 
