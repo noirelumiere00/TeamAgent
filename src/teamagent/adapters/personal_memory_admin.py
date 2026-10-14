@@ -72,6 +72,18 @@ class AdminRow:
 ConnectionFactory = Callable[[str], AbstractContextManager[Any]]
 
 
+def _col(row: Any, name: str, index: int) -> Any:
+    """行から 1 列を名前で読む。本番の PgVectorClient は row_factory=dict_row（行は dict）。
+
+    tuple の接続（psycopg の既定）でも読めるよう、dict でなければ位置で読む。
+    """
+    if row is None:
+        return None
+    if isinstance(row, dict):
+        return row[name]
+    return row[index]
+
+
 def _default_connection_factory() -> ConnectionFactory:
     from teamagent.adapters.pgvector_client import PgVectorClient
 
@@ -120,7 +132,15 @@ class PersonalMemoryAdmin:
                 "FROM public.personal_memory_admin_view(%s, %s, %s, %s)",
                 (admin_email.strip().lower(), team_id, slack_user_id, reason),
             )
-            rows = [AdminRow(int(r[0]), str(r[1]), str(r[2]), r[3]) for r in cur.fetchall()]
+            rows = [
+                AdminRow(
+                    int(_col(r, "entry_no", 0)),
+                    str(_col(r, "entry_target", 1)),
+                    str(_col(r, "entry_content", 2)),
+                    _col(r, "entry_updated_at", 3),
+                )
+                for r in cur.fetchall()
+            ]
         logger.info("personal_memory_admin_viewed", items=len(rows))
         return rows
 
@@ -129,29 +149,33 @@ class PersonalMemoryAdmin:
             cur.execute(
                 "SELECT team_id, slack_user_id FROM public.personal_memory_retire_candidates()"
             )
-            return [(str(r[0]), str(r[1])) for r in cur.fetchall()]
+            return [
+                (str(_col(r, "team_id", 0)), str(_col(r, "slack_user_id", 1)))
+                for r in cur.fetchall()
+            ]
 
     def retire_delete(self, team_id: str, slack_user_id: str, reason: str = "slack_deleted") -> int:
         if not valid_principal(team_id, slack_user_id):
             raise PersonalMemoryAdminError("bad_principal")
         with self._txn(RETIRER_ROLE, "retire_delete") as cur:
             cur.execute(
-                "SELECT public.personal_memory_retire_delete(%s, %s, %s)",
+                "SELECT public.personal_memory_retire_delete(%s, %s, %s) AS deleted",
                 (team_id, slack_user_id, reason),
             )
-            row = cur.fetchone()
-        return int(row[0]) if row else 0
+            # 読みもトランザクションの中で行う（失敗は db_failed に揃え、削除は確定させない）
+            deleted = _col(cur.fetchone(), "deleted", 0)
+        return int(deleted) if deleted is not None else 0
 
     def retire_freeze(self, team_id: str, slack_user_id: str, reason: str = "slack_guest") -> bool:
         if not valid_principal(team_id, slack_user_id):
             raise PersonalMemoryAdminError("bad_principal")
         with self._txn(RETIRER_ROLE, "retire_freeze") as cur:
             cur.execute(
-                "SELECT public.personal_memory_retire_freeze(%s, %s, %s)",
+                "SELECT public.personal_memory_retire_freeze(%s, %s, %s) AS frozen",
                 (team_id, slack_user_id, reason),
             )
-            row = cur.fetchone()
-        return bool(row and row[0])
+            frozen = _col(cur.fetchone(), "frozen", 0)
+        return bool(frozen)
 
 
 class SlackUserInfo(Protocol):

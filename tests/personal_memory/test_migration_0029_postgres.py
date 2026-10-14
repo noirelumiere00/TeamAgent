@@ -492,13 +492,15 @@ def _admin_adapter(env: PmDb) -> Any:
     from contextlib import contextmanager
 
     import psycopg
+    from psycopg.rows import dict_row
 
     from teamagent.adapters.personal_memory_admin import PersonalMemoryAdmin
 
     @contextmanager
     def factory(role: str) -> Any:
-        # 本番の PgVectorClient.connection(app_role=…) と同じく SET ROLE してから使う
-        with psycopg.connect(env.migrator_dsn) as conn:
+        # 本番の PgVectorClient.connection(app_role=…) と同じく SET ROLE してから使う。
+        # 行の形も本番（_connect_pg の row_factory=dict_row）に合わせる（tuple だと r[0] の誤りを見逃す）。
+        with psycopg.connect(env.migrator_dsn, row_factory=dict_row) as conn:
             with conn.cursor() as cur:
                 cur.execute(f"SET ROLE {role}")
             yield conn
@@ -568,3 +570,18 @@ def test_sweep_deletes_only_confirmed_retirees_and_freezes_guests(env: PmDb) -> 
     assert gone not in states
     assert states[guest] == "frozen"
     assert states[flaky] == "active" and states[active] == "active"
+
+
+def test_admin_adapter_retire_paths_read_dict_rows(env: PmDb) -> None:
+    """掃除の 3 経路の戻り値を、本番と同じ dict 行の接続で確かめる（件数・凍結の真偽・対象の形）。"""
+    admin = _admin_adapter(env)
+    gone, guest = "U0ADRGONE1", "U0ADRGUES1"
+    _seed(env, gone, ["返事は短め", "資料は表で", "結論から"])
+    _seed(env, guest, ["返事は短め"])
+    candidates = admin.candidates()
+    assert (_TEAM, gone) in candidates and (_TEAM, guest) in candidates
+    assert all(isinstance(t, str) and isinstance(u, str) for t, u in candidates)
+    assert admin.retire_delete(_TEAM, gone) == 3
+    assert admin.retire_delete(_TEAM, gone) == 0  # 2 回目は消すものが無い
+    assert admin.retire_freeze(_TEAM, guest) is True
+    assert admin.retire_freeze(_TEAM, guest) is False  # 2 回目は何もしない

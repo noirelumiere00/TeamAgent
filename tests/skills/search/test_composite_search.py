@@ -592,6 +592,49 @@ def test_offload_never_publishes_slack_hits(monkeypatch: pytest.MonkeyPatch) -> 
     assert out["slack_hits"] and out["slack_hits"][0]["permalink"].startswith("https://")
 
 
+def _capture_upload(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    monkeypatch.setenv("USE_PAYLOAD_OFFLOAD", "1")
+    monkeypatch.setenv("TEAMAGENT_SHARED_COMPANY_DOMAINS", "vectorinc.co.jp")
+    uploaded: list[str] = []
+
+    import teamagent.adapters.report_publish as rp
+
+    def _pub(text: str, **_: Any) -> rp.PublishedObject:
+        uploaded.append(text)
+        return rp.PublishedObject(url="https://s3/full?X-Amz-Signature=s", bucket="b", key="k")
+
+    monkeypatch.setattr(rp, "publish_text_result", _pub)
+    return uploaded
+
+
+def test_offload_drops_answer_built_from_own_slack(monkeypatch: pytest.MonkeyPatch) -> None:
+    """要約器に本人の Slack を渡した回は、要約（answer）も退避先へ書き出さない。
+
+    退避先は /r の短縮リンク（ログイン不要・時限トークン）で開ける。本人の非公開チャンネルや DM を
+    もとにした要約がそこに載らないようにする。会話へ返す切り詰め版には要約を残す。
+    """
+    uploaded = _capture_upload(monkeypatch)
+    data = _payload(content_chars=2_000, answer_chars=2_500, long_slack=True).model_dump()
+    data["answer"] = "🔒#secret-hr の話では人事異動は来月です。" + data["answer"]
+    out = po.maybe_offload("search", data, request_id="r")
+    assert out["offloaded"] is True and len(uploaded) == 1
+    published = json.loads(uploaded[0])
+    assert "answer" not in published and "人事異動" not in uploaded[0]
+    assert published["hits"]  # 会社共有の資料は退避先に残る
+    assert out["answer"].startswith("🔒#secret-hr の話では人事異動は来月です。")
+
+
+def test_offload_keeps_answer_when_no_slack_was_used(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Slack を探したが 0 件（要約器に本人の Slack を渡していない）回は、要約を退避先に残す。"""
+    uploaded = _capture_upload(monkeypatch)
+    data = _payload(content_chars=2_000, answer_chars=2_500, long_slack=False).model_dump()
+    data["slack_hits"] = []
+    out = po.maybe_offload("search", data, request_id="r")
+    assert out["offloaded"] is True and len(uploaded) == 1
+    published = json.loads(uploaded[0])
+    assert published["answer"] == data["answer"] and "slack_hits" not in published
+
+
 # ── factory ────────────────────────────────────────────────────────────────
 
 
