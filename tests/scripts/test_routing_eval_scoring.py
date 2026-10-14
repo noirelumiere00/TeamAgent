@@ -254,6 +254,26 @@ def test_unwired_rows_excluded_from_rates() -> None:
     assert s["pass_rate"] == 1.0 and s["unwired_runs"] == 1
 
 
+def test_rows_whose_expected_tool_is_not_offered_are_split_out() -> None:
+    offered = {"A": {"search", "mail_summary"}, "B": {"search"}}
+    rows = [
+        _row(id="ok", expect="search"),
+        _row(id="alt", expect="mail_summary", alt_ok=["search"]),
+        _row(id="ask", expect=scoring.ASK_BACK),
+        _row(id="gone", expect="mail_summary"),  # B に無い＝比べられない
+        _row(id="off", expect="tiktok_comment_mining"),  # フラグで外れたツール
+    ]
+    kept, skipped = scoring.split_offered(rows, offered, frozenset())
+    assert [r.id for r in kept] == ["ok", "alt", "ask"]
+    assert [r.id for r in skipped] == ["gone", "off"]
+
+
+def test_frozen_row_with_missing_tool_stops_instead_of_skipping() -> None:
+    rows = [_row(id="r4-x", expect="calendar_freebusy")]
+    with pytest.raises(ValueError, match="r4-x"):
+        scoring.split_offered(rows, {"A": {"search"}}, frozenset({"r4-x"}))
+
+
 def test_compare_cases_reports_direction() -> None:
     a = [_rec("c1", True), _rec("c1", True), _rec("c2", False)]
     b = [_rec("c1", True), _rec("c1", False), _rec("c2", True)]

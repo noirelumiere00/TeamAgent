@@ -247,6 +247,38 @@ def tool_props_from_template(template: dict[str, Any]) -> dict[str, set[str]]:
     return props
 
 
+def expected_tool_offered(row: CorpusRow, offered: set[str]) -> bool:
+    """期待ツール（か alt_ok のどれか）が雛形のツール一覧に出ているか。聞き返しの期待は常に測れる。
+
+    出ていない行は、モデルが何を選んでも必ず落ちる（機能フラグで外れたツール等）。
+    固定の unwired 一覧はフラグを変えると古くなるので、実際に評価する雛形から判定する。
+    """
+    if row.expect == ASK_BACK:
+        return True
+    return bool(({row.expect} | set(row.alt_ok)) & offered)
+
+
+def split_offered(
+    rows: list[CorpusRow], offered_by_variant: dict[str, set[str]], frozen: frozenset[str]
+) -> tuple[list[CorpusRow], list[CorpusRow]]:
+    """全 variant で測れる行と、どれかの variant で期待ツールが出ていない行に分ける。
+
+    比べる variant 同士で同じ行を使うため、1 つでも出ていなければ外す。凍結済みの本番障害行が
+    外れると必須条件（R4 全合格）を測れないので、黙って外さず止める。
+    """
+    kept: list[CorpusRow] = []
+    skipped: list[CorpusRow] = []
+    for row in rows:
+        if all(expected_tool_offered(row, o) for o in offered_by_variant.values()):
+            kept.append(row)
+        else:
+            skipped.append(row)
+    lost_frozen = sorted(r.id for r in skipped if r.id in frozen)
+    if lost_frozen:
+        raise ValueError(f"凍結済みの本番障害行の期待ツールが雛形に無い: {lost_frozen}")
+    return kept, skipped
+
+
 # ── 集計 ─────────────────────────────────────────────────────────────────────
 
 

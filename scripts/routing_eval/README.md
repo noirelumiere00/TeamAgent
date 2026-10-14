@@ -61,8 +61,9 @@ git worktree add --detach /tmp/src_A <commit A>
 git worktree add --detach /tmp/src_B <commit B>
 
 # 1) ツール定義（同じ機能フラグで固定。公開停止の影響を測るときだけ --disable を使う）
-uv run python scripts/routing_eval/dump_tools.py --src /tmp/src_A/src --flags scripts/routing_eval/flags_mcp132.json --out runs/tools_A.json
-uv run python scripts/routing_eval/dump_tools.py --src /tmp/src_B/src --flags scripts/routing_eval/flags_mcp132.json --out runs/tools_B.json
+#    いまの本番に合わせるなら flags_mcp157.json（2026-10-14 の本番 TD）。#491 前後の比較は flags_mcp132.json
+uv run python scripts/routing_eval/dump_tools.py --src /tmp/src_A/src --flags scripts/routing_eval/flags_mcp157.json --out runs/tools_A.json
+uv run python scripts/routing_eval/dump_tools.py --src /tmp/src_B/src --flags scripts/routing_eval/flags_mcp157.json --out runs/tools_B.json
 
 # 2) 雛形（docker が要る。AWS の資格情報は使わない。1 本 20 秒ほど）
 scripts/routing_eval/capture.sh /tmp/src_A runs/tools_A.json runs/cap_A_new
@@ -112,6 +113,10 @@ uv run python scripts/routing_eval/report.py runs/results_new.jsonl runs/results
 - 禁止ツールの呼び出し 0・引数の契約違反 0・API エラー 0
 
 本番で呼べないツールを期待する既知の行（同ファイルの `CORPUS_ROWS_EXPECTING_UNWIRED_TOOLS`）は母数から外して別に数える。
+
+さらに `run_routing_eval.py` は、期待ツール（か `alt_ok`）が**どれかの variant の雛形に出ていない行**を実行前に外し、
+外した行を毎回表示する（機能フラグで外れたツールを期待する行は、何を選んでも必ず落ちるため。課金もしない）。
+固定の一覧はフラグを変えると古くなるので、こちらは実際に評価する雛形から判定する。凍結済みの本番障害行が外れる場合は止まる。
 
 ### 読み方の注意
 

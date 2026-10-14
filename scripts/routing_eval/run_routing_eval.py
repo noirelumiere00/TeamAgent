@@ -210,6 +210,17 @@ def main() -> int:
         rows = [r for r in rows if r.id in wanted]
     frozen, unwired = scoring.load_fixed_sets(args.catalog_test)
     props = {name: scoring.tool_props_from_template(v) for name, v in variants.items()}
+    try:
+        rows, skipped = scoring.split_offered(
+            rows, {name: set(p) for name, p in props.items()}, frozen
+        )
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
+    if skipped:
+        # 黙って外さない。何を外したかを毎回出す（課金もしない）。
+        print(f"期待ツールが雛形に無いので外す: {len(skipped)} 件")
+        for r in skipped:
+            print(f"  {r.id}: 期待 {r.expect}")
 
     done: set[tuple[str, str, str, int]] = set()
     if args.out.exists():
