@@ -211,3 +211,9 @@ def test_env_defaults_and_independence(monkeypatch: pytest.MonkeyPatch) -> None:
     assert video.load_policy() == direct_summary.DirectPolicy(True, frozenset({ME, OTHER}))
     monkeypatch.delenv(direct_summary.ENABLED_ENV)
     assert video.load_policy().enabled
+
+
+def test_posted_text_tells_aico_not_to_repeat_the_numbers() -> None:
+    # 10-13 の DM 実機: 別の投稿の後に Aico が同じ数字を丸めて並べ直した。置き換えの 1 行で止める。
+    assert video.POSTED_TEXT.startswith("📊 ")
+    assert "説明では数字を並べ直しません" in video.POSTED_TEXT
