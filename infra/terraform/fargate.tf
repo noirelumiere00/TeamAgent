@@ -742,6 +742,10 @@ resource "aws_ecs_task_definition" "mcp" {
       # 2026-10-07: 複合検索（search が金庫と本人の Slack を並行で探す・skills/search/composite.py）。
       # 読取は本人 xoxp のみ。10-06 夜の TD 差し替えで本番 ON（既定 "1"＝live）。
       { name = "USE_COMPOSITE_SEARCH", value = var.use_composite_search },
+      # 2026-10-15: 小俣さん「テストで問題なければ皆に公開」で統合検索を全員へ。
+      # register で入れる live の値を焼き、次の guard 経由の apply でも全員公開を維持する。
+      { name = "USE_SEARCH_FANOUT", value = "1" },
+      { name = "SEARCH_FANOUT_ALLOWED_EMAILS", value = "*" },
       # 2026-10-14: 複合検索で Aico 自身の過去の答えを根拠に拾い直さない（composite.py S7）。
       # Aico（bot）の Slack ユーザー ID。秘密ではない。bot token では引かない（S1）。
       { name = "AICO_BOT_USER_IDS", value = "U0B990FG03T" },

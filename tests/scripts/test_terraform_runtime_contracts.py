@@ -172,6 +172,13 @@ LIVE_MCP_ENV_20261014 = {
     "PROPOSAL_BUILDER_ALLOWED_EMAILS": "*",
 }
 
+# 2026-10-15: 統合検索を全員公開。Aico 自身の回答を再び根拠に拾わない bot ID も維持する。
+LIVE_MCP_ENV_20261015 = {
+    "USE_SEARCH_FANOUT": "1",
+    "SEARCH_FANOUT_ALLOWED_EMAILS": "*",
+    "AICO_BOT_USER_IDS": "U0B990FG03T",
+}
+
 # 全員開放で tfvars から外した allowlist（fargate.tf が "*" を直接焼く）。tfvars（正本）には第 1 段階の
 # 値が残っているので、fargate.tf が再びこの var を読むと全員開放が黙って小俣さんだけに戻る。
 RETIRED_ALLOWLIST_VARIABLES = (
@@ -221,7 +228,8 @@ def test_mcp_task_renders_live_env_from_20261007_td_swap() -> None:
     """
     mcp = _block(TF_ROOT / "fargate.tf", "aws_ecs_task_definition", "mcp")
     variables = (TF_ROOT / "variables_fargate.tf").read_text(encoding="utf-8")
-    for env_name, live_value in {**LIVE_MCP_ENV_20261007, **LIVE_MCP_ENV_20261014}.items():
+    live_env = {**LIVE_MCP_ENV_20261007, **LIVE_MCP_ENV_20261014, **LIVE_MCP_ENV_20261015}
+    for env_name, live_value in live_env.items():
         assert _rendered_default(mcp, variables, env_name) == live_value, (
             f"{env_name} が live（{live_value!r}）と違う値を描く"
         )
