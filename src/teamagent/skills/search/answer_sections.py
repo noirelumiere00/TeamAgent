@@ -30,8 +30,8 @@
     段 1: 各節を 2→1 件にする。🔎→🗃→💬→🗂→🤝→🏆→📁 の順に、節の後ろの行から。
     段 2: 🔎 の節を外す。
     段 3: 残りの節を 🗃→💬→🗂→🤝→🏆→📁 の順に丸ごと外す。
-    段 4: それでも超える（要約・📊 だけで超える）ときだけ、head を行の境目で切って「…」を付ける。
-          リンクの途中・URL の途中では切らない。
+    段 4: それでも超えるとき、📊 を先に確保して要約を行の境目で切り「…」を付ける。
+          📊 だけで超える場合も行の境目で切る。リンクの途中・URL の途中では切らない。
   1 段ごとに描き直して測り、収まった時点で止める（決定論）。
 
 書き方（Slack で崩れないこと）:
@@ -801,6 +801,18 @@ def _clip_block(text: str, budget: int) -> str:
     return cut.rstrip() + MORE
 
 
+def _clip_head(text: str, budget: int) -> str:
+    """コードの動画実績を先に確保し、要約の長さで 📊 全体が消えるのを防ぐ。"""
+    before, heading, rows = text.partition(VIDEO_METRICS_HEADING)
+    if not heading or len(text) <= budget:
+        return _clip_block(text, budget)
+    metrics = heading + rows
+    if len(metrics) >= budget:
+        return _clip_block(metrics, budget)
+    before = _clip_block(before.rstrip(), budget - len(metrics) - 2)
+    return before + "\n\n" + metrics if before else metrics
+
+
 def compose_answer(
     *,
     head: str,
@@ -823,9 +835,12 @@ def compose_answer(
     }
     # 名指し資料を優先する。要約が長いときは先に要約だけを切る。
     if sections.required_counts:
-        blocks = _blocks(sections, caps)
-        budget = limit - len(_join("", blocks, tail, scope)) - 2
-        head = _clip_block(head, max(0, budget))
+        blocks = _blocks(
+            sections, {key: sections.required_counts.get(key, 0) for key in SECTION_ORDER}
+        )
+        separator_chars = 3 if VIDEO_METRICS_HEADING in head else 2
+        budget = limit - len(_join("", blocks, tail, scope)) - separator_chars
+        head = _clip_head(head, max(0, budget))
 
     def render(text_head: str, text_tail: str = tail) -> str:
         blocks = _blocks(sections, caps)
@@ -864,7 +879,7 @@ def compose_answer(
     tail_budget = limit - len(_join("", (), "", scope)) - 2
     clipped_tail = _clip_block(tail.strip(), max(0, tail_budget))
     head_budget = limit - len(_join("", (), clipped_tail, scope)) - 2
-    text = render(_clip_block(head.rstrip(), max(0, head_budget)), clipped_tail)
+    text = render(_clip_head(head.rstrip(), max(0, head_budget)), clipped_tail)
     if len(text) <= limit:
         return text
     return truncate_graphemes(scope, limit)

@@ -182,6 +182,7 @@ _CAMPAIGN_RESULTS_KEYWORDS: tuple[str, ...] = (
     "伸び",
     "バズ",
     "投稿",
+    "本ずつ",
     "結果",
     "効果",
     "施策",

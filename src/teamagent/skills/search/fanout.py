@@ -287,18 +287,20 @@ def run_fanout(skill: Any, input: SearchInput, ctx: SkillContext) -> SearchOutpu
     # 時間切れの別名再検索が接続を持つ間は、補助接続を足さない（最大 3 本）。
     file_urls = {} if extra.get("incomplete") else skill._resolve_file_urls(hits, ctx)
     summary_hits = hits
+    from teamagent.ingest.industry_taxonomy import normalize_industry
+    from teamagent.skills.search.knowledge_query import extract_query_industry
+
+    asked_industry = normalize_industry(input.filter_industry) or extract_query_industry(
+        input.query
+    )
     if (
         not extra.get("incomplete")
         and skill._campaign_files
         and any(is_campaign_hit(h) for h in hits)
     ):
         skill._attach_campaign_files(hits, ctx)
-        from teamagent.ingest.industry_taxonomy import normalize_industry
-        from teamagent.skills.search.knowledge_query import extract_query_industry
-
-        summary_hits = scope_by_industry(
-            hits, normalize_industry(input.filter_industry) or extract_query_industry(input.query)
-        )
+    if skill._campaign_files:
+        summary_hits = scope_by_industry(hits, asked_industry)
         if not summary_hits:
             found = False
     client = skill._asked_client(probe)
@@ -325,7 +327,7 @@ def run_fanout(skill: Any, input: SearchInput, ctx: SkillContext) -> SearchOutpu
         and not _LIST_FAST_ANALYSIS_RE.search(input.query)
     )
     if list_fast:
-        head = skill._append_campaign_footer(LIST_FAST_HEAD, summary_hits)
+        head = LIST_FAST_HEAD
     elif found and input.include_answer:
         summary_started = time.perf_counter()
 
@@ -338,6 +340,7 @@ def run_fanout(skill: Any, input: SearchInput, ctx: SkillContext) -> SearchOutpu
                     slack_items=slack.items,
                     bedrock=build_summary_client(),
                     karte_hits=karte.items,
+                    asked_industry=asked_industry,
                     **({"timeline_statuses": statuses} if statuses is not None else {}),
                 )
                 return answer, cost, "ok"
@@ -349,8 +352,8 @@ def run_fanout(skill: Any, input: SearchInput, ctx: SkillContext) -> SearchOutpu
             summary_future, summary_started, SUMMARY_DEADLINE_S, ("", 0.0, "timeout")
         )
         summary_ms = int((time.perf_counter() - summary_started) * 1000)
-        if head:
-            head = skill._append_campaign_footer(head, summary_hits)
+    if found and input.include_answer:
+        head = skill._append_campaign_footer(head, summary_hits, asked_industry=asked_industry)
     # 広げる処理は 10s 以内。回収の追加待ちは該当ありで 1s、該当なしで 0s に抑える。
     collection_deadline = time.perf_counter() + (1.0 if found else 0.0)
     expanded = _collect(

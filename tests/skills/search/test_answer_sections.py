@@ -918,6 +918,50 @@ def test_video_metrics_section_does_not_swallow_following_sections() -> None:
     assert after.rstrip().endswith(scope_line(LANES_ALL, deal_count=1))
 
 
+@pytest.mark.parametrize("required", [False, True])
+def test_iter3_metrics_survive_long_head_with_or_without_named_files(required: bool) -> None:
+    video = f"{VIDEO_METRICS_HEADING}\n施策 A\n1. 331,300 再生・保存 80　洋食 https://x.test/v/1"
+    sections = Sections(
+        entries={"vault": [Entry(title="報告書", url="https://x.test/report", kind="vault")]},
+        required_counts={"vault": 1} if required else {},
+    )
+    answer = compose_answer(
+        head="説明です。" * 600 + "\n\n" + video,
+        sections=sections,
+        lanes={"vault": LaneStatus.found(1)},
+        limit=500,
+    )
+    cut = extract_section(answer)
+    assert cut is not None and cut[1] == video
+    assert len(answer) <= 500
+    if required:
+        assert "https://x.test/report" in answer
+
+
+def test_iter3_metrics_survive_named_files_and_optional_lane_pressure() -> None:
+    video = f"{VIDEO_METRICS_HEADING}\n施策 A\n1. 331,300 再生・保存 80　洋食 https://x.test/v/1"
+    base = _two_per_section()
+    named = [
+        Entry(
+            title=f"報告書{i}" + "長い資料名" * 12,
+            url=f"https://drive.google.com/file/d/named{i}/view",
+            detail="報告書",
+            kind="vault",
+        )
+        for i in range(8)
+    ]
+    sections = Sections(
+        entries={**base.entries, "vault": named}, required_counts={"vault": len(named)}
+    )
+    answer = compose_answer(
+        head="説明です。" * 600 + "\n\n" + video, sections=sections, lanes=LANES_ALL
+    )
+    cut = extract_section(answer)
+    assert cut is not None and cut[1] == video
+    assert all(entry.url in answer for entry in named)
+    assert len(answer) <= ANSWER_MAX_CHARS
+
+
 #: 見出しの許可リストに変える前（origin/dev 482a7089）の extract_section の境界。
 #: 📊 の節は空行 2 つ・📎・探した範囲でしか閉じなかった。
 _PRE_P0_BOUNDARY = re.compile(r"\n{3,}|\n+(?=📎|探した範囲[:：])")

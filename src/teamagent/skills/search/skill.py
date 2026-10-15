@@ -745,7 +745,9 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
             )
             timings["converse_ms"] = (time.perf_counter() - _t) * 1000
             # 資料リンク・「シートのみ」と、動画ごとの数字・リンクをコードで足す。
-            answer = self._append_campaign_footer(answer, summary_hits)
+            answer = self._append_campaign_footer(
+                answer, summary_hits, asked_industry=asked_industry
+            )
             # 要約は資料名を挙げてもURLを出さないため回答末尾に「資料リンク」を決定論で付与。
             # markdown [label](url) は openclaw(@Aico) が Slack 装飾リンクへ変換する。ただし
             # connect-web(/app) は answer を textContent で生表示しリテラル化するため、env で
@@ -993,14 +995,21 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
             candidates=len(rows),
         )
 
-    def _append_campaign_footer(self, answer: str, hits: list[SearchHit]) -> str:
+    def _append_campaign_footer(
+        self, answer: str, hits: list[SearchHit], *, asked_industry: str | None = None
+    ) -> str:
         """施策の資料リンク・「シートのみ」と動画ごとの数字を末尾へ足す（OFF なら素通し）。"""
-        if not self._campaign_files or not answer:
+        if not self._campaign_files:
             return answer
         footer = "\n\n".join(
-            part for part in (links_footer(hits, answer), video_stats_footer(hits, answer)) if part
+            part
+            for part in (
+                links_footer(hits, answer),
+                video_stats_footer(hits, answer, asked_industry=asked_industry),
+            )
+            if part
         )
-        return f"{answer}\n\n{footer}" if footer else answer
+        return "\n\n".join(part for part in (answer, footer) if part)
 
     def _scope_to_client(self, hits: list[SearchHit], asked: str) -> list[SearchHit]:
         """``asked`` の資料と言えるヒットだけ（hit_is_about_client・別名込み・本文は見ない）。"""
@@ -2248,7 +2257,7 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
             answer, cost_usd = self._summarize(
                 query, hits, request_id, slack_items=slack_items, asked_industry=asked_industry
             )
-            answer = self._append_campaign_footer(answer, hits)
+            answer = self._append_campaign_footer(answer, hits, asked_industry=asked_industry)
             if _source_links_enabled():
                 answer += self._source_links_block(hits, file_urls=file_urls)
             if searched_scope:
@@ -2366,7 +2375,11 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
         # 2026-10-14: 📊 の節（コードが本文から作る動画ごとの数字とリンク）に載る動画は、要約器へ
         # 渡す本文から数字とリンクを抜く。抜かないと要約器が「50.7 万再生 / 保存 129 件」と丸めて
         # 並べ直し、📊 と二重になる（10-14 本番 DM・📊 の直接投稿の後でも説明に数字が並んだ）。
-        footer_urls = video_footer_urls(primary_hits) if self._campaign_files else ""
+        footer_urls = (
+            video_footer_urls(primary_hits, asked_industry=asked_industry)
+            if self._campaign_files
+            else ""
+        )
         primary_block = "\n\n".join(
             f"[chunk_id: {h.chunk_id}, score: {h.score:.3f}"
             + ("（関連度低・参考）" if (h.metadata or {}).get("is_low_confidence") else "")
