@@ -466,3 +466,13 @@ def test_pipeline_marks_only_campaign_documents_as_cases(monkeypatch: pytest.Mon
         assert md["case_effect"].startswith(f"投稿 {md['video_count']} 本")
     for doc in accounts:
         assert "case_corpus" not in doc["metadata"]
+
+
+def test_iter2_saves_average_uses_observed_values_only() -> None:
+    rows = [
+        _row("https://t/v/1", "a", "食品", "ハンバーグ", "205000", saves="100"),
+        _row("https://t/v/2", "a", "食品", "ハンバーグ", "205000", saves=""),
+        _row("https://t/v/3", "a", "食品", "ハンバーグ", "205000", saves="0"),
+    ]
+    agg = aggregate_campaigns(HEADERS, rows)[0]
+    assert "保存 平均 50、" in format_campaign_document(agg)

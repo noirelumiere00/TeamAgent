@@ -64,6 +64,7 @@ from teamagent.skills.search.client_match import (
     hit_is_about_client,
     normalize_filter_client,
 )
+from teamagent.skills.search.comparison import comparison_table
 from teamagent.skills.search.composite import (
     MCP_SURFACE_CTX_KEY,
     SlackItem,
@@ -2385,6 +2386,14 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
             sections = [f"# 質問\n{query}\n\n# 参考資料（金庫の資料）\n{vault_block}"]
         else:
             sections = [f"# 質問\n{query}\n\n# 参考資料\n{primary_block}"]
+        comparison = comparison_table(query, primary_hits)
+        if comparison:
+            sections.append(comparison)
+            sections.append(
+                "勝ち負けは表の数字で判定。表に無い数字は書かない。"
+                "比較表と大小の結論はコードが回答に添えるため、書き直さない。"
+                "本文は資料に裏づけられた投稿内容の違いだけを説明する。因果効果は断定しない。"
+            )
         if self._answer_modes:
             # 回答モードを決めるのはここ 1 か所だけ（同期・二段返しの後追いの両方が通る）。
             # ツール出力（SearchOutput）には載せない＝v2d のツール結果の形を変えないため、
@@ -2450,7 +2459,18 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
             from teamagent.skills.search.fanout import shadow_grounding
 
             shadow_grounding(resp.text, user_message, [*hits, *karte_hits], request_id)
-        return _strip_internal_markers(resp.text, request_id=request_id), resp.usage.cost_usd
+        answer = _strip_internal_markers(resp.text, request_id=request_id)
+        if comparison:
+            from teamagent.skills._shared.grounding import NumberGrounder
+
+            answer, dropped = NumberGrounder.from_inputs(
+                comparison, always_allowed=frozenset()
+            ).keep_sentences(
+                answer, deny=("効いた", "勝ち", "上回", "下回", "優位", "方が", "ほうが")
+            )
+            logger.info("search_comparison_grounding", request_id=request_id, dropped=len(dropped))
+            answer = comparison + ("\n\n" + answer if answer.strip() else "")
+        return answer, resp.usage.cost_usd
 
     @staticmethod
     def _title_date_of(

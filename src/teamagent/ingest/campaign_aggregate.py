@@ -388,7 +388,7 @@ def format_campaign_document(agg: CampaignAggregate) -> str:
         "反応: いいね 合計 "
         f"{_fmt_int(agg.total('likes'))}、シェア 合計 {_fmt_int(agg.total('shares'))}、"
         f"コメント 合計 {_fmt_int(agg.total('comments'))}、"
-        f"保存 合計 {_fmt_int(agg.total('saves'))}、"
+        f"保存 合計 {_fmt_int(agg.total('saves'))}、保存 平均 {_fmt_int(agg.mean('saves'))}、"
         f"保存率の中央値 {_fmt_pct(agg.save_rate_median)}"
     )
     if agg.ad_video_count:

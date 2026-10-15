@@ -852,3 +852,54 @@ def test_summarizer_keeps_numbers_when_campaign_files_are_off(
     out = _run(skill, query="食品メーカーのショート動画の事例")
     assert "507,000" in _message(skill)
     assert "📊" not in out.answer
+
+
+def test_iter2_comparison_table_and_grounding() -> None:
+    """10-15: 平均・合計・最大が下の施策を勝ちと答え、資料に無い39本も追加した。"""
+    ham = _campaign(901, "食品", "ハンバーグ")
+    quick = _campaign(902, "食品", "クイックディナー")
+    ham = replace(
+        ham,
+        content=(
+            "投稿本数: 6 本。\n再生数: 合計 1,230,000、中央値 100,000、平均 205,000、最大 507,700\n"
+            "反応: 保存 合計 300、保存 平均 50"
+        ),
+    )
+    quick = replace(
+        quick,
+        content=(
+            "投稿本数: 4 本。\n再生数: 合計 685,300、中央値 100,000、平均 171,325、最大 400,000\n"
+            "反応: 保存 合計 100、保存 平均 25"
+        ),
+    )
+    skill = _skill(
+        _Pg([ham, quick], []),
+        answer="クイックディナーが効いた。mogugoku_dayoは39本中8本が案件付き。別アカウントは8本です。投稿は食事のアレンジです。",
+    )
+    answer, _ = skill._summarize("比較して何が効いた？", [ham, quick], "iter2")
+    sent = _message(skill)
+    assert "| 食品 / ハンバーグ | 6 | 1,230,000 | 205,000 | 507,700 | 50 |" in sent
+    assert "再生合計: 食品 / ハンバーグが上" in sent
+    assert "再生平均: 食品 / ハンバーグが上" in sent
+    assert "再生最大: 食品 / ハンバーグが上" in sent
+    assert "勝ち負けは表の数字で判定" in sent
+    assert "クイックディナーが効いた" not in answer
+    assert "投稿は食事のアレンジです。" in answer
+    assert "8本" not in answer
+    assert "39本" not in answer
+    assert "| 食品 / ハンバーグ |" in answer
+
+
+def test_iter2_comparison_missing_metrics_and_ties() -> None:
+    ham = _campaign(901, "食品", "ハンバーグ")
+    other = _campaign(902, "食品", "別施策")
+    content = "投稿本数: 6 本。\n再生数: 合計 1,230,000、平均 205,000、最大 507,700"
+    ham, other = replace(ham, content=content), replace(other, content=content)
+    skill = _skill(_Pg([ham, other], []), answer="比較しました。")
+    skill._summarize("比較して", [ham, other, ham], "iter2")
+    sent = _message(skill)
+    assert "再生平均: 同率" in sent
+    assert "| なし |" in sent
+    assert sent.count("| 食品 / ハンバーグ |") == 1
+    skill._summarize("資料を見せて", [ham, other], "iter2")
+    assert "# 施策比較表" not in _message(skill)
