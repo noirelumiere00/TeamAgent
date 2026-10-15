@@ -1095,9 +1095,81 @@ async def dispatch_tool(
             )
         ]
 
+    from teamagent.skills._shared import input_policy
+
+    policy_on = input_policy.enabled(metadata)
+    if policy_on and verified_caller is not None:
+        metadata["_input_policy_session"] = getattr(verified_caller, "session_sha256", "")
+    policy_note = ""
+    if policy_on and name == "x_voice_search" and skill_args.get("product_name"):
+        result = input_policy.CACHE.apply(
+            metadata,
+            name,
+            (
+                input_policy.FieldSpec(
+                    "queries", "nice_to_have", "検索語", [skill_args["product_name"]]
+                ),
+            ),
+            skill_args,
+        )
+        if result.states["queries"] == "declined":
+            return _err(
+                "検索語は不要として扱いました。検索は行わず、目的・対象・まとめ方の骨子を作れます。"
+            )
+        skill_args["queries"] = result.values["queries"]
+        policy_note = result.note
+    if policy_on and name == "search_surface_check":
+        result = input_policy.CACHE.apply(
+            metadata,
+            name,
+            (
+                input_policy.FieldSpec("max_videos", "nice_to_have", "分析本数", 5),
+                input_policy.FieldSpec("competitor_accounts", "nice_to_have", "競合比較"),
+            ),
+            skill_args,
+        )
+        skill_args["max_videos"] = result.values["max_videos"]
+        skill_args["competitor_accounts"] = result.values["competitor_accounts"] or []
+        policy_note = result.note
     try:
         skill_input = spec.input_schema(**skill_args)
     except Exception as e:  # 入力検証エラーは構造化で返す
+        from pydantic import ValidationError
+
+        if policy_on and isinstance(e, ValidationError):
+            errors = e.errors(include_input=False, include_url=False)
+            # 値の誤り・権限・費用の確認は従来どおり。欠落だけをまとめて1回にする。
+            if errors and all(
+                item["type"] == "missing" and len(item["loc"]) == 1 for item in errors
+            ):
+                labels = {
+                    "brand": "対象ブランド",
+                    "product_name": "対象の商材",
+                    "keywords": "調べる言葉",
+                    "query": "調べたい内容",
+                    "url": "対象のURL",
+                    "theme": "調べたいテーマ",
+                    "keyword": "調べる言葉",
+                    "start_date": "期間の開始日",
+                    "end_date": "期間の終了日",
+                    "posting_start_date": "投稿開始日",
+                    "client_name": "お客様の名前",
+                    "brief": "依頼内容",
+                    "proposal_text": "提案の文章",
+                    "title": "予定の件名",
+                    "start": "予定の開始日時",
+                    "end": "予定の終了日時",
+                }
+                fields = tuple(
+                    input_policy.FieldSpec(
+                        str(item["loc"][0]),
+                        "required",
+                        labels.get(str(item["loc"][0]), f"必須情報（入力欄{index}）"),
+                    )
+                    for index, item in enumerate(errors, 1)
+                )
+                result = input_policy.CACHE.apply(metadata, name, fields, skill_args)
+                return _err(result.message)
         return _err(f"invalid input: {_exception_text(e)}")
 
     # 二段返し（USE_SEARCH_TWO_STAGE・既定 OFF）を許可してよい面の印。**この境界を通った
@@ -1388,6 +1460,8 @@ async def dispatch_tool(
     # 対象なら上位の動画の中身の分析を裏で登録し、slack_summary に予告を 1 行足す（fail-open）。
     # 対象のときは月間上限の残りを DB から読むので、event loop を塞がないよう thread で呼ぶ。
     # 取得の前の確認（status=needs_input）は 2 段目も直接投稿もしない（確認文を Aico が返す）。
+    if policy_note and hasattr(output, "slack_summary"):
+        output.slack_summary += "\n" + policy_note
     needs_input = getattr(output, "status", None) == "needs_input"
     if name == surface_video_followup.TOOL and not needs_input:
         await asyncio.to_thread(

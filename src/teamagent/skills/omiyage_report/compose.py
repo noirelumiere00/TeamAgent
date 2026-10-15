@@ -45,7 +45,7 @@ def build_summary_lines(measurement: OmiyageMeasurement) -> list[str]:
         elif competitor_exposures:
             own_text += "、競合の露出は0本"
         lines.append(f"{axis.label}の上位{len(axis.posts)}本中、{own_text}でした。")
-    else:
+    elif measurement.keywords:
         lines.append("一般キーワード検索は取得できなかったため、露出シェアは未計測です。")
 
     brand_axis = measurement.brand_axis
@@ -54,7 +54,7 @@ def build_summary_lines(measurement: OmiyageMeasurement) -> list[str]:
         rate = axis_measurement.keyword.combined_rate_pct
         if rate is not None and (competitor_best is None or rate > competitor_best[1]):
             competitor_best = (axis_measurement.axis.label, rate)
-    if brand_axis is not None:
+    if brand_axis is not None and measurement.keywords:
         brand_rate = _pct(brand_axis.keyword.combined_rate_pct)
         line = (
             f"一般キーワード{_kw_label(measurement)}の登場率（caption+hashtag計）は、"
@@ -64,7 +64,7 @@ def build_summary_lines(measurement: OmiyageMeasurement) -> list[str]:
         if competitor_best is not None and competitor_best[1] > 0:
             line += f"、競合最高は{competitor_best[0]}の{competitor_best[1]}%"
         lines.append(line + "でした。")
-    else:
+    elif measurement.keywords:
         lines.append("ブランド名検索は取得できなかったため、自社側の登場率は未計測です。")
 
     pr_parts: list[str] = []
@@ -86,6 +86,13 @@ def build_summary_lines(measurement: OmiyageMeasurement) -> list[str]:
         lines.append("#PR表記ありは" + "、".join(pr_parts) + "でした。")
     else:
         lines.append("#PR表記の比較は、対象軸を取得できなかったため未計測です。")
+    if not measurement.keywords or not measurement.competitors:
+        omitted = []
+        if not measurement.keywords:
+            omitted.append("一般キーワード検索と登場率")
+        if not measurement.competitors:
+            omitted.append("競合比較")
+        lines.append("今回は" + "、".join(omitted) + "を省きました。")
     return lines
 
 

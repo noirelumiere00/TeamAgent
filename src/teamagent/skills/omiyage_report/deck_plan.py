@@ -395,7 +395,7 @@ def _cluster_slide(
     measurement: OmiyageMeasurement,
     analysis: VideoAnalysisReport | None,
 ) -> Slide | None:
-    if analysis is None or analysis.analyzed == 0:
+    if not measurement.competitors or analysis is None or analysis.analyzed == 0:
         return None
     axis_a, axis_b = _brand_pair(measurement)
     if axis_a is None and axis_b is None:
@@ -463,6 +463,8 @@ def _keyword_slide(
     measurement: OmiyageMeasurement,
     analysis: VideoAnalysisReport | None,
 ) -> Slide | None:
+    if not measurement.keywords:
+        return None
     axes = _keyword_axes(measurement)
     if not axes:
         return None
@@ -686,13 +688,15 @@ def build_deck_plan(
     research_notes: str = "",
     excluded_unrelated: int = 0,
     relevance_checked: bool = False,
+    allow_brand_only: bool = False,
 ) -> DeckPlan:
     """U1構成の計測JSONを組む。組める材料が無ければ DeckPlanBuildError。
 
     ``research_notes``（任意）は出典URL付きの行だけを「先行調査」D スライドとして露出シェア
     導入の直後に併記する（Q番号なし・H の再掲行には含めない＝U1 の 6 行上限を保つ）。
     """
-    if not measurement.competitors:
+
+    if not measurement.competitors and not allow_brand_only:
         raise DeckPlanBuildError("competitors are required for the deck brand pair")
 
     q_slides = [
@@ -747,13 +751,17 @@ def build_deck_plan(
         # 軸の一覧は「対象」欄に書く（表紙の要約に全軸を並べると枠からあふれる・9/17 GABAN 版）
         abstract=(
             f"TikTok検索{fetched_axes}軸の実測データから、"
-            f"{measurement.brand}と競合の露出・語られ方の現状を確認する。"
+            + (
+                f"{measurement.brand}と競合の露出・語られ方の現状を確認する。"
+                if measurement.competitors
+                else f"{measurement.brand}の投稿の現状を確認する。"
+            )
         ),
         category_en="TIKTOK SEARCH SNAPSHOT REPORT",
         running_head="TIKTOK SEARCH REPORT",
         issuer=issuer or os.environ.get("OMIYAGE_ISSUER", "NewsTV"),
         brand_a=DeckBrand(name=measurement.brand),
-        brand_b=DeckBrand(name=measurement.competitors[0]),
+        brand_b=DeckBrand(name=measurement.competitors[0]) if measurement.competitors else None,
         part_titles=[part_title],
         method_target_constraints=[
             (
@@ -761,9 +769,12 @@ def build_deck_plan(
                 "取得順位は検索時スナップショット）+ 上位動画の視覚AI解析"
             ),
             (
-                f"対象: {axes_summary or '取得できた検索軸'}。"
-                f"{relevance_note}。"
-                "登場率の分母は各軸の集計本数（キーワード0回の動画も含む）"
+                f"対象: {axes_summary or '取得できた検索軸'}。{relevance_note}。"
+                + (
+                    "登場率の分母は各軸の集計本数（キーワード0回の動画も含む）"
+                    if measurement.keywords
+                    else "一般キーワード検索・登場率は省略"
+                )
             ),
             VOICE_UNMEASURED_NOTE,
         ],
