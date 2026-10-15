@@ -59,7 +59,7 @@ _COUNT_PATTERN = r"(?:不明|[0-9]{1,3}(?:,[0-9]{3})+|[0-9]+)"
 _TOP_POSTS_RE = re.compile(r"^上位の投稿\s*[（(]再生数順[）)]\s*[:：][^\S\n]*$", re.MULTILINE)
 _VIDEO_ROW_RE = re.compile(
     rf"^\s*(?P<rank>[1-9][0-9]*)[.．]\s*再生\s*(?P<plays>{_COUNT_PATTERN})\s*、\s*"
-    rf"保存\s*(?P<saves>{_COUNT_PATTERN})\s*、\s*[^、\n]+、\s*(?P<preview>\S.*?)\s*$"
+    rf"保存\s*(?P<saves>{_COUNT_PATTERN})\s*、\s*(?P<account>[^、\n]+)、\s*(?P<preview>\S.*?)\s*$"
 )
 _VIDEO_URL_RE = re.compile(r"(?:^|\s)(?P<url>https?://[^\s<>]+)$")
 _POST_COUNT_RE = re.compile(rf"^投稿本数[:：]\s*({_COUNT_PATTERN})\s*本", re.MULTILINE)
@@ -303,7 +303,7 @@ def _plain_video_text(text: str) -> str:
     return text.replace("###", "").replace("**", "").replace("—", "、").strip()
 
 
-def _video_lines(content: str) -> list[tuple[str, str]]:
+def _video_lines(content: str, *, include_account: bool = False) -> list[tuple[str, str]]:
     """本文の上位投稿だけを表示行と URL にする。崩れた行は飛ばし、URL 無しは数字を残す。"""
     heading = _TOP_POSTS_RE.search(content)
     if heading is None:
@@ -325,6 +325,8 @@ def _video_lines(content: str) -> list[tuple[str, str]]:
         if len(shown) < len(preview):
             shown += "…"
         text = f"{match['rank']}. {match['plays']} 再生・保存 {match['saves']}"
+        if include_account:
+            text += f"　{_plain_video_text(match['account'])}"
         if shown:
             text += f"　{shown}"
         if url:

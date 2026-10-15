@@ -1,0 +1,83 @@
+FULL PYTEST: .venv/bin/python -m pytest -q -p no:warnings
+
+==================================== ERRORS ====================================
+_________________ ERROR collecting tests/media/test_deck_qa.py _________________
+ImportError while importing test module '/Users/s-komata/dev/worktrees/teamagent-vault-videos/tests/media/test_deck_qa.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+../../../.local/share/uv/python/cpython-3.13.13-macos-aarch64-none/lib/python3.13/importlib/__init__.py:88: in import_module
+    return _bootstrap._gcd_import(name[level:], package, level)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+tests/media/test_deck_qa.py:11: in <module>
+    from PIL import Image
+E   ModuleNotFoundError: No module named 'PIL'
+_________ ERROR collecting tests/media/test_proposal_render_format.py __________
+ImportError while importing test module '/Users/s-komata/dev/worktrees/teamagent-vault-videos/tests/media/test_proposal_render_format.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+../../../.local/share/uv/python/cpython-3.13.13-macos-aarch64-none/lib/python3.13/importlib/__init__.py:88: in import_module
+    return _bootstrap._gcd_import(name[level:], package, level)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+tests/media/test_proposal_render_format.py:13: in <module>
+    from pptx import Presentation
+E   ModuleNotFoundError: No module named 'pptx'
+__________ ERROR collecting tests/skills/_shared/test_deck_review.py ___________
+ImportError while importing test module '/Users/s-komata/dev/worktrees/teamagent-vault-videos/tests/skills/_shared/test_deck_review.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+../../../.local/share/uv/python/cpython-3.13.13-macos-aarch64-none/lib/python3.13/importlib/__init__.py:88: in import_module
+    return _bootstrap._gcd_import(name[level:], package, level)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+tests/skills/_shared/test_deck_review.py:5: in <module>
+    from pptx import Presentation
+E   ModuleNotFoundError: No module named 'pptx'
+_____ ERROR collecting tests/skills/proposal_deck/test_renderer_images.py ______
+ImportError while importing test module '/Users/s-komata/dev/worktrees/teamagent-vault-videos/tests/skills/proposal_deck/test_renderer_images.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+../../../.local/share/uv/python/cpython-3.13.13-macos-aarch64-none/lib/python3.13/importlib/__init__.py:88: in import_module
+    return _bootstrap._gcd_import(name[level:], package, level)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+tests/skills/proposal_deck/test_renderer_images.py:16: in <module>
+    from pptx import Presentation
+E   ModuleNotFoundError: No module named 'pptx'
+_______ ERROR collecting tests/skills/proposal_deck/test_review_scan.py ________
+ImportError while importing test module '/Users/s-komata/dev/worktrees/teamagent-vault-videos/tests/skills/proposal_deck/test_review_scan.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+../../../.local/share/uv/python/cpython-3.13.13-macos-aarch64-none/lib/python3.13/importlib/__init__.py:88: in import_module
+    return _bootstrap._gcd_import(name[level:], package, level)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+tests/skills/proposal_deck/test_review_scan.py:13: in <module>
+    from tests.skills._shared.test_deck_review import _deck
+tests/skills/_shared/test_deck_review.py:5: in <module>
+    from pptx import Presentation
+E   ModuleNotFoundError: No module named 'pptx'
+______ ERROR collecting tests/skills/video_algorithm/test_pptx_export.py _______
+ImportError while importing test module '/Users/s-komata/dev/worktrees/teamagent-vault-videos/tests/skills/video_algorithm/test_pptx_export.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+../../../.local/share/uv/python/cpython-3.13.13-macos-aarch64-none/lib/python3.13/importlib/__init__.py:88: in import_module
+    return _bootstrap._gcd_import(name[level:], package, level)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+tests/skills/video_algorithm/test_pptx_export.py:12: in <module>
+    from pptx import Presentation
+E   ModuleNotFoundError: No module named 'pptx'
+=========================== short test summary info ============================
+ERROR tests/media/test_deck_qa.py
+ERROR tests/media/test_proposal_render_format.py
+ERROR tests/skills/_shared/test_deck_review.py
+ERROR tests/skills/proposal_deck/test_renderer_images.py
+ERROR tests/skills/proposal_deck/test_review_scan.py
+ERROR tests/skills/video_algorithm/test_pptx_export.py
+!!!!!!!!!!!!!!!!!!! Interrupted: 6 errors during collection !!!!!!!!!!!!!!!!!!!!
+6 errors in 35.43s
+
+
+FULL MYPY: .venv/bin/mypy src/teamagent scripts/export_vault.py
+src/teamagent/media/deck_qa.py:607: error: Cannot find implementation or library stub for module named "PIL"  [import-not-found]
+src/teamagent/media/deck_qa.py:607: note: See https://mypy.readthedocs.io/en/stable/running_mypy.html#missing-imports
+src/teamagent/media/deck_qa.py:629: error: Returning Any from function declared to return "tuple[int, int] | None"  [no-any-return]
+src/teamagent/skills/proposal_deck/renderer.py:390: error: Cannot find implementation or library stub for module named "PIL"  [import-not-found]
+pyproject.toml: note: unused section(s): module = ['playwright', 'weasyprint.*']
+Found 3 errors in 2 files (checked 463 source files)

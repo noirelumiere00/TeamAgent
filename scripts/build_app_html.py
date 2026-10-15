@@ -159,11 +159,18 @@ def client_md(text, limit=2600):
         m = re.match(r"^- \[\[docs/(.+?)\]\]", ln)
         return not (m and _is_excluded(m.group(1)))
 
-    return _strip_self_tags("\n".join(l for l in b.split("\n") if _keep(l)))[:limit]
+    shown = _strip_self_tags("\n".join(l for l in b.split("\n") if _keep(l)))
+    base, marker, campaigns = shown.partition("## この取引先の施策")
+    return base[:limit] + ("\n\n" + marker + campaigns if marker else "")
 
 
 def doc_md(text, limit=900):
-    return _strip_self_tags(body_of(text).strip())[:limit]
+    shown = _strip_self_tags(body_of(text).strip())
+    fm = front(text)
+    if (fm.get("campaign_aggregate") == "true" or fm.get("doc_type") == "施策一覧"
+            or "- 関連施策: [[" in shown):
+        return shown
+    return shown[:limit]
 
 
 def bant_short(b):

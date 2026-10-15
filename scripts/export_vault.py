@@ -75,6 +75,13 @@ from teamagent.client_properties import (  # noqa: E402
     resolve_client_industry_with_source,
 )
 from teamagent.skills.knowledge_deliver.skill import extract_drive_file_id  # noqa: E402
+from teamagent.skills.search.campaign_files import (  # noqa: E402
+    SIMILARITY_MIN,
+    _video_lines,
+    campaign_similarity,
+    file_kind,
+)
+from teamagent.skills.search.client_match import aliases, names_overlap  # noqa: E402
 
 logger = structlog.get_logger(__name__)
 
@@ -394,6 +401,8 @@ def render_doc_note(doc: dict[str, Any], client_path: str = "", project_path: st
         f"source_type: {yaml_quote(doc.get('source_type') or '')}",
         f"external_id: {yaml_quote(doc.get('external_id') or '')}",
     ]
+    if doc.get("campaign_aggregate") == "true":
+        lines.append('campaign_aggregate: "true"')
     # ナレッジ共有メタ（カテゴリ/クライアント種別/提案プロダクト）は値があるときだけ出す。
     # build_app_html が front() で拾い、docTags の カテゴリ/クライアント種別/提案プロダクト
     # 軸へ展開する。空値の行は既存 note と同一出力を保つ（回帰なし）。
@@ -430,7 +439,18 @@ def render_doc_note(doc: dict[str, Any], client_path: str = "", project_path: st
         lines.append(" ".join(f"#{t}" for t in dict.fromkeys(tags)))
         lines.append("")
     excerpt = str(doc.get("excerpt") or "").strip()
-    if doc.get("x_research_tool"):
+    if doc.get("campaign_aggregate") == "true":
+        lines += ["## 動画ごとの実績（上位の投稿・再生数順）", ""]
+        for text, url in _video_lines(excerpt, include_account=True):
+            label = text.removesuffix(f" {url}") if url else text
+            entry = md_inline_escape(label)
+            if url:
+                # Markdown のリンク先内でも括弧・山括弧をデータとして保持する。
+                target = url.replace("<", "%3C").replace(">", "%3E")
+                entry += f" [TikTok](<{target}>)"
+            lines.append(entry)
+        lines.append("")
+    elif doc.get("x_research_tool"):
         # 施策研究ノートは要約 markdown を全文そのまま本文にする（構造保持・外部リンク非依存で
         # Vault に残る。SQL 側で研究 doc は全文 excerpt を返している）。
         if excerpt:
@@ -465,6 +485,7 @@ def plan_vault(clients: dict[str, dict[str, list[dict[str, Any]]]]) -> dict[str,
     claimed_path_keys = {_portable_path_key(path) for path in files}
     doc_path_by_uri: dict[str, str] = {}
     doc_path_by_source_key: dict[tuple[str, str], str] = {}
+    doc_by_path: dict[str, dict[str, Any]] = {}
     doc_ownership_by_path: dict[str, tuple[str, str]] = {}
     doc_source_key_by_path: dict[str, tuple[str, str]] = {}
 
@@ -486,6 +507,8 @@ def plan_vault(clients: dict[str, dict[str, list[dict[str, Any]]]]) -> dict[str,
     client_path_by_name: dict[str, str] = {}
     client_path_by_identity: dict[str, str] = {}
     for client, _data in client_items:
+        if not client:
+            continue
         client_path = _claim("clients", safe_filename(client, fallback="client"))
         client_path_by_name[client] = client_path
         identity = client_identity_key(client)
@@ -495,7 +518,7 @@ def plan_vault(clients: dict[str, dict[str, list[dict[str, Any]]]]) -> dict[str,
     for client, data in client_items:
         timeline = list(data.get("timeline") or [])
         documents = list(data.get("documents") or [])
-        client_path = client_path_by_name[client]
+        client_path = client_path_by_name.get(client, "")
 
         doc_paths: list[str] = []
         for doc in documents:
@@ -536,7 +559,11 @@ def plan_vault(clients: dict[str, dict[str, list[dict[str, Any]]]]) -> dict[str,
                     doc_path_by_source_key[source_key] = reused_path
                 doc_paths.append(reused_path)
                 continue
-            needs_discriminator = bool(doc.get("x_research_tool") or source_type == "gsheets")
+            needs_discriminator = bool(
+                doc.get("x_research_tool")
+                or source_type == "gsheets"
+                or (doc.get("topic") == "案件決定" and source_type == "slack")
+            )
             # discriminator 付きは UTF-8 4 byte/文字でも一般的な 255-byte の
             # filename 上限内に収める（55*4 + '-' + 16hex + '.md' = 240 bytes）。
             base = safe_filename(
@@ -551,12 +578,13 @@ def plan_vault(clients: dict[str, dict[str, list[dict[str, Any]]]]) -> dict[str,
             # (`-` 区切りなので `_N` 束ねに当たらない)。stem は内部キーで、UI は title を出す
             # (build_app_html の IDX/dByStem) ため表示は汚れない。対象:
             #   - x_research_tool: 「商材名 Xの声集め」等で別owner/別研究が衝突
+            #   - topic=案件決定の Slack: チャンネル名だけの同題投稿を別案件として保持
             #   - gsheets: ナレッジ共有の title は「正式社名 案件名」で行ごとに一意ではない
             #     (実測 142 行中 8 stem が衝突。案件名が空の行は社名だけに潰れて更に衝突する)
             if needs_discriminator:
                 if not external_id:
                     raise ValueError(
-                        "external_id is required for gsheets/x_research document filenames"
+                        "external_id is required for gsheets/x_research/decision document filenames"
                     )
                 disc = source_discriminator(external_id)
                 base = f"{base}-{disc}"
@@ -584,10 +612,85 @@ def plan_vault(clients: dict[str, dict[str, list[dict[str, Any]]]]) -> dict[str,
                 or client_path_by_identity.get(client_identity_key(project))
                 or ""
             )
+            doc_by_path[doc_path] = doc
             files[f"{doc_path}.md"] = render_doc_note(doc, primary_path, project_path)
             doc_paths.append(doc_path)
 
-        files[f"{client_path}.md"] = render_client_note(client, timeline, documents, doc_paths)
+        if client:
+            files[f"{client_path}.md"] = render_client_note(client, timeline, documents, doc_paths)
+
+    client_forms: dict[str, tuple[str, ...]] = {}
+
+    def same_client(advertiser: str, name: str) -> bool:
+        if advertiser not in client_forms:
+            client_forms[advertiser] = (advertiser, *aliases(advertiser))
+        return any(names_overlap(form, name) for form in client_forms[advertiser])
+
+    summaries: dict[str, list[str]] = {}
+    orphans: list[str] = []
+    for path, doc in doc_by_path.items():
+        if doc.get("campaign_aggregate") != "true":
+            continue
+        advertiser = str(doc.get("advertiser") or doc.get("cls_project") or "")
+        campaign = str(doc.get("campaign") or "")
+        if not campaign:
+            campaign = str(doc.get("title") or "").removeprefix(f"施策実績 {advertiser} ")
+        targets = {cp for name, cp in client_path_by_name.items() if same_client(advertiser, name)}
+        facts = "・".join(
+            f"{label} {md_inline_escape(doc.get(key) or '不明')}{unit}"
+            for key, label, unit in (
+                ("video_count", "投稿", " 本"),
+                ("plays_total", "合計再生", " 回"),
+                ("last_posted_on", "最終投稿日", ""),
+            )
+        )
+        for cp in sorted(targets):
+            summaries.setdefault(cp, []).append(
+                f"- {md_inline_escape(campaign)}・{facts} {wikilink(path)}"
+            )
+        for other_path, other in doc_by_path.items():
+            if other_path == path or other.get("campaign_aggregate") == "true":
+                continue
+            title = str(other.get("title") or "")
+            decision = other.get("topic") == "案件決定"
+            client_field = (
+                re.search(
+                    r"^\s*(?:[-*]\s*)?クライアント名(?:[／/]商材名)?[\s*]*[:：]\s*(.+)$",
+                    str(other.get("excerpt") or ""),
+                    re.MULTILINE,
+                )
+                if decision
+                else None
+            )
+            if not any(
+                same_client(advertiser, str(other.get(key) or ""))
+                for key in ("client_name", "cls_project", "cls_entities", "title")
+            ) and not (client_field and same_client(advertiser, client_field[1])):
+                continue
+            material = (
+                file_kind(title, other.get("cls_doc_type")) in ("提案書", "レポート")
+                and campaign_similarity(campaign, title) >= SIMILARITY_MIN
+            )
+            if decision or material:
+                targets.add(other_path)
+                files[f"{other_path}.md"] += f"\n- 関連施策: {wikilink(path)}\n"
+        if targets:
+            files[f"{path}.md"] += (
+                "\n## 関連する取引先・案件・資料\n\n"
+                + "\n".join(f"- {wikilink(target)}" for target in sorted(targets))
+                + "\n"
+            )
+        else:
+            orphans.append(f"- {wikilink(path)}")
+    for cp, entries in summaries.items():
+        files[f"{cp}.md"] += "\n## この取引先の施策\n\n" + "\n".join(entries) + "\n"
+    if orphans:
+        index_path = _claim("docs", "紐付け先の無い施策")
+        files[f"{index_path}.md"] = (
+            render_doc_note({"title": "紐付け先の無い施策", "cls_doc_type": "施策一覧"})
+            + "\n".join(orphans)
+            + "\n"
+        )
     return files
 
 
@@ -1083,14 +1186,24 @@ _DOCUMENTS_SQL_TEMPLATE = f"""
         d.metadata->>'proposed_menu' AS cls_product,
         d.metadata->>'client_name' AS client_name,
         d.metadata->>'x_research_tool' AS x_research_tool,
+        d.metadata->>'campaign_aggregate' AS campaign_aggregate,
+        d.metadata->>'advertiser' AS advertiser,
+        d.metadata->>'campaign' AS campaign,
+        d.metadata->>'video_count' AS video_count,
+        d.metadata->>'plays_total' AS plays_total,
+        d.metadata->>'last_posted_on' AS last_posted_on,
+        d.metadata->>'topic' AS topic,
         d.external_id AS external_id,
         ex.excerpt AS excerpt
     FROM documents d
     LEFT JOIN LATERAL (
         -- 施策研究ノート(x_research_tool 付き)は要約全文を Vault に残す（外部リンク非依存）。
+        -- 施策は上位投稿まで、案件決定は構造化クライアント欄まで読む（ingest は1 chunk）。
         -- 通常資料は従来どおり先頭160字の抜粋（Vault 肥大を避ける）。
         SELECT CASE
                  WHEN d.metadata->>'x_research_tool' IS NOT NULL
+                   OR d.metadata->>'campaign_aggregate' = 'true'
+                   OR d.metadata->>'topic' = '案件決定'
                  THEN COALESCE(c.contextualized, c.content)
                  ELSE left(COALESCE(c.contextualized, c.content), 160)
                END AS excerpt
@@ -1140,8 +1253,9 @@ def load_clients_data(
     """クライアント一覧（client_name ∪ cls_project）→ 各クライアントの FB/資料を読む。
 
     SELECT のみ（read-only）。admin DSN が RLS を bypass しても、必須の
-    ``shared_group`` を acl_groups に持つ company-shared document だけを全 3 経路で
-    読む。空/複数/不正 group は DB 接続前に fail-closed。
+    ``shared_group`` を acl_groups に持つ company-shared document だけを全取得経路で
+    読む。完全 export は全施策・案件決定を別途回収し、通常資料の件数制限も外す。
+    空/複数/不正 group は DB 接続前に fail-closed。
 
     --client 指定時はその部分一致 1 件系に絞り、--limit はクライアント数の先頭
     N 件キャップ（検証用）。include_stale=False（既定）で metadata.stale='true'
@@ -1154,6 +1268,11 @@ def load_clients_data(
 
     docs_sql = documents_sql(include_stale=include_stale)
 
+    # 全施策・案件決定を client regex / 最新100件の外からも回収する。同じ ACL・stale 制約を使う。
+    campaigns_sql = docs_sql.split("      AND (normalize(", 1)[0] + (
+        " AND (d.metadata->>'campaign_aggregate' = 'true'"
+        " OR d.metadata->>'topic' = '案件決定') ORDER BY d.id"
+    )
     clients_data: dict[str, dict[str, list[dict[str, Any]]]] = {}
     with psycopg.connect(dsn, row_factory=dict_row) as conn:
         with conn.cursor() as cur:
@@ -1193,13 +1312,20 @@ def load_clients_data(
                         match_pattern,
                         match_pattern,
                         title_match_pattern,
-                        per_client_limit,
+                        per_client_limit if client or limit else None,
                     ),
                 )
                 documents = [dict(r) for r in cur.fetchall()]
             if timeline or documents:
                 clients_data[name] = {"timeline": timeline, "documents": documents}
-    logger.info("export_vault_loaded", clients=len(clients_data))
+        if not client and not limit:
+            with conn.cursor() as cur:
+                cur.execute(campaigns_sql, (normalized_group,))
+                campaigns = [dict(r) for r in cur.fetchall()]
+            if campaigns:
+                # 空キーは未所属資料の受け皿。架空の取引先カルテは作らない。
+                clients_data[""] = {"timeline": [], "documents": campaigns}
+    logger.info("export_vault_loaded", clients=len(clients_data) - ("" in clients_data))
     return clients_data
 
 
@@ -1303,7 +1429,7 @@ def main() -> int:
 
     mode = "commit" if args.commit else "dry-run"
     print(
-        f"clients={len(clients_data)} planned={stats['planned']} "
+        f"clients={len(clients_data) - ('' in clients_data)} planned={stats['planned']} "
         f"written={stats['written']} delete_planned={stats['delete_planned']} "
         f"deleted={stats['deleted']} out={out_dir} mode={mode}"
     )

@@ -1,0 +1,34 @@
+{
+  "one_campaign_per_client": {
+    "before": {
+      "html_bytes": 623815,
+      "note_bytes": 195230,
+      "notes": 201
+    },
+    "after": {
+      "html_bytes": 743719,
+      "note_bytes": 258590,
+      "notes": 201
+    },
+    "delta_bytes": 119904,
+    "sample_campaigns": 40,
+    "estimated_delta_779": 2335130,
+    "projected_from_7_3MB": 9635130
+  },
+  "five_campaigns_per_client": {
+    "before": {
+      "html_bytes": 604032,
+      "note_bytes": 184390,
+      "notes": 169
+    },
+    "after": {
+      "html_bytes": 1058723,
+      "note_bytes": 334950,
+      "notes": 169
+    },
+    "delta_bytes": 454691,
+    "sample_campaigns": 40,
+    "estimated_delta_779": 8855107,
+    "projected_from_7_3MB": 16155107
+  }
+}
