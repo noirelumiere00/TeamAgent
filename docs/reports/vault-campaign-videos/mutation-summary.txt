@@ -1,0 +1,11 @@
+drop-videos: RED — 2 failed in 2.51s
+drop-account: RED — 2 failed in 1.66s
+drop-aliases: RED — 2 failed in 2.07s
+drop-reverse-link: RED — 1 failed in 2.00s
+wrong-campaign-material: RED — 2 failed in 1.24s
+drop-orphan-index: RED — 1 failed in 1.25s
+truncate-campaign-sql: RED — 1 failed in 1.15s
+drop-complete-campaign-fetch: RED — 1 failed in 1.17s
+drop-discriminator: RED — 2 failed in 0.91s
+truncate-html: RED — 1 failed in 1.04s
+drop-structured-client: RED — 1 failed in 0.74s

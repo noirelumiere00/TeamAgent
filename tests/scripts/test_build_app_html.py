@@ -3084,3 +3084,66 @@ def test_cluster_does_not_touch_colorby(sidecars: Path, vault: Path, tmp_path: P
     # ncol は従来通り groupBy 依存で cluster を参照しない
     assert 'opt.groupBy==="phase"?(PHASECOLOR[n.phase]||"#9a9a9a"):colorOf(n.industry)' in html
     assert 'groupBy:"industry"' in html  # 既定色分けは業種のまま
+
+
+def test_campaign_export_reaches_html_and_graph(sidecars: Path, tmp_path: Path) -> None:
+    from scripts.export_vault import plan_vault, write_vault
+    from tests.scripts.test_export_vault import campaign_document
+
+    doc = campaign_document()
+    proposal = {
+        "title": "ファミリーマート 秋のお弁当 提案書",
+        "client_name": "ファミリーマート",
+        "source_uri": "gdrive://proposal",
+        "cls_doc_type": "提案書",
+        "excerpt": "資料本文",
+    }
+    decision = dict(
+        proposal,
+        title="案件決定",
+        source_uri="gdrive://decision",
+        topic="案件決定",
+        source_type="slack",
+        external_id="deal:1",
+    )
+    files = plan_vault(
+        {
+            "ファミリーマート": {"timeline": [], "documents": [doc, proposal, decision]},
+        }
+    )
+    root = tmp_path / "campaign-vault"
+    write_vault(root, files, commit=True, complete_export=True)
+    out = tmp_path / "campaign-app.html"
+    assert _run(root, out, refresh_manifest=False) == 0
+    data = _payload(out.read_text(encoding="utf-8"))
+    assert len(data["docs"]) == 3
+    assert len(data["clients"]) == 1
+    campaign = next(d for d in data["docs"] if d["doc_type"] == "施策実績")
+    for i in range(1, 6):
+        assert f"https://www.tiktok.com/@creator/video/{i}" in campaign["md"]
+        assert f"creator{i}" in campaign["md"]
+    assert "## この取引先の施策" in data["clients"][0]["md"]
+    ck = "d:" + campaign["stem"]
+    client_key = "c:" + data["clients"][0]["stem"]
+    pairs = {(s, t) for s, t, _ in data["links"]}
+    nodes = data["graph"]["nodes"]
+    edges = {frozenset((nodes[a]["id"], nodes[b]["id"])) for a, b in data["graph"]["links"]}
+    for target in (client_key, *("d:" + d["stem"] for d in data["docs"] if d != campaign)):
+        prefix, stem = target.split(":", 1)
+        assert f"[[{'clients' if prefix == 'c' else 'docs'}/{stem}]]" in campaign["md"]
+        assert (ck, target) in pairs
+        assert (target, ck) in pairs
+        assert frozenset((ck, target)) in edges
+
+
+def test_campaign_sections_survive_display_limits() -> None:
+    client = "---\nclient: x\n---\n" + "FB本文" * 3000 + "\n## この取引先の施策\n施策リンク"
+    shown = _mod.client_md(client)
+    assert "施策リンク" in shown and len(shown) < 2700
+    ordinary = "---\ndoc_type: 提案書\n---\n" + "a" * 1500
+    assert len(_mod.doc_md(ordinary)) == 900
+    campaign = ordinary.replace("doc_type: 提案書", 'campaign_aggregate: "true"')
+    assert len(_mod.doc_md(campaign)) == 1500
+    index = ordinary.replace("doc_type: 提案書", "doc_type: 施策一覧")
+    assert len(_mod.doc_md(index)) == 1500
+    assert "関連施策" in _mod.doc_md(ordinary + "\n- 関連施策: [[docs/C]]")

@@ -1503,6 +1503,8 @@ def test_load_clients_data_returns_timeline_oldest_first(
             executions.append((sql, tuple(params or ())))
             if "DISTINCT name" in sql:
                 self._rows = [{"name": "PIVOT"}]
+            elif "ORDER BY d.id" in sql:
+                self._rows = []
             elif "is_sales_fb' = 'true'" in sql:  # _TIMELINE_SQL（DB は新しい順で返す）
                 self._rows = list(desc_rows)
             else:  # _DOCUMENTS_SQL
@@ -1539,8 +1541,9 @@ def test_load_clients_data_returns_timeline_oldest_first(
             client_match_pattern("PIVOT"),
             client_match_pattern("PIVOT"),
             client_title_match_pattern("PIVOT"),
-            100,
+            None,
         ),
+        ("vectorinc.co.jp",),  # all campaigns, same ACL
     ]
     assert client_title_match_pattern("PIVOT") != client_match_pattern("PIVOT")
     assert all("vectorinc.co.jp" not in sql.lower() for sql, _ in executions)
@@ -1571,6 +1574,8 @@ def test_load_clients_data_normalizes_and_dedupes_unicode_client_names(
             executed_sql.append(sql)
             if "DISTINCT name" in sql:
                 self._rows = [{"name": nfd}, {"name": nfc}, {"name": "   "}]
+            elif "ORDER BY d.id" in sql:
+                self._rows = []
             elif "is_sales_fb' = 'true'" in sql:
                 self._rows = []
             else:
@@ -1597,7 +1602,7 @@ def test_load_clients_data_normalizes_and_dedupes_unicode_client_names(
 
     assert list(data) == [nfc]
     assert len(data[nfc]["documents"]) == 1
-    assert len(executed_sql) == 3  # client列挙 + 1 client分の timeline/documents
+    assert len(executed_sql) == 4  # client列挙 + timeline/documents + 全施策
 
 
 @pytest.mark.parametrize("shared_group", ["", " ", "a.example,b.example", "not-a-domain"])
@@ -1672,3 +1677,181 @@ def test_main_uses_single_env_group_as_safe_default(
 
     assert _mod.main() == 0
     assert captured["shared_group"] == "vectorinc.co.jp"
+
+
+@pytest.fixture()
+def campaign_doc() -> dict[str, Any]:
+    return campaign_document()
+
+
+def campaign_document() -> dict[str, Any]:
+    from teamagent.ingest.campaign_aggregate import (
+        CampaignAggregate,
+        CampaignVideo,
+        campaign_metadata,
+        campaign_title,
+        format_campaign_document,
+    )
+
+    videos = tuple(
+        CampaignVideo(
+            url=f"https://www.tiktok.com/@creator/video/{i}",
+            account=f"creator{i}",
+            text="投稿文の冒頭" * 12,
+            plays=10000 - i,
+            saves=20 - i,
+            likes=None,
+            shares=None,
+            comments=None,
+            cost=None,
+            impressions=None,
+            ctr=None,
+            ad_name="",
+            posted_on="2026-10-01",
+        )
+        for i in range(1, 6)
+    )
+    agg = CampaignAggregate(videos=videos, advertiser="ファミマ", campaign="秋のお弁当")
+    return _doc(
+        campaign_title(agg),
+        "https://docs.google.com/spreadsheets/d/shared/edit",
+        source_type="gsheets",
+        external_id="sheet:campaign:1",
+        excerpt=format_campaign_document(agg),
+        **campaign_metadata(agg),
+    )
+
+
+@pytest.mark.parametrize("advertiser", ["ファミマ", "株式会社ファミリーマート"])
+def test_campaign_videos_links_and_existing_paths(
+    campaign_doc: dict[str, Any], advertiser: str
+) -> None:
+    campaign_doc["advertiser"] = advertiser
+    proposal = _doc("ファミリーマート 秋のお弁当 ご提案", client_name="株式会社ファミリーマート")
+    report = _doc("ファミマ 秋のお弁当 報告書", "gdrive://report", client_name="ファミマ")
+    decision = _doc(
+        "案件決定",
+        "gdrive://decision",
+        topic="案件決定",
+        client_name="ファミリーマート",
+        source_type="slack",
+        external_id="deal:1",
+    )
+    unrelated = _doc("ファミマ 春のコスメ 提案", "gdrive://other", client_name="ファミマ")
+    competitor = _doc(
+        "競合社 秋のお弁当 提案", "gdrive://competitor", client_name="競合社", cls_project="競合社"
+    )
+    docs = [campaign_doc, proposal, report, decision, unrelated, competitor]
+    data = {"ファミリーマート": {"documents": docs, "timeline": []}}
+    data[""] = {"documents": [campaign_doc], "timeline": []}  # 完全回収との重複も同一note
+    files = plan_vault(data)
+    path = next(p for p, text in files.items() if 'campaign_aggregate: "true"' in text)
+    note = files[path]
+    assert len(files) == 8  # CLAUDE + client + six documents; no duplicate campaign
+    assert (
+        path
+        == f"docs/施策実績 ファミマ 秋のお弁当-{_mod.source_discriminator('sheet:campaign:1')}.md"
+    )
+    for i in range(1, 6):
+        assert f"{i}. {10000 - i:,} 再生・保存 {20 - i}　creator{i}　投稿文の冒頭" in note
+        assert f"[TikTok](<https://www.tiktok.com/@creator/video/{i}>)" in note
+    client_note = files["clients/ファミリーマート.md"]
+    assert "## この取引先の施策" in client_note
+    assert "秋のお弁当・投稿 5 本・合計再生 49985 回・最終投稿日 2026-10-01" in client_note
+    assert "[[clients/ファミリーマート]]" in note
+    for doc in (proposal, report, decision):
+        target = f"docs/{safe_filename(doc['title'])}"
+        if doc.get("topic") == "案件決定":
+            target += f"-{_mod.source_discriminator(doc['external_id'])}"
+        assert wikilink(target) in note
+        assert wikilink(path[:-3]) in files[target + ".md"]
+    for doc in (unrelated, competitor):
+        assert wikilink(f"docs/{safe_filename(doc['title'])}") not in note
+    before = plan_vault({"ファミリーマート": {"documents": docs[1:], "timeline": []}})
+    assert set(before) == set(files) - {path}
+    for doc in (unrelated, competitor):
+        target = f"docs/{safe_filename(doc['title'])}.md"
+        assert before[target] == files[target]
+
+
+def test_orphan_campaign_index_keeps_every_campaign(campaign_doc: dict[str, Any]) -> None:
+    second = dict(campaign_doc, external_id="sheet:campaign:2", campaign="別施策")
+    files = plan_vault({"": {"documents": [campaign_doc, second], "timeline": []}})
+    assert not any(p.startswith("clients/") for p in files)
+    index = files["docs/紐付け先の無い施策.md"]
+    paths = [p for p, t in files.items() if 'campaign_aggregate: "true"' in t]
+    assert len(paths) == 2  # same source URI, distinct identities (#537)
+    for path in paths:
+        assert wikilink(path[:-3]) in index
+    assert len(files) == 4
+
+
+def test_load_all_campaigns_without_client_or_limit(
+    monkeypatch: pytest.MonkeyPatch, campaign_doc: dict[str, Any]
+) -> None:
+    import psycopg
+
+    calls: list[tuple[str, Any]] = []
+
+    class Cursor:
+        def __enter__(self) -> Cursor:
+            return self
+
+        def __exit__(self, *args: Any) -> None:
+            pass
+
+        def execute(self, sql: str, params: Any) -> None:
+            calls.append((sql, params))
+
+        def fetchall(self) -> list[dict[str, Any]]:
+            return [campaign_doc] if "ORDER BY d.id" in calls[-1][0] else []
+
+    class Conn:
+        def __enter__(self) -> Conn:
+            return self
+
+        def __exit__(self, *args: Any) -> None:
+            pass
+
+        def cursor(self) -> Cursor:
+            return Cursor()
+
+    monkeypatch.setattr(psycopg, "connect", lambda *a, **kw: Conn())
+    loaded = _mod.load_clients_data("unused", shared_group="vectorinc.co.jp")
+    assert loaded[""]["documents"] == [campaign_doc]
+    sql, params = calls[-1]
+    assert params == ("vectorinc.co.jp",)
+    assert _mod._SHARED_ACL_SQL in sql
+    assert "d.metadata->>'topic' AS topic" in sql
+    assert "stale' IS DISTINCT FROM 'true'" in sql
+    assert "suppressed' IS DISTINCT FROM 'true'" in sql
+    assert "~* %s" not in sql and "LIMIT %s" not in sql
+    assert "OR d.metadata->>'campaign_aggregate' = 'true'" in sql
+    assert "THEN COALESCE(c.contextualized, c.content)" in sql
+    assert "docs/紐付け先の無い施策.md" in plan_vault(loaded)
+
+
+def test_unclassified_decisions_link_by_client_field_without_agency_crosslink(
+    campaign_doc: dict[str, Any],
+) -> None:
+    decisions = [
+        _doc(
+            "#proj-01案件決定-同行依頼",
+            f"https://slack.com/archives/C1/p{i}",
+            source_type="slack",
+            external_id=f"C1:{i}",
+            topic="案件決定",
+            cls_project="",
+            client_name="",
+            excerpt="定型ヘッダー" * 60 + f"\nクライアント名／商材名：{name}\n代理店：ファミマ",
+        )
+        for i, name in enumerate(("株式会社ファミリーマート", "ファミマ", "競合社"))
+    ]
+    files = plan_vault({"": {"documents": [campaign_doc, *decisions], "timeline": []}})
+    cp = next(p for p, text in files.items() if 'campaign_aggregate: "true"' in text)
+    for i, decision in enumerate(decisions):
+        path = f"docs/{safe_filename(decision['title'])}-{_mod.source_discriminator(decision['external_id'])}"
+        assert (wikilink(path) in files[cp]) == (i < 2)
+        assert (wikilink(cp[:-3]) in files[path + ".md"]) == (i < 2)
+    assert "docs/紐付け先の無い施策.md" not in files
+    assert len(files) == 5
