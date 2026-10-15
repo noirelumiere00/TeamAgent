@@ -907,6 +907,11 @@ def test_intent_normalizes_width_and_case(query: str) -> None:
     assert is_campaign_results_intent(query, explicit_doc_type=None, has_client=False)
 
 
+@pytest.mark.parametrize("query", ["1本ずつ見せて", "１ 本ずつ見せて", "一本ずつ見せて"])
+def test_iter3_individual_result_intent_without_known_client(query: str) -> None:
+    assert is_campaign_results_intent(query, explicit_doc_type=None, has_client=False)
+
+
 # ---------------------------------------------------------------------------
 # アダプタ側の射影とフェイクの忠実性
 # ---------------------------------------------------------------------------

@@ -354,12 +354,17 @@ def _video_campaign_label(hit: SearchHit) -> str:
 
 def _footer_campaigns(
     hits: Sequence[SearchHit],
+    asked_industry: str | None = None,
 ) -> list[tuple[SearchHit, list[tuple[str, str]]]]:
     """📊 の節に載せる施策（最大 3 施策・各 5 本）と、その表示行。表示と要約の受け渡しで共用。"""
     picked: list[tuple[SearchHit, list[tuple[str, str]]]] = []
     seen: set[tuple[str, str] | int] = set()
+    wanted = normalize_industry(asked_industry)
     for hit in hits:
-        if not is_campaign_hit(hit) or "related_files" not in (hit.metadata or {}):
+        if not is_campaign_hit(hit):
+            continue
+        # 業種未確定の施策を、指定業種の動画実績として提示しない。
+        if wanted and hit_industry(hit) != wanted:
             continue
         key: tuple[str, str] | int = campaign_key(hit) or hit.chunk_id
         if key in seen:
@@ -374,20 +379,21 @@ def _footer_campaigns(
     return picked
 
 
-def video_footer_urls(hits: Sequence[SearchHit]) -> str:
+def video_footer_urls(hits: Sequence[SearchHit], *, asked_industry: str | None = None) -> str:
     """📊 の節に載る動画の URL（改行区切り）。要約器へ渡す本文から同じ動画の数字を抜くのに使う。"""
-    return "\n".join(url for _, rows in _footer_campaigns(hits) for _, url in rows if url)
+    return "\n".join(
+        url for _, rows in _footer_campaigns(hits, asked_industry) for _, url in rows if url
+    )
 
 
-def video_stats_footer(hits: Sequence[SearchHit], answer: str) -> str:
+def video_stats_footer(
+    hits: Sequence[SearchHit], answer: str, *, asked_industry: str | None = None
+) -> str:
     """要約に使った施策の上位動画を最大 3 施策・各 5 本、数字とリンク付きで並べる。"""
     blocks: list[str] = []
-    urls: list[str] = []
-    for hit, rows in _footer_campaigns(hits):
+    for hit, rows in _footer_campaigns(hits, asked_industry):
         blocks.append(_video_campaign_label(hit) + "\n" + "\n".join(row[0] for row in rows))
-        urls.extend(row[1] for row in rows)
-    # URL 無しの行まで空集合の all() で省かない。部分的な引用なら全行を残す。
-    if not blocks or all(url and url in answer for url in urls):
+    if not blocks:
         return ""
     return VIDEO_METRICS_HEADING + "\n" + "\n\n".join(blocks)
 

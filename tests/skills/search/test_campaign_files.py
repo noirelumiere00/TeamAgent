@@ -434,6 +434,7 @@ def _video_campaign(
     chunk_id: int, advertiser: str, campaign: str, videos: list[CampaignVideo]
 ) -> SearchHit:
     hit = _campaign(chunk_id, advertiser, campaign)
+    hit.metadata["cls_industry"] = "食品"
     return SearchHit(
         hit.chunk_id,
         format_campaign_document(
@@ -574,14 +575,15 @@ def test_video_footer_excludes_campaigns_from_other_industries(
     assert "990,000" not in out.answer
 
 
-def test_video_footer_is_omitted_only_when_summary_includes_all_displayed_urls(
+def test_iter3_video_footer_remains_when_summary_includes_all_urls_without_numbers(
     ham_campaign: tuple[SearchHit, list[dict[str, Any]]],
 ) -> None:
     hit, docs = ham_campaign
-    # 表示対象は 5 本。集計文書に出ない 6 本目の URL は省略判定に不要。
+    # URL を全件書いただけでは再生・保存の実数を届けたことにならない。
     answer = "動画はこちら。 " + " ".join(HAM_VIDEO_URLS[:5])
     out = _run(_skill(_Pg([hit], docs), answer=answer), query="食品メーカーの事例")
-    assert VIDEO_STATS_HEADING not in out.answer
+    assert VIDEO_STATS_HEADING in out.answer
+    assert "1. 507,000 再生・保存 120" in out.answer
     assert "📎 施策のレポート・提案書" in out.answer
 
 
@@ -684,14 +686,12 @@ def test_video_footer_strips_forbidden_decoration_from_names_and_post_text() -> 
     assert "###" not in display and "**" not in display and "—" not in display
 
 
-@pytest.mark.parametrize("eligible", ["not_campaign", "attachment_not_attempted"])
-def test_video_footer_only_uses_campaigns_where_related_file_lookup_was_attempted(
-    ham_campaign: tuple[SearchHit, list[dict[str, Any]]], eligible: str
+def test_video_footer_does_not_depend_on_related_file_lookup(
+    ham_campaign: tuple[SearchHit, list[dict[str, Any]]],
 ) -> None:
     hit, _ = ham_campaign
-    if eligible == "not_campaign":
-        hit.metadata["campaign_aggregate"] = "false"
-        hit.metadata["related_files"] = []
+    assert "507,000 再生" in video_stats_footer([hit], "事例。")
+    hit.metadata["campaign_aggregate"] = "false"
     assert video_stats_footer([hit], "事例。") == ""
 
 

@@ -636,6 +636,94 @@ def test_list_fast_keeps_campaign_footers(monkeypatch: pytest.MonkeyPatch) -> No
     assert "📁" in suffix and "探した範囲（まとめて検索）:" in suffix
 
 
+@pytest.mark.parametrize("summary_kind", ["empty", "long", "error"])
+@pytest.mark.parametrize("wording", ["動画ごとの結果", "投稿ごとの結果", "1本ずつの結果"])
+def test_iter3_campaign_metrics_survive_empty_or_long_summary_without_related_files(
+    monkeypatch: pytest.MonkeyPatch, summary_kind: str, wording: str
+) -> None:
+    from structlog.testing import capture_logs
+
+    from teamagent.mcp_gateway.direct_video_metrics import extract_section
+
+    campaign_fakes = import_module("tests.skills.search.test_campaign_files")
+    hits = [
+        campaign_fakes._video_campaign(
+            20 + i,
+            "食品メーカー",
+            name,
+            [
+                campaign_fakes._video(f"https://example.test/{i}/{n}", "食事のアレンジ", plays, n)
+                for n, plays in enumerate((507_700, 331_300, 184_100, 122_500, 49_200), 1)
+            ],
+        )
+        for i, name in enumerate(("ハンバーグ", "クイックディナー"))
+    ]
+    skill, pg = make(hits)
+    skill._campaign_files = True
+    pg.find_drive_files_for_advertisers.return_value = [
+        {"advertiser": "食品メーカー", "title": "会社紹介", "source_uri": "gdrive://OTHER1"},
+        {"advertiser": "食品メーカー", "title": "別商品提案書", "source_uri": "gdrive://OTHER2"},
+    ]
+    summary = _bedrock()
+    summary.converse.return_value = _converse("説明です。" * 600 if summary_kind == "long" else "")
+    if summary_kind == "error":
+        summary.converse.side_effect = RuntimeError("summary unavailable")
+    monkeypatch.setattr(fanout, "build_summary_client", lambda: summary)
+    with capture_logs() as logs:
+        out = run(skill, query=f"食品メーカーのハンバーグの施策の{wording}と、何が効いたか教えて")
+    row = next(log for log in logs if log["event"] == "search_campaign_files")
+    assert (row["campaigns"], row["attached"], row["candidates"]) == (2, 0, 2)
+    section = extract_section(out.answer)
+    assert section is not None
+    assert "331,300 再生" in section[1] and "49,200 再生" in section[1]
+    assert len(out.answer) <= 2500
+
+
+@pytest.mark.parametrize("industry", [None, "金融"])
+@pytest.mark.parametrize("incomplete", [False, True])
+def test_iter3_industry_metrics_exclude_unconfirmed_or_other_industries(
+    monkeypatch: pytest.MonkeyPatch, industry: str | None, incomplete: bool
+) -> None:
+    from teamagent.mcp_gateway.direct_video_metrics import extract_section
+
+    campaign_fakes = import_module("tests.skills.search.test_campaign_files")
+    food = campaign_fakes._video_campaign(
+        20,
+        "食品メーカー",
+        "ハンバーグ",
+        [campaign_fakes._video("https://example.test/food", "食事", 331_300, 10)],
+    )
+    card = campaign_fakes._video_campaign(
+        21,
+        "JCB-USJ",
+        "TikTok",
+        [campaign_fakes._video("https://example.test/card", "旅行", 990_000, 20)],
+    )
+    food.metadata["cls_industry"] = "食品"
+    card.metadata.pop("cls_industry", None)
+    if industry:
+        card.metadata["cls_industry"] = industry
+    skill, pg = make([food, card])
+    skill._campaign_files = True
+    if incomplete:
+        retrieve = skill._retrieve
+
+        def partial(*args: Any, **kwargs: Any) -> Any:
+            hits = retrieve(*args, **kwargs)
+            kwargs["fanout_probe"]["incomplete"] = True
+            return hits
+
+        monkeypatch.setattr(skill, "_retrieve", partial)
+    pg.find_drive_files_for_advertisers.return_value = []
+    summary = _bedrock()
+    summary.converse.return_value = _converse("食品の事例です。")
+    monkeypatch.setattr(fanout, "build_summary_client", lambda: summary)
+    out = run(skill, query="食品メーカーのショート動画施策の事例を探して")
+    section = extract_section(out.answer)
+    assert section is not None and "331,300 再生" in section[1]
+    assert "JCB" not in section[1] and "990,000" not in section[1]
+
+
 @pytest.mark.parametrize(
     "query",
     [

@@ -2666,6 +2666,7 @@ export function createCallerIdentityPlugin({
   const evidenceByRun = new Map();
   const evidenceBySession = new Map();
   const searchRevisionsByRun = new Map();
+  const revisedRepliesByRun = new Map();
   function evidenceSessionKey(runId) {
     const ingress = connectIngressByRun.get(runId);
     return ingress ? JSON.stringify([ingress.sessionSha256, ingress.senderId]) : null;
@@ -2675,7 +2676,8 @@ export function createCallerIdentityPlugin({
     if (!runId || (event?.runId && event.runId !== runId) || event?.error ||
         event?.result?.isError) return;
     pruneConnectGuardState(now());
-    const entry = evidenceByRun.get(runId) ?? {urls: new Set(), needsInput: false};
+    const entry = evidenceByRun.get(runId) ?? {urls: new Set(), numbers: new Set(), needsInput: false};
+    if (["search", "teamagent__search"].includes(event?.toolName)) entry.searchCompleted = true;
     if (["oauth_connect", "teamagent__oauth_connect"].includes(event?.toolName)) entry.needsInput = true;
     function collect(value, depth = 0) {
       if (depth > 12) return;
@@ -2684,13 +2686,19 @@ export function createCallerIdentityPlugin({
           const parsed = JSON.parse(value);
           if (typeof parsed !== "string") { collect(parsed, depth + 1); return; }
         } catch {}
+        for (const number of metricNumbers(value)) {
+          if (entry.numbers.size >= 4096) break;
+          entry.numbers.add(number);
+        }
         for (const m of value.slice(0, ASSISTANT_MESSAGE_SCAN_LIMIT).matchAll(/https?:\/\/[^\s<>"`|\\）」』、。！？]+/giu)) {
           if (entry.urls.size >= 128) break;
           entry.urls.add(m[0].replace(CONNECT_URL_TRAILING_RE, ""));
         }
+      } else if (typeof value === "number" && Number.isFinite(value)) {
+        if (entry.numbers.size < 4096) entry.numbers.add(String(value));
       } else if (Array.isArray(value)) {
         for (const item of value) collect(item, depth + 1);
-      } else if (value && typeof value === "object") {
+      } else if (value && typeof value === "object" && !value.isError) {
         for (const [key, item] of Object.entries(value)) {
           if ((key === "status" && ["needs_input", "requires_confirmation", "confirmation_required",
             "needs_authorization"].includes(item)) ||
@@ -2710,6 +2718,74 @@ export function createCallerIdentityPlugin({
       evidenceBySession.delete(session);
       evidenceBySession.set(session, {urls: new Set(entry.urls), updatedAtMs: now()});
     }
+  }
+
+  // NumberGrounder と同じく NFKC・カンマ・万/億を揃える。URL の ID は根拠にしない。
+  function metricNumbers(text) {
+    const clean = text.slice(0, ASSISTANT_MESSAGE_SCAN_LIMIT).normalize("NFKC")
+      .replace(/https?:\/\/[^\s<>"`|\\）」』、。！？]+/giu, "");
+    return [...clean.matchAll(/(\d[\d,]*(?:\.\d+)?)\s*([万億])?\s*(倍|%)?/gu)].map(match =>
+      String(Number(match[1].replaceAll(",", "")) * (match[2] === "億" ? 1e8 : match[2] === "万" ? 1e4 : 1)) + (match[3] ?? ""));
+  }
+
+  // shortcut: 同 run の数値集合で照合し、投稿者との対応も保証する要件が出たら行キーで照合する。
+  function stripUngroundedVideoMetrics(text, numbers) {
+    const lines = text.split("\n");
+    const out = [];
+    const video = /動画|投稿者|アカウント|クリエイター|投稿ごと|投稿別|上位の投稿|@[\w.]/u;
+    const metric = /再生|保存/u;
+    const notice = "動画ごとの数値は 📊 を参照してください。";
+    const ungrounded = value => metricNumbers(value).some(number => !numbers?.has(number));
+    function rowMetricText(row) {
+      const normalized = row.normalize("NFKC");
+      const count = "\\d[\\d,]*(?:\\.\\d+)?\\s*[万億]?\\s*(?:倍|%)?";
+      const values = [...normalized.matchAll(new RegExp(
+        "(?:再生|保存)(?:数|率)?\\s*[:：はが]?\\s*(" + count + ")|(" + count + ")\\s*(?:回|件)?\\s*(?:再生|保存)", "gu"))]
+        .map(match => match[1] ?? match[2]);
+      return values.length ? values.join(" ") : normalized.replace(/^\s*[0-9]+[.．、)]\s*/u, "")
+        .replace(/^[^:：]*[:：]/u, "").replace(/@[\w.]+/gu, "");
+    }
+    let context = "";
+    let fenced = false;
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i];
+      if (/^\s*(?:```|~~~)/u.test(line)) fenced = !fenced;
+      if (fenced) { out.push(line); continue; }
+      if (line.includes("|") && metric.test(line)) {
+        const header = line.split("|");
+        const columns = header.flatMap((cell, index) => /再生|保存|比率|倍率/u.test(cell) ? [index] : []);
+        let end = i + 1;
+        while (end < lines.length && lines[end].includes("|")) end++;
+        if ((video.test(line) || (video.test(context) && !/施策|キャンペーン/u.test(line))) && lines.slice(i + 1, end).some(row => {
+          const cells = row.split("|");
+          return columns.some(index => ungrounded(cells[index] ?? ""));
+        })) {
+          out.push(notice);
+          i = end - 1;
+          continue;
+        }
+      }
+      const isListRow = row => /^\s*(?:[-*•・]|[0-9]+[.．、)])\s*/u.test(row) ||
+        (video.test(context) && metric.test(row) && /[:：]/u.test(row));
+      if (isListRow(line)) {
+        let end = i + 1;
+        while (end < lines.length && isListRow(lines[end])) end++;
+        const block = lines.slice(i, end);
+        if (video.test(context + block.join("\n")) && metric.test(context + block.join("\n")) &&
+            block.some(row => ungrounded(rowMetricText(row)))) {
+          out.push(notice);
+          i = end - 1;
+          continue;
+        }
+      }
+      if (video.test(context + line) && metric.test(line) && /\d+(?:\.\d+)?\s*(?:倍|%)/u.test(line) && ungrounded(line)) {
+        out.push(notice);
+        continue;
+      }
+      out.push(line);
+      if (line.trim()) context = line;
+    }
+    return out.join("\n");
   }
 
   // Only a unique close match is safe to restore; unrelated or ambiguous URLs survive.
@@ -2751,7 +2827,7 @@ export function createCallerIdentityPlugin({
     const last = match[0].trim();
     // Authorization and connection guidance remain actionable even without a tool result.
     if (/連携|認証|送信|送付|購入|決済|支払|課金|削除|実行して|実行します/u.test(last)) return text;
-    if (!/(?:しますか|ですか|何に[^。！？!?]*|(?:へ|に)確認してください)[？?。]?$/u.test(last)) return text;
+    if (!/(?:しますか|見ますか|ましょうか|いかがですか|必要ですか|ですか|何に[^。！？!?]*|(?:へ|に)確認してください)[？?。]?$/u.test(last)) return text;
     return text.slice(0, match.index).trimEnd();
   }
 
@@ -2794,6 +2870,7 @@ export function createCallerIdentityPlugin({
       evidenceByRun,
       evidenceBySession,
       searchRevisionsByRun,
+      revisedRepliesByRun,
       toolCallsByRun,
       connectRevisionsByRun,
       connectFallbackByRun,
@@ -3134,7 +3211,8 @@ export function createCallerIdentityPlugin({
       searchRequired: typeof event?.content === "string" && (
         /比較|何が効|どっちが|どちらが|勝ち|効果/u.test(event.content) ? "comparison" :
         /ビデオリリース|\bTTO\b|切り抜き|\bVVS\b|タテガタ|ショートドラマ|スワイプ\s*LP|ソリューションプラン|\bVSEO\b|検索面|お土産資料|ケイパ|感触|BANT|営業\s*FB|カルテ|二次利用費/iu.test(event.content)
-          ? "internal_term" : null),
+          ? "internal_term" : /元の資料|根拠|資料を(?:もと|基)に|ソース/u.test(event.content)
+            ? "source" : null),
       hasMedia,
     };
     const existing = pendingByMessage.get(pendingKey);
@@ -5447,12 +5525,110 @@ export function createCallerIdentityPlugin({
         typeof event?.lastAssistantMessage !== "string" || !event.lastAssistantMessage.trim() ||
         searchRevisionsByRun.has(runId) ||
         connectRevisionsByRun.has(runId) || videoRevisionsByRun.has(runId)) return undefined;
+    if (ingress.searchRequired === "source" &&
+        !/(?:添付|(?:URL|リンク|ファイル|資料).{0,24}(?:貼|送|共有|提供|指定|アップロード))|抽出でき|添付が[無な]/iu.test(event.lastAssistantMessage)) return undefined;
     searchRevisionsByRun.set(runId, {updatedAtMs: now()});
     emitPluginLog(logger, "warn", `search zero-tool revise reason=${ingress.searchRequired} outcome=revised`);
     return {action: "revise", reason: "社内資料の検索が必要です。", retry: {
-      instruction: "search を必ず呼び、元の質問と会話中の施策名を使って社内資料・施策実績を確認してから答えてください。比較の勝敗は取得した表の数字で判定し、資料に無い数字・定義は書かない。",
+      instruction: "この指示は明示的にツール実行を要求します。This retry explicitly requires a new tool call, even if the previous pass was final. " +
+        "利用可能な teamagent__search（search）を今のパスで必ず呼び出してください。" +
+        "query には元の質問と会話中の取引先・施策名・資料名を使い、社内資料・施策実績を確認してから答えてください。" +
+        "過去の自分の返答は根拠にせず、取得した表の数字で比較し、資料に無い数字・定義は書かないでください。" +
+        "検索が失敗・空でもその旨を短く回答してください。空の最終回答・NO_REPLY は禁止です。",
       idempotencyKey: "search-zero-tool", maxAttempts: 1,
     }};
+  }
+
+  // 空の再パスでは finalize/配信フック自体が来ないため、全 revise の完了を別に追う。
+  function trackRevisedReply(event, ctx, result) {
+    const runId = authoritativeRunId(event, ctx, null, "before_agent_finalize");
+    if (!runId) return result;
+    if (result?.action === "revise") {
+      const entry = revisedRepliesByRun.get(runId) ?? {payloadSeen: false, delivered: false};
+      entry.pending = true;
+      entry.draftDigest = createHash("sha256").update(event.lastAssistantMessage ?? "").digest("hex");
+      entry.searchRequired ||= result.retry?.idempotencyKey === "search-zero-tool";
+      entry.updatedAtMs = now();
+      revisedRepliesByRun.delete(runId);
+      revisedRepliesByRun.set(runId, entry);
+    } else {
+      const entry = revisedRepliesByRun.get(runId);
+      if (entry) entry.pending = !visibleReplyText(event?.lastAssistantMessage);
+    }
+    return result;
+  }
+
+  function visibleReplyText(text) {
+    return typeof text === "string" && !!text.replace(/\[\[(?:reply_to[^\]]*|audio_as_voice)\]\]/gu, "")
+      .replace(/^\s*(?:NO_REPLY|HEARTBEAT_OK)\s*$/u, "").trim();
+  }
+
+  function revisedReplyFallback(entry) {
+    return entry.searchRequired
+      ? "数字や説明は search で元資料を確認してからお伝えします。今回は確認を完了できませんでした。"
+      : "回答の作り直しを完了できませんでした。結果を確認できていないため、断定を控えます。";
+  }
+
+  function finishRevisedReply(event, ctx, result) {
+    const runId = authoritativeRunId(event, ctx, null, "reply_payload_sending");
+    const entry = runId && revisedRepliesByRun.get(runId);
+    if (!entry) return result;
+    const payload = result?.payload ?? event?.payload;
+    if ((event?.kind !== undefined && event.kind !== "final") ||
+        payload?.isReasoning === true || payload?.isCommentary === true) return result;
+    if (entry.posting) return entry.task.then(() => finishRevisedReply(event, ctx, result));
+    if (entry.delivered || entry.replaced) return {cancel: true, reason: "revised reply fallback already delivered"};
+    if (resolveConnectSuppression(runId).suppress) return result;
+    const hasContent = !result?.cancel && (visibleReplyText(payload?.text) ||
+      payload?.mediaUrl || payload?.mediaUrls?.length || payload?.attachments?.length || payload?.blocks?.length);
+    if (!entry.payloadSeen && (!hasContent ||
+        (entry.searchRequired && !evidenceByRun.get(runId)?.searchCompleted))) {
+      entry.payloadSeen = true;
+      entry.replaced = true;
+      return {payload: {...payload, text: revisedReplyFallback(entry)}};
+    }
+    if (hasContent) entry.payloadSeen = true;
+    return result;
+  }
+
+  function rescueEmptyRevisedReply(event, ctx, logger) {
+    pruneConnectGuardState(now());
+    const runId = authoritativeRunId(event, ctx, logger, "agent_end");
+    const entry = runId && revisedRepliesByRun.get(runId);
+    const ingress = runId && connectIngressByRun.get(runId);
+    const finalMessage = Array.isArray(event?.messages) ? event.messages.at(-1) : null;
+    const last = finalMessage?.role === "assistant" ? finalMessage : null;
+    const content = last?.content;
+    const text = typeof content === "string" ? content : Array.isArray(content)
+      ? content.filter(block => block?.type === "text").map(block => block.text ?? "").join("\n") : "";
+    const toolOnly = last?.tool_calls?.length || (Array.isArray(content) &&
+      content.some(block => ["toolCall", "tool_use"].includes(block?.type)));
+    // 成功した tool call 後は finalize が省略される。却下した下書きだけの履歴は救済する。
+    if (entry && visibleReplyText(text) && !toolOnly &&
+        !["analysis", "commentary"].includes(last?.channel) &&
+        (evidenceByRun.has(runId) ||
+          createHash("sha256").update(text).digest("hex") !== entry.draftDigest)) entry.pending = false;
+    if (!entry?.pending || entry.payloadSeen || entry.delivered || entry.attempted ||
+        !ingress || resolveConnectSuppression(runId).suppress) return;
+    if (!slackBotToken) {
+      emitPluginLog(logger, "warn", "revised reply fallback outcome=skipped reason=no_slack_bot_token");
+      return;
+    }
+    entry.attempted = true;
+    const task = (async () => {
+      const channel = await resolveCanonicalChannel(ingress);
+      if (entry.payloadSeen || resolveConnectSuppression(runId).suppress) return;
+      const threadTs = SLACK_DM_CHANNEL_RE.test(channel) ? ingress.threadTs
+        : (ingress.threadTs ?? canonicalSlackTimestamp(ingress.messageId));
+      entry.posting = true;
+      await postButtonMessage({channel, threadTs}, {text: revisedReplyFallback(entry)});
+      entry.delivered = true;
+      emitPluginLog(logger, "warn", "revised reply fallback outcome=delivered reason=empty_revised_pass");
+    })().catch(error => {
+      emitPluginLog(logger, "warn", `revised reply fallback outcome=failed reason=${connectPathReason(error)}`);
+    }).finally(() => {entry.posting = false;});
+    entry.task = task;
+    onBackgroundTask(task);
   }
 
   // 層3。層2 の再パス後も 0 tool call のまま終わった run の最終応答を、送信直前に
@@ -6144,10 +6320,10 @@ export function createCallerIdentityPlugin({
       // 連携側を先に評価し、何もしなかったときだけ動画 URL × 0 tool call の層2 を評価する。
       observe(
         "before_agent_finalize",
-        (event, ctx) =>
+        (event, ctx) => trackRevisedReply(event, ctx,
           guardConnectUrlFabrication(event, ctx, api.logger) ??
           guardVideoZeroTool(event, ctx, api.logger) ??
-          guardSearchZeroTool(event, ctx, api.logger),
+          guardSearchZeroTool(event, ctx, api.logger)),
       );
       observe("reply_payload_sending", (event, ctx) => {
         let result = replaceExhaustedConnectReply(event, ctx, api.logger);
@@ -6167,8 +6343,11 @@ export function createCallerIdentityPlugin({
           const urls = evidence?.urls?.size ? evidence.urls : evidenceBySession.get(session)?.urls;
           const restored = restoreEvidenceUrls(payload.text, urls);
           if (restored !== payload.text) emitPluginLog(api.logger, "info", "outbound URL restored diagnostic=CONNECT-Z04");
-          const trimmed = authoritative ? trimUnsolicitedEnding(restored, evidence?.needsInput) : restored;
-          if (payload.text.trim() && !trimmed.trim()) return { ...result, cancel: true };
+          const grounded = authoritative ? stripUngroundedVideoMetrics(restored, evidence?.numbers) : restored;
+          const trimmed = authoritative ? trimUnsolicitedEnding(grounded, evidence?.needsInput) : grounded;
+          if (payload.text.trim() && !trimmed.trim()) {
+            return finishRevisedReply(event, ctx, { ...result, cancel: true });
+          }
           const scrubbed = scrubOutboundReplyText(trimmed, replacements);
           if (scrubbed.text !== payload.text) {
             const { signedUrls, toolNames, urlSeparators, unverifiedConnectUrls = 0 } = scrubbed.counts;
@@ -6183,11 +6362,17 @@ export function createCallerIdentityPlugin({
             result = { ...result, payload: { ...payload, text: scrubbed.text } };
           }
         }
+        result = finishRevisedReply(event, ctx, result);
+        if (result?.then) return result.then(finished => {
+          maybeScheduleAnswerFeedback(event, ctx, finished, api.logger);
+          return finished;
+        });
         // 配信されるメッセージ起点の返信の後に、評価メッセージを予約する。
         maybeScheduleAnswerFeedback(event, ctx, result, api.logger);
         return result;
       });
       observe("agent_end", (event, ctx) => {
+        rescueEmptyRevisedReply(event, ctx, api.logger);
         releaseAgentRun(event, ctx);
       });
       // 実登録と期待値の乖離は起動時に落とす（テストが緑のまま前提が壊れるのを防ぐ）。
