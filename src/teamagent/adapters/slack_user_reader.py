@@ -80,6 +80,7 @@ class SlackSearchMatch:
     channel_is_mpim: bool | None = None
     channel_is_im: bool | None = None
     channel_is_group: bool | None = None
+    channel_is_channel: bool | None = None
     # 一致したメッセージの添付ファイル名（応答の ``files[].name``・無ければ ``title``）。
     # 応答に files が無い一致は空タプル（推測で埋めない）。
     file_names: tuple[str, ...] = ()
@@ -140,6 +141,7 @@ def _search_match_from_raw(m: dict[str, Any]) -> SlackSearchMatch:
         channel_is_mpim=_opt_bool(ch.get("is_mpim")),
         channel_is_im=_opt_bool(ch.get("is_im")),
         channel_is_group=_opt_bool(ch.get("is_group")),
+        channel_is_channel=_opt_bool(ch.get("is_channel")),
         file_names=_file_names_from_raw(m),
         thread_ts=str(
             m.get("thread_ts")

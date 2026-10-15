@@ -325,7 +325,8 @@ def test_slack_sort_and_two_term_retry(query: str, sort: str) -> None:
     calls = client.search_messages.call_args_list
     assert calls[0].kwargs["sort"] == sort
     if len(calls[0].kwargs["query"].split()) == 3:
-        assert len(calls) == 2 and len(calls[1].kwargs["query"].split()) == 2
+        assert len(calls) == 3
+        assert [len(c.kwargs["query"].split()) for c in calls] == [3, 2, 1]
 
 
 def test_fanout_next_move_never_asks_or_contains_query(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -978,3 +979,156 @@ def test_timeline_unknown_date_section(monkeypatch: pytest.MonkeyPatch) -> None:
     skill, _ = make([hit(client_name="日本ガイシ", occurred_at=None)])
     answer = run(skill).answer
     assert "状態は資料からは確認できません（最新の記録: 日付不明 の営業FB）" in answer
+
+
+def test_public_nonmember_is_prioritized_and_private_nonmember_is_not_returned(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Slack enforces private membership: the fake never returns that private channel.
+    private = _match("1759210000.000001", "CSECRET", "joined-private", "JOINED", is_private=True)
+    public = _match("1759210000.000002", "COPEN", "unjoined-public", "PUBLIC_NONMEMBER")
+    public["channel"].update(is_channel=True, is_member=False)
+    client = _slack_client([private, public])
+    skill, _ = make(client=client)
+    summary = _bedrock()
+    monkeypatch.setattr(fanout, "build_summary_client", lambda: summary)
+    out = run(skill)
+    assert [hit.channel for hit in out.slack_hits] == ["#unjoined-public", "🔒#joined-private"]
+    assert "PUBLIC_NONMEMBER" in out.answer
+    assert "UNJOINED_PRIVATE" not in out.model_dump_json()
+    assert "Slack: 公開チャンネル全体＋参加している非公開・DM" in out.answer
+    assert "PUBLIC_NONMEMBER" in str(summary.converse.call_args)
+
+
+def test_wide_pages_summary_cap_and_display_cap(monkeypatch: pytest.MonkeyPatch) -> None:
+    def batch(start: int) -> list[dict[str, Any]]:
+        return [
+            _match(f"1759210000.{i:06}", "COPEN", "public", f"BODY_{i:02}")
+            for i in range(start, start + 20)
+        ]
+
+    first, second = batch(0), batch(20)
+    # Public results on page 2 must outrank private results on page 1.
+    for match in first:
+        match["channel"]["is_private"] = True
+    for match in second:
+        match["channel"]["is_channel"] = True
+    client = _slack_client([])
+    client.search_messages.side_effect = [
+        _slack_fakes._search_response(first, total=40),
+        _slack_fakes._search_response(second, total=40),
+    ]
+    skill, _ = make(client=client)
+    summary = MagicMock(return_value=("要約", 0.0))
+    monkeypatch.setattr(skill, "_summarize", summary)
+    out = run(skill, query="日本ガイシ ケイパ 動画")
+    calls = client.search_messages.call_args_list
+    assert [(c.kwargs["count"], c.kwargs["page"]) for c in calls] == [(20, 1), (20, 2)]
+    assert calls[0].kwargs["query"] == calls[1].kwargs["query"]
+    items = summary.call_args.kwargs["slack_items"]
+    assert len(items) == 20 and all(i.hit.channel == "#public" for i in items)
+    assert len(out.slack_hits) == 5 and out.slack_hits[0].excerpt == "BODY_20"
+    assert "BODY_39" not in out.answer
+
+
+@pytest.mark.parametrize("initial_count", [0, 2])
+def test_relaxation_order_merges_deduplicates_and_stops_at_five(initial_count: int) -> None:
+    first = [_match(f"1759210000.{i:06}", "COPEN", "public", str(i)) for i in range(initial_count)]
+    final = [_match(f"1759210000.{i:06}", "COPEN", "public", str(i)) for i in range(5)]
+    client = _slack_client([])
+    client.search_messages.side_effect = [
+        _slack_fakes._search_response(first),
+        _slack_fakes._search_response(first),
+        _slack_fakes._search_response(final),
+    ]
+    skill, _ = make(client=client)
+    out = run(skill, query="日本ガイシ ケイパ 動画")
+    assert [c.kwargs["query"] for c in client.search_messages.call_args_list] == [
+        "日本ガイシ ケイパ 動画",
+        "日本ガイシ ケイパ",
+        "日本ガイシ",
+    ]
+    assert len(out.slack_hits) == 5
+
+
+def test_wide_deadline_includes_token_lookup_and_no_call_after_expiry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from teamagent.adapters.slack_user_reader import SlackSearchRead
+    from teamagent.skills.search import composite
+
+    now = [100.0]
+    monkeypatch.setattr(composite.time, "perf_counter", lambda: now[0])
+    reader = MagicMock()
+    timeouts: list[float] = []
+
+    def search(*a: Any, **kw: Any) -> SlackSearchRead:
+        timeouts.append(kw["timeout_s"])
+        now[0] += 4
+        return SlackSearchRead()
+
+    reader.search_checked.side_effect = search
+    store = _slack_fakes._Store()
+    result = lookup_slack(
+        slack_store=store,
+        reader_factory=lambda token: reader,
+        query="日本ガイシ ケイパ 動画",
+        metadata=META,
+        request_id="deadline",
+        fanout=True,
+    )
+    assert timeouts == [8.0, 4.0]
+    assert result.status == "error" and result.reason == "timeout"
+    reader.reset_mock()
+    result = lookup_slack(
+        slack_store=store,
+        reader_factory=lambda token: reader,
+        query="日本ガイシ",
+        metadata=META,
+        request_id="expired",
+        fanout=True,
+        deadline_at=108.0,
+    )
+    reader.search_checked.assert_not_called()
+    assert result.reason == "timeout"
+
+
+def test_operators_are_not_relaxed_and_off_keeps_count_ten(monkeypatch: pytest.MonkeyPatch) -> None:
+    client = _slack_client([])
+    skill, _ = make(client=client)
+    run(skill, query="日本ガイシ in:general after:2026-01-01")
+    assert client.search_messages.call_count == 1
+    assert (
+        client.search_messages.call_args.kwargs["query"] == "日本ガイシ in:general after:2026-01-01"
+    )
+    monkeypatch.setenv("USE_SEARCH_FANOUT", "0")
+    client.reset_mock()
+    run(skill, query="日本ガイシ ケイパ 動画")
+    assert client.search_messages.call_count == 1
+    assert client.search_messages.call_args.kwargs == {
+        "query": "日本ガイシ ケイパ 動画",
+        "count": 10,
+        "sort": "timestamp",
+        "page": 1,
+    }
+
+
+def test_explicit_client_is_used_for_last_relaxation() -> None:
+    client = _slack_client([])
+    reader = _slack_fakes._ReaderFactory(client)
+    result = lookup_slack(
+        slack_store=_slack_fakes._Store(),
+        reader_factory=reader,
+        query="動画 ケイパ 日本ガイシ",
+        metadata=META,
+        request_id="explicit-client",
+        fanout=True,
+        client_name="日本ガイシ",
+    )
+    assert result.status == "ok"
+    assert [c.kwargs["query"] for c in client.search_messages.call_args_list] == [
+        "動画 ケイパ 日本ガイシ",
+        "動画 ケイパ",
+        "日本ガイシ",
+    ]
+    assert reader.tokens == [_slack_fakes.XOXP]
