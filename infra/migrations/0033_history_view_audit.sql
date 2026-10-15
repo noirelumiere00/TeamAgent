@@ -140,8 +140,25 @@ BEGIN
   IF pg_has_role(current_user, 'history_view_definer', 'SET') THEN
     RAISE EXCEPTION 'current_user must not be able to SET ROLE history_view_definer';
   END IF;
-  IF has_table_privilege(current_user, 'public.history_view_audit', 'SELECT')
-     OR has_table_privilege(current_user, 'public.history_view_audit', 'INSERT') THEN
-    RAISE EXCEPTION 'current_user must not touch history_view_audit without the function';
+  -- RDS master は rds_superuser 経由で pg_read_all_data / pg_write_all_data を INHERIT する。
+  -- 管理者の全表アクセスは RDS の仕様で防げないため、current_user の実効表権限は検査しない。
+  -- アプリ・監査ロールの実効権限（他ロール経由も含む）と、表への直接 ACL を別々に検査する。
+  FOREACH r IN ARRAY ARRAY['teamagent_app', 'teamagent_dashboard', 'history_view_auditor'] LOOP
+    IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = r) THEN
+      IF has_table_privilege(r, 'public.history_view_audit', 'SELECT')
+         OR has_table_privilege(r, 'public.history_view_audit', 'INSERT')
+         OR has_table_privilege(r, 'public.history_view_audit', 'UPDATE')
+         OR has_table_privilege(r, 'public.history_view_audit', 'DELETE') THEN
+        RAISE EXCEPTION '% must not touch history_view_audit without the function', r;
+      END IF;
+    END IF;
+  END LOOP;
+  IF EXISTS (
+    SELECT 1 FROM pg_class c
+    CROSS JOIN LATERAL aclexplode(c.relacl) a
+    WHERE c.oid = 'public.history_view_audit'::regclass
+      AND a.grantee <> 'history_view_definer'::regrole
+  ) THEN
+    RAISE EXCEPTION 'history_view_audit ACL must grant only to history_view_definer';
   END IF;
 END $$;

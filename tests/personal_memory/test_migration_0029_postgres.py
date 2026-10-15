@@ -4,8 +4,8 @@
 
 本番に似せるため、superuser では migration を流さない。試験ごとに次を作る:
 - 使い捨ての DATABASE（SECURITY DEFINER 関数は search_path を固定し public を修飾するので schema 分離は使えない）
-- 本番の master（teamagent）に似せた「CREATEROLE・BYPASSRLS・非 superuser」の migrator ロール
-  （handoff day0-4:265-270 に「master 接続では FORCE RLS でもすり抜けた」とあるため、最悪の BYPASSRLS を仮定する）
+- 本番の master（teamagent）に似せた「CREATEROLE・全表読み書き権限・非 superuser」の migrator ロール
+  （本番の NOBYPASSRLS と、最悪条件の BYPASSRLS の両方で検証する）
 - 0002 の既定権限（新しい表に teamagent_app の S/I/U/D が自動で付く）
 その migrator で 0029 を流し、権限の行列・RLS・SECURITY DEFINER 関数を実機で確かめる。
 """
@@ -135,15 +135,20 @@ def test_table_privilege_matrix(env: PmDb, role: str, table: str, allowed: set[s
     assert granted == allowed
 
 
-def test_master_without_set_role_cannot_read_even_with_bypassrls(seeded: PmDb) -> None:
-    import psycopg
-
+def test_master_has_rds_table_privileges_without_inheriting_pm_roles(seeded: PmDb) -> None:
     with _connect(seeded) as conn, conn.cursor() as cur:
         cur.execute("SELECT rolbypassrls FROM pg_roles WHERE rolname = current_user")
-        assert cur.fetchone()[0] is True  # 最悪の前提（master が BYPASSRLS）で試している
-        cur.execute("SELECT set_config('app.user_role', 'admin', true)")
-        with pytest.raises(psycopg.errors.InsufficientPrivilege):
-            cur.execute("SELECT count(*) FROM personal_memory_entries")
+        assert cur.fetchone()[0] is seeded.bypassrls
+        for table in _TABLES:
+            for privilege in ("SELECT", "INSERT", "UPDATE", "DELETE"):
+                cur.execute(
+                    "SELECT has_table_privilege(current_user, %s, %s)",
+                    (f"public.{table}", privilege),
+                )
+                assert cur.fetchone()[0] is True
+        for role in PM_ROLES:
+            cur.execute("SELECT pg_has_role(current_user, %s, 'USAGE')", (role,))
+            assert cur.fetchone()[0] is False
 
 
 def test_teamagent_app_with_admin_guc_cannot_read(seeded: PmDb) -> None:
@@ -585,3 +590,88 @@ def test_admin_adapter_retire_paths_read_dict_rows(env: PmDb) -> None:
     assert admin.retire_delete(_TEAM, gone) == 0  # 2 回目は消すものが無い
     assert admin.retire_freeze(_TEAM, guest) is True
     assert admin.retire_freeze(_TEAM, guest) is False  # 2 回目は何もしない
+
+
+def test_master_privilege_guard_fails_before_fix(env: PmDb) -> None:
+    """旧 SQL の最後の検査は RDS の全表権限だけで必ず失敗する。"""
+    import psycopg
+
+    with _connect(env) as conn:
+        with pytest.raises(
+            psycopg.errors.RaiseException,
+            match="current_user must not read personal_memory tables without SET ROLE",
+        ):
+            conn.execute(
+                "DO $$ BEGIN IF has_table_privilege(current_user, 'public.personal_memory_entries', 'SELECT') OR has_table_privilege(current_user, 'public.personal_memory_profiles', 'SELECT') "
+                "THEN RAISE EXCEPTION 'current_user must not read personal_memory tables without SET ROLE'; "
+                "END IF; END $$;"
+            )
+
+
+@pytest.mark.parametrize(
+    "role",
+    [
+        "teamagent_app",
+        "teamagent_dashboard",
+        "personal_memory_admin_reader",
+        "personal_memory_retirer",
+    ],
+)
+@pytest.mark.parametrize("inherited_role", ["pg_read_all_data", "pg_write_all_data"])
+def test_final_guard_rejects_inherited_table_access(
+    env: PmDb, role: str, inherited_role: str
+) -> None:
+    """表 ACL を変えずに漏れる実効権限を検出する（ロール検査の削除で赤）。"""
+    import psycopg
+    from psycopg import sql
+
+    guard = "DO $$" + _MIGRATION.read_text(encoding="utf-8").rsplit("\nDO $$", 1)[1]
+    # 付与と検査を同一 transaction に入れ、成功・失敗にかかわらず共有ロールへの付与を rollback。
+    with pytest.raises(psycopg.errors.RaiseException, match=f"{role} must not touch"):
+        with psycopg.connect(env.admin_dsn) as conn:
+            conn.execute(
+                sql.SQL("GRANT {} TO {} WITH INHERIT TRUE, SET FALSE").format(
+                    sql.Identifier(inherited_role), sql.Identifier(role)
+                )
+            )
+            conn.execute(sql.SQL("SET LOCAL ROLE {}").format(sql.Identifier(env.migrator)))
+            conn.execute(guard)
+            # ガード削除時にも commit しない。
+            conn.rollback()
+
+
+@pytest.mark.parametrize(
+    "grantee",
+    [
+        "PUBLIC",
+        "teamagent_app",
+        "teamagent_dashboard",
+        "personal_memory_admin_reader",
+        "personal_memory_retirer",
+        "master",
+    ],
+)
+@pytest.mark.parametrize("privilege", ["SELECT", "INSERT", "UPDATE", "DELETE", "TRUNCATE"])
+def test_final_guard_rejects_non_definer_acl(env: PmDb, grantee: str, privilege: str) -> None:
+    """master への直接付与は全表権限と区別し ACL で検出する（ACL 検査削除で赤）。"""
+    import psycopg
+    from psycopg import sql
+
+    guard = "DO $$" + _MIGRATION.read_text(encoding="utf-8").rsplit("\nDO $$", 1)[1]
+    target = (
+        sql.SQL("PUBLIC")
+        if grantee == "PUBLIC"
+        else sql.Identifier(env.migrator if grantee == "master" else grantee)
+    )
+    # PUBLIC/app の CRUD は実効権限検査も検出する。master や TRUNCATE は ACL 検査だけが検出する。
+    match = "ACL must grant" if grantee == "master" or privilege == "TRUNCATE" else "must not touch"
+    with pytest.raises(psycopg.errors.RaiseException, match=match):
+        with psycopg.connect(env.admin_dsn) as conn:
+            conn.execute(
+                sql.SQL("GRANT {} ON public.personal_memory_entries TO {}").format(
+                    sql.SQL(privilege), target
+                )
+            )
+            conn.execute(sql.SQL("SET LOCAL ROLE {}").format(sql.Identifier(env.migrator)))
+            conn.execute(guard)
+            conn.rollback()
