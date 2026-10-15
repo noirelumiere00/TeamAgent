@@ -165,6 +165,8 @@ class Sections:
     expand_subject: str = ""
     required_counts: Mapping[SectionKey, int] = field(default_factory=dict)
 
+    timeline_lines: Mapping[str, Sequence[str]] = field(default_factory=dict)
+
     def of(self, key: SectionKey) -> Sequence[Entry]:
         return self.entries.get(key, ())
 
@@ -574,6 +576,8 @@ def _header(key: SectionKey, count: int, sections: Sections) -> str:
         return f"📁 金庫の資料（{count}件）"
     if key == "case":
         return f"🏆 事例・施策実績（{count}件）"
+    if key == "deal" and sections.timeline_lines.get(key):
+        return "🤝 案件（記録に基づく状態）"
     if key == "deal":
         return "🤝 案件（決定・進行中の案件。実績ではありません）"
     if key == "karte":
@@ -639,8 +643,13 @@ def _blocks(sections: Sections, caps: Mapping[SectionKey, int]) -> list[str]:
             lines.append(_line(entry, key))
             if len(lines) >= cap:
                 break
+        count = len(lines)
         if lines:
-            blocks.append(_header(key, len(lines), sections) + "\n" + "\n".join(lines))
+            status_lines = [
+                "- 状態: " + _clean(line, 350) for line in sections.timeline_lines.get(key, ())
+            ]
+            lines = status_lines + lines
+            blocks.append(_header(key, count, sections) + "\n" + "\n".join(lines))
     return blocks
 
 
@@ -766,7 +775,13 @@ def compose_answer(
         head = _clip_block(head, max(0, budget))
 
     def render(text_head: str, text_tail: str = tail) -> str:
-        return _join(text_head, _blocks(sections, caps), text_tail, scope)
+        blocks = _blocks(sections, caps)
+        if sections.timeline_lines:
+            leading = [b for b in blocks if b.startswith(("🤝", "🗂"))]
+            rest = [b for b in blocks if b not in leading]
+            text_head = "\n\n".join([*leading, text_head] if text_head else leading)
+            blocks = rest
+        return _join(text_head, blocks, text_tail, scope)
 
     text = render(head)
     if len(text) <= limit:

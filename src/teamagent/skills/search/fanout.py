@@ -20,6 +20,7 @@ from teamagent.adapters.pgvector_client import SearchHit
 from teamagent.adapters.retry import RetryPolicy
 from teamagent.mcp_gateway.allowlist import email_allowed
 from teamagent.skills.base import SkillContext
+from teamagent.skills.search import timeline_status
 from teamagent.skills.search.answer_mode import classify_answer_mode
 from teamagent.skills.search.answer_sections import (
     LaneStatus,
@@ -301,6 +302,11 @@ def run_fanout(skill: Any, input: SearchInput, ctx: SkillContext) -> SearchOutpu
     )
     karte = extra.get("karte", SourceResult(source="karte", status="skipped", reason="no_client"))
     cases = extra.get("case", SourceResult(source="case", status="skipped", reason="no_industry"))
+    statuses = (
+        timeline_status.resolve_statuses([*summary_hits, *extra.get("named", []), *karte.items])
+        if timeline_status.enabled()
+        else None
+    )
     head, summary_cost = ("" if found else NOT_FOUND_HEAD), 0.0
     summary_state: LaneState = "skipped"
     summary_ms = 0
@@ -325,6 +331,7 @@ def run_fanout(skill: Any, input: SearchInput, ctx: SkillContext) -> SearchOutpu
                     slack_items=slack.items,
                     bedrock=build_summary_client(),
                     karte_hits=karte.items,
+                    **({"timeline_statuses": statuses} if statuses is not None else {}),
                 )
                 return answer, cost, "ok"
             except Exception as exc:
@@ -410,10 +417,17 @@ def run_fanout(skill: Any, input: SearchInput, ctx: SkillContext) -> SearchOutpu
         entries=grouped,
         karte_client=client or "",
         expand_subject=input.query,
+        timeline_lines={
+            key: tuple(status.line for status in statuses if key in status.sections)
+            for key in ("deal", "karte")
+        }
+        if statuses is not None
+        else {},
         required_counts={
-            key: count
+            key: max(1, count)
             for key in grouped
             if (count := sum(entry_from_hit(h, url=None).kind == key for h in named)) > 0
+            or (statuses is not None and any(key in status.sections for status in statuses))
         },
     )
     vault_count = len(hits) + len(named)

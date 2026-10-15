@@ -375,6 +375,13 @@ def slack_prompt_block(items: tuple[SlackItem, ...]) -> str:
     blocks = []
     for i, item in enumerate(items, start=1):
         where = _neutralize(f"{item.hit.channel} {item.hit.posted_on}", per_msg=120)
+        from teamagent.skills.search.timeline_status import day, enabled
+
+        if enabled():
+            posted = day(item.hit.posted_on)
+            where = _neutralize(item.hit.channel, per_msg=90) + (
+                f" 投稿日: {posted}" if posted else " 日付不明"
+            )
         blocks.append(f"<<<SLACK [S{i}] {where}>>>\n{item.text}\n<<<END>>>")
     return (
         f"# Slack の投稿（依頼者本人の Slack 検索・{len(items)} 件）\n"

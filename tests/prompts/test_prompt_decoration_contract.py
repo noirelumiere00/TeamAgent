@@ -87,6 +87,8 @@ HUMAN_FACING_PROMPTS = (
 # 含まないもの（enum・ID・真偽値だけの JSON）は、地の文の書きぶりを模倣されても
 # 人に届く文章が無いので対象外にする。注入防止の安全指示かどうかは基準にしない。
 EXEMPT_PROMPTS = {
+    # 時系列フラグ ON 時だけ本体へ足す規律。装飾の禁止節は v2d/v3 から継承する。
+    "search/timeline/system.md": "search の system への時系列追記（装飾の決まりは本体側）",
     # 本番で読まれない版。装飾を直しても誰にも届かず、差分だけ増える。
     "search/v1/system.md": "本番既定は v2d（旧版は触らない）",
     # 別名で探し直す機能（SEARCH_ALIAS_EXPANSION）が search の system に足す 1 行。装飾の決まりは
