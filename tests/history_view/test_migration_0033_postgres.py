@@ -1,11 +1,11 @@
 """0033_history_view_audit の実 PostgreSQL 回帰テスト（質問と回答の履歴・管理者閲覧の監査）。
 
 ``TEAMAGENT_TEST_DB_DSN`` が明示された使い捨ての PostgreSQL 16 だけで実行する（CI は postgres:16）。
-0029 と同じく superuser では流さず、本番の master に似せた「CREATEROLE・BYPASSRLS・非 superuser」の
+0029 と同じく superuser では流さず、本番の master に似せた「CREATEROLE・全表読み書き権限・非 superuser」の
 migrator で流す（tests/history_view/conftest.py）。
 
 固定すること:
-- 監査の表は FORCE RLS・所有者は history_view_definer。既存ロールも master（SET ROLE なし）も読めない・書けない
+- 監査の表は FORCE RLS・所有者は history_view_definer。アプリ・監査ロールは直接読めない・書けない（RDS master の全表権限は対象外）
 - 監査を書けるのは関数 1 本だけで、EXECUTE は history_view_auditor だけ
 - 関数は形の不正を拒み、そのときは何も書かない。対象は U… そのものではなく SHA-256 先頭 16 hex
 - adapters/history_audit は管理者でなければ DB に触れずに拒否し、通ったときだけ 1 行書く
@@ -95,20 +95,23 @@ def test_no_role_touches_the_table_directly(env: HvDb, role: str, privilege: str
         assert cur.fetchone()[0] is False
 
 
-def test_master_cannot_read_write_or_become_definer(env: HvDb) -> None:
+def test_master_has_rds_table_privileges_but_cannot_become_definer(env: HvDb) -> None:
     import psycopg
 
     with _connect(env) as conn, conn.cursor() as cur:
-        for privilege in ("SELECT", "INSERT"):
+        for privilege in ("SELECT", "INSERT", "UPDATE", "DELETE"):
             cur.execute(
                 "SELECT has_table_privilege(current_user, 'public.history_view_audit', %s)",
                 (privilege,),
             )
+            assert cur.fetchone()[0] is True
+        for role in HV_ROLES:
+            cur.execute("SELECT pg_has_role(current_user, %s, 'USAGE')", (role,))
             assert cur.fetchone()[0] is False
         cur.execute("SELECT pg_has_role(current_user, 'history_view_definer', 'SET')")
         assert cur.fetchone()[0] is False
         with pytest.raises(psycopg.errors.InsufficientPrivilege):
-            cur.execute("SELECT count(*) FROM history_view_audit")
+            cur.execute("SET ROLE history_view_definer")
 
 
 def test_function_privileges_and_definition(env: HvDb) -> None:
@@ -228,3 +231,72 @@ def test_adapter_records_only_for_the_admin(env: HvDb, monkeypatch: pytest.Monke
     rows = _audit_rows(env)
     assert len(rows) == before + 1
     assert rows[-1] == ("owner@vectorinc.co.jp", _sha16(f"{_TEAM}:{user}"), 30, "admin_page")
+
+
+def test_master_privilege_guard_fails_before_fix(env: HvDb) -> None:
+    """旧 SQL の最後の検査は RDS の全表権限だけで必ず失敗する。"""
+    import psycopg
+
+    with _connect(env) as conn:
+        with pytest.raises(
+            psycopg.errors.RaiseException,
+            match="current_user must not touch history_view_audit without the function",
+        ):
+            conn.execute(
+                "DO $$ BEGIN IF has_table_privilege(current_user, 'public.history_view_audit', 'SELECT') OR has_table_privilege(current_user, 'public.history_view_audit', 'INSERT') "
+                "THEN RAISE EXCEPTION 'current_user must not touch history_view_audit without the function'; "
+                "END IF; END $$;"
+            )
+
+
+@pytest.mark.parametrize("role", ["teamagent_app", "teamagent_dashboard", "history_view_auditor"])
+@pytest.mark.parametrize("inherited_role", ["pg_read_all_data", "pg_write_all_data"])
+def test_final_guard_rejects_inherited_table_access(
+    env: HvDb, role: str, inherited_role: str
+) -> None:
+    """表 ACL を変えずに漏れる実効権限を検出する（ロール検査の削除で赤）。"""
+    import psycopg
+    from psycopg import sql
+
+    guard = "DO $$" + _MIGRATION.read_text(encoding="utf-8").rsplit("\nDO $$", 1)[1]
+    # 付与と検査を同一 transaction に入れ、成功・失敗にかかわらず共有ロールへの付与を rollback。
+    with pytest.raises(psycopg.errors.RaiseException, match=f"{role} must not touch"):
+        with psycopg.connect(env.admin_dsn) as conn:
+            conn.execute(
+                sql.SQL("GRANT {} TO {} WITH INHERIT TRUE, SET FALSE").format(
+                    sql.Identifier(inherited_role), sql.Identifier(role)
+                )
+            )
+            conn.execute(sql.SQL("SET LOCAL ROLE {}").format(sql.Identifier(env.migrator)))
+            conn.execute(guard)
+            # ガード削除時にも commit しない。
+            conn.rollback()
+
+
+@pytest.mark.parametrize(
+    "grantee", ["PUBLIC", "teamagent_app", "teamagent_dashboard", "history_view_auditor", "master"]
+)
+@pytest.mark.parametrize("privilege", ["SELECT", "INSERT", "UPDATE", "DELETE", "TRUNCATE"])
+def test_final_guard_rejects_non_definer_acl(env: HvDb, grantee: str, privilege: str) -> None:
+    """master への直接付与は全表権限と区別し ACL で検出する（ACL 検査削除で赤）。"""
+    import psycopg
+    from psycopg import sql
+
+    guard = "DO $$" + _MIGRATION.read_text(encoding="utf-8").rsplit("\nDO $$", 1)[1]
+    target = (
+        sql.SQL("PUBLIC")
+        if grantee == "PUBLIC"
+        else sql.Identifier(env.migrator if grantee == "master" else grantee)
+    )
+    # PUBLIC/app の CRUD は実効権限検査も検出する。master や TRUNCATE は ACL 検査だけが検出する。
+    match = "ACL must grant" if grantee == "master" or privilege == "TRUNCATE" else "must not touch"
+    with pytest.raises(psycopg.errors.RaiseException, match=match):
+        with psycopg.connect(env.admin_dsn) as conn:
+            conn.execute(
+                sql.SQL("GRANT {} ON public.history_view_audit TO {}").format(
+                    sql.SQL(privilege), target
+                )
+            )
+            conn.execute(sql.SQL("SET LOCAL ROLE {}").format(sql.Identifier(env.migrator)))
+            conn.execute(guard)
+            conn.rollback()
