@@ -515,3 +515,21 @@ def test_corpus_expectations_are_callable_in_production() -> None:
     for names in unreachable.values():
         for name in names:
             assert name in NOT_WIRED_IN_PRODUCTION, f"{name} は露出台帳にも無い"
+
+
+def test_campaign_results_use_search_not_fresh_video_acquisition() -> None:
+    from teamagent.skills.search.skill import SearchSkill
+    from teamagent.skills.video_algorithm.skill import VideoAlgorithmSkill
+
+    for description in (SearchSkill.description, VideoAlgorithmSkill.description):
+        assert "何が効いたか" in description
+        assert "施策実績・動画ごとの数字・資料" in description
+    assert "まず search" in SearchSkill.description
+    assert "新しく取得・分析する依頼のときだけ" in VideoAlgorithmSkill.description
+
+
+def test_user_eval_campaign_routing_examples_are_frozen() -> None:
+    rows = {row["id"]: row for row in _corpus_rows()}
+    assert rows["iter1-campaign-results"]["expect"] == "search"
+    assert "何が効いたか" in rows["iter1-campaign-results"]["utterance"]
+    assert rows["iter1-new-market-videos"]["expect"] == "video_algorithm"

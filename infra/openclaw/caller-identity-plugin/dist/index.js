@@ -113,8 +113,30 @@ const OUTBOUND_TOOL_RE = new RegExp(
   "giu",
 );
 
+// oauth_connect の google_start_link/slack_start_link は base64.urlsafe_b64encode の
+// state を path に直接付ける（末尾 = の padding を含む）。署名・期限の検証は connect-web。
+// run 束縛は差し戻し先の探索専用。ここで許可した形は台帳が無くても保持する。
+const CONNECT_START_URL_RE =
+  /^https:\/\/connect\.newstv\.co\.jp\/(?:oauth2\/start|slack\/oauth\/start)\/[A-Za-z0-9_-]+={0,2}$/u;
+function isAllowedConnectStartUrl(value) {
+  return CONNECT_START_URL_RE.test(value);
+}
+function isConnectOAuthUrl(value) {
+  try {
+    const url = new URL(value);
+    if (url.hostname.toLowerCase() !== "connect.newstv.co.jp") return false;
+    let path = url.pathname;
+    try { path = decodeURIComponent(path); } catch {}
+    return /oauth|authorize|connect/iu.test(path) ||
+      [...url.searchParams.keys()].some((key) => key.toLowerCase() === "state");
+  } catch { return false; }
+}
+const UNVERIFIED_CONNECT_TEXT = "連携は Aico の DM に『連携』とだけ送ると、正しいリンクをお出しします";
+// Z 系は plugin の送信・連携ガード用（P 系はツール呼び出し拒否）。URL/state は記録しない。
+const CONNECT_LINK_MODIFIED_DIAGNOSTIC_CODE = "CONNECT-Z03";
+
 // 純関数: 本文と変更件数だけ返す。payload の blocks/value/ファイル情報には触れない。
-export function scrubOutboundReplyText(text) {
+export function scrubOutboundReplyText(text, replacementConnectUrls = new Set()) {
   const counts = { signedUrls: 0, toolNames: 0, urlSeparators: 0 };
   const parts = [];
   let end = 0;
@@ -130,11 +152,14 @@ export function scrubOutboundReplyText(text) {
   }
   function scrubLinkText(value) {
     // href が通常 URL でも、表示ラベルや Markdown タイトルへ署名 URL を書くことがある。
-    if (!OUTBOUND_SIGNED_URL_RE.test(value)) return scrubTools(value);
-    const nested = scrubOutboundReplyText(value);
+    if (!OUTBOUND_SIGNED_URL_RE.test(value) && !/connect\.newstv\.co\.jp/iu.test(value)) return scrubTools(value);
+    const nested = scrubOutboundReplyText(value, replacementConnectUrls);
     counts.signedUrls += nested.counts.signedUrls;
     counts.toolNames += nested.counts.toolNames;
     counts.urlSeparators += nested.counts.urlSeparators;
+    if (nested.counts.unverifiedConnectUrls) {
+      counts.unverifiedConnectUrls = (counts.unverifiedConnectUrls ?? 0) + nested.counts.unverifiedConnectUrls;
+    }
     return nested.text;
   }
   function markdownEnd(start) {
@@ -229,7 +254,10 @@ export function scrubOutboundReplyText(text) {
       }
     }
     parts.push(scrubTools(text.slice(end, start)));
-    if (OUTBOUND_SIGNED_URL_RE.test(url)) {
+    if (isConnectOAuthUrl(url) && !isAllowedConnectStartUrl(url)) {
+      counts.unverifiedConnectUrls = (counts.unverifiedConnectUrls ?? 0) + 1;
+      parts.push([...replacementConnectUrls].find(isAllowedConnectStartUrl) ?? UNVERIFIED_CONNECT_TEXT);
+    } else if (OUTBOUND_SIGNED_URL_RE.test(url)) {
       counts.signedUrls += 1;
       parts.push(OUTBOUND_SIGNED_URL_TEXT);
     } else {
@@ -767,6 +795,7 @@ export const REGISTERED_HOOKS = Object.freeze([
   "before_model_resolve",
   "before_prompt_build",
   "before_tool_call",
+  "after_tool_call",
   "before_agent_finalize",
   "reply_payload_sending",
   "agent_end",
@@ -2632,12 +2661,48 @@ export function createCallerIdentityPlugin({
   // 本文を定型文に置換する。agent_end より後に配信が走りうるので releaseAgentRun では消さず、
   // 他の台帳と同じ TTL/上限掃除に任せる。
   const connectFallbackByRun = new Map();
+  // 配信は agent_end より後。TTL/上限で掃除し、別 run の結果は絶対に再利用しない。
+  const connectUrlsByRun = new Map();
+  function rememberConnectToolResult(event, ctx) {
+    const runId = canonicalInvocationId(ctx?.runId);
+    if (!runId || (event?.runId && event.runId !== runId) || event?.error ||
+        !["oauth_connect", "teamagent__oauth_connect"].includes(event?.toolName) ||
+        event?.result?.isError) return;
+    pruneConnectGuardState(now());
+    const urls = connectUrlsByRun.get(runId)?.urls ?? new Set();
+    function collect(value, depth = 0) {
+      if (depth > 12 || urls.size >= 32) return;
+      if (typeof value === "string") {
+        // MCP content.text は JSON の場合もある。引用符の escape を URL に混ぜない。
+        try {
+          const parsed = JSON.parse(value);
+          if (typeof parsed !== "string") {
+            collect(parsed, depth + 1);
+            return;
+          }
+        } catch {}
+        for (const match of value.slice(0, ASSISTANT_MESSAGE_SCAN_LIMIT).matchAll(/https?:\/\/[^\s<>"`|\\）」』、。！？]+/giu)) {
+          const url = match[0].replace(CONNECT_URL_TRAILING_RE, "");
+          if (isAllowedConnectStartUrl(url)) urls.add(url);
+          if (urls.size >= 32) break;
+        }
+      } else if (Array.isArray(value)) {
+        for (const item of value) collect(item, depth + 1);
+      } else if (value && typeof value === "object") {
+        for (const item of Object.values(value)) collect(item, depth + 1);
+      }
+    }
+    collect(event.result);
+    connectUrlsByRun.delete(runId);
+    connectUrlsByRun.set(runId, { urls, updatedAtMs: now() });
+  }
 
   function pruneConnectGuardState(nowMs) {
     for (const ledger of [
       toolCallsByRun,
       connectRevisionsByRun,
       connectFallbackByRun,
+      connectUrlsByRun,
       videoRevisionsByRun,
       feedbackQueryByPending,
       feedbackByRun,
@@ -5297,10 +5362,13 @@ export function createCallerIdentityPlugin({
   const isNonAscii = (ch) => typeof ch === "string" && ch.length > 0 && ch.charCodeAt(0) > 0x7f;
   function deaiNormalizeLine(line) {
     const kept = [];
-    const masked = line.replace(DEAI_PROTECTED_RE, (m) => {
+    let masked = line.replace(DEAI_PROTECTED_RE, (m) => {
       kept.push(m);
       return `@@DEAI${kept.length - 1}@@`;
     });
+    if (/^[ \t　]*[|｜]/u.test(masked)) {
+      masked = masked.replace(/(?<=[|｜])([ \t　]*)[—-]+([ \t　]*)(?=[|｜])/gu, "$1なし$2");
+    }
     let out = masked.replace(DEAI_EM_DASH_RE, (m, lead, _dash, trail, offset, whole) => {
       if (offset === 0) return "";
       if (offset + m.length === whole.length) return "";
@@ -5950,6 +6018,7 @@ export function createCallerIdentityPlugin({
       });
       // logger を渡していなかったのが「14 日間 warn が 1 行も出ない」原因だった（2026-09-03）。
       observe("before_tool_call", (event, ctx) => signToolCall(event, ctx, api.logger));
+      observe("after_tool_call", rememberConnectToolResult);
       // 連携側を先に評価し、何もしなかったときだけ動画 URL × 0 tool call の層2 を評価する。
       observe(
         "before_agent_finalize",
@@ -5965,14 +6034,20 @@ export function createCallerIdentityPlugin({
           !result?.cancel && payload && typeof payload === "object" &&
           !Array.isArray(payload) && typeof payload.text === "string"
         ) {
-          const scrubbed = scrubOutboundReplyText(payload.text);
+          pruneConnectGuardState(now());
+          const runId = canonicalInvocationId(event?.runId);
+          const replacements = runId && runId === canonicalInvocationId(ctx?.runId)
+            ? connectUrlsByRun.get(runId)?.urls : undefined;
+          const scrubbed = scrubOutboundReplyText(payload.text, replacements);
           if (scrubbed.text !== payload.text) {
-            const { signedUrls, toolNames, urlSeparators } = scrubbed.counts;
+            const { signedUrls, toolNames, urlSeparators, unverifiedConnectUrls = 0 } = scrubbed.counts;
             emitPluginLog(
               api.logger,
               "info",
               `outbound scrubbed signed_urls=${signedUrls} tool_names=${toolNames}` +
-                ` url_separators=${urlSeparators}`,
+                ` url_separators=${urlSeparators}` +
+                (unverifiedConnectUrls ? ` unverified_connect_urls=${unverifiedConnectUrls}` +
+                  ` diagnostic=${CONNECT_LINK_MODIFIED_DIAGNOSTIC_CODE}` : ""),
             );
             result = { ...result, payload: { ...payload, text: scrubbed.text } };
           }

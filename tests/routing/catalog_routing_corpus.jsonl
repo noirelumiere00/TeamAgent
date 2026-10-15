@@ -82,3 +82,5 @@
 {"id": "vanalysis-yt-03", "utterance": "YouTubeのこの動画、構成を分析して。1:20あたりの見せ方も気になる https://youtu.be/jNQXAC9IVRw", "expect": "video_analysis", "forbid": ["video_capture"], "arg_rules": {"url": "must_be_present"}, "note": "R5 敵対: 時刻の言及＋YouTube でも『分析して』は video_analysis"}
 {"id": "vcapture-03", "utterance": "上の動画の0:10のところ画像にして", "expect": "video_capture", "forbid": ["video_analysis"], "arg_rules": {"url": "must_be_absent"}, "note": "R5d 添付動画の言い換え。添付が見えなくても聞き返さず slack_file=true で呼ぶ"}
 {"id": "vcapture-04", "utterance": "このスレに貼った動画、2:05あたりをサムネ用に切り出して", "expect": "video_capture", "forbid": ["video_analysis"], "arg_rules": {"url": "must_be_absent"}, "note": "R5d 添付動画の言い換え（サムネ用）"}
+{"id": "iter1-campaign-results", "utterance": "サンプル食品のハンバーグ施策の動画ごとの結果と、何が効いたか教えて", "expect": "search", "note": "既知施策の金庫の実績を先に読む。新規動画取得へ流さない", "forbid": ["video_algorithm", "tiktok_acquire"]}
+{"id": "iter1-new-market-videos", "utterance": "TikTok でハンバーグ市場の上位動画を新しく取得して、何が効いたか分析して", "expect": "video_algorithm"}

@@ -4196,6 +4196,7 @@ def test_every_registered_hook_reports_its_first_invocation() -> None:
         # 本人メモ（M8・2026-10-05）。既定 OFF でも登録はする（バナーと first_fired で発火を観測する）。
         "before_prompt_build",
         "before_tool_call",
+        "after_tool_call",
         "before_agent_finalize",
         "reply_payload_sending",
         "agent_end",

@@ -353,3 +353,10 @@ def test_idempotent_on_decorated_input() -> None:
     """2 回かけても結果が変わらない（べき等）。"""
     once = strip_ai_decoration(REPORTED_ANSWER)
     assert strip_ai_decoration(once) == once
+
+
+@pytest.mark.parametrize("dash", ["—", "-", "——", "--"])
+def test_campaign_table_missing_cells_are_not_commas(dash: str) -> None:
+    src = f"| ハンバーグ | 6本 | 1,230,000 | 205,000 | 507,700 | {dash} | {dash} | {dash} |"
+    assert strip_ai_decoration(src) == src.replace(f" {dash} ", " なし ")
+    assert strip_ai_decoration("説明 — 補足") == "説明、補足"

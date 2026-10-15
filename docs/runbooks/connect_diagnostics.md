@@ -309,3 +309,19 @@ fields @timestamp, @message
 - コード: `src/teamagent/connect_diagnostics.py`（S/I/L/T のコード表の正）、`infra/openclaw/caller-identity-plugin/dist/index.js` の `BLOCK_DIAG`（**P コード表の正**）、`src/teamagent/connect_web/app.py`（`_connect_failure`）、`src/teamagent/mcp_gateway/server.py`（`_identity_rejected`）、`src/teamagent/skills/oauth_connect/skill.py`（`_diag`）
 - OpenClaw 指示: `infra/openclaw/SOUL.md`「連携の失敗は『診断:』行をそのまま出す」（OC 再ビルドは別便）
 - 根治側: PR #376 `/oauth2/start/{state}`（path 形式リンク・`USE_OAUTH_START_LINKS` 既定 OFF）
+
+### CONNECT-Z03: 送信直前の連携リンク改変検出
+
+plugin の `reply_payload_sending` で、connect.newstv.co.jp の連携 URL が許可形式から
+外れていたため置き換えた場合に、`outbound scrubbed ... diagnostic=CONNECT-Z03` を出す。
+ログは置換件数のみで、URL と state は含めない。
+
+許可形式は `https://connect.newstv.co.jp/oauth2/start/<state>` と
+`https://connect.newstv.co.jp/slack/oauth/start/<state>`。state は base64url の文字
+（英数字・`_`・`-` と末尾の最大 2 個の `=`）で、クエリ・フラグメントは付けない。
+この形式は run 情報やツール結果の記録が無くても保持する。署名と期限は connect-web が検証する。
+
+許可形式以外の OAuth/連携パス、または state クエリを持つ同ホストの URL は、
+同じ run の成功した oauth_connect 結果に許可形式のリンクがあればそれへ差し戻す。
+無ければ「連携は Aico の DM に『連携』とだけ送ると、正しいリンクをお出しします」に置き換える。
+run 束縛は差し戻し先の探索にのみ使う。別ホストの URL や通常の資料リンクには適用しない。
