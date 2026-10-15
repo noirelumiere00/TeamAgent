@@ -107,6 +107,14 @@ class Origin:
             self._notices.add(kind)
             return True
 
+    def release_notice(self, kind: str) -> None:
+        with self._lock:
+            self._notices.discard(kind)
+
+    def has_notice(self, kind: str) -> bool:
+        with self._lock:
+            return kind in self._notices
+
     @property
     def pending(self) -> bool:
         with self._lock:

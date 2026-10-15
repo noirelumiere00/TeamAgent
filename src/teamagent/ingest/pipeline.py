@@ -58,7 +58,12 @@ from teamagent.ingest.loader import (
     SlackChannelSpec,
 )
 from teamagent.ingest.ops_alert import IngestOpsAlerter
-from teamagent.ingest.repository import ChunkUpsert, DocumentUpsert, IngestRepository
+from teamagent.ingest.repository import (
+    ChunkUpsert,
+    DocumentUpsert,
+    GDriveAclUpdate,
+    IngestRepository,
+)
 
 if TYPE_CHECKING:
     from teamagent.ingest.classify import DocClassifier
@@ -2773,23 +2778,7 @@ def _process_one_gdrive_file(
     if lease_heartbeat is not None:
         lease_heartbeat(True)
 
-    if _should_skip_unchanged_gdrive_file(repository, f, request_id=request_id):
-        # claimed retryが残っている場合だけlease fence付きで解消する。
-        # document/chunksは触らない。
-        if retry_lease_owner is not None or retry_lease_token is not None:
-            _resolve_source_retry(
-                repository=repository,
-                f=f,
-                source_kind=warning_source_kind,
-                source_id=warning_source_id,
-                request_id=request_id,
-                dry_run=dry_run,
-                expected_lease_owner=retry_lease_owner,
-                expected_lease_token=retry_lease_token,
-                durability_tracker=durability_tracker,
-            )
-        skipped.append(f.id)
-        return 0, 0
+    unchanged = _should_skip_unchanged_gdrive_file(repository, f, request_id=request_id)
 
     # INGEST_RICH_EXTRACT=1 のときだけ rich 抽出（gslide/gsheet/plain-text 本文化・抽出器の
     # rich 引数）を有効化。OFF（既定）は現行と 1 バイトも挙動を変えない（後方互換）。
@@ -2809,7 +2798,7 @@ def _process_one_gdrive_file(
         else {}
     )
 
-    if f.mime_type in OFFICE_BINARY_MIMES:
+    if not unchanged and f.mime_type in OFFICE_BINARY_MIMES:
         known_reason = _known_invalid_office_reason(repository, f)
         if known_reason is not None:
             _record_office_warning(
@@ -2840,13 +2829,51 @@ def _process_one_gdrive_file(
             skipped.append(f.id)
             return 0, 0
 
-    # ACL を permissions.list で解決
+    snapshots = (
+        repository.list_nonstale_gdrive_acl_snapshot(external_id=f.id)
+        if unchanged and not dry_run
+        else []
+    )
+    # ACL を permissions.list で解決（snapshot 後の変更は既存の楽観ロックで検出）。
     file_owner_email, acl_emails, acl_groups = _resolve_drive_file_acl(
         client=client,
         file_id=f.id,
         request_id=request_id,
         fallback_owner_email=f.owners_email[0] if f.owners_email else owner_email,
     )
+
+    if unchanged:
+        if not dry_run:
+            updates = [
+                GDriveAclUpdate(
+                    document_id=row.document_id,
+                    external_id=row.external_id,
+                    expected_row_version=row.row_version,
+                    owner_email=file_owner_email,
+                    acl_emails=tuple(acl_emails),
+                    acl_groups=tuple(acl_groups),
+                )
+                for row in snapshots
+                if (row.owner_email, set(row.acl_emails), set(row.acl_groups))
+                != (file_owner_email, set(acl_emails), set(acl_groups))
+            ]
+            repository.update_gdrive_acls(updates)
+        # claimed retryが残っている場合だけlease fence付きで解消する。
+        # document/chunksは触らない。
+        if retry_lease_owner is not None or retry_lease_token is not None:
+            _resolve_source_retry(
+                repository=repository,
+                f=f,
+                source_kind=warning_source_kind,
+                source_id=warning_source_id,
+                request_id=request_id,
+                dry_run=dry_run,
+                expected_lease_owner=retry_lease_owner,
+                expected_lease_token=retry_lease_token,
+                durability_tracker=durability_tracker,
+            )
+        skipped.append(f.id)
+        return 0, 0
 
     # PDF / Office (docx/pptx/xlsx) / Google native gdoc は chunk 化、他は title のみ
     chunks: list[ChunkUpsert] = []

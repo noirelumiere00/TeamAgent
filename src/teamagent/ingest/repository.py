@@ -1537,7 +1537,9 @@ class IngestRepository:
     # -------------------------------------------------------
     # Google Drive ACL-only 同期
     # -------------------------------------------------------
-    def list_nonstale_gdrive_acl_snapshot(self) -> list[GDriveAclSnapshot]:
+    def list_nonstale_gdrive_acl_snapshot(
+        self, *, external_id: str | None = None
+    ) -> list[GDriveAclSnapshot]:
         """non-stale gdrive documents の ACL と楽観 lock token だけを返す。
 
         title / source_uri / client_code / metadata 本体 / modified_at / ingested_at / chunks は
@@ -1555,9 +1557,15 @@ class IngestRepository:
               AND COALESCE(metadata->>'stale', '') <> 'true'
             ORDER BY external_id, id
         """
+        params = None
+        if external_id is not None:
+            sql = sql.replace(
+                "ORDER BY external_id, id", "AND external_id = %s ORDER BY external_id, id"
+            )
+            params = (external_id,)
         with self._ops_connection() as conn:
             with conn.cursor(row_factory=dict_row) as cur:
-                cur.execute(sql)
+                cur.execute(sql, params)
                 rows = cur.fetchall()
         return [
             GDriveAclSnapshot(

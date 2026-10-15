@@ -1565,7 +1565,7 @@ async def dispatch_tool(
     if isinstance(data, dict):
         from teamagent.mcp_gateway.payload_offload import maybe_offload
 
-        data = maybe_offload(name, data, request_id=ctx.request_id)
+        data = await asyncio.to_thread(maybe_offload, name, data, request_id=ctx.request_id)
     if name == SEARCH_TOOL_NAME and isinstance(data, dict):
         _inject_search_web_links(data)
     return [TextContent(type="text", text=json.dumps(data, ensure_ascii=False, default=str))]

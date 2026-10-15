@@ -52,11 +52,11 @@ OFFLOAD_TOOLS: frozenset[str] = frozenset(
 )
 
 # 退避先（署名 URL・無認証で開ける）へ **書き出さない** キー。会社共有ナレッジの tool の中に
-# 混ざる「依頼者本人にしか見えない」データ（search の複合検索が足す本人 Slack の一致）。
+# 混ざる「依頼者本人にしか見えない」データ（本人の Slack・Drive 等の資料本文）。
 # 署名 URL は RLS/本人限定配信をバイパスする経路なので、全文 JSON から落としてから退避する。
 # 切り詰め版（依頼者本人の会話へ返す側）には残す。
-PER_USER_KEYS: frozenset[str] = frozenset({"slack_hits"})
-# 本人の Slack を材料にした要約（複合検索の answer）も、本人の非公開チャンネルや DM の中身を
+PER_USER_KEYS: frozenset[str] = frozenset({"slack_hits", "hits", "related"})
+# 本人の Slack・資料を材料にした要約（複合検索の answer）も、本人限定の中身を
 # 含みうる。PER_USER_KEYS に中身がある（＝要約器に本人の Slack を渡した）回は、これらのキーも
 # 退避先から落とす。会話へ返す切り詰め版には残す（本人の会話なので見せてよい）。
 PER_USER_DERIVED_KEYS: frozenset[str] = frozenset({"answer"})

@@ -533,7 +533,9 @@ def test_deterministic_build_failure_is_not_retried_and_notifies_without_codes(
     monkeypatch.setattr(notify, "ProposalJobStore", lambda: store)
     posted: list[str] = []
     monkeypatch.setattr(
-        detached_jobs, "post_to_origin", lambda text, *args, **kwargs: posted.append(text) or True
+        detached_jobs,
+        "post_to_origin_status",
+        lambda text, *args, **kwargs: posted.append(text) or "posted",
     )
     accepted = skill.run(_input(), context)
     assert launcher.finished.wait(timeout=10)

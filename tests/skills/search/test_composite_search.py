@@ -692,19 +692,22 @@ def test_offload_drops_answer_built_from_own_slack(monkeypatch: pytest.MonkeyPat
     assert out["offloaded"] is True and len(uploaded) == 1
     published = json.loads(uploaded[0])
     assert "answer" not in published and "人事異動" not in uploaded[0]
-    assert published["hits"]  # 会社共有の資料は退避先に残る
+    assert "hits" not in published  # Drive 資料も本人限定の可能性がある
     assert out["answer"].startswith("🔒#secret-hr の話では人事異動は来月です。")
 
 
-def test_offload_keeps_answer_when_no_slack_was_used(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Slack を探したが 0 件（要約器に本人の Slack を渡していない）回は、要約を退避先に残す。"""
+def test_offload_drops_answer_built_from_documents_without_slack(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Slack が 0 件でも、本人限定かもしれない資料の要約は退避先に残さない。"""
     uploaded = _capture_upload(monkeypatch)
     data = _payload(content_chars=2_000, answer_chars=2_500, long_slack=False).model_dump()
     data["slack_hits"] = []
     out = po.maybe_offload("search", data, request_id="r")
     assert out["offloaded"] is True and len(uploaded) == 1
     published = json.loads(uploaded[0])
-    assert published["answer"] == data["answer"] and "slack_hits" not in published
+    assert "answer" not in published and "slack_hits" not in published
+    assert out["answer"]
 
 
 # ── factory ────────────────────────────────────────────────────────────────
