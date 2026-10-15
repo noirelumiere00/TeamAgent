@@ -13,6 +13,7 @@ from typing import Any
 
 import pytest
 
+from teamagent.media import tool_contracts
 from teamagent.media.contracts import (
     AcquireOperation,
     FrameOperation,
@@ -1404,3 +1405,136 @@ def test_tiktok_acquire_video_slot_accepts_mp4(monkeypatch: pytest.MonkeyPatch) 
     # 画像/JSON の既存契約は弱体化させない
     assert module._allowed_content_types(spec, "thumb-p01001") == {"image/jpeg"}
     assert module._allowed_content_types(spec, "posts.json") == {"application/json"}
+
+
+@pytest.mark.parametrize("enabled", [None, False, True])
+def test_first_visit_capture_operation_accepts_only_optional_bool_and_grants_exact_slot(
+    monkeypatch: pytest.MonkeyPatch, enabled: bool | None
+) -> None:
+    module = _load_handler(monkeypatch, ddb=_Dynamo(), ecs=_Ecs())
+    request = make_job_request(
+        operation=TikTokAcquireOperation(
+            kind="tiktok_acquire", keywords=("synthetic",), videos_per_kw=0,
+            artifact_mode="metadata_only", first_visit_capture=enabled is True,
+        ),
+        output_bucket="teamagent-media",
+        request_fingerprint="first-visit-output-slot",
+        now_epoch_s=1_000,
+        timeout_s=300,
+    )
+    spec = json.loads(request.to_json_bytes())
+    if enabled is not None:
+        spec["operation"]["first_visit_capture"] = enabled
+    module._validate_operation(spec["operation"])
+    attempt = {"attempt_version": 1, "attempt_id": _ATTEMPT_ID}
+    slots = module._operation_output_slots(spec, attempt)
+    expected_names = ["posts.json"] + (["first-visit-capture.json"] if enabled else [])
+    assert [slot["name"] for slot in slots] == expected_names
+    assert [(slot["name"], slot["key"], slot["max_bytes"]) for slot in slots] == list(
+        tool_contracts._output_slots(request, _ATTEMPT_ID, 1)
+    )
+    assert module._required_output_names(spec) == {"posts.json"}
+    if enabled:
+        assert slots[-1]["key"].endswith("/output/first-visit-capture.json")
+        assert slots[-1]["max_bytes"] == 128 * 1024 * 1024
+        assert module._allowed_content_types(spec, "first-visit-capture.json") == {"application/json"}
+
+
+@pytest.mark.parametrize("invalid", [None, 0, 1, "true", "1", [], {}])
+def test_first_visit_capture_operation_rejects_non_boolean_opt_in(
+    monkeypatch: pytest.MonkeyPatch, invalid: Any
+) -> None:
+    module = _load_handler(monkeypatch, ddb=_Dynamo(), ecs=_Ecs())
+    operation = TikTokAcquireOperation(
+        kind="tiktok_acquire", keywords=("synthetic",), videos_per_kw=0,
+        artifact_mode="metadata_only",
+    ).model_dump(mode="json")
+    operation["first_visit_capture"] = invalid
+    with pytest.raises(ValueError):
+        module._validate_operation(operation)
+
+
+@pytest.mark.parametrize("with_capture", [False, True])
+def test_first_visit_capture_completion_is_optional_and_validated_in_exact_s3_slot(
+    monkeypatch: pytest.MonkeyPatch, with_capture: bool
+) -> None:
+    module = _load_handler(monkeypatch, ddb=_Dynamo(), ecs=_Ecs())
+    request = make_job_request(
+        operation=TikTokAcquireOperation(
+            kind="tiktok_acquire", keywords=("synthetic",), videos_per_kw=0,
+            artifact_mode="metadata_only", first_visit_capture=True,
+        ),
+        output_bucket="teamagent-media",
+        request_fingerprint="first-visit-completion",
+        now_epoch_s=1_000,
+        timeout_s=300,
+    )
+    spec = json.loads(request.to_json_bytes())
+    attempt = {
+        "attempt_version": 1, "attempt_id": _ATTEMPT_ID,
+        "capability_sha256": _CAPABILITY_SHA256,
+    }
+    s3 = _S3()
+    metadata = module._fixed_object_metadata(spec, attempt)
+    names = ["posts.json"] + (["first-visit-capture.json"] if with_capture else [])
+    keys = ["posts.normalized.json"] + (["first-visit-capture.json"] if with_capture else [])
+    artifacts = [
+        {
+            "name": name,
+            "object": s3.add_output(
+                key=f"{request.output_prefix}attempts/1/{_ATTEMPT_ID}/output/{key}",
+                version_id=f"version-{index}", body=b"{}", content_type="application/json",
+                metadata=metadata,
+            ),
+        }
+        for index, (name, key) in enumerate(zip(names, keys, strict=True))
+    ]
+    completion = {
+        "schema_version": "1", "job_id": request.job_id,
+        "payload_sha256": request.payload_sha256,
+        "attempt_id": _ATTEMPT_ID, "attempt_version": 1,
+        "capability_secret": _CAPABILITY_SECRET,
+        "_completion_version_id": "completion-version",
+        "result": {
+            "schema_version": "1", "job_id": request.job_id, "status": "done",
+            "artifacts": artifacts, "metadata": {}, "error_code": None,
+        },
+    }
+    result, manifest = module._validate_completion_result(
+        completion, s3=s3, bucket=request.output_bucket, spec=spec, attempt=attempt, exit_code=0,
+    )
+    assert result["status"] == "done"
+    assert manifest == module._artifact_manifest_sha256(artifacts)
+
+
+def test_first_visit_capture_on_reaches_dispatcher_launch_with_bounded_output_capability(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ddb, ecs, s3 = _Dynamo(), _Ecs(), _S3()
+    module = _load_handler(monkeypatch, ddb=ddb, ecs=ecs, s3=s3)
+    _configure(monkeypatch)
+    monkeypatch.setattr(module.time, "time", lambda: 1_001)
+    request = make_job_request(
+        operation=TikTokAcquireOperation(
+            kind="tiktok_acquire", keywords=("synthetic",), videos_per_kw=0,
+            artifact_mode="metadata_only", first_visit_capture=True,
+        ),
+        output_bucket="teamagent-media", request_fingerprint="first-visit-dispatch",
+        now_epoch_s=1_000, timeout_s=300,
+    )
+    body = request.to_json_bytes().decode()
+    _seed_queued(ddb, body, s3)
+    result = module.handler(
+        {"Records": [{"messageId": "synthetic-capture-message", "body": body}]},
+        types.SimpleNamespace(aws_request_id="synthetic-dispatch-request"),
+    )
+    assert result["started"] == ["arn:aws:ecs:region:account:task/media/1"]
+    control_put = next(kwargs for name, kwargs in s3.calls if name == "put_object")
+    packed = bytes(control_put["Body"]).split(b"=", 1)[1].strip()
+    control = json.loads(zlib.decompress(base64.b64decode(packed)))
+    assert control["request"]["operation"]["first_visit_capture"] is True
+    sidecar = next(item for item in control["outputs"] if item["name"] == "first-visit-capture.json")
+    assert sidecar["key"].startswith(request.output_prefix)
+    assert sidecar["key"].endswith("/output/first-visit-capture.json")
+    assert sidecar["max_bytes"] == 128 * 1024 * 1024
+    assert control["inputs"] == []

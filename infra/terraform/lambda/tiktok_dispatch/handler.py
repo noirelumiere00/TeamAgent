@@ -219,9 +219,12 @@ def _validate_operation(value: Any) -> None:
                 "artifact_mode",
                 "max_video_bytes",
                 "client",
-            },
+            }
+            | ({"first_visit_capture"} if "first_visit_capture" in value else set()),
             "TikTok operation",
         )
+        if type(operation.get("first_visit_capture", False)) is not bool:
+            raise ValueError("TikTok first visit capture flag is invalid")
         keywords = operation["keywords"]
         if operation["search_type"] not in {"keyword", "hashtag"}:
             raise ValueError("TikTok search type is invalid")
@@ -1032,6 +1035,10 @@ def _operation_output_slots(spec: dict[str, Any], attempt: dict[str, Any]) -> li
         slots.append(("media", "media", int(operation["max_bytes"])))
     elif kind == "tiktok_acquire":
         slots.append(("posts.json", "posts.normalized.json", 16 * 1024 * 1024))
+        if operation.get("first_visit_capture"):
+            slots.append(
+                ("first-visit-capture.json", "first-visit-capture.json", _MAX_OUTPUT_BYTES)
+            )
         if operation["artifact_mode"] == "full":
             slots.extend(
                 (

@@ -19,8 +19,10 @@ from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
+    SerializerFunctionWrapHandler,
     StringConstraints,
     field_validator,
+    model_serializer,
     model_validator,
 )
 
@@ -182,6 +184,14 @@ class TikTokAcquireOperation(_StrictModel):
     artifact_mode: Literal["metadata_only", "full"] = "full"
     max_video_bytes: int = Field(default=30 * 1024 * 1024, ge=1, le=MAX_OUTPUT_BYTES)
     client: TikTokClientConfig = Field(default_factory=TikTokClientConfig)
+    first_visit_capture: bool = False
+
+    @model_serializer(mode="wrap")
+    def _capture_only_when_enabled(self, handler: SerializerFunctionWrapHandler) -> dict[str, Any]:
+        value: dict[str, Any] = handler(self)
+        if not self.first_visit_capture:
+            value.pop("first_visit_capture", None)
+        return value
 
     @field_validator("keywords")
     @classmethod

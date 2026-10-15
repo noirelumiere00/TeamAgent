@@ -10,7 +10,7 @@ from typing import Any
 
 import pytest
 
-from teamagent.skills.first_visit.contract import convert_inputs, write_inputs
+from teamagent.skills.first_visit.contract import _validate_video, convert_inputs, write_inputs
 from teamagent.skills.omiyage_report.metrics import AxisData, PostRecord
 from teamagent.skills.omiyage_report.schema import OmiyageReportSubmitInput
 
@@ -237,11 +237,51 @@ def test_legacy_normalized_zero_stays_ambiguous_without_preserved_missingness() 
     assert video["stats"]["playCount"] is None
     assert video["stats"]["commentCount"] is None
     assert video["author"]["followerCount"] is None
-    assert set(video["missingFields"]) >= {
+    assert video["missingFields"] == []
+    assert set(video["unknownFields"]) == {
         "stats.playCount",
         "stats.commentCount",
         "author.followerCount",
     }
+
+
+def test_explicit_unknown_and_missing_remain_distinct() -> None:
+    sources = synthetic_sources()
+    row = sources[2]["posts"][0]
+    row.update(
+        plays=0,
+        likes=None,
+        missingFields=["stats.diggCount"],
+        unknownFields=["stats.playCount"],
+    )
+    video = _convert(sources)["raw/axis_01.json"]["videos"][0]
+    assert video["stats"]["playCount"] is None
+    assert video["unknownFields"] == ["stats.playCount"]
+    assert video["missingFields"] == ["stats.diggCount"]
+    assert video["stats"]["commentCount"] == 0
+    _validate_video(video)
+
+
+@pytest.mark.parametrize(
+    "unknown",
+    ["stats.playCount", ["stats.playCount", "stats.playCount"], ["other"], [1]],
+)
+def test_reopened_raw_rejects_malformed_unknown_fields(unknown: Any) -> None:
+    video = synthetic_inputs()["raw/axis_01.json"]["videos"][0]
+    video["unknownFields"] = unknown
+    with pytest.raises(ValueError, match="unknownFields"):
+        _validate_video(video)
+
+
+def test_reopened_raw_rejects_unknown_recorded_as_missing_or_measured() -> None:
+    video = synthetic_inputs()["raw/axis_01.json"]["videos"][0]
+    video["unknownFields"] = ["stats.playCount"]
+    with pytest.raises(ValueError, match="欠測記録"):
+        _validate_video(video)
+    video["stats"]["playCount"] = None
+    video["missingFields"] = ["stats.playCount"]
+    with pytest.raises(ValueError, match="unknownFields"):
+        _validate_video(video)
 
 
 def test_postrecord_fallback_preserves_known_values_and_exposes_unavailable_metadata() -> None:

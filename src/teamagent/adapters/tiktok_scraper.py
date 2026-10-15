@@ -26,11 +26,14 @@ import os
 import shutil
 import subprocess
 import tempfile
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 import structlog
+
+from teamagent.media.tiktok_capture import _capture_record
 
 logger = structlog.get_logger(__name__)
 
@@ -186,6 +189,17 @@ def _parse_media_post(post: dict[str, Any]) -> TikTokVideo:
     )
 
 
+def _emit_capture(
+    callback: Callable[[dict[str, Any]], None] | None,
+    record: dict[str, Any],
+) -> None:
+    if callback is not None:
+        try:
+            callback(record)
+        except Exception as exc:
+            logger.warning("first_visit_capture_failed", error_type=type(exc).__name__)
+
+
 def search_tiktok(
     query: str,
     *,
@@ -194,6 +208,7 @@ def search_tiktok(
     request_id: str | None = None,
     timeout_s: int = _DEFAULT_TIMEOUT_S,
     sessions: int | None = None,
+    capture: Callable[[dict[str, Any]], None] | None = None,
 ) -> TikTokSearchResult:
     """TikTok をキーワード/ハッシュタグで検索し、上位動画のメタを返す。
 
@@ -226,6 +241,7 @@ def search_tiktok(
                 search_type=search_type,
                 max_videos=max_videos,
                 timeout_s=min(max(timeout_s, _MEDIA_JOB_MIN_TIMEOUT_S), 15 * 60),
+                **({"capture": capture} if capture is not None else {}),
             )
         except Exception as exc:
             raise TikTokScrapeError(f"TIKTOK_MEDIA_JOB_FAILED: {type(exc).__name__}") from exc
@@ -263,6 +279,8 @@ def search_tiktok(
         "--sessions",
         str(sessions),
     ]
+    if capture is not None:
+        cmd.append("--first-visit-capture")
     logger.info(
         "tiktok_search_start",
         request_id=request_id,
@@ -282,6 +300,18 @@ def search_tiktok(
             check=False,
         )
     except subprocess.TimeoutExpired as e:
+        if capture is not None:
+            _emit_capture(
+                capture,
+                _capture_record(
+                    {},
+                    query=query,
+                    search_type=search_type,
+                    requested=max_videos,
+                    sessions=sessions,
+                    error_code="TIKTOK_TIMEOUT",
+                ),
+            )
         logger.warning("tiktok_search_timeout", request_id=request_id, timeout_s=timeout_s)
         raise TikTokScrapeError(
             f"TIKTOK_TIMEOUT: 検索が {timeout_s}s 以内に終わりませんでした"
@@ -290,6 +320,18 @@ def search_tiktok(
     # stdout は JSON のみ (ブラウザログは stderr)。空なら異常。
     stdout = (proc.stdout or "").strip()
     if not stdout:
+        if capture is not None:
+            _emit_capture(
+                capture,
+                _capture_record(
+                    {},
+                    query=query,
+                    search_type=search_type,
+                    requested=max_videos,
+                    sessions=sessions,
+                    error_code="TIKTOK_NO_OUTPUT",
+                ),
+            )
         logger.warning(
             "tiktok_search_no_output",
             request_id=request_id,
@@ -304,10 +346,33 @@ def search_tiktok(
     try:
         payload = json.loads(stdout)
     except json.JSONDecodeError as e:
+        if capture is not None:
+            _emit_capture(
+                capture,
+                _capture_record(
+                    {},
+                    query=query,
+                    search_type=search_type,
+                    requested=max_videos,
+                    sessions=sessions,
+                    error_code="TIKTOK_BAD_JSON",
+                ),
+            )
         # stdout の先頭だけログ (生データを丸ごと残さない)
         logger.warning("tiktok_search_bad_json", request_id=request_id, head=stdout[:200])
         raise TikTokScrapeError("TIKTOK_BAD_JSON: スクレイパ出力を解析できませんでした") from e
 
+    if capture is not None:
+        _emit_capture(
+            capture,
+            _capture_record(
+                payload,
+                query=query,
+                search_type=search_type,
+                requested=max_videos,
+                sessions=sessions,
+            ),
+        )
     if not payload.get("ok"):
         err = payload.get("error") or "不明なエラー"
         error_code = payload.get("errorCode") or "TIKTOK_EMPTY_RESULT"

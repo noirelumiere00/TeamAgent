@@ -7,6 +7,7 @@ import json
 import os
 from collections.abc import Iterator
 from contextlib import contextmanager
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -16,6 +17,7 @@ from teamagent.media import tool_worker
 from teamagent.media.contracts import (
     AcquireOperation,
     S3ObjectRef,
+    TikTokAcquireOperation,
     make_job_request,
 )
 from teamagent.media.deadline import DeadlineBudget
@@ -491,6 +493,71 @@ def test_run_tool_uploads_artifact_then_canonical_secret_bound_completion(
     assert completion["capability_secret"] == _SECRET
     assert completion["attempt_id"] == _ATTEMPT_ID
     assert completion["result"] == result.model_dump(mode="json")
+
+
+@pytest.mark.parametrize("failed_name", ["first-visit-capture.json", "posts.json"])
+def test_first_visit_capture_upload_failure_does_not_fail_roleless_tiktok_job(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, failed_name: str
+) -> None:
+    base = _control()
+    request = make_job_request(
+        operation=TikTokAcquireOperation(
+            kind="tiktok_acquire", keywords=("synthetic",), videos_per_kw=0,
+            artifact_mode="metadata_only", first_visit_capture=True,
+        ),
+        output_bucket=base.request.output_bucket,
+        request_fingerprint="first-visit-upload-failure",
+        now_epoch_s=1_000,
+        timeout_s=300,
+        job_id=base.request.job_id,
+    )
+    names = ("posts.json", "first-visit-capture.json")
+    control = replace(
+        base, request=request,
+        outputs=tuple(
+            _output_capability(name=name, key=f"{request.output_prefix}attempts/1/{_ATTEMPT_ID}/output/{name}")
+            for name in names
+        ),
+    )
+    monkeypatch.setattr(tool_worker, "_signal_scope", _no_signal)
+
+    def execute(*_args: Any, **kwargs: Any) -> OperationOutput:
+        workdir = kwargs["workdir"]
+        artifacts = []
+        for name in names:
+            path = workdir / name
+            path.write_bytes(b"{}")
+            artifacts.append(ProducedArtifact(name, path, "application/json"))
+        return OperationOutput(tuple(artifacts), {})
+
+    completions: list[dict[str, Any]] = []
+
+    def upload(
+        capability: OutputCapability, *, path: Path, content_type: str,
+        bucket: str, budget: DeadlineBudget,
+    ) -> S3ObjectRef:
+        if capability.name == failed_name:
+            raise OSError("synthetic upload outage")
+        body = path.read_bytes()
+        if capability.name == "_completion":
+            completions.append(json.loads(body))
+        return S3ObjectRef(
+            bucket=bucket, key=capability.key, version_id="synthetic-version",
+            sha256=hashlib.sha256(body).hexdigest(), size=len(body), content_type=content_type,
+        )
+
+    monkeypatch.setattr(tool_worker, "execute_operation", execute)
+    monkeypatch.setattr(tool_worker, "_upload_path", upload)
+    result = tool_worker.run_tool(
+        control, environ=_identity_environment(control), temp_root=tmp_path, clock=lambda: 1_001,
+    )
+    if failed_name == "first-visit-capture.json":
+        assert result.status == "done"
+        assert [artifact.name for artifact in result.artifacts] == ["posts.json"]
+    else:
+        assert result.status == "failed"
+        assert result.error_code == "MEDIA_WORKER_FAILED"
+    assert completions[-1]["result"] == result.model_dump(mode="json")
 
 
 def test_main_hardens_before_decoding_and_always_scrubs_capability_environment(

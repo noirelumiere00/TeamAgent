@@ -51,6 +51,12 @@ from teamagent.skills._shared.long_jobs import (
 )
 from teamagent.skills._shared.long_jobs import enabled as long_jobs_enabled
 from teamagent.skills.base import BaseSkill, SkillContext, register
+from teamagent.skills.first_visit.recording import (
+    CaptureSession,
+    CaptureUploader,
+    capture_enabled,
+    upload_capture,
+)
 from teamagent.skills.omiyage_report.compose import (
     build_all_failed_message,
     build_analysis_note,
@@ -538,6 +544,7 @@ class OmiyageReportSubmitSkill(BaseSkill[OmiyageReportSubmitInput, OmiyageReport
         thread_launcher: _ThreadLauncher = _launch_daemon_thread,
         analyzer_factory: _AnalyzerFactory = _default_analyzer_factory,
         plan_uploader: _PlanUploader = _default_plan_uploader,
+        capture_uploader: CaptureUploader = upload_capture,
         heartbeat_seconds: int | None = None,
         retry_after_seconds: int | None = None,
         search_depth: int | None = None,
@@ -575,6 +582,7 @@ class OmiyageReportSubmitSkill(BaseSkill[OmiyageReportSubmitInput, OmiyageReport
         self._thread_launcher = thread_launcher
         self._analyzer_factory = analyzer_factory
         self._plan_uploader = plan_uploader
+        self._capture_uploader = capture_uploader
         self._analysis_per_axis = (
             _envint("OMIYAGE_VA_PER_AXIS", 10, minimum=1, maximum=30)
             if analysis_per_axis is None
@@ -898,7 +906,7 @@ class OmiyageReportSubmitSkill(BaseSkill[OmiyageReportSubmitInput, OmiyageReport
             heartbeat_thread.start()
 
         try:
-            result = self._execute(input, ctx)
+            result = self._execute(input, ctx, job_id=job_id)
             result_json = result.model_dump_json()
             try:
                 stored = self._store.mark_done(job_id, result_json)
@@ -1000,6 +1008,7 @@ class OmiyageReportSubmitSkill(BaseSkill[OmiyageReportSubmitInput, OmiyageReport
         axes: list[AxisData],
         ctx: SkillContext,
         log: Any,
+        capture: CaptureSession | None = None,
     ) -> tuple[list[AxisData], RelevanceSummary]:
         """検索結果から商材と関係の無い動画を外す（軸ごとに LLM 1 回・失敗した軸は外さない）。"""
         if self._relevance_checker is None:
@@ -1007,7 +1016,7 @@ class OmiyageReportSubmitSkill(BaseSkill[OmiyageReportSubmitInput, OmiyageReport
         kept_axes: list[AxisData] = []
         by_axis: list[tuple[str, int]] = []
         unchecked: list[str] = []
-        for axis in axes:
+        for index, axis in enumerate(axes):
             if axis.failed or not axis.posts:
                 kept_axes.append(axis)
                 continue
@@ -1029,10 +1038,20 @@ class OmiyageReportSubmitSkill(BaseSkill[OmiyageReportSubmitInput, OmiyageReport
                 )
                 check = RelevanceCheck(excluded_ids=frozenset(), checked=False)
             if not check.checked:
+                if capture is not None:
+                    capture.record_relevance(index, checked=False, excluded_ids=())
                 unchecked.append(axis.label)
                 kept_axes.append(axis)
                 continue
             kept = tuple(post for post in axis.posts if post.video_id not in check.excluded_ids)
+            if capture is not None:
+                capture.record_relevance(
+                    index,
+                    checked=True,
+                    excluded_ids=[
+                        p.video_id for p in axis.posts if p.video_id in check.excluded_ids
+                    ],
+                )
             excluded = len(axis.posts) - len(kept)
             if excluded:
                 by_axis.append((axis.label, excluded))
@@ -1055,18 +1074,32 @@ class OmiyageReportSubmitSkill(BaseSkill[OmiyageReportSubmitInput, OmiyageReport
         input: OmiyageReportSubmitInput,
         ctx: SkillContext,
         log: Any,
+        capture: CaptureSession | None = None,
     ) -> list[AxisData]:
         axes: list[AxisData] = []
-        for role, label, query in self._axis_plan(input):
+        for index, (role, label, query) in enumerate(self._axis_plan(input)):
 
-            def search(query: str = query) -> TikTokSearchResult:
-                return self._searcher(
-                    query,
-                    search_type="keyword",
-                    max_videos=self._search_depth,
-                    request_id=ctx.request_id,
-                    timeout_s=self._search_timeout_seconds,
-                )
+            def search(query: str = query, index: int = index) -> TikTokSearchResult:
+                kwargs: dict[str, Any] = {}
+                before = capture.attempt_count(index) if capture is not None else 0
+                if capture is not None:
+                    kwargs["capture"] = lambda evidence: capture.record(index, evidence)
+                try:
+                    result = self._searcher(
+                        query,
+                        search_type="keyword",
+                        max_videos=self._search_depth,
+                        request_id=ctx.request_id,
+                        timeout_s=self._search_timeout_seconds,
+                        **kwargs,
+                    )
+                except Exception as exc:
+                    if capture is not None and capture.attempt_count(index) == before:
+                        capture.fallback(index, error_code=_safe_failure_code(exc))
+                    raise
+                if capture is not None and capture.attempt_count(index) == before:
+                    capture.fallback(index, result=result)
+                return result
 
             try:
                 result = retry_once(search)
@@ -1232,12 +1265,28 @@ class OmiyageReportSubmitSkill(BaseSkill[OmiyageReportSubmitInput, OmiyageReport
         self,
         input: OmiyageReportSubmitInput,
         ctx: SkillContext,
+        *,
+        job_id: str | None = None,
     ) -> OmiyageReportResult:
         log = ctx.bind_logger(self.name)
-        axes = self._search_axes(input, ctx, log)
+        capture = (
+            CaptureSession(
+                input.model_dump(mode="json"),
+                ctx.request_id,
+                ctx.user_id,
+                self._axis_plan(input),
+                self._search_depth,
+                uploader=self._capture_uploader,
+                log=log,
+                omiyage_job_id=job_id,
+            )
+            if capture_enabled()
+            else None
+        )
+        axes = self._search_axes(input, ctx, log, capture=capture)
         if all(axis.failed for axis in axes):
             raise _OmiyageAllSearchesFailedError(build_all_failed_message())
-        axes, relevance = self._filter_unrelated(input, axes, ctx, log)
+        axes, relevance = self._filter_unrelated(input, axes, ctx, log, capture=capture)
 
         measurement = measure(
             axes,

@@ -31,6 +31,7 @@ from teamagent.media.contracts import (
     MediaJobRequest,
     MediaJobResult,
     S3ObjectRef,
+    TikTokAcquireOperation,
 )
 from teamagent.media.deadline import DeadlineBudget, MediaDeadlineExceededError
 from teamagent.media.operations import MediaOperationError, ProducedArtifact, execute_operation
@@ -621,13 +622,27 @@ def run_tool(
                     slot = output_slots.get(produced.name)
                     if slot is None:
                         raise ToolTransportError("operation exceeded its granted output slots")
-                    ref = _upload_path(
-                        slot,
-                        path=produced.path,
-                        content_type=produced.content_type,
-                        bucket=request.output_bucket,
-                        budget=execution_budget,
-                    )
+                    try:
+                        ref = _upload_path(
+                            slot,
+                            path=produced.path,
+                            content_type=produced.content_type,
+                            bucket=request.output_bucket,
+                            budget=execution_budget,
+                        )
+                    except Exception:
+                        if (
+                            isinstance(request.operation, TikTokAcquireOperation)
+                            and request.operation.first_visit_capture
+                            and produced.name == "first-visit-capture.json"
+                        ):
+                            logger.warning(
+                                "optional first visit capture upload failed: job_id=%s",
+                                request.job_id,
+                                exc_info=True,
+                            )
+                            continue
+                        raise
                     artifacts.append(MediaArtifact(name=produced.name, object=ref))
                     names.add(produced.name)
                 result = MediaJobResult(
