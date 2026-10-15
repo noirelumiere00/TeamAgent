@@ -857,6 +857,53 @@ class PgVectorClient:
         )
         return docs
 
+    def list_documents_for_seed_graph(
+        self, conn: psycopg.Connection[dict[str, Any]], ids: list[str]
+    ) -> list[dict[str, Any]]:
+        """RLS接続で種と各12件の隣だけを読む。不可視・suppressedの種は候補を作らない。"""
+        sql = """
+            WITH seeds AS (
+                SELECT id, metadata FROM documents
+                WHERE id = ANY(%s::uuid[])
+                  AND metadata->>'suppressed' IS DISTINCT FROM 'true'
+            ), selected AS (
+                SELECT id FROM seeds
+                UNION
+                SELECT nb.id FROM seeds s
+                CROSS JOIN LATERAL (
+                    SELECT d.id,
+                        CASE
+                          WHEN NULLIF(s.metadata->>'cls_project', '') = d.metadata->>'cls_project'
+                          THEN 0
+                          WHEN NULLIF(s.metadata->>'advertiser', '') = d.metadata->>'advertiser'
+                           AND NULLIF(s.metadata->>'campaign', '') = d.metadata->>'campaign' THEN 1
+                          ELSE 2 END AS priority
+                    FROM documents d
+                    WHERE d.id <> s.id
+                      AND d.metadata->>'suppressed' IS DISTINCT FROM 'true'
+                      AND (
+                        NULLIF(s.metadata->>'cls_project', '') = d.metadata->>'cls_project'
+                        OR (NULLIF(s.metadata->>'advertiser', '') = d.metadata->>'advertiser'
+                            AND NULLIF(s.metadata->>'campaign', '') = d.metadata->>'campaign')
+                        OR NULLIF(s.metadata->>'client_name', '') = d.metadata->>'client_name'
+                        OR NULLIF(s.metadata->>'cls_industry', '') = d.metadata->>'cls_industry'
+                      )
+                    ORDER BY priority, d.id LIMIT 12
+                ) nb
+            )
+            SELECT d.id::text AS document_id, d.title, d.source_uri,
+                   d.source_type::text AS source_type, d.metadata
+            FROM documents d JOIN selected s ON s.id = d.id
+            ORDER BY d.id LIMIT 200
+        """
+        with conn.cursor() as cur:
+            cur.execute(sql, [ids])
+            rows = cur.fetchall()
+        return [
+            dict(r.get("metadata") or {}, **{k: v for k, v in r.items() if k != "metadata"})
+            for r in rows
+        ]
+
     def list_by_metadata(
         self,
         conn: psycopg.Connection[dict[str, Any]],
@@ -954,6 +1001,7 @@ class PgVectorClient:
     # domain 共有資料は policy 0010 の acl_groups 分岐に当たらず **誰にも 0 件** になる。
 
     _CASE_COLUMNS = """
+                d.id::text AS document_id,
                 d.title,
                 d.source_uri,
                 d.owner_email,

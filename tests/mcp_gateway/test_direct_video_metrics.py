@@ -434,3 +434,13 @@ def test_strip_video_numbers_is_idempotent_and_leaves_other_docs() -> None:
         )
         == account
     )
+
+
+def test_graph_heading_ends_video_section() -> None:
+    from teamagent.mcp_gateway.direct_video_metrics import extract_section
+    from teamagent.skills.search.campaign_files import VIDEO_METRICS_HEADING
+
+    metrics = VIDEO_METRICS_HEADING + "\n動画: 123再生"
+    graph = "\n\n🕸 関係図で見る: <https://connect.newstv.co.jp/search/graph/focus?seed=id>"
+    answer = metrics + graph + "\n\n探した範囲: 金庫"
+    assert extract_section(answer) == ("", metrics, graph + "\n\n探した範囲: 金庫")

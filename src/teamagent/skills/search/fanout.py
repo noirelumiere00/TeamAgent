@@ -458,7 +458,16 @@ def run_fanout(skill: Any, input: SearchInput, ctx: SkillContext) -> SearchOutpu
     if karte.status != "failed" and main_kinds.sales_fb:
         lanes["karte"] = LaneStatus.found(len(karte.items) + len(main_kinds.sales_fb))
     answer = (
-        compose_answer(head=head, sections=sections, lanes=lanes) if input.include_answer else ""
+        compose_answer(
+            head=head,
+            sections=sections,
+            lanes=lanes,
+            graph_base_url=os.environ.get("CONNECT_BASE_URL", "").strip()
+            if os.environ.get("SEARCH_FANOUT_GRAPH_LINK") == "1"
+            else "",
+        )
+        if input.include_answer
+        else ""
     )
     vault_cost = 0.002 if timings.get("rerank_ms", 0.0) > 0.0 else 0.0
     results = [
