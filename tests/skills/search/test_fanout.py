@@ -853,6 +853,39 @@ def test_soul_fanout_rules_never_fire_on_the_existing_scope_footer() -> None:
     assert f"「{SCOPE_PREFIX.rstrip()}」があれば" in soul
 
 
+def test_graph_link_flag_and_off_byte_identical(monkeypatch: pytest.MonkeyPatch) -> None:
+    nid = "00000000-0000-0000-0000-000000000001"
+    monkeypatch.setenv("CONNECT_BASE_URL", "https://connect.newstv.co.jp")
+    monkeypatch.delenv("SEARCH_FANOUT_GRAPH_LINK", raising=False)
+    skill, _ = make([_vault_hit(document_id=nid)])
+    baseline = run(skill).answer
+    for flag in ("0", "true"):
+        monkeypatch.setenv("SEARCH_FANOUT_GRAPH_LINK", flag)
+        skill, _ = make([_vault_hit(document_id=nid)])
+        assert run(skill).answer.encode() == baseline.encode()
+    monkeypatch.setenv("SEARCH_FANOUT_GRAPH_LINK", "1")
+    skill, _ = make([_vault_hit(document_id=nid)])
+    answer = run(skill).answer
+    assert (
+        f"🕸 関係図で見る: <https://connect.newstv.co.jp/search/graph/focus?seed={nid}>\n\n探した範囲"
+        in answer
+    )
+    assert len(answer) <= 2500
+    monkeypatch.delenv("CONNECT_BASE_URL")
+    skill, _ = make([_vault_hit(document_id=nid)])
+    assert run(skill).answer.encode() == baseline.encode()
+
+
+def test_graph_link_non_fanout_byte_identical(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("CONNECT_BASE_URL", "https://connect.newstv.co.jp")
+    monkeypatch.setenv("SEARCH_FANOUT_GRAPH_LINK", "1")
+    skill, _ = make()
+    baseline = run(skill, meta={**META, "channel_id": "C1"}).model_dump_json()
+    monkeypatch.setenv("SEARCH_FANOUT_GRAPH_LINK", "0")
+    skill, _ = make()
+    assert run(skill, meta={**META, "channel_id": "C1"}).model_dump_json() == baseline
+
+
 @pytest.mark.parametrize("with_campaign", [True, False])
 @pytest.mark.parametrize("list_fast", [True, False])
 def test_timeline_reproduction_summary_and_sections(

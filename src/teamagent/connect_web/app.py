@@ -249,6 +249,18 @@ class _RedactShortLinkAccessLog(logging.Filter):
         return True
 
 
+def _is_graph_login_target(path: str) -> bool:
+    """ログインへの戻り先に埋めた種も、同じ閲覧履歴として伏せる。"""
+    from urllib.parse import parse_qs, urlsplit
+
+    if not path.startswith("/search/login?"):
+        return False
+    return any(
+        value.startswith("/search/graph/focus?seed=")
+        for value in parse_qs(urlsplit(path).query).get("next", [])
+    )
+
+
 class _RedactAdminUserAccessLog(logging.Filter):
     """uvicorn アクセスログの ``/admin?user=<email>`` を ``/admin?user=<redacted>`` に伏せる。
 
@@ -260,12 +272,17 @@ class _RedactAdminUserAccessLog(logging.Filter):
 
     def filter(self, record: logging.LogRecord) -> bool:
         args = record.args
+        # 資料IDは秘密ではないが、選んだ資料の履歴は閲覧行動なので新グラフも伏せる。
         # /admin/memory?user=U… と /admin/history?user=U…（誰の記録を見たか）も同じ理由で伏せる。
         if (
             isinstance(args, tuple)
             and len(args) >= 3
             and isinstance(args[2], str)
-            and args[2].startswith("/admin")
+            and (
+                args[2].startswith(("/admin", "/api/v1/graph/seed", "/api/v1/graph/neighbors"))
+                or args[2].split("?", 1)[0] == "/search/graph/focus"
+                or _is_graph_login_target(args[2])
+            )
             and "?" in args[2]
         ):
             redacted = list(args)
@@ -652,6 +669,16 @@ def _safe_next(raw: str | None) -> str:
     candidate = (raw or "").strip()
     if candidate in {"/app", "/search", "/admin", "/app/history", "/admin/history"}:
         return candidate
+    if candidate == "/search/graph/focus":
+        return candidate
+    if candidate.startswith("/search/graph/focus?seed="):
+        from teamagent.connect_web.graph import parse_document_ids
+
+        try:
+            ids = parse_document_ids(candidate.removeprefix("/search/graph/focus?seed="))
+        except ValueError:
+            return "/app"
+        return "/search/graph/focus?seed=" + ",".join(ids)
     return "/app"
 
 
@@ -4995,6 +5022,70 @@ def create_app(
         if email is None:
             return RedirectResponse("/search/login", status_code=303)
         return HTMLResponse(_shell_page(email, mode="graph"))
+
+    @app.get("/search/graph/focus")
+    def search_graph_focus_ui(request: Request) -> Response:
+        """検索結果の種から開く関係図（既定OFF）。"""
+        if os.environ.get("GRAPH_SEARCH_VIEW") != "1":
+            raise HTTPException(status_code=404)
+        from teamagent.connect_web.graph import parse_document_ids
+        from teamagent.connect_web.search_graph import graph_page
+
+        raw = request.query_params.get("seed", "")
+        email = _search_email(request)
+        if email is None:
+            from urllib.parse import quote
+
+            try:
+                ids = parse_document_ids(raw)
+                next_path = "/search/graph/focus?seed=" + ",".join(ids)
+            except ValueError:
+                next_path = "/search/graph/focus"
+            return RedirectResponse(
+                "/search/login?next=" + quote(next_path, safe=""), status_code=303
+            )
+        try:
+            ids = parse_document_ids(raw)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="invalid_ids") from None
+        return HTMLResponse(graph_page(email, ids))
+
+    def _seed_graph(request: Request, raw: str, limit: int) -> JSONResponse:
+        if os.environ.get("GRAPH_SEARCH_VIEW") != "1":
+            return JSONResponse({"error": "not_found"}, status_code=404)
+        email = _search_email(request)
+        if email is None:
+            return JSONResponse({"error": "unauthorized"}, status_code=401)
+        from teamagent.connect_web.graph import build_seed_graph, parse_document_ids
+
+        try:
+            ids = parse_document_ids(raw, limit=limit)
+        except ValueError:
+            return JSONResponse({"error": "invalid_ids"}, status_code=400)
+        try:
+            if graph_docs_provider is not None:
+                docs = graph_docs_provider(email)
+            else:
+                from teamagent.adapters.pgvector_client import PgVectorClient
+
+                pg = PgVectorClient.from_env()
+                domain = email.split("@", 1)[-1]
+                with pg.connection(
+                    app_role=app_role, user_email=email, user_groups=[domain], user_role="user"
+                ) as conn:
+                    docs = pg.list_documents_for_seed_graph(conn, ids)
+            return JSONResponse(build_seed_graph(docs, ids))
+        except Exception:
+            logger.warning("seed_graph_failed")
+            return JSONResponse({"error": "graph_failed"}, status_code=500)
+
+    @app.get("/api/v1/graph/seed")
+    def api_graph_seed(request: Request) -> JSONResponse:
+        return _seed_graph(request, request.query_params.get("ids", ""), 12)
+
+    @app.get("/api/v1/graph/neighbors")
+    def api_graph_neighbors(request: Request) -> JSONResponse:
+        return _seed_graph(request, request.query_params.get("id", ""), 1)
 
     @app.get("/api/v1/graph")
     def api_graph(request: Request) -> JSONResponse:

@@ -260,7 +260,7 @@ class DeckMeta(_Strict):
     running_head: ShortText
     issuer: ShortText
     brand_a: BrandMeta
-    brand_b: BrandMeta
+    brand_b: BrandMeta | None = None
     part_titles: tuple[ShortText, ...] = Field(min_length=1, max_length=4)
     method_target_constraints: tuple[ShortText, ...] = Field(min_length=2, max_length=3)
 
@@ -336,7 +336,7 @@ class DeckContent(_Strict):
             self.deck_meta.running_head,
             self.deck_meta.issuer,
             self.deck_meta.brand_a.name,
-            self.deck_meta.brand_b.name,
+            (self.deck_meta.brand_b.name if self.deck_meta.brand_b else ""),
             *self.deck_meta.part_titles,
             *self.deck_meta.method_target_constraints,
         ]

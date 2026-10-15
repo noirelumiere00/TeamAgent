@@ -86,7 +86,9 @@ class _EditableBuilder:
         meta = content.deck_meta
         accents = spec.tokens.colors.brand_accents
         self._accent_a = meta.brand_a.accent_color or accents.brand_a.value
-        self._accent_b = meta.brand_b.accent_color or accents.brand_b.value
+        self._accent_b = (
+            meta.brand_b.accent_color if meta.brand_b else None
+        ) or accents.brand_b.value
         self._total = len(content.slides)
 
     def _c(self, name: str) -> str:
@@ -370,7 +372,7 @@ class _EditableBuilder:
         )
         self._text(
             page,
-            f"{meta.brand_a.name} × {meta.brand_b.name}",
+            f"{meta.brand_a.name} × {meta.brand_b.name}" if meta.brand_b else meta.brand_a.name,
             x=_MARGIN,
             y=262,
             w=1100,
@@ -660,7 +662,7 @@ class _EditableBuilder:
             side="b",
             x=_MARGIN + card_w + 44,
             w=card_w,
-            name=meta.brand_b.name,
+            name=(meta.brand_b.name if meta.brand_b else ""),
             accent=self._accent_b,
             max_by_unit=max_by_unit,
             units_with_pairs=units_with_pairs,

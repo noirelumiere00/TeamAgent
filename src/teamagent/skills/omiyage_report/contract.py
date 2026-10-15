@@ -57,7 +57,7 @@ class DeckMeta(_StrictModel):
     running_head: str = Field(min_length=1)
     issuer: str = Field(min_length=1)
     brand_a: DeckBrand
-    brand_b: DeckBrand
+    brand_b: DeckBrand | None = None
     part_titles: list[str] = Field(min_length=1)
     method_target_constraints: list[str] = Field(min_length=2, max_length=3)
 

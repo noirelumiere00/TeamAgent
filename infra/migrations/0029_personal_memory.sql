@@ -9,10 +9,9 @@
 --   ② 既存のどのロールにも表の権限を与えない。表を読み書きできるのは専用の
 --      personal_memory_app だけで、master（本 migration の実行者）には
 --      「SET ROLE はできるが権限は受け継がない（INHERIT FALSE）」で与える。
---      → master 直結（朝ダイジェスト・backfill）・teamagent_app（ingest・mcp の既存経路）・
---        teamagent_dashboard（利用状況）からは、admin GUC を立てても permission denied。
---        master が BYPASSRLS を持っていても、表の権限そのものが無いので読めない
---        （handoff day0-4:265-270「master 接続では FORCE RLS でもすり抜けた」への構造的な対策）。
+--      → teamagent_app（ingest・mcp の既存経路）・teamagent_dashboard（利用状況）からは、
+--        admin GUC を立てても permission denied。
+--        RDS master は pg_read_all_data / pg_write_all_data を INHERIT するため対象外（末尾参照）。
 --   ③ 表と関数の所有者は NOLOGIN NOBYPASSRLS の personal_memory_definer。FORCE RLS が所有者にも効く。
 --      他人の行に届くのは SECURITY DEFINER 関数 2 本（管理者閲覧・退職削除）だけで、
 --      閲覧は「監査 INSERT → 行を返す」を 1 本の関数で行う（監査に失敗したら 1 行も返らない）。
@@ -337,7 +336,7 @@ REVOKE CREATE ON SCHEMA public FROM personal_memory_definer;
 REVOKE personal_memory_definer FROM CURRENT_USER;
 
 -- 7) 実行者（master）がアプリ・管理者閲覧・退職削除のロールへ SET ROLE できるようにする。
---   INHERIT FALSE なので、master のまま（SET ROLE せずに）表を読むことも関数を実行することもできない。
+--   INHERIT FALSE なので、これらの専用ロールの表権限・関数実行権限は master に受け継がれない。
 GRANT personal_memory_app          TO CURRENT_USER WITH INHERIT FALSE, SET TRUE;
 GRANT personal_memory_admin_reader TO CURRENT_USER WITH INHERIT FALSE, SET TRUE;
 GRANT personal_memory_retirer      TO CURRENT_USER WITH INHERIT FALSE, SET TRUE;
@@ -361,8 +360,43 @@ BEGIN
   IF pg_has_role(current_user, 'personal_memory_definer', 'SET') THEN
     RAISE EXCEPTION 'current_user must not be able to SET ROLE personal_memory_definer';
   END IF;
-  IF has_table_privilege(current_user, 'public.personal_memory_entries', 'SELECT')
-     OR has_table_privilege(current_user, 'public.personal_memory_profiles', 'SELECT') THEN
-    RAISE EXCEPTION 'current_user must not read personal_memory tables without SET ROLE';
+  -- RDS master は rds_superuser 経由で pg_read_all_data / pg_write_all_data を INHERIT する。
+  -- 管理者の全表アクセスは RDS の仕様で防げないため、current_user の実効表権限は検査しない。
+  FOREACH r IN ARRAY ARRAY[
+    'teamagent_app', 'teamagent_dashboard', 'personal_memory_admin_reader', 'personal_memory_retirer'
+  ] LOOP
+    IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = r) THEN
+      IF EXISTS (
+        SELECT 1 FROM unnest(ARRAY[
+          'public.personal_memory_profiles', 'public.personal_memory_entries', 'public.personal_memory_audit'
+        ]) AS t(table_name)
+        WHERE has_table_privilege(r, t.table_name, 'SELECT')
+           OR has_table_privilege(r, t.table_name, 'INSERT')
+           OR has_table_privilege(r, t.table_name, 'UPDATE')
+           OR has_table_privilege(r, t.table_name, 'DELETE')
+      ) THEN
+        RAISE EXCEPTION '% must not touch personal_memory tables without the function', r;
+      END IF;
+    END IF;
+  END LOOP;
+  -- 本人行を RLS で操作する personal_memory_app の既存の最小権限だけは許可する。
+  IF EXISTS (
+    SELECT 1 FROM pg_class c
+    CROSS JOIN LATERAL aclexplode(c.relacl) a
+    WHERE c.oid IN (
+      'public.personal_memory_profiles'::regclass, 'public.personal_memory_entries'::regclass,
+      'public.personal_memory_audit'::regclass
+    ) AND a.grantee <> 'personal_memory_definer'::regrole
+      AND NOT (
+        a.grantee = 'personal_memory_app'::regrole AND NOT a.is_grantable AND (
+          (c.oid = 'public.personal_memory_profiles'::regclass
+            AND a.privilege_type IN ('SELECT', 'INSERT', 'UPDATE'))
+          OR (c.oid = 'public.personal_memory_entries'::regclass
+            AND a.privilege_type IN ('SELECT', 'INSERT', 'DELETE'))
+          OR (c.oid = 'public.personal_memory_audit'::regclass AND a.privilege_type = 'INSERT')
+        )
+      )
+  ) THEN
+    RAISE EXCEPTION 'personal_memory ACL must grant only to definer or the minimal app privileges';
   END IF;
 END $$;
