@@ -2663,6 +2663,98 @@ export function createCallerIdentityPlugin({
   const connectFallbackByRun = new Map();
   // 配信は agent_end より後。TTL/上限で掃除し、別 run の結果は絶対に再利用しない。
   const connectUrlsByRun = new Map();
+  const evidenceByRun = new Map();
+  const evidenceBySession = new Map();
+  const searchRevisionsByRun = new Map();
+  function evidenceSessionKey(runId) {
+    const ingress = connectIngressByRun.get(runId);
+    return ingress ? JSON.stringify([ingress.sessionSha256, ingress.senderId]) : null;
+  }
+  function rememberEvidenceToolResult(event, ctx) {
+    const runId = canonicalInvocationId(ctx?.runId);
+    if (!runId || (event?.runId && event.runId !== runId) || event?.error ||
+        event?.result?.isError) return;
+    pruneConnectGuardState(now());
+    const entry = evidenceByRun.get(runId) ?? {urls: new Set(), needsInput: false};
+    if (["oauth_connect", "teamagent__oauth_connect"].includes(event?.toolName)) entry.needsInput = true;
+    function collect(value, depth = 0) {
+      if (depth > 12) return;
+      if (typeof value === "string") {
+        try {
+          const parsed = JSON.parse(value);
+          if (typeof parsed !== "string") { collect(parsed, depth + 1); return; }
+        } catch {}
+        for (const m of value.slice(0, ASSISTANT_MESSAGE_SCAN_LIMIT).matchAll(/https?:\/\/[^\s<>"`|\\）」』、。！？]+/giu)) {
+          if (entry.urls.size >= 128) break;
+          entry.urls.add(m[0].replace(CONNECT_URL_TRAILING_RE, ""));
+        }
+      } else if (Array.isArray(value)) {
+        for (const item of value) collect(item, depth + 1);
+      } else if (value && typeof value === "object") {
+        for (const [key, item] of Object.entries(value)) {
+          if ((key === "status" && ["needs_input", "requires_confirmation", "confirmation_required",
+            "needs_authorization"].includes(item)) ||
+            (["needs_input", "requires_confirmation", "confirmation_required", "needs_authorization"].includes(key) && item === true)) {
+            entry.needsInput = true;
+          }
+          collect(item, depth + 1);
+        }
+      }
+    }
+    collect(event.result);
+    entry.updatedAtMs = now();
+    evidenceByRun.delete(runId);
+    evidenceByRun.set(runId, entry);
+    const session = evidenceSessionKey(runId);
+    if (session && entry.urls.size) {
+      evidenceBySession.delete(session);
+      evidenceBySession.set(session, {urls: new Set(entry.urls), updatedAtMs: now()});
+    }
+  }
+
+  // Only a unique close match is safe to restore; unrelated or ambiguous URLs survive.
+  function restoreEvidenceUrls(text, urls) {
+    if (!urls?.size) return text;
+    function distance(a, b) {
+      if (Math.abs(a.length - b.length) > 3) return 4;
+      let row = Array.from({length: b.length + 1}, (_, i) => i);
+      for (let i = 0; i < a.length; i++) {
+        const next = [i + 1];
+        for (let j = 0; j < b.length; j++) {
+          next.push(Math.min(next[j] + 1, row[j + 1] + 1, row[j] + (a[i] !== b[j])));
+        }
+        if (Math.min(...next) > 3) return 4;
+        row = next;
+      }
+      return row[b.length];
+    }
+    return text.replace(/https?:\/\/[^\s<>"`|\\）」』、。！？]+/giu, raw => {
+      const url = raw.replace(CONNECT_URL_TRAILING_RE, "");
+      if (urls.has(url) || url.length > 2048) return raw;
+      let parsed;
+      try { parsed = new URL(url); } catch { return raw; }
+      const matches = [...urls].filter(candidate => {
+        if (candidate.length > 2048) return false;
+        try {
+          const source = new URL(candidate);
+          return source.origin === parsed.origin && distance(candidate, url) <= 3;
+        } catch { return false; }
+      });
+      return matches.length === 1 ? matches[0] + raw.slice(url.length) : raw;
+    });
+  }
+
+  function trimUnsolicitedEnding(text, needsInput) {
+    if (needsInput) return text;
+    const match = /(?:^|(?<=[。！？!?\n]))[ \t]*(?:[^。！？!?\n]+[。！？!?]?)[ \t\n]*$/u.exec(text);
+    if (!match || (text.slice(0, match.index).match(/^[ \t]*(?:```|~~~)/gm)?.length ?? 0) % 2) return text;
+    const last = match[0].trim();
+    // Authorization and connection guidance remain actionable even without a tool result.
+    if (/連携|認証|送信|送付|購入|決済|支払|課金|削除|実行して|実行します/u.test(last)) return text;
+    if (!/(?:しますか|ですか|何に[^。！？!?]*|(?:へ|に)確認してください)[？?。]?$/u.test(last)) return text;
+    return text.slice(0, match.index).trimEnd();
+  }
+
   function rememberConnectToolResult(event, ctx) {
     const runId = canonicalInvocationId(ctx?.runId);
     if (!runId || (event?.runId && event.runId !== runId) || event?.error ||
@@ -2699,6 +2791,9 @@ export function createCallerIdentityPlugin({
 
   function pruneConnectGuardState(nowMs) {
     for (const ledger of [
+      evidenceByRun,
+      evidenceBySession,
+      searchRevisionsByRun,
       toolCallsByRun,
       connectRevisionsByRun,
       connectFallbackByRun,
@@ -2885,6 +2980,7 @@ export function createCallerIdentityPlugin({
           existing.videoUrlKind = ingress.videoUrlKind;
           existing.videoRequestIntent = ingress.videoRequestIntent === true;
         }
+        if (ingress.searchRequired) existing.searchRequired = ingress.searchRequired;
         // 再通知でも抑止用台帳を確実に持つ（agent_end 後に ingressByRun 側が消えた後、
         // 同じ受信の再通知が来る順序でも判定が失われないように）。
         rememberConnectIngress(runId, existing);
@@ -3035,6 +3131,10 @@ export function createCallerIdentityPlugin({
       connectShape,
       videoUrlKind,
       videoRequestIntent,
+      searchRequired: typeof event?.content === "string" && (
+        /比較|何が効|どっちが|どちらが|勝ち|効果/u.test(event.content) ? "comparison" :
+        /ビデオリリース|\bTTO\b|切り抜き|\bVVS\b|タテガタ|ショートドラマ|スワイプ\s*LP|ソリューションプラン|\bVSEO\b|検索面|お土産資料|ケイパ|感触|BANT|営業\s*FB|カルテ|二次利用費/iu.test(event.content)
+          ? "internal_term" : null),
       hasMedia,
     };
     const existing = pendingByMessage.get(pendingKey);
@@ -3055,6 +3155,7 @@ export function createCallerIdentityPlugin({
       ingress.videoUrlKind = existing.videoUrlKind;
       ingress.videoRequestIntent = existing.videoRequestIntent === true;
     }
+    if (existing?.searchRequired && !ingress.searchRequired) ingress.searchRequired = existing.searchRequired;
     if (answerFeedbackEnabled && answerFeedbackTargets(senderId)) {
       const query = normalizeFeedbackQuery(event?.content);
       if (query !== null) {
@@ -5336,6 +5437,24 @@ export function createCallerIdentityPlugin({
     };
   }
 
+  function guardSearchZeroTool(event, ctx, logger) {
+    pruneConnectGuardState(now());
+    const runId = authoritativeRunId(event, ctx, logger, "before_agent_finalize");
+    if (!runId) return undefined;
+    const ingress = connectIngressByRun.get(runId);
+    if (!ingress?.searchRequired || ingress.connectRequest ||
+        (toolCallsByRun.get(runId)?.count ?? 0) > 0 || evidenceByRun.has(runId) ||
+        typeof event?.lastAssistantMessage !== "string" || !event.lastAssistantMessage.trim() ||
+        searchRevisionsByRun.has(runId) ||
+        connectRevisionsByRun.has(runId) || videoRevisionsByRun.has(runId)) return undefined;
+    searchRevisionsByRun.set(runId, {updatedAtMs: now()});
+    emitPluginLog(logger, "warn", `search zero-tool revise reason=${ingress.searchRequired} outcome=revised`);
+    return {action: "revise", reason: "社内資料の検索が必要です。", retry: {
+      instruction: "search を必ず呼び、元の質問と会話中の施策名を使って社内資料・施策実績を確認してから答えてください。比較の勝敗は取得した表の数字で判定し、資料に無い数字・定義は書かない。",
+      idempotencyKey: "search-zero-tool", maxAttempts: 1,
+    }};
+  }
+
   // 層3。層2 の再パス後も 0 tool call のまま終わった run の最終応答を、送信直前に
   // 定型文へ置換する。event.runId と ctx.runId は agent run と同じ id
   // （dispatch:2528-2545 が runState.runId を両方に載せる）。食い違えば触らない。
@@ -6018,13 +6137,17 @@ export function createCallerIdentityPlugin({
       });
       // logger を渡していなかったのが「14 日間 warn が 1 行も出ない」原因だった（2026-09-03）。
       observe("before_tool_call", (event, ctx) => signToolCall(event, ctx, api.logger));
-      observe("after_tool_call", rememberConnectToolResult);
+      observe("after_tool_call", (event, ctx) => {
+        rememberEvidenceToolResult(event, ctx);
+        rememberConnectToolResult(event, ctx);
+      });
       // 連携側を先に評価し、何もしなかったときだけ動画 URL × 0 tool call の層2 を評価する。
       observe(
         "before_agent_finalize",
         (event, ctx) =>
           guardConnectUrlFabrication(event, ctx, api.logger) ??
-          guardVideoZeroTool(event, ctx, api.logger),
+          guardVideoZeroTool(event, ctx, api.logger) ??
+          guardSearchZeroTool(event, ctx, api.logger),
       );
       observe("reply_payload_sending", (event, ctx) => {
         let result = replaceExhaustedConnectReply(event, ctx, api.logger);
@@ -6038,7 +6161,15 @@ export function createCallerIdentityPlugin({
           const runId = canonicalInvocationId(event?.runId);
           const replacements = runId && runId === canonicalInvocationId(ctx?.runId)
             ? connectUrlsByRun.get(runId)?.urls : undefined;
-          const scrubbed = scrubOutboundReplyText(payload.text, replacements);
+          const authoritative = runId && runId === canonicalInvocationId(ctx?.runId);
+          const evidence = authoritative ? evidenceByRun.get(runId) : undefined;
+          const session = authoritative ? evidenceSessionKey(runId) : null;
+          const urls = evidence?.urls?.size ? evidence.urls : evidenceBySession.get(session)?.urls;
+          const restored = restoreEvidenceUrls(payload.text, urls);
+          if (restored !== payload.text) emitPluginLog(api.logger, "info", "outbound URL restored diagnostic=CONNECT-Z04");
+          const trimmed = authoritative ? trimUnsolicitedEnding(restored, evidence?.needsInput) : restored;
+          if (payload.text.trim() && !trimmed.trim()) return { ...result, cancel: true };
+          const scrubbed = scrubOutboundReplyText(trimmed, replacements);
           if (scrubbed.text !== payload.text) {
             const { signedUrls, toolNames, urlSeparators, unverifiedConnectUrls = 0 } = scrubbed.counts;
             emitPluginLog(
