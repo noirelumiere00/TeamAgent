@@ -33,6 +33,29 @@ logger = structlog.get_logger(__name__)
 _ALLOWED_EMBEDDING_COLUMNS: frozenset[str] = frozenset({"embedding", "embedding_cohere"})
 
 
+def _timeline_columns() -> str:
+    if os.environ.get("SEARCH_TIMELINE_STATUS", "").strip().lower() not in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }:
+        return ""
+    return (
+        ", d.metadata AS timeline_metadata, "
+        "to_char(d.modified_at AT TIME ZONE INTERVAL '+09:00', 'YYYY-MM-DD') AS timeline_date"
+    )
+
+
+def _timeline_metadata(row: dict[str, Any]) -> dict[str, Any]:
+    if not _timeline_columns():
+        return {}
+    meta = dict(row.get("timeline_metadata") or {})
+    if row.get("timeline_date"):
+        meta["updated_at"] = str(row["timeline_date"])
+    return meta
+
+
 def _env_int(name: str, default: int) -> int:
     """env を int として読む（空・不正値は default）。"""
     raw = os.environ.get(name, "").strip()
@@ -626,7 +649,7 @@ class PgVectorClient:
         sql = f"""
             SELECT
                 abs(hashtext(c.id::text)::bigint) AS chunk_id,
-                COALESCE(c.contextualized, c.content) AS content,
+                COALESCE(c.contextualized, c.content) AS content{_timeline_columns()},
                 1 - (c.{embedding_col} <=> %s::vector) AS score,
                 c.page_num,
                 d.id AS document_id,
@@ -668,6 +691,7 @@ class PgVectorClient:
         hits: list[SearchHit] = []
         for r in rows:
             meta: dict[str, Any] = {
+                **_timeline_metadata(r),
                 "source_uri": r.get("source_uri"),
                 "source_type": r.get("source_type"),
                 "title": r.get("title"),
@@ -937,7 +961,7 @@ class PgVectorClient:
         sql = f"""
             SELECT
                 abs(hashtext(c.id::text)::bigint) AS chunk_id,
-                COALESCE(c.contextualized, c.content) AS content,
+                COALESCE(c.contextualized, c.content) AS content{_timeline_columns()},
                 c.page_num,
                 d.source_uri,
                 d.source_type::text AS source_type,
@@ -962,6 +986,7 @@ class PgVectorClient:
         hits: list[SearchHit] = []
         for r in rows:
             meta: dict[str, Any] = {
+                **_timeline_metadata(r),
                 "source_uri": r.get("source_uri"),
                 "source_type": r.get("source_type"),
                 "title": r.get("title"),
@@ -1216,10 +1241,10 @@ class PgVectorClient:
         if not client_name.strip():
             return []
 
-        sql = """
+        sql = f"""
             SELECT
                 abs(hashtext(c.id::text)::bigint) AS chunk_id,
-                COALESCE(c.contextualized, c.content) AS content,
+                COALESCE(c.contextualized, c.content) AS content{_timeline_columns()},
                 to_char(d.modified_at AT TIME ZONE 'Asia/Tokyo', 'YYYY-MM-DD') AS occurred_at,
                 d.source_uri,
                 d.title,
@@ -1249,6 +1274,7 @@ class PgVectorClient:
         hits: list[SearchHit] = []
         for r in rows:
             meta: dict[str, Any] = {
+                **_timeline_metadata(r),
                 "source_uri": r.get("source_uri"),
                 "source_type": "slack",
                 "title": r.get("title"),
@@ -1311,10 +1337,10 @@ class PgVectorClient:
         if not client_name.strip():
             return []
 
-        sql = """
+        sql = f"""
             SELECT
                 abs(hashtext(c.id::text)::bigint) AS chunk_id,
-                COALESCE(c.contextualized, c.content) AS content,
+                COALESCE(c.contextualized, c.content) AS content{_timeline_columns()},
                 to_char(d.modified_at AT TIME ZONE 'Asia/Tokyo', 'YYYY-MM-DD') AS occurred_at,
                 d.source_uri,
                 d.title,
@@ -1344,6 +1370,7 @@ class PgVectorClient:
         hits: list[SearchHit] = []
         for r in rows:
             meta: dict[str, Any] = {
+                **_timeline_metadata(r),
                 "source_uri": r.get("source_uri"),
                 "source_type": "slack",
                 "title": r.get("title"),
@@ -1427,7 +1454,7 @@ class PgVectorClient:
         sql = f"""
             SELECT
                 abs(hashtext(c.id::text)::bigint) AS chunk_id,
-                COALESCE(c.contextualized, c.content) AS content,
+                COALESCE(c.contextualized, c.content) AS content{_timeline_columns()},
                 c.page_num,
                 d.source_uri,
                 d.source_type::text AS source_type,
@@ -1452,6 +1479,7 @@ class PgVectorClient:
             if cid in excluded:
                 continue
             meta: dict[str, Any] = {
+                **_timeline_metadata(r),
                 "source_uri": r.get("source_uri"),
                 "source_type": r.get("source_type"),
                 "title": r.get("title"),
@@ -1506,7 +1534,7 @@ class PgVectorClient:
         sql = f"""
             SELECT
                 abs(hashtext(c.id::text)::bigint) AS chunk_id,
-                COALESCE(c.contextualized, c.content) AS content,
+                COALESCE(c.contextualized, c.content) AS content{_timeline_columns()},
                 1 - (c.{embedding_col} <=> %s::vector) AS score,
                 c.page_num,
                 d.source_uri,

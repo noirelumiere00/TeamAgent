@@ -42,6 +42,7 @@ from teamagent.skills._shared.next_step import (
 )
 from teamagent.skills._shared.source_url import hit_doc_url
 from teamagent.skills.base import BaseSkill, SkillContext, register
+from teamagent.skills.search import timeline_status
 from teamagent.skills.search.aggregation import extract_aggregation_filter
 from teamagent.skills.search.alias_expansion import retry_inputs, scope_footer
 from teamagent.skills.search.answer_mode import MODE_INSTRUCTIONS, classify_answer_mode
@@ -2334,6 +2335,7 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
         asked_industry: str | None = None,
         bedrock: Any | None = None,
         karte_hits: tuple[SearchHit, ...] = (),
+        timeline_statuses: tuple[timeline_status.TimelineStatus, ...] | None = None,
     ) -> tuple[str, float]:
         """Bedrock に system prompt + chunks + query を渡して要約させる。
 
@@ -2350,6 +2352,9 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
         system = load_prompt("search", self._prompt_version, "system")
         if self._alias_expansion:
             system += "\n" + load_prompt("search", "retry", "system")
+
+        if timeline_status.enabled():
+            system += "\n" + load_prompt("search", "timeline", "system")
 
         # 主検索結果と関連 Drive 資料を分離 (Phase 2 新機能)
         primary_hits = [h for h in hits if not (h.metadata or {}).get("is_related_drive")]
@@ -2423,6 +2428,13 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
                     f"[カルテ: {h.chunk_id}{self._date_header(h)}]\n{h.content}" for h in karte_hits
                 )
             )
+        if timeline_status.enabled():
+            statuses = (
+                timeline_statuses
+                if timeline_statuses is not None
+                else timeline_status.resolve_statuses([*hits, *karte_hits])
+            )
+            sections.insert(0, timeline_status.prompt_block(statuses))
         user_message = "以下の社内資料から質問に答えてください。\n\n" + "\n\n".join(sections)
 
         resp = (bedrock if bedrock is not None else self._bedrock).converse(
@@ -2473,6 +2485,8 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
         prompt 側は「日付はこのヘッダの値だけを書く」契約なので、ここに載らない日付
         （本文中の日付）は更新日として扱われない。
         """
+        if timeline_status.enabled():
+            return timeline_status.date_header(hit)
         meta = hit.metadata or {}
         parts: list[str] = []
         updated_at = meta.get("updated_at")

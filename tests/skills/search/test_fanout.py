@@ -884,3 +884,97 @@ def test_graph_link_non_fanout_byte_identical(monkeypatch: pytest.MonkeyPatch) -
     monkeypatch.setenv("SEARCH_FANOUT_GRAPH_LINK", "0")
     skill, _ = make()
     assert run(skill, meta={**META, "channel_id": "C1"}).model_dump_json() == baseline
+
+
+@pytest.mark.parametrize("with_campaign", [True, False])
+@pytest.mark.parametrize("list_fast", [True, False])
+def test_timeline_reproduction_summary_and_sections(
+    monkeypatch: pytest.MonkeyPatch,
+    with_campaign: bool,
+    list_fast: bool,
+) -> None:
+    from tests.skills.search.test_timeline_status import campaign, hit
+
+    monkeypatch.setenv("SEARCH_TIMELINE_STATUS", "1")
+    monkeypatch.setenv("SEARCH_FANOUT_LIST_FAST", "1" if list_fast else "0")
+    fb = hit(client_name="日本ガイシ", source_uri="https://example.com/fb")
+    deal = hit(
+        3,
+        client_name="日本ガイシ",
+        topic="案件決定",
+        is_sales_fb=False,
+        source_uri="https://example.com/deal",
+    )
+    actual = campaign(client_name="日本ガイシ", source_uri="https://example.com/campaign")
+    skill, pg = make([fb, deal, *([actual] if with_campaign else [])])
+    pg.list_client_timeline_recent.return_value = [fb]
+    summary = _bedrock()
+    summary.converse.return_value = _converse("要約器の文章")
+    monkeypatch.setattr(fanout, "build_summary_client", lambda: summary)
+    out = run(skill, query="日本ガイシの過去の提案資料と施策実績一覧")
+    expected = (
+        "実施済み（投稿 6 本・最終投稿 2026-08-15）"
+        if with_campaign
+        else "2026-06-15 時点では詰めの段階"
+    )
+    assert out.answer.count("- 状態: 日本ガイシ / 500万視聴トライアル: " + expected) == 2
+    assert "現在は" not in out.answer
+    assert out.answer.index("🤝") < out.answer.index("🗂")
+    if not list_fast:
+        text = summary.converse.call_args.kwargs["messages"][0]["content"][0]["text"]
+        assert expected in text
+        assert "投稿日: 2026-06-15" in text
+        assert out.answer.index("🗂") < out.answer.index("要約器の文章")
+    else:
+        summary.converse.assert_not_called()
+    assert len(out.answer) <= 2500
+
+
+def test_timeline_off_fanout_payload_and_summary_are_byte_identical(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from tests.skills.search.test_timeline_status import campaign, hit
+
+    summary = _bedrock()
+    monkeypatch.setattr(fanout, "build_summary_client", lambda: summary)
+    monkeypatch.delenv("SEARCH_TIMELINE_STATUS", raising=False)
+    skill, _ = make([hit(client_name="日本ガイシ"), campaign(client_name="日本ガイシ")])
+    baseline = run(skill).model_dump_json()
+    prompt = summary.converse.call_args.kwargs
+    monkeypatch.setenv("SEARCH_TIMELINE_STATUS", "0")
+    skill, _ = make([hit(client_name="日本ガイシ"), campaign(client_name="日本ガイシ")])
+    assert baseline == run(skill).model_dump_json()
+    assert prompt == summary.converse.call_args.kwargs
+
+
+def test_timeline_latest_karte_record_controls_status_when_summary_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from tests.skills.search.test_timeline_status import hit
+
+    monkeypatch.setenv("SEARCH_TIMELINE_STATUS", "1")
+    old = hit(client_name="日本ガイシ", source_uri="https://example.com/old")
+    recent = hit(
+        4,
+        client_name="日本ガイシ",
+        occurred_at="2026-09-01",
+        deal_phase="終了",
+        source_uri="https://example.com/new",
+    )
+    skill, pg = make([old])
+    pg.list_client_timeline_recent.return_value = [recent]
+    summary = _bedrock()
+    summary.converse.side_effect = RuntimeError("fake failure")
+    monkeypatch.setattr(fanout, "build_summary_client", lambda: summary)
+    answer = run(skill, query="日本ガイシの提案資料と施策実績").answer
+    assert "状態: 日本ガイシ / 500万視聴トライアル: 2026-09-01 時点では終了" in answer
+    assert "時点では詰めの段階" not in answer
+
+
+def test_timeline_unknown_date_section(monkeypatch: pytest.MonkeyPatch) -> None:
+    from tests.skills.search.test_timeline_status import hit
+
+    monkeypatch.setenv("SEARCH_TIMELINE_STATUS", "1")
+    skill, _ = make([hit(client_name="日本ガイシ", occurred_at=None)])
+    answer = run(skill).answer
+    assert "状態は資料からは確認できません（最新の記録: 日付不明 の営業FB）" in answer
