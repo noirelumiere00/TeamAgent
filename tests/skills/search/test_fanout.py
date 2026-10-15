@@ -19,6 +19,7 @@ from teamagent.skills.base import SkillContext
 from teamagent.skills.search import fanout
 from teamagent.skills.search.composite import MCP_SURFACE_CTX_KEY, SlackLookup, lookup_slack
 from teamagent.skills.search.expand import ExpansionResult
+from teamagent.skills.search.not_found import NOT_FOUND_HEAD
 from teamagent.skills.search.schema import SearchInput
 
 _fakes = import_module("tests.skills.search.test_composite_search")
@@ -44,6 +45,7 @@ META = {
 
 @pytest.fixture(autouse=True)
 def setup(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("SEARCH_FANOUT_LIST_FAST", raising=False)
     monkeypatch.setenv("USE_SEARCH_FANOUT", "1")
     monkeypatch.setenv("SEARCH_FANOUT_ALLOWED_EMAILS", ME)
     monkeypatch.setenv("USE_COMPOSITE_SEARCH", "1")
@@ -554,6 +556,165 @@ def test_logs_have_no_client_query_or_body() -> None:
         run(skill)
     assert "日本ガイシ" not in str(logs) and "ケイパ提案" not in str(logs)
     assert any(r["event"] == "search_fanout_lanes" for r in logs)
+
+
+@pytest.mark.parametrize(
+    "query", ["伊藤ハムの資料を一覧で", "提案書をリストで出して", "資料は何件ある？"]
+)
+def test_list_fast_skips_summary_and_keeps_links(
+    monkeypatch: pytest.MonkeyPatch, query: str
+) -> None:
+    from structlog.testing import capture_logs
+
+    monkeypatch.setenv("SEARCH_FANOUT_LIST_FAST", "1")
+    summary = _bedrock()
+    factory = MagicMock(return_value=summary)
+    monkeypatch.setattr(fanout, "build_summary_client", factory)
+    hit = _vault_hit(title="提案書", source_uri="https://drive.google.com/file/d/list/view")
+    skill, _ = make([hit])
+    with capture_logs() as logs:
+        out = run(skill, query=query)
+    factory.assert_not_called()
+    summary.converse.assert_not_called()
+    skill._bedrock.converse.assert_not_called()
+    assert out.found
+    assert fanout.LIST_FAST_HEAD in out.answer
+    assert "📁" in out.answer and "提案書" in out.answer
+    assert hit.metadata["source_uri"] in out.answer
+    assert out.answer.splitlines()[-1].startswith("探した範囲（まとめて検索）:")
+    lane = next(r for r in out.sources if r["lane"] == "summary")
+    assert lane["status"] == "skipped"
+    row = next(r for r in logs if r["event"] == "search_latency_breakdown")
+    assert row["list_fast"] is True and row["converse_ms"] == 0
+    assert "伊藤ハム" not in str(logs) and query not in str(logs)
+
+
+def test_list_fast_keeps_campaign_footers(monkeypatch: pytest.MonkeyPatch) -> None:
+    from teamagent.mcp_gateway.direct_video_metrics import extract_section
+
+    monkeypatch.setenv("SEARCH_FANOUT_LIST_FAST", "1")
+    hit = SearchHit(
+        chunk_id=20,
+        content=(
+            "上位の投稿（再生数順）:\n"
+            "1. 再生 507,000、保存 120、たべもの、ハンバーグ https://www.tiktok.com/@example/video/1"
+        ),
+        score=0.9,
+        metadata={
+            "campaign_aggregate": "true",
+            "advertiser": "伊藤ハム",
+            "campaign": "ハンバーグ",
+            "title": "施策実績 伊藤ハム ハンバーグ",
+            "related_files": [
+                {
+                    "title": "ハンバーグ報告書",
+                    "url": "https://drive.google.com/file/d/report/view",
+                    "kind": "レポート",
+                }
+            ],
+        },
+    )
+    skill, _ = make([_vault_hit(), hit])
+    skill._campaign_files = True
+    monkeypatch.setattr(skill, "_attach_campaign_files", lambda *a: None)
+    summary = _bedrock()
+    monkeypatch.setattr(fanout, "build_summary_client", lambda: summary)
+    out = run(skill, query="伊藤ハムの資料を一覧で")
+    summary.converse.assert_not_called()
+    assert "📎" in out.answer and "📊 動画ごとの数字（ショート動画データベース）" in out.answer
+    assert "https://drive.google.com/file/d/report/view" in out.answer
+    assert "https://www.tiktok.com/@example/video/1" in out.answer
+    assert "507,000" in out.answer and "120" in out.answer
+    assert out.answer.splitlines()[-1].startswith("探した範囲（まとめて検索）:")
+    section = extract_section(out.answer)
+    assert section is not None
+    prefix, metrics, suffix = section
+    assert fanout.LIST_FAST_HEAD in prefix and "📎" in prefix
+    assert "507,000" in metrics and "120" in metrics
+    assert "📁" not in metrics and "探した範囲" not in metrics
+    assert "📁" in suffix and "探した範囲（まとめて検索）:" in suffix
+
+
+@pytest.mark.parametrize(
+    "query",
+    [
+        "伊藤ハムの施策で何が効いた？",
+        "比較して",
+        "伊藤ハムの施策で何が効いたか一覧で",
+        "提案書を一覧で比較して",
+        "施策の傾向を一覧で",
+        "最新の提案書どこ？",
+    ],
+)
+def test_list_fast_preserves_summary_for_analysis_and_fact(
+    monkeypatch: pytest.MonkeyPatch, query: str
+) -> None:
+    from structlog.testing import capture_logs
+
+    monkeypatch.setenv("SEARCH_FANOUT_LIST_FAST", "1")
+    summary = _bedrock()
+    monkeypatch.setattr(fanout, "build_summary_client", lambda: summary)
+    skill, _ = make()
+    with capture_logs() as logs:
+        run(skill, query=query)
+    summary.converse.assert_called_once()
+    assert next(r for r in logs if r["event"] == "search_latency_breakdown")["list_fast"] is False
+
+
+@pytest.mark.parametrize("flag", [None, "0", "true", ""])
+def test_list_fast_off_is_byte_identical(monkeypatch: pytest.MonkeyPatch, flag: str | None) -> None:
+    summary = _bedrock()
+    monkeypatch.setattr(fanout, "build_summary_client", lambda: summary)
+    monkeypatch.delenv("SEARCH_FANOUT_LIST_FAST", raising=False)
+    baseline, _ = make()
+    expected = run(baseline, query="提案書をリストで出して").model_dump_json()
+    if flag is not None:
+        monkeypatch.setenv("SEARCH_FANOUT_LIST_FAST", flag)
+    skill, _ = make()
+    actual = run(skill, query="提案書をリストで出して")
+    assert actual.model_dump_json() == expected
+    assert fanout.LIST_FAST_HEAD not in actual.answer
+    assert summary.converse.call_count == 2
+
+
+def test_list_fast_not_found_is_byte_identical(monkeypatch: pytest.MonkeyPatch) -> None:
+    summary = _bedrock()
+    monkeypatch.setattr(fanout, "build_summary_client", lambda: summary)
+    baseline, _ = make([])
+    expected = run(baseline, query="伊藤ハムの資料を一覧で").model_dump_json()
+    monkeypatch.setenv("SEARCH_FANOUT_LIST_FAST", "1")
+    skill, _ = make([])
+    out = run(skill, query="伊藤ハムの資料を一覧で")
+    assert out.model_dump_json() == expected
+    assert not out.found and out.answer.startswith(NOT_FOUND_HEAD)
+    summary.converse.assert_not_called()
+
+
+def test_list_fast_inactive_fanout_is_byte_identical(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("USE_SEARCH_FANOUT", "0")
+    baseline, _ = make()
+    expected = run(baseline, query="提案書をリストで出して").model_dump_json()
+    monkeypatch.setenv("SEARCH_FANOUT_LIST_FAST", "1")
+    skill, _ = make()
+    assert run(skill, query="提案書をリストで出して").model_dump_json() == expected
+    skill._bedrock.converse.assert_called_once()
+
+
+def test_list_fast_without_answer_skips_summary(monkeypatch: pytest.MonkeyPatch) -> None:
+    from structlog.testing import capture_logs
+
+    monkeypatch.setenv("SEARCH_FANOUT_LIST_FAST", "1")
+    summary = _bedrock()
+    monkeypatch.setattr(fanout, "build_summary_client", lambda: summary)
+    skill, _ = make()
+    with capture_logs() as logs:
+        out = skill.run(
+            SearchInput(query="資料を一覧で", include_answer=False),
+            SkillContext(request_id="fanout-test", metadata=META),
+        )
+    assert out.found and out.answer == ""
+    summary.converse.assert_not_called()
+    assert next(r for r in logs if r["event"] == "search_latency_breakdown")["list_fast"] is False
 
 
 def test_found_case_with_other_industry_still_shows_expansion_without_summary_input(
