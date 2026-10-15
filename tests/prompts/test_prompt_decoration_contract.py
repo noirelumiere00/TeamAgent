@@ -92,6 +92,11 @@ EXEMPT_PROMPTS = {
     # 別名で探し直す機能（SEARCH_ALIAS_EXPANSION）が search の system に足す 1 行。装飾の決まりは
     # 本体（v2d/v3）側にあり、この追記は作業を利用者に戻さない指示だけ。
     "search/retry/system.md": "search の system への 1 行の追記（装飾の決まりは本体の v2d 側）",
+    # 統合検索（USE_SEARCH_FANOUT）の間だけ search の system に足す出典の書き分け 4 行。
+    # 装飾の決まりは本体（v2d/v3）側にあり、この追記に `**` と `—` は無い。
+    "search/fanout/v1/sources.md": "統合検索中だけ search の system に足す追記（装飾の決まりは本体の v2d 側）",
+    # 統合検索の広げ役。出力は検索語（2〜4 語の並び）と業種 enum の JSON だけで、人に届かない。
+    "search/expand/v1/system.md": "内部 JSON（検索語と業種だけ・人に見えない）",
     "search/v2/system.md": "本番既定は v2d（旧版は触らない）",
     "search/v2c/system.md": "本番既定は v2d（旧版は触らない）",
     "search/v2e/system.md": "本番既定は v2d（v2e は env 切替時のみ・別便で扱う）",

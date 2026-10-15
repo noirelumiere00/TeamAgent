@@ -60,7 +60,9 @@ class SearchInput(BaseModel):
         max_length=50,
         description=(
             "施策/ソリューション種別フィルタ（cls_solution 等価）。"
-            "SNS運用 / 動画広告 / インフルエンサー / SEO / Web制作 / 広告運用 / イベント 等。"
+            "SNS運用 / インフルエンサー / SEO / Web制作 / 広告運用 / イベント 等。"
+            "動画系（動画広告・ショート動画・リール）は資料の分類が割れているため指定しない"
+            "（指定しても DM からの検索では使わない）。"
             "fail-open 再検索でも外れない sticky フィルタとして配線する。"
         ),
     )
@@ -296,7 +298,7 @@ class SlackHitOut(BaseModel):
 
 
 # 値が None のときはツール結果から落とすキー（複合検索 OFF のとき出力を 1 バイトも変えないため）。
-_OMIT_WHEN_NONE: tuple[str, ...] = ("slack_hits", "slack_status", "suggested_next")
+_OMIT_WHEN_NONE: tuple[str, ...] = ("slack_hits", "slack_status", "suggested_next", "sources")
 
 
 class SearchOutput(BaseModel):
@@ -328,6 +330,7 @@ class SearchOutput(BaseModel):
         default=None,
         description="次の一手（既存ツールを 1 つだけ・提案のみ）。無ければ出さない",
     )
+    sources: list[dict[str, Any]] | None = Field(default=None)
     query_client: str | None = Field(
         default=None,
         description=(

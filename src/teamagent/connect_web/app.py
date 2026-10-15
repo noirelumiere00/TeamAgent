@@ -260,14 +260,16 @@ class _RedactAdminUserAccessLog(logging.Filter):
 
     def filter(self, record: logging.LogRecord) -> bool:
         args = record.args
+        # /admin/memory?user=U… と /admin/history?user=U…（誰の記録を見たか）も同じ理由で伏せる。
         if (
             isinstance(args, tuple)
             and len(args) >= 3
             and isinstance(args[2], str)
-            and args[2].startswith("/admin?")
+            and args[2].startswith("/admin")
+            and "?" in args[2]
         ):
             redacted = list(args)
-            redacted[2] = "/admin?<redacted>"
+            redacted[2] = args[2].split("?", 1)[0] + "?<redacted>"
             record.args = tuple(redacted)
         return True
 
@@ -642,13 +644,13 @@ def _resolve_app_html() -> dict[str, Any]:
 def _safe_next(raw: str | None) -> str:
     """ログイン後の戻り先を検証（オープンリダイレクト防止）。
 
-    既知の内部ページ（``/app`` / ``/search`` / ``/admin``）のみ許可し、それ以外は既定
-    ``/app``。
+    既知の内部ページ（``/app`` / ``/search`` / ``/admin`` / 履歴の 2 画面）のみ許可し、
+    それ以外は既定 ``/app``。
     ＝ログイン後は原則 Obsidian 風 UI(/app) に着地する（旧 /search UI は明示遷移時のみ）。
     外部 URL・``//host``・スキーム付き等は一切通さない（ホワイトリスト方式）。
     """
     candidate = (raw or "").strip()
-    if candidate in {"/app", "/search", "/admin"}:
+    if candidate in {"/app", "/search", "/admin", "/app/history", "/admin/history"}:
         return candidate
     return "/app"
 
@@ -5227,6 +5229,131 @@ def create_app(
             render_memory_admin(rows=rows, target=target, error=""), headers=headers
         )
 
+    history_holder: dict[str, Any] = {}
+    history_headers = {"Cache-Control": "no-store", "X-Robots-Tag": "noindex"}
+
+    def _history_unavailable(reason: str) -> HTMLResponse:
+        return HTMLResponse(
+            _page("質問と回答の履歴", reason, accent="#e0a040"),
+            status_code=503,
+            headers=history_headers,
+        )
+
+    @app.get("/admin/history", response_class=HTMLResponse)
+    def history_admin(request: Request) -> Response:
+        """質問と回答の履歴（管理者閲覧・上司 5）。HISTORY_ADMIN_EMAILS のちょうど 1 名だけ。
+
+        - 管理者でなければページの存在を秘匿する（/admin と同じ 404）。
+        - 本文は保存せず、表示のたびに bot token で対象の 1 人の DM を Slack から読む。
+        - **Slack を読む前に**監査を確定する。監査に失敗したら 503 で Slack に触れない。
+        - 本文・対象の ID はログに出さない。キャッシュさせない。
+        """
+        from teamagent.adapters import dm_history as dh
+        from teamagent.adapters import history_audit as ha
+
+        email = _search_email(request)
+        if email is None:
+            return RedirectResponse("/search/login?next=/admin/history", status_code=303)
+        if not dh.is_admin(email):
+            raise HTTPException(status_code=404)
+        target = (request.query_params.get("user") or "").strip().upper()[:32]
+        team = os.environ.get("SLACK_TEAM_ID", "").strip()
+        if target and not dh.valid_user_id(target):
+            return HTMLResponse(
+                render_history_page(
+                    heading="質問と回答の履歴（管理者）",
+                    error="Slack のユーザー ID（U…）が正しくありません。",
+                ),
+                status_code=400,
+                headers=history_headers,
+            )
+        try:
+            reader = dh.DmHistoryReader.from_env()
+        except dh.DmHistoryError as exc:
+            logger.warning("history_admin_unavailable", code=exc.code)
+            return _history_unavailable("準備中です（Slack の読み取りの設定がまだありません）。")
+        if not target:
+            try:
+                users = reader.list_users()
+            except dh.DmHistoryError as exc:
+                logger.warning("history_admin_list_failed", code=exc.code)
+                return _history_unavailable(
+                    "いま一覧を表示できません（Slack から読めませんでした）。"
+                )
+            return HTMLResponse(
+                render_history_page(heading="質問と回答の履歴（管理者）", users=users),
+                headers=history_headers,
+            )
+        if not dh.valid_team_id(team):
+            logger.warning("history_admin_unavailable", code="no_team_id")
+            return _history_unavailable("準備中です（ワークスペースの設定がまだありません）。")
+        audit = history_holder.get("audit")
+        if audit is None:
+            audit = history_holder.setdefault("audit", ha.HistoryAudit())
+        try:
+            audit.record(
+                admin_email=email, team_id=team, slack_user_id=target, days=dh.HISTORY_DAYS_MAX
+            )
+        except ha.HistoryAuditError as exc:
+            logger.warning("history_admin_audit_failed", code=exc.code)
+            return _history_unavailable(
+                "いま表示できません。閲覧の記録に失敗したため、何も表示していません。"
+            )
+        try:
+            read = reader.read(target, days=dh.HISTORY_DAYS_MAX)
+        except dh.DmHistoryError as exc:
+            logger.warning("history_admin_read_failed", code=exc.code)
+            return _history_unavailable("いま表示できません（Slack から読めませんでした）。")
+        return HTMLResponse(
+            render_history_page(
+                heading=f"{target} と Aico の会話（直近 {dh.HISTORY_DAYS_MAX} 日）",
+                exchanges=dh.group_exchanges(read.messages),
+                truncated=read.truncated,
+                back_href="/admin/history",
+            ),
+            headers=history_headers,
+        )
+
+    @app.get("/app/history", response_class=HTMLResponse)
+    def history_self(request: Request) -> Response:
+        """自分と Aico の会話（本人画面・上司 5）。ログインした本人の DM だけを読む。
+
+        対象はログインの email から bot token で引いた本人の Slack ID だけ。クエリは一切読まない
+        （他人の ID を渡されても本人の分しか出ない）。本人の閲覧は監査しない。
+        """
+        from teamagent.adapters import dm_history as dh
+
+        email = _search_email(request)
+        if email is None:
+            return RedirectResponse("/search/login?next=/app/history", status_code=303)
+        try:
+            reader = dh.DmHistoryReader.from_env()
+        except dh.DmHistoryError as exc:
+            logger.warning("history_self_unavailable", code=exc.code)
+            return _history_unavailable("準備中です（Slack の読み取りの設定がまだありません）。")
+        try:
+            own_id = reader.user_id_for_email(email)
+            read = reader.read(own_id, days=dh.HISTORY_DAYS_MAX)
+        except dh.DmHistoryError as exc:
+            logger.warning("history_self_read_failed", code=exc.code)
+            if exc.code in {"users_not_found", "user_not_found"}:
+                return HTMLResponse(
+                    render_history_page(
+                        heading="あなたと Aico の会話",
+                        error="このメールアドレスの Slack アカウントが見つかりませんでした。",
+                    ),
+                    headers=history_headers,
+                )
+            return _history_unavailable("いま表示できません（Slack から読めませんでした）。")
+        return HTMLResponse(
+            render_history_page(
+                heading=f"あなたと Aico の会話（直近 {dh.HISTORY_DAYS_MAX} 日）",
+                exchanges=dh.group_exchanges(read.messages),
+                truncated=read.truncated,
+            ),
+            headers=history_headers,
+        )
+
     return app
 
 
@@ -5262,6 +5389,133 @@ def render_memory_admin(*, rows: list[Any] | None, target: str, error: str) -> s
         "td,th{border:1px solid #283450;padding:6px 10px;text-align:left}"
         ".note{color:#93a1bd}.err{color:#f08080}</style></head><body>"
         "<h1>本人メモ（管理者閲覧）</h1>" + form + "".join(parts) + "</body></html>"
+    )
+
+
+_SLACK_TOKEN_RE = re.compile(r"<([^<>]*)>")
+
+
+def _slack_plain_html(text: str) -> str:
+    # Slack は本文の & < > を実体参照で送る。一度戻してからエスケープし直す
+    # （二重エスケープを避ける）。
+    return html.escape(html.unescape(text)).replace("\n", "<br>")
+
+
+def _slack_token_html(inner: str) -> str:
+    """Slack の ``<…>`` 1 個を HTML にする。リンクは http(s) だけ（javascript: 等は文字のまま）。"""
+    target, _, label = inner.partition("|")
+    url = html.unescape(target)
+    shown = html.unescape(label)
+    if url.startswith(("https://", "http://")):
+        return (
+            f'<a href="{html.escape(url, quote=True)}" rel="noopener noreferrer" '
+            f'target="_blank">{html.escape(shown or url)}</a>'
+        )
+    if target.startswith(("@U", "@W")):
+        return "@" + html.escape(shown or "メンバー")
+    if target.startswith("#C"):
+        return "#" + html.escape(shown or "チャンネル")
+    if target.startswith("!"):
+        return html.escape("@" + (shown or target[1:].split("^")[0]))
+    # 知らない形は山かっこごと文字として見せる（タグとしては働かない）
+    return html.escape("<" + html.unescape(inner) + ">")
+
+
+def slack_text_to_html(text: str) -> str:
+    """DM の本文を表示用の HTML にする。一回限りのリンクを先に伏せ、残りはすべてエスケープする。"""
+    from teamagent.adapters.dm_history import redact_secret_links
+
+    redacted = redact_secret_links(text or "")
+    out: list[str] = []
+    pos = 0
+    for m in _SLACK_TOKEN_RE.finditer(redacted):
+        out.append(_slack_plain_html(redacted[pos : m.start()]))
+        out.append(_slack_token_html(m.group(1)))
+        pos = m.end()
+    out.append(_slack_plain_html(redacted[pos:]))
+    return "".join(out)
+
+
+def _jst_label(ts: float) -> str:
+    # 本番の実行イメージには時間帯のデータが無い（tests/runtime/test_no_iana_timezone.py）。
+    # 日本時間は固定の +9 時間で表す。
+    from datetime import datetime, timedelta, timezone
+
+    return datetime.fromtimestamp(ts, tz=timezone(timedelta(hours=9))).strftime("%m/%d %H:%M")
+
+
+def render_history_page(
+    *,
+    heading: str,
+    exchanges: list[Any] | None = None,
+    truncated: bool = False,
+    users: list[Any] | None = None,
+    error: str = "",
+    back_href: str = "",
+) -> str:
+    """質問と回答の履歴のページ（管理者・本人で共用）。新しい往復が上。値はすべてエスケープする。"""
+    parts: list[str] = []
+    if back_href:
+        parts.append(f'<p><a href="{html.escape(back_href, quote=True)}">← 一覧へ</a></p>')
+    if error:
+        parts.append(f'<p class="err">{html.escape(error)}</p>')
+    if users is not None:
+        if users:
+            rows = "".join(
+                f'<tr><td><a href="/admin/history?user={html.escape(u.slack_user_id, quote=True)}">'
+                f"{html.escape(u.name or u.slack_user_id)}</a></td>"
+                f"<td>{html.escape(u.slack_user_id)}</td></tr>"
+                for u in users
+            )
+            parts.append(
+                f"<p>Aico と DM のある人（{len(users)} 人）。"
+                "名前を押すと直近の会話を表示します。</p>"
+                "<table><tr><th>名前</th><th>Slack ID</th></tr>" + rows + "</table>"
+                '<p class="note">開くたびに閲覧の記録が残ります。</p>'
+            )
+        else:
+            parts.append("<p>Aico と DM のある人はいません。</p>")
+    if exchanges is not None:
+        if truncated:
+            parts.append('<p class="note">件数が多いため、途中までを表示しています。</p>')
+        if not exchanges:
+            parts.append("<p>この期間の会話はありません。</p>")
+        for ex in sorted(exchanges, key=lambda e: e.ts, reverse=True):
+            files = (
+                f'<div class="files">添付: {html.escape("・".join(ex.files))}</div>'
+                if ex.files
+                else ""
+            )
+            replies = "".join(
+                f'<div class="msg aico">{slack_text_to_html(text)}</div>' for text in ex.aico
+            )
+            if not ex.n_aico:
+                replies = '<div class="note">Aico の返事はありません。</div>'
+            more = (
+                f'<div class="note">ほか {ex.n_aico - len(ex.aico)} 通</div>'
+                if ex.n_aico > len(ex.aico)
+                else ""
+            )
+            parts.append(
+                '<section class="ex">'
+                f'<div class="when">{html.escape(_jst_label(ex.ts))}</div>'
+                f'<div class="msg user">{slack_text_to_html(ex.user_text)}</div>{files}'
+                f"{replies}{more}</section>"
+            )
+    return (
+        '<!doctype html><html lang="ja"><head><meta charset="utf-8">'
+        '<meta name="viewport" content="width=device-width, initial-scale=1">'
+        "<title>質問と回答の履歴</title><style>"
+        "body{background:#0f1420;color:#e8edf7;font-family:-apple-system,'Hiragino Sans',"
+        "'Noto Sans JP',sans-serif;padding:24px 16px;max-width:880px;margin:0 auto}"
+        "a{color:#7fb2ff}table{border-collapse:collapse;margin-top:12px}"
+        "td,th{border:1px solid #283450;padding:6px 10px;text-align:left}"
+        ".ex{border:1px solid #283450;border-radius:8px;padding:12px;margin:12px 0}"
+        ".when{color:#93a1bd;font-size:13px}.msg{padding:8px 10px;border-radius:6px;margin-top:8px;"
+        "overflow-wrap:anywhere}.user{background:#1c2a44}.aico{background:#16201a}"
+        ".files,.note{color:#93a1bd;font-size:13px;margin-top:6px}.err{color:#f08080}"
+        "</style></head><body>"
+        f"<h1>{html.escape(heading)}</h1>" + "".join(parts) + "</body></html>"
     )
 
 

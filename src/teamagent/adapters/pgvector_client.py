@@ -1245,6 +1245,7 @@ class PgVectorClient:
         client_name: str,
         limit: int = 20,
         request_id: str | None = None,
+        log_client: bool = True,
     ) -> list[SearchHit]:
         """指定クライアントの営業 FB の【最新 N 件】を古い順で返す（カルテ用・read-only）。
 
@@ -1329,7 +1330,7 @@ class PgVectorClient:
         logger.info(
             "pgvector_list_client_timeline_recent",
             request_id=request_id,
-            client_name=client_name,
+            **({"client_name": client_name} if log_client else {}),
             limit=limit,
             hit_count=len(hits),
         )
@@ -1577,6 +1578,50 @@ class PgVectorClient:
             resolved=len(resolved),
         )
         return resolved
+
+    def find_documents_for_advertiser(
+        self,
+        conn: psycopg.Connection[dict[str, Any]],
+        client_name: str,
+        *,
+        limit: int = 8,
+    ) -> list[SearchHit]:
+        """名指し資料を種類を問わず新しい順に引く（RLS 済み接続・読み取りだけ）。"""
+        if not client_name.strip():
+            return []
+        pattern = f"%{self._escape_like(client_name.strip())}%"
+        sql = """
+            SELECT -(abs(hashtext(d.id::text)::bigint) + 1) AS chunk_id,
+                   d.id AS document_id, d.title, d.source_uri, d.source_type::text AS source_type,
+                   d.metadata,
+                   to_char(d.modified_at AT TIME ZONE 'Asia/Tokyo', 'YYYY-MM-DD') AS updated_at
+            FROM documents d
+            WHERE d.metadata->>'suppressed' IS DISTINCT FROM 'true'
+              AND (d.title ILIKE %s ESCAPE '\\'
+                   OR d.metadata->>'cls_project' ILIKE %s ESCAPE '\\'
+                   OR d.metadata->>'client_name' ILIKE %s ESCAPE '\\')
+            ORDER BY d.modified_at DESC NULLS LAST, d.id DESC
+            LIMIT %s
+        """  # nosec B608
+        with conn.cursor() as cur:
+            cur.execute(sql, [pattern, pattern, pattern, min(8, max(1, limit))])
+            rows = cur.fetchall()
+        return [
+            SearchHit(
+                chunk_id=int(row["chunk_id"]),
+                content="",
+                score=1.0,
+                metadata={
+                    **(row.get("metadata") or {}),
+                    "document_id": str(row["document_id"]),
+                    **{
+                        key: row.get(key)
+                        for key in ("title", "source_uri", "source_type", "updated_at")
+                    },
+                },
+            )
+            for row in rows
+        ]
 
     def find_drive_files_for_advertisers(
         self,

@@ -250,6 +250,39 @@ def _envint(name: str, default: int, *, minimum: int, maximum: int) -> int:
     return min(maximum, max(minimum, value))
 
 
+# 同時に作る提案書の上限（お土産資料の OMIYAGE_MAX_CONCURRENT_JOBS と同じ考え方）。
+# ジョブは mcp タスク（desiredCount=1）の中の daemon thread で動くので、プロセス内の
+# BoundedSemaphore がそのまま系全体の上限になる。全員公開（10-14 小俣さん決定・動画チェックの
+# Gemini 切替の後）の前提。上限なしだと、同時に何件も走って Aico 全体が遅くなる・費用が跳ねる。
+_MAX_CONCURRENT_JOBS_DEFAULT = 2
+BUSY_MESSAGE = (
+    "いま提案書を{running}件作成中のため、この依頼は受け付けられませんでした。"
+    "1件あたり40〜50分かかります。少し時間をおいて、もう一度送ってください。"
+)
+_job_slots_lock = threading.Lock()
+_job_slots: threading.BoundedSemaphore | None = None
+_job_slots_limit = 0
+
+
+def _configured_max_concurrent_jobs() -> int:
+    return _envint(
+        "PROPOSAL_MAX_CONCURRENT_JOBS",
+        _MAX_CONCURRENT_JOBS_DEFAULT,
+        minimum=1,
+        maximum=8,
+    )
+
+
+def _shared_job_slots() -> tuple[threading.BoundedSemaphore, int]:
+    """プロセス共有の枠（skill のインスタンスが呼び出しごとに作られても上限を共有する）。"""
+    global _job_slots, _job_slots_limit
+    with _job_slots_lock:
+        if _job_slots is None:
+            _job_slots_limit = _configured_max_concurrent_jobs()
+            _job_slots = threading.BoundedSemaphore(_job_slots_limit)
+        return _job_slots, _job_slots_limit
+
+
 def _configured_heartbeat_seconds() -> int:
     return _envint(
         "PROPOSAL_JOB_HEARTBEAT_SECONDS",
@@ -1531,7 +1564,9 @@ class ProposalBuilderSubmitSkill(
         input_validator: _ProposalInputValidator = _validate_submit_input,
         heartbeat_seconds: int | None = None,
         retry_after_seconds: int | None = None,
+        job_slots: tuple[threading.BoundedSemaphore, int] | None = None,
     ) -> None:
+        self._job_slots, self._job_slots_limit = job_slots or _shared_job_slots()
         self._builder_factory = builder_factory
         self._research_factory = research_factory
         self._store = store or ProposalJobStore()
@@ -1577,6 +1612,31 @@ class ProposalBuilderSubmitSkill(
                 message=RESEARCH_NOT_READY_MESSAGE,
             )
         self._input_validator(input)
+        if not self._job_slots.acquire(blocking=False):
+            # 枠が埋まっている: job row も thread も作らずに断る（待たない・submit は即答が契約）。
+            log.info("proposal_builder_submit_busy", limit=self._job_slots_limit)
+            return ProposalBuilderSubmitOutput(
+                job_id="",
+                status="failed",
+                retry_after_seconds=0,
+                message=BUSY_MESSAGE.format(running=self._job_slots_limit),
+            )
+        # 枠は thread を起動できたら thread が返す。それ以外（失敗・例外）はここで返す。
+        handed_off: list[bool] = [False]
+        try:
+            return self._submit(input, ctx, log, handed_off)
+        finally:
+            if not handed_off[0]:
+                self._job_slots.release()
+
+    def _submit(
+        self,
+        input: ProposalBuilderSubmitInput,
+        ctx: SkillContext,
+        log: Any,
+        handed_off: list[bool],
+    ) -> ProposalBuilderSubmitOutput:
+        """枠を取った後の受付。thread を起動できたら ``handed_off[0]`` を立てる。"""
         job_id = new_proposal_job_id()
         request_summary = {
             "request_id": ctx.request_id,
@@ -1595,11 +1655,16 @@ class ProposalBuilderSubmitSkill(
             user_id=ctx.user_id,
             metadata=copy.deepcopy(ctx.metadata),
         )
+
+        def background() -> None:
+            try:
+                self._run_background(job_id, job_input, job_ctx)
+            finally:
+                self._job_slots.release()
+
         try:
-            self._thread_launcher(
-                lambda: self._run_background(job_id, job_input, job_ctx),
-                f"proposal-builder-{job_id}",
-            )
+            self._thread_launcher(background, f"proposal-builder-{job_id}")
+            handed_off[0] = True
         except Exception as exc:
             self._store.mark_failed(
                 job_id,

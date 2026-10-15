@@ -33,7 +33,11 @@ from slack_sdk.errors import SlackApiError
 
 from teamagent.adapters.slack_channel_ingest_client import HistoryBatch, SlackMessage
 from teamagent.adapters.slack_file_guard import SlackFileGuardError
-from teamagent.adapters.slack_user_reader import SlackThreadRead, SlackUserReader
+from teamagent.adapters.slack_user_reader import (
+    SlackChannelSharing,
+    SlackThreadRead,
+    SlackUserReader,
+)
 from teamagent.skills.attachment_assist import skill as skill_mod
 from teamagent.skills.attachment_assist.permalink import may_repost, parse_permalink
 from teamagent.skills.attachment_assist.schema import AttachmentAssistInput
@@ -113,9 +117,16 @@ class _FakeStore:
 class _FakeReader:
     """SlackUserReader の代役（本人 xoxp）。見え方を error code で再現する。"""
 
-    def __init__(self, result: SlackThreadRead) -> None:
+    def __init__(self, result: SlackThreadRead, sharing: SlackChannelSharing | None = None) -> None:
         self.result = result
         self.calls: list[tuple[str, str, str]] = []
+        # 既定は社内のチャンネル。本番の失敗（共有・権限不足・取得失敗）は sharing で再現する
+        self.sharing = sharing or SlackChannelSharing(external=False)
+        self.sharing_calls: list[str] = []
+
+    def channel_sharing_checked(self, channel_id: str, request_id: str) -> SlackChannelSharing:
+        self.sharing_calls.append(channel_id)
+        return self.sharing
 
     def read_message_checked(
         self, channel_id: str, ts: str, request_id: str, *, thread_ts: str = ""
@@ -1212,3 +1223,130 @@ def test_extraction_scans_far_beyond_llm_cap_to_find_late_case(
     assert out.error == ""
     assert "紅茶花伝" in bedrock.last_user_text
     assert "35 ページ目" in out.message
+
+
+# ── 社外共有（Slack Connect）のチャンネルへは添付し直さない ──────────────────
+
+
+@pytest.mark.parametrize(
+    "sharing",
+    [
+        SlackChannelSharing(external=True),  # Slack Connect
+        SlackChannelSharing(error="ratelimited"),  # 確かめられない＝出さない
+        SlackChannelSharing(error="channel_not_found"),
+    ],
+)
+def test_public_file_not_reposted_to_external_or_unknown_channel(
+    sharing: SlackChannelSharing,
+) -> None:
+    skill, reader, slack, _, _ = _skill(_post([_file(is_public=True, channels=[SRC_CH])]))
+    reader.sharing = sharing
+    out = _run(skill, ctx=_ctx(channel=PUBLIC_ORIGIN, thread="1791278520.000900"))
+    assert slack.uploads == [] and out.error == "not_found"
+    assert reader.sharing_calls == [PUBLIC_ORIGIN]
+    # 共有かどうかで文を変えない（見えない投稿と同じ一様文）
+    invisible, _, _, _, _ = _skill(SlackThreadRead(error="channel_not_found"))
+    origin = _ctx(channel=PUBLIC_ORIGIN, thread="1791278520.000900")
+    assert out.message == _run(invisible, ctx=origin).message
+
+
+def test_missing_scope_on_sharing_check_asks_to_reconnect() -> None:
+    skill, reader, slack, _, _ = _skill(_post([_file(is_public=True, channels=[SRC_CH])]))
+    reader.sharing = SlackChannelSharing(error="missing_scope")
+    out = _run(skill, ctx=_ctx(channel=PUBLIC_ORIGIN))
+    assert slack.uploads == [] and slack.downloads == []
+    assert out.error == "not_connected" and "連携" in out.message
+    _assert_no_punt(out.message)
+
+
+def test_dm_and_same_channel_do_not_need_the_sharing_check() -> None:
+    skill, reader, slack, _, _ = _skill(_post([_file(is_public=True, channels=[SRC_CH])]))
+    reader.sharing = SlackChannelSharing(external=True)
+    assert _run(skill, ctx=_ctx(channel=DM)).error == "" and len(slack.uploads) == 1
+    same, same_reader, _, _, _ = _skill(_post([_file()]))
+    same_reader.sharing = SlackChannelSharing(external=True)
+    assert _run(same, ctx=_ctx(channel=SRC_CH)).error == ""
+    assert reader.sharing_calls == [] and same_reader.sharing_calls == []
+
+
+class _InfoClient:
+    def __init__(self, channel: dict[str, Any] | None = None, exc: Exception | None = None) -> None:
+        self.channel = channel
+        self.exc = exc
+        self.calls: list[str] = []
+
+    async def conversations_info(self, *, channel: str) -> dict[str, Any]:
+        self.calls.append(channel)
+        if self.exc is not None:
+            raise self.exc
+        return {"ok": True, "channel": self.channel}
+
+
+@pytest.mark.parametrize(
+    ("channel", "external"),
+    [
+        # 本番の conversations.info はチャンネルに is_ext_shared 等の真偽値を必ず載せる
+        ({"id": PUBLIC_ORIGIN, "is_ext_shared": False}, False),
+        ({"id": PUBLIC_ORIGIN, "is_ext_shared": True}, True),
+        ({"id": PUBLIC_ORIGIN, "is_ext_shared": False, "is_pending_ext_shared": True}, True),
+        ({"id": PUBLIC_ORIGIN, "is_ext_shared": False, "is_shared": True}, True),
+        (
+            {"id": PUBLIC_ORIGIN, "is_ext_shared": False, "is_shared": True, "is_org_shared": True},
+            False,
+        ),
+    ],
+)
+def test_reader_channel_sharing(channel: dict[str, Any], external: bool) -> None:
+    client = _InfoClient(channel)
+    got = SlackUserReader("xoxp-test", client=client).channel_sharing_checked(PUBLIC_ORIGIN, "r")
+    assert got == SlackChannelSharing(external=external) and client.calls == [PUBLIC_ORIGIN]
+
+
+def test_reader_channel_sharing_fails_closed() -> None:
+    err = SlackApiError("x", {"ok": False, "error": "missing_scope"})  # type: ignore[arg-type]
+    got = SlackUserReader("xoxp-test", client=_InfoClient(exc=err)).channel_sharing_checked(
+        PUBLIC_ORIGIN, "r"
+    )
+    assert got.external is True and got.error == "missing_scope"
+    bad = SlackUserReader("xoxp-test", client=_InfoClient()).channel_sharing_checked("x", "r")
+    assert bad.external is True and bad.error == "bad_target"
+
+
+def test_reader_channel_sharing_without_flags_is_not_internal() -> None:
+    got = SlackUserReader(
+        "xoxp-test", client=_InfoClient({"id": PUBLIC_ORIGIN})
+    ).channel_sharing_checked(PUBLIC_ORIGIN, "r")
+    assert got.external is True and got.error == "bad_response"
+
+
+def test_reader_keeps_needed_scope_on_missing_scope() -> None:
+    err = SlackApiError(  # type: ignore[arg-type]
+        "x", {"ok": False, "error": "missing_scope", "needed": "mpim:read"}
+    )
+    got = SlackUserReader("xoxp-test", client=_InfoClient(exc=err)).channel_sharing_checked(
+        PUBLIC_ORIGIN, "r"
+    )
+    assert got.error == "missing_scope" and got.needed == "mpim:read"
+
+
+def test_scope_that_reconnect_cannot_grant_is_a_uniform_denial() -> None:
+    # 本人連携の scope に mpim:read は無い＝再連携しても直らない。行き止まりの「連携して」を出さない
+    skill, reader, slack, _, _ = _skill(_post([_file(is_public=True, channels=[SRC_CH])]))
+    reader.sharing = SlackChannelSharing(error="missing_scope", needed="mpim:read")
+    out = _run(skill, ctx=_ctx(channel=PUBLIC_ORIGIN))
+    assert out.error == "not_found" and slack.uploads == []
+    reader.sharing = SlackChannelSharing(error="missing_scope", needed="channels:read")
+    assert _run(skill, ctx=_ctx(channel=PUBLIC_ORIGIN)).error == "not_connected"
+
+
+def test_sharing_is_checked_before_reading_the_linked_post() -> None:
+    # 読めたかどうかで返事が変わると投稿の有無が漏れるので、社外共有なら投稿を読まずに断る
+    skill, reader, slack, _, _ = _skill(_post([_file(is_public=True, channels=[SRC_CH])]))
+    reader.sharing = SlackChannelSharing(external=True)
+    visible = _run(skill, ctx=_ctx(channel=PUBLIC_ORIGIN))
+    assert reader.calls == [] and slack.uploads == []
+    hidden, hidden_reader, _, _, _ = _skill(SlackThreadRead(error="channel_not_found"))
+    hidden_reader.sharing = SlackChannelSharing(error="missing_scope")
+    reconnect = _run(hidden, ctx=_ctx(channel=PUBLIC_ORIGIN))
+    assert hidden_reader.calls == [] and reconnect.error == "not_connected"
+    assert visible.error == "not_found"

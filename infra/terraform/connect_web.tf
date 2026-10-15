@@ -34,6 +34,17 @@ variable "personal_memory_admin_emails" {
   }
 }
 
+variable "history_admin_emails" {
+  description = "質問と回答の履歴の管理者閲覧（/admin/history）を許す email（HISTORY_ADMIN_EMAILS）。CONNECT_ADMIN_EMAILS・PERSONAL_MEMORY_ADMIN_EMAILS とは共用しない。v1 は小俣さんちょうど 1 名（2026-10-14 決裁）。空＝誰も見られない。⚠️ TD で変えたら activation 版 tfvars（正本）へ同じ値を追記。"
+  type        = string
+  default     = ""
+
+  validation {
+    condition     = var.history_admin_emails == "" || can(regex("^[^,@[:space:]]+@[^,@[:space:]]+$", var.history_admin_emails))
+    error_message = "history_admin_emails は空か email ちょうど 1 件（v1 の決裁。広げるには決裁が要る）。"
+  }
+}
+
 variable "connect_answer_rating" {
   description = "既定OFFで AI 要約の4段階評価UIを非表示にする機能フラグ"
   type        = bool
@@ -226,6 +237,8 @@ data "aws_iam_policy_document" "ecs_execution_connect_web_secrets" {
       data.aws_secretsmanager_secret.connect_slack_client_secret[0].arn,
       data.aws_secretsmanager_secret.slack_oauth_state_secret[0].arn,
       data.aws_secretsmanager_secret.database_url.arn,
+      # 質問と回答の履歴（/admin/history・/app/history）が対象の 1 人の DM を読む bot token。
+      data.aws_secretsmanager_secret.slack_bot.arn,
     ], local.hmac_report_secret_iam_arns)
   }
 }
@@ -453,6 +466,8 @@ resource "aws_ecs_task_definition" "connect_web" {
       { name = "CONNECT_ANSWER_RATING", value = var.connect_answer_rating ? "true" : "false" },
       # 本人メモの管理者閲覧（M6）。本人メモ専用の allowlist（空＝誰も見られない）。
       { name = "PERSONAL_MEMORY_ADMIN_EMAILS", value = var.personal_memory_admin_emails },
+      # 質問と回答の履歴の管理者閲覧（上司 5）。専用の allowlist（空＝誰も見られない）。
+      { name = "HISTORY_ADMIN_EMAILS", value = var.history_admin_emails },
       { name = "OAUTH_REDIRECT_URI", value = var.connect_redirect_uri },
       { name = "SLACK_OAUTH_REDIRECT_URI", value = var.slack_oauth_redirect_uri },
       { name = "SLACK_TEAM_ID", value = var.slack_team_id },
@@ -535,6 +550,7 @@ resource "aws_ecs_task_definition" "connect_web" {
       { name = "CONNECT_SLACK_CLIENT_SECRET", valueFrom = data.aws_secretsmanager_secret.connect_slack_client_secret[0].arn },
       { name = "SLACK_OAUTH_STATE_SECRET", valueFrom = data.aws_secretsmanager_secret.slack_oauth_state_secret[0].arn },
       { name = "DATABASE_URL", valueFrom = data.aws_secretsmanager_secret.database_url.arn },
+      { name = "SLACK_BOT_TOKEN", valueFrom = data.aws_secretsmanager_secret.slack_bot.arn },
     ], local.report_link_hmac_secrets)
     logConfiguration = {
       logDriver = "awslogs"
