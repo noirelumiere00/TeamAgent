@@ -197,3 +197,11 @@ def test_acl_update_rowcount_failure_raises_for_transaction_rollback() -> None:
     pg = _FakePgVector(fetchall_results=[[lock_row]], update_rowcounts=[0])
     with pytest.raises(GDriveAclOptimisticLockError, match="transaction rolled back"):
         _repo(pg).update_gdrive_acls([_update()])
+
+
+def test_acl_snapshot_can_target_one_file() -> None:
+    pg = _FakePgVector(fetchall_results=[[_snapshot_row()]])
+    assert len(_repo(pg).list_nonstale_gdrive_acl_snapshot(external_id="drive-file-1")) == 1
+    sql, params = pg.conn.executed[0]
+    assert "AND external_id = %s" in sql
+    assert params == ("drive-file-1",)

@@ -7,7 +7,9 @@ dispatch_tool 経由の順序（offload→リンク注入）。
 
 from __future__ import annotations
 
+import asyncio
 import json
+import threading
 from typing import Any, ClassVar
 
 import pytest
@@ -100,8 +102,8 @@ def test_offload_trims_structure_preserving(monkeypatch: pytest.MonkeyPatch) -> 
     assert len(out["hits"][0]["content"]) <= 100 + 30
     assert out["hits"][0]["source_uri"] == data["hits"][0]["source_uri"]  # リンク温存
     assert len(out["answer"]) <= 500 + 30  # 要約キーは5倍許容
-    # S3 に上がったのは切り詰め前の全文。
-    assert json.loads(uploaded[0])["hits"][0]["content"] == "本文" * 300
+    assert "hits" not in json.loads(uploaded[0])
+    assert "answer" not in json.loads(uploaded[0])
 
 
 def test_s3_failure_fail_open(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -189,3 +191,59 @@ def test_list_direct_strings_are_trimmed(monkeypatch: pytest.MonkeyPatch) -> Non
     data = {"answer": "a" * 2000, "notes": ["n" * 3000]}
     out = po.maybe_offload("search", data, request_id="r")
     assert len(out["notes"][0]) <= 100 + 30
+
+
+@pytest.mark.parametrize("key", ["hits", "related"])
+def test_private_document_body_is_not_published(monkeypatch: pytest.MonkeyPatch, key: str) -> None:
+    uploaded = _fake_publish(monkeypatch, _PRESIGNED)
+    data = {key: [{"content": "private-document-body" * 100}], "answer": "private-answer" * 100}
+    out = po.maybe_offload("search", data, request_id="private")
+    assert "private-document-body" not in uploaded[0]
+    assert "private-answer" not in uploaded[0]
+    assert out[key][0]["content"].startswith("private-document-body")
+    assert out["answer"].startswith("private-answer")
+    assert data[key][0]["content"] == "private-document-body" * 100
+
+
+async def test_slow_offload_allows_another_request(monkeypatch: pytest.MonkeyPatch) -> None:
+    started = threading.Event()
+    release = threading.Event()
+    progressed = threading.Event()
+
+    def offload(tool: str, data: dict[str, Any], **kwargs: Any) -> dict[str, Any]:
+        if kwargs["request_id"] == "slow":
+            started.set()
+            assert release.wait(3), "another request could not run while offload waited"
+        return data
+
+    monkeypatch.setattr(po, "maybe_offload", offload)
+    by_name = {SEARCH_TOOL_NAME: ToolSpec(SEARCH_TOOL_NAME, "t", _BigSearchSkill)}
+
+    async def request() -> Any:
+        return await dispatch_tool(
+            by_name,
+            SEARCH_TOOL_NAME,
+            {"q": "x", USER_CONTEXT_KEY: {"user_email": "a@b.co"}},
+            require_rls=True,
+        )
+
+    # dispatch_tool generates its context request ID; set it explicitly through the context factory.
+    from teamagent.mcp_gateway import server
+
+    original = server.SkillContext
+    ids = iter(["slow", "fast"])
+
+    def context(**kwargs: Any) -> SkillContext:
+        kwargs["request_id"] = next(ids)
+        return original(**kwargs)
+
+    monkeypatch.setattr(server, "SkillContext", context)
+    slow = asyncio.create_task(request())
+    try:
+        assert await asyncio.to_thread(started.wait, 3)
+        await request()
+        progressed.set()
+    finally:
+        release.set()
+        await slow
+    assert progressed.is_set()

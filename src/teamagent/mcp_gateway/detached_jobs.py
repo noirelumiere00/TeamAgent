@@ -532,6 +532,11 @@ def post_to_origin_status(
                 text, user_id=fallback_user_id, request_id=request_id, timeout_s=_POST_TIMEOUT_S
             )
         )
+    except TimeoutError:
+        logger.warning(
+            "video_algorithm_detach_post_uncertain", request_id=request_id, error="TimeoutError"
+        )
+        return "uncertain"
     except Exception as exc:
         logger.warning(
             "video_algorithm_detach_dm_fallback_failed",

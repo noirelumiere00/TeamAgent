@@ -87,6 +87,25 @@ class _ChecksumRepository:
         self.stored_checksum = stored_checksum
         self.lookup_calls: list[tuple[str, str]] = []
         self.upsert_calls: list[Any] = []
+        self.acl_updates: list[Any] = []
+        self.acl_emails = ("owner@example.com", "removed@example.com")
+        self.acl_groups = ("removed-group@example.com",)
+
+    def list_nonstale_gdrive_acl_snapshot(self, *, external_id: str) -> list[Any]:
+        from teamagent.ingest.repository import GDriveAclSnapshot
+
+        return [
+            GDriveAclSnapshot(
+                "doc", external_id, "owner@example.com", self.acl_emails, self.acl_groups, "1"
+            )
+        ]
+
+    def update_gdrive_acls(self, updates: list[Any]) -> int:
+        self.acl_updates.extend(updates)
+        for update in updates:
+            self.acl_emails = update.acl_emails
+            self.acl_groups = update.acl_groups
+        return len(updates)
 
     def get_document_checksum(self, source_type: str, external_id: str) -> str | None:
         self.lookup_calls.append((source_type, external_id))
@@ -122,6 +141,7 @@ def _process_file(
     *,
     repository: _ChecksumRepository,
     drive_file: DriveFile,
+    dry_run: bool = False,
 ) -> tuple[tuple[int, int], MagicMock, _SequentialEmbedder, list[str]]:
     from teamagent.ingest.pipeline import _process_one_gdrive_file
 
@@ -138,7 +158,7 @@ def _process_file(
         embedder=embedder,
         repository=repository,  # type: ignore[arg-type]
         owner_email="owner@example.com",
-        dry_run=False,
+        dry_run=dry_run,
         request_id="request",
         skipped=skipped,
     )
@@ -162,7 +182,10 @@ def test_matching_md5_skips_before_download_extract_embed_and_write(
     assert skipped == ["FILE-1"]
     assert repository.lookup_calls == [("gdrive", "FILE-1")]
     assert repository.upsert_calls == []
-    client.list_permissions.assert_not_called()
+    client.list_permissions.assert_called_once_with(file_id="FILE-1", request_id="request")
+    assert len(repository.acl_updates) == 1
+    assert repository.acl_updates[0].acl_emails == ("owner@example.com",)
+    assert repository.acl_updates[0].acl_groups == ()
     client.download_file_bytes.assert_not_called()
     assert embedder.calls == []
 
@@ -231,3 +254,20 @@ def test_unchanged_skip_can_be_disabled(monkeypatch: pytest.MonkeyPatch) -> None
     assert repository.lookup_calls == []
     assert embedder.calls == ["body"]
     assert len(repository.upsert_calls) == 1
+
+
+@pytest.mark.parametrize("dry_run", [False, True])
+def test_unchanged_acl_does_not_write(monkeypatch: pytest.MonkeyPatch, dry_run: bool) -> None:
+    monkeypatch.setenv("USE_UNCHANGED_SKIP", "true")
+    repository = _ChecksumRepository("a" * 32)
+    if not dry_run:
+        repository.acl_emails = ("owner@example.com",)
+        repository.acl_groups = ()
+    _process_file(
+        monkeypatch,
+        repository=repository,
+        drive_file=_drive_file(checksum="a" * 32),
+        dry_run=dry_run,
+    )
+    assert repository.acl_updates == []
+    assert repository.upsert_calls == []

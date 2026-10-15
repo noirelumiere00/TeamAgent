@@ -40,6 +40,13 @@ def notices(monkeypatch: pytest.MonkeyPatch) -> Iterator[list[dict[str, Any]]]:
         return True
 
     monkeypatch.setattr(detached_jobs, "post_to_origin", post)
+    monkeypatch.setattr(
+        detached_jobs,
+        "post_to_origin_status",
+        lambda *args, **kwargs: (
+            "posted" if detached_jobs.post_to_origin(*args, **kwargs) else "failed"
+        ),
+    )
     notify._active.clear()
     yield posted
     notify._active.clear()
@@ -901,3 +908,108 @@ def test_latest_omiyage_restart_failure_does_not_claim_analysis_finished(
     assert result.status == "failed" and result.error_code == "MCP_RESTARTED"
     assert "システム更新" in result.message
     assert "動画分析は終わりました" not in result.message
+
+
+@pytest.mark.parametrize("failure", ["failed", "uncertain"])
+def test_notice_failure_retries_only_when_certain(
+    notices: list[dict[str, Any]],
+    monkeypatch: pytest.MonkeyPatch,
+    failure: str,
+) -> None:
+    _inline_threads(monkeypatch)
+    attempts: list[str] = []
+    clock = [0.0]
+    monkeypatch.setattr(notify, "_monotonic", lambda: clock[0])
+    monkeypatch.setattr(notify, "_MAX_WATCH_SECONDS", 60)
+    monkeypatch.setattr(notify, "_TIMEOUT_SECONDS", 0)
+
+    def advance(deadline: float, interval: float) -> None:
+        clock[0] += interval
+
+    monkeypatch.setattr(notify, "_wait_until_next_poll", advance)
+
+    def post(*args: Any, **kwargs: Any) -> str:
+        attempts.append(args[0])
+        assert _outbox()  # Keep the durable entry until delivery has been resolved.
+        return failure if len(attempts) == 1 else "posted"
+
+    monkeypatch.setattr(detached_jobs, "post_to_origin_status", post)
+    notify.schedule_completion_notice(
+        tool="tiktok_acquire",
+        job_id="retry",
+        origin=target(),
+        request_id="req",
+        poll=lambda: ("done", "result"),
+        ctx=ctx(),
+    )
+    assert attempts == (["result", "result"] if failure == "failed" else ["result"])
+    assert _outbox() == {}
+
+
+def test_failed_notice_keeps_outbox_on_watcher_exception(
+    notices: list[dict[str, Any]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _inline_threads(monkeypatch)
+    monkeypatch.setattr(detached_jobs, "post_to_origin_status", lambda *a, **kw: "failed")
+
+    def stop(deadline: float, interval: float) -> None:
+        if interval:
+            raise RuntimeError("watcher interrupted")
+
+    monkeypatch.setattr(notify, "_wait_until_next_poll", stop)
+    notify.schedule_completion_notice(
+        tool="tiktok_acquire",
+        job_id="retry",
+        origin=target(),
+        request_id="req",
+        poll=lambda: ("done", "result"),
+        ctx=ctx(),
+    )
+    assert _outbox()
+
+
+@pytest.mark.parametrize("uncertain", [False, True])
+def test_notice_released_lock_is_retryable_after_restart(
+    notices: list[dict[str, Any]],
+    monkeypatch: pytest.MonkeyPatch,
+    uncertain: bool,
+) -> None:
+    monkeypatch.setattr(
+        detached_jobs,
+        "post_to_origin_status",
+        lambda *a, **kw: "uncertain" if uncertain else "failed",
+    )
+    assert not notify.publish_notice("result", origin=target(), job_id="restart", request_id="req")
+    attempts: list[str] = []
+
+    def post(*args: Any, **kwargs: Any) -> str:
+        attempts.append(args[0])
+        return "posted"
+
+    monkeypatch.setattr(detached_jobs, "post_to_origin_status", post)
+    assert notify.publish_notice("result", origin=target(), job_id="restart", request_id="req") is (
+        not uncertain
+    )
+    assert attempts == ([] if uncertain else ["result"])
+
+
+def test_dm_fallback_timeout_is_uncertain(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def rejected(*args: Any, **kwargs: Any) -> bool:
+        return False
+
+    async def timeout(*args: Any, **kwargs: Any) -> bool:
+        raise TimeoutError
+
+    monkeypatch.setattr(detached_jobs, "_post_once", rejected)
+    monkeypatch.setattr(detached_jobs, "_post_to_user_dm", timeout)
+    monkeypatch.setattr(detached_jobs, "_POST_RETRY_WAIT_S", 0)
+    assert (
+        detached_jobs.post_to_origin_status(
+            "result",
+            detached_jobs.Destination("D12345678", None),
+            request_id="req",
+            fallback_user_id="U12345678",
+        )
+        == "uncertain"
+    )

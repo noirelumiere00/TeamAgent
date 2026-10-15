@@ -62,7 +62,8 @@ def publish_notice(
 
     try:
         if not store.put_dedup_lock(key, "claimed", expected_target=None):
-            return False
+            if not store.put_dedup_lock(key, "claimed", expected_target=""):
+                return False
         if kind == "terminal" and not completed:
             # 組み立てに失敗しても、完了済み調査JSONは依頼者へ届ける。
             origin.discard(keep_failure_uploads=True)
@@ -107,6 +108,7 @@ def publish_notice(
                     else:
                         message += " 完了済みの調査JSONはDMへお届けしました。"
             except TimeoutError:
+                logger.warning("long_job_notice_uncertain", request_id=request_id, job_id=job_id)
                 # 添付の自動再送はしない。DMへ振り替えた場合は依頼元へ結果の不確実性を知らせる。
                 if not origin.redirected:
                     return False
@@ -142,13 +144,19 @@ def publish_notice(
                         " ".join(notes)
                         or "資料は生成・保存できましたが、Slackへの添付に失敗しました。"
                     )
-        return detached_jobs.post_to_origin(
+        status = detached_jobs.post_to_origin_status(
             message,
             detached_jobs.Destination(origin.channel_id, origin.thread_ts),
             request_id=request_id,
             fallback_user_id=origin.user_id,
             rich=rich,
         )
+        if status == "failed":
+            store.put_dedup_lock(key, "", expected_target="claimed")
+            origin.release_notice(kind)
+        elif status == "uncertain":
+            logger.warning("long_job_notice_uncertain", request_id=request_id, job_id=job_id)
+        return status == "posted"
     except Exception as exc:
         logger.warning("long_job_notice_failed", request_id=request_id, error=type(exc).__name__)
         return False
@@ -204,8 +212,9 @@ def schedule_completion_notice(
     outbox_key = key if ctx is not None else None
 
     def run() -> None:
+        finished = False
         try:
-            _run_completion_notice(
+            finished = _run_completion_notice(
                 job_id=job_id,
                 origin=origin,
                 request_id=request_id,
@@ -215,9 +224,8 @@ def schedule_completion_notice(
         finally:
             with _lock:
                 _active.pop(key, None)
-            # 更新での停止（cancelled）だけは行を残し、次のプロセスが見張りを再開する。
-            # それ以外の終わり方（完了・失敗・24 時間の見守り切れ・例外）では行を消す。
-            if outbox_key and not origin.cancelled:
+            # 確定失敗・例外・更新での停止は未配信情報を残して再開に回す。
+            if outbox_key and finished and not origin.cancelled:
                 _remove_from_outbox(outbox_key, request_id)
 
     try:
@@ -235,7 +243,7 @@ def _run_completion_notice(
     request_id: str,
     poll: Callable[[], tuple[str, str]],
     outbox_key: str | None = None,
-) -> None:
+) -> bool:
     started = _monotonic()
     deadline = started + _MAX_WATCH_SECONDS
     _wait_until_next_poll(deadline, _INITIAL_DELAY_SECONDS)
@@ -269,8 +277,9 @@ def _run_completion_notice(
                     job_id=job_id,
                     completed=status == "done",
                 )
-                return
-        if _monotonic() - started >= _TIMEOUT_SECONDS:
+                if origin.has_notice("terminal"):
+                    return True
+        if last_status not in {"done", "failed"} and _monotonic() - started >= _TIMEOUT_SECONDS:
             message = (
                 "作業はまだ完了していません。通常より時間がかかっています。完了・失敗はこの会話にお届けします。"
                 if last_status in {"queued", "running"}
@@ -283,8 +292,8 @@ def _run_completion_notice(
                 message, origin=origin, request_id=request_id, job_id=job_id, kind="stalled"
             )
         _wait_until_next_poll(deadline, _POLL_INTERVAL_SECONDS)
-    if origin.cancelled:
-        return
+    if origin.cancelled or last_status in {"done", "failed"}:
+        return False
     publish_notice(
         "作業の見守りを継続できなくなりました。完了は確認できていません。",
         origin=origin,
@@ -292,6 +301,7 @@ def _run_completion_notice(
         job_id=job_id,
         kind="interrupted",
     )
+    return True
 
 
 def _wait_until_next_poll(deadline: float, interval_seconds: float) -> None:

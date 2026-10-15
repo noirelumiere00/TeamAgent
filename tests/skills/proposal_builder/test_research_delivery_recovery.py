@@ -122,6 +122,11 @@ def _build_job(
     monkeypatch.setattr(
         detached_jobs, "post_to_origin", lambda message, *_a, **_kw: posts.append(message) or True
     )
+    monkeypatch.setattr(
+        detached_jobs,
+        "post_to_origin_status",
+        lambda message, *_a, **_kw: posts.append(message) or "posted",
+    )
     accepted = ProposalBuilderSubmitSkill(
         builder_factory=lambda: builder,
         research_factory=Research,
