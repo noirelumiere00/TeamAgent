@@ -57,6 +57,8 @@ MCP_SURFACE_CTX_KEY = TWO_STAGE_CTX_KEY
 SLACK_TOP_N = 5
 #: search.messages で取る件数。チャンネル経路で非公開分を落としても 5 件残りやすいよう多めに取る。
 SLACK_FETCH_COUNT = 10
+FANOUT_FETCH_COUNT = 20
+FANOUT_SUMMARY_MAX = 20
 EXCERPT_CHARS = 160
 #: 要約器へ渡す 1 投稿の本文上限（ツール結果には載らない）。
 LLM_TEXT_CHARS = 500
@@ -258,8 +260,10 @@ def lookup_slack(
     metadata: Mapping[str, Any],
     request_id: str,
     fanout: bool = False,
+    deadline_at: float | None = None,
+    client_name: str | None = None,
 ) -> SlackLookup:
-    """本人の Slack を search.messages で探し、表示してよい上位 5 件を返す（例外は投げない）。"""
+    """本人の Slack を探す（通常 5 件・統合検索は要約用に最大 20 件・例外は投げない）。"""
     try:
         return _lookup_slack(
             slack_store=slack_store,
@@ -268,6 +272,8 @@ def lookup_slack(
             metadata=metadata,
             request_id=request_id,
             fanout=fanout,
+            deadline_at=deadline_at,
+            client_name=client_name,
         )
     except Exception as exc:  # Slack 側の想定外で金庫の検索を落とさない
         logger.warning(
@@ -284,8 +290,14 @@ def _lookup_slack(
     metadata: Mapping[str, Any],
     request_id: str,
     fanout: bool = False,
+    deadline_at: float | None = None,
+    client_name: str | None = None,
 ) -> SlackLookup:
+    from teamagent.skills.slack_search.render import classify_visibility
     from teamagent.skills.slack_search.skill import _partition
+
+    if fanout and deadline_at is None:
+        deadline_at = time.perf_counter() + 8.0
 
     requester = str(metadata.get("user_email", "") or "").strip()
     if not requester:
@@ -314,40 +326,76 @@ def _lookup_slack(
 
     terms = slack_query_terms(query)
     if fanout:
-        deadline_at = time.perf_counter() + 8.0
+        assert deadline_at is not None
         sort: Literal["timestamp", "score"] = (
             "timestamp"
             if any(word in query for word in ("最新", "直近", "最近", "今週"))
             else "score"
         )
-        result = reader.search_checked(
-            terms,
-            request_id,
-            count=SLACK_FETCH_COUNT,
-            sort=sort,
-            timeout_s=max(0.001, deadline_at - time.perf_counter()),
-        )
-        if not result.error and not result.matches and len(terms.split()) == 3:
+        queries = [terms]
+        if not _SLACK_OPERATOR_RE.search(terms):
+            words = terms.split()
+            if len(words) == 3:
+                queries.append(" ".join(words[:2]))
+            # shortcut: 取引先の指定が無ければ先頭語を使う。固有名抽出が必要なら見直す。
+            if len(words) >= 2:
+                queries.append(client_name or words[0])
+        matches_by_key: dict[tuple[str, str], Any] = {}
+        for search_query in dict.fromkeys(queries):
+            remaining = deadline_at - time.perf_counter()
+            if remaining <= 0:
+                return SlackLookup(status="error", reason="timeout")
             result = reader.search_checked(
-                " ".join(terms.split()[:2]),
+                search_query,
                 request_id,
-                count=SLACK_FETCH_COUNT,
+                count=FANOUT_FETCH_COUNT,
+                page=1,
                 sort=sort,
-                timeout_s=max(0.001, deadline_at - time.perf_counter()),
+                timeout_s=remaining,
             )
+            if result.error:
+                break
+            for match in result.matches:
+                matches_by_key.setdefault((match.channel_id, match.ts), match)
+            usable, _ = drop_own_conversation(tuple(matches_by_key.values()), origin=origin)
+            shown, _ = _partition(usable, dm_surface=dm_surface)
+            if len(shown) >= SLACK_TOP_N:
+                break
+        if not result.error and result.total > FANOUT_FETCH_COUNT:
+            remaining = deadline_at - time.perf_counter()
+            if remaining > 0:
+                result = reader.search_checked(
+                    search_query,
+                    request_id,
+                    count=FANOUT_FETCH_COUNT,
+                    page=2,
+                    sort=sort,
+                    timeout_s=remaining,
+                )
+                if not result.error:
+                    for match in result.matches:
+                        matches_by_key.setdefault((match.channel_id, match.ts), match)
+        matches = tuple(matches_by_key.values())
     else:
         result = reader.search_checked(terms, request_id, count=SLACK_FETCH_COUNT)
+        matches = result.matches
     if result.error:
         if result.error in _RECONNECT_CODES:
             return SlackLookup(status="not_connected", reason="reconnect_required")
         logger.info("search_composite_slack_error", request_id=request_id, slack_error=result.error)
         return SlackLookup(status="error", reason="search_failed")
 
-    matches, dropped = drop_own_conversation(result.matches, origin=origin)
+    matches, dropped = drop_own_conversation(matches, origin=origin)
     if dropped:
         logger.info("search_composite_slack_self_dropped", request_id=request_id, dropped=dropped)
     shown, hidden_count = _partition(matches, dm_surface=dm_surface)
-    items = tuple(_to_item(m) for m in shown[:SLACK_TOP_N])
+    if fanout:
+        shown = sorted(
+            shown,
+            key=lambda m: not (m.channel_is_channel is True and classify_visibility(m) == "public"),
+        )
+    limit = FANOUT_SUMMARY_MAX if fanout else SLACK_TOP_N
+    items = tuple(_to_item(m) for m in shown[:limit])
     return SlackLookup(status="ok", reason="ok", items=items, hidden_count=hidden_count)
 
 

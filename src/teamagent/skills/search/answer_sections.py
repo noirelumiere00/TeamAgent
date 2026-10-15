@@ -758,6 +758,8 @@ def scope_line(lanes: Mapping[str, LaneStatus], *, deal_count: int = 0) -> str:
         for name in LANE_ORDER
         if name in lanes
     ]
+    if "slack" in lanes and lanes["slack"].kind in ("found", "zero"):
+        parts.append("Slack: 公開チャンネル全体＋参加している非公開・DM")
     return SCOPE_PREFIX + ("・".join(parts) if parts else "記録なし")
 
 

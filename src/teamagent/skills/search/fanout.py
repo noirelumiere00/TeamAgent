@@ -32,7 +32,12 @@ from teamagent.skills.search.answer_sections import (
 )
 from teamagent.skills.search.campaign_files import is_campaign_hit, scope_by_industry
 from teamagent.skills.search.client_match import hit_entities
-from teamagent.skills.search.composite import MCP_SURFACE_CTX_KEY, SlackLookup, lookup_slack
+from teamagent.skills.search.composite import (
+    MCP_SURFACE_CTX_KEY,
+    SLACK_TOP_N,
+    SlackLookup,
+    lookup_slack,
+)
 from teamagent.skills.search.dates import resolve_date_basis
 from teamagent.skills.search.expand import (
     ExpansionResult,
@@ -252,6 +257,8 @@ def run_fanout(skill: Any, input: SearchInput, ctx: SkillContext) -> SearchOutpu
                 metadata=dict(ctx.metadata),
                 request_id=ctx.request_id,
                 fanout=True,
+                deadline_at=started + SLACK_DEADLINE_S,
+                client_name=input.filter_client,
             )
         finally:
             slack_ms[0] = int((time.perf_counter() - lane_started) * 1000)
@@ -401,7 +408,7 @@ def run_fanout(skill: Any, input: SearchInput, ctx: SkillContext) -> SearchOutpu
         karte_hits=karte.items,
         case_rows=_case_rows(cases) if cases.stage != 4 else (),
         near_case_rows=_case_rows(near),
-        slack_hits=[i.hit for i in slack.items],
+        slack_hits=[i.hit for i in slack.items[:SLACK_TOP_N]],
         min_score=skill._weak_result_threshold,
         karte_client=client or "",
         expand_subject=input.query,
@@ -556,7 +563,7 @@ def run_fanout(skill: Any, input: SearchInput, ctx: SkillContext) -> SearchOutpu
         hits=_output_hits(skill, hits, file_urls),
         found=found,
         total_cost_usd=summary_cost + expanded.cost_usd + vault_cost,
-        slack_hits=[i.hit for i in slack.items],
+        slack_hits=[i.hit for i in slack.items[:SLACK_TOP_N]],
         slack_status=slack.status,
         query_client=client,
         sources=[

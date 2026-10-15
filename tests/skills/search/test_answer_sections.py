@@ -562,6 +562,7 @@ def test_special_markup_in_titles_excerpts_and_names_is_neutralized() -> None:
     # 問いの語の『』は外して 1 組だけで囲む。
     assert answer.endswith(
         "探した範囲（まとめて検索）: 金庫 ✓1件（『＜!channel＞ 宅配 事例』『宅配』）・Slack ✓1件"
+        "・Slack: 公開チャンネル全体＋参加している非公開・DM"
     )
 
 
@@ -673,6 +674,8 @@ def test_dates_are_only_shown_when_well_formed() -> None:
     ],
 )
 def test_scope_line_states(name: str, status: LaneStatus, text: str) -> None:
+    if name == "slack" and status.kind in ("found", "zero"):
+        text += "・Slack: 公開チャンネル全体＋参加している非公開・DM"
     assert scope_line({name: status}) == SCOPE_PREFIX + text
 
 
@@ -685,6 +688,7 @@ def test_scope_line_order_is_fixed_and_counts_deals() -> None:
         "・カルテ ✓最新1件（『北都フーズ』）"
         "・事例 0件（『北都フーズ』）"
         "・X・TikTok —（自動では探していません。「X の声も見て」と言えば調べます）"
+        "・Slack: 公開チャンネル全体＋参加している非公開・DM"
     )
     # compose_answer は 🤝 の件数から「うち案件」を数える。
     answer = compose_answer(head="要約", sections=_all_sections(), lanes=LANES_ALL)
@@ -778,6 +782,7 @@ def test_lane_from_slack_takes_over_status_note_roles() -> None:
     assert "Slack に無いという意味ではありません" in scope_line({"slack": failed})
     assert scope_line({"slack": hidden}) == (
         "探した範囲（まとめて検索）: Slack 0件（『宅配』・非公開の場所の一致 2件は DM でだけ出せます）"
+        "・Slack: 公開チャンネル全体＋参加している非公開・DM"
     )
 
 
