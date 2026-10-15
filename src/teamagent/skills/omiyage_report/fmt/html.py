@@ -105,7 +105,9 @@ class _DeckHtmlBuilder:
         meta = content.deck_meta
         accents = spec.tokens.colors.brand_accents
         self._accent_a = meta.brand_a.accent_color or accents.brand_a.value
-        self._accent_b = meta.brand_b.accent_color or accents.brand_b.value
+        self._accent_b = (
+            meta.brand_b.accent_color if meta.brand_b else None
+        ) or accents.brand_b.value
 
     # ------------------------------------------------------------------
     # helpers
@@ -221,7 +223,10 @@ class _DeckHtmlBuilder:
             '<div class="cv-mid"><div class="cv-left">',
             f'<p class="cv-cat">{sink.take("latin", meta.category_en)}</p>',
             '<p class="cv-brands">'
-            + sink.take("mincho", f"{meta.brand_a.name} × {meta.brand_b.name}")
+            + sink.take(
+                "mincho",
+                f"{meta.brand_a.name} × {meta.brand_b.name}" if meta.brand_b else meta.brand_a.name,
+            )
             + "</p>",
             '<h1 class="cv-title">'
             + "<br>".join(
@@ -363,7 +368,7 @@ class _DeckHtmlBuilder:
                 units_with_pairs,
             )
             + self._c_card(
-                meta.brand_b.name,
+                (meta.brand_b.name if meta.brand_b else ""),
                 self._accent_b,
                 data.note_b,
                 data.groups,

@@ -54,6 +54,11 @@ def one_shot_enabled(user_email: str | None) -> bool:
 
 def confirm_required(input: SearchSurfaceCheckInput, metadata: dict[str, Any]) -> bool:
     """取得の前に確認文を返すか。確認済み（confirmed）・対象外・DM 以外は返さない。"""
+    from teamagent.skills._shared.input_policy import enabled as input_policy_enabled
+
+    # 取得範囲の任意確認だけを省く。認証・月間上限の門には触れない。
+    if input_policy_enabled(metadata):
+        return False
     if input.confirmed or input.acquire_job_id:
         # 取得ジョブを持ってきた＝確認の後（SOUL の順序: 確認 → tiktok_acquire → 本ツール）。
         # confirmed の付け忘れで確認が繰り返されないようにする。

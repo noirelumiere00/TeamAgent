@@ -42,6 +42,7 @@ from teamagent.adapters.proposal_job_store import ProposalJobStore
 from teamagent.adapters.retry import retry_long_job_once as retry_once
 from teamagent.adapters.tiktok_scraper import TikTokScrapeError, TikTokSearchResult
 from teamagent.media.contracts import TIKTOK_N_PER_KW_MAX
+from teamagent.skills._shared.input_policy import enabled as input_policy_enabled
 from teamagent.skills._shared.long_jobs import (
     completed_delivery_failed,
     failure_reason,
@@ -80,6 +81,7 @@ from teamagent.skills.omiyage_report.input_check import (
     RelevanceCheck,
     check_competitors,
     check_relevance,
+    find_input_problems,
     llm_checks_enabled,
 )
 from teamagent.skills.omiyage_report.metrics import (
@@ -631,8 +633,49 @@ class OmiyageReportSubmitSkill(BaseSkill[OmiyageReportSubmitInput, OmiyageReport
         ctx: SkillContext,
     ) -> OmiyageReportSubmitOutput:
         log = ctx.bind_logger(self.name)
-        preflight = run_preflight(input, self._completion_source)
-        if preflight.ready:
+        from teamagent.skills._shared import input_policy
+
+        policy_note = ""
+        policy_on = input_policy.enabled(ctx.metadata)
+        if policy_on:
+            result = input_policy.CACHE.apply(
+                ctx.metadata, self.name, input_policy.OMIYAGE_FIELDS, input.model_dump()
+            )
+            if result.decision != "proceed":
+                return OmiyageReportSubmitOutput(
+                    status="needs_input" if result.decision == "ask_once" else "failed",
+                    missing=["brand"],
+                    message=result.message,
+                )
+            input = input.model_copy(
+                update={
+                    "competitors": result.values["competitors"] or [],
+                    "keywords": result.values["keywords"] or [],
+                    "official_tiktok_account": result.values["official_tiktok_account"] or "",
+                }
+            )
+            problems = find_input_problems(input.brand, input.competitors, input.keywords)
+            if input.competitors:
+                problems.extend(self._competitor_problems(input, ctx, log))
+            input = input.model_copy(
+                update={
+                    name: [
+                        value
+                        for value in getattr(input, name)
+                        if not any(p.field == name and p.value == value for p in problems)
+                    ]
+                    for name in ("competitors", "keywords")
+                }
+            )
+            policy_note = result.note
+            if problems:
+                policy_note += " 比較や一般検索に合わない項目を省きました。"
+        preflight = (
+            PreflightResult(missing=())
+            if policy_on
+            else run_preflight(input, self._completion_source)
+        )
+        if preflight.ready and not policy_on:
             competitor_problems = self._competitor_problems(input, ctx, log)
             if competitor_problems:
                 preflight = PreflightResult(missing=(), problems=tuple(competitor_problems))
@@ -665,7 +708,8 @@ class OmiyageReportSubmitSkill(BaseSkill[OmiyageReportSubmitInput, OmiyageReport
                 status="queued",
                 job_id=dedup.duplicate_of,
                 retry_after_seconds=self._retry_after_seconds,
-                message=build_deduplicated_message(input, dedup.duplicate_status),
+                message=build_deduplicated_message(input, dedup.duplicate_status)
+                + ("\n" + policy_note if policy_note else ""),
                 deduplicated=True,
             )
 
@@ -745,7 +789,8 @@ class OmiyageReportSubmitSkill(BaseSkill[OmiyageReportSubmitInput, OmiyageReport
             status="queued",
             job_id=job_id,
             retry_after_seconds=self._retry_after_seconds,
-            message=build_accepted_message(input, estimate),
+            message=build_accepted_message(input, estimate)
+            + ("\n" + policy_note if policy_note else ""),
         )
 
     def _claim_dedup(
@@ -1209,6 +1254,7 @@ class OmiyageReportSubmitSkill(BaseSkill[OmiyageReportSubmitInput, OmiyageReport
             generated_on=generated_on,
             search_depth=self._search_depth,
             research_notes=input.research_notes,
+            allow_brand_only=not input.competitors and input_policy_enabled(ctx.metadata),
             excluded_unrelated=relevance.excluded,
             relevance_checked=relevance.enabled and not relevance.unchecked_axes,
         )
