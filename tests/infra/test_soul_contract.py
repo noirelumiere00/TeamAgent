@@ -1048,3 +1048,24 @@ def test_guess_first_and_retry_before_saying_missing(soul: str) -> None:
 )
 def test_fixed_blocks_are_transcribed_verbatim(soul: str, phrase: str) -> None:
     assert phrase in soul
+
+
+@pytest.mark.parametrize(
+    "phrase",
+    [
+        "使い方の質問も含む",
+        "連携状態は同じ回のツール結果だけ",
+        "既知の取引先・施策の結果や効いた理由",
+        "まず `search`",
+        "新しく取得・分析する依頼のときだけ",
+    ],
+)
+def test_user_eval_iter1_routing_contract(soul: str, phrase: str) -> None:
+    assert phrase in soul
+
+
+def test_oauth_usage_question_must_check_current_tool_result(soul: str) -> None:
+    rule = next(line for line in soul.splitlines() if "使い方の質問も含む" in line)
+    assert "聞き返さず `oauth_connect` を呼ぶ" in rule
+    assert "連携状態は同じ回のツール結果だけ" in rule
+    assert "連携 URL は自分で書かない" in rule

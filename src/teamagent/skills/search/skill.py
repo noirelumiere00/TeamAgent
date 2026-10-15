@@ -187,10 +187,12 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
 
     name: ClassVar[str] = "search"
     description: ClassVar[str] = (
-        "営業16名が過去の提案書・議事録・メールを自然文で検索する一次窓口。"
-        "『探して/あったっけ/どれ?/見つけて』など“あるか/どれが該当するか”の探索・列挙はここ。"
-        "各ヒットに updated_at（更新日・取込元の最終更新）/ title_date（資料名の日付）/ "
-        "date_basis を返す。日付は返った値だけを書き、date_basis=none の資料に日付を付けない"
+        "提案書・議事録・メールを探して/列挙する窓口。"
+        "既知の取引先・施策の動画ごとの結果や何が効いたかは、まず search で"
+        "施策実績・動画ごとの数字・資料を探す。"
+        "新規の市場・競合動画は video_algorithm。"
+        "日付は updated_at（更新日）/ title_date（資料名の日付）/ date_basis の返値のみ。"
+        "date_basis=none は日付なし"
     )
     input_schema: ClassVar[type[BaseModel]] = SearchInput
     output_schema: ClassVar[type[BaseModel]] = SearchOutput

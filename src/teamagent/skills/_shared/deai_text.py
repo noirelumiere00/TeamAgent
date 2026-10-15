@@ -184,6 +184,9 @@ def _normalize_masked(masked: str) -> str:
 def _normalize_line(line: str) -> str:
     """1 行を、保護領域を避けながら正規化する。"""
     masked, kept = _mask_protected(line)
+    # 表区切り行は呼び出し側で除外済み。保護領域を退避してから空セルだけを直す。
+    if re.match(r"^[ \t　]*[|｜]", masked):
+        masked = re.sub(r"(?<=[|｜])([ \t　]*)[—-]+([ \t　]*)(?=[|｜])", r"\1なし\2", masked)
     return _unmask_protected(_normalize_masked(masked), kept)
 
 
