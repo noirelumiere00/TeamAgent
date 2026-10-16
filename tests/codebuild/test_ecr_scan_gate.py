@@ -157,13 +157,15 @@ def test_registry_contents_are_exactly_the_adjudicated_exceptions() -> None:
     # 恒久対応は python ベースの glibc 2.44-r8 へのバンプで、その PR で core を空へ戻す。
     # 2026-10-12: Chainguard python（builder latest-dev / runtime latest）を glibc 2.44-r8 の
     # 3.14.8 世代へ上げ、12 件を撤去した（python:latest は同日 3.15 へ動いたため 10-09 の digest で固定）。
+    # 2026-10-16: mcp 便 r62 の段3 で CVE-2026-12345（MEDIUM・python-3.14 3.14.8_git20261008-r0）が
+    # 新規検出。#573 と同型の期限つき例外（stale=fail・expires 2026-10-30）で段3 だけを通す。
     core_payload = json.loads(core.read_text(encoding="utf-8"))
-    assert core_payload == {
-        "schema_version": 1,
-        "stale_exception_policy": "fail",
-        "exceptions": [],
-    }
-    assert gate.load_exceptions(core, today=TODAY) == {}
+    assert core_payload["schema_version"] == 1
+    assert core_payload["stale_exception_policy"] == "fail"
+    assert [
+        (e["cve"], e["severity"], e["package"], e["version"], e["expires_on"])
+        for e in core_payload["exceptions"]
+    ] == [("CVE-2026-12345", "MEDIUM", "python-3.14", "3.14.8_git20261008-r0", "2026-10-30")]
 
     # 2026-08-14: media の CVE-2026-7210（python3 3.14.5-r2）は一時的に例外登録したが、
     # Trivy 側では HIGH 判定（4サブパッケージに計上）で attestor の C/H ゼロゲートを

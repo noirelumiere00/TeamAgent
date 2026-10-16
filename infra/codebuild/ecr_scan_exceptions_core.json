@@ -1,5 +1,15 @@
 {
   "schema_version": 1,
   "stale_exception_policy": "fail",
-  "exceptions": []
+  "exceptions": [
+    {
+      "cve": "CVE-2026-12345",
+      "severity": "MEDIUM",
+      "package": "python-3.14",
+      "version": "3.14.8_git20261008-r0",
+      "owner": "s-komata@vectorinc.co.jp",
+      "reason": "2026-10-16 mcp 便 r62 の image-builder 段3 で新規検出（Chainguard python 3.14.8 世代の python-3.14・MEDIUM 1 件）。10-12 の r56 以降の便では未検出で、その後に検査データが更新された。段4 Trivy は契約が Critical/High ゼロを固定しており MEDIUM は通る。9/14（#408）・10/08（#573）と同じく MEDIUM は期限つき例外で段3 を通し、恒久対応は python ベースのバンプで行う。その着地時に stale=fail で本例外の撤去が強制される。",
+      "expires_on": "2026-10-30"
+    }
+  ]
 }
