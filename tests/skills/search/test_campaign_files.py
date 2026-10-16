@@ -43,7 +43,6 @@ from teamagent.skills.search.campaign_files import (
     pick_related_files,
     video_stats_footer,
 )
-from teamagent.skills.search.not_found import NOT_FOUND_HEAD
 from teamagent.skills.search.schema import SearchInput
 from teamagent.skills.search.skill import SearchSkill
 
@@ -183,6 +182,9 @@ class _Pg:
     def resolve_file_urls_by_titles(self, *_: Any, **__: Any) -> dict[str, str]:
         return {}
 
+    def get_industry_for_client(self, conn: Any, client_name: str, request_id: Any = None) -> None:
+        return None
+
     def find_drive_files_for_advertisers(
         self, conn: Any, advertisers: list[str], *, per_advertiser: int = 30, request_id: Any = None
     ) -> list[dict[str, Any]]:
@@ -264,7 +266,7 @@ def _hit(out: Any, chunk_id: int) -> Any:
 
 def test_related_files_and_industry_are_attached_with_one_query() -> None:
     pg = _Pg(CAMPAIGNS, DRIVE_DOCS)
-    out = _run(_skill(pg))
+    out = _run(_skill(pg), query="施策実績の一覧")
 
     assert len(pg.drive_calls) == 1  # ヒットごとに N 回投げない
     assert pg.drive_calls[0] == ["アオバ製薬", "ミドリマート", "ヒノデ化学", "ハルカ茶園"]
@@ -301,12 +303,8 @@ def test_answer_is_scoped_to_the_asked_industry() -> None:
     assert "# 問いの業種\n飲料" in msg
     assert "うるおいシリカ水" in msg and "アサイースムージー" in msg
     assert "あまみシロップ" not in msg  # 業種違い（日用品）は要約に渡さない
-    # 業種不明は「業種不明」と明示して最後に回す。
-    assert msg.index("むぎ茶ボトル") > msg.index("アサイースムージー")
-    assert (
-        "業種: 業種不明, 関連ファイル: なし（施策の数字はシート（ショート動画データベース）のみ）"
-        in msg
-    )
+    # 10-16: 一致根拠が無い施策を、指定業種の事例として埋めない。
+    assert "むぎ茶ボトル" not in msg
     assert "業種: 飲料, 関連ファイル: 『レポート_アオバ製薬" in msg
     assert "https://drive.google.com/file/d/AOBA_REPORT/view（レポート）" in msg
     assert "施策実績の書き方（厳守）" in msg
@@ -318,7 +316,7 @@ def test_answer_gets_links_and_sheet_only_when_summary_drops_them() -> None:
     assert "📎 施策のレポート・提案書" in out.answer
     assert "https://drive.google.com/file/d/AOBA_REPORT/view" in out.answer
     assert "https://drive.google.com/file/d/MIDORI_REPORT/view" in out.answer
-    assert f"{SHEET_ONLY_NOTE}: ハルカ茶園 むぎ茶ボトル" in out.answer
+    assert "ハルカ茶園" not in out.answer  # 一致根拠が無い業種不明は足さない
     assert "ヒノデ化学" not in out.answer  # 業種違いはリンクも足さない
 
 
@@ -338,7 +336,7 @@ def test_files_invisible_under_rls_are_not_attached() -> None:
         if d["source_uri"].startswith("gdrive://MIDORI"):
             d["acl"] = {OTHER}  # 本人には見えない
     pg = _Pg(CAMPAIGNS, docs)
-    out = _run(_skill(pg))
+    out = _run(_skill(pg), query="ショート動画の施策事例")
     assert (
         pg.connections[-1]["user_email"] == ME and pg.connections[-1]["app_role"] == "teamagent_app"
     )
@@ -353,7 +351,9 @@ def test_only_mismatched_industry_is_not_found() -> None:
     skill = _skill(pg)
     out = _run(skill)
     assert out.found is False
-    assert out.answer.startswith(NOT_FOUND_HEAD)
+    assert (
+        out.answer == "飲料の事例は見つかりませんでした（探した範囲: 社内資料・施策実績・Slack）。"
+    )
     skill._bedrock.converse.assert_not_called()  # type: ignore[attr-defined]
 
 
@@ -365,22 +365,26 @@ def test_without_industry_word_nothing_is_dropped() -> None:
     assert "あまみシロップ" in msg and "# 問いの業種\n" not in msg
 
 
-def test_kill_switch_restores_previous_behaviour(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_campaign_files_kill_switch_keeps_case_target_guard(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     monkeypatch.setenv("SEARCH_CAMPAIGN_FILES", "false")
     pg = _Pg(CAMPAIGNS, DRIVE_DOCS)
     skill = _skill(pg)
     out = _run(skill)
     assert pg.drive_calls == []
     assert all("related_files" not in h for h in out.model_dump()["hits"])
-    msg = _message(skill)
-    assert "あまみシロップ" in msg and "関連ファイル" not in msg
-    assert "📎 施策" not in out.answer
+    assert (
+        out.answer == "飲料の事例は見つかりませんでした（探した範囲: 社内資料・施策実績・Slack）。"
+    )
+    assert out.found is False
+    skill._bedrock.converse.assert_not_called()  # type: ignore[attr-defined]
 
 
 def test_non_campaign_search_adds_no_query() -> None:
     hit = SearchHit(1, "提案書の本文", 0.9, {"source_type": "gdrive", "title": "提案書.pptx"})
     pg = _Pg([hit], DRIVE_DOCS)
-    out = _run(_skill(pg))
+    out = _run(_skill(pg), query="資料を探して")
     assert pg.drive_calls == []
     assert "related_files" not in out.model_dump()["hits"][0]
 
@@ -393,7 +397,7 @@ def test_lookup_failure_is_fail_open_and_claims_nothing() -> None:
 
     pg.find_drive_files_for_advertisers = _boom  # type: ignore[method-assign]
     skill = _skill(pg)
-    out = _run(skill)
+    out = _run(skill, query="ショート動画の施策事例")
     assert out.found is True
     assert all("related_files" not in h for h in out.model_dump()["hits"])
     assert SHEET_ONLY_NOTE not in out.answer  # 照会できていないのに「無い」とは言わない
@@ -903,3 +907,222 @@ def test_iter2_comparison_missing_metrics_and_ties() -> None:
     assert sent.count("| 食品 / ハンバーグ |") == 1
     skill._summarize("資料を見せて", [ham, other], "iter2")
     assert "# 施策比較表" not in _message(skill)
+
+
+# 10-16 実機: 空の業種を既知の取引先分類で補い、別業種で回答を埋めない。
+@pytest.mark.parametrize(
+    "industry_key", ["case_industry", "industry", "client_industry", "advertiser_industry"]
+)
+def test_empty_campaign_industry_uses_known_client_industry(
+    industry_key: str, ham_campaign: tuple[SearchHit, list[dict[str, Any]]]
+) -> None:
+    hit, _ = ham_campaign
+    hit.metadata.pop("cls_industry")
+    hit.metadata["campaign_industry"] = ""
+    hit.metadata[industry_key] = "食品"
+    out = _run(
+        _skill(_Pg([hit], []), answer="伊藤ハムのハンバーグはアレンジ訴求の事例です。"),
+        query="食品メーカーのショート動画の事例ってある？",
+    )
+    assert VIDEO_STATS_HEADING in out.answer
+    assert HAM_VIDEO_URLS[0] in out.answer
+    assert "見つかりませんでした" not in out.answer
+
+
+def test_campaign_inherits_industry_from_same_client_hit(
+    ham_campaign: tuple[SearchHit, list[dict[str, Any]]],
+) -> None:
+    hit, _ = ham_campaign
+    hit.metadata.pop("cls_industry")
+    related = SearchHit(
+        80,
+        "ハンバーグの提案内容",
+        0.8,
+        {
+            "source_type": "gdrive",
+            "title": "伊藤ハム_別施策.pdf",
+            "cls_project": "株式会社伊藤ハム",
+            "case_industry": "食品",
+        },
+    )
+    unrelated = SearchHit(
+        81,
+        "衣料品の提案内容",
+        0.8,
+        {"source_type": "gdrive", "title": "別社_提案.pdf", "cls_industry": "アパレル"},
+    )
+    skill = _skill(_Pg([unrelated, hit, related], []), answer="伊藤ハムの事例です。")
+    out = _run(skill, query="食品メーカーのショート動画の事例ってある？")
+    assert VIDEO_STATS_HEADING in out.answer
+    assert HAM_VIDEO_URLS[0] in out.answer
+    assert "見つかりませんでした" not in out.answer
+    assert "別社_提案" not in _message(skill)
+
+
+def test_no_industry_case_is_a_short_deterministic_answer() -> None:
+    unrelated = SearchHit(
+        90,
+        "食品メーカーの動画施策。",
+        0.9,
+        {"source_type": "gdrive", "title": "食品A_施策.pdf", "cls_industry": "食品"},
+    )
+    skill = _skill(
+        _Pg([unrelated, CAMPAIGNS[1]], DRIVE_DOCS),
+        answer="金融関連の施策実績は見つかりませんでした。食品Aの事例です。銀行で検索してと言ってもらえれば探せます。",
+    )
+    out = _run(skill, query="金融の事例を教えて")
+    assert (
+        out.answer == "金融の事例は見つかりませんでした（探した範囲: 社内資料・施策実績・Slack）。"
+    )
+    assert out.found is False
+    skill._bedrock.converse.assert_not_called()  # type: ignore[attr-defined]
+
+
+def test_unclassified_campaign_with_explicit_industry_keeps_summary_and_video_footer(
+    ham_campaign: tuple[SearchHit, list[dict[str, Any]]],
+) -> None:
+    hit, _ = ham_campaign
+    hit.metadata.pop("cls_industry")
+    hit.metadata["campaign"] = "食品ハンバーグ"
+    hit.metadata["title"] = "施策実績 伊藤ハム 食品ハンバーグ"
+    hit = replace(
+        hit, content=hit.content.replace("伊藤ハム / ハンバーグ", "伊藤ハム / 食品ハンバーグ")
+    )
+    skill = _skill(_Pg([hit], []), answer="食品ハンバーグのアレンジ訴求です。")
+    out = _run(skill, query="食品の事例を教えて")
+    assert "食品ハンバーグ" in _message(skill)
+    assert VIDEO_STATS_HEADING in out.answer
+    assert HAM_VIDEO_URLS[0] in out.answer
+    assert "見つかりませんでした" not in out.answer
+
+
+def test_campaign_sql_fallback_restores_food_case_with_existing_sheet_and_report(
+    monkeypatch: pytest.MonkeyPatch,
+    ham_campaign: tuple[SearchHit, list[dict[str, Any]]],
+) -> None:
+    food, _ = ham_campaign
+    food.metadata.pop("cls_industry")
+    docs = [
+        {
+            "title": "伊藤ハム_ハンバーグ_レポート.pptx",
+            "source_uri": "gdrive://food_report",
+            "cls_industry": "",
+            "acl": {ME},
+        }
+    ]
+    pg = _Pg([food], docs)
+    lookup = MagicMock(return_value="食品")
+    finder = MagicMock(wraps=pg.find_drive_files_for_advertisers)
+    monkeypatch.setattr(pg, "get_industry_for_client", lookup)
+    monkeypatch.setattr(pg, "find_drive_files_for_advertisers", finder)
+    out = _skill(pg).run(
+        SearchInput(query="食品メーカーのショート動画の事例ってある？"),
+        SkillContext(
+            request_id="iter4-client-industry",
+            metadata={
+                "user_email": ME,
+                "user_groups": ["sales"],
+                "user_role": "member",
+            },
+        ),
+    )
+    assert out.found and "見つかりません" not in out.answer
+    assert HAM_VIDEO_URLS[0] in out.answer
+    assert "https://drive.google.com/file/d/food_report/view" in out.answer
+    lookup.assert_called_once_with(
+        finder.call_args.args[0], "伊藤ハム", request_id="iter4-client-industry"
+    )
+    assert pg.connections[-1] == {
+        "app_role": "teamagent_app",
+        "user_email": ME,
+        "user_groups": ["sales"],
+        "user_role": "member",
+    }
+
+
+def test_campaign_sql_fallback_queries_each_normalized_advertiser_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    hits = [
+        _campaign(300, "株式会社伊藤ハム", "ハンバーグ"),
+        _campaign(301, "伊藤ハム様", "ソーセージ"),
+    ]
+    pg = _Pg(hits, [])
+    lookup = MagicMock(return_value="食品")
+    monkeypatch.setattr(pg, "get_industry_for_client", lookup)
+    _skill(pg)._attach_campaign_files(
+        hits, SkillContext(request_id="iter4-once", metadata={"user_email": ME})
+    )
+    assert lookup.call_count == 1
+    assert lookup.call_args.args[1] == "伊藤ハム"
+    assert all(h.metadata.get("campaign_industry") == "食品" for h in hits)
+
+
+@pytest.mark.parametrize("evidence", ["metadata", "drive", "same_client_hit"])
+def test_campaign_sql_fallback_skips_already_known_industry(
+    monkeypatch: pytest.MonkeyPatch,
+    evidence: str,
+) -> None:
+    hit = _campaign(310, "伊藤ハム", "ハンバーグ")
+    docs: list[dict[str, Any]] = []
+    hits = [hit]
+    if evidence == "metadata":
+        hit.metadata["cls_industry"] = "食品"
+    elif evidence == "drive":
+        docs = [
+            {
+                "title": "伊藤ハム_ハンバーグ.pdf",
+                "source_uri": "gdrive://known_food",
+                "cls_industry": "食品",
+                "acl": {ME},
+            }
+        ]
+    else:
+        hits.append(
+            SearchHit(
+                311,
+                "既知の取引先資料",
+                0.8,
+                {
+                    "cls_project": "株式会社伊藤ハム",
+                    "cls_industry": "食品",
+                },
+            )
+        )
+    pg = _Pg(hits, docs)
+    lookup = MagicMock(side_effect=AssertionError("known industry must not issue SQL"))
+    monkeypatch.setattr(pg, "get_industry_for_client", lookup)
+    _skill(pg)._attach_campaign_files(hits, SkillContext(metadata={"user_email": ME}))
+    lookup.assert_not_called()
+    assert hit.metadata["campaign_industry"] == "食品"
+
+
+def test_campaign_sql_fallback_failure_keeps_attached_report_and_other_industry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    hit = _campaign(320, "伊藤ハム", "ハンバーグ")
+    known = _campaign(321, "別社", "洗剤")
+    known.metadata["cls_industry"] = "日用品"
+    later = _campaign(322, "カネカ", "パン")
+    docs = [
+        {
+            "title": "伊藤ハム_ハンバーグ.pdf",
+            "source_uri": "gdrive://retained_report",
+            "cls_industry": "",
+            "acl": {ME},
+        }
+    ]
+    pg = _Pg([hit, known, later], docs)
+    lookup = MagicMock(side_effect=[RuntimeError("classification unavailable"), "食品"])
+    monkeypatch.setattr(pg, "get_industry_for_client", lookup)
+    _skill(pg)._attach_campaign_files(
+        [hit, known, later], SkillContext(metadata={"user_email": ME})
+    )
+    assert lookup.call_count == 2
+    assert (
+        hit.metadata["related_files"][0]["url"]
+        == "https://drive.google.com/file/d/retained_report/view"
+    )
+    assert "campaign_industry" not in hit.metadata
+    assert known.metadata["campaign_industry"] == "日用品"
+    assert later.metadata["campaign_industry"] == "食品"

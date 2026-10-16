@@ -449,14 +449,17 @@ def test_end_to_end_search_detects_client_and_deliver_attaches_nothing() -> None
     )
     assert s_out.query_client == "日本コカ・コーラ"
     assert s_out.found is True  # top1 が該当取引先＝検索側は「有り」（事故と同じ状態）
-    assert any(h.entities == ["東洋水産"] for h in s_out.hits)
+    assert not any(h.entities == ["東洋水産"] for h in s_out.hits)  # 対象外は検索側でも除外
 
     slack = _slack_mock()
     skill = KnowledgeDeliverSkill(search=search, slack=slack, gdrive=_gdrive_mock())
     out = skill.run(KnowledgeDeliverInput(query=INCIDENT_QUERY), _ctx())
     assert out.delivered_count == 0
     slack.upload_file.assert_not_awaited()
-    assert "日本コカ・コーラの資料のファイル本体は見つかりませんでした" in out.note
+    assert "添付できる Drive の実ファイルに紐づきませんでした" in out.note
+    assert [ref.title for ref in out.references] == [
+        "紅茶花伝 無糖 アールグレイ サンリオ限定ボトル"
+    ]
 
 
 # ── 取引先が既知の語彙に無いとき（10-06 実データ QA）────────────────────────────

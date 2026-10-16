@@ -191,7 +191,7 @@ PUNTING_LLM_TEXT = """資生堂（EDP部勉強会、シーブリーズ案件）
 def test_answer_never_asks_the_user_to_search_or_ask_internally() -> None:
     """社内の検索・確認を利用者に頼む文は run() の出口で落ちる（先方への確認と数字は残す）。"""
     out = _skill(_bedrock(PUNTING_LLM_TEXT)).run(
-        SearchInput(query="エリクシールの施策実績"), SkillContext(metadata={})
+        SearchInput(query="施策実績の確認"), SkillContext(metadata={})
     )
     for punt in (
         "営業DB",
@@ -209,6 +209,6 @@ def test_answer_never_asks_the_user_to_search_or_ask_internally() -> None:
 def test_punt_filter_can_be_turned_off(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("SEARCH_NO_PUNT", "0")
     out = _skill(_bedrock(PUNTING_LLM_TEXT)).run(
-        SearchInput(query="エリクシールの施策実績"), SkillContext(metadata={})
+        SearchInput(query="施策実績の確認"), SkillContext(metadata={})
     )
     assert "担当営業への直接確認" in out.answer

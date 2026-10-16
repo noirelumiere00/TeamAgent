@@ -71,7 +71,11 @@ from teamagent.ingest.industry_taxonomy import normalize_industry
 from teamagent.observability import scrub_value
 from teamagent.skills._shared.slack_blocks import plain
 from teamagent.skills._shared.source_url import hit_doc_url
-from teamagent.skills.search.campaign_files import UNKNOWN_INDUSTRY, VIDEO_METRICS_HEADING
+from teamagent.skills.search.campaign_files import (
+    UNKNOWN_INDUSTRY,
+    VIDEO_METRICS_HEADING,
+    is_campaign_hit,
+)
 from teamagent.skills.search.composite import SlackLookup, slack_query_terms
 from teamagent.skills.search.dates import extract_title_date
 from teamagent.skills.search.schema import SlackHitOut
@@ -152,6 +156,7 @@ class Entry:
     kind: SectionKey = "vault"
     case_external_use: str | None = None
     document_id: str | None = None
+    source_title: str = ""
 
 
 @dataclass(frozen=True)
@@ -448,13 +453,14 @@ def entry_from_hit(hit: SearchHit, *, url: str | None) -> Entry:
             meta.get("case_brand") or meta.get("case_product"),
         )
         return Entry(
-            title=case_title or title,
+            title=title if is_campaign_hit(hit) else case_title or title,
             url=url,
             date=date,
             industry=_hit_industry(meta),
             detail=_clean(meta.get("case_effect"), _EFFECT_CHARS),
             kind="case",
             document_id=document_id,
+            source_title=title,
             case_external_use=str(meta.get("case_external_use") or "") or None,
         )
     if kind == "karte":
@@ -484,13 +490,14 @@ def entry_from_case_row(row: Mapping[str, Any]) -> Entry:
         row.get("case_client"), row.get("case_brand") or row.get("case_product")
     )
     return Entry(
-        title=case_title or title or "事例",
+        title=title if row.get("case_source") == "campaign_db" else case_title or title or "事例",
         url=hit_doc_url({"source_uri": row.get("source_uri")}),
         date=_date_text(row.get("updated_at")) or _date_text(extract_title_date(title)),
         industry=normalize_industry(str(row.get("case_industry") or "") or None),
         detail=_clean(row.get("case_effect"), _EFFECT_CHARS),
         kind="case",
         document_id=str(row.get("document_id") or row.get("id") or "") or None,
+        source_title=title,
         case_external_use=str(row.get("case_external_use") or "") or None,
     )
 
@@ -630,6 +637,9 @@ def _line(entry: Entry, key: SectionKey) -> str:
 
 def _identity(entry: Entry) -> tuple[str, ...]:
     url = _safe_url(entry.url)
+    if entry.kind == "case":
+        # 同じシートのタブ・事例集ファイルにも複数の施策がある。
+        return ("case", url or entry.document_id or "", entry.source_title or entry.title)
     if url:
         return ("url", url)
     return ("text", _clean(entry.title, _TITLE_CHARS), _date_text(entry.date), entry.detail)

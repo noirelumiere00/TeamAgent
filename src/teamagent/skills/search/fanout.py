@@ -29,8 +29,9 @@ from teamagent.skills.search.answer_sections import (
     compose_answer,
     entry_from_hit,
     lane_from_slack,
+    scope_line,
 )
-from teamagent.skills.search.campaign_files import is_campaign_hit, scope_by_industry
+from teamagent.skills.search.campaign_files import is_campaign_hit
 from teamagent.skills.search.client_match import hit_entities
 from teamagent.skills.search.composite import (
     MCP_SURFACE_CTX_KEY,
@@ -55,7 +56,13 @@ from teamagent.skills.search.fanout_sources import (
     rls_connection,
 )
 from teamagent.skills.search.next_move import suggest_next_move
-from teamagent.skills.search.not_found import NOT_FOUND_HEAD
+from teamagent.skills.search.not_found import (
+    NOT_FOUND_HEAD,
+    build_case_not_found_answer,
+    case_query_target,
+    case_target_hits,
+    target_matches,
+)
 from teamagent.skills.search.result_guard import build_result_header, prefix_header
 from teamagent.skills.search.schema import RelatedFileOut, SearchHitOut, SearchInput, SearchOutput
 
@@ -299,10 +306,13 @@ def run_fanout(skill: Any, input: SearchInput, ctx: SkillContext) -> SearchOutpu
         and any(is_campaign_hit(h) for h in hits)
     ):
         skill._attach_campaign_files(hits, ctx)
-    if skill._campaign_files:
-        summary_hits = scope_by_industry(hits, asked_industry)
-        if not summary_hits:
-            found = False
+    case_target = case_query_target(input.query, asked_industry)
+    scope_target = case_target or (
+        asked_industry if input.filter_industry or any(is_campaign_hit(h) for h in hits) else None
+    )
+    summary_hits = case_target_hits(hits, scope_target)
+    if not summary_hits:
+        found = False
     client = skill._asked_client(probe)
     if found and skill._summary_client_scope and client:
         summary_hits = skill._scope_to_client(summary_hits, client) or summary_hits
@@ -311,12 +321,43 @@ def run_fanout(skill: Any, input: SearchInput, ctx: SkillContext) -> SearchOutpu
     )
     karte = extra.get("karte", SourceResult(source="karte", status="skipped", reason="no_client"))
     cases = extra.get("case", SourceResult(source="case", status="skipped", reason="no_industry"))
+    if scope_target:
+        slack = replace(
+            slack, items=tuple(i for i in slack.items if target_matches(i.text, scope_target))
+        )
+        extra["named"] = case_target_hits(extra.get("named", []), scope_target)
+        karte = replace(karte, items=tuple(case_target_hits(karte.items, scope_target)))
+        cases = replace(
+            cases,
+            items=tuple(
+                r
+                for r in cases.items
+                if (
+                    normalize_industry(r.industry) == asked_industry
+                    if asked_industry and r.industry
+                    else target_matches(f"{r.title} {r.client} {r.brand} {r.product}", scope_target)
+                )
+            ),
+        )
+    if case_target:
+        found = bool((found and summary_hits) or slack.items or cases.items or extra["named"])
+        hits = summary_hits
+    case_miss = bool(case_target and not found)
     statuses = (
         timeline_status.resolve_statuses([*summary_hits, *extra.get("named", []), *karte.items])
         if timeline_status.enabled()
         else None
     )
-    head, summary_cost = ("" if found else NOT_FOUND_HEAD), 0.0
+    head, summary_cost = (
+        (
+            build_case_not_found_answer(case_target or "")
+            if case_miss
+            else ""
+            if found
+            else NOT_FOUND_HEAD
+        ),
+        0.0,
+    )
     summary_state: LaneState = "skipped"
     summary_ms = 0
     list_fast = (
@@ -328,7 +369,7 @@ def run_fanout(skill: Any, input: SearchInput, ctx: SkillContext) -> SearchOutpu
     )
     if list_fast:
         head = LIST_FAST_HEAD
-    elif found and input.include_answer:
+    elif found and input.include_answer and (summary_hits or slack.items):
         summary_started = time.perf_counter()
 
         def summarize() -> tuple[str, float, LaneState]:
@@ -365,6 +406,9 @@ def run_fanout(skill: Any, input: SearchInput, ctx: SkillContext) -> SearchOutpu
     candidates = extra.get("candidates", hits)
     if extra.get("retried"):
         candidates = hits
+    if scope_target:
+        candidates = case_target_hits(candidates, scope_target)
+        expanded = replace(expanded, hits=tuple(case_target_hits(expanded.hits, scope_target)))
     show_expanded = (
         not found
         or not classify_hits(hits).has_case_or_campaign
@@ -375,7 +419,8 @@ def run_fanout(skill: Any, input: SearchInput, ctx: SkillContext) -> SearchOutpu
     )
     near: SourceResult[Any] = SourceResult(source="case", status="skipped", reason="main_has_cases")
     if (
-        expanded.industry
+        not scope_target
+        and expanded.industry
         and not classify_hits(hits).has_case_or_campaign
         and not cases.items
         and not extra.get("incomplete")
@@ -423,6 +468,14 @@ def run_fanout(skill: Any, input: SearchInput, ctx: SkillContext) -> SearchOutpu
         entry = entry_from_hit(hit, url=skill._hit_url(hit, file_urls=file_urls))
         entry = replace(entry, detail=str((hit.metadata or {}).get("cls_doc_type") or entry.detail))
         grouped.setdefault(entry.kind, []).insert(0, entry)
+    required_counts = {
+        key: max(1, count)
+        for key in grouped
+        if (count := sum(entry_from_hit(h, url=None).kind == key for h in named)) > 0
+        or (statuses is not None and any(key in status.sections for status in statuses))
+    }
+    if list_fast and grouped.get("case"):
+        required_counts["case"] = max(required_counts.get("case", 0), min(2, len(grouped["case"])))
     sections = Sections(
         entries=grouped,
         karte_client=client or "",
@@ -433,12 +486,7 @@ def run_fanout(skill: Any, input: SearchInput, ctx: SkillContext) -> SearchOutpu
         }
         if statuses is not None
         else {},
-        required_counts={
-            key: max(1, count)
-            for key in grouped
-            if (count := sum(entry_from_hit(h, url=None).kind == key for h in named)) > 0
-            or (statuses is not None and any(key in status.sections for status in statuses))
-        },
+        required_counts=required_counts,
     )
     vault_count = len(hits) + len(named)
     vault_lane = (
@@ -466,7 +514,7 @@ def run_fanout(skill: Any, input: SearchInput, ctx: SkillContext) -> SearchOutpu
         head = prefix_header(
             build_result_header(
                 query=input.query,
-                hits=hits,
+                hits=summary_hits,
                 weak_threshold=skill._weak_result_threshold,
                 query_client=client,
                 asked_industry=input.filter_industry,
@@ -481,14 +529,28 @@ def run_fanout(skill: Any, input: SearchInput, ctx: SkillContext) -> SearchOutpu
         )
     if karte.status != "failed" and main_kinds.sales_fb:
         lanes["karte"] = LaneStatus.found(len(karte.items) + len(main_kinds.sales_fb))
+    source_links = (
+        skill._source_links_block(
+            summary_hits[:3], file_urls=file_urls, slack_items=slack.items[:3]
+        )
+        if found and not list_fast
+        else ""
+    )
+    failed_lanes = {key: status for key, status in lanes.items() if status.kind == "failed"}
+    empty_answer = head + ("\n\n" + scope_line(failed_lanes) if failed_lanes else "")
     answer = (
-        compose_answer(
-            head=head,
-            sections=sections,
-            lanes=lanes,
-            graph_base_url=os.environ.get("CONNECT_BASE_URL", "").strip()
-            if os.environ.get("SEARCH_FANOUT_GRAPH_LINK") == "1"
-            else "",
+        (
+            empty_answer
+            if case_miss
+            else compose_answer(
+                head=head,
+                sections=sections,
+                lanes=lanes,
+                tail=source_links,
+                graph_base_url=os.environ.get("CONNECT_BASE_URL", "").strip()
+                if os.environ.get("SEARCH_FANOUT_GRAPH_LINK") == "1"
+                else "",
+            )
         )
         if input.include_answer
         else ""

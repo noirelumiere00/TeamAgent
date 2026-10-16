@@ -473,7 +473,9 @@ def test_summary_uses_only_the_named_clients_hits() -> None:
     assert "東洋水産の予算100万円" not in sent and "日立の投稿数20件" not in sent
 
 
-def test_summary_client_scope_can_be_turned_off(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_case_target_scope_survives_summary_client_scope_kill_switch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     monkeypatch.setenv("SEARCH_SUMMARY_CLIENT_SCOPE", "false")
     bedrock = MagicMock()
     bedrock.converse.return_value = _converse()
@@ -485,4 +487,62 @@ def test_summary_client_scope_can_be_turned_off(monkeypatch: pytest.MonkeyPatch)
     _prod_skill(bedrock, _pg(hits, vocab=["日本コカ・コーラ", "東洋水産"])).run(
         SearchInput(query="日本コカ・コーラの事例"), SkillContext(metadata={})
     )
-    assert "東洋水産の予算100万円" in str(bedrock.converse.call_args)
+    assert "紅茶花伝の施策メモ" in str(bedrock.converse.call_args)
+    assert "東洋水産の予算100万円" not in str(bedrock.converse.call_args)
+
+
+@pytest.mark.parametrize(
+    ("query", "industry", "target"),
+    [
+        ("食品メーカーのショート動画の事例ってある？", "食品", "食品"),
+        ("メタバースの事例を教えて", None, "メタバース"),
+        ("宇宙開発に関する施策実績は？", None, "宇宙開発"),
+        ("銀行の事例ある？", "金融", "金融"),
+        ("ショート動画の事例は？", None, None),
+        ("過去の事例を教えて", None, None),
+        ("一覧で出して", "食品", None),
+    ],
+)
+def test_case_query_target_is_limited_to_explicit_case_subjects(
+    query: str, industry: str | None, target: str | None
+) -> None:
+    from teamagent.skills.search import not_found
+
+    assert not_found.case_query_target(query, industry) == target
+
+
+def test_case_target_matching_and_zero_answer_do_not_invite_another_search() -> None:
+    from teamagent.skills.search import not_found
+
+    assert not_found.target_matches("Ｍｅｔａｖｅｒｓｅの企画", "Metaverse")
+    assert not_found.target_matches("メタバースの施策", "メタバース")
+    assert not_found.target_matches(
+        "紅茶花伝の施策\n日本コカ・コーラ", "日本コカ・コーラの紅茶花伝"
+    )
+    assert not not_found.target_matches("小売の施策", "メタバース")
+    assert not_found.build_case_not_found_answer("宇宙開発") == (
+        "宇宙開発の事例は見つかりませんでした（探した範囲: 社内資料・施策実績・Slack）。"
+    )
+
+
+def test_case_target_hits_excludes_unrelated_high_score_and_preserves_matches() -> None:
+    from teamagent.skills.search.not_found import case_target_hits
+
+    unrelated = _hit(0.99, content="別社の食品施策", cls_industry="食品", chunk_id=91)
+    matching = _hit(0.8, content="宇宙開発の動画施策", chunk_id=92)
+    hits = [unrelated, matching]
+    assert case_target_hits(hits, "宇宙開発") == [matching]
+    assert case_target_hits(hits, "金融") == []
+    assert case_target_hits(hits, "食品") == [unrelated]
+    assert case_target_hits(hits, None) == hits
+
+
+def test_case_target_accepts_descriptive_product_variants_without_crossing_clients() -> None:
+    from teamagent.skills.search.not_found import target_matches
+
+    target = "日本コカ・コーラの紅茶花伝 無糖 アールグレイアイスティー（サンリオ限定ボトル）"
+    product = "紅茶花伝 無糖 アールグレイ サンリオ限定ボトル ショート動画"
+    assert target_matches(f"{product}\n日本コカ・コーラ", target)
+    assert not target_matches(f"{product}\n東洋水産", target)
+    assert not target_matches("綾鷹 新作の施策\n日本コカ・コーラ", target)
+    assert not target_matches("アールグレイアイスティー\n日本コカ・コーラ", target)

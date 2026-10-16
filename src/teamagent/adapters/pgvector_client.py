@@ -33,6 +33,26 @@ logger = structlog.get_logger(__name__)
 _ALLOWED_EMBEDDING_COLUMNS: frozenset[str] = frozenset({"embedding", "embedding_cohere"})
 
 
+_INDUSTRY_METADATA_KEYS = (
+    "campaign_industry",
+    "case_industry",
+    "cls_industry",
+    "industry",
+    "client_industry",
+    "advertiser_industry",
+)
+
+
+def _industry_columns(alias: str = "d") -> str:
+    return "".join(
+        f",\n                {alias}.metadata->>'{key}' AS {key}" for key in _INDUSTRY_METADATA_KEYS
+    )
+
+
+def _industry_metadata(row: dict[str, Any]) -> dict[str, Any]:
+    return {key: row[key] for key in _INDUSTRY_METADATA_KEYS if row.get(key)}
+
+
 def _timeline_columns() -> str:
     if os.environ.get("SEARCH_TIMELINE_STATUS", "").strip().lower() not in {
         "1",
@@ -655,7 +675,7 @@ class PgVectorClient:
                 d.id AS document_id,
                 d.source_uri,
                 d.source_type::text AS source_type,
-                d.title,
+                d.title{_industry_columns()},
                 d.metadata->>'channel_name' AS channel_name,
                 d.metadata->>'is_sales_fb' AS is_sales_fb,
                 d.metadata->>'client_name' AS client_name,
@@ -663,7 +683,6 @@ class PgVectorClient:
                 d.metadata->>'bant_score' AS bant_score,
                 d.metadata->>'channel_type' AS channel_type,
                 d.metadata->>'cls_project' AS cls_project,
-                d.metadata->>'cls_industry' AS cls_industry,
                 d.metadata->>'cls_doc_type' AS cls_doc_type,
                 d.metadata->>'cls_phase' AS cls_phase,
                 d.metadata->>'cls_solution' AS cls_solution,
@@ -692,6 +711,7 @@ class PgVectorClient:
         for r in rows:
             meta: dict[str, Any] = {
                 **_timeline_metadata(r),
+                **_industry_metadata(r),
                 "source_uri": r.get("source_uri"),
                 "source_type": r.get("source_type"),
                 "title": r.get("title"),
@@ -707,8 +727,6 @@ class PgVectorClient:
             # Day 8: 営業 FB metadata (Phase 2 Drive 自動マッチング用)
             if r.get("is_sales_fb") == "true":
                 meta["is_sales_fb"] = True
-                if r.get("client_name"):
-                    meta["client_name"] = r["client_name"]
                 if r.get("deal_phase"):
                     meta["deal_phase"] = r["deal_phase"]
                 # Sprint 5: BANT 評価 / チャネル種別 (代理店/直販)。検索結果での
@@ -724,8 +742,8 @@ class PgVectorClient:
             # 2026-09 まで SELECT に無く、rerank / result_guard の cls_entities 判定は
             # 本番で死んだコードだった（ingest 側の USE_ENTITY_TAGS が OFF なら NULL のまま）。
             for cls_key in (
+                "client_name",
                 "cls_project",
-                "cls_industry",
                 "cls_doc_type",
                 "cls_phase",
                 "cls_solution",
@@ -965,7 +983,7 @@ class PgVectorClient:
                 c.page_num,
                 d.source_uri,
                 d.source_type::text AS source_type,
-                d.title,
+                d.title{_industry_columns()},
                 d.metadata->>'channel_name' AS channel_name,
                 d.metadata->>'client_name' AS client_name,
                 d.metadata->>'deal_phase' AS deal_phase,
@@ -987,6 +1005,7 @@ class PgVectorClient:
         for r in rows:
             meta: dict[str, Any] = {
                 **_timeline_metadata(r),
+                **_industry_metadata(r),
                 "source_uri": r.get("source_uri"),
                 "source_type": r.get("source_type"),
                 "title": r.get("title"),
@@ -1074,11 +1093,12 @@ class PgVectorClient:
         if not name:
             return None
         sql = """
-            SELECT COALESCE(d.metadata->>'case_industry', d.metadata->>'cls_industry') AS industry
+            SELECT COALESCE(NULLIF(d.metadata->>'case_industry', ''),
+                            NULLIF(d.metadata->>'cls_industry', '')) AS industry
             FROM documents d
             WHERE d.metadata->>'client_name' = %(name)s
-              AND COALESCE(d.metadata->>'case_industry', d.metadata->>'cls_industry') IS NOT NULL
-              AND COALESCE(d.metadata->>'case_industry', d.metadata->>'cls_industry') <> ''
+              AND COALESCE(NULLIF(d.metadata->>'case_industry', ''),
+                           NULLIF(d.metadata->>'cls_industry', '')) IS NOT NULL
             ORDER BY d.modified_at DESC NULLS LAST
             LIMIT 1
         """
@@ -1247,7 +1267,7 @@ class PgVectorClient:
                 COALESCE(c.contextualized, c.content) AS content{_timeline_columns()},
                 to_char(d.modified_at AT TIME ZONE 'Asia/Tokyo', 'YYYY-MM-DD') AS occurred_at,
                 d.source_uri,
-                d.title,
+                d.title{_industry_columns()},
                 d.metadata->>'client_name' AS client_name,
                 d.metadata->>'deal_phase' AS deal_phase,
                 d.metadata->>'bant_score' AS bant_score,
@@ -1275,6 +1295,7 @@ class PgVectorClient:
         for r in rows:
             meta: dict[str, Any] = {
                 **_timeline_metadata(r),
+                **_industry_metadata(r),
                 "source_uri": r.get("source_uri"),
                 "source_type": "slack",
                 "title": r.get("title"),
@@ -1343,7 +1364,7 @@ class PgVectorClient:
                 COALESCE(c.contextualized, c.content) AS content{_timeline_columns()},
                 to_char(d.modified_at AT TIME ZONE 'Asia/Tokyo', 'YYYY-MM-DD') AS occurred_at,
                 d.source_uri,
-                d.title,
+                d.title{_industry_columns()},
                 d.metadata->>'client_name' AS client_name,
                 d.metadata->>'deal_phase' AS deal_phase,
                 d.metadata->>'bant_score' AS bant_score,
@@ -1371,6 +1392,7 @@ class PgVectorClient:
         for r in rows:
             meta: dict[str, Any] = {
                 **_timeline_metadata(r),
+                **_industry_metadata(r),
                 "source_uri": r.get("source_uri"),
                 "source_type": "slack",
                 "title": r.get("title"),
@@ -1458,7 +1480,9 @@ class PgVectorClient:
                 c.page_num,
                 d.source_uri,
                 d.source_type::text AS source_type,
-                d.title,
+                d.title{_industry_columns()},
+                d.metadata->>'cls_project' AS cls_project,
+                d.metadata->>'client_name' AS client_name,
                 to_char(d.modified_at AT TIME ZONE 'Asia/Tokyo', 'YYYY-MM-DD') AS updated_at
             FROM chunks c
             JOIN documents d ON d.id = c.document_id
@@ -1480,6 +1504,7 @@ class PgVectorClient:
                 continue
             meta: dict[str, Any] = {
                 **_timeline_metadata(r),
+                **_industry_metadata(r),
                 "source_uri": r.get("source_uri"),
                 "source_type": r.get("source_type"),
                 "title": r.get("title"),
@@ -1487,6 +1512,9 @@ class PgVectorClient:
             }
             if r.get("page_num") is not None:
                 meta["page_num"] = r["page_num"]
+            for key in ("client_name", "cls_project"):
+                if r.get(key):
+                    meta[key] = r[key]
             # 便A-3: 関連 Drive 資料にも更新日を添える（主検索ヒットと同じ契約）。
             if r.get("updated_at"):
                 meta["updated_at"] = str(r["updated_at"])
@@ -1728,12 +1756,10 @@ class PgVectorClient:
         if not clean:
             return []
         patterns = [f"%{self._escape_like(a)}%" for a in clean]
-        sql = """
+        sql = f"""
             SELECT p.idx::int AS advertiser_idx,
                    f.title,
-                   f.source_uri,
-                   f.metadata->>'cls_industry' AS cls_industry,
-                   f.metadata->>'case_industry' AS case_industry,
+                   f.source_uri{_industry_columns("f")},
                    f.metadata->>'cls_doc_type' AS cls_doc_type,
                    to_char(f.modified_at AT TIME ZONE 'Asia/Tokyo', 'YYYY-MM-DD') AS updated_at
             FROM unnest(%s::text[]) WITH ORDINALITY AS p(pattern, idx)
@@ -1764,6 +1790,7 @@ class PgVectorClient:
                         "source_uri": str(row.get("source_uri") or ""),
                         "cls_industry": row.get("cls_industry"),
                         "case_industry": row.get("case_industry"),
+                        **_industry_metadata(row),
                         "cls_doc_type": row.get("cls_doc_type"),
                         "updated_at": row.get("updated_at"),
                     }

@@ -52,6 +52,7 @@ from teamagent.skills.search.campaign_files import (
     attach_related_files,
     campaign_header,
     campaign_key,
+    hit_industry,
     is_campaign_hit,
     links_footer,
     scope_by_industry,
@@ -85,7 +86,15 @@ from teamagent.skills.search.knowledge_query import (
     is_video_solution,
 )
 from teamagent.skills.search.next_move import suggest_next_move
-from teamagent.skills.search.not_found import FoundDecision, build_not_found_answer, judge_found
+from teamagent.skills.search.not_found import (
+    FoundDecision,
+    build_case_not_found_answer,
+    build_not_found_answer,
+    case_query_target,
+    case_target_hits,
+    judge_found,
+    target_matches,
+)
 from teamagent.skills.search.query_planner import QueryPlanner
 from teamagent.skills.search.rerank import sort_by_budget_proximity, sort_by_client_match
 from teamagent.skills.search.result_guard import (
@@ -612,6 +621,38 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
                 terms=len(found_decision.terms),
             )
 
+        # Slack / 管理シートの本文にある資料名は、全ヒット分をまとめて 1 回だけ
+        # Drive URL に解決する。answer と構造化 hits の両方で同じ結果を使い回す。
+        _t = time.perf_counter()
+        file_urls = self._resolve_file_urls(hits, ctx)
+        timings["resolve_urls_ms"] = (time.perf_counter() - _t) * 1000
+
+        # 取引先の分類を補ってから対象を絞り、要約・警告・📊で同じ根拠を使う。
+        asked_industry = normalize_industry(input.filter_industry) or extract_query_industry(
+            input.query
+        )
+        if self._campaign_files and any(is_campaign_hit(h) for h in hits):
+            self._attach_campaign_files(hits, ctx)
+        case_target = case_query_target(input.query, asked_industry)
+        summary_hits = case_target_hits(hits, case_target)
+        if self._campaign_files and any(is_campaign_hit(h) for h in hits):
+            summary_hits = scope_by_industry(summary_hits, asked_industry)
+        if not summary_hits:
+            found = False
+
+        # 2-b''. 名指しの取引先があれば、要約に渡すヒットをその取引先の資料に絞る。
+        #        1 件も当たらなければ絞らない（該当なしの判定は judge_found の client_mismatch）。
+        if found and self._summary_client_scope and (asked := self._asked_client(probe)):
+            scoped = self._scope_to_client(summary_hits, asked)
+            if scoped and len(scoped) < len(summary_hits):
+                log.info(
+                    "search_summary_client_scope",  # 件数だけ（取引先名は出さない）
+                    request_id=ctx.request_id,
+                    kept=len(scoped),
+                    dropped=len(summary_hits) - len(scoped),
+                )
+                summary_hits = scoped
+
         # 2-bis. **回答生成に入る前に**、retrieval の実数値だけで警告ヘッダを確定させる。
         #        LLM に判断させない（プロンプトは守られないことがある／ここは無い）。
         guard_header = ""
@@ -619,7 +660,7 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
             guard_decision: dict[str, Any] = {}
             guard_header = build_result_header(
                 query=input.query,
-                hits=hits,
+                hits=summary_hits,
                 weak_threshold=self._weak_result_threshold,
                 query_client=(probe or {}).get("query_client"),
                 asked_industry=input.filter_industry,
@@ -648,52 +689,16 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
                     lines=guard_header.count("\n") + 1,
                 )
 
-        # Slack / 管理シートの本文にある資料名は、全ヒット分をまとめて 1 回だけ
-        # Drive URL に解決する。answer と構造化 hits の両方で同じ結果を使い回す。
-        _t = time.perf_counter()
-        file_urls = self._resolve_file_urls(hits, ctx)
-        timings["resolve_urls_ms"] = (time.perf_counter() - _t) * 1000
-
-        # 2-b'. 施策実績のヒットに同じ施策の Drive 資料と広告主の業種を添え、要約に渡す
-        #       施策実績を問いの業種で絞る（別業種は外し、業種不明は末尾へ）。施策実績が
-        #       無い・SEARCH_CAMPAIGN_FILES=false なら summary_hits は hits そのもの。
-        summary_hits = hits
-        asked_industry: str | None = None
-        if self._campaign_files and any(is_campaign_hit(h) for h in hits):
-            self._attach_campaign_files(hits, ctx)
-            asked_industry = normalize_industry(input.filter_industry) or extract_query_industry(
-                input.query
-            )
-            summary_hits = scope_by_industry(hits, asked_industry)
-            if found and not summary_hits:
-                found = False
-                log.info(
-                    "search_not_found",  # G8: 業種は固定語彙・クエリ原文は出さない
-                    request_id=ctx.request_id,
-                    reason="industry_scope",
-                    top_score=hits[0].score if hits else None,
-                    hit_count=len(hits),
-                    terms=0,
-                )
-
-        # 2-b''. 名指しの取引先があれば、要約に渡すヒットをその取引先の資料に絞る。
-        #        1 件も当たらなければ絞らない（該当なしの判定は judge_found の client_mismatch）。
-        if found and self._summary_client_scope and (asked := self._asked_client(probe)):
-            scoped = self._scope_to_client(summary_hits, asked)
-            if scoped and len(scoped) < len(summary_hits):
-                log.info(
-                    "search_summary_client_scope",  # 件数だけ（取引先名は出さない）
-                    request_id=ctx.request_id,
-                    kept=len(scoped),
-                    dropped=len(summary_hits) - len(scoped),
-                )
-                summary_hits = scoped
-
         # 2-c. 複合検索: 並行して投げた Slack 検索を回収する（失敗・時間切れは状態だけ持つ）。
         slack_lookup: SlackLookup | None = None
         if slack_pending is not None:
             slack_lookup = self._collect_slack_lookup(slack_pending, ctx)
         slack_items = slack_lookup.items if slack_lookup is not None else ()
+        if case_target:
+            slack_items = tuple(i for i in slack_items if target_matches(i.text, case_target))
+            hits = summary_hits
+            found = bool((found and summary_hits) or slack_items)
+        case_miss = bool(case_target and not found)
 
         # 3. Bedrock で要約（chunk が 0 件のときはスキップ）。
         #    include_answer=False（二段レスポンスの fast path）は要約そのものを
@@ -704,7 +709,9 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
         #    回答文は発信元スレッドへ後追い投稿する」。フラグ OFF ならこの分岐は
         #    _should_defer_answer が必ず False を返し、以下は 1 バイトも従来と変わらない。
         deferred = False
-        if input.include_answer and not found:
+        if input.include_answer and case_miss:
+            answer, cost_usd = build_case_not_found_answer(case_target or ""), 0.0
+        elif input.include_answer and not found:
             # 該当なし: 要約器を呼ばない（無いものを有るように書かせない）。近いものは名前だけ。
             answer, cost_usd = build_not_found_answer(hits), 0.0
             if slack_items:
@@ -748,14 +755,14 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
             answer = self._append_campaign_footer(
                 answer, summary_hits, asked_industry=asked_industry
             )
-            # 要約は資料名を挙げてもURLを出さないため回答末尾に「資料リンク」を決定論で付与。
-            # markdown [label](url) は openclaw(@Aico) が Slack 装飾リンクへ変換する。ただし
-            # connect-web(/app) は answer を textContent で生表示しリテラル化するため、env で
-            # サーフェス制御する（mcp=ON / connect-web=未設定 で /app を汚さない）。既定OFF。
-            if _source_links_enabled():
-                answer += self._source_links_block(hits, file_urls=file_urls)
         else:
             answer, cost_usd = "", 0.0
+
+        # MCP向けに資料とSlackの出典を付ける（/appは従来どおりenvで制御）。
+        if input.include_answer and not deferred and not case_miss and _source_links_enabled():
+            answer += self._source_links_block(
+                summary_hits if found else [], file_urls=file_urls, slack_items=slack_items
+            )
 
         # 3-bis. 警告ヘッダを回答の**先頭**へサーバ側で強制注入する。
         #        二段返しの第一報（続報予告文）にも同じヘッダが載る＝「関連度が低い」
@@ -792,7 +799,7 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
             requester=str(ctx.metadata.get("user_email") or "") or None,
         )
 
-        if input.include_answer and show_scope:
+        if input.include_answer and show_scope and not case_miss:
             answer += "\n\n" + scope_footer(
                 searched_queries, slack=slack_lookup, incomplete=retries_incomplete
             )
@@ -837,11 +844,7 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
                     project=(str(meta["cls_project"]) if meta.get("cls_project") else None),
                     # 取引先判定の口（search の警告と同じ SEARCH_CLIENT_GUARD_ENTITIES で切る）。
                     entities=(hit_entities(h) or None) if self._client_guard_entities else None,
-                    industry=(
-                        str(meta.get("cls_industry") or meta.get("campaign_industry"))
-                        if (meta.get("cls_industry") or meta.get("campaign_industry"))
-                        else None
-                    ),
+                    industry=hit_industry(h),
                     doc_type=(str(meta["cls_doc_type"]) if meta.get("cls_doc_type") else None),
                     budget=(str(meta["cls_budget"]) if meta.get("cls_budget") else None),
                     is_low_confidence=bool(meta.get("is_low_confidence", False)),
@@ -949,11 +952,13 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
     # ── 施策実績の関連ファイル（SEARCH_CAMPAIGN_FILES 既定 ON）────────────────────────
 
     def _attach_campaign_files(self, hits: list[SearchHit], ctx: SkillContext) -> None:
-        """施策実績のヒットへ同じ施策の Drive 資料と広告主の業種を添える（SQL は 1 回）。
+        """施策実績へ Drive 資料を添え、未分類の広告主だけ既知の業種を引く。
 
         接続は検索と同じ RLS（本人の email / groups / role）＝見えない資料は添えない。
-        失敗しても検索は続ける（fail-open・何も添えない＝ヘッダでも「無い」と主張しない）。
+        業種の照会に失敗しても、添付済みの資料を保って検索を続ける。
         """
+        from teamagent.skills.search.fanout_sources import case_client_name
+
         advertisers: list[str] = []
         for h in hits:
             key = campaign_key(h) if is_campaign_hit(h) else None
@@ -978,6 +983,32 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
                 rows = self._pgvector.find_drive_files_for_advertisers(
                     conn, advertisers, request_id=ctx.request_id
                 )
+                campaigns, attached = attach_related_files(hits, rows)
+                industries: dict[str, str | None] = {}
+                for hit in hits:
+                    if not is_campaign_hit(hit) or hit_industry(hit):
+                        continue
+                    key = campaign_key(hit)
+                    client = case_client_name(key[0]) if key else None
+                    if not client:
+                        continue
+                    if client not in industries:
+                        industries[client] = None
+                        try:
+                            with conn.transaction():
+                                industries[client] = normalize_industry(
+                                    self._pgvector.get_industry_for_client(
+                                        conn, client, request_id=ctx.request_id
+                                    )
+                                )
+                        except Exception as exc:
+                            logger.warning(
+                                "search_campaign_industry_failed",
+                                request_id=ctx.request_id,
+                                error=type(exc).__name__,
+                            )
+                    if industry := industries[client]:
+                        hit.metadata["campaign_industry"] = industry
         except Exception as exc:  # 添付の失敗で検索回答そのものを壊さない
             logger.warning(
                 "search_campaign_files_failed",
@@ -985,7 +1016,6 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
                 error=type(exc).__name__,
             )
             return
-        campaigns, attached = attach_related_files(hits, rows)
         logger.info(
             "search_campaign_files",  # G8: 件数だけ（広告主名・資料名は出さない）
             request_id=ctx.request_id,
@@ -2259,7 +2289,9 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
             )
             answer = self._append_campaign_footer(answer, hits, asked_industry=asked_industry)
             if _source_links_enabled():
-                answer += self._source_links_block(hits, file_urls=file_urls)
+                answer += self._source_links_block(
+                    hits, file_urls=file_urls, slack_items=slack_items
+                )
             if searched_scope:
                 answer += "\n\n" + searched_scope
             converse_ms = (time.perf_counter() - started) * 1000
@@ -2710,7 +2742,11 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
 
     @classmethod
     def _source_links_block(
-        cls, hits: list[SearchHit], *, file_urls: dict[str, str] | None = None
+        cls,
+        hits: list[SearchHit],
+        *,
+        file_urls: dict[str, str] | None = None,
+        slack_items: tuple[SlackItem, ...] = (),
     ) -> str:
         """回答末尾に付ける『📎 資料リンク』の markdown ブロック（重複資料は畳む・最大6件）。
 
@@ -2720,19 +2756,26 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
         resolved = file_urls or {}
         seen: set[str] = set()
         lines: list[str] = []
-        for h in hits:
-            meta = h.metadata or {}
-            url = cls._hit_url(h, file_urls=resolved)
+        sources = [
+            (
+                cls._hit_url(h, file_urls=resolved),
+                str(
+                    (h.metadata or {}).get("title") or (h.metadata or {}).get("file_name") or "資料"
+                ),
+                "（関連資料）" if (h.metadata or {}).get("is_related_drive") else "",
+            )
+            for h in hits
+        ]
+        sources.extend((i.hit.permalink, i.hit.channel or "Slack", "") for i in slack_items)
+        for url, raw, tag in sources:
             if not url or url in seen:
                 continue
             # url に markdown を壊す文字（)・空白・制御）が混ざる資料は安全側でスキップ。
             if any(c in url for c in ") \t\n\r") or "(" in url:
                 continue
             seen.add(url)
-            raw = str(meta.get("title") or meta.get("file_name") or "資料")
-            # markdown リンクを壊す文字（[]()と改行）を除去。
-            title = re.sub(r"[\[\]()\n\r]+", " ", raw).strip() or "資料"
-            tag = "（関連資料）" if meta.get("is_related_drive") else ""
+            # MarkdownやSlackのメンションとして解釈される文字を除去。
+            title = re.sub(r"[\[\]()<>@\n\r]+", " ", raw).strip() or "資料"
             lines.append(f"- [{title}]({url}){tag}")
             if len(lines) >= 6:
                 break

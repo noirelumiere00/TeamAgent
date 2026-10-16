@@ -33,6 +33,11 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from teamagent.adapters.pgvector_client import SearchHit
+from teamagent.ingest.industry_taxonomy import (
+    INDUSTRY_KEYWORDS,
+    match_industry_keyword,
+    normalize_industry,
+)
 from teamagent.skills.search.client_match import (
     _hit_matches_client,
     aliases,
@@ -116,6 +121,79 @@ def query_subject_terms(query: str) -> list[str]:
         seen.add(key)
         out.append(term)
     return out
+
+
+def case_query_target(query: str, asked_industry: str | None = None) -> str | None:
+    """明示された「X の事例」の対象。省略された追問や一般的な実績検索は絞らない。"""
+    text = unicodedata.normalize("NFKC", query or "").strip()
+    match = re.match(
+        r"^(.+?)(?:に関する|についての|関連の|向けの|の)"
+        r"(?:(?:ショート動画|動画|SNS|施策|活用|成功|提案)[の・ ]*)*(?:事例|施策実績|実績)",
+        text,
+        re.IGNORECASE,
+    )
+    if not match:
+        return None
+    target = match[1].strip(" 「」『』\"'")
+    industry = normalize_industry(asked_industry) or match_industry_keyword(target)
+    if industry:
+        return industry
+    if target in {
+        "過去",
+        "これまで",
+        "今回",
+        "社内",
+        "うち",
+        "その",
+        "それ",
+        "施策",
+        "動画",
+        "ショート動画",
+        "SNS",
+    }:
+        return None
+    target = re.sub(r"(?:の施策|施策|広告|活用|関連)$", "", target).strip()
+    return target if len(target) >= 2 else None
+
+
+def target_matches(text: str, target: str) -> bool:
+    """対象語の直接一致（全半角・大小文字・既存の業種/取引先の別名を吸収）。"""
+    if "の" in target:
+        return all(target_matches(text, part) for part in target.split("の") if part)
+    body = unicodedata.normalize("NFKC", text or "").casefold()
+    industry = normalize_industry(target)
+    forms = {target, *aliases(target), *(INDUSTRY_KEYWORDS.get(industry, ()) if industry else ())}
+    for form in forms:
+        needle = unicodedata.normalize("NFKC", form).casefold()
+        if not needle:
+            continue
+        if needle.isascii():
+            if re.search(r"(?<![a-z0-9])" + re.escape(needle) + r"(?![a-z0-9])", body):
+                return True
+        elif needle in body:
+            return True
+    if re.search(r"[\s()（）]", target):
+        from teamagent.skills.search.campaign_files import SIMILARITY_MIN, campaign_similarity
+
+        # 商品説明の省略・括弧差は、既存の施策名照合と同じ基準で吸収する。
+        return campaign_similarity(target, text) >= SIMILARITY_MIN
+    return False
+
+
+def case_target_hits(hits: Sequence[SearchHit], target: str | None) -> list[SearchHit]:
+    """事例の対象があるときだけ、同じ対象のヒットへ絞る。"""
+    if not target:
+        return list(hits)
+    if normalize_industry(target):
+        from teamagent.skills.search.campaign_files import scope_by_industry
+
+        return scope_by_industry(hits, target)
+    return [hit for hit in hits if target_matches(_haystack(hit), target)]
+
+
+def build_case_not_found_answer(target: str) -> str:
+    """一致事例 0 件の回答は無関係な事例・探し直しの依頼を付けずに確定する。"""
+    return f"{target}の事例は見つかりませんでした（探した範囲: 社内資料・施策実績・Slack）。"
 
 
 def _haystack(hit: SearchHit) -> str:
@@ -250,7 +328,11 @@ def build_not_found_answer(hits: Sequence[SearchHit], *, max_near: int = _NEAR_M
 __all__ = [
     "NOT_FOUND_HEAD",
     "FoundDecision",
+    "build_case_not_found_answer",
     "build_not_found_answer",
+    "case_query_target",
+    "case_target_hits",
     "judge_found",
     "query_subject_terms",
+    "target_matches",
 ]

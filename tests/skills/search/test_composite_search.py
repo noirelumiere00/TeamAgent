@@ -172,6 +172,28 @@ def _user_message(bedrock: MagicMock) -> str:
     return str(bedrock.converse.call_args.kwargs["messages"][0]["content"][0]["text"])
 
 
+@pytest.mark.parametrize("vault_found", [True, False])
+def test_iter4_answer_links_include_slack_sources(
+    monkeypatch: pytest.MonkeyPatch, vault_found: bool
+) -> None:
+    monkeypatch.setenv("SEARCH_ANSWER_SOURCE_LINKS", "1")
+    bedrock = _bedrock()
+    bedrock.converse.return_value = _converse("ビデオリリースの定義。施策管理シートもあります。")
+    source = _match("1759210000.000100", "CPROJECT", "project-open", "案件の説明")
+    hits = (
+        [_vault_hit(source_uri="https://drive.google.com/file/d/definition/view")]
+        if vault_found
+        else []
+    )
+    skill, _ = _skill(bedrock, _pg(hits), client=_slack_client([source]))
+    out = skill.run(
+        SearchInput(query="社内でいうビデオリリースって何？"), SkillContext(metadata=MCP)
+    )
+    assert source["permalink"] in out.answer
+    if vault_found:
+        assert hits[0].metadata["source_uri"] in out.answer
+
+
 def _public(i: int, text: str = "日本ガイシ ケイパ提案の感触は良好", **kw: Any) -> dict[str, Any]:
     return _match(f"17592{i:05d}.000100", f"C0PUB{i}", f"sales-{i}", text, **kw)
 

@@ -165,3 +165,104 @@ test('iter3 numeric evidence is isolated between turns of the same bound convers
   receive('124.456');
   assert.doesNotMatch(send(fabricated), /181,200|168,900/);
 });
+
+test('iter4 removes only unsupported numeric rows and preserves what worked explanations', () => {
+  const {remember, send} = setup();
+  remember(evidence);
+  const out = send('## 何が効いたか\nSlack での投稿から、以下が確認できます:\n' +
+    '- @creator-a：再生181,200、保存127\n' +
+    '- 冒頭で調理後の姿を見せ、続きを見たくなる構成です。\n' +
+    '- 冒頭15秒で完成形を見せています。\n' +
+    '- 15秒で完成形を見せています。\n' +
+    '- 保存したくなる具体的な手順が効いていました。\n' +
+    '- @creator-b：再生184,100、保存96');
+  assert.doesNotMatch(out, /181,200/);
+  assert.match(out, /## 何が効いたか/);
+  assert.match(out, /冒頭で調理後の姿を見せ/);
+  assert.match(out, /冒頭15秒で完成形/);
+  assert.match(out, /- 15秒で完成形/);
+  assert.match(out, /保存したくなる具体的な手順/);
+  assert.match(out, /@creator-b：再生184,100、保存96/);
+});
+
+test('iter4 replaces unsupported numbers once and removes sections emptied by the replacement', () => {
+  const {remember, send} = setup();
+  remember(evidence);
+  const out = send('## 動画ごとの再生数\nSlack での投稿から、以下が確認できます:\n' +
+    '- @creator-a：再生181,200、保存127\n\n' +
+    '## 投稿者ごとの保存数\n- @creator-b：保存1000\n\n' +
+    '## 何が効いたか\n完成後の姿を冒頭に見せています。');
+  assert.equal(out.split('動画ごとの数値は 📊 を参照してください。').length - 1, 1);
+  assert.doesNotMatch(out, /## 動画ごとの再生数|## 投稿者ごとの保存数|以下が確認できます/);
+  assert.match(out, /## 何が効いたか\n完成後の姿を冒頭に見せています。/);
+});
+
+test('iter4 keeps supported table rows when a neighboring row has fabricated counts', () => {
+  const {remember, send} = setup();
+  remember(evidence);
+  const out = send(table([['@creator-a', '181,200', '127'], ['@creator-b', '184,100', '96']]));
+  assert.doesNotMatch(out, /@creator-a|181,200/);
+  assert.match(out, /\| @creator-b \| 184,100 \| 96 \|/);
+});
+
+test('iter4 accepts rounded unit conversions including supported totals and averages', () => {
+  const {remember, send} = setup();
+  remember({total_plays: 507321, average_plays: 253660.5, total_saves: 371, average_saves: 185.5});
+  for (const text of [
+    '動画ごとの結果：\n- 再生合計：50.7 万回、再生平均：25.37万回\n- 保存合計：371件、保存平均：185.5件',
+    table([['@creator-a', '50.7 万', '371']]),
+    '動画ごとの再生数：\n- 合計：５０．７万\n- 平均：２５．３７万',
+  ]) assert.equal(send(text), text);
+  assert.doesNotMatch(send(table([['@creator-a', '50.6 万', '371']])), /50\.6 万/);
+});
+
+test('iter4 recomputes rounded ratios from tool numbers instead of retaining a fabricated ratio', () => {
+  const {remember, send} = setup();
+  remember({posts: [{save_count: 261}, {save_count: 110}]});
+  const supported = '動画ごとの保存数は261件と110件で、約2.4倍です。';
+  assert.equal(send(supported), supported);
+  assert.doesNotMatch(send(supported.replace('2.4倍', '1.6倍')), /1\.6倍/);
+  assert.doesNotMatch(send(supported.replace('2.4倍', '１．６倍')), /１．６倍/);
+  const supportedTable = '| 動画 | 保存数 | 倍率 |\n| --- | --- | --- |\n| A | 261 | 2.4倍 |';
+  assert.equal(send(supportedTable), supportedTable);
+  assert.doesNotMatch(send(supportedTable.replace('2.4倍', '1.6倍')), /1\.6倍/);
+  const supportedList = '動画ごとの保存結果：\n- A：保存261、B：保存110、差は2.4倍';
+  assert.equal(send(supportedList), supportedList);
+  assert.doesNotMatch(send(supportedList.replace('2.4倍', '1.6倍')), /1\.6倍/);
+});
+
+test('iter4 ratio operands do not come from dates, unrelated metrics, or other stated operands', () => {
+  const {remember, send} = setup();
+  remember({posts: [{save_count: 261, play_count: 16}, {save_count: 110, play_count: 10}],
+    year: 2026, month: 10, page: 16, url: 'https://example.test/16/10', ratio: '1.6倍'});
+  for (const text of [
+    '動画ごとの保存数は261件と110件で、約1.6倍です。',
+    '| 動画 | 保存数 | 倍率 |\n| --- | --- | --- |\n| A | 261 | 1.6倍 |',
+    '動画ごとの保存結果：\n- A：保存261、B：保存110、差は1.6倍',
+  ]) assert.doesNotMatch(send(text), /1\.6倍/);
+});
+
+test('iter4 uses rounded precision boundaries and labeled metric arrays or text for ratios', () => {
+  for (const [result, accepted] of [[{plays: 507499}, true], [{plays: 507500}, false]]) {
+    const {remember, send} = setup();
+    remember(result);
+    const text = table([['@creator-a', '50.7 万', '']]);
+    assert.equal(send(text).includes('50.7 万'), accepted);
+  }
+  for (const result of [
+    {save_counts: [261, 110], year: 2026, month: 10, day: 16},
+    {text: '保存数は261件と110件。2026年10月16日。'},
+  ]) {
+    const {remember, send} = setup();
+    remember(result);
+    const text = '動画ごとの保存数は261件と110件で、約2.4倍です。';
+    assert.equal(send(text), text);
+    assert.doesNotMatch(send(text.replace('2.4倍', '1.6倍')), /1\.6倍/);
+  }
+  const {remember, send} = setup();
+  remember({save_counts: [261, 110, 16, 10]});
+  assert.doesNotMatch(send('動画ごとの保存数は261件と110件で、約1.6倍です。'), /1\.6倍/);
+  const urls = setup();
+  urls.remember({text: 'https://example.test/保存16/保存10'});
+  assert.doesNotMatch(urls.send('動画ごとの保存数は約1.6倍です。'), /1\.6倍/);
+});
