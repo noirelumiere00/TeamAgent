@@ -973,6 +973,8 @@ def test_entrypoint_is_readonly_secret_safe_and_environment_allowlisted() -> Non
         "TEAMAGENT_PERSONAL_MEMORY",
         "TEAMAGENT_ANSWER_FEEDBACK",
         "TEAMAGENT_FIRST_MESSAGE_RESTORE",
+        "SEARCH_DIRECT_ANSWER",
+        "SEARCH_DIRECT_ANSWER_ALLOWED_EMAILS",
     }
     # 秘密値の受け皿にしない（allowlist の意味が消える）。
     assert diagnostic.isdisjoint(passthrough)
@@ -987,6 +989,52 @@ def test_entrypoint_is_readonly_secret_safe_and_environment_allowlisted() -> Non
     )
     assert "process.exit(128 + signalNumber)" in entrypoint
     assert "writeFile(templatePath" not in entrypoint
+
+
+@pytest.mark.parametrize(("flag", "allowed"), [("0", ""), ("1", "me@example.test"), ("true", "*")])
+def test_entrypoint_forwards_search_direct_answer_to_actual_child_environment(
+    flag: str, allowed: str
+) -> None:
+    script = r"""
+import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+const source = readFileSync(process.argv[1], "utf8");
+const library = source.replace(/\nrun\(\)\.catch\([^\n]*\);\s*$/, "\n");
+assert.notEqual(library, source, "strip startup only; exercise the real environment builder");
+const { buildChildEnvironment } = await import(
+  `data:text/javascript;base64,${Buffer.from(library + "\nexport { buildChildEnvironment };\n").toString("base64")}`
+);
+const childEnv = buildChildEnvironment({
+  runtimeRoot: "/tmp/runtime", stateDir: "/tmp/runtime/state", workspaceDir: "/tmp/runtime/workspace",
+  homeDir: "/tmp/runtime/home", cacheDir: "/tmp/runtime/cache", configPath: "/tmp/runtime/config.json",
+});
+const child = spawnSync(process.execPath, ["-e", "process.stdout.write(JSON.stringify(process.env))"], {
+  env: childEnv, encoding: "utf8", timeout: 5000,
+});
+assert.equal(child.status, 0, child.stderr);
+process.stdout.write(child.stdout);
+"""
+    result = subprocess.run(
+        ["node", "--input-type=module", "-e", script, str(ENTRYPOINT)],
+        env={
+            "PATH": os.environ["PATH"],
+            "SEARCH_DIRECT_ANSWER": flag,
+            "SEARCH_DIRECT_ANSWER_ALLOWED_EMAILS": allowed,
+            "NODE_OPTIONS": "--no-warnings",
+            "UNAPPROVED_ENV": "must-not-reach-child",
+        },
+        check=False,
+        text=True,
+        capture_output=True,
+        timeout=15,
+    )
+    assert result.returncode == 0, result.stderr
+    child = json.loads(result.stdout)
+    assert child["SEARCH_DIRECT_ANSWER"] == flag
+    assert child["SEARCH_DIRECT_ANSWER_ALLOWED_EMAILS"] == allowed
+    assert "NODE_OPTIONS" not in child
+    assert "UNAPPROVED_ENV" not in child
 
 
 def test_dedicated_builder_is_fail_closed_and_scans_child() -> None:
@@ -1340,6 +1388,75 @@ def _render_task(task: dict[str, Any], image: str) -> subprocess.CompletedProces
         text=True,
         capture_output=True,
     )
+
+
+@pytest.mark.parametrize(
+    "optional",
+    [
+        [],
+        [{"name": "SEARCH_DIRECT_ANSWER", "value": "1"}],
+        [{"name": "SEARCH_DIRECT_ANSWER_ALLOWED_EMAILS", "value": "*"}],
+        [
+            {"name": "SEARCH_DIRECT_ANSWER", "value": "0"},
+            {"name": "SEARCH_DIRECT_ANSWER_ALLOWED_EMAILS", "value": ""},
+        ],
+        [
+            {"name": "SEARCH_DIRECT_ANSWER", "value": "1"},
+            {"name": "SEARCH_DIRECT_ANSWER_ALLOWED_EMAILS", "value": "me@example.test"},
+        ],
+    ],
+)
+def test_task_hardening_preserves_legacy_inputs_and_optional_search_delivery_inputs(
+    optional: list[dict[str, str]],
+) -> None:
+    task = json.loads(TASK_FIXTURE.read_text())
+    environment = task["containerDefinitions"][0]["environment"]
+    environment.extend(optional)
+    image = (
+        f"718959508629.dkr.ecr.ap-northeast-1.amazonaws.com/teamagent-openclaw@sha256:{'b' * 64}"
+    )
+    rendered = _render_task(task, image)
+    assert rendered.returncode == 0, rendered.stderr
+    assert json.loads(rendered.stdout)["containerDefinitions"][0]["environment"] == environment
+
+
+@pytest.mark.parametrize("name", ["SEARCH_DIRECT_ANSWER", "SEARCH_DIRECT_ANSWER_ALLOWED_EMAILS"])
+@pytest.mark.parametrize("value", [None, True, 1, [], {}])
+def test_task_hardening_rejects_non_string_search_delivery_inputs(name: str, value: Any) -> None:
+    task = json.loads(TASK_FIXTURE.read_text())
+    task["containerDefinitions"][0]["environment"].append({"name": name, "value": value})
+    image = (
+        f"718959508629.dkr.ecr.ap-northeast-1.amazonaws.com/teamagent-openclaw@sha256:{'b' * 64}"
+    )
+    rejected = _render_task(task, image)
+    assert rejected.returncode != 0
+    assert "OpenClaw task definition:" in rejected.stderr
+
+
+@pytest.mark.parametrize("change", ["unknown", "missing_required", "duplicate"])
+def test_task_hardening_search_delivery_inputs_do_not_expand_other_environment_access(
+    change: str,
+) -> None:
+    task = json.loads(TASK_FIXTURE.read_text())
+    environment = task["containerDefinitions"][0]["environment"]
+    environment.extend(
+        [
+            {"name": "SEARCH_DIRECT_ANSWER", "value": "1"},
+            {"name": "SEARCH_DIRECT_ANSWER_ALLOWED_EMAILS", "value": "me@example.test"},
+        ]
+    )
+    if change == "unknown":
+        environment.append({"name": "SEARCH_DIRECT_ANSWER_UNAPPROVED", "value": "1"})
+    elif change == "missing_required":
+        environment[:] = [entry for entry in environment if entry["name"] != "AWS_REGION"]
+    else:
+        environment.append({"name": "SEARCH_DIRECT_ANSWER", "value": "1"})
+    image = (
+        f"718959508629.dkr.ecr.ap-northeast-1.amazonaws.com/teamagent-openclaw@sha256:{'b' * 64}"
+    )
+    rejected = _render_task(task, image)
+    assert rejected.returncode != 0
+    assert "OpenClaw task definition:" in rejected.stderr
 
 
 def test_authoritative_deploy_renderer_enforces_real_fargate_contract(

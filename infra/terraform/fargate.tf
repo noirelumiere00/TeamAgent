@@ -641,6 +641,9 @@ resource "aws_ecs_task_definition" "mcp" {
       # tf にも焼く（tfvars に行が無くても guard 経由の apply で消えない）。allowlist は上と同じ理由で "*"。
       { name = "USE_DIRECT_VIDEO_METRICS_POST", value = "1" },
       { name = "DIRECT_VIDEO_METRICS_POST_ALLOWED_EMAILS", value = "*" },
+      # OC の抑止を先に ON にしてから MCP の直接投稿を ON にする。許可リストは共通。
+      { name = "SEARCH_DIRECT_ANSWER", value = var.search_direct_answer },
+      { name = "SEARCH_DIRECT_ANSWER_ALLOWED_EMAILS", value = var.search_direct_answer_allowed_emails },
       # Conditional PutItemでrolling taskを跨いだnonce one-useを保証。障害時は認可fail-closed。
       { name = "TEAMAGENT_CALLER_CLAIM_REPLAY_TABLE", value = aws_dynamodb_table.mcp_caller_claim_nonces.name },
       # v0.3 Task6: AiLaVault リンク注入の発火条件（未設定だと build_search_web_links が
@@ -1137,6 +1140,8 @@ resource "aws_ecs_task_definition" "openclaw" {
       # §U: DM 許可リスト（カンマ区切り Slack user_id）。entrypoint が起動時に allowFrom へ注入。
       # メンバー追加は本 var を編集 + apply（task 再デプロイ）だけ＝image rebuild 不要・15名まで可動。
       { name = "SLACK_DM_ALLOWLIST", value = var.slack_dm_allowlist },
+      { name = "SEARCH_DIRECT_ANSWER", value = var.openclaw_search_direct_answer },
+      { name = "SEARCH_DIRECT_ANSWER_ALLOWED_EMAILS", value = var.search_direct_answer_allowed_emails },
     ]
     secrets = [
       { name = "TEAMAGENT_MCP_BEARER", valueFrom = data.aws_secretsmanager_secret.bearer.arn },

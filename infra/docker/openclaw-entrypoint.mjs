@@ -95,6 +95,9 @@ const DIAGNOSTIC_ENV = [
   // 新しい会話の 1 通目を戻す（2026-10-06・P7）の plugin 側スイッチ。既定 ON・値が 0 のときだけ OFF
   // （秘密値ではない）。ここに無いと TD で 0 にしても黙って捨てられ、止められない。
   "TEAMAGENT_FIRST_MESSAGE_RESTORE",
+  // MCP の直接投稿と同じ利用者だけ、plugin の二重返信抑止・search 直接実行を有効にする。
+  "SEARCH_DIRECT_ANSWER",
+  "SEARCH_DIRECT_ANSWER_ALLOWED_EMAILS",
 ];
 
 function fail(message) {

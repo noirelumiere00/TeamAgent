@@ -52,6 +52,7 @@ from teamagent.skills.search.campaign_files import (
     attach_related_files,
     campaign_header,
     campaign_key,
+    campaign_totals_block,
     hit_industry,
     is_campaign_hit,
     links_footer,
@@ -709,6 +710,11 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
         #    回答文は発信元スレッドへ後追い投稿する」。フラグ OFF ならこの分岐は
         #    _should_defer_answer が必ず False を返し、以下は 1 バイトも従来と変わらない。
         deferred = False
+        direct_head, direct_kind = (
+            self._direct_answer_head(input.query, summary_hits, asked_industry=asked_industry)
+            if ctx.metadata.get("_search_direct_answer") is True and input.include_answer and found
+            else ("", None)
+        )
         if input.include_answer and case_miss:
             answer, cost_usd = build_case_not_found_answer(case_target or ""), 0.0
         elif input.include_answer and not found:
@@ -723,6 +729,8 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
                 )
                 timings["converse_ms"] = (time.perf_counter() - _t) * 1000
                 answer = f"{answer}\n\n{slack_answer}"
+        elif direct_kind is not None:
+            answer, cost_usd = direct_head, 0.0
         elif input.include_answer and self._should_defer_answer(hits, ctx):
             answer = self._start_followup_answer(
                 input,
@@ -749,6 +757,11 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
                 ctx.request_id,
                 slack_items=slack_items,
                 asked_industry=asked_industry,
+                canonical_campaign_totals=(
+                    campaign_totals_block(summary_hits)
+                    if ctx.metadata.get("_search_direct_answer") is True
+                    else ""
+                ),
             )
             timings["converse_ms"] = (time.perf_counter() - _t) * 1000
             # 資料リンク・「シートのみ」と、動画ごとの数字・リンクをコードで足す。
@@ -758,8 +771,20 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
         else:
             answer, cost_usd = "", 0.0
 
+        if (
+            ctx.metadata.get("_search_direct_answer") is True
+            and input.include_answer
+            and (case_miss or (not found and not slack_items))
+        ):
+            direct_kind = "not_found"
+
         # MCP向けに資料とSlackの出典を付ける（/appは従来どおりenvで制御）。
-        if input.include_answer and not deferred and not case_miss and _source_links_enabled():
+        if (
+            input.include_answer
+            and not deferred
+            and not case_miss
+            and (_source_links_enabled() or direct_kind is not None)
+        ):
             answer += self._source_links_block(
                 summary_hits if found else [], file_urls=file_urls, slack_items=slack_items
             )
@@ -861,6 +886,8 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
 
         output = SearchOutput(
             answer=answer,
+            direct_answer=answer if direct_kind is not None else None,
+            direct_answer_kind=direct_kind,
             hits=search_hits,
             total_cost_usd=cost_usd,
             found=found,
@@ -1040,6 +1067,28 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
             if part
         )
         return "\n\n".join(part for part in (answer, footer) if part)
+
+    def _direct_answer_head(
+        self, query: str, hits: list[SearchHit], *, asked_industry: str | None = None
+    ) -> tuple[str, str | None]:
+        """直接投稿の比較・施策実績は、要約器を通さず集計行と資料リンクで組む。"""
+        primary = [h for h in hits if not (h.metadata or {}).get("is_related_drive")]
+        comparison = comparison_table(query, primary)
+        totals = campaign_totals_block(scope_by_industry(primary, asked_industry))
+        if comparison:
+            head = "\n\n".join(part for part in (comparison, totals) if part)
+            return (
+                self._append_campaign_footer(head, primary, asked_industry=asked_industry),
+                "comparison",
+            )
+        if self._campaign_files and (
+            totals or video_stats_footer(primary, "", asked_industry=asked_industry)
+        ):
+            return (
+                self._append_campaign_footer(totals, primary, asked_industry=asked_industry),
+                "video_metrics",
+            )
+        return "", None
 
     def _scope_to_client(self, hits: list[SearchHit], asked: str) -> list[SearchHit]:
         """``asked`` の資料と言えるヒットだけ（hit_is_about_client・別名込み・本文は見ない）。"""
@@ -2380,6 +2429,7 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
         bedrock: Any | None = None,
         karte_hits: tuple[SearchHit, ...] = (),
         timeline_statuses: tuple[timeline_status.TimelineStatus, ...] | None = None,
+        canonical_campaign_totals: str = "",
     ) -> tuple[str, float]:
         """Bedrock に system prompt + chunks + query を渡して要約させる。
 
@@ -2438,6 +2488,11 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
                 "勝ち負けは表の数字で判定。表に無い数字は書かない。"
                 "比較表と大小の結論はコードが回答に添えるため、書き直さない。"
                 "本文は資料に裏づけられた投稿内容の違いだけを説明する。因果効果は断定しない。"
+            )
+        if canonical_campaign_totals:
+            sections.append(
+                canonical_campaign_totals
+                + "\n反応合計はこの集計値だけを使う。関連資料や上位動画から合計を作り直さない。"
             )
         if self._answer_modes:
             # 回答モードを決めるのはここ 1 か所だけ（同期・二段返しの後追いの両方が通る）。
