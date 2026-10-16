@@ -75,15 +75,18 @@ def test_adapter_saved_capture_has_no_acquisition_gate_shortfalls(
                 "stop_reason": source_reason,
                 "missingness_preserved": True,
                 "posts": [normalized["posts"][index]],
-                "shortfalls": [{
-                    "kw": axis.query,
-                    "requested": 2,
-                    "actual": 1,
-                    "reason": "MEDIA_TIKTOK_RESULT_SHORTFALL",
-                }],
+                "shortfalls": [
+                    {
+                        "kw": axis.query,
+                        "requested": 2,
+                        "actual": 1,
+                        "reason": "MEDIA_TIKTOK_RESULT_SHORTFALL",
+                    }
+                ],
                 "sessions_data": [{"responses": [{"posts": [{"id": VID}]}]}],
             },
         }
+
         def fake_process(
             *args: Any, payload: dict[str, Any] = payload, **kwargs: Any
         ) -> subprocess.CompletedProcess[str]:

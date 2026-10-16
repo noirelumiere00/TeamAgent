@@ -502,8 +502,11 @@ def test_first_visit_capture_upload_failure_does_not_fail_roleless_tiktok_job(
     base = _control()
     request = make_job_request(
         operation=TikTokAcquireOperation(
-            kind="tiktok_acquire", keywords=("synthetic",), videos_per_kw=0,
-            artifact_mode="metadata_only", first_visit_capture=True,
+            kind="tiktok_acquire",
+            keywords=("synthetic",),
+            videos_per_kw=0,
+            artifact_mode="metadata_only",
+            first_visit_capture=True,
         ),
         output_bucket=base.request.output_bucket,
         request_fingerprint="first-visit-upload-failure",
@@ -513,9 +516,12 @@ def test_first_visit_capture_upload_failure_does_not_fail_roleless_tiktok_job(
     )
     names = ("posts.json", "first-visit-capture.json")
     control = replace(
-        base, request=request,
+        base,
+        request=request,
         outputs=tuple(
-            _output_capability(name=name, key=f"{request.output_prefix}attempts/1/{_ATTEMPT_ID}/output/{name}")
+            _output_capability(
+                name=name, key=f"{request.output_prefix}attempts/1/{_ATTEMPT_ID}/output/{name}"
+            )
             for name in names
         ),
     )
@@ -533,8 +539,12 @@ def test_first_visit_capture_upload_failure_does_not_fail_roleless_tiktok_job(
     completions: list[dict[str, Any]] = []
 
     def upload(
-        capability: OutputCapability, *, path: Path, content_type: str,
-        bucket: str, budget: DeadlineBudget,
+        capability: OutputCapability,
+        *,
+        path: Path,
+        content_type: str,
+        bucket: str,
+        budget: DeadlineBudget,
     ) -> S3ObjectRef:
         if capability.name == failed_name:
             raise OSError("synthetic upload outage")
@@ -542,14 +552,21 @@ def test_first_visit_capture_upload_failure_does_not_fail_roleless_tiktok_job(
         if capability.name == "_completion":
             completions.append(json.loads(body))
         return S3ObjectRef(
-            bucket=bucket, key=capability.key, version_id="synthetic-version",
-            sha256=hashlib.sha256(body).hexdigest(), size=len(body), content_type=content_type,
+            bucket=bucket,
+            key=capability.key,
+            version_id="synthetic-version",
+            sha256=hashlib.sha256(body).hexdigest(),
+            size=len(body),
+            content_type=content_type,
         )
 
     monkeypatch.setattr(tool_worker, "execute_operation", execute)
     monkeypatch.setattr(tool_worker, "_upload_path", upload)
     result = tool_worker.run_tool(
-        control, environ=_identity_environment(control), temp_root=tmp_path, clock=lambda: 1_001,
+        control,
+        environ=_identity_environment(control),
+        temp_root=tmp_path,
+        clock=lambda: 1_001,
     )
     if failed_name == "first-visit-capture.json":
         assert result.status == "done"

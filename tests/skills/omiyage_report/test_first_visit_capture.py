@@ -168,7 +168,8 @@ def test_search_result_without_capture_callback_still_saves_normalized_posts(
         assert saved["missingness_preserved"] is False
         assert [post["rank_display"] for post in saved["posts"]] == [1, 2]
         assert [post["provider_id"] for post in saved["posts"]] == [
-            "7100000000000000001", "7100000000000000002"
+            "7100000000000000001",
+            "7100000000000000002",
         ]
         assert saved["posts"][0]["plays"] == 10_000
         assert saved["posts"][0]["missingFields"] == []

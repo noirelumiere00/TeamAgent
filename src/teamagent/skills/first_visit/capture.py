@@ -39,8 +39,7 @@ def materialize_capture(
     ref = dict(capture_ref)
     if (
         any(
-            not isinstance(ref.get(k), str) or not ref[k]
-            for k in ("bucket", "key", "content_type")
+            not isinstance(ref.get(k), str) or not ref[k] for k in ("bucket", "key", "content_type")
         )
         or not isinstance(ref.get("sha256"), str)
         or not re.fullmatch(r"[0-9a-f]{64}", ref["sha256"])
@@ -67,17 +66,14 @@ def materialize_capture(
     if not isinstance(captured_axes, list) or any(not isinstance(a, dict) for a in captured_axes):
         raise ValueError("capture: axesはオブジェクト配列が必要です")
     axis_ids = [a.get("axis_id") for a in captured_axes]
-    if (
-        any(not isinstance(a, str) or not re.fullmatch(r"axis_\d{2,}", a) for a in axis_ids)
-        or len(set(axis_ids)) != len(axis_ids)
-    ):
+    if any(not isinstance(a, str) or not re.fullmatch(r"axis_\d{2,}", a) for a in axis_ids) or len(
+        set(axis_ids)
+    ) != len(axis_ids):
         raise ValueError("capture: 軸IDが不正または重複しています")
     for axis in captured_axes:
         if (
             axis.get("role") not in {"general", "brand", "competitor"}
-            or any(
-                not isinstance(axis.get(k), str) or not axis[k] for k in ("label", "query")
-            )
+            or any(not isinstance(axis.get(k), str) or not axis[k] for k in ("label", "query"))
             or type(axis.get("requested")) is not int
             or axis["requested"] < 1
         ):

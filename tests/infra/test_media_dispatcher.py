@@ -1414,8 +1414,11 @@ def test_first_visit_capture_operation_accepts_only_optional_bool_and_grants_exa
     module = _load_handler(monkeypatch, ddb=_Dynamo(), ecs=_Ecs())
     request = make_job_request(
         operation=TikTokAcquireOperation(
-            kind="tiktok_acquire", keywords=("synthetic",), videos_per_kw=0,
-            artifact_mode="metadata_only", first_visit_capture=enabled is True,
+            kind="tiktok_acquire",
+            keywords=("synthetic",),
+            videos_per_kw=0,
+            artifact_mode="metadata_only",
+            first_visit_capture=enabled is True,
         ),
         output_bucket="teamagent-media",
         request_fingerprint="first-visit-output-slot",
@@ -1437,7 +1440,9 @@ def test_first_visit_capture_operation_accepts_only_optional_bool_and_grants_exa
     if enabled:
         assert slots[-1]["key"].endswith("/output/first-visit-capture.json")
         assert slots[-1]["max_bytes"] == 128 * 1024 * 1024
-        assert module._allowed_content_types(spec, "first-visit-capture.json") == {"application/json"}
+        assert module._allowed_content_types(spec, "first-visit-capture.json") == {
+            "application/json"
+        }
 
 
 @pytest.mark.parametrize("invalid", [None, 0, 1, "true", "1", [], {}])
@@ -1446,7 +1451,9 @@ def test_first_visit_capture_operation_rejects_non_boolean_opt_in(
 ) -> None:
     module = _load_handler(monkeypatch, ddb=_Dynamo(), ecs=_Ecs())
     operation = TikTokAcquireOperation(
-        kind="tiktok_acquire", keywords=("synthetic",), videos_per_kw=0,
+        kind="tiktok_acquire",
+        keywords=("synthetic",),
+        videos_per_kw=0,
         artifact_mode="metadata_only",
     ).model_dump(mode="json")
     operation["first_visit_capture"] = invalid
@@ -1461,8 +1468,11 @@ def test_first_visit_capture_completion_is_optional_and_validated_in_exact_s3_sl
     module = _load_handler(monkeypatch, ddb=_Dynamo(), ecs=_Ecs())
     request = make_job_request(
         operation=TikTokAcquireOperation(
-            kind="tiktok_acquire", keywords=("synthetic",), videos_per_kw=0,
-            artifact_mode="metadata_only", first_visit_capture=True,
+            kind="tiktok_acquire",
+            keywords=("synthetic",),
+            videos_per_kw=0,
+            artifact_mode="metadata_only",
+            first_visit_capture=True,
         ),
         output_bucket="teamagent-media",
         request_fingerprint="first-visit-completion",
@@ -1471,7 +1481,8 @@ def test_first_visit_capture_completion_is_optional_and_validated_in_exact_s3_sl
     )
     spec = json.loads(request.to_json_bytes())
     attempt = {
-        "attempt_version": 1, "attempt_id": _ATTEMPT_ID,
+        "attempt_version": 1,
+        "attempt_id": _ATTEMPT_ID,
         "capability_sha256": _CAPABILITY_SHA256,
     }
     s3 = _S3()
@@ -1483,25 +1494,38 @@ def test_first_visit_capture_completion_is_optional_and_validated_in_exact_s3_sl
             "name": name,
             "object": s3.add_output(
                 key=f"{request.output_prefix}attempts/1/{_ATTEMPT_ID}/output/{key}",
-                version_id=f"version-{index}", body=b"{}", content_type="application/json",
+                version_id=f"version-{index}",
+                body=b"{}",
+                content_type="application/json",
                 metadata=metadata,
             ),
         }
         for index, (name, key) in enumerate(zip(names, keys, strict=True))
     ]
     completion = {
-        "schema_version": "1", "job_id": request.job_id,
+        "schema_version": "1",
+        "job_id": request.job_id,
         "payload_sha256": request.payload_sha256,
-        "attempt_id": _ATTEMPT_ID, "attempt_version": 1,
+        "attempt_id": _ATTEMPT_ID,
+        "attempt_version": 1,
         "capability_secret": _CAPABILITY_SECRET,
         "_completion_version_id": "completion-version",
         "result": {
-            "schema_version": "1", "job_id": request.job_id, "status": "done",
-            "artifacts": artifacts, "metadata": {}, "error_code": None,
+            "schema_version": "1",
+            "job_id": request.job_id,
+            "status": "done",
+            "artifacts": artifacts,
+            "metadata": {},
+            "error_code": None,
         },
     }
     result, manifest = module._validate_completion_result(
-        completion, s3=s3, bucket=request.output_bucket, spec=spec, attempt=attempt, exit_code=0,
+        completion,
+        s3=s3,
+        bucket=request.output_bucket,
+        spec=spec,
+        attempt=attempt,
+        exit_code=0,
     )
     assert result["status"] == "done"
     assert manifest == module._artifact_manifest_sha256(artifacts)
@@ -1516,11 +1540,16 @@ def test_first_visit_capture_on_reaches_dispatcher_launch_with_bounded_output_ca
     monkeypatch.setattr(module.time, "time", lambda: 1_001)
     request = make_job_request(
         operation=TikTokAcquireOperation(
-            kind="tiktok_acquire", keywords=("synthetic",), videos_per_kw=0,
-            artifact_mode="metadata_only", first_visit_capture=True,
+            kind="tiktok_acquire",
+            keywords=("synthetic",),
+            videos_per_kw=0,
+            artifact_mode="metadata_only",
+            first_visit_capture=True,
         ),
-        output_bucket="teamagent-media", request_fingerprint="first-visit-dispatch",
-        now_epoch_s=1_000, timeout_s=300,
+        output_bucket="teamagent-media",
+        request_fingerprint="first-visit-dispatch",
+        now_epoch_s=1_000,
+        timeout_s=300,
     )
     body = request.to_json_bytes().decode()
     _seed_queued(ddb, body, s3)
@@ -1533,7 +1562,9 @@ def test_first_visit_capture_on_reaches_dispatcher_launch_with_bounded_output_ca
     packed = bytes(control_put["Body"]).split(b"=", 1)[1].strip()
     control = json.loads(zlib.decompress(base64.b64decode(packed)))
     assert control["request"]["operation"]["first_visit_capture"] is True
-    sidecar = next(item for item in control["outputs"] if item["name"] == "first-visit-capture.json")
+    sidecar = next(
+        item for item in control["outputs"] if item["name"] == "first-visit-capture.json"
+    )
     assert sidecar["key"].startswith(request.output_prefix)
     assert sidecar["key"].endswith("/output/first-visit-capture.json")
     assert sidecar["max_bytes"] == 128 * 1024 * 1024

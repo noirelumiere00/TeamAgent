@@ -68,7 +68,9 @@ def materialize(
     value: dict[str, Any], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> tuple[Path, dict[str, Any], dict[str, Any]]:
     ref, data = stored(value)
-    monkeypatch.setattr(capture, "missing_inputs", lambda *args, **kwargs: ["labels.json: 未作成です"])
+    monkeypatch.setattr(
+        capture, "missing_inputs", lambda *args, **kwargs: ["labels.json: 未作成です"]
+    )
     root = tmp_path / "case"
     result = capture.materialize_capture(
         ref,
@@ -138,9 +140,13 @@ def test_saved_normalized_capture_keeps_unknown_distinct_from_missing(
         missingFields=[],
         unknownFields=["stats.playCount", "stats.diggCount"],
     )
-    attempt["shortfalls"] = [{
-        "kw": attempt["query"], "reason": "MEDIA_TIKTOK_RESULT_SHORTFALL", "actual": 1,
-    }]
+    attempt["shortfalls"] = [
+        {
+            "kw": attempt["query"],
+            "reason": "MEDIA_TIKTOK_RESULT_SHORTFALL",
+            "actual": 1,
+        }
+    ]
     root, _, ref = materialize(value, tmp_path, monkeypatch)
     raw = read(root, "raw/axis_01.json")
     video = raw["videos"][0]
@@ -249,7 +255,9 @@ def test_capture_without_bucket_version_is_verified_by_bytes(
 ) -> None:
     ref, data = stored(saved_capture())
     ref["version_id"] = None
-    monkeypatch.setattr(capture, "missing_inputs", lambda *args, **kwargs: ["labels.json: 未作成です"])
+    monkeypatch.setattr(
+        capture, "missing_inputs", lambda *args, **kwargs: ["labels.json: 未作成です"]
+    )
     result = capture.materialize_capture(
         ref, tmp_path / "case", reader=lambda _: data, kit_path=tmp_path / "kit"
     )
@@ -270,7 +278,13 @@ def test_uses_real_missing_inputs_to_report_human_evidence_and_never_seals(
         selection=[{"id": VID, "url": URL}],
     )
     missing = "\n".join(result["missing_inputs"])
-    for name in ("labels.json", "first_visit.json", "transcripts/", "anatomy/", "authored/synthesis.json"):
+    for name in (
+        "labels.json",
+        "first_visit.json",
+        "transcripts/",
+        "anatomy/",
+        "authored/synthesis.json",
+    ):
         assert name in missing
     assert result["manifest"] is None
     assert not (root / "manifest.json").exists()
@@ -289,7 +303,9 @@ def test_seal_only_after_existing_missing_inputs_accepts_case(
 
     monkeypatch.setattr(capture, "seal_inputs", seal)
     root = tmp_path / "case"
-    result = capture.materialize_capture(ref, root, reader=lambda _: data, kit_path=tmp_path / "kit")
+    result = capture.materialize_capture(
+        ref, root, reader=lambda _: data, kit_path=tmp_path / "kit"
+    )
     assert result["manifest"] == {"verified": True}
     assert result["missing_inputs"] == []
     assert calls == [root]
