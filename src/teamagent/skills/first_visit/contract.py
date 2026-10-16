@@ -97,20 +97,29 @@ def _video(row: Mapping[str, Any], preserved: bool) -> dict[str, Any]:
     missing = row.get("missingFields") or []
     if not isinstance(missing, list) or any(not isinstance(field, str) for field in missing):
         raise ValueError("missingFieldsは文字列配列が必要です")
+    unknown = row.get("unknownFields") or []
+    if not isinstance(unknown, list) or any(not isinstance(field, str) for field in unknown):
+        raise ValueError("unknownFieldsは文字列配列が必要です")
     targets = {
         **{k: f"stats.{v}" for k, v in _STATS.items()},
         "followers": "author.followerCount",
         "create_time": "createTime",
         "duration": "duration",
     }
+    if set(unknown) - set(targets.values()) or set(unknown) & set(missing):
+        raise ValueError("unknownFieldsは欠測と重複しない数値項目が必要です")
+    unknown = [
+        target
+        for field, target in targets.items()
+        if target not in missing
+        and (target in unknown or (not preserved and row.get(field) in (None, 0)))
+    ]
 
     def number(field: str) -> Any:
         value = row.get(field)
-        if targets[field] in missing:
-            return None
         if value is not None and (type(value) is not int or value < 0):
             raise ValueError(f"{field}: 非負整数またはnullが必要です")
-        return None if value == 0 and not preserved else value
+        return None if targets[field] in missing or targets[field] in unknown else value
 
     vid, url = row.get("provider_id"), row.get("url")
     _identity(vid, url)
@@ -137,7 +146,13 @@ def _video(row: Mapping[str, Any], preserved: bool) -> dict[str, Any]:
         "imageCount": row.get("imageCount"),
         "textLanguage": row.get("textLanguage"),
     }
-    video["missingFields"] = [target for field, target in targets.items() if number(field) is None]
+    video["missingFields"] = [
+        target
+        for field, target in targets.items()
+        if number(field) is None and target not in unknown
+    ]
+    if unknown:
+        video["unknownFields"] = unknown
     return video
 
 
@@ -155,6 +170,8 @@ def convert_inputs(
     ``acquisition`` keys are ``<AxisData.role>:<AxisData.label>``. Its
     missingness_preserved/unfiltered declarations require upstream capture evidence.
     ``case_details.brand_details`` supplies confirmed display/official information.
+    Saved captures can supply ``axis_posts``/``axis_shortfalls`` keyed by each
+    acquisition's ``axis_id`` to keep separate snapshots with the same query.
     """
     details = dict(case_details or {})
     brands = details.pop("brand_details", {})
@@ -204,10 +221,21 @@ def convert_inputs(
         file = f"raw/axis_{index:02d}.json"
         meta = dict(acquisition.get(f"{axis.role}:{axis.label}", {}))
         rows = [row for row in posts if row.get("kw") == axis.query]
+        failures = [s for s in shortfalls if s.get("kw") == axis.query]
+        for field, values in (("axis_posts", rows), ("axis_shortfalls", failures)):
+            if normalized is not None and field in normalized:
+                keyed = normalized[field]
+                if not isinstance(keyed, dict) or meta.get("axis_id") not in keyed:
+                    raise ValueError(f"{field}: 軸IDごとの取得結果が必要です")
+                captured = keyed[meta["axis_id"]]
+                if not isinstance(captured, list) or any(not isinstance(r, dict) for r in captured):
+                    raise ValueError(f"{field}: 投稿/不足はオブジェクト配列が必要です")
+                if field == "axis_posts" and any(r.get("kw") != axis.query for r in captured):
+                    raise ValueError("axis_posts: 投稿の実検索語が取得軸と一致しません")
+                values[:] = captured
         media_present = normalized is not None
         if not media_present:
             rows = [_legacy_row(post, axis.query) for post in axis.posts]
-        failures = [s for s in shortfalls if s.get("kw") == axis.query]
         failed = (
             axis.failed
             or meta.get("status") == "failed"
@@ -310,10 +338,19 @@ def _validate_video(video: Mapping[str, Any]) -> None:
     missing = video.get("missingFields")
     if not isinstance(missing, list) or any(not isinstance(field, str) for field in missing):
         raise ValueError(f"{video['id']}: missingFieldsが不正です")
+    unknown = video.get("unknownFields", [])
+    if (
+        not isinstance(unknown, list)
+        or any(not isinstance(field, str) for field in unknown)
+        or len(set(unknown)) != len(unknown)
+        or set(unknown) - numeric.keys()
+        or set(unknown) & set(missing)
+    ):
+        raise ValueError(f"{video['id']}: unknownFieldsが不正です")
     for field, value in numeric.items():
         if value is not None and (type(value) is not int or value < 0):
             raise ValueError(f"{video['id']}: {field}は非負整数またはnullが必要です")
-        if (value is None) != (field in missing):
+        if (value is None) != (field in missing or field in unknown):
             raise ValueError(f"{video['id']}: {field}の欠測記録が矛盾しています")
     if video.get("hashtags") is not None and (
         not isinstance(video["hashtags"], list)

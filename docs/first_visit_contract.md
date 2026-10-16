@@ -38,7 +38,7 @@ verify_manifest(root, *, kit_path, kit_python=None) -> list[str]
 
 率は件数からキットで再計算する。元の配列順、元順位、投稿ID・URL、実行済みの`query`を保持する。短い社名から検索語を作り直さない。同じ投稿が複数軸に現れたら各軸に残し、軸ごとの順位・判定を保つ。`selection`のID・URLはrawの投稿と一致させる。
 
-`AxisData.label` は実際の表示文と依頼名を照合して対応付ける。rawのファイル名は入力軸順の `raw/axis_01.json` 等。変換自体は順位の抜けや元順序をそのまま残し、欠落した表示順位があれば不足検査で停止する。同じqueryの軸は同一取得スナップショットを共有する契約であり、別取得の結果を同じ `kw` で連結して渡してはいけない。②では軸ID・取得job参照で別スナップショットを識別する。
+`AxisData.label` は実際の表示文と依頼名を照合して対応付ける。rawのファイル名は入力軸順の `raw/axis_01.json` 等。変換自体は順位の抜けや元順序をそのまま残し、欠落した表示順位があれば不足検査で停止する。従来の `posts` / `shortfalls` は `kw` で対応付けるので、同じqueryの軸は同一取得スナップショットを共有する。②の保存から渡す場合は `acquisition` の `axis_id` と、`normalized.axis_posts[axis_id]` / `axis_shortfalls[axis_id]` で別取得を区別する。別取得の結果を同じ `kw` で連結して渡してはいけない。
 
 `acquisition` は `"<role>:<label>"` をキーにした軸別メタデータ。次の情報を明示する。
 
@@ -67,6 +67,8 @@ verify_manifest(root, *, kit_path, kit_python=None) -> list[str]
 単位①の対象は `VERSION = 2026.10.14.1`、git HEAD `5544938b7f1695a7f13a646ea4b7fd8cadf37629`。manifestには版とgitの指紋を記録する。別版や未固定の変更を暗黙に受け入れない。キット側のソースを変更せず、設定された`kit_path`の入力ゲートを使う。
 
 ## 単位②で追加する保存
+
+実装した保存フラグ・S3形式・不足を返すAPI・単位⑤への受け渡しは [初訪取得保存](first_visit_capture.md) を参照。
 
 1. `tools/tiktok_scraper/search.mjs` の `normalizeVideo()` より前に、元応答のキー存在・null・実測0・`isAd`・写真種別・言語を保存する。現状はここですでに`|| 0`への変換と項目削除がある。
 2. 検索条件、実検索語、取得時刻、順序根拠、セッション数、終了理由、診断を保存する。複数セッションの頻度順を表示順と偽らない。

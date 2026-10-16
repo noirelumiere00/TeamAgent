@@ -446,6 +446,7 @@ def _node_json(
     workdir: Path,
     budget: DeadlineBudget,
     timeout_s: int,
+    capture: Callable[[dict[str, Any]], None] | None = None,
 ) -> dict[str, Any]:
     environment = _isolated_child_environment(workdir)
     completed = _run_process(
@@ -469,6 +470,11 @@ def _node_json(
             "MEDIA_TIKTOK_OUTPUT_INVALID",
             "TikTok output is invalid",
         ) from exc
+    if capture is not None and isinstance(result, dict):
+        try:
+            capture(result)
+        except Exception:
+            logger.warning("first visit capture callback failed", exc_info=True)
     if completed.returncode != 0 or not isinstance(result, dict) or result.get("ok") is not True:
         raw_error = result.get("error") if isinstance(result, dict) else None
         logger.warning(
@@ -730,8 +736,22 @@ def _tiktok_acquire(
     shortfalls: list[dict[str, Any]] = []
     warnings: list[str] = []
     actual_search_types: dict[str, str] = {}
+    capture_attempts: list[dict[str, Any]] = []
     for keyword_index, keyword in enumerate(operation.keywords):
         _remaining(budget)
+
+        def capture_response(payload: dict[str, Any], keyword: str = keyword) -> None:
+            from teamagent.media.tiktok_capture import _capture_record
+
+            capture_attempts.append(
+                _capture_record(
+                    payload,
+                    query=keyword,
+                    search_type=operation.search_type,
+                    requested=operation.n_per_kw,
+                )
+            )
+
         try:
             result = _node_json(
                 [
@@ -743,10 +763,12 @@ def _tiktok_acquire(
                     operation.search_type,
                     "--max",
                     str(operation.n_per_kw),
+                    *(["--first-visit-capture"] if operation.first_visit_capture else []),
                 ],
                 workdir=workdir,
                 budget=budget,
                 timeout_s=tiktok_search_timeout_seconds(operation.n_per_kw),
+                **({"capture": capture_response} if operation.first_visit_capture else {}),
             )
         except MediaOperationError as exc:
             if exc.code not in {
@@ -801,6 +823,26 @@ def _tiktok_acquire(
             )
 
     artifacts: list[ProducedArtifact] = []
+    capture_artifacts: tuple[ProducedArtifact, ...] = ()
+    if operation.first_visit_capture:
+        try:
+            capture_path = workdir / "first-visit-capture.json"
+            capture_path.write_text(
+                json.dumps(
+                    {"attempts": capture_attempts}, ensure_ascii=False, separators=(",", ":")
+                ),
+                encoding="utf-8",
+            )
+            capture_artifacts = (
+                ProducedArtifact(
+                    "first-visit-capture.json",
+                    capture_path,
+                    "application/json",
+                    relative_key="first-visit-capture.json",
+                ),
+            )
+        except Exception:
+            logger.warning("first visit capture write failed", exc_info=True)
     manifest_items: list[dict[str, Any]] = []
     posts_by_keyword = {
         keyword: [post for post in posts if post["kw"] == keyword] for keyword in operation.keywords
@@ -826,6 +868,7 @@ def _tiktok_acquire(
                     "application/json",
                     relative_key="posts.normalized.json",
                 ),
+                *capture_artifacts,
             ),
             {
                 "counts": {
@@ -984,6 +1027,7 @@ def _tiktok_acquire(
             ),
         )
     )
+    artifacts.extend(capture_artifacts)
     downloaded_count = sum(bool(item["downloaded"]) for item in manifest_items)
     return OperationOutput(
         tuple(artifacts),

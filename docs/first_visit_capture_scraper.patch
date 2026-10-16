@@ -1,0 +1,214 @@
+diff --git a/tools/tiktok_scraper/search.mjs b/tools/tiktok_scraper/search.mjs
+index 442d3003..70c87cf0 100644
+--- a/tools/tiktok_scraper/search.mjs
++++ b/tools/tiktok_scraper/search.mjs
+@@ -48,6 +48,7 @@ function parseArgs(argv) {
+     out: null,
+     headful: false,
+     networkGuardSelfTest: false,
++    firstVisitCapture: false,
+     sessions: 1, // 独立セッション数 (>1 で複数回検索→出現頻度ランク=単発失敗に強くする)
+   };
+   for (let i = 2; i < argv.length; i++) {
+@@ -63,6 +64,7 @@ function parseArgs(argv) {
+     else if (k === "--sessions") a.sessions = Math.max(1, parseInt(argv[++i], 10) || 1);
+     else if (k === "--headful") a.headful = true;
+     else if (k === "--network-guard-self-test") a.networkGuardSelfTest = true;
++    else if (k === "--first-visit-capture") a.firstVisitCapture = true;
+   }
+   return a;
+ }
+@@ -220,6 +222,43 @@ function parseSearchItem(item) {
+   return normalizeVideo(item.item);
+ }
+ 
++// Read source values before normalizeVideo fills missing statistics with zero.
++function captureVideo(v, query, rank, rankSource) {
++  if (!v?.id) return null;
++  const stats = v.stats || {};
++  const author = v.author || {};
++  const authorStats = v.authorStats || v.author_stats || {};
++  const images = v.imagePost?.images ?? v.imagePostInfo?.images;
++  const isPhoto = Array.isArray(images) || v.itemType === 2 || v.aweme_type === 150;
++  const row = {
++    provider_id: String(v.id),
++    url: `https://www.tiktok.com/@${author.uniqueId || "_"}/${isPhoto ? "photo" : "video"}/${v.id}`,
++    kw: query, rank_display: rank, rank_source: rankSource,
++    title: v.desc ?? null,
++    hashtags: Array.isArray(v.textExtra) ? v.textExtra.filter((t) => t.hashtagName).map((t) => t.hashtagName) : [],
++    account_id: author.uniqueId ?? null, account_name: author.nickname ?? null,
++    cover_url: v.video?.cover ?? v.video?.originCover ?? images?.[0]?.imageURL?.urlList?.[0] ?? null,
++    isAd: typeof v.isAd === "boolean" ? v.isAd : typeof v.is_ad === "boolean" ? v.is_ad : null,
++    mediaType: isPhoto ? "photo" : v.video ? "video" : null,
++    imageCount: Array.isArray(images) ? images.length : null,
++    textLanguage: v.textLanguage ?? v.descLanguage ?? null,
++    missingFields: [],
++  };
++  const numbers = {
++    plays: [stats.playCount, "stats.playCount"], likes: [stats.diggCount, "stats.diggCount"],
++    comments: [stats.commentCount, "stats.commentCount"], shares: [stats.shareCount, "stats.shareCount"],
++    saves: [stats.collectCount, "stats.collectCount"],
++    followers: [author.followerCount ?? authorStats.followerCount, "author.followerCount"],
++    create_time: [v.createTime, "createTime"], duration: [v.video?.duration, "duration"],
++  };
++  for (const [field, [value, source]] of Object.entries(numbers)) {
++    row[field] = value == null || value === "" ? null : Number(value);
++    if (!Number.isInteger(row[field]) || row[field] < 0) row[field] = null;
++    if (row[field] == null) row.missingFields.push(source);
++  }
++  return row;
++}
++
+ // challenge / SSR 形式: 動画オブジェクト直
+ function normalizeVideo(v) {
+   if (!v || !v.id) return null;
+@@ -275,6 +314,15 @@ async function searchOnce(browser, query, type, maxVideos) {
+   let captchaDetected = false;
+   let gridFound = false;
+   let ssrCount = 0;
++  const capturedPosts = [];
++  const capturedResponses = [];
++  let stopReason = "scroll_limit";
++  const captureSnapshot = () => ({
++    query, search_type: type, acquired_on: new Date().toISOString(),
++    status: allVideos.length > 0 ? "ok" : captchaDetected || pagesFetched === 0 ? "failed" : "observed_zero",
++    stop_reason: captchaDetected ? "bot_wall" : stopReason,
++    posts: capturedPosts, responses: capturedResponses,
++  });
+ 
+   const MAX_PAGES = 18;
+   const MAX_SCROLL = 20;
+@@ -306,10 +354,19 @@ async function searchOnce(browser, query, type, maxVideos) {
+         if (!text || text.includes("<html") || text.includes("<!DOCTYPE")) return;
+         const json = JSON.parse(text);
+         const items = json?.data || json?.itemList || json?.item_list || [];
++        if (args.firstVisitCapture) capturedResponses.push({
++          source: isSearch ? "search/general" : "challenge/item_list", acquired_on: new Date().toISOString(),
++          has_more: json.has_more ?? json.hasMore ?? null, posts: items,
++        });
+         let added = 0;
+-        for (const it of items) {
++        for (const [sourceIndex, it] of items.entries()) {
++          const original = isSearch ? (it?.type === 1 ? it.item : null) : it;
++          const captured = args.firstVisitCapture ? captureVideo(original, query, allVideos.length + 1, sourceIndex + 1) : null;
+           const v = isSearch ? parseSearchItem(it) : normalizeVideo(it);
+-          if (v && !allVideos.find((e) => e.id === v.id)) { allVideos.push(v); added++; }
++          if (v && !allVideos.find((e) => e.id === v.id)) {
++            if (captured) capturedPosts.push(captured);
++            allVideos.push(v); added++;
++          }
+         }
+         pagesFetched++;
+         latestHasMore = json.has_more === true || json.has_more === 1 || json.hasMore === true;
+@@ -362,9 +419,15 @@ async function searchOnce(browser, query, type, maxVideos) {
+           } catch { return null; }
+         }, isTag);
+         if (Array.isArray(ssr)) {
+-          for (const it of ssr) {
++          if (args.firstVisitCapture) capturedResponses.push({ source: "ssr", acquired_on: new Date().toISOString(), posts: ssr });
++          for (const [sourceIndex, it] of ssr.entries()) {
++            const original = isTag ? it : (it?.type === 1 ? it.item : null);
++            const captured = args.firstVisitCapture ? captureVideo(original, query, allVideos.length + 1, sourceIndex + 1) : null;
+             const v = isTag ? normalizeVideo(it) : parseSearchItem(it);
+-            if (v && !allVideos.find((e) => e.id === v.id)) { allVideos.push(v); ssrCount++; }
++            if (v && !allVideos.find((e) => e.id === v.id)) {
++              if (captured) capturedPosts.push(captured);
++              allVideos.push(v); ssrCount++;
++            }
+           }
+           log(`SSR extraction: ${allVideos.length} videos (ssr+${ssrCount})`);
+         }
+@@ -375,10 +438,10 @@ async function searchOnce(browser, query, type, maxVideos) {
+     let noNew = 0;
+     let hasMoreFalseRetries = 0;
+     for (let s = 0; s < MAX_SCROLL; s++) {
+-      if (allVideos.length >= maxVideos) { log(`reached target ${allVideos.length}/${maxVideos}`); break; }
+-      if (pagesFetched >= MAX_PAGES) break;
++      if (allVideos.length >= maxVideos) { stopReason = "target_reached"; log(`reached target ${allVideos.length}/${maxVideos}`); break; }
++      if (pagesFetched >= MAX_PAGES) { stopReason = "page_limit"; break; }
+       if (!latestHasMore && pagesFetched > 0) {
+-        if (hasMoreFalseRetries >= 3) break;
++        if (hasMoreFalseRetries >= 3) { stopReason = "has_more_false"; break; }
+         hasMoreFalseRetries++;
+         await humanDelay(3000, 5000);
+       }
+@@ -394,11 +457,17 @@ async function searchOnce(browser, query, type, maxVideos) {
+       }, s);
+       await humanDelay(3000, 4500);
+       if (allVideos.length > prev) { noNew = 0; hasMoreFalseRetries = 0; }
+-      else { noNew++; if (noNew >= 5) { log("no new data x5, stop"); break; } if (noNew >= 2) await humanDelay(2000, 3000); }
++      else { noNew++; if (noNew >= 5) { stopReason = "no_new_data"; log("no new data x5, stop"); break; } if (noNew >= 2) await humanDelay(2000, 3000); }
+     }
+ 
+     const diag = { pagesFetched, captchaDetected, gridFound, ssrCount, videosFound: allVideos.length };
+-    return { videos: allVideos.slice(0, maxVideos), diag };
++    return {
++      videos: allVideos.slice(0, maxVideos), diag,
++      ...(args.firstVisitCapture ? { capture: captureSnapshot() } : {}),
++    };
++  } catch (e) {
++    if (args.firstVisitCapture) e.firstVisitCapture = { ...captureSnapshot(), status: "failed", stop_reason: "exception" };
++    throw e;
+   } finally {
+     await page.close();
+     await context.close();
+@@ -796,6 +865,8 @@ async function main() {
+   let browser;
+   let pinnedProxy;
+   const result = { ok: false, query: args.query, type: args.type, count: 0, videos: [], error: null, errorCode: null, diag: null };
++  const capturedSessions = [];
++  const rememberSession = (r) => { if (args.firstVisitCapture && r.capture) capturedSessions.push(r.capture); };
+   try {
+     const chrome = findChrome();
+     log(`launch chrome: ${chrome} (headless=${!args.headful}) sessions=${args.sessions}`);
+@@ -812,12 +883,14 @@ async function main() {
+     if (args.sessions <= 1) {
+       // 単一セッション (既定・低レイテンシ)
+       const r = await searchOnce(browser, args.query, args.type, args.max);
++      rememberSession(r);
+       videos = r.videos;
+       diag = { ...r.diag, sessionsRun: 1 };
+       // タグ空振り → keyword 検索フォールバック (検索 API は安定)
+       if (videos.length === 0 && args.type === "hashtag") {
+         log("hashtag 空振り → keyword 検索にフォールバック");
+         const r2 = await searchOnce(browser, args.query, "keyword", args.max);
++        rememberSession(r2);
+         videos = r2.videos;
+         diag = { ...r2.diag, sessionsRun: 1 };
+         if (videos.length > 0) result.type = "keyword(fallback)";
+@@ -828,6 +901,7 @@ async function main() {
+       for (let si = 0; si < args.sessions; si++) {
+         if (si > 0) await humanDelay(10000, 20000); // セッション間ギャップ (同一IP連打回避)
+         const r = await searchOnce(browser, args.query, args.type, args.max);
++        rememberSession(r);
+         diag.sessionsRun++;
+         diag.pagesFetched += r.diag.pagesFetched;
+         diag.captchaDetected = diag.captchaDetected || r.diag.captchaDetected;
+@@ -865,11 +939,27 @@ async function main() {
+   } catch (e) {
+     result.error = String((e && e.message) || e);
+     result.errorCode = "TIKTOK_EXCEPTION";
++    if (args.firstVisitCapture && e.firstVisitCapture) capturedSessions.push(e.firstVisitCapture);
+     log("ERROR:", result.error);
+   } finally {
+     if (browser) await browser.close().catch(() => {});
+     if (pinnedProxy) await pinnedProxy.close().catch(() => {});
+   }
++  if (args.firstVisitCapture) {
++    const latest = capturedSessions[capturedSessions.length - 1];
++    result.firstVisitCapture = {
++      acquired_on: latest?.acquired_on ?? null,
++      executed_search_type: latest?.search_type ?? args.type,
++      requested_search_type: args.type,
++      order_basis: args.sessions <= 1 ? "search_display_order" : "frequency_rank",
++      sessions: args.sessions, sessions_data: capturedSessions,
++      stop_reason: result.errorCode || latest?.stop_reason || "unknown",
++      missingness_preserved: !!latest,
++      posts: latest?.posts || [],
++      shortfalls: result.count < args.max ? [{ kw: args.query, requested: args.max, actual: result.count,
++        reason: result.errorCode ? `MEDIA_${result.errorCode}` : "MEDIA_TIKTOK_RESULT_SHORTFALL" }] : [],
++    };
++  }
+   const out = JSON.stringify(result);
+   if (args.out) fs.writeFileSync(args.out, out);
+   writeOutAndExit(out, result.ok ? 0 : 2);

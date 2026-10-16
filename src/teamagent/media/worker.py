@@ -1207,7 +1207,21 @@ def run_job(
                 artifacts_list: list[MediaArtifact] = []
                 for artifact in output.artifacts:
                     execution_budget.checkpoint()
-                    uploaded = backend.upload_artifact(request, lease, artifact)
+                    try:
+                        uploaded = backend.upload_artifact(request, lease, artifact)
+                    except Exception:
+                        if (
+                            isinstance(request.operation, TikTokAcquireOperation)
+                            and request.operation.first_visit_capture
+                            and artifact.name == "first-visit-capture.json"
+                        ):
+                            logger.warning(
+                                "optional first visit capture upload failed: job_id=%s",
+                                request.job_id,
+                                exc_info=True,
+                            )
+                            continue
+                        raise
                     execution_budget.checkpoint()
                     artifacts_list.append(
                         MediaArtifact(

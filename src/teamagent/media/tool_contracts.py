@@ -421,6 +421,8 @@ def _output_slots(
         slots.append(("media", "media", int(operation["max_bytes"])))
     elif kind == "tiktok_acquire":
         slots.append(("posts.json", "posts.normalized.json", 16 * 1024 * 1024))
+        if operation.get("first_visit_capture"):
+            slots.append(("first-visit-capture.json", "first-visit-capture.json", MAX_OUTPUT_BYTES))
         if operation["artifact_mode"] == "full":
             slots.extend(
                 (

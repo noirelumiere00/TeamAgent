@@ -913,6 +913,7 @@ class MediaJobClient:
         request: MediaJobRequest,
         *,
         timeout_s: int = _SYNC_TIMEOUT_DEFAULT_S,
+        capture_result: Callable[[MediaJobResult], None] | None = None,
     ) -> tuple[Mapping[str, bytes], Mapping[str, Any]]:
         """submit→bounded poll→integrity-checked download."""
 
@@ -932,33 +933,57 @@ class MediaJobClient:
                 deadline_epoch_s=execution_deadline_epoch_s,
                 expected_audit_principal_hash=request.audit_principal_hash,
             )
+            if capture_result is not None:
+                try:
+                    capture_result(result)
+                except Exception as exc:
+                    logger.warning("first_visit_capture_failed", error_type=type(exc).__name__)
             if result.status != "done":
                 raise MediaJobError(result.error_code or "MEDIA_JOB_FAILED")
             artifacts: dict[str, bytes] = {}
-            for artifact in result.artifacts:
-                artifact_bound = (
-                    MAX_PROPOSAL_PPTX_BYTES
-                    if isinstance(request.operation, ProposalPptxOperation)
-                    and artifact.name == "proposal.pptx"
-                    else MAX_OUTPUT_BYTES
-                )
-                if artifact.object.size > artifact_bound:
-                    raise MediaJobError("MEDIA_ARTIFACT_SIZE_INVALID")
-                for attempt in range(3):
-                    self._remaining(execution_deadline_epoch_s)
-                    try:
-                        artifacts[artifact.name] = self.download(
-                            artifact.object,
-                            deadline_epoch_s=execution_deadline_epoch_s,
-                        )
-                        break
-                    except MediaJobError:
-                        raise
-                    except Exception as exc:
-                        if not _is_transient_network_error(exc) or attempt == 2:
+            capture_enabled = (
+                isinstance(request.operation, TikTokAcquireOperation)
+                and request.operation.first_visit_capture
+            )
+            ordered_artifacts = (
+                sorted(result.artifacts, key=lambda value: value.name == "first-visit-capture.json")
+                if capture_enabled
+                else result.artifacts
+            )
+            for artifact in ordered_artifacts:
+                optional_capture = capture_enabled and artifact.name == "first-visit-capture.json"
+                try:
+                    artifact_bound = (
+                        MAX_PROPOSAL_PPTX_BYTES
+                        if isinstance(request.operation, ProposalPptxOperation)
+                        and artifact.name == "proposal.pptx"
+                        else MAX_OUTPUT_BYTES
+                    )
+                    if artifact.object.size > artifact_bound:
+                        raise MediaJobError("MEDIA_ARTIFACT_SIZE_INVALID")
+                    for attempt in range(3):
+                        self._remaining(execution_deadline_epoch_s)
+                        try:
+                            artifacts[artifact.name] = self.download(
+                                artifact.object,
+                                deadline_epoch_s=execution_deadline_epoch_s,
+                            )
+                            break
+                        except MediaJobError:
                             raise
-                        self._sleeper(1.0)
-                self._remaining(execution_deadline_epoch_s)
+                        except Exception as exc:
+                            if not _is_transient_network_error(exc) or attempt == 2:
+                                raise
+                            self._sleeper(1.0)
+                    self._remaining(execution_deadline_epoch_s)
+                except Exception as exc:
+                    if not optional_capture:
+                        raise
+                    artifacts.pop(artifact.name, None)
+                    logger.warning(
+                        "first_visit_capture_download_failed",
+                        error_type=type(exc).__name__,
+                    )
             return artifacts, result.metadata
         finally:
             self._release_consumer(request)
@@ -999,6 +1024,7 @@ class MediaJobClient:
         search_type: str = "keyword",
         max_videos: int = 10,
         timeout_s: int = _SYNC_TIMEOUT_DEFAULT_S,
+        capture: Callable[[dict[str, Any]], None] | None = None,
     ) -> list[dict[str, Any]]:
         """既存の同期検索UXをgeneric TikTok media operationで維持する。
 
@@ -1028,15 +1054,92 @@ class MediaJobClient:
             sort="display",
             artifact_mode="metadata_only",
             client=TikTokClientConfig(),
+            first_visit_capture=capture is not None,
         )
         deadline_epoch_s = self._absolute_deadline(timeout_s)
         request = self._request(
             operation,
-            request_fingerprint,
+            request_fingerprint if capture is None else f"{request_fingerprint}:first-visit-v1",
             timeout_s,
             deadline_epoch_s=deadline_epoch_s,
         )
-        artifacts, _metadata = self.run_sync(request, timeout_s=timeout_s)
+        references: list[dict[str, Any]] = []
+        media_result: dict[str, Any] = {}
+
+        def capture_result(result: MediaJobResult) -> None:
+            references.extend(artifact.model_dump(mode="json") for artifact in result.artifacts)
+            media_result.update(result.model_dump(mode="json"))
+
+        if capture is None:
+            artifacts, _metadata = self.run_sync(request, timeout_s=timeout_s)
+        else:
+            from teamagent.adapters.tiktok_scraper import _emit_capture
+            from teamagent.media.tiktok_capture import _capture_record
+
+            try:
+                artifacts, _metadata = self.run_sync(
+                    request,
+                    timeout_s=timeout_s,
+                    capture_result=capture_result,
+                )
+            except Exception as exc:
+                record = _capture_record(
+                    {},
+                    query=query,
+                    search_type=search_type,
+                    requested=max_videos,
+                    error_code=str(exc) if isinstance(exc, MediaJobError) else type(exc).__name__,
+                )
+                record.update(
+                    media_job_id=request.job_id,
+                    artifacts=references,
+                    media_result=media_result,
+                    media_metadata=media_result.get("metadata") or {},
+                )
+                _emit_capture(capture, record)
+                raise
+            try:
+                captured_body = artifacts.get("first-visit-capture.json")
+                try:
+                    attempts = json.loads(captured_body)["attempts"] if captured_body else []
+                    if not isinstance(attempts, list) or any(
+                        not isinstance(attempt, dict) for attempt in attempts
+                    ):
+                        raise ValueError("capture attempts are invalid")
+                except (KeyError, TypeError, ValueError):
+                    logger.warning("first_visit_capture_invalid")
+                    attempts = []
+                if not attempts:
+                    normalized = json.loads(artifacts.get("posts.json", b"{}"))
+                    attempts = [
+                        _capture_record(
+                            {
+                                **normalized,
+                                "ok": True,
+                                "type": (_metadata.get("search_types") or {}).get(query)
+                                or search_type,
+                                "shortfalls": _metadata.get("shortfalls")
+                                or normalized.get("shortfalls")
+                                or [],
+                            },
+                            query=query,
+                            search_type=search_type,
+                            requested=max_videos,
+                        )
+                    ]
+                for record in attempts:
+                    record.update(
+                        media_job_id=request.job_id,
+                        artifacts=references,
+                        media_result=media_result,
+                        media_metadata=media_result.get("metadata") or dict(_metadata),
+                    )
+                    record["shortfalls"] = (
+                        _metadata.get("shortfalls") or record.get("shortfalls") or []
+                    )
+                    _emit_capture(capture, record)
+            except Exception as exc:
+                logger.warning("first_visit_capture_failed", error_type=type(exc).__name__)
         body = artifacts.get("posts.json")
         if body is None:
             raise MediaJobError("MEDIA_TIKTOK_POSTS_MISSING")
