@@ -195,10 +195,8 @@ async def test_existing_partial_video_post_retains_evidence_only_for_new_flag(
 async def test_signed_gateway_runs_real_search_and_posts_canonical_campaign_once(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from unittest.mock import MagicMock
-
     from tests.skills.search.test_campaign_totals import _campaign_hit
-    from tests.skills.search.test_composite_search import _bedrock, _pg, _skill
+    from tests.skills.search.test_composite_search import _bedrock, _converse, _pg, _skill
 
     enable(monkeypatch)
     monkeypatch.setenv("USE_SEARCH_FANOUT", "0")
@@ -207,7 +205,8 @@ async def test_signed_gateway_runs_real_search_and_posts_canonical_campaign_once
     campaign.metadata["source_uri"] = "gdrive://CAMPAIGN_SHEET"
     skill, _ = _skill(_bedrock(), _pg([campaign]))
     monkeypatch.setattr(skill, "_attach_campaign_files", lambda *a: None)
-    skill._summarize = MagicMock(return_value=("いいねは2,150です。進めますか？", 0.01))
+    summary = "施策は完了し、商談は検討中です。11月に連絡予定です。"
+    skill._bedrock.converse.return_value = _converse(summary)
     slack = _FakeSlack()
     monkeypatch.setattr(detached_jobs, "_slack_client", lambda timeout_seconds: slack)
     result = await server.dispatch_tool(
@@ -221,7 +220,8 @@ async def test_signed_gateway_runs_real_search_and_posts_canonical_campaign_once
     assert payload["delivered"] is True
     assert payload["delivery"]["answer_kind"] == "video_metrics"
     assert len(slack.posts) == 1
+    assert slack.posts[0]["text"].startswith(summary)
     assert "いいね 合計 2,844・保存 合計 310" in slack.posts[0]["text"]
     assert "https://drive.google.com/file/d/CAMPAIGN_SHEET/view" in slack.posts[0]["text"]
     assert "進めますか" not in slack.posts[0]["text"]
-    skill._summarize.assert_not_called()
+    skill._bedrock.converse.assert_called_once()

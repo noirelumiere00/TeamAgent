@@ -40,10 +40,7 @@
     （SOUL.md の「リンクは [表示名](URL)」とも同じ）。書式を変えるときは _link の 1 か所だけ。
   - 行は ``- `` の箇条書き（配信側で行の分かれ目が保たれる）。見出しは行頭の絵文字から書く
     （direct_video_metrics.extract_section の見出しの許可リストと合わせる）。
-  - head に 📊 の節があるとき（要約の直後に付く＝head の最後）は、節との間を空行 2 つにする。
-    origin/dev の extract_section は空行 2 つ・📎・探した範囲でしか 📊 の節を閉じないので、
-    境界の直し（P0・見出しの許可リスト）が先に出なくても 📁 以降を DM への直接投稿に
-    巻き込まない（直しが入った後も害は無い。配信側の Markdown では空行 2 つは 1 つと同じ）。
+  - 節との間は空行 1 つ。extract_section は次の節の見出しで 📊 を閉じる。
   - 第三者・利用者の文字列（資料名・抜粋・効果・取引先名・問いの語）は、制御文字を落として 1 行に
     潰し、search_surface_check の slack_safe で ``& < > * ~ ` | [ ]`` を効かない字にしてから
     差し込む。``<!channel>``・``<@U…>``・``<https://x|偽名>``・``[偽名](https://x)`` を
@@ -777,9 +774,7 @@ def _join(head: str, blocks: Sequence[str], tail: str, scope: str) -> str:
     out = head.rstrip()
     body = "\n\n".join(blocks)
     if body:
-        # 📊 の節の直後は空行 2 つ（今の extract_section が 📁 以降を 📊 に巻き込まない境界）。
-        sep = "\n\n\n" if VIDEO_METRICS_HEADING in out else "\n\n"
-        out = f"{out}{sep}{body}" if out else body
+        out = f"{out}\n\n{body}" if out else body
     for part in (tail.strip(), scope):
         if part:
             out = f"{out}\n\n{part}" if out else part
@@ -830,13 +825,14 @@ def compose_answer(
     lanes: Mapping[str, LaneStatus],
     tail: str = "",
     graph_base_url: str = "",
-    limit: int = ANSWER_MAX_CHARS,
+    limit: int | None = ANSWER_MAX_CHARS,
 ) -> str:
     """答え全体（head → 節 → tail → 探した範囲）を ``limit`` 字以内で組む。
 
     探した範囲は毎回・必ず最後に付く。超えたときの削り方はモジュールの docstring の段 1〜4。
     ``head`` は警告ヘッダ・要約・📎 施策・📊（または該当なしの定型文）を組み上げた文字列、
     ``tail`` は 📎 実ファイルの提案 1 行（無ければ空）。
+    直接投稿の ``limit=None`` は head を先頭に置き、モデル用 2,500 字予算で本文を削らない。
     """
     # 「うち案件 N件」は同じ資料（URL）の重複を 1 件と数える（描画の重複除去と同じ鍵）。
     scope = scope_line(lanes, deal_count=len({_identity(e) for e in sections.of("deal")}))
@@ -844,17 +840,16 @@ def compose_answer(
         key: max(PER_SECTION_MAX, sections.required_counts.get(key, 0)) for key in SECTION_ORDER
     }
     # 名指し資料を優先する。要約が長いときは先に要約だけを切る。
-    if sections.required_counts:
+    if sections.required_counts and limit is not None:
         blocks = _blocks(
             sections, {key: sections.required_counts.get(key, 0) for key in SECTION_ORDER}
         )
-        separator_chars = 3 if VIDEO_METRICS_HEADING in head else 2
-        budget = limit - len(_join("", blocks, tail, scope)) - separator_chars
+        budget = limit - len(_join("", blocks, tail, scope)) - 2
         head = _clip_head(head, max(0, budget))
 
     def render(text_head: str, text_tail: str = tail) -> str:
         blocks = _blocks(sections, caps)
-        if sections.timeline_lines:
+        if sections.timeline_lines and limit is not None:
             leading = [b for b in blocks if b.startswith(("🤝", "🗂"))]
             rest = [b for b in blocks if b not in leading]
             text_head = "\n\n".join([*leading, text_head] if text_head else leading)
@@ -864,7 +859,7 @@ def compose_answer(
         return _join(text_head, blocks, text_tail, footer)
 
     text = render(head)
-    if len(text) <= limit:
+    if limit is None or len(text) <= limit:
         return text
     # 段 1: 各節を 2→1 件（削る順に）。
     for key in TRIM_ORDER:

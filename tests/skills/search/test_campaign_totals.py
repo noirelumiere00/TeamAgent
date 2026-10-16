@@ -124,7 +124,7 @@ def test_summarizer_receives_same_canonical_totals_as_code_answer() -> None:
     assert "2,150" not in totals and "300" not in totals
 
 
-def test_direct_campaign_answers_keep_identical_totals_without_model(
+def test_direct_campaign_answers_keep_canonical_totals_with_model_summary(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from teamagent.skills.base import SkillContext
@@ -140,15 +140,13 @@ def test_direct_campaign_answers_keep_identical_totals_without_model(
         content="レポートの一部期間: いいね 合計 2,150、保存 合計 300",
         metadata={"source_type": "gdrive", "is_related_drive": True, "title": "施策レポート"},
     )
-    answers = []
-    for model_answer in ("いいね合計は2,150です。", "いいね合計は9,999です。"):
+    for model_answer in ("施策は完了しています。", "食事のアレンジを紹介しました。"):
         skill = _skill(_Pg([campaign, related], []), answer=model_answer)
         result = skill.run(
             SearchInput(query="施策実績"),
             SkillContext(metadata={"user_email": ME, "_search_direct_answer": True}),
         )
-        answers.append(result.answer)
-        skill._bedrock.converse.assert_not_called()
+        skill._bedrock.converse.assert_called_once()
+        assert result.answer.startswith(model_answer)
         assert "いいね 合計 2,844・保存 合計 310" in result.answer
         assert "2,150" not in result.answer and "9,999" not in result.answer
-    assert answers[0] == answers[1]
