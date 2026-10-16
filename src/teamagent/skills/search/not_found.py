@@ -35,7 +35,6 @@ from typing import Any
 from teamagent.adapters.pgvector_client import SearchHit
 from teamagent.ingest.industry_taxonomy import (
     INDUSTRY_KEYWORDS,
-    match_industry_keyword,
     normalize_industry,
 )
 from teamagent.skills.search.client_match import (
@@ -135,7 +134,18 @@ def case_query_target(query: str, asked_industry: str | None = None) -> str | No
     if not match:
         return None
     target = match[1].strip(" 「」『』\"'")
-    industry = normalize_industry(asked_industry) or match_industry_keyword(target)
+    # ルーターの業種推定より、利用者が指定した元の対象語を優先する。
+    industry_target = re.sub(r"(?:メーカー|業界|業種|企業|会社|業)$", "", target)
+    industry = normalize_industry(target) or normalize_industry(industry_target)
+    if not industry and not aliases(target):
+        industry = next(
+            (
+                name
+                for name, keywords in INDUSTRY_KEYWORDS.items()
+                if industry_target.casefold() in {keyword.casefold() for keyword in keywords}
+            ),
+            None,
+        )
     if industry:
         return industry
     if target in {
@@ -191,9 +201,10 @@ def case_target_hits(hits: Sequence[SearchHit], target: str | None) -> list[Sear
     return [hit for hit in hits if target_matches(_haystack(hit), target)]
 
 
-def build_case_not_found_answer(target: str) -> str:
+def build_case_not_found_answer(target: str, *, unavailable: str = "") -> str:
     """一致事例 0 件の回答は無関係な事例・探し直しの依頼を付けずに確定する。"""
-    return f"{target}の事例は見つかりませんでした（探した範囲: 社内資料・施策実績・Slack）。"
+    scope = "社内資料・施策実績・Slack" + (f"／{unavailable}" if unavailable else "")
+    return f"{target}の事例は見つかりませんでした（探した範囲: {scope}）。"
 
 
 def _haystack(hit: SearchHit) -> str:

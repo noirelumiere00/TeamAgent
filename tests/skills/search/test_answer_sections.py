@@ -989,22 +989,15 @@ def test_iter3_metrics_survive_named_files_and_optional_lane_pressure() -> None:
     assert len(answer) <= ANSWER_MAX_CHARS
 
 
-#: 見出しの許可リストに変える前（origin/dev 482a7089）の extract_section の境界。
-#: 📊 の節は空行 2 つ・📎・探した範囲でしか閉じなかった。
-_PRE_P0_BOUNDARY = re.compile(r"\n{3,}|\n+(?=📎|探した範囲[:：])")
-
-
-def test_sections_after_video_metrics_are_safe_even_with_the_old_boundary() -> None:
-    # 境界の直し（P0）が先に出なくても、📁 以降を 📊 の直接投稿に巻き込まない（空行 2 つで閉じる）。
+def test_sections_after_video_metrics_use_heading_boundary_without_extra_blank_line() -> None:
     video = f"{VIDEO_METRICS_HEADING}\n施策 A\n1. 507,000 再生・保存 120　洋食 https://x.test/v/1"
     answer = compose_answer(
         head="要約です。\n\n" + video, sections=_all_sections(), lanes=LANES_ALL
     )
-    start = answer.index(VIDEO_METRICS_HEADING) + len(VIDEO_METRICS_HEADING)
-    boundary = _PRE_P0_BOUNDARY.search(answer[start:])
-    assert boundary is not None
-    assert answer[start : start + boundary.start()] == video.removeprefix(VIDEO_METRICS_HEADING)
-    assert f"{video}\n\n\n📁 金庫の資料" in answer
+    cut = extract_section(answer)
+    assert cut is not None and cut[1] == video
+    assert f"{video}\n\n📁 金庫の資料" in answer
+    assert "\n\n\n" not in answer
 
 
 def test_without_video_metrics_sections_follow_head_with_one_blank_line() -> None:

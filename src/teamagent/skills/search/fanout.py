@@ -7,7 +7,6 @@
 from __future__ import annotations
 
 import os
-import re
 import time
 from collections.abc import Callable, Iterator
 from concurrent.futures import Future, ThreadPoolExecutor
@@ -23,6 +22,8 @@ from teamagent.skills.base import SkillContext
 from teamagent.skills.search import timeline_status
 from teamagent.skills.search.answer_mode import classify_answer_mode
 from teamagent.skills.search.answer_sections import (
+    ANSWER_MAX_CHARS,
+    SCOPE_PREFIX,
     LaneStatus,
     Sections,
     build_sections,
@@ -33,6 +34,7 @@ from teamagent.skills.search.answer_sections import (
 )
 from teamagent.skills.search.campaign_files import campaign_totals_block, is_campaign_hit
 from teamagent.skills.search.client_match import hit_entities
+from teamagent.skills.search.comparison import is_comparison_query
 from teamagent.skills.search.composite import (
     MCP_SURFACE_CTX_KEY,
     SLACK_TOP_N,
@@ -63,15 +65,17 @@ from teamagent.skills.search.not_found import (
     case_target_hits,
     target_matches,
 )
-from teamagent.skills.search.result_guard import build_result_header, prefix_header
+from teamagent.skills.search.result_guard import (
+    WEAK_RESULT_NOTICE,
+    build_result_header,
+    prefix_header,
+)
 from teamagent.skills.search.schema import RelatedFileOut, SearchHitOut, SearchInput, SearchOutput
 
 SLACK_DEADLINE_S = 8.0
 EXPAND_DEADLINE_S = 10.0
 SUMMARY_DEADLINE_S = 30.0
 LIST_FAST_HEAD = "検索で見つかった範囲の資料を一覧にしました（要約は省いています）。"
-# 既存の分類器が拾わない比較・効果の問いも、一覧語との併記で要約を落とさない。
-_LIST_FAST_ANALYSIS_RE = re.compile(r"比較|何が効|どれが効")
 T = TypeVar("T")
 LaneState = Literal["ok", "empty", "skipped", "not_connected", "timeout", "error"]
 
@@ -333,8 +337,8 @@ def run_fanout(skill: Any, input: SearchInput, ctx: SkillContext) -> SearchOutpu
                 r
                 for r in cases.items
                 if (
-                    normalize_industry(r.industry) == asked_industry
-                    if asked_industry and r.industry
+                    normalize_industry(r.industry) == normalize_industry(scope_target)
+                    if normalize_industry(scope_target) and r.industry
                     else target_matches(f"{r.title} {r.client} {r.brand} {r.product}", scope_target)
                 )
             ),
@@ -361,10 +365,10 @@ def run_fanout(skill: Any, input: SearchInput, ctx: SkillContext) -> SearchOutpu
     summary_state: LaneState = "skipped"
     summary_ms = 0
     direct_mode = ctx.metadata.get("_search_direct_answer") is True
-    direct_head, direct_kind = (
-        skill._direct_answer_head(input.query, summary_hits, asked_industry=asked_industry)
+    direct_kind = (
+        skill._direct_answer_kind(input.query, summary_hits, asked_industry=asked_industry)
         if direct_mode and input.include_answer and found
-        else ("", None)
+        else None
     )
     if direct_mode and input.include_answer and not found:
         direct_kind = "not_found"
@@ -373,14 +377,12 @@ def run_fanout(skill: Any, input: SearchInput, ctx: SkillContext) -> SearchOutpu
         and input.include_answer
         and os.environ.get("SEARCH_FANOUT_LIST_FAST", "") == "1"
         and classify_answer_mode(input.query) == "list"
-        and not _LIST_FAST_ANALYSIS_RE.search(input.query)
+        and not is_comparison_query(input.query)
     )
     if list_fast:
         head = LIST_FAST_HEAD
         if direct_mode:
             direct_kind = "list_fast"
-    elif direct_kind in {"comparison", "video_metrics"}:
-        head = direct_head
     elif found and input.include_answer and (summary_hits or slack.items):
         summary_started = time.perf_counter()
 
@@ -410,7 +412,9 @@ def run_fanout(skill: Any, input: SearchInput, ctx: SkillContext) -> SearchOutpu
             summary_future, summary_started, SUMMARY_DEADLINE_S, ("", 0.0, "timeout")
         )
         summary_ms = int((time.perf_counter() - summary_started) * 1000)
-    if found and input.include_answer and direct_kind not in {"comparison", "video_metrics"}:
+        if summary_state != "ok" or not head.strip():
+            direct_kind = None
+    if found and input.include_answer:
         head = skill._append_campaign_footer(head, summary_hits, asked_industry=asked_industry)
     # 広げる処理は 10s 以内。回収の追加待ちは該当ありで 1s、該当なしで 0s に抑える。
     collection_deadline = time.perf_counter() + (1.0 if found else 0.0)
@@ -528,17 +532,17 @@ def run_fanout(skill: Any, input: SearchInput, ctx: SkillContext) -> SearchOutpu
             else LaneStatus.failed("search_failed")
         )
     if found and skill._result_guard:
-        head = prefix_header(
-            build_result_header(
-                query=input.query,
-                hits=summary_hits,
-                weak_threshold=skill._weak_result_threshold,
-                query_client=client,
-                asked_industry=input.filter_industry,
-                use_entities=skill._client_guard_entities,
-            ),
-            head,
+        guard_header = build_result_header(
+            query=input.query,
+            hits=summary_hits,
+            weak_threshold=skill._weak_result_threshold,
+            query_client=client,
+            asked_industry=input.filter_industry,
+            use_entities=skill._client_guard_entities,
         )
+        head = prefix_header(guard_header, head)
+        if WEAK_RESULT_NOTICE in guard_header:
+            direct_kind = None
     main_kinds = classify_hits([*candidates, *named])
     if cases.status != "failed" and (main_kinds.case or main_kinds.campaign):
         lanes["case"] = LaneStatus.found(
@@ -553,11 +557,15 @@ def run_fanout(skill: Any, input: SearchInput, ctx: SkillContext) -> SearchOutpu
         if found and not list_fast
         else ""
     )
-    failed_lanes = {key: status for key, status in lanes.items() if status.kind == "failed"}
-    empty_answer = head + ("\n\n" + scope_line(failed_lanes) if failed_lanes else "")
+    if case_miss:
+        failed_lanes = {key: status for key, status in lanes.items() if status.kind == "failed"}
+        head = build_case_not_found_answer(
+            case_target or "",
+            unavailable=scope_line(failed_lanes).removeprefix(SCOPE_PREFIX) if failed_lanes else "",
+        )
     answer = (
         (
-            empty_answer
+            head
             if case_miss
             else compose_answer(
                 head=head,
@@ -567,6 +575,7 @@ def run_fanout(skill: Any, input: SearchInput, ctx: SkillContext) -> SearchOutpu
                 graph_base_url=os.environ.get("CONNECT_BASE_URL", "").strip()
                 if os.environ.get("SEARCH_FANOUT_GRAPH_LINK") == "1"
                 else "",
+                limit=None if direct_kind is not None else ANSWER_MAX_CHARS,
             )
         )
         if input.include_answer

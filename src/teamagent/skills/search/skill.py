@@ -99,6 +99,7 @@ from teamagent.skills.search.not_found import (
 from teamagent.skills.search.query_planner import QueryPlanner
 from teamagent.skills.search.rerank import sort_by_budget_proximity, sort_by_client_match
 from teamagent.skills.search.result_guard import (
+    WEAK_RESULT_NOTICE,
     aliases,
     build_result_header,
     find_client_mention,
@@ -710,13 +711,18 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
         #    回答文は発信元スレッドへ後追い投稿する」。フラグ OFF ならこの分岐は
         #    _should_defer_answer が必ず False を返し、以下は 1 バイトも従来と変わらない。
         deferred = False
-        direct_head, direct_kind = (
-            self._direct_answer_head(input.query, summary_hits, asked_industry=asked_industry)
+        direct_kind = (
+            self._direct_answer_kind(input.query, summary_hits, asked_industry=asked_industry)
             if ctx.metadata.get("_search_direct_answer") is True and input.include_answer and found
-            else ("", None)
+            else None
         )
         if input.include_answer and case_miss:
-            answer, cost_usd = build_case_not_found_answer(case_target or ""), 0.0
+            answer, cost_usd = (
+                build_case_not_found_answer(
+                    case_target or "", unavailable=status_note(slack_lookup) if slack_lookup else ""
+                ),
+                0.0,
+            )
         elif input.include_answer and not found:
             # 該当なし: 要約器を呼ばない（無いものを有るように書かせない）。近いものは名前だけ。
             answer, cost_usd = build_not_found_answer(hits), 0.0
@@ -729,9 +735,7 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
                 )
                 timings["converse_ms"] = (time.perf_counter() - _t) * 1000
                 answer = f"{answer}\n\n{slack_answer}"
-        elif direct_kind is not None:
-            answer, cost_usd = direct_head, 0.0
-        elif input.include_answer and self._should_defer_answer(hits, ctx):
+        elif input.include_answer and direct_kind is None and self._should_defer_answer(hits, ctx):
             answer = self._start_followup_answer(
                 input,
                 summary_hits,
@@ -764,6 +768,8 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
                 ),
             )
             timings["converse_ms"] = (time.perf_counter() - _t) * 1000
+            if not answer.strip():
+                direct_kind = None
             # 資料リンク・「シートのみ」と、動画ごとの数字・リンクをコードで足す。
             answer = self._append_campaign_footer(
                 answer, summary_hits, asked_industry=asked_industry
@@ -777,6 +783,8 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
             and (case_miss or (not found and not slack_items))
         ):
             direct_kind = "not_found"
+        if WEAK_RESULT_NOTICE in guard_header:
+            direct_kind = None
 
         # MCP向けに資料とSlackの出典を付ける（/appは従来どおりenvで制御）。
         if (
@@ -800,7 +808,7 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
 
         # 3-bis'. 複合検索で Slack を探せなかった（未連携・切れ・失敗）／非公開の一致しか無い
         #         ときは 1 行で言う（「無い」と「探せなかった」を区別する）。
-        if input.include_answer and slack_lookup is not None:
+        if input.include_answer and slack_lookup is not None and not case_miss:
             note = status_note(slack_lookup)
             if note:
                 answer = f"{answer}\n\n{note}" if answer else note
@@ -1068,27 +1076,19 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
         )
         return "\n\n".join(part for part in (answer, footer) if part)
 
-    def _direct_answer_head(
+    def _direct_answer_kind(
         self, query: str, hits: list[SearchHit], *, asked_industry: str | None = None
-    ) -> tuple[str, str | None]:
-        """直接投稿の比較・施策実績は、要約器を通さず集計行と資料リンクで組む。"""
+    ) -> str | None:
+        """📊 は直接投稿の理由に使う。本文は通常と同じ要約経路で組む。"""
         primary = [h for h in hits if not (h.metadata or {}).get("is_related_drive")]
-        comparison = comparison_table(query, primary)
-        totals = campaign_totals_block(scope_by_industry(primary, asked_industry))
-        if comparison:
-            head = "\n\n".join(part for part in (comparison, totals) if part)
-            return (
-                self._append_campaign_footer(head, primary, asked_industry=asked_industry),
-                "comparison",
-            )
+        if comparison_table(query, primary):
+            return "comparison"
         if self._campaign_files and (
-            totals or video_stats_footer(primary, "", asked_industry=asked_industry)
+            campaign_totals_block(scope_by_industry(primary, asked_industry))
+            or video_stats_footer(primary, "", asked_industry=asked_industry)
         ):
-            return (
-                self._append_campaign_footer(totals, primary, asked_industry=asked_industry),
-                "video_metrics",
-            )
-        return "", None
+            return "video_metrics"
+        return None
 
     def _scope_to_client(self, hits: list[SearchHit], asked: str) -> list[SearchHit]:
         """``asked`` の資料と言えるヒットだけ（hit_is_about_client・別名込み・本文は見ない）。"""
@@ -2570,6 +2570,8 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
             )
             logger.info("search_comparison_grounding", request_id=request_id, dropped=len(dropped))
             answer = comparison + ("\n\n" + answer if answer.strip() else "")
+        if canonical_campaign_totals and answer.strip():
+            answer = "\n\n".join(part for part in (answer, canonical_campaign_totals) if part)
         return answer, resp.usage.cost_usd
 
     @staticmethod
