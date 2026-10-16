@@ -640,6 +640,24 @@ variable "direct_summary_post_allowed_emails" {
   default     = ""
 }
 
+variable "search_direct_answer" {
+  description = "MCP の検索確定回答を直接配信する（SEARCH_DIRECT_ANSWER）。既定 OFF。OC の抑止を先に ON にする。TD で変更したら正本 tfvars にも反映する。"
+  type        = string
+  default     = "0"
+}
+
+variable "openclaw_search_direct_answer" {
+  description = "OC の検索回答抑止・直接実行（SEARCH_DIRECT_ANSWER）。既定 OFF。MCP より先に ON、停止時は MCP より後に OFF にする。"
+  type        = string
+  default     = "0"
+}
+
+variable "search_direct_answer_allowed_emails" {
+  description = "検索の直接配信の本人メール許可リスト（MCP・OC 共通）。空は全員拒否、* は本人確認済みの全員。初回は小俣さんのメールのみ指定する。"
+  type        = string
+  default     = ""
+}
+
 # ============================================================
 # 2026-09-29: F0 連携切れの見える化（PR-0b 連携の生存確認）。既定はすべて「今と同じ」。
 # ============================================================

@@ -48,6 +48,7 @@ from teamagent.identity import (
 from teamagent.mcp_gateway import (
     answer_feedback,
     detached_jobs,
+    direct_search_answer,
     direct_summary,
     direct_video_metrics,
     surface_video_followup,
@@ -1197,6 +1198,16 @@ async def dispatch_tool(
                 deferred=name in _ASYNC_JOB_TOOLS,
             )
 
+    metadata.pop(direct_search_answer.CTX_KEY, None)
+    search_direct_destination = None
+    if name == SEARCH_TOOL_NAME:
+        search_direct_destination, _ = direct_summary.decide_destination(
+            direct_search_answer.load_policy(),
+            verified_caller=verified_caller,
+            metadata=metadata,
+        )
+        if search_direct_destination is not None:
+            metadata[direct_search_answer.CTX_KEY] = True
     ctx = SkillContext(user_id=metadata.get("user_email"), metadata=metadata)
 
     # ── video_algorithm の切り離し（USE_VIDEO_ALGORITHM_DETACH 既定OFF＝以下は素通り）─────
@@ -1545,13 +1556,35 @@ async def dispatch_tool(
                 return direct_summary.posted_response(
                     direct_status, deferred=bool(data.get("deferred"))
                 )
-    if name == SEARCH_TOOL_NAME and isinstance(data, dict):
+    search_direct_attempted = False
+    if (
+        name == SEARCH_TOOL_NAME
+        and isinstance(data, dict)
+        and search_direct_destination is not None
+    ):
+        direct_answer = getattr(output, "direct_answer", None)
+        direct_kind = getattr(output, "direct_answer_kind", None)
+        if isinstance(direct_answer, str) and direct_kind in direct_search_answer.KINDS:
+            search_direct_attempted = True
+            posted = await asyncio.to_thread(
+                direct_search_answer.deliver,
+                direct_answer,
+                direct_kind,
+                search_direct_destination,
+                request_id=ctx.request_id,
+            )
+            if posted is not None and posted.get("delivered") is True:
+                return [TextContent(type="text", text=json.dumps(posted, ensure_ascii=False))]
+            if posted is not None:
+                data["delivery"] = posted["delivery"]
+    if name == SEARCH_TOOL_NAME and isinstance(data, dict) and not search_direct_attempted:
         await asyncio.to_thread(
             direct_video_metrics.maybe_post,
             data,
             verified_caller=verified_caller,
             metadata=metadata,
             request_id=ctx.request_id,
+            evidence_enabled=search_direct_destination is not None,
         )
     # ── 返却前ミドルウェア（順序契約・v0.3 監査 Step4-(a)）────────────────────
     # (0.5) 返す欄の絞り込み（skill の mcp_relay_fields・None＝全体）: usage 記録（total_cost_usd

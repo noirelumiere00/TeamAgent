@@ -31,7 +31,7 @@ from teamagent.skills.search.answer_sections import (
     lane_from_slack,
     scope_line,
 )
-from teamagent.skills.search.campaign_files import is_campaign_hit
+from teamagent.skills.search.campaign_files import campaign_totals_block, is_campaign_hit
 from teamagent.skills.search.client_match import hit_entities
 from teamagent.skills.search.composite import (
     MCP_SURFACE_CTX_KEY,
@@ -360,6 +360,14 @@ def run_fanout(skill: Any, input: SearchInput, ctx: SkillContext) -> SearchOutpu
     )
     summary_state: LaneState = "skipped"
     summary_ms = 0
+    direct_mode = ctx.metadata.get("_search_direct_answer") is True
+    direct_head, direct_kind = (
+        skill._direct_answer_head(input.query, summary_hits, asked_industry=asked_industry)
+        if direct_mode and input.include_answer and found
+        else ("", None)
+    )
+    if direct_mode and input.include_answer and not found:
+        direct_kind = "not_found"
     list_fast = (
         found
         and input.include_answer
@@ -369,6 +377,10 @@ def run_fanout(skill: Any, input: SearchInput, ctx: SkillContext) -> SearchOutpu
     )
     if list_fast:
         head = LIST_FAST_HEAD
+        if direct_mode:
+            direct_kind = "list_fast"
+    elif direct_kind in {"comparison", "video_metrics"}:
+        head = direct_head
     elif found and input.include_answer and (summary_hits or slack.items):
         summary_started = time.perf_counter()
 
@@ -383,6 +395,11 @@ def run_fanout(skill: Any, input: SearchInput, ctx: SkillContext) -> SearchOutpu
                     karte_hits=karte.items,
                     asked_industry=asked_industry,
                     **({"timeline_statuses": statuses} if statuses is not None else {}),
+                    **(
+                        {"canonical_campaign_totals": campaign_totals_block(summary_hits)}
+                        if direct_mode
+                        else {}
+                    ),
                 )
                 return answer, cost, "ok"
             except Exception as exc:
@@ -393,7 +410,7 @@ def run_fanout(skill: Any, input: SearchInput, ctx: SkillContext) -> SearchOutpu
             summary_future, summary_started, SUMMARY_DEADLINE_S, ("", 0.0, "timeout")
         )
         summary_ms = int((time.perf_counter() - summary_started) * 1000)
-    if found and input.include_answer:
+    if found and input.include_answer and direct_kind not in {"comparison", "video_metrics"}:
         head = skill._append_campaign_footer(head, summary_hits, asked_industry=asked_industry)
     # 広げる処理は 10s 以内。回収の追加待ちは該当ありで 1s、該当なしで 0s に抑える。
     collection_deadline = time.perf_counter() + (1.0 if found else 0.0)
@@ -625,6 +642,8 @@ def run_fanout(skill: Any, input: SearchInput, ctx: SkillContext) -> SearchOutpu
     )
     return SearchOutput(
         answer=answer,
+        direct_answer=answer if direct_kind is not None else None,
+        direct_answer_kind=direct_kind,
         hits=_output_hits(skill, hits, file_urls),
         found=found,
         total_cost_usd=summary_cost + expanded.cost_usd + vault_cost,

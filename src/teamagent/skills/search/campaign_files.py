@@ -69,6 +69,11 @@ _AD_COUNT_RE = re.compile(
     rf"^投稿本数[^\n]*?広告配信あり[:：]\s*({_COUNT_PATTERN})\s*本", re.MULTILINE
 )
 _TOTAL_PLAYS_RE = re.compile(rf"^再生数[:：]\s*合計\s*({_COUNT_PATTERN})\s*(?=、|$)", re.MULTILINE)
+_REACTION_TOTAL_RE = re.compile(
+    rf"(?:^反応[:：]\s*|、\s*)(?P<metric>いいね|保存)\s*合計\s*"
+    rf"(?P<count>{_COUNT_PATTERN})\s*(?=、|$)",
+    re.MULTILINE,
+)
 #: 添える資料名の表示上限（ツール結果の字数予算・OC のツール結果上限 2 万字の内側に収める）。
 TITLE_CHARS = 60
 
@@ -94,6 +99,31 @@ def campaign_key(hit: SearchHit) -> tuple[str, str] | None:
     if not advertiser or not campaign:
         return None
     return advertiser, campaign
+
+
+def campaign_totals_block(hits: Sequence[SearchHit]) -> str:
+    """施策実績の反応行を唯一の合計値にする。上位動画や関連資料から再集計しない。"""
+    totals_by_campaign: dict[tuple[str, str], dict[str, set[str]]] = {}
+    for hit in hits:
+        key = campaign_key(hit) if is_campaign_hit(hit) else None
+        if key is None:
+            continue
+        reactions = next((line for line in hit.content.splitlines() if line.startswith("反応")), "")
+        for match in _REACTION_TOTAL_RE.finditer(reactions):
+            count = match["count"]
+            count = count if count == "不明" else f"{int(count.replace(',', '')):,}"
+            totals_by_campaign.setdefault(key, {}).setdefault(match["metric"], set()).add(count)
+    rows: list[str] = []
+    for key, totals in sorted(totals_by_campaign.items()):
+        label = _plain_video_text(" / ".join(key)).replace("\n", " ")
+        facts = "・".join(
+            f"{metric} 合計 "
+            + (next(iter(totals[metric])) if len(totals[metric]) == 1 else "不明（集計行が不一致）")
+            for metric in ("いいね", "保存")
+            if metric in totals
+        )
+        rows.append(f"- {label}: {facts}")
+    return "施策の反応合計（ショート動画データベース）\n" + "\n".join(rows) if rows else ""
 
 
 def advertiser_pattern(advertiser: str) -> str:
@@ -484,6 +514,7 @@ __all__ = [
     "campaign_header",
     "campaign_key",
     "campaign_similarity",
+    "campaign_totals_block",
     "file_kind",
     "hit_industry",
     "is_campaign_hit",

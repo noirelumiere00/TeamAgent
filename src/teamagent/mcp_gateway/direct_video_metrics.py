@@ -84,8 +84,18 @@ def _strip_hit_numbers(data: dict[str, Any], posted: str) -> None:
             hit["content"] = strip_video_numbers(hit["content"], posted)
 
 
+def metrics_evidence(section: str) -> dict[str, Any]:
+    """直接投稿で本文から抜く前の数字・URL を、プラグインの照合材料に残す。"""
+    return {"text": section, "urls": list(dict.fromkeys(re.findall(r"https?://[^\s<>]+", section)))}
+
+
 def maybe_post(
-    data: dict[str, Any], *, verified_caller: Any, metadata: dict[str, Any], request_id: str
+    data: dict[str, Any],
+    *,
+    verified_caller: Any,
+    metadata: dict[str, Any],
+    request_id: str,
+    evidence_enabled: bool = False,
 ) -> None:
     """投稿成功・到達不明なら answer の節だけ置換。失敗・対象外は元の結果を保持。"""
     answer = data.get("answer")
@@ -108,6 +118,8 @@ def maybe_post(
             else:
                 reason = "post_status"
             if outcome in {direct_summary.POSTED, direct_summary.UNCERTAIN}:
+                if evidence_enabled:
+                    data["video_metrics_evidence"] = metrics_evidence(section[1])
                 data["answer"] = section[0] + POSTED_TEXT + section[2]
                 _strip_hit_numbers(data, section[1])
     logger.info(

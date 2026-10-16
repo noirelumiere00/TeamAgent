@@ -2560,6 +2560,9 @@ export function createCallerIdentityPlugin({
   // heartbeat run を bindSlackActionRun で束縛）のまま。register のバナーに button_direct を出す。
   const buttonDirect =
     mcpBearer !== null && slackBotToken !== null && typeof fetchFn === "function";
+  const searchDirectEnabled = ["1", "true", "yes"].includes(String(env.SEARCH_DIRECT_ANSWER ?? "").trim().toLowerCase());
+  const searchDirectAllowlist = new Set(String(env.SEARCH_DIRECT_ANSWER_ALLOWED_EMAILS ?? "")
+    .split(",").map(value => value.trim().toLowerCase()).filter(Boolean));
   // 本人メモ（M8）。flag と mcp の bearer と fetch がそろったときだけ。告知の投稿には bot token も使う。
   const personalMemoryEnabled =
     String(env[PERSONAL_MEMORY_ENV] ?? "").trim() === "1" &&
@@ -2666,6 +2669,8 @@ export function createCallerIdentityPlugin({
   const evidenceByRun = new Map();
   const evidenceBySession = new Map();
   const searchRevisionsByRun = new Map();
+  const searchDirectByRun = new Map();
+  const searchQueryByPending = new Map();
   const revisedRepliesByRun = new Map();
   function evidenceSessionKey(runId) {
     const ingress = connectIngressByRun.get(runId);
@@ -2964,8 +2969,13 @@ export function createCallerIdentityPlugin({
     const last = match[0].trim();
     // Authorization and connection guidance remain actionable even without a tool result.
     if (/連携|認証|送信|送付|購入|決済|支払|課金|削除|実行して|実行します/u.test(last)) return text;
-    if (!/(?:しますか|見ますか|ましょうか|いかがですか|必要ですか|ですか|何に[^。！？!?]*|(?:へ|に)確認してください)[？?。]?$/u.test(last)) return text;
+    if (!/(?:しますか|見ますか|要りますか|進めますか|ましょうか|いかがですか|必要ですか|ですか|何に[^。！？!?]*|(?:へ|に)確認してください)[？?。]?$/u.test(last)) return text;
     return body.slice(0, match.index).trimEnd() + (footer.trim() ? footer : "");
+  }
+
+  function groundEvidenceReply(text, evidence) {
+    return stripUngroundedVideoMetrics(
+      trimUnsolicitedEnding(text, evidence?.needsInput), evidence?.numbers, evidence?.metricEvidence);
   }
 
   function rememberConnectToolResult(event, ctx) {
@@ -3007,6 +3017,8 @@ export function createCallerIdentityPlugin({
       evidenceByRun,
       evidenceBySession,
       searchRevisionsByRun,
+      searchDirectByRun,
+      searchQueryByPending,
       revisedRepliesByRun,
       toolCallsByRun,
       connectRevisionsByRun,
@@ -3371,6 +3383,9 @@ export function createCallerIdentityPlugin({
       ingress.videoRequestIntent = existing.videoRequestIntent === true;
     }
     if (existing?.searchRequired && !ingress.searchRequired) ingress.searchRequired = existing.searchRequired;
+    if (searchDirectEnabled && typeof event?.content === "string" && event.content.trim()) {
+      searchQueryByPending.set(pendingKey, {query: event.content.slice(0, 4096), updatedAtMs: nowMs});
+    }
     if (answerFeedbackEnabled && answerFeedbackTargets(senderId)) {
       const query = normalizeFeedbackQuery(event?.content);
       if (query !== null) {
@@ -5662,8 +5677,22 @@ export function createCallerIdentityPlugin({
         typeof event?.lastAssistantMessage !== "string" || !event.lastAssistantMessage.trim() ||
         searchRevisionsByRun.has(runId) ||
         connectRevisionsByRun.has(runId) || videoRevisionsByRun.has(runId)) return undefined;
+    if (searchDirectEnabled && searchDirectAllowlist.size && mcpBearer && slackBotToken) {
+      const existing = searchDirectByRun.get(runId);
+      if (existing) return existing.task;
+      const entry = {updatedAtMs: now(), pending: true};
+      searchDirectByRun.set(runId, entry);
+      entry.task = executeSearchZeroTool(runId, ingress, event, ctx, entry, logger)
+        .finally(() => {entry.pending = false;});
+      return entry.task;
+    }
+    return reviseSearchZeroTool(runId, ingress, logger, event);
+  }
+
+  function reviseSearchZeroTool(runId, ingress, logger, event) {
     if (ingress.searchRequired === "source" &&
-        !/(?:添付|(?:URL|リンク|ファイル|資料).{0,24}(?:貼|送|共有|提供|指定|アップロード))|抽出でき|添付が[無な]/iu.test(event.lastAssistantMessage)) return undefined;
+        !/(?:添付|(?:URL|リンク|ファイル|資料).{0,24}(?:貼|送|共有|提供|指定|アップロード))|抽出でき|添付が[無な]/iu.test(event?.lastAssistantMessage ?? "")) return;
+
     searchRevisionsByRun.set(runId, {updatedAtMs: now()});
     emitPluginLog(logger, "warn", `search zero-tool revise reason=${ingress.searchRequired} outcome=revised`);
     return {action: "revise", reason: "社内資料の検索が必要です。", retry: {
@@ -5674,6 +5703,132 @@ export function createCallerIdentityPlugin({
         "検索が失敗・空でもその旨を短く回答してください。空の最終回答・NO_REPLY は禁止です。",
       idempotencyKey: "search-zero-tool", maxAttempts: 1,
     }};
+  }
+
+  // Only the MCP search envelope can acknowledge delivery; retrieved content is never a receipt.
+  function searchResultData(result) {
+    if (!result || result.isError) return null;
+    const first = Array.isArray(result.content)
+      ? result.content.find(item => item?.type === "text" && typeof item.text === "string") : null;
+    if (!first) return null;
+    try {
+      const data = JSON.parse(first.text);
+      return isPlainObject(data) ? data : null;
+    } catch { return null; }
+  }
+
+  function rememberSearchDelivery(event, ctx, logger) {
+    if (!searchDirectEnabled || !searchDirectAllowlist.size || event?.error ||
+        !["search", "teamagent__search"].includes(event?.toolName)) return;
+    const runId = canonicalInvocationId(ctx?.runId);
+    if (!runId || (event?.runId && event.runId !== runId) || !connectIngressByRun.has(runId)) return;
+    const data = searchResultData(event.result);
+    if (data?.status !== "posted" || data.delivered !== true ||
+        data.delivery?.kind !== "search_direct_answer") return;
+    const entry = searchDirectByRun.get(runId) ?? {};
+    entry.delivered = true;
+    entry.updatedAtMs = now();
+    searchDirectByRun.set(runId, entry);
+    maybeScheduleAnswerFeedback({runId, kind: "final", payload: {text: data.answer || "投稿済み"}},
+      {runId}, undefined, logger);
+  }
+
+  function rememberSearchConversation(event, ctx) {
+    if (!searchDirectEnabled) return;
+    const runId = canonicalInvocationId(ctx?.runId);
+    if (!runId || (event?.runId && event.runId !== runId)) return;
+    const ingress = connectIngressByRun.get(runId);
+    const entry = ingress && searchQueryByPending.get(ingress.pendingKey);
+    if (!entry || !Array.isArray(event?.messages) || !event.messages.length) return;
+    // Earlier user turns carry client/campaign names; assistant guesses are not search inputs.
+    entry.context = event.messages.filter(message => message?.role === "user").slice(-4)
+      .map(message => typeof message.content === "string" ? message.content :
+        Array.isArray(message.content) ? message.content.filter(block => block?.type === "text")
+          .map(block => block.text ?? "").join("\n") : "")
+      .map(text => text.slice(0, 1024)).filter(Boolean).join("\n").slice(0, 3072);
+  }
+
+  async function executeSearchZeroTool(runId, ingress, event, ctx, entry, logger) {
+    let allowed = searchDirectAllowlist.has("*");
+    if (!allowed) {
+      try {
+        const profile = await callSlackApi({fetchFn, botToken: slackBotToken, method: "users.info",
+          body: {user: ingress.senderId}, timeoutMs: SLACK_API_TIMEOUT_MS, sleepFn});
+        allowed = profile.user?.id === ingress.senderId && profile.user?.team_id === ingress.teamId &&
+          typeof profile.user?.profile?.email === "string" &&
+          searchDirectAllowlist.has(profile.user.profile.email.trim().toLowerCase());
+      } catch {}
+    }
+    if (!allowed) return reviseSearchZeroTool(runId, ingress, logger, event);
+    let channel;
+    try { channel = await resolveCanonicalChannel(ingress); }
+    catch { return reviseSearchZeroTool(runId, ingress, logger, event); }
+    if (!SLACK_DM_CHANNEL_RE.test(channel)) return reviseSearchZeroTool(runId, ingress, logger, event);
+    rememberSearchConversation(event, ctx);
+    const saved = searchQueryByPending.get(ingress.pendingKey);
+    const query = [saved?.query, saved?.context].filter(Boolean).join("\n").slice(0, 1000);
+    let result;
+    try {
+      if (!query) throw new ConnectPathError("missing_search_query");
+      const invocationId = `search-direct-${randomBytesFn(16).toString("hex")}`;
+      const signed = mintCallerClaim({trusted: {...ingress, channelId: channel}, runId, toolCallId: invocationId,
+        tool: "search", params: {query}, nowMs: now(), nonceBytes: randomBytesFn(16)});
+      toolCallsByRun.set(runId, {count: 1, updatedAtMs: now()});
+      const feedback = feedbackByRun.get(runId);
+      if (feedback) {
+        feedback.searchQuery = normalizeFeedbackQuery(query);
+        if (!feedback.tools.includes("search")) feedback.tools.push("search");
+      }
+      result = await callMcpTool({fetchFn, mcpUrl, bearer: mcpBearer, name: "search",
+        toolArguments: signed.params, timeoutMs: buttonTimeoutMs});
+      const data = searchResultData(result);
+      if (!data || data.error || result.isError) throw new ConnectPathError("mcp_tool_error");
+      rememberEvidenceToolResult({toolName: "search", result, runId}, {runId});
+      rememberSearchDelivery({toolName: "search", result, runId}, {runId}, logger);
+      if (entry.delivered || (data.delivery?.kind === "search_direct_answer" &&
+          ["failed", "uncertain"].includes(data.delivery.status))) return;
+      if (typeof data.answer !== "string" || !data.answer.trim()) throw new ConnectPathError("mcp_invalid_result");
+    } catch (error) {
+      entry.failed = true;
+      emitPluginLog(logger, "warn", `search direct outcome=failed reason=${connectPathReason(error)}`);
+      return;
+    }
+    const data = searchResultData(result);
+    try {
+      const threadTs = ingress.threadTs;
+      const normalized = finalizeOutgoingText({payload: {text: data.answer}}, logger, runId)?.payload?.text ?? data.answer;
+      const evidence = evidenceByRun.get(runId);
+      const grounded = groundEvidenceReply(restoreEvidenceUrls(normalized, evidence?.urls), evidence);
+      const sourced = appendMissingSearchSources(grounded, evidence?.searchUrls);
+      const text = scrubOutboundReplyText(sourced, connectUrlsByRun.get(runId)?.urls).text
+        .replace(/<[@!][^>\n]*>/gu, escapeSlackText);
+      if (!text.trim()) return;
+      await postButtonMessage({channel, threadTs}, {text});
+      entry.delivered = true;
+      maybeScheduleAnswerFeedback({runId, kind: "final", payload: {text}}, {runId}, undefined, logger);
+      emitPluginLog(logger, "info", "search direct outcome=delivered");
+    } catch (error) {
+      // Search succeeded: a Slack delivery failure must leave the model reply available.
+      emitPluginLog(logger, "warn", `search direct outcome=post_failed reason=${connectPathReason(error)}`);
+    }
+  }
+
+  function suppressSearchReply(event, ctx) {
+    if (!searchDirectEnabled) return;
+    pruneConnectGuardState(now());
+    const runId = canonicalInvocationId(event?.runId);
+    if (!runId || runId !== canonicalInvocationId(ctx?.runId) || !connectIngressByRun.has(runId)) return;
+    const payload = event?.payload;
+    if ((event?.kind !== undefined && event.kind !== "final") ||
+        payload?.isReasoning === true || payload?.isCommentary === true) return;
+    const entry = searchDirectByRun.get(runId);
+    if (!entry) return;
+    if (entry.pending) return entry.task.then(() => suppressSearchReply(event, ctx));
+    if (entry.delivered || entry.replaced) return {cancel: true, reason: "search answer already delivered"};
+    if (entry.failed) {
+      entry.replaced = true;
+      return {payload: {...payload, text: revisedReplyFallback({searchRequired: true})}};
+    }
   }
 
   // 空の再パスでは finalize/配信フック自体が来ないため、全 revise の完了を別に追う。
@@ -5746,7 +5901,8 @@ export function createCallerIdentityPlugin({
         (evidenceByRun.has(runId) ||
           createHash("sha256").update(text).digest("hex") !== entry.draftDigest)) entry.pending = false;
     if (!entry?.pending || entry.payloadSeen || entry.delivered || entry.attempted ||
-        !ingress || resolveConnectSuppression(runId).suppress) return;
+        !ingress || resolveConnectSuppression(runId).suppress ||
+        searchDirectByRun.get(runId)?.delivered || searchDirectByRun.get(runId)?.pending) return;
     if (!slackBotToken) {
       emitPluginLog(logger, "warn", "revised reply fallback outcome=skipped reason=no_slack_bot_token");
       return;
@@ -5754,7 +5910,8 @@ export function createCallerIdentityPlugin({
     entry.attempted = true;
     const task = (async () => {
       const channel = await resolveCanonicalChannel(ingress);
-      if (entry.payloadSeen || resolveConnectSuppression(runId).suppress) return;
+      if (entry.payloadSeen || resolveConnectSuppression(runId).suppress ||
+          searchDirectByRun.get(runId)?.delivered || searchDirectByRun.get(runId)?.pending) return;
       const threadTs = SLACK_DM_CHANNEL_RE.test(channel) ? ingress.threadTs
         : (ingress.threadTs ?? canonicalSlackTimestamp(ingress.messageId));
       entry.posting = true;
@@ -6126,22 +6283,29 @@ export function createCallerIdentityPlugin({
       nowMs: now(),
     });
     try {
-      await callSlackApi({
-        fetchFn,
-        botToken: slackBotToken,
-        method: "chat.postMessage",
-        body: {
-          channel,
+      if (searchDirectByRun.get(runId)?.delivered) {
+        await postButtonMessage({channel, threadTs}, {
           text: ANSWER_FEEDBACK_PROMPT_TEXT,
           blocks: buildAnswerFeedbackBlocks(token),
-          unfurl_links: false,
-          unfurl_media: false,
-          ...(threadTs === null ? {} : {thread_ts: threadTs}),
-        },
-        timeoutMs: SLACK_API_TIMEOUT_MS,
-        sleepFn,
-        retryOnTimeout: false,
-      });
+        });
+      } else {
+        await callSlackApi({
+          fetchFn,
+          botToken: slackBotToken,
+          method: "chat.postMessage",
+          body: {
+            channel,
+            text: ANSWER_FEEDBACK_PROMPT_TEXT,
+            blocks: buildAnswerFeedbackBlocks(token),
+            unfurl_links: false,
+            unfurl_media: false,
+            ...(threadTs === null ? {} : {thread_ts: threadTs}),
+          },
+          timeoutMs: SLACK_API_TIMEOUT_MS,
+          sleepFn,
+          retryOnTimeout: false,
+        });
+      }
     } catch (error) {
       emitPluginLog(
         logger,
@@ -6444,6 +6608,7 @@ export function createCallerIdentityPlugin({
           emitPluginLog(api.logger, "warn", "first message restore outcome=error");
           restore = undefined;
         }
+        rememberSearchConversation(event, ctx);
         const memo = await injectPersonalMemory(event, ctx, api.logger);
         if (restore === undefined) return memo;
         return memo === undefined ? restore : { ...memo, ...restore };
@@ -6453,16 +6618,19 @@ export function createCallerIdentityPlugin({
       observe("after_tool_call", (event, ctx) => {
         rememberEvidenceToolResult(event, ctx);
         rememberConnectToolResult(event, ctx);
+        rememberSearchDelivery(event, ctx, api.logger);
       });
       // 連携側を先に評価し、何もしなかったときだけ動画 URL × 0 tool call の層2 を評価する。
       observe(
         "before_agent_finalize",
-        (event, ctx) => trackRevisedReply(event, ctx,
-          guardConnectUrlFabrication(event, ctx, api.logger) ??
-          guardVideoZeroTool(event, ctx, api.logger) ??
-          guardSearchZeroTool(event, ctx, api.logger)),
+        (event, ctx) => {
+          const result = guardConnectUrlFabrication(event, ctx, api.logger) ??
+            guardVideoZeroTool(event, ctx, api.logger) ?? guardSearchZeroTool(event, ctx, api.logger);
+          return result?.then ? result.then(value => trackRevisedReply(event, ctx, value))
+            : trackRevisedReply(event, ctx, result);
+        },
       );
-      observe("reply_payload_sending", (event, ctx) => {
+      function sendReply(event, ctx) {
         let result = replaceExhaustedConnectReply(event, ctx, api.logger);
         // 抑止・層3・overflow・deai の処理が終わった本文を最後に洗浄する。cancel は維持する。
         const payload = result?.payload ?? event?.payload;
@@ -6480,8 +6648,7 @@ export function createCallerIdentityPlugin({
           const urls = evidence?.urls?.size ? evidence.urls : evidenceBySession.get(session)?.urls;
           const restored = restoreEvidenceUrls(payload.text, urls);
           if (restored !== payload.text) emitPluginLog(api.logger, "info", "outbound URL restored diagnostic=CONNECT-Z04");
-          const grounded = authoritative ? stripUngroundedVideoMetrics(restored, evidence?.numbers, evidence?.metricEvidence) : restored;
-          const trimmed = authoritative ? trimUnsolicitedEnding(grounded, evidence?.needsInput) : grounded;
+          const trimmed = authoritative ? groundEvidenceReply(restored, evidence) : restored;
           if (payload.text.trim() && !trimmed.trim()) {
             return finishRevisedReply(event, ctx, { ...result, cancel: true });
           }
@@ -6508,6 +6675,11 @@ export function createCallerIdentityPlugin({
         // 配信されるメッセージ起点の返信の後に、評価メッセージを予約する。
         maybeScheduleAnswerFeedback(event, ctx, result, api.logger);
         return result;
+      }
+      observe("reply_payload_sending", (event, ctx) => {
+        const direct = suppressSearchReply(event, ctx);
+        return direct?.then ? direct.then(result => result ?? sendReply(event, ctx))
+          : direct ?? sendReply(event, ctx);
       });
       observe("agent_end", (event, ctx) => {
         rescueEmptyRevisedReply(event, ctx, api.logger);
