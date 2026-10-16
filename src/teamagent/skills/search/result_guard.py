@@ -115,20 +115,6 @@ def hit_client_name(hit: SearchHit) -> str:
     return ""
 
 
-def _hit_industry(hit: SearchHit) -> str | None:
-    """このヒットの業種（正準値）。未分類・未知値は None。
-
-    保存済みデータには ``旅行`` と ``旅行・観光`` のような表記ゆれが実在するため、
-    比較前に必ず正規化する（再分類バッチを走らせずに揺れを吸収する唯一の手段）。
-    """
-    meta = getattr(hit, "metadata", None) or {}
-    for key in ("industry", "cls_industry"):
-        value = str(meta.get(key) or "").strip()
-        if value:
-            return normalize_industry(value)
-    return None
-
-
 def hit_client_vocabulary(hits: Sequence[SearchHit]) -> list[str]:
     """ヒット集合から観測されたクライアント名の一覧（辞書が引けないときの代替語彙）。"""
     seen: dict[str, None] = {}
@@ -330,8 +316,10 @@ def build_result_header(
     # filter_industry は soft（industry = 値 OR NULL）なので「別業種が混ざる」ことは
     # 起きない。起きるのは「全部 NULL だった」であり、それを黙って要約させない。
     if asked_industry:
+        from teamagent.skills.search.campaign_files import scope_by_industry
+
         wanted = normalize_industry(asked_industry) or asked_industry
-        if not any(_hit_industry(hit) == wanted for hit in hits):
+        if not scope_by_industry(hits, wanted):
             lines.append(_INDUSTRY_MISS_TEMPLATE.format(industry=wanted))
 
     asked = query_client

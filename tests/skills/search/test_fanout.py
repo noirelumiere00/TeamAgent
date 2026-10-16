@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import threading
 import time
+from dataclasses import replace
 from importlib import import_module
 from pathlib import Path
 from typing import Any
@@ -160,7 +161,8 @@ def test_kanji_expansion_is_not_promoted_or_summarized(monkeypatch: pytest.Monke
     summary = MagicMock(side_effect=AssertionError("要約禁止"))
     monkeypatch.setattr(fanout, "build_summary_client", summary)
     out = run(skill, query="宅配系の事例")
-    assert out.found is False and "🔎" in out.answer and "言い換え" in out.answer
+    assert out.found is False and "宅配系の事例は見つかりませんでした" in out.answer
+    assert "🔎" not in out.answer and "near/view" not in out.answer
     summary.assert_not_called()
 
 
@@ -636,6 +638,168 @@ def test_list_fast_keeps_campaign_footers(monkeypatch: pytest.MonkeyPatch) -> No
     assert "📁" in suffix and "探した範囲（まとめて検索）:" in suffix
 
 
+def test_iter4_list_fast_keeps_campaign_sheet_rows_when_answer_is_full(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from tests.skills.search.test_campaign_files import _video, _video_campaign
+
+    monkeypatch.setenv("SEARCH_FANOUT_LIST_FAST", "1")
+    campaigns = [
+        _video_campaign(
+            20 + i,
+            "伊藤ハム",
+            f"施策{i}",
+            [
+                _video(f"https://example.test/{i}/{n}", "投稿の説明" * 8, 507_700, n)
+                for n in range(1, 6)
+            ],
+        )
+        for i in range(2)
+    ]
+    for hit in campaigns:
+        hit.metadata["source_uri"] = "https://docs.google.com/spreadsheets/d/campaign/edit#gid=0"
+        hit.metadata["client_name"] = "伊藤ハム"
+    skill, pg = make([_vault_hit(), *campaigns])
+    pg.list_client_names.return_value = ["伊藤ハム"]
+    monkeypatch.setattr(skill, "_match_client", lambda *a, **kw: "伊藤ハム")
+    skill._campaign_files = True
+    monkeypatch.setattr(skill, "_attach_campaign_files", lambda *a: None)
+    pg.find_documents_for_advertiser.return_value = [
+        _vault_hit(
+            50 + i,
+            title="伊藤ハム_提案書_" + "長い資料名" * 9,
+            source_uri=f"https://drive.google.com/file/d/{'x' * 330}{i}/view",
+        )
+        for i in range(3)
+    ]
+    out = run(skill, query="伊藤ハムの資料を一覧で出して")
+    assert "🏆 事例・施策実績（2件）" in out.answer
+    for hit in campaigns:
+        assert hit.metadata["source_uri"] in out.answer
+        assert hit.metadata["title"] in out.answer
+    assert len(out.answer) <= 2500
+
+
+@pytest.mark.parametrize("fanout_enabled", [True, False])
+@pytest.mark.parametrize("target", ["金融", "メタバース"])
+def test_iter4_zero_matching_cases_never_fill_with_unrelated_results(
+    monkeypatch: pytest.MonkeyPatch, fanout_enabled: bool, target: str
+) -> None:
+    monkeypatch.setenv("USE_SEARCH_FANOUT", "1" if fanout_enabled else "0")
+    unrelated = _vault_hit(title="食品メーカーの施策", cls_industry="食品")
+    skill, _ = make([unrelated])
+    wrong = "見つかりませんでした。食品の事例です。銀行で検索してと言ってもらえれば探せます。"
+    monkeypatch.setattr(skill, "_summarize", MagicMock(return_value=(wrong, 0.0)))
+    monkeypatch.setattr(
+        fanout,
+        "run_expansion",
+        lambda *a, **kw: ExpansionResult(("別の事例",), "食品", (unrelated,), "ok", 1, 0.0),
+    )
+    out = run(skill, query=f"{target}の事例を教えて")
+    assert (
+        out.answer
+        == f"{target}の事例は見つかりませんでした（探した範囲: 社内資料・施策実績・Slack）。"
+    )
+    assert out.found is False
+    skill._summarize.assert_not_called()
+
+
+@pytest.mark.parametrize("fanout_enabled", [True, False])
+@pytest.mark.parametrize("industry_evidence", ["client_industry", "content"])
+def test_iter4_food_campaign_survives_missing_campaign_industry_without_false_absence(
+    monkeypatch: pytest.MonkeyPatch, fanout_enabled: bool, industry_evidence: str
+) -> None:
+    from tests.skills.search.test_campaign_files import _video, _video_campaign
+
+    monkeypatch.setenv("USE_SEARCH_FANOUT", "1" if fanout_enabled else "0")
+    food = _video_campaign(
+        20,
+        "伊藤ハム",
+        "ハンバーグ",
+        [_video("https://example.test/food/1", "アレンジレシピ", 507_700, 261)],
+    )
+    food.metadata.pop("cls_industry", None)
+    food.metadata["campaign_industry"] = ""
+    food.metadata["source_uri"] = "https://docs.google.com/spreadsheets/d/food/edit#gid=1"
+    if industry_evidence == "client_industry":
+        food.metadata["client_industry"] = "食品"
+    else:
+        food = replace(food, content=food.content + "\n食品メーカーのショート動画施策。")
+    other = _vault_hit(30, title="アパレル社の施策", cls_industry="アパレル")
+    skill, _ = make([food, other])
+    skill._result_guard = True
+    summary = MagicMock(return_value=("伊藤ハムのハンバーグの事例です。", 0.0))
+    monkeypatch.setattr(skill, "_summarize", summary)
+    out = skill.run(
+        SearchInput(query="食品メーカーのショート動画の事例ってある？", filter_industry="食品"),
+        SkillContext(request_id="iter4-food", metadata=META),
+    )
+    assert out.found
+    assert "見つかりません" not in out.answer
+    assert "アパレル" not in out.answer
+    assert "https://example.test/food/1" in out.answer
+    assert [h.chunk_id for h in summary.call_args.args[1]] == [20]
+
+
+def test_iter4_fanout_answer_links_include_summary_slack_sources(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from teamagent.skills.search.composite import SlackItem
+    from teamagent.skills.search.schema import SlackHitOut
+
+    items = tuple(
+        SlackItem(
+            hit=SlackHitOut(
+                channel=f"#project-{i}",
+                permalink=f"https://vectorinc.slack.com/archives/CPROJECT/p{i}",
+            ),
+            text=f"案件{i}の説明",
+        )
+        for i in range(3)
+    )
+    monkeypatch.setattr(
+        fanout, "lookup_slack", lambda **kw: SlackLookup(status="ok", reason="ok", items=items)
+    )
+    skill, _ = make()
+    monkeypatch.setattr(
+        skill, "_summarize", lambda *a, **kw: ("案件2。施策管理シートもあります。", 0.0)
+    )
+    out = run(skill, query="案件2って何？うちも関わってる？")
+    for item in items:
+        assert item.hit.permalink in out.answer
+
+
+def test_iter4_case_miss_preserves_include_answer_false() -> None:
+    skill, _ = make([])
+    out = skill.run(
+        SearchInput(query="金融の事例を教えて", include_answer=False), SkillContext(metadata=META)
+    )
+    assert not out.found and out.answer == ""
+
+
+def test_iter4_industry_list_excludes_other_industry_campaigns(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from tests.skills.search.test_campaign_files import _video, _video_campaign
+
+    monkeypatch.setenv("SEARCH_FANOUT_LIST_FAST", "1")
+    food = _video_campaign(
+        20,
+        "伊藤ハム",
+        "ハンバーグ",
+        [_video("https://example.test/food/1", "レシピ", 507_700, 261)],
+    )
+    other = _video_campaign(
+        21, "服飾会社", "夏服", [_video("https://example.test/clothes/1", "服", 500_000, 110)]
+    )
+    other.metadata["cls_industry"] = "アパレル"
+    skill, _ = make([food, other])
+    monkeypatch.setattr(skill, "_attach_campaign_files", lambda *a: None)
+    out = run(skill, query="食品の資料を一覧で出して")
+    assert out.found and "伊藤ハム" in out.answer
+    assert "服飾会社" not in out.answer and "夏服" not in out.answer
+
+
 @pytest.mark.parametrize("summary_kind", ["empty", "long", "error"])
 @pytest.mark.parametrize("wording", ["動画ごとの結果", "投稿ごとの結果", "1本ずつの結果"])
 def test_iter3_campaign_metrics_survive_empty_or_long_summary_without_related_files(
@@ -806,7 +970,7 @@ def test_list_fast_without_answer_skips_summary(monkeypatch: pytest.MonkeyPatch)
     assert next(r for r in logs if r["event"] == "search_latency_breakdown")["list_fast"] is False
 
 
-def test_found_case_with_other_industry_still_shows_expansion_without_summary_input(
+def test_other_industry_case_does_not_claim_a_match_or_show_unrelated_expansion(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     case = SearchHit(
@@ -834,8 +998,9 @@ def test_found_case_with_other_industry_still_shows_expansion_without_summary_in
     monkeypatch.setattr(fanout, "build_summary_client", lambda: summary)
     skill, _ = make([case])
     out = run(skill, query="お酒系のビデオリリースの事例")
-    assert out.found and "🔎" in out.answer and "飲料事例" in out.answer
-    assert "NEAR_BODY" not in str(summary.converse.call_args)
+    assert not out.found and "事例は見つかりませんでした" in out.answer
+    assert "🔎" not in out.answer and "飲料事例" not in out.answer
+    summary.converse.assert_not_called()
 
 
 def test_bounded_connection_restores_timeout_and_rolls_back_failure() -> None:
@@ -886,7 +1051,8 @@ def test_slow_industry_case_lookup_keeps_vault(monkeypatch: pytest.MonkeyPatch) 
         started = time.perf_counter()
         out = run(skill, query="お酒の事例")
         assert time.perf_counter() - started < 0.3 and not out.found
-        assert "事例 ✗" in out.answer
+        assert "お酒の事例は見つかりませんでした" in out.answer
+        assert "🔎" not in out.answer
     finally:
         gate.set()
 

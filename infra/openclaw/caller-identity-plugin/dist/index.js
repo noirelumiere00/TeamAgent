@@ -2671,21 +2671,46 @@ export function createCallerIdentityPlugin({
     const ingress = connectIngressByRun.get(runId);
     return ingress ? JSON.stringify([ingress.sessionSha256, ingress.senderId]) : null;
   }
+  function metricKind(value) {
+    const play = /再生|(?:^|_)(?:plays?|views?)(?:_|$)/iu.test(value);
+    const save = /保存|(?:^|_)(?:saves?|collect)(?:_|$)/iu.test(value);
+    return play === save ? null : play ? "play" : "save";
+  }
   function rememberEvidenceToolResult(event, ctx) {
     const runId = canonicalInvocationId(ctx?.runId);
     if (!runId || (event?.runId && event.runId !== runId) || event?.error ||
         event?.result?.isError) return;
     pruneConnectGuardState(now());
-    const entry = evidenceByRun.get(runId) ?? {urls: new Set(), numbers: new Set(), needsInput: false};
+    const entry = evidenceByRun.get(runId) ?? {urls: new Set(), numbers: new Set(),
+      metricEvidence: {play: new Set(), save: new Set()}, needsInput: false};
     if (["search", "teamagent__search"].includes(event?.toolName)) entry.searchCompleted = true;
     if (["oauth_connect", "teamagent__oauth_connect"].includes(event?.toolName)) entry.needsInput = true;
-    function collect(value, depth = 0) {
+    function collect(value, depth = 0, kind = null) {
       if (depth > 12) return;
       if (typeof value === "string") {
         try {
           const parsed = JSON.parse(value);
-          if (typeof parsed !== "string") { collect(parsed, depth + 1); return; }
+          if (typeof parsed !== "string") { collect(parsed, depth + 1, kind); return; }
         } catch {}
+        if (kind) {
+          for (const number of metricNumbers(value)) {
+            if (entry.metricEvidence[kind].size >= 4096) break;
+            entry.metricEvidence[kind].add(number);
+          }
+        } else {
+          const count = "\\d[\\d,]*(?:\\.\\d+)?\\s*[万億]?\\s*(?:倍|%)?";
+          const pattern = new RegExp("(再生|保存)(?:数|率)?\\s*(?:合計|平均|最大|最小)?\\s*[:：はが]?\\s*(" +
+            count + "(?:\\s*(?:回|件)?\\s*と\\s*" + count + ")*)|(" + count + ")\\s*(?:回|件)?\\s*(再生|保存)", "gu");
+          const clean = value.slice(0, ASSISTANT_MESSAGE_SCAN_LIMIT).normalize("NFKC")
+            .replace(/https?:\/\/[^\s<>"`|\\）」』、。！？]+/giu, "");
+          for (const match of clean.matchAll(pattern)) {
+            const sourceKind = metricKind(match[1] ?? match[4]);
+            for (const number of metricNumbers(match[2] ?? match[3])) {
+              if (entry.metricEvidence[sourceKind].size >= 4096) break;
+              entry.metricEvidence[sourceKind].add(number);
+            }
+          }
+        }
         for (const number of metricNumbers(value)) {
           if (entry.numbers.size >= 4096) break;
           entry.numbers.add(number);
@@ -2696,8 +2721,9 @@ export function createCallerIdentityPlugin({
         }
       } else if (typeof value === "number" && Number.isFinite(value)) {
         if (entry.numbers.size < 4096) entry.numbers.add(String(value));
+        if (kind && entry.metricEvidence[kind].size < 4096) entry.metricEvidence[kind].add(String(value));
       } else if (Array.isArray(value)) {
-        for (const item of value) collect(item, depth + 1);
+        for (const item of value) collect(item, depth + 1, kind);
       } else if (value && typeof value === "object" && !value.isError) {
         for (const [key, item] of Object.entries(value)) {
           if ((key === "status" && ["needs_input", "requires_confirmation", "confirmation_required",
@@ -2705,11 +2731,15 @@ export function createCallerIdentityPlugin({
             (["needs_input", "requires_confirmation", "confirmation_required", "needs_authorization"].includes(key) && item === true)) {
             entry.needsInput = true;
           }
-          collect(item, depth + 1);
+          collect(item, depth + 1, metricKind(key));
         }
       }
     }
     collect(event.result);
+    if (entry.searchCompleted && ["search", "teamagent__search"].includes(event?.toolName)) {
+      entry.searchUrls = new Set();
+      collectSearchSourceUrls(event.result, entry.searchUrls);
+    }
     entry.updatedAtMs = now();
     evidenceByRun.delete(runId);
     evidenceByRun.set(runId, entry);
@@ -2720,47 +2750,128 @@ export function createCallerIdentityPlugin({
     }
   }
 
+  function collectSearchSourceUrls(value, urls, depth = 0) {
+    if (depth > 12 || urls.size >= 128) return;
+    if (typeof value === "string") {
+      try { collectSearchSourceUrls(JSON.parse(value), urls, depth + 1); } catch {}
+      return;
+    }
+    if (Array.isArray(value)) {
+      for (const item of value) collectSearchSourceUrls(item, urls, depth + 1);
+      return;
+    }
+    if (!value || typeof value !== "object" || value.isError) return;
+    const add = raw => {
+      if (urls.size >= 128 || typeof raw !== "string" || raw.length > 2048 || /[\s()\[\]<>"'`]/u.test(raw)) return;
+      try {
+        const url = new URL(raw);
+        if (["http:", "https:"].includes(url.protocol) && !url.username && !url.password) urls.add(raw);
+      } catch {}
+    };
+    for (const key of value.found === false ? ["slack_hits"] : ["hits", "slack_hits", "sources"]) {
+      if (Array.isArray(value[key])) {
+        for (const hit of value[key]) add(hit?.url || hit?.drive_url || hit?.permalink);
+      }
+    }
+    if (typeof value.answer === "string" && (value.found !== false || value.slack_hits?.length)) {
+      for (const match of value.answer.slice(0, ASSISTANT_MESSAGE_SCAN_LIMIT).matchAll(/https?:\/\/[^\s<>"`|\\）」』、。！？]+/giu)) {
+        add(match[0].replace(CONNECT_URL_TRAILING_RE, ""));
+      }
+    }
+    for (const item of Object.values(value)) collectSearchSourceUrls(item, urls, depth + 1);
+  }
+
+  function appendMissingSearchSources(text, urls) {
+    if (!text.trim() || !urls?.size || /https?:\/\//iu.test(text)) return text;
+    return text.trimEnd() + "\n\n📎 出典\n" + [...urls].slice(0, 3).map(url => `- <${url}>`).join("\n");
+  }
+
   // NumberGrounder と同じく NFKC・カンマ・万/億を揃える。URL の ID は根拠にしない。
-  function metricNumbers(text) {
+  function metricNumberTokens(text) {
     const clean = text.slice(0, ASSISTANT_MESSAGE_SCAN_LIMIT).normalize("NFKC")
       .replace(/https?:\/\/[^\s<>"`|\\）」』、。！？]+/giu, "");
-    return [...clean.matchAll(/(\d[\d,]*(?:\.\d+)?)\s*([万億])?\s*(倍|%)?/gu)].map(match =>
-      String(Number(match[1].replaceAll(",", "")) * (match[2] === "億" ? 1e8 : match[2] === "万" ? 1e4 : 1)) + (match[3] ?? ""));
+    return [...clean.matchAll(/(\d[\d,]*(?:\.\d+)?)\s*([万億])?\s*(倍|%)?/gu)].map(match => {
+      const scale = match[2] === "億" ? 1e8 : match[2] === "万" ? 1e4 : 1;
+      return {value: Number(match[1].replaceAll(",", "")) * scale, suffix: match[3] ?? "",
+        quantum: scale / 10 ** (match[1].split(".")[1]?.length ?? 0)};
+    });
+  }
+  function metricNumbers(text) {
+    return metricNumberTokens(text).map(number => String(number.value) + number.suffix);
   }
 
   // shortcut: 同 run の数値集合で照合し、投稿者との対応も保証する要件が出たら行キーで照合する。
-  function stripUngroundedVideoMetrics(text, numbers) {
+  function stripUngroundedVideoMetrics(text, numbers, metricEvidence) {
     const lines = text.split("\n");
-    const out = [];
     const video = /動画|投稿者|アカウント|クリエイター|投稿ごと|投稿別|上位の投稿|@[\w.]/u;
     const metric = /再生|保存/u;
     const notice = "動画ごとの数値は 📊 を参照してください。";
-    const ungrounded = value => metricNumbers(value).some(number => !numbers?.has(number));
+    const sources = [...(numbers ?? [])].map(value => ({value: Number.parseFloat(value),
+      suffix: value.endsWith("倍") ? "倍" : value.endsWith("%") ? "%" : ""}));
+    const ungrounded = (value, label = value) => {
+      const tokens = metricNumberTokens(value);
+      const kind = metricKind(label);
+      const relevant = kind ? [...(metricEvidence?.[kind] ?? [])] : [];
+      return tokens.some(number => {
+        const matches = candidate => Math.round(candidate / number.quantum) === Math.round(number.value / number.quantum);
+        if (!number.suffix) return !sources.some(source => !source.suffix && matches(source.value));
+        const operands = tokens.filter(token => !token.suffix);
+        if ((number.suffix !== "倍" || operands.length !== 2) && relevant.some(source =>
+          source.endsWith(number.suffix) && matches(Number.parseFloat(source)))) return false;
+        if (number.suffix !== "倍") return true;
+        const counts = relevant.filter(source => !/(?:倍|%)$/u.test(source)).map(Number)
+          .filter(candidate => candidate > 0 && (operands.length !== 2 || operands.some(operand =>
+            Math.round(candidate / operand.quantum) === Math.round(operand.value / operand.quantum))))
+          .sort((a, b) => a - b);
+        return !counts.some(denominator => {
+          const target = denominator * number.value;
+          let low = 0;
+          let high = counts.length;
+          while (low < high) {
+            const mid = (low + high) >>> 1;
+            if (counts[mid] < target) low = mid + 1;
+            else high = mid;
+          }
+          return [counts[low - 1], counts[low]].some(numerator =>
+            numerator !== undefined && numerator !== denominator && matches(numerator / denominator));
+        });
+      });
+    };
     function rowMetricText(row) {
       const normalized = row.normalize("NFKC");
       const count = "\\d[\\d,]*(?:\\.\\d+)?\\s*[万億]?\\s*(?:倍|%)?";
       const values = [...normalized.matchAll(new RegExp(
-        "(?:再生|保存)(?:数|率)?\\s*[:：はが]?\\s*(" + count + ")|(" + count + ")\\s*(?:回|件)?\\s*(?:再生|保存)", "gu"))]
+        "(?:再生|保存)(?:数|率)?\\s*(?:合計|平均|最大|最小)?\\s*[:：はが]?\\s*(" + count + ")|(" + count + ")\\s*(?:回|件)?\\s*(?:再生|保存)", "gu"))]
         .map(match => match[1] ?? match[2]);
-      return values.length ? values.join(" ") : normalized.replace(/^\s*[0-9]+[.．、)]\s*/u, "")
+      values.push(...[...normalized.matchAll(/\d[\d,]*(?:\.\d+)?\s*(?:倍|%)/gu)].map(match => match[0]));
+      if (values.length) return values.join(" ");
+      const unlabeled = normalized.replace(/^\s*(?:[-*•・]|[0-9]+[.．、)])\s*/u, "")
         .replace(/^[^:：]*[:：]/u, "").replace(/@[\w.]+/gu, "");
+      return /^\s*\d[\d,]*(?:\.\d+)?\s*[万億]?\s*(?:回|件|倍|%|$|[、・])/u.test(unlabeled) ? unlabeled : "";
     }
+    const removed = new Set();
+    const heading = line => /^\s*(?:#{1,6}\s+|\*{1,2}[^*]+\*{1,2}\s*$)/u.test(line) || /[:：]\s*$/u.test(line);
     let context = "";
     let fenced = false;
     for (let i = 0; i < lines.length; i++) {
       const line = lines[i];
       if (/^\s*(?:```|~~~)/u.test(line)) fenced = !fenced;
-      if (fenced) { out.push(line); continue; }
+      if (fenced) continue;
       if (line.includes("|") && metric.test(line)) {
         const header = line.split("|");
         const columns = header.flatMap((cell, index) => /再生|保存|比率|倍率/u.test(cell) ? [index] : []);
         let end = i + 1;
         while (end < lines.length && lines[end].includes("|")) end++;
-        if ((video.test(line) || (video.test(context) && !/施策|キャンペーン/u.test(line))) && lines.slice(i + 1, end).some(row => {
-          const cells = row.split("|");
-          return columns.some(index => ungrounded(cells[index] ?? ""));
-        })) {
-          out.push(notice);
+        if (video.test(line) || (video.test(context) && !/施策|キャンペーン/u.test(line))) {
+          const rows = lines.slice(i + 1, end).filter((row, offset) => {
+            const cells = row.split("|");
+            if (!columns.some(index => ungrounded(cells[index] ?? "", line))) return true;
+            removed.add(i + offset + 1);
+            return false;
+          });
+          if (rows.length !== end - i - 1 && !rows.some(row => !/^[\s|:-]+$/u.test(row))) {
+            for (let index = i; index < end; index++) removed.add(index);
+          }
           i = end - 1;
           continue;
         }
@@ -2771,21 +2882,34 @@ export function createCallerIdentityPlugin({
         let end = i + 1;
         while (end < lines.length && isListRow(lines[end])) end++;
         const block = lines.slice(i, end);
-        if (video.test(context + block.join("\n")) && metric.test(context + block.join("\n")) &&
-            block.some(row => ungrounded(rowMetricText(row)))) {
-          out.push(notice);
+        if (video.test(context + block.join("\n")) && metric.test(context + block.join("\n"))) {
+          for (let offset = 0; offset < block.length; offset++) {
+            const row = block[offset];
+            if (ungrounded(rowMetricText(row), metric.test(row) ? row : context)) removed.add(i + offset);
+          }
           i = end - 1;
           continue;
         }
       }
-      if (video.test(context + line) && metric.test(line) && /\d+(?:\.\d+)?\s*(?:倍|%)/u.test(line) && ungrounded(line)) {
-        out.push(notice);
+      if (video.test(context + line) && metric.test(line) && /\d+(?:\.\d+)?\s*(?:倍|%)/u.test(line.normalize("NFKC")) && ungrounded(line)) {
+        removed.add(i);
         continue;
       }
-      out.push(line);
       if (line.trim()) context = line;
     }
-    return out.join("\n");
+    if (!removed.size) return text;
+    for (let i = lines.length - 1; i >= 0; i--) {
+      if (!heading(lines[i])) continue;
+      let end = i + 1;
+      while (end < lines.length && (!heading(lines[end]) || removed.has(end))) end++;
+      if (lines.slice(i + 1, end).some((line, offset) => removed.has(i + offset + 1)) &&
+          lines.slice(i + 1, end).every((line, offset) => !line.trim() || removed.has(i + offset + 1))) {
+        removed.add(i);
+      }
+    }
+    const kept = lines.filter((line, index) => !removed.has(index))
+      .filter(line => line !== notice).join("\n").trim();
+    return kept ? kept + "\n" + notice : notice;
   }
 
   // Only a unique close match is safe to restore; unrelated or ambiguous URLs survive.
@@ -2822,13 +2946,26 @@ export function createCallerIdentityPlugin({
 
   function trimUnsolicitedEnding(text, needsInput) {
     if (needsInput) return text;
-    const match = /(?:^|(?<=[。！？!?\n]))[ \t]*(?:[^。！？!?\n]+[。！？!?]?)[ \t\n]*$/u.exec(text);
-    if (!match || (text.slice(0, match.index).match(/^[ \t]*(?:```|~~~)/gm)?.length ?? 0) % 2) return text;
+    const lines = text.split("\n");
+    let end = lines.length;
+    while (end > 0) {
+      const line = lines[end - 1].trim();
+      const withoutLinks = line.replace(/\[[^\]\n]*\]\(https?:\/\/[^)\s]+\)|<https?:\/\/[^<>\s]+>|https?:\/\/[^\s<>]+/giu, "")
+        .replace(/（関連資料）/gu, "");
+      if (line && !/^[\s\-—*•・:：]*$/u.test(withoutLinks) &&
+          !/^(?:(?:📎|📚|:books:)\s*)?\*{0,2}(?:資料リンク|出典(?:リンク)?|参考資料)\*{0,2}[:：]?$/u.test(line) &&
+          !/(?:Aico Vault|:books:).*https?:\/\//iu.test(line)) break;
+      end--;
+    }
+    const body = lines.slice(0, end).join("\n");
+    const footer = text.slice(body.length);
+    const match = /(?:^|(?<=[。！？!?\n]))[ \t]*(?:[^。！？!?\n]+[。！？!?]?)[ \t\n]*$/u.exec(body);
+    if (!match || (body.slice(0, match.index).match(/^[ \t]*(?:```|~~~)/gm)?.length ?? 0) % 2) return text;
     const last = match[0].trim();
     // Authorization and connection guidance remain actionable even without a tool result.
     if (/連携|認証|送信|送付|購入|決済|支払|課金|削除|実行して|実行します/u.test(last)) return text;
     if (!/(?:しますか|見ますか|ましょうか|いかがですか|必要ですか|ですか|何に[^。！？!?]*|(?:へ|に)確認してください)[？?。]?$/u.test(last)) return text;
-    return text.slice(0, match.index).trimEnd();
+    return body.slice(0, match.index).trimEnd() + (footer.trim() ? footer : "");
   }
 
   function rememberConnectToolResult(event, ctx) {
@@ -6343,12 +6480,13 @@ export function createCallerIdentityPlugin({
           const urls = evidence?.urls?.size ? evidence.urls : evidenceBySession.get(session)?.urls;
           const restored = restoreEvidenceUrls(payload.text, urls);
           if (restored !== payload.text) emitPluginLog(api.logger, "info", "outbound URL restored diagnostic=CONNECT-Z04");
-          const grounded = authoritative ? stripUngroundedVideoMetrics(restored, evidence?.numbers) : restored;
+          const grounded = authoritative ? stripUngroundedVideoMetrics(restored, evidence?.numbers, evidence?.metricEvidence) : restored;
           const trimmed = authoritative ? trimUnsolicitedEnding(grounded, evidence?.needsInput) : grounded;
           if (payload.text.trim() && !trimmed.trim()) {
             return finishRevisedReply(event, ctx, { ...result, cancel: true });
           }
-          const scrubbed = scrubOutboundReplyText(trimmed, replacements);
+          const sourced = authoritative ? appendMissingSearchSources(trimmed, evidence?.searchUrls) : trimmed;
+          const scrubbed = scrubOutboundReplyText(sourced, replacements);
           if (scrubbed.text !== payload.text) {
             const { signedUrls, toolNames, urlSeparators, unverifiedConnectUrls = 0 } = scrubbed.counts;
             emitPluginLog(

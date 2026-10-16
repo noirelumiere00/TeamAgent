@@ -14,7 +14,7 @@
   2. 広告主の業種を Drive 文書の cls_industry / case_industry の最頻値で決める
      （同じ施策の資料があればその中の最頻値・無ければ広告主の資料全体の最頻値）。
   3. 問いに業種語（飲料・食品・化粧品 等）があれば、要約に渡す施策実績をその業種で絞る
-     （別の業種は外す・業種が分からないものは「業種不明」として末尾へ）。
+     （広告主の既知の業種も使い、別業種・一致根拠の無いものは外す）。
   4. 施策の数字を言うときに資料のリンクを併記させ、無い施策は「シートのみ」と書かせる。
      要約が落としたときはコードで末尾に足す（プロンプトだけに任せない）。
   5. 上位の投稿の再生数・保存数・動画 URL を本文から取り、回答末尾へ機械的に並べる。
@@ -31,9 +31,11 @@ from collections.abc import Iterable, Mapping, Sequence
 from typing import Any
 
 from teamagent.adapters.pgvector_client import SearchHit
+from teamagent.client_identity import client_identity_key
 from teamagent.ingest.industry_taxonomy import normalize_industry
 from teamagent.skills._shared.source_url import hit_doc_url
 from teamagent.skills.search.client_match import normalize_filter_client
+from teamagent.skills.search.not_found import target_matches
 from teamagent.util.grapheme_cut import truncate_graphemes
 
 #: 1 つの施策に添える資料の上限。
@@ -131,7 +133,14 @@ def file_kind(title: str, doc_type: str | None) -> str:
 
 
 def _industry_of(row: Mapping[str, Any]) -> str | None:
-    for key in ("case_industry", "cls_industry"):
+    for key in (
+        "campaign_industry",
+        "case_industry",
+        "cls_industry",
+        "industry",
+        "client_industry",
+        "advertiser_industry",
+    ):
         value = normalize_industry(str(row.get(key) or "") or None)
         if value:
             return value
@@ -200,6 +209,14 @@ def attach_related_files(
     by_advertiser: dict[str, list[Mapping[str, Any]]] = {}
     for row in rows:
         by_advertiser.setdefault(str(row.get("advertiser") or ""), []).append(row)
+    by_owner: dict[str, list[Mapping[str, Any]]] = {}
+    for source in hits:
+        meta = source.metadata or {}
+        owner = client_identity_key(
+            meta.get("advertiser") or meta.get("client_name") or meta.get("cls_project")
+        )
+        if owner and _industry_of(meta):
+            by_owner.setdefault(owner, []).append(meta)
     campaigns = attached = 0
     for hit in hits:
         if not is_campaign_hit(hit):
@@ -216,7 +233,12 @@ def attach_related_files(
             for r in candidates
             if campaign_similarity(campaign, str(r.get("title") or "")) >= SIMILARITY_MIN
         ]
-        industry = _mode_industry(matched_rows) or _mode_industry(candidates)
+        industry = (
+            _mode_industry(matched_rows)
+            or _mode_industry(candidates)
+            or hit_industry(hit)
+            or _mode_industry(by_owner.get(client_identity_key(advertiser), []))
+        )
         hit.metadata["related_files"] = files
         if industry:
             hit.metadata["campaign_industry"] = industry
@@ -226,36 +248,34 @@ def attach_related_files(
 
 
 def hit_industry(hit: SearchHit) -> str | None:
-    """ヒットの業種（施策実績は添えた広告主の業種・それ以外は cls_industry）。正準値か None。"""
-    meta = getattr(hit, "metadata", None) or {}
-    return normalize_industry(
-        str(meta.get("campaign_industry") or meta.get("cls_industry") or "") or None
-    )
+    """施策・事例・資料・取引先の既知の業種を同じ優先順で読む。正準値か None。"""
+    return _industry_of(getattr(hit, "metadata", None) or {})
 
 
 def scope_by_industry(hits: Sequence[SearchHit], asked_industry: str | None) -> list[SearchHit]:
-    """要約に渡すヒットを問いの業種で絞る（施策実績だけ・他の資料は触らない）。
-
-    - 業種が問いと一致する施策実績はそのまま
-    - 業種が分からない施策実績は末尾へ（ヘッダで「業種不明」と明示する）
-    - 別の業種の施策実績は外す
-    問いに業種語が無ければ何もしない。
-    """
-    wanted = normalize_industry(asked_industry) if asked_industry else None
+    """確認できる業種一致を先にし、未分類でも対象業種を明記した資料は残す。"""
+    wanted = normalize_industry(asked_industry)
     if not wanted:
         return list(hits)
-    kept: list[SearchHit] = []
-    unknown: list[SearchHit] = []
+    matched: list[SearchHit] = []
+    mentioned: list[SearchHit] = []
     for hit in hits:
-        if not is_campaign_hit(hit):
-            kept.append(hit)
-            continue
         industry = hit_industry(hit)
-        if industry is None:
-            unknown.append(hit)
-        elif industry == wanted:
-            kept.append(hit)
-    return kept + unknown
+        if industry == wanted:
+            matched.append(hit)
+        elif industry is None:
+            meta = hit.metadata or {}
+            text = (
+                "\n".join(
+                    str(meta.get(key) or "")
+                    for key in ("title", "campaign", "case_product", "cls_project", "advertiser")
+                )
+                + "\n"
+                + hit.content
+            )
+            if target_matches(text, wanted):
+                mentioned.append(hit)
+    return matched + mentioned
 
 
 def campaign_header(hit: SearchHit) -> str:
@@ -359,12 +379,8 @@ def _footer_campaigns(
     """📊 の節に載せる施策（最大 3 施策・各 5 本）と、その表示行。表示と要約の受け渡しで共用。"""
     picked: list[tuple[SearchHit, list[tuple[str, str]]]] = []
     seen: set[tuple[str, str] | int] = set()
-    wanted = normalize_industry(asked_industry)
-    for hit in hits:
+    for hit in scope_by_industry(hits, asked_industry):
         if not is_campaign_hit(hit):
-            continue
-        # 業種未確定の施策を、指定業種の動画実績として提示しない。
-        if wanted and hit_industry(hit) != wanted:
             continue
         key: tuple[str, str] | int = campaign_key(hit) or hit.chunk_id
         if key in seen:

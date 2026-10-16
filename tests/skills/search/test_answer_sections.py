@@ -481,10 +481,37 @@ def test_campaign_hits_are_marked_as_needing_confirmation() -> None:
     answer = render_sections(build_sections(vault_hits=[_campaign()], url_of=_url_of))
     assert answer == (
         "🏆 事例・施策実績（1件）\n"
-        "- [株式会社南海飲料様：夏の新作]"
+        "- [施策実績 株式会社南海飲料 夏の新作]"
         "(https://docs.google.com/spreadsheets/d/1Sheet/edit#gid=0&range=3:3)"
         "（2026-07-01・業種: 飲料） 投稿 8 本・合計 120 万回再生 社外利用は要確認"
     )
+
+
+def test_iter4_same_sheet_campaigns_keep_names_and_deduplicate_the_case_lane() -> None:
+    first = _campaign()
+    first.metadata["document_id"] = "first-campaign"
+    second = SearchHit(
+        999,
+        "冬の施策",
+        0.8,
+        {
+            **first.metadata,
+            "document_id": "second-campaign",
+            "title": "施策実績 株式会社南海飲料 冬の新作",
+            "case_product": "冬の新作",
+        },
+    )
+    row = {
+        "title": first.metadata["title"],
+        "source_uri": first.metadata["source_uri"],
+        "case_client": "南海飲料",
+        "case_product": "夏の新作",
+        "case_source": "campaign_db",
+    }
+    answer = render_sections(build_sections(vault_hits=[first, second], case_rows=[row]))
+    assert "🏆 事例・施策実績（2件）" in answer
+    assert answer.count("夏の新作") == 1
+    assert answer.count("冬の新作") == 1
 
 
 def test_ok_case_has_no_mark_and_case_in_expand_is_still_marked() -> None:

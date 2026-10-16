@@ -277,3 +277,130 @@ test('iter2 trims an offer after code and cancels an otherwise empty reply', () 
     payload: {text: '何に使いたいですか？'}}, ctx);
   assert.equal(out?.cancel, true);
 });
+
+const vaultFooter = ':books: Aico Vault で詳しく見る: <https://vault.example.test/project>';
+test('iter4 removes the last question before Vault and source footers', () => {
+  const {send} = setup();
+  for (const suffix of [vaultFooter,
+    '📎 *資料リンク*\n- [資料](https://docs.google.com/document/d/source/edit)',
+    '📎 *資料リンク*\n- [資料](https://docs.google.com/document/d/source/edit)（関連資料）',
+    '📎 出典\n- <https://workspace.slack.com/archives/C123/p123456>']) {
+    assert.equal(send(`結果をまとめました。\nどの施策について詳しく見ますか？\n\n${suffix}`),
+      `結果をまとめました。\n\n${suffix}`);
+  }
+});
+
+test('iter4 required input, authorization and code questions survive before footers', () => {
+  const {send, remember} = setup();
+  for (const question of ['メールを送信しますか？', 'Slack を連携しますか？']) {
+    const text = `${question}\n${vaultFooter}`;
+    assert.equal(send(text), text);
+  }
+  const code = `説明。\n\`\`\`\nどの施策を見ますか？\n${vaultFooter}`;
+  assert.equal(send(code), code);
+  remember('', {toolName: 'teamagent__search', result: {status: 'needs_input'}});
+  const required = `対象を選んでください。何に使いたいですか？\n${vaultFooter}`;
+  assert.equal(send(required), required);
+});
+
+const docSource = 'https://docs.google.com/document/d/video-release/edit';
+const slackSource = 'https://workspace.slack.com/archives/C123/p1234567890';
+const sheetSource = 'https://docs.google.com/spreadsheets/d/project/edit#gid=17';
+const extraSource = 'https://docs.google.com/presentation/d/project/edit';
+const sourcesResult = {content: [{type: 'text', text: JSON.stringify({
+  answer: '施策管理シートもあります。',
+  hits: [{url: docSource, drive_url: docSource}, {url: sheetSource}],
+  slack_hits: [{permalink: slackSource}, {permalink: extraSource}],
+})}]};
+
+test('iter4 appends up to three deduplicated search source links after agent_end', () => {
+  const {send, remember, hooks, ctx} = setup();
+  remember('', {toolName: 'teamagent__search', result: sourcesResult});
+  hooks.get('agent_end')({runId: ctx.runId}, ctx);
+  const text = 'ビデオリリースは動画による情報発信です。';
+  const out = send(text);
+  assert.ok(out.startsWith(text));
+  for (const url of [docSource, sheetSource, slackSource]) assert.ok(out.includes(url), url);
+  assert.ok(!out.includes(extraSource));
+  assert.equal([...out.matchAll(/https:\/\//gu)].length, 3);
+});
+
+test('iter4 Slack-only search and answer source links fill an otherwise uncited reply', () => {
+  for (const result of [
+    {slack_hits: [{permalink: slackSource, excerpt: '案件担当です。'}]},
+    {found: false, hits: [{url: docSource}], slack_hits: [{permalink: slackSource, excerpt: '案件担当です。'}]},
+    {answer: `資料の定義です。\n📎 *資料リンク*\n- [定義](${docSource})`},
+    {sources: [{url: sheetSource}]},
+  ]) {
+    const {send, remember} = setup();
+    remember('', {toolName: 'search', result});
+    const out = send('施策管理シートもあります。');
+    assert.match(out, /https:\/\//u);
+    if (result.found === false) {
+      assert.ok(out.includes(slackSource));
+      assert.ok(!out.includes(docSource));
+    }
+  }
+});
+
+test('iter4 existing reply links never receive extra search sources', () => {
+  const {send, remember} = setup();
+  remember('', {toolName: 'teamagent__search', result: sourcesResult});
+  const text = `定義は[資料](${docSource})にあります。`;
+  assert.equal(send(text), text);
+});
+
+test('iter4 source fallback follows question removal and never revives an empty reply', () => {
+  const {send, remember, hooks, ctx} = setup();
+  remember('', {toolName: 'teamagent__search', result: sourcesResult});
+  const out = send('定義を確認しました。どの施策について詳しく見ますか？');
+  assert.ok(out.startsWith('定義を確認しました。\n\n📎 出典'));
+  assert.doesNotMatch(out, /見ますか/u);
+  assert.equal(hooks.get('reply_payload_sending')({runId: ctx.runId,
+    payload: {text: 'どの施策について詳しく見ますか？'}}, ctx)?.cancel, true);
+});
+
+test('iter4 source fallback never borrows failed, unrelated, stale or conflicting evidence', () => {
+  for (const [event, eventCtx] of [
+    [{toolName: 'teamagent__slack_search'}, undefined],
+    [{error: 'failed'}, undefined],
+    [{result: {isError: true, ...sourcesResult}}, undefined],
+    [{result: {found: false, hits: [{url: docSource}]}}, undefined],
+    [{runId: 'other'}, undefined],
+    [{}, {}],
+  ]) {
+    const {send, remember} = setup();
+    remember('', {toolName: 'teamagent__search', result: sourcesResult, ...event}, eventCtx);
+    assert.equal(send('説明です。'), '説明です。');
+  }
+  const {send, remember, ctx} = setup();
+  remember('', {toolName: 'teamagent__search', result: sourcesResult});
+  assert.equal(send('説明です。', {runId: 'other'}, 'run-1'), '説明です。');
+  assert.equal(send('説明です。', {}), '説明です。');
+  ctx.runId = 'run-2';
+  assert.equal(send('説明です。'), '説明です。');
+});
+
+test('iter4 source fallback rejects content URLs, internal identifiers and malformed URLs', () => {
+  const {send, remember} = setup();
+  remember('', {toolName: 'teamagent__search', result: {
+    hits: [{source_uri: 'gdrive://internal', content: 'https://example.test/unrelated'},
+      {url: 'javascript:alert(1)'}, {url: 'https://docs.google.com/line\nbreak'},
+      {url: 'https://docs.google.com/file)[malformed]'}, {url: 'https://user:secret@example.test/private'}],
+  }});
+  assert.equal(send('説明です。'), '説明です。');
+});
+
+test('iter4 latest search replaces earlier sources and zero matches never cite broad-search hits', () => {
+  const {send, remember} = setup();
+  remember('', {toolName: 'teamagent__search', result: {hits: [{url: docSource}]}});
+  remember('', {toolName: 'teamagent__search', result: {slack_hits: [{permalink: slackSource}]}});
+  const cited = send('案件は進行しています。');
+  assert.ok(cited.includes(slackSource));
+  assert.ok(!cited.includes(docSource));
+  remember('', {toolName: 'teamagent__search', result: {content: [{type: 'text', text: JSON.stringify({
+    found: false, answer: '対象の事例は見つかりませんでした。', hits: [], slack_hits: [],
+  })}]}});
+  const absent = '対象の事例は見つかりませんでした（探した範囲: 社内資料・施策実績・Slack）。';
+  assert.equal(send(absent), absent);
+});
