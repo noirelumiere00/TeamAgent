@@ -107,3 +107,26 @@ def test_industry_fallback_does_not_promote_unrelated_cases(
     assert not out.found
     assert "unrelated" not in out.model_dump_json()
     summary.assert_not_called()
+
+
+def test_named_case_lookup_is_a_compact_answer_source_without_vector_hits(monkeypatch):
+    skill, pg = make([])
+    pg.list_case_studies.return_value = [
+        {
+            "title": "みなと食品 ハンバーグ事例",
+            "case_client": "みなと食品",
+            "case_industry": "食品",
+            "case_source": "deck",
+            "source_uri": "https://example.test/named-case",
+            "case_effect": "調理アレンジの投稿を配信しました。",
+        }
+    ]
+    monkeypatch.setattr(
+        skill, "_summarize", lambda *a, **kw: ("調理アレンジの投稿を配信しました。[S:-1]", 0.0)
+    )
+    ctx = context()
+    ctx.metadata["_search_compact_answer"] = True
+    out = skill.run(SearchInput(query="みなと食品の事例ある？", filter_client="みなと食品"), ctx)
+    assert "調理アレンジの投稿を配信しました。" in out.answer
+    assert "https://example.test/named-case" in out.answer
+    assert "確認できません" not in out.answer

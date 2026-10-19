@@ -375,8 +375,8 @@ def run_fanout(skill: Any, input: SearchInput, ctx: SkillContext) -> SearchOutpu
                 )
             ),
         )
-    if case_target and cases.stage == 4 and cases.items:
-        # 明示業種そのものの一致は「近い事例」ではなく回答の根拠。
+    if case_target and cases.items:
+        # 対象に一致した構造化事例も、意味検索と同じ回答の根拠にする。
         summary_hits = [*summary_hits, *_case_hits(cases)]
     if case_target:
         found = bool((found and summary_hits) or slack.items or cases.items or extra["named"])
