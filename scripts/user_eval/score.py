@@ -193,7 +193,7 @@ def load_previous(path: Path) -> list[dict[str, Any]]:
 
 
 def infer_files(row: dict[str, Any], root: Path) -> list[str]:
-    """grep (rg) のコード中の語の一致だけから候補を出す。原因の断定はしない。"""
+    """git grep のコード中の語の一致だけから候補を出す。原因の断定はしない。"""
     names = [c["type"] for c in row["checks"] if c["points"] < c["max_points"]]
     if row.get("critical_violations"):
         names.append("critical_violation")
@@ -202,7 +202,17 @@ def infer_files(row: dict[str, Any], root: Path) -> list[str]:
         return []
     try:
         result = subprocess.run(
-            ["rg", "-l", "--glob", "*.py", "--glob", "*.md", "|".join(patterns), "src/teamagent"],
+            # rg は CI に無いため、どこにでもある git grep を使う。
+            [
+                "git",
+                "grep",
+                "-l",
+                "-E",
+                "|".join(patterns),
+                "--",
+                "src/teamagent/*.py",
+                "src/teamagent/*.md",
+            ],
             cwd=root,
             capture_output=True,
             text=True,
@@ -255,7 +265,7 @@ def report(rows: list[dict[str, Any]], previous: list[dict[str, Any]] | None, ro
             "",
             "## 直すべきこと",
             "",
-            "コード候補は grep（rg）の語の一致による推測です。原因の確定には本文・ログとコードを確認してください。",
+            "コード候補は git grepの語の一致による推測です。原因の確定には本文・ログとコードを確認してください。",
             "",
         ]
     )
