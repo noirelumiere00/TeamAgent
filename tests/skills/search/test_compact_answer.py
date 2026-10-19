@@ -101,3 +101,59 @@ def test_compact_annotated_inventory_cannot_return_as_prose():
     assert "シートのみ" not in answer
     assert "- 報告書" not in answer
     assert answer.count("https://") == 1
+
+
+@pytest.mark.parametrize(
+    "url", ["", "javascript:alert(1)", "https://[invalid", "https://user:pass@example.test"]
+)
+def test_compact_drops_claims_and_derived_facts_without_a_safe_source_link(url):
+    from teamagent.skills.search.compact import render
+
+    answer = render(
+        "確認済みです。[S:1]\n別の根拠があります。[S:2]",
+        {
+            "1": ("未解決資料", url, "確認済みです。"),
+            "2": ("報告書", "https://example.test/report", "別の根拠があります。"),
+        },
+        facts="再生平均はAが100回、Bが50回です。",
+        fact_keys=["1"],
+    )
+    assert "確認済み" not in answer
+    assert "再生平均" not in answer
+    assert "未解決資料" not in answer
+    assert "別の根拠" in answer and answer.count("https://") == 1
+
+
+def test_compact_source_urls_cannot_exceed_the_final_message_limit():
+    from teamagent.skills.search.compact import render
+
+    answer = render(
+        "確認済みです。[S:1]",
+        {"1": ("長いURL", "https://example.test/" + "a" * 2600, "確認済みです。")},
+        facts="再生平均はAが100回、Bが50回です。",
+        fact_keys=["1"],
+    )
+    assert len(answer) <= 2500
+    assert "確認済み" not in answer and "再生平均" not in answer
+    assert "https://" not in answer
+
+
+def test_compact_sentence_limit_does_not_depend_on_model_line_breaks():
+    from teamagent.skills.search.compact import render
+
+    answer = render(
+        "。".join(["要点です"] * 7) + "。[S:1]",
+        {"1": ("報告書", "https://example.test/report", "要点です。")},
+    )
+    assert answer.count("。") <= 6
+
+
+@pytest.mark.parametrize("link", ["HTTPS://fabricated.test/file", "[資料](//fabricated.test/file)"])
+def test_compact_prose_cannot_introduce_its_own_links(link):
+    from teamagent.skills.search.compact import render
+
+    answer = render(
+        f"詳細は{link}です。[S:1]",
+        {"1": ("報告書", "https://example.test/report", "詳細があります。")},
+    )
+    assert "fabricated" not in answer

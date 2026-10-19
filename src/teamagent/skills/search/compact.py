@@ -62,20 +62,31 @@ def _source_line(keys: Sequence[str], sources: Sources) -> str:
     seen = set()
     for key in keys:
         title, url, _ = sources[key]
-        if url in seen or not url or re.search(r"[\s<>()[\]`\"']", url):
-            continue
-        parsed = urlsplit(url)
-        if (
-            parsed.scheme not in {"http", "https"}
-            or not parsed.netloc
-            or parsed.username
-            or parsed.password
-        ):
+        if url in seen or not _safe_url(url):
             continue
         seen.add(url)
         title = re.sub(r"[\[\]()<>@\n\r]", " ", title).strip()[:70] or "資料"
         links.append(f"[{title}]({url})")
     return "出典: " + " / ".join(links) if links else ""
+
+
+def _safe_url(url: str) -> bool:
+    if not url or re.search(r"[\s<>()[\]`\"']", url):
+        return False
+    try:
+        parsed = urlsplit(url)
+        return bool(
+            parsed.scheme in {"http", "https"}
+            and parsed.netloc
+            and not parsed.username
+            and not parsed.password
+        )
+    except ValueError:
+        return False
+
+
+def _sentence_count(text: str) -> int:
+    return len(re.findall(r"[^。！？!?\n]+(?:[。！？!?]+|$)", text))
 
 
 def render(
@@ -87,14 +98,25 @@ def render(
     facts: str = "",
     fact_keys: Sequence[str] = (),
 ) -> str:
+    sources = {key: source for key, source in sources.items() if _safe_url(source[1])}
     derived = facts.splitlines() if all(key in sources for key in fact_keys) else []
-    if len("\n".join(derived)) > 550:
+    if derived and (
+        len("\n".join(derived)) > 550
+        or _sentence_count("\n".join(derived)) > 6
+        or len({sources[key][1] for key in fact_keys}) > 3
+        or len(facts) + len(_source_line(fact_keys, sources)) + 2 > 2500
+    ):
         derived = []
+    if any(key not in sources for key in metric_keys):
+        metrics, metric_keys = "", ()
     lines: list[str] = []
     used: list[str] = []
     # A valid code-generated metric block also uses its source even without prose.
     for key in [*(fact_keys if derived else ()), *metric_keys]:
         if key in sources and key not in used and len(used) < 3:
+            if len(_source_line([*used, key], sources)) + 64 > 2500:
+                metrics = ""
+                continue
             used.append(key)
     for raw in answer.splitlines():
         keys = list(dict.fromkeys(_CITATION.findall(raw)))
@@ -119,8 +141,9 @@ def render(
             continue
         if (
             not text
-            or "http" in text
+            or re.search(r"[a-z][a-z0-9+.-]*://|\[[^]]*\]\(", text, re.IGNORECASE)
             or len(derived) + len(lines) >= 6
+            or _sentence_count("\n".join([*derived, *lines, text])) > 6
             or len("\n".join([*derived, *lines, text])) > 550
         ):
             continue
