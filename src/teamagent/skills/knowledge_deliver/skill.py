@@ -334,7 +334,9 @@ class KnowledgeDeliverSkill(BaseSkill[KnowledgeDeliverInput, KnowledgeDeliverOut
         if compact:
             from teamagent.skills.search.skill import _drop_punt_lines
 
-            answer = _drop_punt_lines(answer).strip()
+            answer = "".join(
+                _drop_punt_lines(sentence) for sentence in re.split(r"(?<=[。！？])", answer)
+            ).strip()
         if asked_client or subject_terms:
             answer = _drop_link_lines(answer, other_client_urls - kept_urls)
         # ガードが無ければ添付していた（＝ガードが 0 件の原因）なら、従来の理由文ではなく

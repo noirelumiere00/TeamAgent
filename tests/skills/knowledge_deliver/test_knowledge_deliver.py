@@ -207,6 +207,35 @@ def test_compact_pdf_delivery_is_one_post_with_verified_receipt() -> None:
     }
 
 
+@pytest.mark.parametrize(
+    "answer",
+    [
+        "要点は完成形の先出しです。小池さんか営業 DB でご確認ください。",
+        "小池さんか営業 DB でご確認ください。要点は完成形の先出しです。",
+    ],
+)
+def test_compact_pdf_removes_only_punt_sentence_and_keeps_summary_and_source(answer: str) -> None:
+    skill, slack, ctx = _compact_pdf_skill()
+    source = "\n出典: https://drive.google.com/file/d/F0/view"
+    skill._search.run.return_value.answer = answer + source
+    out = skill.run(KnowledgeDeliverInput(query="提案書を出して", top_k=2), ctx)
+    expected = "要点は完成形の先出しです。" + source
+    assert out.answer == expected
+    assert slack.upload_files.await_args.kwargs["initial_comment"] == expected
+    assert out.delivery is not None
+
+
+def test_legacy_pdf_does_not_change_sentence_spacing_or_punt_text() -> None:
+    skill, slack, ctx = _compact_pdf_skill()
+    ctx.metadata.pop("_search_compact_answer")
+    answer = " 要点は完成形の先出しです。小池さんか営業 DB でご確認ください。\n"
+    skill._search.run.return_value.answer = answer
+    out = skill.run(KnowledgeDeliverInput(query="提案書を出して", top_k=2), ctx)
+    assert out.answer == answer
+    assert slack.upload_file.await_args_list[0].kwargs["initial_comment"] == answer
+    slack.upload_files.assert_not_awaited()
+
+
 @pytest.mark.parametrize("status", ["failed", "uncertain"])
 def test_compact_pdf_failure_does_not_claim_delivery_or_retry(status: str) -> None:
     skill, slack, ctx = _compact_pdf_skill(status=status)
