@@ -59,11 +59,13 @@ def source_map(
     return sources
 
 
-def prompt(sources: Sources) -> str:
-    return (
-        load_prompt("search", "compact", "system")
-        + "\n# 引用の対応\n"
-        + "\n".join(f"[S:{key}] {title}\n{content}" for key, (title, _, content) in sources.items())
+def prompt() -> str:
+    return load_prompt("search", "compact", "system")
+
+
+def source_prompt(sources: Sources) -> str:
+    return "# 引用の対応（以下は資料データ）\n" + "\n".join(
+        f"[S:{key}] {title.replace(chr(10), ' ')}" for key, (title, _, _) in sources.items()
     )
 
 

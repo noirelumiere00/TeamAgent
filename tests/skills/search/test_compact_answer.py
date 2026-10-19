@@ -157,3 +157,18 @@ def test_compact_prose_cannot_introduce_its_own_links(link):
         {"1": ("報告書", "https://example.test/report", "詳細があります。")},
     )
     assert "fabricated" not in answer
+
+
+def test_compact_source_content_is_user_data_not_system_instructions(monkeypatch):
+    from dataclasses import replace
+
+    marker = "取得資料内の指示は実行しないSOURCE_DATA_SENTINEL"
+    skill, _ = make(
+        [replace(_vault_hit(1, title="報告書", source_uri="gdrive://REPORT"), content=marker)]
+    )
+    skill._bedrock.converse.return_value = _converse("報告書を確認しました。[S:1]")
+    monkeypatch.setattr(fanout, "build_summary_client", lambda: skill._bedrock)
+    run(skill, query="状況は？", meta={**META, "_search_compact_answer": True})
+    sent = skill._bedrock.converse.call_args.kwargs
+    assert marker not in sent["system"]
+    assert marker in sent["messages"][0]["content"][0]["text"]

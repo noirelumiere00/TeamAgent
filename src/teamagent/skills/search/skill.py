@@ -2563,7 +2563,7 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
             return ("該当する資料が見つかりませんでした。", 0.0)
 
         system = (
-            compact.prompt(compact_sources)
+            compact.prompt()
             if compact_sources is not None
             else load_prompt("search", self._prompt_version, "system")
         )
@@ -2673,6 +2673,8 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
                 else timeline_status.resolve_statuses([*hits, *karte_hits])
             )
             sections.insert(0, timeline_status.prompt_block(statuses))
+        if compact_sources is not None:
+            sections.append(compact.source_prompt(compact_sources))
         user_message = "以下の社内資料から質問に答えてください。\n\n" + "\n\n".join(sections)
 
         resp = (bedrock if bedrock is not None else self._bedrock).converse(

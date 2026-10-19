@@ -93,6 +93,7 @@ async def test_gateway_delivers_comparison_or_exact_case_miss(
     ]
     for hit in campaigns:
         hit.metadata["cls_industry"] = "食品" if comparison else "運輸・交通"
+        hit.metadata["source_uri"] = f"gdrive://CAMPAIGN_{hit.chunk_id}"
     skill, _ = make(campaigns)
     skill._campaign_files = True
     monkeypatch.setattr(skill, "_attach_campaign_files", lambda *a: None)
