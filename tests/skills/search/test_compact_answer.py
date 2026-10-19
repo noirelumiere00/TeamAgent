@@ -172,3 +172,48 @@ def test_compact_source_content_is_user_data_not_system_instructions(monkeypatch
     sent = skill._bedrock.converse.call_args.kwargs
     assert marker not in sent["system"]
     assert marker in sent["messages"][0]["content"][0]["text"]
+
+
+def test_recorded_answer_shape_is_five_sentences_and_three_sources_without_appendices():
+    from teamagent.skills.search.compact import render
+
+    body = [
+        "施策は実施済みです。[S:1]",
+        "投稿では調理の手軽さを紹介しました。[S:2]",
+        "顧客から冒頭表現への指摘があります。[S:3]",
+        "その後の記録は次回提案の準備です。[S:1]",
+        "次は完成形を冒頭に見せる案を検討します。[S:2]",
+    ]
+    sections = [
+        ("📁 金庫の資料", 4),
+        ("🏆 事例・施策実績", 2),
+        ("🗂 カルテ", 6),
+        ("💬 Slack", 2),
+        ("📎 資料リンク", 6),
+    ]
+    appendices = [
+        "施策の反応合計: 保存310件です。[S:1]",
+        "施策の数字はシートのみです。[S:1]",
+        "📊 動画ごとの数字[S:1]",
+        *[f"{i}. 100再生・保存10件[S:1]" for i in range(1, 6)],
+    ]
+    for heading, count in sections:
+        appendices.extend([heading + "[S:1]", *[f"- 資料{i}[S:4]" for i in range(count)]])
+    appendices.extend(["🕸 関係図[S:1]", "探した範囲: 金庫・事例・カルテ・Slack[S:1]"])
+    sources = {
+        str(i): (
+            f"根拠{i}",
+            f"https://example.test/source/{i}",
+            "調理の手軽さ。100再生・保存10件。",
+        )
+        for i in range(1, 24)
+    }
+    answer = render("\n".join([*body, *appendices]), sources)
+    assert answer.split("\n\n")[0].splitlines() == [line.split("[S:")[0] for line in body]
+    assert len(answer.splitlines()) <= 8
+    assert len(answer) <= 2500
+    assert answer.count("https://") == 3
+    assert answer.count("出典:") == 1
+    assert not any(
+        token in answer for token in ("📊", "📁", "🏆", "🗂", "💬", "📎", "🕸", "探した範囲")
+    )
