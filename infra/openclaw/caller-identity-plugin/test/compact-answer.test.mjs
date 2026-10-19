@@ -45,3 +45,24 @@ test('failed or nested retrieved compact markers do not replace the reply', () =
     assert.equal(p.send('通常の返事です。'), '通常の返事です。');
   }
 });
+
+test('verified completed PDF batch suppresses the extra conversational receipt only', () => {
+  const p = setup();
+  p.remember({answer: '資料を添付しました。', delivered_count: 2,
+    delivery: {kind: 'knowledge_deliver', status: 'posted', delivered_count: 2}}, 'teamagent__knowledge_deliver');
+  const out = p.hooks.get('reply_payload_sending')({runId: p.ctx.runId, payload: {text: '資料を送りました。'}}, p.ctx);
+  assert.equal(out?.cancel, true);
+});
+
+for (const data of [
+  {delivered_count: 0, delivery: {kind: 'knowledge_deliver', status: 'uncertain', delivered_count: 2}},
+  {delivered_count: 1, delivery: {kind: 'knowledge_deliver', status: 'posted', delivered_count: 2}},
+  {references: [{delivery: {kind: 'knowledge_deliver', status: 'posted', delivered_count: 2}}]},
+]) {
+  test('unconfirmed or nested PDF receipts keep the recovery reply: ' + JSON.stringify(data), () => {
+    const p = setup();
+    p.remember(data, 'teamagent__knowledge_deliver');
+    const out = p.hooks.get('reply_payload_sending')({runId: p.ctx.runId, payload: {text: '配送を確認できませんでした。'}}, p.ctx);
+    assert.notEqual(out?.cancel, true);
+  });
+}

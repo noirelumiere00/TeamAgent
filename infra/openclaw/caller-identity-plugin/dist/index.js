@@ -5800,12 +5800,17 @@ export function createCallerIdentityPlugin({
 
   function rememberSearchDelivery(event, ctx, logger) {
     if (!searchDirectEnabled || !searchDirectAllowlist.size || event?.error ||
-        !["search", "teamagent__search"].includes(event?.toolName)) return;
+        !["search", "teamagent__search", "knowledge_deliver", "teamagent__knowledge_deliver"].includes(event?.toolName)) return;
     const runId = canonicalInvocationId(ctx?.runId);
     if (!runId || (event?.runId && event.runId !== runId) || !connectIngressByRun.has(runId)) return;
     const data = searchResultData(event.result);
-    if (data?.status !== "posted" || data.delivered !== true ||
-        data.delivery?.kind !== "search_direct_answer") return;
+    const pdfReceipt = ["knowledge_deliver", "teamagent__knowledge_deliver"].includes(event?.toolName) &&
+      data?.delivery?.kind === "knowledge_deliver" && data.delivery.status === "posted" &&
+      Number.isInteger(data.delivered_count) && data.delivered_count > 0 &&
+      data.delivery.delivered_count === data.delivered_count;
+    const searchReceipt = ["search", "teamagent__search"].includes(event?.toolName) &&
+      data?.status === "posted" && data.delivered === true && data.delivery?.kind === "search_direct_answer";
+    if (!pdfReceipt && !searchReceipt) return;
     const entry = searchDirectByRun.get(runId) ?? {};
     entry.delivered = true;
     entry.updatedAtMs = now();

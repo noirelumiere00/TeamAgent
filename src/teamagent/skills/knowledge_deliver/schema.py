@@ -86,5 +86,7 @@ class KnowledgeDeliverOutput(BaseModel):
     note: str = Field(default="", description="配信ステータス（依頼者へ伝える 1 行）")
     total_cost_usd: float = Field(default=0.0, ge=0.0, description="この実行の概算コスト")
     delivery: KnowledgeDeliveryReceipt | None = Field(
-        default=None, description="本文と全添付を 1 投稿に配信済みの場合だけ付く機械確認情報"
+        default=None,
+        exclude_if=lambda value: value is None,
+        description="本文と全添付を 1 投稿に配信済みの場合だけ付く機械確認情報",
     )
