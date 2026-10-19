@@ -182,3 +182,56 @@ async def test_upload_file_omits_filename_when_not_given(fake_web_client: AsyncM
     kwargs = fake_web_client.files_upload_v2.await_args.kwargs
     assert "filename" not in kwargs
     assert kwargs["title"] == "レポート"
+
+
+async def test_upload_files_shares_two_pdfs_in_one_post(fake_web_client: AsyncMock) -> None:
+    fake_web_client.files_upload_v2.return_value = {
+        "ok": True,
+        "files": [{"id": "F1"}, {"id": "F2"}],
+    }
+    client = SlackClient(bot_token="xoxb-test", client=fake_web_client)
+
+    status = await client.upload_files(
+        "D123",
+        [("/tmp/a.pdf", "提案.pdf"), ("/tmp/b.pdf", "参考.pdf")],
+        "req-batch",
+        initial_comment="該当する提案書です。",
+        thread_ts="1.2",
+    )
+
+    assert status == "posted"
+    fake_web_client.files_upload_v2.assert_awaited_once_with(
+        channel="D123",
+        file_uploads=[
+            {"file": "/tmp/a.pdf", "filename": "提案.pdf", "title": "提案.pdf"},
+            {"file": "/tmp/b.pdf", "filename": "参考.pdf", "title": "参考.pdf"},
+        ],
+        initial_comment="該当する提案書です。",
+        thread_ts="1.2",
+    )
+
+
+@pytest.mark.parametrize(
+    ("response", "status"),
+    [
+        ({"ok": False}, "failed"),
+        ({"ok": True, "files": [{"id": "F1"}]}, "uncertain"),
+        ({"ok": True}, "uncertain"),
+        ({"ok": True, "files": [{"id": "F1"}, {"id": "F1"}]}, "uncertain"),
+    ],
+)
+async def test_upload_files_requires_all_files_confirmed(
+    fake_web_client: AsyncMock, response: dict[str, Any], status: str
+) -> None:
+    fake_web_client.files_upload_v2.return_value = response
+    client = SlackClient(bot_token="xoxb-test", client=fake_web_client)
+    assert (
+        await client.upload_files("D123", [("/tmp/a.pdf", "a.pdf"), ("/tmp/b.pdf", "b.pdf")], "r")
+        == status
+    )
+
+
+async def test_upload_files_timeout_is_uncertain(fake_web_client: AsyncMock) -> None:
+    fake_web_client.files_upload_v2.side_effect = TimeoutError("completion response lost")
+    client = SlackClient(bot_token="xoxb-test", client=fake_web_client)
+    assert await client.upload_files("D123", [("/tmp/a.pdf", "a.pdf")], "r") == "uncertain"

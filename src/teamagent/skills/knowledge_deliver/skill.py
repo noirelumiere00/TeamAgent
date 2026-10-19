@@ -42,6 +42,7 @@ from teamagent.skills.base import BaseSkill, SkillContext, register
 from teamagent.skills.knowledge_deliver.schema import (
     KnowledgeDeliverInput,
     KnowledgeDeliverOutput,
+    KnowledgeDeliveryReceipt,
     KnowledgeRef,
 )
 from teamagent.skills.search.client_match import (
@@ -217,6 +218,7 @@ class KnowledgeDeliverSkill(BaseSkill[KnowledgeDeliverInput, KnowledgeDeliverOut
 
     def run(self, input: KnowledgeDeliverInput, ctx: SkillContext) -> KnowledgeDeliverOutput:
         log = ctx.bind_logger(self.name)
+        compact = ctx.metadata.get("_search_compact_answer") is True
 
         # 1. 検索＋要約（Phase1 の分類フィルタ・再ランクをそのまま通す）。
         search = self._search or self._build_search()
@@ -329,6 +331,10 @@ class KnowledgeDeliverSkill(BaseSkill[KnowledgeDeliverInput, KnowledgeDeliverOut
         # 根拠に使わない（別取引先の）リンクを回答末尾の「📎 資料リンク」から外す。
         # 同じ URL を名指しの取引先のヒットも持っていれば残す。
         answer = s_out.answer
+        if compact:
+            from teamagent.skills.search.skill import _drop_punt_lines
+
+            answer = _drop_punt_lines(answer).strip()
         if asked_client or subject_terms:
             answer = _drop_link_lines(answer, other_client_urls - kept_urls)
         # ガードが無ければ添付していた（＝ガードが 0 件の原因）なら、従来の理由文ではなく
@@ -377,7 +383,9 @@ class KnowledgeDeliverSkill(BaseSkill[KnowledgeDeliverInput, KnowledgeDeliverOut
             # email から本人 DM を開いて送る（deliver_files の DM 経路）。
             dm_channel: str | None = None
             if on_private_surface:
-                dm_channel, channel_id, thread_ts = channel_id, None, None
+                dm_channel, channel_id = channel_id, None
+                if not compact:
+                    thread_ts = None
             else:
                 channel_id, thread_ts = None, None
 
@@ -435,6 +443,8 @@ class KnowledgeDeliverSkill(BaseSkill[KnowledgeDeliverInput, KnowledgeDeliverOut
                 )
             else:
                 try:
+                    if compact and len(prepared) < len(candidates):
+                        answer = f"{answer}\n一部の資料は取得できませんでした。".strip()
                     delivered_ids, where = asyncio.run(
                         self._deliver(
                             prepared=prepared,
@@ -444,6 +454,7 @@ class KnowledgeDeliverSkill(BaseSkill[KnowledgeDeliverInput, KnowledgeDeliverOut
                             thread_ts=thread_ts,
                             email=requester_email,
                             dm_channel=dm_channel,
+                            single_post=compact,
                         )
                     )
                 except Exception:
@@ -454,6 +465,10 @@ class KnowledgeDeliverSkill(BaseSkill[KnowledgeDeliverInput, KnowledgeDeliverOut
                     note = f"{filt_prefix}該当資料 {n} 件をこのスレッドにお出ししました。"
                 elif where == "dm":
                     note = f"{filt_prefix}該当資料 {n} 件をあなたの DM にお送りしました。"
+                elif where == "uncertain":
+                    note = (
+                        "資料配信の完了を確認できませんでした。重複を避けるため再送していません。"
+                    )
                 else:
                     note = "資料配信に失敗しました（要約のみお返しします）。"
         finally:
@@ -508,6 +523,14 @@ class KnowledgeDeliverSkill(BaseSkill[KnowledgeDeliverInput, KnowledgeDeliverOut
             delivered_count=len(delivered_ids),
             note=note,
             total_cost_usd=s_out.total_cost_usd,
+            delivery=(
+                KnowledgeDeliveryReceipt(delivered_count=len(delivered_ids))
+                if compact
+                and delivered_ids
+                and len(delivered_ids) == len(candidates)
+                and where in {"thread", "dm"}
+                else None
+            ),
         )
 
     async def _deliver(
@@ -520,18 +543,22 @@ class KnowledgeDeliverSkill(BaseSkill[KnowledgeDeliverInput, KnowledgeDeliverOut
         thread_ts: str | None = None,
         email: str | None = None,
         dm_channel: str | None = None,
+        single_post: bool = False,
     ) -> tuple[set[str], str]:
         """prepared を配信（配信先の決定ルールは _shared/drive_slack_delivery に集約）。"""
         slack = self._slack or self._build_slack()
         return await deliver_files(
             slack,
             prepared=prepared,
-            comment=answer,
+            comment=(answer or f"該当資料 {len(prepared)} 件を添付します。")
+            if single_post
+            else answer,
             request_id=request_id,
             channel_id=channel_id,
             thread_ts=thread_ts,
             email=email,
             dm_channel=dm_channel,
+            single_post=single_post,
         )
 
     # --- 遅延生成（factory が注入しない / 本番起動時のフォールバック） ---

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Literal
+
 from pydantic import BaseModel, Field
 
 
@@ -67,6 +69,14 @@ class KnowledgeDeliverInput(BaseModel):
     )
 
 
+class KnowledgeDeliveryReceipt(BaseModel):
+    """全添付の完了を確認した場合だけ、gateway が重複返信を抑止するために使う。"""
+
+    kind: Literal["knowledge_deliver"] = "knowledge_deliver"
+    status: Literal["posted"] = "posted"
+    delivered_count: int = Field(ge=1)
+
+
 class KnowledgeDeliverOutput(BaseModel):
     """knowledge_deliver の出力（実ファイルは依頼者 DM に直接添付済）。"""
 
@@ -75,3 +85,6 @@ class KnowledgeDeliverOutput(BaseModel):
     delivered_count: int = Field(default=0, description="DM に添付できたファイル数")
     note: str = Field(default="", description="配信ステータス（依頼者へ伝える 1 行）")
     total_cost_usd: float = Field(default=0.0, ge=0.0, description="この実行の概算コスト")
+    delivery: KnowledgeDeliveryReceipt | None = Field(
+        default=None, description="本文と全添付を 1 投稿に配信済みの場合だけ付く機械確認情報"
+    )
