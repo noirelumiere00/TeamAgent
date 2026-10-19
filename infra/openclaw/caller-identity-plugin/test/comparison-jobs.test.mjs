@@ -78,6 +78,24 @@ test('explicit multiple keyword analyses each run once and reject model-added ke
   assert.equal(call(ctx, 'video_algorithm', 'call-other', {query: '新宿 グルメ'})?.block, true);
 });
 
+test('quoted document and existing video campaign comparisons never authorize heavy analyses', () => {
+  for (const content of ['「提案書」「カルテ」をそれぞれ比較して',
+    '「ハンバーグ」「ステーキ」の動画結果をそれぞれ比較して']) {
+    const {receive, call} = setup();
+    const ctx = receive(content);
+    assert.equal(call(ctx, 'video_algorithm', 'heavy', {query: '提案書'})?.block, true);
+  }
+});
+
+test('all explicit user keyword analyses remain available beyond ten keywords', () => {
+  const {receive, call} = setup();
+  const keywords = Array.from({length: 12}, (_, i) => `検索語${i + 1}`);
+  const ctx = receive(`TikTokの上位動画を${keywords.map(word => `「${word}」`).join('')}の各キーワードでそれぞれ分析して`);
+  for (const [i, query] of keywords.entries()) {
+    assert.ok(call(ctx, 'video_algorithm', `keyword-${i}`, {query})?.params, query);
+  }
+});
+
 test('a separate inbound and caller can still start a job, and invalid signing never consumes it', () => {
   const {receive, call} = setup();
   const ctx = receive('上位動画を分析して');

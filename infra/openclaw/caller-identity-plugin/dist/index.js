@@ -25,10 +25,11 @@ function videoQueryHash(query) {
 
 function explicitVideoQuerySlots(content) {
   if (typeof content !== "string" || !/(?:複数|それぞれ|各(?:KW|キーワード)|[2-9２-９](?:個|つ|KW|キーワード))/u.test(content) ||
-      !/(?:分析|解析|調べ|比較)/u.test(content)) return [];
+      !/(?:動画|映像|TikTok)/iu.test(content) || !/(?:KW|キーワード|検索語|検索ワード)/iu.test(content) ||
+      !/(?:分析して|解析して|調べて|取得して|検索して|集めて|収集して)/u.test(content)) return [];
   const labels = [...content.slice(0, 4096).matchAll(/[「『"]([^」』"\n]{1,120})[」』"]/gu)]
     .map(match => videoQueryHash(match[1]));
-  const slots = [...new Set(labels)].slice(0, 10);
+  const slots = [...new Set(labels)];
   return slots.length > 1 ? slots : [];
 }
 
