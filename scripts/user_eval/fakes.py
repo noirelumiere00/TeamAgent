@@ -1,4 +1,5 @@
 """ネットワークも課金も発生しない差し込み実装。"""
+
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -42,7 +43,9 @@ class FakeJudge:
     verdict: str = "good"
     calls: list[dict[str, Any]] = field(default_factory=list)
 
-    def judge(self, prompt: str, conversation: dict[str, Any], *, timeout_s: float) -> dict[str, str]:
+    def judge(
+        self, prompt: str, conversation: dict[str, Any], *, timeout_s: float
+    ) -> dict[str, str]:
         self.calls.append({"prompt": prompt, "conversation": conversation})
         return {"verdict": self.verdict, "reason": "偽物による配線確認（実機評価ではない）"}
 
@@ -51,6 +54,8 @@ class FakeJudge:
 class FakeLogReader:
     calls: list[str] = field(default_factory=list)
 
-    def read(self, request_id: str, events: tuple[str, ...], *, timeout_s: float) -> list[dict[str, Any]]:
+    def read(
+        self, request_id: str, events: tuple[str, ...], *, timeout_s: float
+    ) -> list[dict[str, Any]]:
         self.calls.append(request_id)
         return [{"event": event, "fake": True} for event in events]

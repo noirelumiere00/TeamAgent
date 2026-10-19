@@ -1,4 +1,5 @@
 """記録した会話のオフライン採点と偽物デモ。送受信や認証は行わない。"""
+
 from pathlib import Path
 
 from scripts.user_eval.core import Attachment, Message, Runner, run_suite
@@ -42,9 +43,20 @@ def main() -> None:
     for row in rows:
         turns = []
         for _ in row["utterances"]:
-            turns.append([[Message("metrics", "📊 動画A 再生1,234 保存56", 1),
-                           Message("answer", "実施済み。https://drive.google.com/file/d/demo\n導入の見せ方が効いた。", 2,
-                                   attachments=[Attachment("demo.pdf")], request_id="fake-request")]])
+            turns.append(
+                [
+                    [
+                        Message("metrics", "📊 動画A 再生1,234 保存56", 1),
+                        Message(
+                            "answer",
+                            "実施済み。https://drive.google.com/file/d/demo\n導入の見せ方が効いた。",
+                            2,
+                            attachments=[Attachment("demo.pdf")],
+                            request_id="fake-request",
+                        ),
+                    ]
+                ]
+            )
         replies.extend(turns)
     runner = Runner("DDEMO", FakeTransport(replies), FakeJudge(), FakeLogReader(), FakeClock())
     run_suite(runner, rows, args.output)

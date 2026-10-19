@@ -1,4 +1,5 @@
 """Claude が道具で取得した会話を読む。送信・認証・ネットワーク処理は行わない。"""
+
 from __future__ import annotations
 
 import json
@@ -107,9 +108,15 @@ def answers(record: dict[str, Any]) -> list[Message]:
     """本人・評価ボタン・最初の送信前の履歴を採点対象から除く。"""
     start = min((timestamp(m["ts"]) for m in record["sent"]), default=math.inf)
     return [
-        Message(str(index), m["text"], timestamp(m["ts"]),
-                attachments=[Attachment(a["name"], a.get("url", "")) for a in m["files"]],
-                citations=[Citation(**c) for c in m.get("citations", [])])
-        for index, m in sorted(enumerate(record["received"]), key=lambda item: timestamp(item[1]["ts"]))
+        Message(
+            str(index),
+            m["text"],
+            timestamp(m["ts"]),
+            attachments=[Attachment(a["name"], a.get("url", "")) for a in m["files"]],
+            citations=[Citation(**c) for c in m.get("citations", [])],
+        )
+        for index, m in sorted(
+            enumerate(record["received"]), key=lambda item: timestamp(item[1]["ts"])
+        )
         if m["author"] == "aico" and not m["is_feedback_buttons"] and timestamp(m["ts"]) >= start
     ]
