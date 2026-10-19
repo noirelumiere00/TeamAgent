@@ -96,6 +96,44 @@ test('all explicit user keyword analyses remain available beyond ten keywords', 
   }
 });
 
+test('malformed multi-keyword query is blocked without throwing or consuming the request', () => {
+  const {receive, call} = setup();
+  const ctx = receive('TikTokの上位動画を「新宿ランチ」「渋谷ランチ」の各キーワードでそれぞれ分析して');
+  for (const query of [{toString: 42}, ['新宿ランチ'], null, 42]) {
+    let result;
+    assert.doesNotThrow(() => {result = call(ctx, 'video_algorithm', 'bad-query', {query});});
+    assert.equal(result?.block, true);
+  }
+  assert.ok(call(ctx, 'video_algorithm', 'valid-query', {query: '新宿ランチ'})?.params);
+});
+
+test('explicitly watching supplied videos authorizes analysis for their comparison', () => {
+  const {receive, call} = setup();
+  const ctx = receive('この2本の動画を見比べて、どちらが効いた？ https://www.tiktok.com/@sample/video/123456789 https://www.tiktok.com/@sample/video/123456790');
+  assert.ok(call(ctx, 'video_analysis', 'watch-supplied', {query: '比較'})?.params);
+});
+
+test('supplied-video watching cannot finish without actually invoking analysis', () => {
+  const {receive, hooks} = setup();
+  const ctx = receive('この2本の動画を見比べて https://www.tiktok.com/@sample/video/123456789 https://www.tiktok.com/@sample/video/123456790');
+  const out = hooks.get('before_agent_finalize')({runId: ctx.runId,
+    lastAssistantMessage: 'どちらも完成度が高いです。'}, ctx);
+  assert.equal(out?.action, 'revise');
+  assert.match(out.retry.instruction, /video_analysis/);
+});
+
+for (const content of ['伊藤ハムのハンバーグとステーキの施策を見比べて',
+  '伊藤ハムの施策を比べて',
+  'この2本の動画の施策資料を見比べて https://docs.google.com/document/d/campaign-a/edit https://docs.google.com/document/d/campaign-b/edit']) {
+  test(`campaign comparisons require search when actual videos were not supplied: ${content}`, () => {
+    const {receive, call, hooks} = setup();
+    const ctx = receive(content);
+    assert.equal(call(ctx, 'video_analysis', 'heavy-analysis', {query: '比較'})?.block, true);
+    assert.equal(hooks.get('before_agent_finalize')({runId: ctx.runId,
+      lastAssistantMessage: 'これから分析します。'}, ctx)?.action, 'revise');
+  });
+}
+
 test('a separate inbound and caller can still start a job, and invalid signing never consumes it', () => {
   const {receive, call} = setup();
   const ctx = receive('上位動画を分析して');

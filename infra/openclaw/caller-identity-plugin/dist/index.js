@@ -35,6 +35,7 @@ function explicitVideoQuerySlots(content) {
 
 function explicitlyRequestsFreshVideoAnalysis(content) {
   if (typeof content !== "string") return false;
+  if (classifyVideoUrl(content) && /(?:動画|映像).{0,12}(?:見比べて|観比べて)/u.test(content)) return true;
   return explicitVideoQuerySlots(content).length > 1 || /(?:動画|映像)(?:自体|そのもの)?を(?:見て|観て|視聴して|分析して|解析して)|実(?:映像|際の動画).{0,12}(?:見て|観て|視聴して|分析して)|(?:動画|TikTok).{0,32}(?:取得して|集めて|収集して)|(?:競合|市場|検索KW|検索キーワード).{0,32}上位動画.{0,16}(?:分析して|比較して)/iu.test(content);
 }
 const TEAMAGENT_TOOL_PREFIX = "teamagent__";
@@ -436,7 +437,7 @@ const VIDEO_URL_RULES = [
 // （相互検証 2026-09-25: 「明日10:00の会議で使います＋URL」で差し戻していた）。
 // 切り出しの依頼は「切り出し」「画像に」「キャプチャ」「シーン」「サムネ用」で拾う。
 const VIDEO_REQUEST_RE =
-  /(分析|構成|フック|CTA|解説|要約|切り出|切出|キャプチャ|画像に|画像で|静止画|サムネ用|シーン|評価|比較|読み解|勝ち筋|どう作|作りを|内容を)/iu;
+  /(分析|構成|フック|CTA|解説|要約|切り出|切出|キャプチャ|画像に|画像で|静止画|サムネ用|シーン|評価|比較|見比べ|観比べ|読み解|勝ち筋|どう作|作りを|内容を)/iu;
 // 下書きが断りの形か（本番の断り「取得不可です…ファイル添付でお願いします」を含む）。
 // 「できない」単独は拾わない（「明日は参加できない」等）。動画の取得・分析・切り出しに掛かる形に限る。
 // 下書きは判定にだけ使い、保持も記録もしない。
@@ -3397,7 +3398,7 @@ export function createCallerIdentityPlugin({
       videoAnalysisQuerySlots: explicitVideoQuerySlots(event?.content),
       searchRequired: typeof event?.content === "string" && (
         explicitlyRequestsFreshVideoAnalysis(event.content) ? null :
-        /比較|何が効|どっちが|どちらが|勝ち|効果/u.test(event.content) ? "comparison" :
+        /比較|比べ|何が効|どっちが|どちらが|勝ち|効果/u.test(event.content) ? "comparison" :
         /一覧|リスト(?:アップ)?|列挙|(?:資料|事例|案件)を全部|全部(?:の資料)?を?(?:出|見せ|並べ)/u.test(event.content) ? "list" :
         /ビデオリリース|\bTTO\b|切り抜き|\bVVS\b|タテガタ|ショートドラマ|スワイプ\s*LP|ソリューションプラン|\bVSEO\b|検索面|お土産資料|ケイパ|感触|BANT|営業\s*FB|カルテ|二次利用費/iu.test(event.content)
           ? "internal_term" : /元の資料|根拠|資料を(?:もと|基)に|ソース/u.test(event.content)
@@ -5340,7 +5341,11 @@ export function createCallerIdentityPlugin({
       return {block: true, blockReason:
         "既存施策の比較は teamagent__search を使い、取得済みの数字と投稿文で答えてください。新しい動画分析は開始しないでください。"};
     }
-    const videoSlot = trusted.videoAnalysisQuerySlots?.length ? videoQueryHash(params.query) : null;
+    if (tool === "video_algorithm" && trusted.videoAnalysisQuerySlots?.length && typeof params.query !== "string") {
+      return {block: true, blockReason: "動画分析の検索語を文字列で指定してください。"};
+    }
+    const videoSlot = tool === "video_algorithm" && trusted.videoAnalysisQuerySlots?.length
+      ? videoQueryHash(params.query) : null;
     if (tool === "video_algorithm" && videoSlot && !trusted.videoAnalysisQuerySlots.includes(videoSlot)) {
       return {block: true, blockReason: "依頼者が指定した各キーワードをそのまま query に使ってください。"};
     }
