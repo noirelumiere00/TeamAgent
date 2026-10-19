@@ -1461,7 +1461,15 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
             if fanout_probe is not None:
                 from teamagent.skills.search.fanout import collect_named_sources
 
-                collect_named_sources(self, conn, self._asked_client(probe), ctx, fanout_probe)
+                collect_named_sources(
+                    self,
+                    conn,
+                    self._asked_client(probe),
+                    ctx,
+                    fanout_probe,
+                    industry=normalize_industry(input.filter_industry)
+                    or extract_query_industry(input.query),
+                )
             if self._use_new_schema:
                 # Sprint 5: 集約・一覧クエリモード。「BANT A の案件一覧」「失注案件」等は
                 # 意味検索では答えられないため、メタデータフィルタで FB を列挙する。

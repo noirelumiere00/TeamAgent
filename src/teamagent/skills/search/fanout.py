@@ -168,7 +168,13 @@ def bounded_connection(connect: Callable[[], Any], deadline_at: float) -> Callab
 
 
 def collect_named_sources(
-    skill: Any, conn: Any, client: str | None, ctx: SkillContext, probe: dict[str, Any]
+    skill: Any,
+    conn: Any,
+    client: str | None,
+    ctx: SkillContext,
+    probe: dict[str, Any],
+    *,
+    industry: str | None = None,
 ) -> None:
     """金庫の接続で名指し資料・カルテ・事例を読む。SAVEPOINT で本体を守る。"""
     connect = bounded_connection(reuse_connection(conn), time.perf_counter() + 3.0)
@@ -178,7 +184,7 @@ def collect_named_sources(
     probe["case"] = case_lookup_by_industry(
         skill._pgvector,
         connect,
-        industry=None,
+        industry=industry,
         main_hits=(),
         query_client=client,
         request_id=ctx.request_id,
@@ -222,6 +228,22 @@ def _case_rows(result: SourceResult[Any]) -> list[dict[str, Any]]:
             "updated_at": r.updated_at,
         }
         for r in result.items
+    ]
+
+
+def _case_hits(result: SourceResult[Any]) -> list[SearchHit]:
+    """構造化検索の事例も、取得済みの効果・URLを本文の根拠へ渡す。"""
+    return [
+        SearchHit(
+            # 事例集は文書単位の検索なので、chunk の実IDと衝突しない内部IDを使う。
+            chunk_id=-index,
+            content="\n".join(
+                str(row[key] or "") for key in ("title", "case_product", "case_effect")
+            ),
+            score=1.0,
+            metadata={**row, "case_corpus": "true", "client_name": row["case_client"]},
+        )
+        for index, row in enumerate(_case_rows(result), 1)
     ]
 
 
@@ -348,6 +370,9 @@ def run_fanout(skill: Any, input: SearchInput, ctx: SkillContext) -> SearchOutpu
                 )
             ),
         )
+    if case_target and cases.stage == 4 and cases.items:
+        # 明示業種そのものの一致は「近い事例」ではなく回答の根拠。
+        summary_hits = [*summary_hits, *_case_hits(cases)]
     if case_target:
         found = bool((found and summary_hits) or slack.items or cases.items or extra["named"])
         hits = summary_hits
