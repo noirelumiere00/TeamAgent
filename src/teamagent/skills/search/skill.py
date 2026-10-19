@@ -702,6 +702,8 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
             slack_items = tuple(i for i in slack_items if target_matches(i.text, case_target))
             hits = summary_hits
             found = bool((found and summary_hits) or slack_items)
+        if compact_mode and slack_items:
+            found = True
         case_miss = bool(case_target and not found)
 
         # 3. Bedrock で要約（chunk が 0 件のときはスキップ）。
@@ -949,15 +951,25 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
                 )
             )
 
-        if compact_mode and input.include_answer and found:
-            answer = compact.build(
-                answer,
-                summary_hits,
-                slack_items,
-                lambda h: self._hit_url(h, file_urls=file_urls),
-                query=input.query,
-                asked_industry=asked_industry,
-            )
+        if compact_mode and input.include_answer:
+            if found:
+                answer = compact.build(
+                    answer,
+                    summary_hits,
+                    slack_items,
+                    lambda h: self._hit_url(h, file_urls=file_urls),
+                    query=input.query,
+                    asked_industry=asked_industry,
+                    notice=guard_header,
+                )
+            elif slack_lookup is not None and slack_lookup.hidden_count:
+                answer = "Slackの非公開の場所に一致がありますが、この会話では内容を表示できません。"
+            else:
+                scope = "社内資料・施策実績"
+                if slack_lookup is not None:
+                    scope += "・Slack" if slack_lookup.status == "ok" else "（Slackは検索未完了）"
+                answer = build_scoped_not_found_answer(case_target, scope=scope, complete=complete)
+
         output = SearchOutput(
             answer=answer,
             answer_format="compact" if compact_mode else None,

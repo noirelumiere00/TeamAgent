@@ -381,6 +381,8 @@ def run_fanout(skill: Any, input: SearchInput, ctx: SkillContext) -> SearchOutpu
     if case_target:
         found = bool((found and summary_hits) or slack.items or cases.items or extra["named"])
         hits = summary_hits
+    if compact_mode and slack.items:
+        found = True
     case_miss = bool(case_target and not found)
     statuses = (
         timeline_status.resolve_statuses([*summary_hits, *extra.get("named", []), *karte.items])
@@ -583,6 +585,7 @@ def run_fanout(skill: Any, input: SearchInput, ctx: SkillContext) -> SearchOutpu
             if hits
             else LaneStatus.failed("search_failed")
         )
+    guard_header = ""
     if found and skill._result_guard:
         guard_header = build_result_header(
             query=input.query,
@@ -668,11 +671,15 @@ def run_fanout(skill: Any, input: SearchInput, ctx: SkillContext) -> SearchOutpu
                 query=input.query,
                 asked_industry=asked_industry,
                 karte_hits=karte.items,
+                notice=guard_header,
             )
-        elif not visible_found and not slack.hidden_count:
-            answer = build_scoped_not_found_answer(
-                case_target, scope="社内資料・施策実績・Slack", complete=complete
-            )
+        elif not visible_found:
+            if slack.hidden_count:
+                answer = "Slackの非公開の場所に一致がありますが、この会話では内容を表示できません。"
+            else:
+                scope = "社内資料・施策実績"
+                scope += "・Slack" if slack.status == "ok" else "（Slackは検索未完了）"
+                answer = build_scoped_not_found_answer(case_target, scope=scope, complete=complete)
     logger.info(
         "search_found_decision",
         request_id=ctx.request_id,
