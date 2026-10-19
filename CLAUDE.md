@@ -77,7 +77,7 @@
 - **D5 trivy**：`trivy fs`（uv.lock の CVE）＋ `trivy config`（infra/ の IaC）が CRITICAL/HIGH で fail。依存 CVE は ignore に足さず**依存バンプで直す**（無関係 PR が突然赤くなったらバンプ PR を先行 merge → rebase）。misconfig の例外は `.trivyignore.yaml` に **paths スコープ＋statement＋expired_at** 付きでのみ（ID グローバル ignore 禁止）。
 - **branch protection は未設定＝赤でも merge ボタンは押せる**。「赤なら merge しない」は運用規律。
 
-## 7. Aico にツール/機能を足すとき
+## 7. Aico にツール/機能を足すとき（旧 §10）
 
 - ツールは **4段（skill 実装 → factory の `USE_<X>` gate・既定 OFF → `openclaw.config.json5` の `toolFilter.include` → 本番 env ON + apply + run-task）**が全部通って初めて稼働。「実装済」と「稼働」は別。どの段で止まっているかを常に言う。
 - description は OC がツールを選ぶ唯一の材料。被るツール（動画/TikTok 系）はトリガー語で棲み分け、「対象外（→他tool）」の相互排他注記を書く。
@@ -96,7 +96,7 @@ pytest -q && mypy --strict src && ruff check . && ruff format --check src/ tests
 - 詳細と CI で skip されるテストは [`openwiki/testing/running-tests.md`](openwiki/testing/running-tests.md)。
 - 本番 RDS は SSM port-forward + `.env.local` 経由（`localhost:15432`、手順は `docs/v3.2/ops/local_dev_with_tunnel.md`）。RLS を効かせるには `app_role="teamagent_app"`（C2）。踏み台直 `psql` は hang するので psycopg / port-forward を使う。
 
-## 9. リンク集
+## 9. リンク集（旧 §7・§9）
 
 | 目的 | ドキュメント |
 |---|---|
