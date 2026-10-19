@@ -378,3 +378,23 @@ def test_ascii_alias_also_expands_back_to_kana(query: str, alias: str) -> None:
     out = skill.run(SearchInput(query=query), SkillContext(metadata={}))
     assert out.found
     b.converse.assert_called_once()
+
+
+def test_partial_alias_retrieval_keeps_hits_and_reports_incomplete(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """補助検索が落ちても、言い換え検索で取れたヒットは捨てず、未完了として報告する。"""
+    skill, _, _ = _search(lambda *_: [])
+    hits = [_hit(0.4, "イオン", chunk_id=1)]
+
+    def partial(*_a: object, probe: dict[str, str] | None = None, **_kw: object) -> list[object]:
+        if probe is not None:
+            probe["incomplete"] = "true"
+        return hits
+
+    monkeypatch.setattr(skill, "_retrieve", partial)
+    rescued, _, incomplete = skill._retry_aliases(
+        SearchInput(query="トップバリュ"), SkillContext(metadata={}), [], None
+    )
+    assert [hit.chunk_id for hit in rescued] == [1]
+    assert incomplete

@@ -15,6 +15,12 @@ from teamagent.skills.search.schema import SearchInput
 from tests.skills.search.test_campaign_files import _video, _video_campaign
 from tests.skills.search.test_fanout import META, _bedrock, make
 
+DIRECT_META = {
+    **META,
+    "_search_direct_answer": True,
+    "_search_direct_answer_kinds": ("not_found", "comparison", "list_fast", "video_metrics"),
+}
+
 
 @pytest.fixture(autouse=True)
 def isolated(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -62,12 +68,16 @@ def test_delivery_case_with_only_logistics_sends_one_not_found_sentence(
     monkeypatch.setattr(skill, "_summarize", summary)
     out = skill.run(
         SearchInput(query="宅配の事例を教えて", filter_industry="運輸・交通"),
-        SkillContext(metadata={**META, "_search_direct_answer": True}),
+        SkillContext(metadata=DIRECT_META),
     )
     assert (
         out.direct_answer
         == out.answer
-        == ("宅配の事例は見つかりませんでした（探した範囲: 社内資料・施策実績・Slack）。")
+        == (
+            "宅配の事例は見つかりませんでした（探した範囲: 社内資料・施策実績"
+            + ("・Slack" if fanout_enabled else "")
+            + "）。"
+        )
     )
     assert out.direct_answer_kind == "not_found" and not out.found
     summary.assert_not_called()
@@ -90,7 +100,7 @@ def test_logistics_case_row_cannot_replace_original_delivery_subject(
         SearchInput(
             query="宅配の事例を教えて", filter_industry="運輸・交通", filter_client="物流会社"
         ),
-        SkillContext(metadata={**META, "_search_direct_answer": True}),
+        SkillContext(metadata=DIRECT_META),
     )
     assert out.direct_answer == (
         "宅配の事例は見つかりませんでした（探した範囲: 社内資料・施策実績・Slack）。"
@@ -112,7 +122,7 @@ def test_food_manufacturer_case_keeps_industry_campaigns(
     monkeypatch.setattr(skill, "_summarize", lambda *a, **kw: ("食品会社の試食施策です。", 0.01))
     out = skill.run(
         SearchInput(query="食品メーカーの事例ってある？", filter_industry="食品"),
-        SkillContext(metadata={**META, "_search_direct_answer": True}),
+        SkillContext(metadata=DIRECT_META),
     )
     assert out.found and "見つかりません" not in out.answer
     assert "食品会社" in out.answer and "https://example.test/food" in out.answer
@@ -135,7 +145,7 @@ def test_weak_reference_answer_is_never_sent_directly(
     monkeypatch.setattr(skill, "_summarize", lambda *a, **kw: ("参考資料です。", 0.01))
     out = skill.run(
         SearchInput(query="資料と施策を教えて"),
-        SkillContext(metadata={**META, "_search_direct_answer": True}),
+        SkillContext(metadata=DIRECT_META),
     )
     assert out.answer.startswith(WEAK_RESULT_NOTICE)
     assert out.direct_answer is None and out.direct_answer_kind is None
