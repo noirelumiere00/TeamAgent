@@ -159,6 +159,7 @@ def case_query_target(query: str, asked_industry: str | None = None) -> str | No
         "その",
         "それ",
         "施策",
+        "提案",
         "動画",
         "ショート動画",
         "SNS",
