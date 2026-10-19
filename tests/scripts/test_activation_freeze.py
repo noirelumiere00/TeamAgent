@@ -232,15 +232,17 @@ def test_unlock_matches_the_committed_declaration() -> None:
     """
     unlock = _freeze_doc()["unlock"]
     if unlock["active"]:
+        # 2026-10-19 human gate: libexpat 2.8.5-r0 が上流から消えたため、scope を core_media 契約 1 path へ切り替えた。
         assert unlock["scope_paths"] == [
-            "infra/codebuild/openclaw_bundle_contract.json",
+            "infra/codebuild/teamagent_core_media_release_contract.json",
         ]
-        assert "glibc 2.44-r8" in unlock["reason"]
-        assert "#568 の例外 16 件を外す" in unlock["reason"]
-        assert "12929629… → 5a7e0d20…" in unlock["reason"]
-        assert "libexpat 2.8.5-r0" in unlock["reason"]
-        assert "2.9.0-r0" in unlock["reason"]
+        assert "libexpat 2.8.5-r0→2.9.0-r0" in unlock["reason"]
         assert "human gate 2026-10-19" in unlock["gate"]
+        prev_oc = unlock["previous_scope_20261019_openclaw_bundle_contract"]
+        assert prev_oc["scope_paths"] == ["infra/codebuild/openclaw_bundle_contract.json"]
+        assert "glibc 2.44-r8" in prev_oc["reason"]
+        assert "#568 の例外 16 件を外す" in prev_oc["reason"]
+        assert "12929629… → 5a7e0d20…" in prev_oc["reason"]
         assert unlock["previous_scope_20261012_core_python_base"]["scope_paths"] == [
             "infra/codebuild/teamagent_runtime_contract.json",
             "infra/codebuild/teamagent_core_media_release_contract.json",
