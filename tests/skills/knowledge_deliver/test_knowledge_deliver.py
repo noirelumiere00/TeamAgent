@@ -225,10 +225,56 @@ def test_compact_pdf_removes_only_punt_sentence_and_keeps_summary_and_source(ans
     assert out.delivery is not None
 
 
-def test_legacy_pdf_does_not_change_sentence_spacing_or_punt_text() -> None:
+def test_compact_pdf_removes_recorded_required_handoff_and_keeps_summary() -> None:
+    skill, slack, ctx = _compact_pdf_skill()
+    summary = "要点は完成形の先出しです。"
+    source = "\n出典: https://drive.google.com/file/d/F0/view"
+    skill._search.run.return_value.answer = (
+        summary + "現在の進捗を確認するには、小池さんへ直接確認するか営業 DB で"
+        "最新の案件ステータスを見る必要があります。" + source
+    )
+    out = skill.run(KnowledgeDeliverInput(query="提案書を出して", top_k=2), ctx)
+    assert out.answer == summary + source
+    assert slack.upload_files.await_args.kwargs["initial_comment"] == summary + source
+    assert out.delivery is not None
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        "営業 DB で確認しました。施策は実施済みです。",
+        "営業 DB で確認しましたが、別の企画には追加提案が必要です。",
+    ],
+)
+def test_compact_pdf_keeps_completed_internal_confirmation(answer: str) -> None:
+    skill, slack, ctx = _compact_pdf_skill()
+    skill._search.run.return_value.answer = answer
+    out = skill.run(KnowledgeDeliverInput(query="提案書を出して", top_k=2), ctx)
+    assert out.answer == answer
+    assert slack.upload_files.await_args.kwargs["initial_comment"] == answer
+
+
+def test_compact_pdf_respects_no_punt_disable_flag(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("SEARCH_NO_PUNT", "0")
+    skill, slack, ctx = _compact_pdf_skill()
+    answer = "営業 DB で確認する必要があります。"
+    skill._search.run.return_value.answer = answer
+    out = skill.run(KnowledgeDeliverInput(query="提案書を出して", top_k=2), ctx)
+    assert out.answer == answer
+    assert slack.upload_files.await_args.kwargs["initial_comment"] == answer
+
+
+@pytest.mark.parametrize(
+    "punt",
+    [
+        "小池さんか営業 DB でご確認ください。",
+        "小池さんへ直接確認するか営業 DB で最新の案件ステータスを見る必要があります。",
+    ],
+)
+def test_legacy_pdf_does_not_change_sentence_spacing_or_punt_text(punt: str) -> None:
     skill, slack, ctx = _compact_pdf_skill()
     ctx.metadata.pop("_search_compact_answer")
-    answer = " 要点は完成形の先出しです。小池さんか営業 DB でご確認ください。\n"
+    answer = " 要点は完成形の先出しです。" + punt + "\n"
     skill._search.run.return_value.answer = answer
     out = skill.run(KnowledgeDeliverInput(query="提案書を出して", top_k=2), ctx)
     assert out.answer == answer
