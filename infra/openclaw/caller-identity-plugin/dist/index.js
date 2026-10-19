@@ -3397,6 +3397,7 @@ export function createCallerIdentityPlugin({
       searchRequired: typeof event?.content === "string" && (
         explicitlyRequestsFreshVideoAnalysis(event.content) ? null :
         /比較|何が効|どっちが|どちらが|勝ち|効果/u.test(event.content) ? "comparison" :
+        /一覧|リスト(?:アップ)?|列挙|(?:資料|事例|案件)を全部|全部(?:の資料)?を?(?:出|見せ|並べ)/u.test(event.content) ? "list" :
         /ビデオリリース|\bTTO\b|切り抜き|\bVVS\b|タテガタ|ショートドラマ|スワイプ\s*LP|ソリューションプラン|\bVSEO\b|検索面|お土産資料|ケイパ|感触|BANT|営業\s*FB|カルテ|二次利用費/iu.test(event.content)
           ? "internal_term" : /元の資料|根拠|資料を(?:もと|基)に|ソース/u.test(event.content)
             ? "source" : null),
@@ -3424,7 +3425,7 @@ export function createCallerIdentityPlugin({
     if (existing?.videoAnalysisQuerySlots?.length && !ingress.videoAnalysisQuerySlots.length) {
       ingress.videoAnalysisQuerySlots = existing.videoAnalysisQuerySlots;
     }
-    if (searchDirectEnabled && typeof event?.content === "string" && event.content.trim()) {
+    if (typeof event?.content === "string" && event.content.trim()) {
       searchQueryByPending.set(pendingKey, {query: event.content.slice(0, 4096), updatedAtMs: nowMs});
     }
     if (answerFeedbackEnabled && answerFeedbackTargets(senderId)) {
@@ -5328,6 +5329,12 @@ export function createCallerIdentityPlugin({
       );
     }
 
+    if (tool === "search" && trusted.searchRequired === "list") {
+      const saved = searchQueryByPending.get(trusted.pendingKey);
+      if (saved?.context) params = {...params,
+        query: [saved.query, saved.context].filter(Boolean).join("\n").slice(0, 1000)};
+    }
+
     if (trusted.searchRequired === "comparison" && HEAVY_VIDEO_TOOLS.has(tool)) {
       return {block: true, blockReason:
         "既存施策の比較は teamagent__search を使い、取得済みの数字と投稿文で答えてください。新しい動画分析は開始しないでください。"};
@@ -5731,7 +5738,7 @@ export function createCallerIdentityPlugin({
     if (!runId) return undefined;
     const ingress = connectIngressByRun.get(runId);
     const searched = evidenceByRun.get(runId)?.searchCompleted === true;
-    const unrelatedToolSatisfies = ingress?.searchRequired !== "comparison" &&
+    const unrelatedToolSatisfies = !["comparison", "list"].includes(ingress?.searchRequired) &&
       ((toolCallsByRun.get(runId)?.count ?? 0) > 0 || evidenceByRun.has(runId));
     if (!ingress?.searchRequired || ingress.connectRequest ||
         searched || unrelatedToolSatisfies ||
@@ -5795,7 +5802,6 @@ export function createCallerIdentityPlugin({
   }
 
   function rememberSearchConversation(event, ctx) {
-    if (!searchDirectEnabled) return;
     const runId = canonicalInvocationId(ctx?.runId);
     if (!runId || (event?.runId && event.runId !== runId)) return;
     const ingress = connectIngressByRun.get(runId);
