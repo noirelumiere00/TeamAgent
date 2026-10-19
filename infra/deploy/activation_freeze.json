@@ -377,8 +377,8 @@
     "scope_paths": [
       "infra/codebuild/teamagent_core_media_release_contract.json"
     ],
-    "reason": "【media の apk ロック追随】 【2026-10-19 apk ロック追随】Alpine v3.24 / edge の索引で libexpat 2.8.5-r0→2.9.0-r0 に入れ替わり、Dockerfile の明示 pin が \"unable to select packages\" で解決不能になる。apk 段の実ビルドで lock 差分 -1 +1（241→241 行）。lock の sha256 が動くため契約の artifact.apk-lock.sha256 と release 契約の sha が動き、世代 publish を再度強制する。scope は core_media 契約 1 path のまま。",
-    "gate": "human gate 2026-10-19（小俣さん承認: 凍結の宣言を core_media 契約へ切り替え・libexpat 2.8.5-r0 が上流から消え 2.9.0-r0 に・lock は1行差し替えで段3が照合）",
+    "reason": "【media の apk ロック追随】 【2026-10-19 apk ロック追随】Alpine v3.24 / edge の索引で libexpat 2.8.5-r0→2.9.0-r0 に入れ替わり、Dockerfile の明示 pin が \"unable to select packages\" で解決不能になる。apk 段の実ビルドで lock 差分 -1 +1（241→241 行）。lock の sha256 が動くため契約の artifact.apk-lock.sha256 と release 契約の sha が動き、世代 publish を再度強制する。scope は core_media 契約 1 path のまま。 【2026-10-19 apk ロック追随】Alpine v3.24 / edge の索引で libx11 1.8.13-r0→1.8.14-r0・libxi 1.8.3-r0→1.8.4-r0・libxrender 0.9.12-r0→0.9.13-r0・libxtst 1.2.5-r0→1.2.6-r0 に入れ替わり、Dockerfile の明示 pin が \"unable to select packages\" で解決不能になる。apk 段の実ビルドで lock 差分 -4 +4（241→241 行）。lock の sha256 が動くため契約の artifact.apk-lock.sha256 と release 契約の sha が動き、世代 publish を再度強制する。scope は core_media 契約 1 path のまま。",
+    "gate": "human gate 2026-10-19（小俣さん「私への公開であれば本番への書き込みの承認は不要」・r64 段3 で base 同梱の X11 系 4 パッケージに HIGH。HIGH は例外にせず版上げで直す既存規律）",
     "folded_2026_08_28": {
       "decision": "裁定③（relock せず相乗り）を打ち切り、本 PR で unlock を畳む。Human Gate ⑤ を 2026-08-28 にユーザーが通した。",
       "why_now": "①本 PR は frozen surface を 1 path も変更していない（assert-frozen-surface --base origin/dev --head HEAD が「frozen surface 無変更（監視対象 21 path）」を返す実測）。∴ この unlock は本 PR には不要。②active のままだと test_unlock_is_inactive_and_empty_by_default が落ち、CI が 1 failed / 7,474 passed で恒常的に赤になる（3.11 / 3.13 / 3.14 すべてで実測）。本物の失敗と見分けがつかなくなる。③裁定③の rationale「いま relock すると同じ宣言を立て直す往復が発生する」は成立しない。retention_ruling_2026_08_27.landmine_partial_scope のとおり、相乗り PR は scope_paths を自分の変更集合へ絞り込まねばならず、**どのみち書き直しが必須**だから。",
