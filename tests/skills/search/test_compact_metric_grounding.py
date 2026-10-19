@@ -77,11 +77,41 @@ def test_model_quantitative_metric_prose_is_rejected_even_when_numbers_are_retri
     assert "調理アレンジを紹介" in answer
 
 
-@pytest.mark.parametrize("date", ["2026-10-19", "2026年10月19日", "10/19", "10月19日 13:38"])
+@pytest.mark.parametrize(
+    "date", ["2026-10-19", "2026年10月19日", "10/19", "10月19日 13:38", "10/19 13:38"]
+)
 def test_compact_preserves_dated_status_without_metric_values(date):
     claim = f"{date}時点の資料では再生を増やす施策が記録されています。"
     answer = render(
         claim + "[S:1]",
         {"1": ("施策資料", "https://example.test/sheet", claim)},
+    )
+    assert claim in answer
+
+
+@pytest.mark.parametrize(
+    "claim",
+    [
+        "再生数は1/2回に対し保存数は3/4件です。",
+        "再生数は１／２回に対し保存数は３／４件です。",
+        "再生数は一万回に対し保存数は二百六十一件です。",
+        "保存の合計は二百六十一です。",
+        "投稿は二本で、再生は一万です。",
+    ],
+)
+def test_model_fractions_and_kanji_quantities_cannot_bypass_code_metrics(claim):
+    answer = render(
+        claim + "[S:1]\n調理アレンジを紹介しています。[S:1]",
+        {"1": ("施策資料", "https://example.test/sheet", "再生1 2。保存3 4。調理アレンジ。")},
+    )
+    assert claim not in answer
+    assert "調理アレンジを紹介" in answer
+
+
+def test_compact_preserves_a_year_in_a_metric_related_document_title():
+    claim = "2026年版の再生改善施策には調理アレンジが記録されています。"
+    answer = render(
+        claim + "[S:1]",
+        {"1": ("再生改善施策_2026年版", "https://example.test/sheet", claim)},
     )
     assert claim in answer

@@ -25,8 +25,14 @@ _EXPLICIT_LIST = re.compile(
 )
 _METRICS = re.compile(r"(?:動画|投稿)(?:ごと|別|毎)|結果(?:を|と|も|が)|数値|数字|再生数|保存数")
 _METRIC_PROSE = re.compile(r"再生|保存|いいね|視聴|平均|中央値|合計|投稿|本数")
+_QUANTITIES = re.compile(
+    r"\d|[〇零一二三四五六七八九十百千万億兆]+"
+    r"(?=\s*(?:回|件|本|倍|%|再生|保存|いいね|[、。]|です|で|$))"
+)
 _DATES = re.compile(
-    r"(?:\d{4}[-/])?\d{1,2}[-/]\d{1,2}|(?:\d{4}年)?\d{1,2}月(?:\d{1,2}日)?|"
+    r"\d{4}[-/]\d{1,2}[-/]\d{1,2}|"
+    r"\d{1,2}[-/]\d{1,2}(?=\s*(?:\d{1,2}:\d{2}\s*)?(?:時点|現在|付))|"
+    r"(?:\d{4}年)?\d{1,2}月(?:\d{1,2}日)?|"
     r"\d{4}年|(?<!\d)\d{1,2}:\d{2}(?::\d{2})?(?!\d)"
 )
 # title, resolved URL, retrieved content. Keys are assigned by code, never model URLs.
@@ -145,7 +151,7 @@ def render(
             continue
         # Quantitative metric prose comes only from the code-generated facts/rows.
         metric_text = _DATES.sub("", unicodedata.normalize("NFKC", text))
-        if _METRIC_PROSE.search(metric_text) and re.search(r"\d", metric_text):
+        if _METRIC_PROSE.search(metric_text) and _QUANTITIES.search(metric_text):
             continue
         if (
             not text
