@@ -155,3 +155,23 @@ def test_direct_not_found_tracks_retrieval_failure_when_legacy_guards_are_disabl
     out = skill.run(SearchInput(query="宅配の事例"), context())
     assert out.direct_answer is None
     assert "確認できませんでした" in out.answer
+
+
+def _slack(lookup: SlackLookup, skill: object, monkeypatch: pytest.MonkeyPatch) -> None:
+    skill._composite = True  # type: ignore[attr-defined]
+    monkeypatch.setattr(skill, "_start_slack_lookup", lambda *a: object())
+    monkeypatch.setattr(skill, "_collect_slack_lookup", lambda *a: lookup)
+    monkeypatch.setattr(fanout, "lookup_slack", lambda *a, **kw: lookup)
+
+
+@pytest.mark.parametrize("fanout_enabled", [False, True])
+def test_hidden_slack_matches_keep_the_lock_notice_and_are_not_called_absent(
+    monkeypatch: pytest.MonkeyPatch, fanout_enabled: bool
+) -> None:
+    """非公開の場所に一致があるときは「無い」と直接届けず、🔒 の案内つきの従来の文にする。"""
+    monkeypatch.setenv("USE_SEARCH_FANOUT", "1" if fanout_enabled else "0")
+    skill, _ = make([])
+    _slack(SlackLookup(status="ok", reason="ok", hidden_count=2), skill, monkeypatch)
+    out = skill.run(SearchInput(query="宅配の資料"), context())
+    assert out.direct_answer_kind is None and out.direct_answer is None
+    assert "検索が完了せず" not in out.answer

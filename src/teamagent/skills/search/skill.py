@@ -835,16 +835,15 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
         complete = (
             not retries_incomplete
             and not (probe or {}).get("incomplete")
-            and (
-                slack_lookup is None
-                or (slack_lookup.status == "ok" and not slack_lookup.hidden_count)
-            )
+            and (slack_lookup is None or slack_lookup.status == "ok")
         )
         visible_found = found or bool(slack_items)
         # 本人限定フラグ（種類 not_found）が ON のときだけ短文にする。OFF は従来の文。
         if (
             input.include_answer
             and not visible_found
+            # 非公開の場所に一致があるときは 🔒 の案内を出す従来の文のまま（「無い」とは言わない）。
+            and not (slack_lookup is not None and slack_lookup.hidden_count)
             and self._direct_answer_allowed(ctx, "not_found")
         ):
             scope = "社内資料・施策実績"
@@ -1199,6 +1198,7 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
         if not candidates:
             return hits, queries, False
         started = time.perf_counter()
+        partial = threading.Event()
 
         def search(candidate: SearchInput) -> list[SearchHit]:
             # 接続/RLSは既存の経路へ。probe・timingsを共有せず初回の依頼先を維持する。
@@ -1207,7 +1207,7 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
                 self._embed(candidate.query), candidate, ctx, probe=retry_probe
             )
             if retry_probe.get("incomplete"):
-                raise RuntimeError("incomplete alias retrieval")
+                partial.set()  # 補助検索の失敗は未完了として記録し、取れたヒットは捨てない。
             return retry_hits
 
         executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="search-alias")
@@ -1216,7 +1216,7 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
             done, pending = wait(
                 futures, timeout=max(0.0, self._alias_timeout_s - (time.perf_counter() - started))
             )
-            incomplete = bool(pending)
+            incomplete = bool(pending) or partial.is_set()
             rescued: dict[int, SearchHit] = {}
             for future in futures:
                 if future not in done:

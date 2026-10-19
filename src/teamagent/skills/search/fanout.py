@@ -571,13 +571,14 @@ def run_fanout(skill: Any, input: SearchInput, ctx: SkillContext) -> SearchOutpu
             for name, status in lanes.items()
             if name not in {"expand", "sns"}
         )
-        and not slack.hidden_count
     )
     visible_found = bool(found or slack.items or cases.items or karte.items or named)
     # 本人限定フラグ（種類 not_found）が ON のときだけ短文にする。OFF は従来の文。
     negative_short = (
         input.include_answer
         and not visible_found
+        # 非公開の場所に一致があるときは 🔒 の案内を出す従来の文のまま（「無い」とは言わない）。
+        and not slack.hidden_count
         and skill._direct_answer_allowed(ctx, "not_found")
     )
     if negative_short:
