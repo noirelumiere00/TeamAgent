@@ -9,7 +9,8 @@ from urllib.parse import urlsplit
 from teamagent.adapters.pgvector_client import SearchHit
 from teamagent.prompts.loader import load_prompt
 from teamagent.skills._shared.grounding import NumberGrounder
-from teamagent.skills.search.comparison import is_comparison_query
+from teamagent.skills.search.campaign_files import is_campaign_hit, video_stats_footer
+from teamagent.skills.search.comparison import compact_comparison, is_comparison_query
 from teamagent.skills.search.composite import SlackItem
 
 CTX_KEY = "_search_compact_answer"
@@ -78,12 +79,21 @@ def _source_line(keys: Sequence[str], sources: Sources) -> str:
 
 
 def render(
-    answer: str, sources: Sources, *, metrics: str = "", metric_keys: Sequence[str] = ()
+    answer: str,
+    sources: Sources,
+    *,
+    metrics: str = "",
+    metric_keys: Sequence[str] = (),
+    facts: str = "",
+    fact_keys: Sequence[str] = (),
 ) -> str:
+    derived = facts.splitlines() if all(key in sources for key in fact_keys) else []
+    if len("\n".join(derived)) > 550:
+        derived = []
     lines: list[str] = []
     used: list[str] = []
     # A valid code-generated metric block also uses its source even without prose.
-    for key in metric_keys:
+    for key in [*(fact_keys if derived else ()), *metric_keys]:
         if key in sources and key not in used and len(used) < 3:
             used.append(key)
     for raw in answer.splitlines():
@@ -100,18 +110,30 @@ def render(
             text,
         ):
             continue
-        if not text or "http" in text or len(lines) >= 6 or len("\n".join([*lines, text])) > 550:
+        # Quantitative metric prose comes only from the code-generated facts/rows.
+        if re.search(
+            r"(?:再生|保存|いいね|平均|中央値|合計|投稿本数)\s*[:：はが]?\s*"
+            r"(?:合計|平均|中央値)?\s*\d|\d[\d,.]*\s*[万億]?\s*(?:回|件|本)?\s*(?:再生|保存|いいね)",
+            text,
+        ):
+            continue
+        if (
+            not text
+            or "http" in text
+            or len(derived) + len(lines) >= 6
+            or len("\n".join([*derived, *lines, text])) > 550
+        ):
             continue
         if not NumberGrounder.from_inputs(
             "\n".join(sources[k][2] for k in keys), always_allowed=frozenset()
         ).ok(text):
             continue
         footer = _source_line(candidate_keys, sources)
-        if len("\n".join([*lines, text, footer])) > 2500:
+        if len("\n".join([*derived, *lines, text, footer])) > 2500:
             continue
         lines.append(text)
         used = candidate_keys
-    body = "\n".join(lines) or "取得した資料では、質問への回答を確認できませんでした。"
+    body = "\n".join([*derived, *lines]) or "取得した資料では、質問への回答を確認できませんでした。"
     footer = _source_line(used, sources)
     # Keep complete metric rows and URLs; explicit lists retain the original dataset.
     budget = 2500 - len(body) - len(footer) - 4
@@ -121,3 +143,27 @@ def render(
             break
         rows.append(row)
     return "\n\n".join(part for part in (body, "\n".join(rows), footer) if part)
+
+
+def build(
+    answer: str,
+    hits: list[SearchHit],
+    slack_items: Sequence[SlackItem],
+    url_of: Callable[[SearchHit], str | None],
+    *,
+    query: str,
+    asked_industry: str | None = None,
+    karte_hits: Sequence[SearchHit] = (),
+) -> str:
+    facts, fact_ids = compact_comparison(query, hits)
+    show_metrics = wants_metrics(query)
+    return render(
+        answer,
+        source_map([*hits, *karte_hits], slack_items, url_of),
+        facts=facts,
+        fact_keys=[str(key) for key in fact_ids],
+        metrics=video_stats_footer(hits, "", asked_industry=asked_industry) if show_metrics else "",
+        metric_keys=[str(hit.chunk_id) for hit in hits if is_campaign_hit(hit)]
+        if show_metrics
+        else (),
+    )

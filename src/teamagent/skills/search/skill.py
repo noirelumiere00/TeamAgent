@@ -950,17 +950,13 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
             )
 
         if compact_mode and input.include_answer and found:
-            answer = compact.render(
+            answer = compact.build(
                 answer,
-                compact.source_map(
-                    summary_hits, slack_items, lambda h: self._hit_url(h, file_urls=file_urls)
-                ),
-                metrics=video_stats_footer(summary_hits, "", asked_industry=asked_industry)
-                if compact.wants_metrics(input.query)
-                else "",
-                metric_keys=[str(h.chunk_id) for h in summary_hits if is_campaign_hit(h)]
-                if compact.wants_metrics(input.query)
-                else (),
+                summary_hits,
+                slack_items,
+                lambda h: self._hit_url(h, file_urls=file_urls),
+                query=input.query,
+                asked_industry=asked_industry,
             )
         output = SearchOutput(
             answer=answer,

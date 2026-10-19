@@ -37,7 +37,6 @@ from teamagent.skills.search.answer_sections import (
 from teamagent.skills.search.campaign_files import (
     campaign_totals_block,
     is_campaign_hit,
-    video_stats_footer,
 )
 from teamagent.skills.search.client_match import hit_entities
 from teamagent.skills.search.comparison import is_comparison_query
@@ -661,19 +660,14 @@ def run_fanout(skill: Any, input: SearchInput, ctx: SkillContext) -> SearchOutpu
     )
     if compact_mode and input.include_answer:
         if found:
-            answer = compact.render(
+            answer = compact.build(
                 head,
-                compact.source_map(
-                    [*summary_hits, *karte.items],
-                    slack.items,
-                    lambda h: skill._hit_url(h, file_urls=file_urls),
-                ),
-                metrics=video_stats_footer(summary_hits, "", asked_industry=asked_industry)
-                if compact.wants_metrics(input.query)
-                else "",
-                metric_keys=[str(h.chunk_id) for h in summary_hits if is_campaign_hit(h)]
-                if compact.wants_metrics(input.query)
-                else (),
+                summary_hits,
+                slack.items,
+                lambda h: skill._hit_url(h, file_urls=file_urls),
+                query=input.query,
+                asked_industry=asked_industry,
+                karte_hits=karte.items,
             )
         elif not visible_found and not slack.hidden_count:
             answer = build_scoped_not_found_answer(
