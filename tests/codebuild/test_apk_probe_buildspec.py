@@ -116,7 +116,9 @@ def _run_probe(
         "FAKE_INPUTS": str(inputs),
         "FAKE_OUTPUTS": str(outputs),
         "FAKE_DOCKER_FAILURE": docker_failure,
-        "FAKE_LOCK": lock if lock is not None else "".join(f"package-{i}-1-r0\n" for i in range(101)),
+        "FAKE_LOCK": lock
+        if lock is not None
+        else "".join(f"package-{i}-1-r0\n" for i in range(101)),
     }
     completed = subprocess.run(
         ["bash", str(script)],
@@ -125,25 +127,65 @@ def _run_probe(
         capture_output=True,
         check=False,
     )
-    recorded = [json.loads(line) for line in calls.read_text().splitlines()] if calls.exists() else []
+    recorded = (
+        [json.loads(line) for line in calls.read_text().splitlines()] if calls.exists() else []
+    )
     return completed, recorded, outputs
 
 
-@pytest.mark.parametrize("args", ["", "LIBEXPAT_PACKAGE_VERSION=2.9.0-r0\nZLIB_PACKAGE_VERSION=1.3.2-r1\n"])
-def test_probe_builds_exact_runtime_target_and_publishes_inventory(tmp_path: Path, args: str) -> None:
+@pytest.mark.parametrize(
+    "args", ["", "LIBEXPAT_PACKAGE_VERSION=2.9.0-r0\nZLIB_PACKAGE_VERSION=1.3.2-r1\n"]
+)
+def test_probe_builds_exact_runtime_target_and_publishes_inventory(
+    tmp_path: Path, args: str
+) -> None:
     result, calls, outputs = _run_probe(tmp_path, args=args)
     assert result.returncode == 0, result.stdout + result.stderr
     build = next(call for call in calls if call[:3] == ["docker", "buildx", "build"])
     expected_args = [value for arg in args.splitlines() for value in ("--build-arg", arg)]
     assert build == [
-        "docker", "buildx", "build", "--builder", "default", "--platform", "linux/arm64",
-        "--file", DOCKERFILE, "--target", "runtime-packages", "--no-cache-filter",
-        "runtime-packages", "--progress", "plain", *expected_args, "--load", "-t",
-        f"media-apk-probe:{RUN_ID}", ".",
+        "docker",
+        "buildx",
+        "build",
+        "--builder",
+        "default",
+        "--platform",
+        "linux/arm64",
+        "--file",
+        DOCKERFILE,
+        "--target",
+        "runtime-packages",
+        "--no-cache-filter",
+        "runtime-packages",
+        "--progress",
+        "plain",
+        *expected_args,
+        "--load",
+        "-t",
+        f"media-apk-probe:{RUN_ID}",
+        ".",
     ]
-    assert ["docker", "buildx", "prune", "--builder", "default", "--filter", "type=exec.cachemount", "--force"] in calls
-    assert ["docker", "run", "--rm", "--platform", "linux/arm64", "--entrypoint", "cat",
-            f"media-apk-probe:{RUN_ID}", "/usr/share/teamagent/provenance/apk-installed.lock"] in calls
+    assert [
+        "docker",
+        "buildx",
+        "prune",
+        "--builder",
+        "default",
+        "--filter",
+        "type=exec.cachemount",
+        "--force",
+    ] in calls
+    assert [
+        "docker",
+        "run",
+        "--rm",
+        "--platform",
+        "linux/arm64",
+        "--entrypoint",
+        "cat",
+        f"media-apk-probe:{RUN_ID}",
+        "/usr/share/teamagent/provenance/apk-installed.lock",
+    ] in calls
     assert len((outputs / "apk-installed.lock").read_text().splitlines()) == 101
     assert (outputs / "apk-build.log").is_file()
     s3_calls = [call for call in calls if call[:3] == ["aws", "s3", "cp"]]
@@ -195,7 +237,9 @@ def test_invalid_or_binary_arguments_fail_before_docker(tmp_path: Path, args: st
         ((DOCKERFILE, b"first"), (DOCKERFILE, b"second")),
     ],
 )
-def test_unexpected_tar_members_are_rejected_without_extraction(tmp_path: Path, members: tuple) -> None:
+def test_unexpected_tar_members_are_rejected_without_extraction(
+    tmp_path: Path, members: tuple
+) -> None:
     result, calls, outputs = _run_probe(tmp_path, members=members)
     assert result.returncode != 0
     assert "FATAL:" in (outputs / "apk-build.log").read_text()

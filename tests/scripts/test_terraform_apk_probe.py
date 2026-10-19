@@ -7,7 +7,6 @@ import json
 import re
 from pathlib import Path
 
-
 ROOT = Path(__file__).resolve().parents[2]
 TF = ROOT / "infra/terraform/apk_probe.tf"
 README = ROOT / "infra/terraform/README.md"
@@ -125,7 +124,7 @@ def test_service_trust_is_bound_to_the_exact_account_and_project() -> None:
     ) in text
     assert (
         'apk_probe_project_arn  = "arn:aws:codebuild:'
-        '${local.expected_build_region}:${local.expected_build_account_id}:'
+        "${local.expected_build_region}:${local.expected_build_account_id}:"
         'project/${local.apk_probe_project_name}"'
     ) in text
 
@@ -209,7 +208,7 @@ def test_operator_docs_preserve_canonical_tfvars_and_guard_requirements() -> Non
     section = readme[readme.index("## media の APK 実インベントリ取得") :]
     for required in (
         "~/dev/worktrees/teamagent-activation/infra/terraform/terraform.tfvars",
-        "kind: \"config\"",
+        'kind: "config"',
         "to.allowed_resource_changes",
         "DenyIamSelfEscalation",
         "PassOnlyExistingTeamAgentServiceRoles",
