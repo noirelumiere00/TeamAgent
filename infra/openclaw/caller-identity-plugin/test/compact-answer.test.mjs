@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {createCallerIdentityPlugin} from '../dist/index.js';
 
-function setup() {
+function setup(content = '施策は今どうなっている？') {
   const hooks = new Map();
   const ctx = {runId: 'short-run', sessionKey: 'agent:teamagent:slack:direct:u12345678',
     senderId: 'U12345678', channelId: 'U12345678'};
@@ -12,7 +12,7 @@ function setup() {
     SEARCH_DIRECT_ANSWER_KINDS: 'not_found',
   }}).register({registerInteractiveHandler() {}, logger: {info() {}, warn() {}},
     on: (name, fn) => hooks.set(name, fn)});
-  hooks.get('message_received')({content: '施策は今どうなっている？', senderId: ctx.senderId,
+  hooks.get('message_received')({content, senderId: ctx.senderId,
     messageId: '1792041600.123456', runId: ctx.runId,
     metadata: {guildId: 'T07MU5P2PBR', to: `user:${ctx.senderId}`}},
   {...ctx, channelId: 'slack', conversationId: `user:${ctx.senderId}`, messageId: '1792041600.123456'});
@@ -66,3 +66,90 @@ for (const data of [
     assert.notEqual(out?.cancel, true);
   });
 }
+
+test('progress does not consume the compact final answer', () => {
+  for (const flags of [{kind: 'block'}, {isCommentary: true}, {isReasoning: true}]) {
+    const p = setup();
+    p.remember({answer_format: 'compact', answer: '施策は実施済みです。'});
+    const payload = {text: '添付資料も確認しています。', ...flags};
+    const progress = p.hooks.get('reply_payload_sending')({runId: p.ctx.runId,
+      kind: flags.kind, payload}, p.ctx);
+    assert.equal(progress?.payload?.text ?? payload.text, payload.text);
+    const final = p.hooks.get('reply_payload_sending')({runId: p.ctx.runId,
+      kind: 'final', payload: {text: '最終回答'}}, p.ctx);
+    assert.notEqual(final?.cancel, true);
+    assert.equal(final?.payload?.text, '施策は実施済みです。');
+  }
+});
+
+test('another requested tool keeps its action link and does not revive unused search sources', () => {
+  const p = setup('施策の状況を教えて。Slack連携のリンクも送って');
+  p.remember({answer_format: 'compact', answer: '施策は実施済みです。',
+    hits: [{url: 'https://example.test/unused'}]});
+  const url = 'https://connect.newstv.co.jp/slack/oauth/start/issued_token-09==';
+  p.remember({slack_url: url}, 'teamagent__oauth_connect');
+  assert.ok(p.send(`連携はこちらです。${url}`).includes(url));
+  assert.doesNotMatch(p.send('施策実績と連携を確認しました。'), /unused|📎/u);
+});
+
+test('a requested action is preserved when its result arrives before search or after direct search delivery', () => {
+  const url = 'https://connect.newstv.co.jp/slack/oauth/start/issued_token-09==';
+  for (const directPosted of [false, true]) {
+    const p = setup('施策の状況を教えて。Slack連携のリンクも送って');
+    if (directPosted) p.remember({status: 'posted', delivered: true,
+      delivery: {kind: 'search_direct_answer', answer_kind: 'not_found'}});
+    p.remember({slack_url: url}, 'teamagent__oauth_connect');
+    if (!directPosted) p.remember({answer_format: 'compact', answer: '施策は実施済みです。'});
+    const text = `施策実績と連携リンクを確認しました。${url}`;
+    const out = p.hooks.get('reply_payload_sending')({runId: p.ctx.runId, payload: {text}}, p.ctx);
+    assert.notEqual(out?.cancel, true);
+    assert.ok((out?.payload?.text ?? text).includes(url));
+  }
+});
+
+test('a failed additional tool keeps its recovery reply instead of a stale search answer', () => {
+  const p = setup('施策の状況を教えて。提案PDFも送って');
+  p.remember({answer_format: 'compact', answer: '施策は実施済みです。',
+    hits: [{url: 'https://example.test/unused'}]});
+  p.remember({}, 'teamagent__knowledge_deliver', 'delivery failed');
+  const text = '提案PDFの配送を確認できませんでした。';
+  assert.equal(p.send(text), text);
+});
+
+test('a PDF receipt does not acknowledge the undelivered status answer requested alongside it', () => {
+  const p = setup('施策の状況を教えて。提案PDFも送って');
+  p.remember({answer_format: 'compact', answer: '施策は実施済みです。'});
+  p.remember({delivered_count: 2,
+    delivery: {kind: 'knowledge_deliver', status: 'posted', delivered_count: 2}}, 'teamagent__knowledge_deliver');
+  const text = '施策は実施済みです。';
+  const out = p.hooks.get('reply_payload_sending')({runId: p.ctx.runId, payload: {text}}, p.ctx);
+  assert.notEqual(out?.cancel, true);
+  assert.equal(out?.payload?.text ?? text, text);
+});
+
+test('a completed PDF batch suppresses its own extra receipt after the compact answer was selected', () => {
+  const p = setup('施策の状況を教えて。提案PDFも送って');
+  p.remember({answer_format: 'compact', answer: '施策は実施済みです。'});
+  assert.equal(p.send('施策状況の回答です。'), '施策は実施済みです。');
+  p.remember({delivered_count: 2,
+    delivery: {kind: 'knowledge_deliver', status: 'posted', delivered_count: 2}}, 'teamagent__knowledge_deliver');
+  assert.equal(p.hooks.get('reply_payload_sending')({runId: p.ctx.runId,
+    payload: {text: 'PDFを送りました。'}}, p.ctx)?.cancel, true);
+});
+
+test('only extra final text chunks are suppressed; requested media is retained', () => {
+  for (const attachment of [{mediaUrl: 'https://example.test/proposal.pdf'},
+    {mediaUrls: ['https://example.test/proposal.pdf']}, {blocks: [{type: 'divider'}]},
+    {attachments: [{text: '提案PDF'}]}]) {
+    const p = setup('施策の状況を教えて。提案PDFも送って');
+    p.remember({answer_format: 'compact', answer: '施策は実施済みです。'});
+    p.send('施策状況の長い回答です。');
+    const duplicate = p.hooks.get('reply_payload_sending')({runId: p.ctx.runId,
+      payload: {text: '余分な資料一覧です。'}}, p.ctx);
+    assert.equal(duplicate?.cancel, true);
+    const payload = {text: '資料PDF', ...attachment};
+    const out = p.hooks.get('reply_payload_sending')({runId: p.ctx.runId, payload}, p.ctx);
+    assert.notEqual(out?.cancel, true);
+    assert.deepEqual(out?.payload ?? payload, payload);
+  }
+});

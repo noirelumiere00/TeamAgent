@@ -2714,12 +2714,26 @@ export function createCallerIdentityPlugin({
   }
   function rememberEvidenceToolResult(event, ctx) {
     const runId = canonicalInvocationId(ctx?.runId);
-    if (!runId || (event?.runId && event.runId !== runId) || event?.error ||
-        event?.result?.isError) return;
+    if (!runId || (event?.runId && event.runId !== runId)) return;
     pruneConnectGuardState(now());
     const entry = evidenceByRun.get(runId) ?? {urls: new Set(), numbers: new Set(),
       metricEvidence: {play: new Set(), save: new Set()}, needsInput: false};
-    if (["search", "teamagent__search"].includes(event?.toolName)) entry.searchCompleted = true;
+    const searchTool = ["search", "teamagent__search"].includes(event?.toolName);
+    if (!searchTool) {
+      entry.compactAnswer = null;
+      const pdfDelivered = !event?.error && !event?.result?.isError &&
+        ["knowledge_deliver", "teamagent__knowledge_deliver"].includes(event?.toolName) &&
+        deliveredPdfBatch(searchResultData(event.result));
+      if (!pdfDelivered) entry.otherReplyRequired = true;
+    }
+    if (event?.error || event?.result?.isError) {
+      if (!searchTool) {
+        entry.updatedAtMs = now();
+        evidenceByRun.set(runId, entry);
+      }
+      return;
+    }
+    if (searchTool) entry.searchCompleted = true;
     if (["oauth_connect", "teamagent__oauth_connect"].includes(event?.toolName)) entry.needsInput = true;
     function collect(value, depth = 0, kind = null) {
       if (depth > 12) return;
@@ -2775,7 +2789,8 @@ export function createCallerIdentityPlugin({
     if (searchDirectEnabled && ["search", "teamagent__search"].includes(event?.toolName)) {
       const data = searchResultData(event.result);
       // Only the trusted MCP envelope defines the final format; retrieved contents cannot opt in.
-      entry.compactAnswer = data?.answer_format === "compact" &&
+      entry.compactModeSeen ||= data?.answer_format === "compact";
+      entry.compactAnswer = !entry.otherReplyRequired && data?.answer_format === "compact" &&
         typeof data.answer === "string" && data.answer.trim() && data.answer.length <= 2500
         ? data.answer : null;
     }
@@ -5798,6 +5813,12 @@ export function createCallerIdentityPlugin({
     } catch { return null; }
   }
 
+  function deliveredPdfBatch(data) {
+    return data?.delivery?.kind === "knowledge_deliver" && data.delivery.status === "posted" &&
+      Number.isInteger(data.delivered_count) && data.delivered_count > 0 &&
+      data.delivery.delivered_count === data.delivered_count;
+  }
+
   function rememberSearchDelivery(event, ctx, logger) {
     if (!searchDirectEnabled || !searchDirectAllowlist.size || event?.error ||
         !["search", "teamagent__search", "knowledge_deliver", "teamagent__knowledge_deliver"].includes(event?.toolName)) return;
@@ -5805,12 +5826,13 @@ export function createCallerIdentityPlugin({
     if (!runId || (event?.runId && event.runId !== runId) || !connectIngressByRun.has(runId)) return;
     const data = searchResultData(event.result);
     const pdfReceipt = ["knowledge_deliver", "teamagent__knowledge_deliver"].includes(event?.toolName) &&
-      data?.delivery?.kind === "knowledge_deliver" && data.delivery.status === "posted" &&
-      Number.isInteger(data.delivered_count) && data.delivered_count > 0 &&
-      data.delivery.delivered_count === data.delivered_count;
+      deliveredPdfBatch(data);
     const searchReceipt = ["search", "teamagent__search"].includes(event?.toolName) &&
       data?.status === "posted" && data.delivered === true && data.delivery?.kind === "search_direct_answer";
     if (!pdfReceipt && !searchReceipt) return;
+    const evidence = evidenceByRun.get(runId);
+    if (pdfReceipt && (evidence?.otherReplyRequired ||
+        (evidence?.compactModeSeen && !evidence.compactPayload))) return;
     const entry = searchDirectByRun.get(runId) ?? {};
     entry.delivered = true;
     entry.updatedAtMs = now();
@@ -5894,7 +5916,8 @@ export function createCallerIdentityPlugin({
       const grounded = groundEvidenceReply(restoreEvidenceUrls(normalized, evidence?.urls), evidence);
       const sourced = data.direct_delivery.answer_format === "compact"
         ? grounded : appendMissingSearchSources(grounded, evidence?.searchUrls);
-      const text = scrubOutboundReplyText(sourced, connectUrlsByRun.get(runId)?.urls).text
+      const linked = sourced.replace(/\[([^\]\n]+)\]\(<?(https?:\/\/[^\s<>)]+)>?\)/gu, "$1 $2");
+      const text = scrubOutboundReplyText(linked, connectUrlsByRun.get(runId)?.urls).text
         .replace(/<[@!][^>\n]*>/gu, escapeSlackText);
       if (!text.trim()) return;
       await postButtonMessage({channel, threadTs}, {text});
@@ -5917,6 +5940,7 @@ export function createCallerIdentityPlugin({
         payload?.isReasoning === true || payload?.isCommentary === true) return;
     const entry = searchDirectByRun.get(runId);
     if (!entry) return;
+    if (evidenceByRun.get(runId)?.otherReplyRequired) return;
     if (entry.pending) return entry.task.then(() => suppressSearchReply(event, ctx));
     if (entry.delivered || entry.replaced) return {cancel: true, reason: "search answer already delivered"};
     if (entry.failed) {
@@ -6740,10 +6764,14 @@ export function createCallerIdentityPlugin({
           const evidence = authoritative ? evidenceByRun.get(runId) : undefined;
           const session = authoritative ? evidenceSessionKey(runId) : null;
           const urls = evidence?.urls?.size ? evidence.urls : evidenceBySession.get(session)?.urls;
-          if (evidence?.compactAnswer && evidence.compactPayload && evidence.compactPayload !== event.payload) {
+          const finalTextOnly = (event.kind === undefined || event.kind === "final") &&
+            payload.isCommentary !== true && payload.isReasoning !== true &&
+            !payload.mediaUrl && !payload.mediaUrls?.length && !payload.attachments?.length &&
+            !payload.blocks?.length && !payload.files?.length && !payload.channelData;
+          if (finalTextOnly && evidence?.compactAnswer && evidence.compactPayload && evidence.compactPayload !== event.payload) {
             return finishRevisedReply(event, ctx, {...result, cancel: true});
           }
-          const compactText = evidence?.compactAnswer
+          const compactText = finalTextOnly && evidence?.compactAnswer
             ? (finalizeOutgoingText({payload: {...payload, text: evidence.compactAnswer}}, api.logger, runId)?.payload?.text ?? evidence.compactAnswer)
             : null;
           if (compactText) evidence.compactPayload = event.payload;
@@ -6753,7 +6781,7 @@ export function createCallerIdentityPlugin({
           if (payload.text.trim() && !trimmed.trim()) {
             return finishRevisedReply(event, ctx, { ...result, cancel: true });
           }
-          const sourced = authoritative && !evidence?.compactAnswer
+          const sourced = authoritative && !evidence?.compactModeSeen
             ? appendMissingSearchSources(trimmed, evidence?.searchUrls) : trimmed;
           const scrubbed = scrubOutboundReplyText(sourced, replacements);
           if (scrubbed.text !== payload.text) {
