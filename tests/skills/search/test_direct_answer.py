@@ -11,6 +11,12 @@ from teamagent.skills.search.expand import ExpansionResult
 from tests.skills.search.test_campaign_files import _video, _video_campaign
 from tests.skills.search.test_fanout import META, _bedrock, _converse, _vault_hit, make, run
 
+DIRECT_META = {
+    **META,
+    "_search_direct_answer": True,
+    "_search_direct_answer_kinds": ("not_found", "comparison", "list_fast", "video_metrics"),
+}
+
 
 @pytest.fixture(autouse=True)
 def isolated(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -31,7 +37,11 @@ def test_direct_not_found_skips_summary(
     monkeypatch.setenv("USE_SEARCH_FANOUT", "1" if fanout_enabled else "0")
     skill, _ = make([_vault_hit(title="食品の事例")])
     skill._summarize = MagicMock(side_effect=AssertionError("該当なしの要約は禁止"))
-    out = run(skill, query="宅配の事例", meta={**META, "_search_direct_answer": True})
+    out = run(
+        skill,
+        query="宅配の事例",
+        meta=DIRECT_META,
+    )
     assert out.direct_answer_kind == "not_found"
     assert out.direct_answer == out.answer
     assert "宅配の事例は見つかりませんでした" in out.answer
@@ -71,7 +81,11 @@ def test_direct_answer_delivers_summary_before_campaign_evidence(
         if kind == "comparison"
         else "食品のハンバーグは今どうなっている？"
     )
-    out = run(skill, query=query, meta={**META, "_search_direct_answer": True})
+    out = run(
+        skill,
+        query=query,
+        meta=DIRECT_META,
+    )
     assert out.direct_answer_kind == kind
     assert out.direct_answer == out.answer
     assert summary in out.direct_answer
@@ -98,7 +112,11 @@ def test_list_fast_is_an_explicit_direct_answer(monkeypatch: pytest.MonkeyPatch)
     monkeypatch.setenv("SEARCH_FANOUT_LIST_FAST", "1")
     skill, _ = make([_vault_hit(source_uri="gdrive://A")])
     skill._summarize = MagicMock(side_effect=AssertionError("LIST_FASTは要約を省く"))
-    out = run(skill, query="資料を一覧で", meta={**META, "_search_direct_answer": True})
+    out = run(
+        skill,
+        query="資料を一覧で",
+        meta=DIRECT_META,
+    )
     assert out.direct_answer_kind == "list_fast"
     assert out.direct_answer == out.answer
     assert "https://drive.google.com/file/d/A/view" in out.answer
@@ -121,7 +139,7 @@ def test_comparison_request_never_takes_list_fast(
     out = run(
         skill,
         query=f"食品の施策1と施策2を一覧にして、{wording}？",
-        meta={**META, "_search_direct_answer": True},
+        meta=DIRECT_META,
     )
     assert out.direct_answer_kind == "comparison"
     assert out.answer.startswith("# 施策比較表")
@@ -142,7 +160,7 @@ def test_summary_failure_never_posts_campaign_evidence_as_an_answer(
     out = run(
         skill,
         query="食品のハンバーグは今どうなっている？",
-        meta={**META, "_search_direct_answer": True},
+        meta=DIRECT_META,
     )
     skill._summarize.assert_called_once()
     assert out.direct_answer is None and out.direct_answer_kind is None
@@ -164,7 +182,7 @@ def test_empty_summary_never_posts_campaign_totals_as_an_answer(
     out = run(
         skill,
         query="食品のハンバーグは今どうなっている？",
-        meta={**META, "_search_direct_answer": True},
+        meta=DIRECT_META,
     )
     skill._bedrock.converse.assert_called_once()
     assert out.direct_answer is None and out.direct_answer_kind is None

@@ -91,6 +91,7 @@ from teamagent.skills.search.not_found import (
     FoundDecision,
     build_case_not_found_answer,
     build_not_found_answer,
+    build_scoped_not_found_answer,
     case_query_target,
     case_target_hits,
     judge_found,
@@ -108,6 +109,7 @@ from teamagent.skills.search.result_guard import (
 )
 from teamagent.skills.search.schema import (
     RelatedFileOut,
+    SearchDirectAnswerKind,
     SearchHitOut,
     SearchInput,
     SearchOutput,
@@ -594,7 +596,13 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
         # 2. pgvector で類似 chunk を取得（RLS 評価用 user_email を ctx から取得）
         _t = time.perf_counter()
         probe: dict[str, str] | None = (
-            {} if (self._result_guard or self._not_found_answer) else None
+            {}
+            if (
+                self._result_guard
+                or self._not_found_answer
+                or ctx.metadata.get("_search_direct_answer") is True
+            )
+            else None
         )
         hits = self._retrieve(embedding, input, ctx, timings=timings, probe=probe)
         timings["retrieve_ms"] = (time.perf_counter() - _t) * 1000
@@ -613,15 +621,6 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
             timings["alias_ms"] = (time.perf_counter() - _t) * 1000
             found_decision = self._judge_found(input.query, hits, probe)
         found = found_decision.found
-        if not found and self._not_found_answer:
-            log.info(
-                "search_not_found",  # G8: クエリ原文・資料名は出さない
-                request_id=ctx.request_id,
-                reason=found_decision.reason,
-                top_score=hits[0].score if hits else None,
-                hit_count=len(hits),
-                terms=len(found_decision.terms),
-            )
 
         # Slack / 管理シートの本文にある資料名は、全ヒット分をまとめて 1 回だけ
         # Drive URL に解決する。answer と構造化 hits の両方で同じ結果を使い回す。
@@ -716,6 +715,8 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
             if ctx.metadata.get("_search_direct_answer") is True and input.include_answer and found
             else None
         )
+        if not self._direct_answer_allowed(ctx, direct_kind):
+            direct_kind = None
         if input.include_answer and case_miss:
             answer, cost_usd = (
                 build_case_not_found_answer(
@@ -777,12 +778,6 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
         else:
             answer, cost_usd = "", 0.0
 
-        if (
-            ctx.metadata.get("_search_direct_answer") is True
-            and input.include_answer
-            and (case_miss or (not found and not slack_items))
-        ):
-            direct_kind = "not_found"
         if WEAK_RESULT_NOTICE in guard_header:
             direct_kind = None
 
@@ -836,6 +831,48 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
             answer += "\n\n" + scope_footer(
                 searched_queries, slack=slack_lookup, incomplete=retries_incomplete
             )
+
+        complete = (
+            not retries_incomplete
+            and not (probe or {}).get("incomplete")
+            and (
+                slack_lookup is None
+                or (slack_lookup.status == "ok" and not slack_lookup.hidden_count)
+            )
+        )
+        visible_found = found or bool(slack_items)
+        if input.include_answer and not visible_found:
+            if not complete or self._direct_answer_allowed(ctx, "not_found"):
+                scope = "社内資料・施策実績"
+                if slack_lookup is not None:
+                    scope += "・Slack" if slack_lookup.status == "ok" else "（Slackは検索未完了）"
+                answer = build_scoped_not_found_answer(case_target, scope=scope, complete=complete)
+                if not complete:
+                    if slack_lookup is not None and (note := status_note(slack_lookup)):
+                        answer += "\n\n" + note
+                    if show_scope:
+                        answer += "\n\n" + scope_footer(
+                            searched_queries, slack=slack_lookup, incomplete=retries_incomplete
+                        )
+            if complete and self._direct_answer_allowed(ctx, "not_found"):
+                direct_kind = "not_found"
+        logger.info(
+            "search_found_decision",
+            request_id=ctx.request_id,
+            found=visible_found,
+            complete=bool(complete),
+            reason=(
+                "incomplete_search"
+                if not complete
+                else "ok"
+                if visible_found
+                else "case_target_mismatch"
+                if case_miss
+                else found_decision.reason
+            ),
+            hit_count=len(summary_hits) if found else 0,
+            slack_count=len(slack_items),
+        )
 
         # 4. 出力スキーマに整形。資料名解決はヒットごとに一度だけ行い、
         #    正準 URL と配信用の内部ファイル名で同じ結果を使う。
@@ -1076,9 +1113,17 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
         )
         return "\n\n".join(part for part in (answer, footer) if part)
 
+    @staticmethod
+    def _direct_answer_allowed(ctx: SkillContext, kind: SearchDirectAnswerKind | None) -> bool:
+        return (
+            kind is not None
+            and ctx.metadata.get("_search_direct_answer") is True
+            and kind in ctx.metadata.get("_search_direct_answer_kinds", ())
+        )
+
     def _direct_answer_kind(
         self, query: str, hits: list[SearchHit], *, asked_industry: str | None = None
-    ) -> str | None:
+    ) -> SearchDirectAnswerKind | None:
         """📊 は直接投稿の理由に使う。本文は通常と同じ要約経路で組む。"""
         primary = [h for h in hits if not (h.metadata or {}).get("is_related_drive")]
         if comparison_table(query, primary):
@@ -1153,7 +1198,13 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
 
         def search(candidate: SearchInput) -> list[SearchHit]:
             # 接続/RLSは既存の経路へ。probe・timingsを共有せず初回の依頼先を維持する。
-            return self._retrieve(self._embed(candidate.query), candidate, ctx, probe={})
+            retry_probe: dict[str, str] = {}
+            retry_hits = self._retrieve(
+                self._embed(candidate.query), candidate, ctx, probe=retry_probe
+            )
+            if retry_probe.get("incomplete"):
+                raise RuntimeError("incomplete alias retrieval")
+            return retry_hits
 
         executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="search-alias")
         futures = [executor.submit(search, candidate) for candidate in candidates]
@@ -1623,6 +1674,7 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
                     hits=hits,
                     input=input,
                     request_id=ctx.request_id,
+                    probe=probe,
                     filter_industry=eff_industry,
                     metadata_filters=pool_metadata_filters,
                     sticky_filters=sticky,
@@ -1638,6 +1690,7 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
                     hits=hits,
                     input=input,
                     request_id=ctx.request_id,
+                    probe=probe,
                     sticky_filters=sticky,
                     metadata_contains=mc,
                     exclude_recurring=excl_recurring,
@@ -1649,6 +1702,7 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
                     hits=hits,
                     input=input,
                     request_id=ctx.request_id,
+                    probe=probe,
                 )
                 # M1 資料の被り対策。**プール段階（rerank の前）**に噛ませる。
                 # 旧実装は rerank→top_k 後段に置いていたため、最良 doc が 2 chunk に圧縮され
@@ -2015,6 +2069,7 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
         hits: list[SearchHit],
         input: SearchInput,
         request_id: str,
+        probe: dict[str, str] | None = None,
         filter_industry: str | None,
         metadata_filters: dict[str, str] | None = None,
         sticky_filters: dict[str, str] | None = None,
@@ -2064,6 +2119,8 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
             seen = {h.chunk_id for h in hits}
             added = [h for h in extra if h.chunk_id not in seen]
         except Exception as exc:  # 補助検索の失敗で検索本体を壊さない（fail-open）
+            if probe is not None:
+                probe["incomplete"] = "true"
             logger.warning(
                 "search_drive_floor_failed",
                 request_id=request_id,
@@ -2090,6 +2147,7 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
         hits: list[SearchHit],
         input: SearchInput,
         request_id: str,
+        probe: dict[str, str] | None = None,
         sticky_filters: dict[str, str] | None = None,
         metadata_contains: dict[str, str] | None = None,
         exclude_recurring: bool = False,
@@ -2157,6 +2215,8 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
             seen = {h.chunk_id for h in hits}
             added = [h for h in extra if h.chunk_id not in seen]
         except Exception as exc:  # 補助検索の失敗で検索本体を壊さない（fail-open）
+            if probe is not None:
+                probe["incomplete"] = "true"
             logger.warning(
                 "search_campaign_floor_failed",
                 request_id=request_id,
@@ -2184,6 +2244,7 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
         hits: list[SearchHit],
         input: SearchInput,
         request_id: str,
+        probe: dict[str, str] | None = None,
     ) -> list[SearchHit]:
         """決まった案件を聞かれたとき、案件決定（topic=案件決定）を rerank プールへ足す。
 
@@ -2230,6 +2291,8 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
                 else []
             )
         except Exception as exc:  # 補助検索の失敗で検索本体を壊さない（fail-open）
+            if probe is not None:
+                probe["incomplete"] = "true"
             logger.warning(
                 "search_deal_floor_failed", request_id=request_id, error=type(exc).__name__
             )

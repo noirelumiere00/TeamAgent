@@ -168,7 +168,7 @@ def assert_current_contract:
      then . else fail("only exact tmp and EFS state mounts are approved") end |
   assert_unique_names(($container.environment // []); "environment") |
   if (($container.environment // [] | map(.name) |
-       . - ["SEARCH_DIRECT_ANSWER", "SEARCH_DIRECT_ANSWER_ALLOWED_EMAILS"] | sort) ==
+       . - ["SEARCH_DIRECT_ANSWER", "SEARCH_DIRECT_ANSWER_ALLOWED_EMAILS", "SEARCH_DIRECT_ANSWER_KINDS"] | sort) ==
       ["AWS_REGION", "SLACK_DM_ALLOWLIST", "SLACK_TEAM_ID", "TMPDIR"])
      then . else fail("environment must contain exact runtime and Slack inputs") end |
   if ($container.environment // []) |
@@ -184,7 +184,7 @@ def assert_current_contract:
            (.value | valid_slack_dm_allowlist)
          ) or
          (
-           (.name == "SEARCH_DIRECT_ANSWER" or .name == "SEARCH_DIRECT_ANSWER_ALLOWED_EMAILS") and
+           (.name == "SEARCH_DIRECT_ANSWER" or .name == "SEARCH_DIRECT_ANSWER_ALLOWED_EMAILS" or .name == "SEARCH_DIRECT_ANSWER_KINDS") and
            (.value | type == "string")
          )
        )

@@ -49,6 +49,7 @@ def isolated(monkeypatch: pytest.MonkeyPatch) -> None:
     for env in (
         "SEARCH_DIRECT_ANSWER",
         "SEARCH_DIRECT_ANSWER_ALLOWED_EMAILS",
+        "SEARCH_DIRECT_ANSWER_KINDS",
         video.ENABLED_ENV,
         video.ALLOWED_EMAILS_ENV,
         "ENABLE_PROGRESS_NOTIFY",
@@ -63,6 +64,7 @@ def isolated(monkeypatch: pytest.MonkeyPatch) -> None:
 def enable(monkeypatch: pytest.MonkeyPatch, emails: str = ME) -> None:
     monkeypatch.setenv("SEARCH_DIRECT_ANSWER", "1")
     monkeypatch.setenv("SEARCH_DIRECT_ANSWER_ALLOWED_EMAILS", emails)
+    monkeypatch.setenv("SEARCH_DIRECT_ANSWER_KINDS", "not_found,comparison,list_fast,video_metrics")
 
 
 async def dispatch(
@@ -104,6 +106,7 @@ async def test_confirmed_search_answer_is_delivered_once_with_suppression_marker
     assert result["answer"] == STUB
     assert result["status"] == "posted" and result["delivered"] is True
     assert result["delivery"] == {"kind": "search_direct_answer", "answer_kind": kind}
+    assert result["direct_delivery"] == {"answer_kind": kind, "answer": answer}
     assert "hits" not in result
     if kind == "video_metrics":
         assert result["video_metrics_evidence"]["text"] == SECTION
@@ -225,3 +228,57 @@ async def test_signed_gateway_runs_real_search_and_posts_canonical_campaign_once
     assert "https://drive.google.com/file/d/CAMPAIGN_SHEET/view" in slack.posts[0]["text"]
     assert "進めますか" not in slack.posts[0]["text"]
     skill._bedrock.converse.assert_called_once()
+
+
+@pytest.mark.parametrize("kinds", [None, "", "unknown", "not_found,unknown", ","])
+async def test_missing_empty_or_unknown_kinds_deny_all_direct_delivery(
+    monkeypatch: pytest.MonkeyPatch, kinds: str | None
+) -> None:
+    enable(monkeypatch)
+    if kinds is None:
+        monkeypatch.delenv("SEARCH_DIRECT_ANSWER_KINDS")
+    else:
+        monkeypatch.setenv("SEARCH_DIRECT_ANSWER_KINDS", kinds)
+    monkeypatch.setenv(video.ENABLED_ENV, "1")
+    monkeypatch.setenv(video.ALLOWED_EMAILS_ENV, ME)
+    posts: list[Any] = []
+    monkeypatch.setattr(detached_jobs, "post_to_origin_status", lambda *a, **kw: posts.append(a))
+    for kind, answer in (
+        ("not_found", "宅配の事例は見つかりませんでした。"),
+        ("video_metrics", ANSWER),
+    ):
+        result = await dispatch(kind, answer)
+        assert "direct_delivery" not in result
+        assert result.get("delivered") is not True
+    assert posts == []
+
+
+@pytest.mark.parametrize("kind", ["comparison", "list_fast", "video_metrics"])
+async def test_not_found_only_blocks_other_kinds_and_legacy_partial_post(
+    monkeypatch: pytest.MonkeyPatch, kind: str
+) -> None:
+    enable(monkeypatch)
+    monkeypatch.setenv("SEARCH_DIRECT_ANSWER_KINDS", "not_found")
+    monkeypatch.setenv(video.ENABLED_ENV, "1")
+    monkeypatch.setenv(video.ALLOWED_EMAILS_ENV, ME)
+    posts: list[Any] = []
+    monkeypatch.setattr(detached_jobs, "post_to_origin_status", lambda *a, **kw: posts.append(a))
+    result = await dispatch(kind, ANSWER)
+    assert "direct_delivery" not in result
+    assert result["answer"] == ANSWER + "\nモデル向けの旧要約。"
+    assert posts == []
+
+
+async def test_verified_candidate_survives_no_mcp_post_for_zero_tool_delivery(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from teamagent.mcp_gateway import direct_search_answer
+
+    enable(monkeypatch)
+    monkeypatch.setenv("SEARCH_DIRECT_ANSWER_KINDS", "not_found")
+    monkeypatch.setattr(direct_search_answer, "deliver", lambda *a, **kw: None)
+    result = await dispatch()
+    assert result["direct_delivery"] == {
+        "answer_kind": "not_found",
+        "answer": "宅配の事例は見つかりませんでした。",
+    }
