@@ -61,9 +61,6 @@ PRIORITY_AUTO = 0
 # 登録簿の項目の寿命（実行開始から）。処理中リース（既定 1800 秒）より長くとる。
 STALE_AFTER_S = 45 * 60.0
 
-# 受付文の目安（5 本で 9 分前後の実測に合わせた概算）。
-ETA_MINUTES = 10
-
 # 1 対 1 DM の channel_id（personal_memory/gate.py と同じ判定・strip しない）。
 _DM_CHANNEL_RE = re.compile(r"D[A-Z0-9]{8,}")
 # Slack の message ts（例: 1784424000.000001）。チャンネル直下の依頼をスレッドにする時だけ使う。
@@ -234,7 +231,7 @@ def inflight_key(slack_user_id: str, query: str) -> str:
 def receipt_text(query: str) -> str:
     return (
         f"🔎 「{query}」の動画分析を続けています。"
-        f"終わったらこの会話にお届けします（目安 {ETA_MINUTES} 分）。"
+        "終わったらこの会話にお届けします。"
     )
 
 

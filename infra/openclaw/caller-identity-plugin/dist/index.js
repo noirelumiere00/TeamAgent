@@ -13,6 +13,29 @@ const CLAIM_TTL_SECONDS = 60;
 const INBOUND_CONTEXT_TTL_MS = 10 * 60 * 1000;
 const ACTION_CONTEXT_TTL_MS = 5 * 60 * 1000;
 const MAX_TRACKED_CONTEXTS = 1000;
+const VIDEO_REQUEST_TTL_MS = 45 * 60 * 1000;
+const HEAVY_VIDEO_TOOLS = new Set([
+  "video_algorithm", "video_analysis", "tiktok_acquire", "search_surface_check",
+]);
+
+function videoQueryHash(query) {
+  return createHash("sha256").update(String(query ?? "").normalize("NFKC")
+    .toLowerCase().trim().replace(/\s+/gu, " "), "utf8").digest("hex");
+}
+
+function explicitVideoQuerySlots(content) {
+  if (typeof content !== "string" || !/(?:複数|それぞれ|各(?:KW|キーワード)|[2-9２-９](?:個|つ|KW|キーワード))/u.test(content) ||
+      !/(?:分析|解析|調べ|比較)/u.test(content)) return [];
+  const labels = [...content.slice(0, 4096).matchAll(/[「『"]([^」』"\n]{1,120})[」』"]/gu)]
+    .map(match => videoQueryHash(match[1]));
+  const slots = [...new Set(labels)].slice(0, 10);
+  return slots.length > 1 ? slots : [];
+}
+
+function explicitlyRequestsFreshVideoAnalysis(content) {
+  if (typeof content !== "string") return false;
+  return explicitVideoQuerySlots(content).length > 1 || /(?:動画|映像)(?:自体|そのもの)?を(?:見て|観て|視聴して|分析して|解析して)|実(?:映像|際の動画).{0,12}(?:見て|観て|視聴して|分析して)|(?:動画|TikTok).{0,32}(?:取得して|集めて|収集して)|(?:競合|市場|検索KW|検索キーワード).{0,32}上位動画.{0,16}(?:分析して|比較して)/iu.test(content);
+}
 const TEAMAGENT_TOOL_PREFIX = "teamagent__";
 const USER_CONTEXT_KEY = "_user_context";
 const CLAIM_FIELD = "caller_claim";
@@ -2660,6 +2683,8 @@ export function createCallerIdentityPlugin({
   const ingressByRun = new Map();
   const rejectedRuns = new Map();
   const consumedInvocations = new Map();
+  // 同じ受信を query の言い換えや別 run で二重起動させない。署名成功後だけ記録する。
+  const videoRequestsByMessage = new Map();
   const toolCallsByRun = new Map();
   const connectRevisionsByRun = new Map();
   // 動画 URL × 0 tool call の層2 の予算（1 run につき revise は 1 回）。連携とは別の台帳。
@@ -3017,6 +3042,12 @@ export function createCallerIdentityPlugin({
   }
 
   function pruneConnectGuardState(nowMs) {
+    for (const [key, atMs] of videoRequestsByMessage) {
+      if (nowMs - atMs > VIDEO_REQUEST_TTL_MS) videoRequestsByMessage.delete(key);
+    }
+    while (videoRequestsByMessage.size > MAX_TRACKED_CONTEXTS) {
+      videoRequestsByMessage.delete(videoRequestsByMessage.keys().next().value);
+    }
     for (const ledger of [
       evidenceByRun,
       evidenceBySession,
@@ -3211,6 +3242,7 @@ export function createCallerIdentityPlugin({
           existing.videoRequestIntent = ingress.videoRequestIntent === true;
         }
         if (ingress.searchRequired) existing.searchRequired = ingress.searchRequired;
+        if (ingress.videoAnalysisQuerySlots?.length) existing.videoAnalysisQuerySlots = ingress.videoAnalysisQuerySlots;
         // 再通知でも抑止用台帳を確実に持つ（agent_end 後に ingressByRun 側が消えた後、
         // 同じ受信の再通知が来る順序でも判定が失われないように）。
         rememberConnectIngress(runId, existing);
@@ -3361,7 +3393,9 @@ export function createCallerIdentityPlugin({
       connectShape,
       videoUrlKind,
       videoRequestIntent,
+      videoAnalysisQuerySlots: explicitVideoQuerySlots(event?.content),
       searchRequired: typeof event?.content === "string" && (
+        explicitlyRequestsFreshVideoAnalysis(event.content) ? null :
         /比較|何が効|どっちが|どちらが|勝ち|効果/u.test(event.content) ? "comparison" :
         /ビデオリリース|\bTTO\b|切り抜き|\bVVS\b|タテガタ|ショートドラマ|スワイプ\s*LP|ソリューションプラン|\bVSEO\b|検索面|お土産資料|ケイパ|感触|BANT|営業\s*FB|カルテ|二次利用費/iu.test(event.content)
           ? "internal_term" : /元の資料|根拠|資料を(?:もと|基)に|ソース/u.test(event.content)
@@ -3387,6 +3421,9 @@ export function createCallerIdentityPlugin({
       ingress.videoRequestIntent = existing.videoRequestIntent === true;
     }
     if (existing?.searchRequired && !ingress.searchRequired) ingress.searchRequired = existing.searchRequired;
+    if (existing?.videoAnalysisQuerySlots?.length && !ingress.videoAnalysisQuerySlots.length) {
+      ingress.videoAnalysisQuerySlots = existing.videoAnalysisQuerySlots;
+    }
     if (searchDirectEnabled && typeof event?.content === "string" && event.content.trim()) {
       searchQueryByPending.set(pendingKey, {query: event.content.slice(0, 4096), updatedAtMs: nowMs});
     }
@@ -5291,6 +5328,22 @@ export function createCallerIdentityPlugin({
       );
     }
 
+    if (trusted.searchRequired === "comparison" && HEAVY_VIDEO_TOOLS.has(tool)) {
+      return {block: true, blockReason:
+        "既存施策の比較は teamagent__search を使い、取得済みの数字と投稿文で答えてください。新しい動画分析は開始しないでください。"};
+    }
+    const videoSlot = trusted.videoAnalysisQuerySlots?.length ? videoQueryHash(params.query) : null;
+    if (tool === "video_algorithm" && videoSlot && !trusted.videoAnalysisQuerySlots.includes(videoSlot)) {
+      return {block: true, blockReason: "依頼者が指定した各キーワードをそのまま query に使ってください。"};
+    }
+    const videoRequestKey = tool === "video_algorithm" && trusted.ingressKind === "message"
+      ? JSON.stringify([trusted.teamId, trusted.senderId, trusted.sessionKey,
+        trusted.channelId, trusted.messageId, videoSlot]) : null;
+    if (videoRequestKey && videoRequestsByMessage.has(videoRequestKey)) {
+      return {block: true, blockReason:
+        "この依頼の動画分析は既に受け付けています。検索語を変えて再起動せず、先の受付・結果を使ってください。"};
+    }
+
     const nonceBytes =
       trusted.ingressKind === "action"
         ? actionNonceBytes(trusted.actionFingerprint)
@@ -5326,6 +5379,7 @@ export function createCallerIdentityPlugin({
       runId: eventRunId,
       consumedAtMs: nowMs,
     });
+    if (videoRequestKey) videoRequestsByMessage.set(videoRequestKey, nowMs);
     // 第3層の権威条件 (a): この run で teamagent tool call が発生したことの記録。
     const priorToolCalls = toolCallsByRun.get(eventRunId)?.count ?? 0;
     // Map の挿入順は既存キーへの再 set では更新されない（実測）。
@@ -5676,8 +5730,11 @@ export function createCallerIdentityPlugin({
     const runId = authoritativeRunId(event, ctx, logger, "before_agent_finalize");
     if (!runId) return undefined;
     const ingress = connectIngressByRun.get(runId);
+    const searched = evidenceByRun.get(runId)?.searchCompleted === true;
+    const unrelatedToolSatisfies = ingress?.searchRequired !== "comparison" &&
+      ((toolCallsByRun.get(runId)?.count ?? 0) > 0 || evidenceByRun.has(runId));
     if (!ingress?.searchRequired || ingress.connectRequest ||
-        (toolCallsByRun.get(runId)?.count ?? 0) > 0 || evidenceByRun.has(runId) ||
+        searched || unrelatedToolSatisfies ||
         typeof event?.lastAssistantMessage !== "string" || !event.lastAssistantMessage.trim() ||
         searchRevisionsByRun.has(runId) ||
         connectRevisionsByRun.has(runId) || videoRevisionsByRun.has(runId)) return undefined;
