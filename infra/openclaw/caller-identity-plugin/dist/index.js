@@ -5811,6 +5811,8 @@ export function createCallerIdentityPlugin({
     const runId = canonicalInvocationId(ctx?.runId);
     if (!runId || (event?.runId && event.runId !== runId)) return;
     const ingress = connectIngressByRun.get(runId);
+    if (!ingress || (!SLACK_DM_CHANNEL_RE.test(ingress.channelId) &&
+        ingress.channelId !== `DM:${ingress.senderId}`)) return;
     const entry = ingress && searchQueryByPending.get(ingress.pendingKey);
     if (!entry || !Array.isArray(event?.messages) || !event.messages.length) return;
     // Earlier user turns carry client/campaign names; assistant guesses are not search inputs.

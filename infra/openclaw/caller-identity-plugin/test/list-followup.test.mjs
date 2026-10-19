@@ -4,10 +4,12 @@ import {createCallerIdentityPlugin} from '../dist/index.js';
 
 const sheet = 'https://docs.google.com/spreadsheets/d/campaign-actual/edit';
 const rows = `📋 伊藤ハム ショート動画実績\n- 動画A：再生507,700、保存127 <${sheet}|施策シート>`;
-function setup({direct = true} = {}) {
+function setup({direct = true, shared = false} = {}) {
   const hooks = new Map(), calls = [], posts = [];
-  const ctx = {runId: 'previous-run', sessionKey: 'agent:teamagent:slack:direct:u12345678',
-    senderId: 'U12345678', channelId: 'U12345678'};
+  const conversation = shared ? 'channel:C12345678' : 'user:U12345678';
+  const ctx = {runId: 'previous-run', sessionKey: shared
+    ? 'agent:teamagent:slack:channel:c12345678' : 'agent:teamagent:slack:direct:u12345678',
+    senderId: 'U12345678', channelId: shared ? 'C12345678' : 'U12345678'};
   createCallerIdentityPlugin({env: {
     TEAMAGENT_CALLER_CLAIM_SECRET: 'x'.repeat(48), SLACK_TEAM_ID: 'T07MU5P2PBR',
     TEAMAGENT_MCP_BEARER: 'test-bearer', SLACK_BOT_TOKEN: 'test-token',
@@ -31,8 +33,8 @@ function setup({direct = true} = {}) {
     on: (name, fn) => hooks.set(name, fn)});
   const receive = (content, messageId) => hooks.get('message_received')({
     content, senderId: ctx.senderId, messageId, runId: ctx.runId,
-    metadata: {guildId: 'T07MU5P2PBR', to: `user:${ctx.senderId}`}},
-  {...ctx, channelId: 'slack', conversationId: `user:${ctx.senderId}`, messageId});
+    metadata: {guildId: 'T07MU5P2PBR', to: conversation}},
+  {...ctx, channelId: 'slack', conversationId: conversation, messageId});
   const call = (tool, id, params = {}) => hooks.get('before_tool_call')({
     toolName: `teamagent__${tool}`, toolCallId: id, runId: ctx.runId, params},
   {...ctx, toolName: `teamagent__${tool}`, toolCallId: id});
@@ -41,10 +43,11 @@ function setup({direct = true} = {}) {
     '前の回答：再生数999,999、保存数888'}}, ctx);
   hooks.get('agent_end')({runId: ctx.runId}, ctx);
   ctx.runId = 'list-run';
-  const followup = async (query = '一覧で出して') => {
+  const followup = async (query = '一覧で出して', history = []) => {
     receive(query, '1792041601.123456');
     await hooks.get('before_prompt_build')({runId: ctx.runId, messages: [
       {role: 'user', content: '伊藤ハムのハンバーグの施策は今どうなっている？'},
+      ...history,
       {role: 'assistant', content: '根拠のない別施策と999,999再生'},
       {role: 'user', content: query},
     ]}, ctx);
@@ -87,4 +90,16 @@ test('list comparison still follows the lightweight comparison path', async () =
   const p = setup({direct: false});
   await p.followup('一覧で比較して、何が効いた？');
   assert.equal(p.call('video_algorithm', 'heavy', {query: '伊藤ハム'})?.block, true);
+});
+
+test('shared-channel list searches preserve the requested client instead of importing other participants', async () => {
+  const p = setup({direct: false, shared: true});
+  await p.followup('一覧で出して', [{role: 'user', content: 'HARIASの資料を確認したい'}]);
+  assert.equal(p.finalize()?.action, 'revise');
+  const requested = '伊藤ハムのハンバーグの施策を一覧で';
+  const out = p.call('search', 'channel-list', {query: requested});
+  assert.ok(out?.params?._user_context?.caller_claim);
+  assert.equal(out.params._user_context.channel_id, 'C12345678');
+  assert.equal(out.params.query, requested);
+  assert.doesNotMatch(out.params.query, /HARIAS/);
 });
