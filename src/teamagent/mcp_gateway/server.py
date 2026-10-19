@@ -1587,12 +1587,7 @@ async def dispatch_tool(
                 return [TextContent(type="text", text=json.dumps(posted, ensure_ascii=False))]
             if posted is not None:
                 data["delivery"] = posted["delivery"]
-    if (
-        name == SEARCH_TOOL_NAME
-        and isinstance(data, dict)
-        and not search_direct_attempted
-        and (search_direct_destination is None or "video_metrics" in search_direct_kinds)
-    ):
+    if name == SEARCH_TOOL_NAME and isinstance(data, dict) and not search_direct_attempted:
         await asyncio.to_thread(
             direct_video_metrics.maybe_post,
             data,

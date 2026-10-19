@@ -574,16 +574,17 @@ def run_fanout(skill: Any, input: SearchInput, ctx: SkillContext) -> SearchOutpu
         and not slack.hidden_count
     )
     visible_found = bool(found or slack.items or cases.items or karte.items or named)
+    # 本人限定フラグ（種類 not_found）が ON のときだけ短文にする。OFF は従来の文。
     negative_short = (
         input.include_answer
         and not visible_found
-        and (not complete or skill._direct_answer_allowed(ctx, "not_found"))
+        and skill._direct_answer_allowed(ctx, "not_found")
     )
     if negative_short:
         scope = "社内資料・施策実績"
         scope += "・Slack" if slack.status == "ok" else "（Slackは検索未完了）"
         head = build_scoped_not_found_answer(case_target, scope=scope, complete=complete)
-        if complete and skill._direct_answer_allowed(ctx, "not_found"):
+        if complete:
             direct_kind = "not_found"
     elif case_miss:
         failed_lanes = {key: status for key, status in lanes.items() if status.kind == "failed"}

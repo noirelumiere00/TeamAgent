@@ -841,20 +841,24 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
             )
         )
         visible_found = found or bool(slack_items)
-        if input.include_answer and not visible_found:
-            if not complete or self._direct_answer_allowed(ctx, "not_found"):
-                scope = "社内資料・施策実績"
-                if slack_lookup is not None:
-                    scope += "・Slack" if slack_lookup.status == "ok" else "（Slackは検索未完了）"
-                answer = build_scoped_not_found_answer(case_target, scope=scope, complete=complete)
-                if not complete:
-                    if slack_lookup is not None and (note := status_note(slack_lookup)):
-                        answer += "\n\n" + note
-                    if show_scope:
-                        answer += "\n\n" + scope_footer(
-                            searched_queries, slack=slack_lookup, incomplete=retries_incomplete
-                        )
-            if complete and self._direct_answer_allowed(ctx, "not_found"):
+        # 本人限定フラグ（種類 not_found）が ON のときだけ短文にする。OFF は従来の文。
+        if (
+            input.include_answer
+            and not visible_found
+            and self._direct_answer_allowed(ctx, "not_found")
+        ):
+            scope = "社内資料・施策実績"
+            if slack_lookup is not None:
+                scope += "・Slack" if slack_lookup.status == "ok" else "（Slackは検索未完了）"
+            answer = build_scoped_not_found_answer(case_target, scope=scope, complete=complete)
+            if not complete:
+                if slack_lookup is not None and (note := status_note(slack_lookup)):
+                    answer += "\n\n" + note
+                if show_scope:
+                    answer += "\n\n" + scope_footer(
+                        searched_queries, slack=slack_lookup, incomplete=retries_incomplete
+                    )
+            if complete:
                 direct_kind = "not_found"
         logger.info(
             "search_found_decision",

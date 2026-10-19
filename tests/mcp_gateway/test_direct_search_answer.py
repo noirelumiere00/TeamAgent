@@ -239,8 +239,6 @@ async def test_missing_empty_or_unknown_kinds_deny_all_direct_delivery(
         monkeypatch.delenv("SEARCH_DIRECT_ANSWER_KINDS")
     else:
         monkeypatch.setenv("SEARCH_DIRECT_ANSWER_KINDS", kinds)
-    monkeypatch.setenv(video.ENABLED_ENV, "1")
-    monkeypatch.setenv(video.ALLOWED_EMAILS_ENV, ME)
     posts: list[Any] = []
     monkeypatch.setattr(detached_jobs, "post_to_origin_status", lambda *a, **kw: posts.append(a))
     for kind, answer in (
@@ -254,13 +252,12 @@ async def test_missing_empty_or_unknown_kinds_deny_all_direct_delivery(
 
 
 @pytest.mark.parametrize("kind", ["comparison", "list_fast", "video_metrics"])
-async def test_not_found_only_blocks_other_kinds_and_legacy_partial_post(
+async def test_not_found_only_blocks_other_kinds(
     monkeypatch: pytest.MonkeyPatch, kind: str
 ) -> None:
+    # 📊 の旧部分配送は別フラグ（USE_DIRECT_VIDEO_METRICS_POST）の機能なので、ここでは OFF のまま種類ゲートだけを見る。
     enable(monkeypatch)
     monkeypatch.setenv("SEARCH_DIRECT_ANSWER_KINDS", "not_found")
-    monkeypatch.setenv(video.ENABLED_ENV, "1")
-    monkeypatch.setenv(video.ALLOWED_EMAILS_ENV, ME)
     posts: list[Any] = []
     monkeypatch.setattr(detached_jobs, "post_to_origin_status", lambda *a, **kw: posts.append(a))
     result = await dispatch(kind, ANSWER)
@@ -282,3 +279,18 @@ async def test_verified_candidate_survives_no_mcp_post_for_zero_tool_delivery(
         "answer_kind": "not_found",
         "answer": "宅配の事例は見つかりませんでした。",
     }
+
+
+async def test_not_found_only_keeps_the_separate_video_metrics_post(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """種類を not_found に絞っても、別フラグで本人だけ ON の 📊 部分配送は止めない（r54 からの本番機能）。"""
+    enable(monkeypatch)
+    monkeypatch.setenv("SEARCH_DIRECT_ANSWER_KINDS", "not_found")
+    monkeypatch.setenv(video.ENABLED_ENV, "1")
+    monkeypatch.setenv(video.ALLOWED_EMAILS_ENV, ME)
+    posts: list[Any] = []
+    monkeypatch.setattr(detached_jobs, "post_to_origin_status", lambda *a, **kw: posts.append(a))
+    result = await dispatch("video_metrics", ANSWER)
+    assert "direct_delivery" not in result
+    assert len(posts) == 1

@@ -500,8 +500,7 @@ def test_vault_weak_and_slack_failed_is_not_found_and_cannot_search() -> None:
     skill, _ = _skill(b, _pg([_vault_hit()]), client=_slack_client(error="ratelimited"))
     out = skill.run(SearchInput(query="x"), SkillContext(metadata=dict(MCP, channel_id="D1")))
     assert out.found is False
-    assert "確認できませんでした" in out.answer
-    assert NOT_FOUND_HEAD not in out.answer
+    assert out.answer.startswith(NOT_FOUND_HEAD)
     assert out.answer.split("\n\n探した範囲:", 1)[0].endswith(STATUS_NOTES["error"])
     assert out.answer.endswith("・Slack は確認できませんでした")
 
