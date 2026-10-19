@@ -135,7 +135,7 @@
       "source_assertions": [
         {
           "key": "artifact.apk-lock.sha256",
-          "value": "29f959f66055501072b196c649012b2239a9f5e3b9e307ca68a06006e6c6540e",
+          "value": "7a917a661038aa7c4b01735e58d5ede39fdc8b93f7698f18a30d235cb94c9718",
           "build_arg": "MEDIA_APK_LOCK_SHA256",
           "oci_label": "io.teamagent.contract.apk-lock-sha256",
           "dockerfile_uses": [
