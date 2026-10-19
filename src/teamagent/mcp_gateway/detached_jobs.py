@@ -229,10 +229,7 @@ def inflight_key(slack_user_id: str, query: str) -> str:
 
 
 def receipt_text(query: str) -> str:
-    return (
-        f"🔎 「{query}」の動画分析を続けています。"
-        "終わったらこの会話にお届けします。"
-    )
+    return f"🔎 「{query}」の動画分析を続けています。終わったらこの会話にお届けします。"
 
 
 def queued_receipt_text(query: str) -> str:
