@@ -2772,6 +2772,13 @@ export function createCallerIdentityPlugin({
       }
     }
     collect(event.result);
+    if (searchDirectEnabled && ["search", "teamagent__search"].includes(event?.toolName)) {
+      const data = searchResultData(event.result);
+      // Only the trusted MCP envelope defines the final format; retrieved contents cannot opt in.
+      entry.compactAnswer = data?.answer_format === "compact" &&
+        typeof data.answer === "string" && data.answer.trim() && data.answer.length <= 2500
+        ? data.answer : null;
+    }
     if (entry.searchCompleted && ["search", "teamagent__search"].includes(event?.toolName)) {
       entry.searchUrls = new Set();
       collectSearchSourceUrls(event.result, entry.searchUrls);
@@ -5880,7 +5887,8 @@ export function createCallerIdentityPlugin({
       const normalized = finalizeOutgoingText({payload: {text: data.direct_delivery.answer}}, logger, runId)?.payload?.text ?? data.direct_delivery.answer;
       const evidence = evidenceByRun.get(runId);
       const grounded = groundEvidenceReply(restoreEvidenceUrls(normalized, evidence?.urls), evidence);
-      const sourced = appendMissingSearchSources(grounded, evidence?.searchUrls);
+      const sourced = data.direct_delivery.answer_format === "compact"
+        ? grounded : appendMissingSearchSources(grounded, evidence?.searchUrls);
       const text = scrubOutboundReplyText(sourced, connectUrlsByRun.get(runId)?.urls).text
         .replace(/<[@!][^>\n]*>/gu, escapeSlackText);
       if (!text.trim()) return;
@@ -6727,13 +6735,21 @@ export function createCallerIdentityPlugin({
           const evidence = authoritative ? evidenceByRun.get(runId) : undefined;
           const session = authoritative ? evidenceSessionKey(runId) : null;
           const urls = evidence?.urls?.size ? evidence.urls : evidenceBySession.get(session)?.urls;
-          const restored = restoreEvidenceUrls(payload.text, urls);
+          if (evidence?.compactAnswer && evidence.compactPayload && evidence.compactPayload !== event.payload) {
+            return finishRevisedReply(event, ctx, {...result, cancel: true});
+          }
+          const compactText = evidence?.compactAnswer
+            ? (finalizeOutgoingText({payload: {...payload, text: evidence.compactAnswer}}, api.logger, runId)?.payload?.text ?? evidence.compactAnswer)
+            : null;
+          if (compactText) evidence.compactPayload = event.payload;
+          const restored = restoreEvidenceUrls(compactText ?? payload.text, urls);
           if (restored !== payload.text) emitPluginLog(api.logger, "info", "outbound URL restored diagnostic=CONNECT-Z04");
           const trimmed = authoritative ? groundEvidenceReply(restored, evidence) : restored;
           if (payload.text.trim() && !trimmed.trim()) {
             return finishRevisedReply(event, ctx, { ...result, cancel: true });
           }
-          const sourced = authoritative ? appendMissingSearchSources(trimmed, evidence?.searchUrls) : trimmed;
+          const sourced = authoritative && !evidence?.compactAnswer
+            ? appendMissingSearchSources(trimmed, evidence?.searchUrls) : trimmed;
           const scrubbed = scrubOutboundReplyText(sourced, replacements);
           if (scrubbed.text !== payload.text) {
             const { signedUrls, toolNames, urlSeparators, unverifiedConnectUrls = 0 } = scrubbed.counts;

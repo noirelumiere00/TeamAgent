@@ -298,7 +298,13 @@ class SlackHitOut(BaseModel):
 
 
 # 値が None のときはツール結果から落とすキー（複合検索 OFF のとき出力を 1 バイトも変えないため）。
-_OMIT_WHEN_NONE: tuple[str, ...] = ("slack_hits", "slack_status", "suggested_next", "sources")
+_OMIT_WHEN_NONE: tuple[str, ...] = (
+    "slack_hits",
+    "slack_status",
+    "suggested_next",
+    "sources",
+    "answer_format",
+)
 
 
 SearchDirectAnswerKind = Literal["not_found", "comparison", "list_fast", "video_metrics"]
@@ -308,6 +314,7 @@ class SearchOutput(BaseModel):
     """検索 Skill の出力。"""
 
     answer: str = Field(description="Claude による要約（引用付き）")
+    answer_format: Literal["compact", "list"] | None = None
     direct_answer: str | None = Field(default=None, exclude=True)
     direct_answer_kind: SearchDirectAnswerKind | None = Field(default=None, exclude=True)
     hits: list[SearchHitOut] = Field(default_factory=list, description="検索ヒット一覧")

@@ -208,8 +208,8 @@ async def test_signed_gateway_runs_real_search_and_posts_canonical_campaign_once
     campaign.metadata["source_uri"] = "gdrive://CAMPAIGN_SHEET"
     skill, _ = _skill(_bedrock(), _pg([campaign]))
     monkeypatch.setattr(skill, "_attach_campaign_files", lambda *a: None)
-    summary = "施策は完了し、商談は検討中です。11月に連絡予定です。"
-    skill._bedrock.converse.return_value = _converse(summary)
+    summary = "施策は完了し、商談は検討中です。"
+    skill._bedrock.converse.return_value = _converse(summary + f"[S:{campaign.chunk_id}]")
     slack = _FakeSlack()
     monkeypatch.setattr(detached_jobs, "_slack_client", lambda timeout_seconds: slack)
     result = await server.dispatch_tool(
@@ -224,7 +224,8 @@ async def test_signed_gateway_runs_real_search_and_posts_canonical_campaign_once
     assert payload["delivery"]["answer_kind"] == "video_metrics"
     assert len(slack.posts) == 1
     assert slack.posts[0]["text"].startswith(summary)
-    assert "いいね 合計 2,844・保存 合計 310" in slack.posts[0]["text"]
+    assert "施策の反応合計" not in slack.posts[0]["text"]
+    assert "📊" not in slack.posts[0]["text"]
     assert "https://drive.google.com/file/d/CAMPAIGN_SHEET/view" in slack.posts[0]["text"]
     assert "進めますか" not in slack.posts[0]["text"]
     skill._bedrock.converse.assert_called_once()
