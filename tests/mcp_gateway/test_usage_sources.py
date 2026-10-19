@@ -108,9 +108,9 @@ def test_clientkarte_records_event_chunk_ids() -> None:
     }
 
 
-def test_no_hits_adds_nothing() -> None:
+def test_no_hits_retains_explicit_found_only() -> None:
     output = SearchOutput(answer="該当する資料は見つかりませんでした", hits=[], total_cost_usd=0.0)
-    assert source_usage_metadata("search", output) == {}
+    assert source_usage_metadata("search", output) == {"found": True}
     # ID が 1 つも取れないヒットだけでも足さない
     assert source_usage_metadata("search", {"answer": "x", "hits": [{"content": "本文"}]}) == {}
 
@@ -150,3 +150,9 @@ def test_answer_not_string_is_omitted_but_sources_kept() -> None:
 def test_long_ids_are_capped() -> None:
     metadata = source_usage_metadata("search", {"hits": [{"external_id": "x" * 1000}]})
     assert len(metadata["source_ids"][0]["external_id"]) == 200
+
+
+def test_search_not_found_is_recorded_even_without_sources() -> None:
+    output = SearchOutput(answer="見つかりませんでした", hits=[], found=False, total_cost_usd=0)
+    assert source_usage_metadata("search", output) == {"found": False}
+    assert source_usage_metadata("search", {"hits": [], "found": "false"}) == {}

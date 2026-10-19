@@ -109,3 +109,9 @@ def test_terraform_allows_exactly_one_admin() -> None:
     assert regex.fullmatch("s-komata@vectorinc.co.jp")
     assert not regex.fullmatch("s-komata@vectorinc.co.jp,a@vectorinc.co.jp")
     assert '"PERSONAL_MEMORY_ADMIN_EMAILS", value = var.personal_memory_admin_emails' in tf
+
+
+def test_memory_has_shared_admin_navigation(client: TestClient) -> None:
+    page = client.get("/admin/memory", cookies=_cookies(_OWNER))
+    assert 'href="/admin"' in page.text
+    assert 'href="/admin/history"' in page.text

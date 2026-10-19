@@ -369,169 +369,642 @@ def render_errors(rows: list[dict[str, Any]], *, email: str | None = None) -> st
     return _page("エラー一覧", body, email=email)
 
 
-def _answer_feedback_block(feedback: dict[str, Any] | None) -> str:
-    """Aico の回答評価（直近30日の 👍/👎 と 👎 の質問一覧）。読めなかったときは案内だけ。"""
-    if not feedback:
-        return (
-            '<div class="card"><h2>回答の評価（Slack・直近30日）</h2>'
-            '<p class="note">評価データはまだ表示できません。</p></div>'
-        )
-    rows = [
-        '<tr><td class="muted">'
-        + _e(_jst(row.get("created_at")))
-        + " JST</td><td>"
-        + _e(row.get("who"))
-        + '</td><td class="question">'
-        + _e(row.get("query"))
-        + "</td></tr>"
-        for row in feedback.get("downs", [])
-    ]
-    table = (
-        "<table><tr><th>時刻</th><th>誰が</th><th>検索語</th></tr>" + "".join(rows) + "</table>"
-        if rows
-        else '<p class="note">👎 はまだありません。</p>'
+def render_admin_nav(active: str) -> str:
+    links = (
+        ("usage", "/admin", "利用状況"),
+        ("history", "/admin/history", "会話履歴"),
+        ("memory", "/admin/memory", "本人メモ"),
     )
     return (
-        '<div class="card"><h2>回答の評価（Slack・直近'
-        + _e(feedback.get("days", 30))
-        + "日）</h2>"
-        + '<div class="kpis"><div class="kpi"><div class="label">👍 役に立った</div>'
-        '<div class="value">'
-        + _e(feedback.get("up", 0))
-        + '</div></div><div class="kpi"><div class="label">👎 いまいち</div>'
-        '<div class="value">'
-        + _e(feedback.get("down", 0))
-        + "</div></div></div><h3>👎 が付いた質問</h3>"
-        + table
-        + '<p class="note">資料検索を使った回答だけに付くボタンの集計です。同じ人が同じ回答を'
-        "押し直したときは最後の評価だけを数えます。回答本文は保存していません。</p></div>"
+        (
+            '<nav aria-label="管理画面" style="displ'
+            "ay:flex;flex-wrap:wrap;gap:12px;mar"
+            'gin-bottom:20px">'
+        )
+        + "".join(
+            f'<a href="{href}" style="color:#8ab8ff;padding:8px 4px"'
+            + (' aria-current="page"' if key == active else "")
+            + f">{label}</a>"
+            for key, href, label in links
+        )
+        + "</nav>"
     )
+
+
+def _history_href(user_id: Any) -> str:
+    from teamagent.adapters.dm_history import valid_user_id
+
+    return (
+        "/admin/history?user=" + str(user_id)
+        if isinstance(user_id, str) and valid_user_id(user_id)
+        else "/admin/history"
+    )
+
+
+def _difference(value: int | None, previous: int | None) -> str:
+    if value is None or previous is None:
+        return "前期差を取得できません"
+    return f"前期差 {value - previous:+,}（前期 {previous:,}）"
+
+
+def _daily_svg(rows: list[dict[str, Any]], period: Any) -> str:
+    values = {str(row["day"]): int(row["requests"]) for row in rows}
+    day = period.start.date()
+    last = (period.end - timedelta(microseconds=1)).date()
+    series = []
+    while day <= last:
+        series.append((day.isoformat(), values.get(day.isoformat(), 0)))
+        day += timedelta(days=1)
+    if not series:
+        return '<p class="note">この期間の記録はまだありません。</p>'
+    peak = max(1, max(n for _, n in series))
+    width = 900 / len(series)
+    bars = []
+    for i, (label, count) in enumerate(series):
+        height = count / peak * 118
+        x = 30 + i * width
+        bars.append(
+            f'<rect x="{x:.1f}" y="{145 - height:.1f}" '
+            f'width="{max(1, width - 5):.1f}" height="{height:.1f}" '
+            f'rx="3" fill="#6da2ff"><title>{_e(label)}: {count}回</title></rect>'
+        )
+        if i in {0, len(series) // 2, len(series) - 1}:
+            anchor = "start" if i == 0 else "end" if i == len(series) - 1 else "middle"
+            bars.append(
+                f'<text x="{x:.1f}" y="170" fill="#bcc9df" font-size="15" '
+                f'text-anchor="{anchor}">{_e(label[5:])}</text>'
+            )
+    description = "、".join(f"{label}: {count}回" for label, count in series)
+    return (
+        (
+            '<svg viewBox="0 0 960 185" role="im'
+            'g" aria-labelledby="daily-title dai'
+            'ly-desc"><title id="daily-title">日別'
+            'ツール実行数</title><desc id="daily-desc"'
+            ">"
+        )
+        + _e(description)
+        + ('</desc><path d="M30 145H940" stroke="#53617a"/>')
+        + "".join(bars)
+        + (
+            '</svg><p class="note">日別ツール実行数・JST。'
+            "期間の最初と最後の日は一部の時間のみの場合があります。</p>"
+        )
+    )
+
+
+_ADMIN_STYLE = """
+.usage-admin h1{font-size:24px;
+margin:0 0 20px}
+.usage-admin h2{font-size:18px;
+color:var(--ink)}
+
+.usage-admin a{color:#8ab8ff}
+.usage-admin button,.usage-admin .period-link{font:inherit;
+cursor:pointer;
+
+ border:1px solid #53617a;
+background:#202e46;
+color:var(--ink);
+border-radius:8px;
+padding:10px 14px;
+display:inline-block;
+text-decoration:none}
+
+.usage-admin button:disabled{opacity:.6;
+cursor:wait}
+.usage-admin :focus-visible{outline:3px solid #a4c9ff;
+outline-offset:3px}
+
+.usage-admin .periods{display:flex;
+flex-wrap:wrap;
+gap:8px}
+.usage-admin [aria-current=page]{font-weight:700;
+text-decoration:underline}
+
+.usage-admin .kpis{grid-template-columns:repeat(3,minmax(0,1fr))}
+.usage-admin .kpi .value{font-size:34px}
+
+.usage-admin .kpi .sub{font-size:13px;
+line-height:1.6}
+.usage-admin .lead{font-size:18px;
+line-height:1.8}
+
+.usage-admin .actions{display:flex;
+flex-wrap:wrap;
+gap:10px}
+.usage-admin .note{font-size:13px}
+
+.usage-admin .review-row,.usage-admin .question-row{padding:14px 0;
+border-top:1px solid var(--line);
+overflow-wrap:anywhere}
+
+.usage-admin .review-head{display:flex;
+flex-wrap:wrap;
+gap:10px;
+align-items:center}
+.usage-admin .review-row p{line-height:1.7;
+white-space:pre-wrap}
+
+.usage-admin .question{min-width:0;
+max-width:none}
+.usage-admin summary{cursor:pointer;
+padding:12px 0;
+color:#a4c9ff}
+
+.usage-admin .table-wrap{overflow-x:auto}
+.usage-admin svg{width:100%;
+height:auto;
+display:block}
+
+.usage-admin .stat-list{display:grid;
+grid-template-columns:repeat(2,minmax(0,1fr));
+gap:8px;
+line-height:1.7}
+
+.usage-admin .stat-list div{border-bottom:1px solid var(--line);
+padding:6px 0}
+.usage-admin .bar-row{grid-template-columns:64px minmax(0,1fr) 110px}
+
+@media(max-width:600px){main{padding:14px}
+.usage-admin svg text{font-size:36px}
+header{padding:12px 14px}
+.usage-admin .kpis{grid-template-columns:1fr;
+gap:10px}
+
+ .usage-admin .card,.usage-admin .kpi{padding:14px}
+.usage-admin .stat-list{grid-template-columns:1fr}
+
+ .usage-admin table.responsive,.usage-admin table.responsive tbody,
+.usage-admin table.responsive tr,.usage-admin table.responsive td{display:block;
+width:100%}
+
+ .usage-admin table.responsive th{display:none}
+.usage-admin table.responsive tr{padding:10px 0;
+border-bottom:1px solid var(--line)}
+
+ .usage-admin table.responsive td{border:0;
+text-align:left;
+padding:5px 0;
+overflow-wrap:anywhere}
+
+ .usage-admin table.responsive td::before{content:attr(data-label);
+color:#bcc9df;
+margin-right:12px}
+
+ .usage-admin .bar-row{grid-template-columns:54px minmax(0,1fr) 100px;
+font-size:12px}
+}
+
+"""
+
+_ADMIN_SCRIPT = """
+<script>
+const copyButton = document.getElementById('copy-summary');
+copyButton.addEventListener('click', async () => {
+  try {
+    await navigator.clipboard.writeText(document.getElementById('report-summary').textContent);
+    document.getElementById('copy-status').textContent = 'コピーしました';
+  } catch (error) {
+    document.getElementById('copy-status').textContent =
+      'コピーできませんでした。要約を選択してコピーしてください。';
+  }
+});
+const analyzeButton = document.getElementById('analyze-questions');
+analyzeButton.addEventListener('click', async () => {
+  const output = document.getElementById('agent-result');
+  output.replaceChildren();
+  output.textContent = '質問を分析しています…';
+  analyzeButton.disabled = true;
+  try {
+    const response = await fetch('/admin/analyze', {
+      method: 'POST', credentials: 'same-origin',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({period: analyzeButton.dataset.period, user: analyzeButton.dataset.user})
+    });
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.error || '分析を表示できませんでした。');
+    output.replaceChildren();
+    const note = document.createElement('p');
+    note.className = 'note';
+    note.textContent = `Agent分析（その場限り）・${data.period}：${data.start} ～ ${data.end}。`
+      + `質問の記録${data.total_questions}件のうち最新${data.sample_size}問、`
+      + `分類済み${data.classified_size}問。各質問は先頭300文字まで。`
+      + '件数はサンプル内のツール実行数です。';
+    output.append(note);
+    for (const [title, rows] of [
+      ['よく聞かれたテーマ 上位5', data.themes],
+      ['答えられていない可能性のあるテーマ 上位3', data.blocked_themes]
+    ]) {
+      const heading = document.createElement('h3');
+      heading.textContent = title;
+      output.append(heading);
+      const list = document.createElement('ol');
+      for (const row of rows) {
+        const item = document.createElement('li');
+        item.textContent = `${row.title}：${row.count}件`;
+        list.append(item);
+      }
+      if (!rows.length) {
+        const item = document.createElement('li');
+        item.textContent = 'サンプル内に該当するテーマはありません。';
+        list.append(item);
+      }
+      output.append(list);
+    }
+    const heading = document.createElement('h3');
+    heading.textContent = '次に直すと良いこと 3つ（提案）';
+    output.append(heading);
+    const list = document.createElement('ol');
+    for (const action of data.actions) {
+      const item = document.createElement('li');
+      item.textContent = action;
+      list.append(item);
+    }
+    output.append(list);
+  } catch (error) {
+    output.textContent = error.message || '分析を表示できませんでした。';
+  } finally {
+    analyzeButton.disabled = false;
+  }
+});
+</script>
+"""
 
 
 def render_usage_admin(data: dict[str, Any]) -> str:
-    """connect-web の小俣さん限定利用状況ページを描画する。"""
-    metrics = data.get("kpis", {})
-    kpi_cards = (
-        '<div class="kpis">'
-        '<div class="kpi"><div class="label">今日の件数</div><div class="value">'
-        + _e(metrics.get("today_requests", 0))
-        + '</div></div><div class="kpi"><div class="label">今日のユーザー数</div>'
-        '<div class="value">'
-        + _e(metrics.get("today_users", metrics.get("active_users", 0)))
-        + '</div></div><div class="kpi"><div class="label">今日のコスト</div>'
-        '<div class="value">$'
-        + _e(_money(metrics.get("today_cost_usd", 0), 3))
-        + '</div></div><div class="kpi"><div class="label">今日のエラー数</div>'
-        '<div class="value">'
-        + _e(metrics.get("today_errors", 0))
-        + '</div></div><div class="kpi"><div class="label">直近7日の件数</div>'
-        '<div class="value">'
-        + _e(metrics.get("seven_day_requests", 0))
-        + '</div></div><div class="kpi"><div class="label">直近7日のユーザー数</div>'
-        '<div class="value">'
-        + _e(metrics.get("seven_day_users", 0))
-        + '</div></div><div class="kpi"><div class="label">直近7日のコスト</div>'
-        '<div class="value">$'
-        + _e(_money(metrics.get("seven_day_cost_usd", 0), 3))
-        + '</div></div><div class="kpi"><div class="label">直近7日のエラー数</div>'
-        '<div class="value">' + _e(metrics.get("seven_day_errors", 0)) + "</div></div></div>"
-    )
+    """把握→要注意→実際の会話の順に、小俣さん限定の管理画面を描画する。"""
+    from teamagent.dashboard.insights import PERIOD_LABELS, admin_period
 
+    period = data.get("period") or admin_period("7d")
+    who = str(data.get("filter_user") or "")
+    user_param = "&amp;user=" + _e(quote(who, safe="")) if who else ""
+    periods = (
+        '<div class="periods" aria-label="集計期間">'
+        + "".join(
+            f'<a class="period-link" href="/admin?period={key}{user_param}"'
+            + (' aria-current="page"' if key == period.key else "")
+            + f">{label}</a>"
+            for key, label in PERIOD_LABELS.items()
+        )
+        + "</div>"
+    )
+    period_note = (
+        f'<p class="note">{_e(_jst(period.start))} ～ {_e(_jst(period.end))} JST<br>'
+        f"比較：{_e(_jst(period.previous_start))} ～ {_e(_jst(period.start))} JST"
+        "（同じ長さの直前期間）</p>"
+    )
+    filter_note = (
+        (
+            f'<p class="filter">利用者 {_e(who)} で絞り込み中 · '
+            f'<a href="/admin?period={period.key}">絞り込みを解除</a></p>'
+        )
+        if who
+        else ""
+    )
+    summary = data.get("summary")
+    current = summary["current"] if summary else None
+    previous = summary["previous"] if summary else None
+    feedback = data.get("feedback")
+    attention = (
+        int(current["attention_events"]) + int(feedback["down"])
+        if current is not None and feedback is not None
+        else None
+    )
+    previous_attention = (
+        int(previous["attention_events"]) + int(feedback["previous_down"])
+        if previous is not None and feedback is not None
+        else None
+    )
+    if current is None:
+        sentence = "利用状況を取得できません。表示できる記録から確認してください。"
+    else:
+        sentence = (
+            f"{period.label}は{current['users']:,}人がツールを{current['requests']:,}回実行。"
+            + _difference(current["requests"], previous["requests"] if previous else None)
+            + "。"
+        )
+        sentence += (
+            f"要注意は{attention:,}件です。"
+            if attention is not None
+            else "要注意件数は取得できません。"
+        )
+    intro = (
+        ('<section class="card"><h2>報告用の一言</h2><p id="report-summary" class="lead">')
+        + _e(sentence)
+        + (
+            '</p><div class="actions"><button id'
+            '="copy-summary" type="button">コピー</'
+            'button><button id="analyze-question'
+            's" type="button" data-period="'
+        )
+        + period.key
+        + '" data-user="'
+        + _e(who)
+        + (
+            '">Agent で分析</button></div><p id="co'
+            'py-status" role="status" class="not'
+            'e"></p><p class="note">Agentには集計値と最'
+            "新200問までの質問文（識別情報を伏せ字）を送ります。結果は保存しませ"
+            'ん。回答本文は分析しません。</p><div id="agent-re'
+            'sult" role="status" aria-live="poli'
+            'te"></div></section>'
+        )
+    )
+    cards = []
+    for label, value, old in (
+        (
+            "利用人数",
+            current["users"] if current else None,
+            previous["users"] if previous else None,
+        ),
+        (
+            "ツール実行数",
+            current["requests"] if current else None,
+            previous["requests"] if previous else None,
+        ),
+        ("要注意件数", attention, previous_attention),
+    ):
+        cards.append(
+            '<div class="kpi"><div class="label">'
+            + label
+            + '</div><div class="value">'
+            + (f"{value:,}" if value is not None else "—")
+            + '</div><div class="sub">'
+            + _e(_difference(value, old))
+            + "</div></div>"
+        )
+    kpis = '<section aria-label="利用概要" class="kpis">' + "".join(cards) + "</section>"
+    quality_note = (
+        '<p class="note">件数は会話数ではなくツール実行数。要注'
+        "意は「失敗または該当なしの実行＋👎評価」の検知件数で、同一会話の重複が"
+        "あります。評価なしは成功を意味しません。費用は記録されたツール費用です"
+        "。</p>"
+    )
+    chart = (
+        _daily_svg(data["daily"], period)
+        if "daily" in data
+        else '<p class="note">日別推移を取得できません。</p>'
+    )
+    trend = '<section class="card"><h2>日別推移</h2>' + chart + "</section>"
+    users = data.get("users", [])
+    slack_ids = {str(row["who"]).lower(): row.get("user_id") for row in users}
+    attention_rows = []
+    for row in (feedback or {}).get("downs", []):
+        attention_rows.append(
+            {
+                **row,
+                "occurred_at": row["created_at"],
+                "reason": "👎 評価",
+                "query_text": row["query"],
+                "user_id": slack_ids.get(str(row["who"]).lower()),
+            }
+        )
+    for row in data.get("errors", []):
+        reason = "エラー・拒否" if row["status"] != "ok" else "検索で該当なし"
+        if row["status"] != "ok" and row.get("found") is False:
+            reason += "・該当なし"
+        attention_rows.append({**row, "reason": reason})
+    attention_rows.sort(key=lambda row: str(row["occurred_at"]), reverse=True)
+    reviews = []
+    for row in attention_rows:
+        reviews.append(
+            ('<article class="review-row"><div class="review-head"><strong>')
+            + _e(row["reason"])
+            + '</strong><span class="muted">'
+            + _e(_jst(row["occurred_at"]))
+            + " JST</span><span>"
+            + _e(row["who"])
+            + '</span><a href="'
+            + _history_href(row.get("user_id"))
+            + '">会話を読む</a></div><p>'
+            + _e(row.get("query_text") or "質問文の記録はありません。")
+            + "</p></article>"
+        )
+    review_body = (
+        "".join(reviews[:10]) or '<p class="note">取得できた範囲に要注意の記録はありません。</p>'
+    )
+    if len(reviews) > 10:
+        review_body += (
+            "<details><summary>さらに見る（取得済み"
+            + str(len(reviews))
+            + "件）</summary>"
+            + "".join(reviews[10:])
+            + "</details>"
+        )
+    if feedback is None:
+        review_body += '<p class="note">評価データはまだ表示できません。</p>'
+    if "errors" not in data:
+        review_body += '<p class="note">エラー・該当なしを取得できません。</p>'
+    if current:
+        review_body += (
+            f'<p class="note">検索で該当なし：{current["not_found"]}件。'
+            f"判定の記録がない検索：{current['unknown_search']}件"
+            "（不明・0件扱いしません）。</p>"
+        )
+    if feedback is not None:
+        review_body += (
+            f'<p class="note">回答の評価（Slack・{period.label}）：'
+            f"👍 {feedback['up']}件 / 👎 {feedback['down']}件。"
+            "同じ人・回答は期間内の最後の評価。検索を使った回答への評価であり、"
+            "全回答の正答率ではありません。</p>"
+        )
+    review_body += (
+        '<p class="note">一覧は実行・評価それぞれ最新200件ま'
+        "で。Slack IDがない行は会話履歴の一覧を開きます。👎と実行記録か"
+        "ら特定の発言との一致は保証しません。</p>"
+    )
+    review = '<section class="card"><h2>先に確認するやり取り</h2>' + review_body + "</section>"
+    user_rows = []
+    for row in users:
+        href = _admin_user_href(row["who"]) + "&amp;period=" + period.key
+        user_rows.append(
+            '<tr><td data-label="社員"><a href="'
+            + href
+            + '">'
+            + _e(row["who"])
+            + '</a></td><td data-label="実行数">'
+            + _e(row["requests"])
+            + '</td><td data-label="前期差">'
+            + _e(_difference(row["requests"], row.get("previous_requests")))
+            + '</td><td data-label="会話"><a href="'
+            + _history_href(row.get("user_id"))
+            + '">会話を読む</a></td></tr>'
+        )
+    user_body = (
+        (
+            '<table class="responsive"><tr><th>社'
+            "員</th><th>ツール実行数</th><th>前期差</th><t"
+            "h>会話</th></tr>"
+        )
+        + "".join(user_rows)
+        + "</table>"
+        if user_rows
+        else '<p class="note">この期間の利用者はいません。</p>'
+    )
+    if "users" not in data:
+        user_body = '<p class="note">利用者を取得できません。</p>'
+    people = (
+        '<section class="card"><h2>誰が使っているか</h2>'
+        + user_body
+        + (
+            '<p class="note">実行数順・最大200人。人数KPIは上'
+            "位一覧の合計ではありません。email/Slack IDで記録され、同"
+            "一人物が分かれる場合があります。</p></section>"
+        )
+    )
+    work = (
+        _work_type_block(data["work_types"], title="何に使っているか")
+        if "work_types" in data
+        else (
+            '<section class="card"><h2>何に使っているか<'
+            '/h2><p class="note">作業内訳を取得できません。</'
+            "p></section>"
+        )
+    )
     question_rows = []
     for row in data.get("questions", []):
-        status = str(row.get("status", ""))
-        badge_class = "b-ok" if status == "ok" else "b-error"
-        latency = row.get("latency_ms")
         question_rows.append(
-            '<tr><td class="muted">'
-            + _e(_jst(row.get("occurred_at")))
-            + " JST</td><td>"
-            + _e(row.get("who"))
-            + "</td><td>"
-            + _e(row.get("skill"))
-            + '</td><td class="question">'
-            + _e(row.get("query_text"))
-            + '</td><td><span class="badge '
-            + badge_class
-            + '">'
-            + _e(status)
-            + '</span></td><td class="num">'
-            + _e(latency if latency is not None else "-")
-            + '</td><td class="num">$'
-            + _e(_money(row.get("cost_usd", 0), 4))
-            + "</td></tr>"
+            ('<article class="question-row"><p class="note">')
+            + _e(_jst(row["occurred_at"]))
+            + " JST · "
+            + _e(row["who"])
+            + " · "
+            + _e(row["skill"])
+            + '</p><p class="question">'
+            + _e(row["query_text"])
+            + "</p></article>"
         )
-    filter_user = str(data.get("filter_user") or "")
-    if filter_user:
-        heading = "質問フィード（" + _e(filter_user) + " で絞り込み・直近200件）"
-        filter_html = (
-            '<p class="filter">利用者 '
-            + _e(filter_user)
-            + ' で絞り込み中 · <a href="/admin">絞り込みを解除</a></p>'
+    question_body = "".join(question_rows[:10]) or (
+        '<p class="note">この利用者・期間の質問はまだ記録がありません。</p>'
+    )
+    if len(question_rows) > 10:
+        question_body += (
+            ("<details><summary>残りの質問を見る（直近200件まで）</summary>")
+            + "".join(question_rows[10:])
+            + "</details>"
         )
-        if not question_rows:
-            filter_html += '<p class="note">この利用者の質問はまだ記録がありません。</p>'
-    else:
-        heading = "質問フィード（直近200件）"
-        filter_html = ""
+    if "questions" not in data:
+        question_body = '<p class="note">質問を取得できません。</p>'
     questions = (
-        '<div class="card"><h2>' + heading + "</h2>" + filter_html + "<table>"
-        "<tr><th>時刻</th><th>誰が</th><th>スキル</th><th>質問文</th><th>status</th>"
-        '<th class="num">latency(ms)</th><th class="num">cost</th></tr>'
-        + "".join(question_rows)
-        + "</table></div>"
-    )
-
-    error_rows = []
-    for row in data.get("errors", []):
-        status = str(row.get("status", ""))
-        error_rows.append(
-            '<tr><td class="muted">'
-            + _e(_jst(row.get("occurred_at")))
-            + " JST</td><td>"
-            + _e(row.get("who"))
-            + "</td><td>"
-            + _e(row.get("skill"))
-            + "</td><td>"
-            + _e(status)
-            + "</td><td>"
-            + _e(row.get("error_code"))
-            + '</td><td class="muted">'
-            + _e(row.get("request_id"))
-            + "</td></tr>"
+        (
+            '<section class="card"><h2>最近の質問</h2'
+            '><p class="note">queryを記録した実行のみ。全DM'
+            "の一覧ではありません。最新10件を表示、展開で最大200件。</p>"
         )
-    errors = (
-        '<div class="card"><h2>エラー一覧</h2><table><tr><th>時刻</th><th>誰が</th>'
-        "<th>スキル</th><th>status</th><th>code</th><th>request_id</th></tr>"
-        + "".join(error_rows)
+        + question_body
+        + "</section>"
+    )
+    technical = []
+    legacy = data.get("kpis")
+    if legacy is not None:
+        technical.append(
+            ('<h3>全体の既存KPI（社員の絞り込み対象外）</h3><div class="stat-list">')
+            + "".join(
+                "<div>" + label + "：" + _e(legacy.get(key, "—")) + "</div>"
+                for label, key in (
+                    ("今日の件数", "today_requests"),
+                    ("今日のユーザー数", "today_users"),
+                    ("今日のコスト USD", "today_cost_usd"),
+                    ("今日のエラー数", "today_errors"),
+                    ("直近7日の件数", "seven_day_requests"),
+                    ("直近7日のユーザー数", "seven_day_users"),
+                    ("直近7日のコスト USD", "seven_day_cost_usd"),
+                    ("直近7日のエラー数", "seven_day_errors"),
+                )
+            )
+            + "</div>"
+        )
+    if "skills" in data:
+        technical.append(
+            '<div class="table-wrap">'
+            + _skill_block(data["skills"]).replace(
+                "Skill 別（直近7日）", f"Skill 別（{period.label}）"
+            )
+            + "</div>"
+        )
+    if "work_types_30d" in data:
+        technical.append(
+            _work_type_block(data["work_types_30d"], title="作業の内訳（直近30日・全体）")
+        )
+    error_details = "".join(
+        "<tr><td>"
+        + _e(_jst(row["occurred_at"]))
+        + "</td><td>"
+        + _e(row["who"])
+        + "</td><td>"
+        + _e(row["skill"])
+        + "</td><td>"
+        + _e(row["status"])
+        + "</td><td>"
+        + _e(row.get("error_code"))
+        + "</td><td>"
+        + _e(row.get("request_id"))
+        + "</td></tr>"
+        for row in data.get("errors", [])
+    )
+    technical.append(
+        (
+            '<div class="table-wrap"><h3>エラー・該当な'
+            "しの詳細</h3><table><tr><th>時刻 JST</th>"
+            "<th>社員</th><th>Skill</th><th>status"
+            "</th><th>code</th><th>request_id</t"
+            "h></tr>"
+        )
+        + error_details
         + "</table></div>"
     )
-
-    notes = list(data.get("notes", []))
-    if data.get("empty"):
-        empty_note = "まだ記録がありません。記録は mcp の次回デプロイから始まります"
-        notes.insert(0, empty_note)
-    note_html = "".join('<p class="note">' + _e(note) + "</p>" for note in notes)
-    body = (
-        '<h1 style="font-size:22px">Aico 利用状況（管理）</h1>'
-        '<p class="who">閲覧者: '
-        + _e(data.get("email"))
-        + "</p>"
-        + kpi_cards
-        + '<div class="grid2">'
-        + _work_type_block(data.get("work_types_7d", []), title="作業の内訳（直近7日）")
-        + _work_type_block(data.get("work_types_30d", []), title="作業の内訳（直近30日）")
-        + "</div>"
-        + questions
-        + _answer_feedback_block(data.get("feedback"))
-        + '<div class="grid2">'
-        + _skill_block(data.get("skills", []))
-        + _user_block(data.get("users", []), drilldown=True)
-        + "</div>"
-        + errors
-        + note_html
+    if current:
+        technical.append(
+            f'<p class="note">選択期間の記録費用：${_money(current["cost_usd"], 4)}。'
+            "Aico全体の請求額とは限りません。</p>"
+        )
+    technical.append(
+        '<p class="note">Agent分析は日本向けHaiku 4'
+        ".5。既存単価表は入力$1/出力$5（100万token）、AWS公表"
+        "値$1.10/$5.50と差があります。単価表の補正は今回の範囲外です"
+        "。</p>"
     )
-    return _page("Aico 利用状況（管理）", body)
+    details = (
+        ('<details class="card"><summary>技術・費用の詳細</summary>')
+        + "".join(technical)
+        + "</details>"
+    )
+    notes = "".join('<p class="note">' + _e(note) + "</p>" for note in data.get("notes", []))
+    empty = (
+        '<p class="note">この期間の利用記録はありません。</p>'
+        if current is not None and current["requests"] == 0
+        else ""
+    )
+    body = (
+        "<style>"
+        + _ADMIN_STYLE
+        + '</style><div class="usage-admin">'
+        + render_admin_nav("usage")
+        + "<h1>Aico 利用状況（管理）</h1>"
+        + periods
+        + period_note
+        + filter_note
+        + notes
+        + empty
+        + intro
+        + kpis
+        + quality_note
+        + trend
+        + review
+        + people
+        + work
+        + questions
+        + details
+        + "</div>"
+    )
+    return _page("Aico 利用状況（管理）", body, scripts=_ADMIN_SCRIPT)
 
 
-__all__ = ["render_dashboard", "render_errors", "render_login", "render_usage_admin"]
+__all__ = [
+    "render_admin_nav",
+    "render_dashboard",
+    "render_errors",
+    "render_login",
+    "render_usage_admin",
+]

@@ -300,3 +300,10 @@ def test_terraform_allows_exactly_one_history_admin_and_wires_the_bot_token() ->
     iam = tf[tf.index('data "aws_iam_policy_document" "ecs_execution_connect_web_secrets"') :]
     iam = iam[: iam.index("\n}\n")]
     assert "data.aws_secretsmanager_secret.slack_bot.arn" in iam
+
+
+def test_admin_history_has_shared_navigation_but_self_history_does_not(client: TestClient) -> None:
+    admin = client.get("/admin/history", cookies=_cookies(_OWNER))
+    assert 'href="/admin"' in admin.text and 'href="/admin/memory"' in admin.text
+    own = client.get("/app/history", cookies=_cookies(_OTHER))
+    assert 'aria-label="管理画面"' not in own.text

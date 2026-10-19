@@ -40,6 +40,7 @@ PROMPTS_ROOT = Path(teamagent.prompts.__file__).parent
 # USE_PROPOSAL_DECK_TOOLS=1 の本番導線が読むのは v1。v2 を明示するのは
 # proposal_builder/skill.py:555-557 で、こちらは別の env ゲート配下。両方を対象にする。
 HUMAN_FACING_PROMPTS = (
+    "admin_summary/v1/system.md",
     "chitchat/v1/system.md",
     "clientkarte/v1/system.md",
     # 案件検索 v3 PR 1（2026-10-01）: KARTE_PROMPT_VERSION=v2 / PROMPT_VERSION=v3 で切り替える新版。
@@ -176,6 +177,7 @@ _BAN_PROSE = (
 # JSON の値がそのまま人に出るプロンプト（video_algorithm・検索上位チェックの結論）は
 # JSON の値に効かせる別文面（`×` の行を持たない）。
 _JSON_VALUE_PROMPTS = (
+    "admin_summary/",
     "video_algorithm/",
     "video_algorithm_cover/",
     "search_surface_check/v1/analyze.md",

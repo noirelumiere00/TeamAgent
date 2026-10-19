@@ -119,7 +119,7 @@ def _source_entry(item: Any) -> dict[str, str] | None:
 def source_usage_metadata(tool: str, output: Any) -> dict[str, Any]:
     """出典を返すツールの結果から ``source_ids``（上位 5 件）と ``answer_chars`` を作る。
 
-    出典が 1 件も取れなければ空 dict（何も足さない）。例外は出さない。
+    search の明示的な found は出典0件でも残す。本文は残さず、例外は出さない。
     """
     list_key = SOURCE_LIST_KEYS.get(tool)
     if list_key is None:
@@ -141,9 +141,11 @@ def source_usage_metadata(tool: str, output: Any) -> dict[str, Any]:
             sources.append(entry)
             if len(sources) >= MAX_SOURCES:
                 break
+        found = _field(output, "found") if tool == "search" else None
+        metadata: dict[str, Any] = {"found": found} if isinstance(found, bool) else {}
         if not sources:
-            return {}
-        metadata: dict[str, Any] = {"source_ids": sources}
+            return metadata
+        metadata["source_ids"] = sources
         answer = _field(output, "answer")
         if isinstance(answer, str):
             metadata["answer_chars"] = len(answer)
