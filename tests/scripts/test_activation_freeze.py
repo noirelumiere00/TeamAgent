@@ -238,7 +238,9 @@ def test_unlock_matches_the_committed_declaration() -> None:
         assert "glibc 2.44-r8" in unlock["reason"]
         assert "#568 の例外 16 件を外す" in unlock["reason"]
         assert "12929629… → 5a7e0d20…" in unlock["reason"]
-        assert "human gate 2026-10-12" in unlock["gate"]
+        assert "libexpat 2.8.5-r0" in unlock["reason"]
+        assert "2.9.0-r0" in unlock["reason"]
+        assert "human gate 2026-10-19" in unlock["gate"]
         assert unlock["previous_scope_20261012_core_python_base"]["scope_paths"] == [
             "infra/codebuild/teamagent_runtime_contract.json",
             "infra/codebuild/teamagent_core_media_release_contract.json",
