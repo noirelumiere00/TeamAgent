@@ -8,9 +8,8 @@ import fcntl
 import json
 import os
 import sys
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
-from zoneinfo import ZoneInfo
 
 from teamagent.adapters.bedrock_client import BedrockClient
 from teamagent.adapters.dm_quality_reader import DmQualityReader, QualityExtraction
@@ -26,7 +25,7 @@ from teamagent.dm_quality import (
 
 def _date(value: str) -> datetime:
     result = datetime.fromisoformat(value)
-    return result.replace(tzinfo=ZoneInfo("Asia/Tokyo")) if result.tzinfo is None else result
+    return result.replace(tzinfo=timezone(timedelta(hours=9))) if result.tzinfo is None else result
 
 
 def main() -> int:

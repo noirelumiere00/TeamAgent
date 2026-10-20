@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import html
 import os
+from datetime import timedelta, timezone
 from pathlib import Path
-from zoneinfo import ZoneInfo
 
 from teamagent.dm_quality import QualityReport
 
@@ -29,7 +29,7 @@ def render_quality_page() -> str:
         def percent(value: float | None) -> str:
             return "—" if value is None else f"{value:.1%}"
 
-        jst = ZoneInfo("Asia/Tokyo")
+        jst = timezone(timedelta(hours=9))
         period = (
             f"{report.start.astimezone(jst):%Y-%m-%d %H:%M} 〜 "
             f"{report.end.astimezone(jst):%Y-%m-%d %H:%M}（終端を含まない・JST）"
