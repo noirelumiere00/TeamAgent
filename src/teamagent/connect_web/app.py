@@ -5289,6 +5289,19 @@ def create_app(
             }
         )
 
+    @app.get("/admin/quality", response_class=HTMLResponse)
+    def quality_admin(request: Request) -> Response:
+        email = _search_email(request)
+        if email is None:
+            return RedirectResponse("/search/login?next=/admin", status_code=303)
+        if email.strip().lower() not in _admin_emails():
+            raise HTTPException(status_code=404)
+        from teamagent.dashboard.quality import render_quality_page
+
+        return HTMLResponse(
+            render_quality_page(), headers={"Cache-Control": "no-store", "X-Robots-Tag": "noindex"}
+        )
+
     pm_admin_holder: dict[str, Any] = {}
 
     @app.get("/admin/memory", response_class=HTMLResponse)
