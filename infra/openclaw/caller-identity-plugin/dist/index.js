@@ -4,6 +4,9 @@ import {
   randomBytes,
   timingSafeEqual,
 } from "node:crypto";
+import * as catchupFs from "node:fs/promises";
+import { constants as catchupFsFlags } from "node:fs";
+import { dirname as catchupDirname, join as catchupJoin } from "node:path";
 
 const PLUGIN_ID = "teamagent-caller-identity";
 const ISSUER = "teamagent-openclaw";
@@ -791,6 +794,7 @@ export function buildFirstMessageRestoreContext(text) {
 export const REGISTERED_HOOKS = Object.freeze([
   "inbound_claim",
   "message_received",
+  "reply_dispatch",
   "before_agent_reply",
   "before_model_resolve",
   "before_prompt_build",
@@ -798,6 +802,7 @@ export const REGISTERED_HOOKS = Object.freeze([
   "after_tool_call",
   "before_agent_finalize",
   "reply_payload_sending",
+  "message_sent",
   "agent_end",
 ]);
 
@@ -2264,13 +2269,13 @@ function findFabricatedConnectUrlKinds(text) {
 
 // 同一受信かどうかは識別子だけで決める。本文由来の判定結果（connectRequest / videoUrlKind）は
 // 比較に含めない: content の有無が違う同じ受信の再通知を「別の受信」と誤判定しないため。
-function sameIngress(left, right) {
+function sameIngress(left, right, allowAliases = false) {
   return (
     left.ingressKind === right.ingressKind &&
     left.sessionKey === right.sessionKey &&
     left.senderId === right.senderId &&
     left.teamId === right.teamId &&
-    left.channelId === right.channelId &&
+    (left.channelId === right.channelId || (allowAliases && left.channelAliases?.includes(right.channelId))) &&
     left.threadTs === right.threadTs &&
     left.messageId === right.messageId &&
     left.actionFingerprint === right.actionFingerprint
@@ -2500,11 +2505,307 @@ function actionRunChannelMatches(actionEvent, runChannelId) {
   );
 }
 
+export const DM_CATCHUP_LIMITS = Object.freeze({
+  windowMs: 30 * 60 * 1000,
+  maxDms: 100,
+  maxHistory: 200,
+  maxPerDm: 20,
+  maxReplay: 200,
+});
+
+export function createDmCatchup({
+  statePath,
+  teamId,
+  botUserId,
+  botToken,
+  allowFrom = ["*"],
+  fetchFn = globalThis.fetch,
+  now = () => Date.now(),
+  dispatch,
+  logger,
+  waitForTransportReady,
+} = {}) {
+  if (typeof statePath !== "string" || !statePath || !SLACK_TEAM_RE.test(teamId ?? "") ||
+      typeof dispatch !== "function" || !Array.isArray(allowFrom) ||
+      allowFrom.some(id => id !== "*" && !SLACK_USER_RE.test(id ?? ""))) {
+    throw new Error("invalid DM catchup configuration");
+  }
+  // shortcut: the gateway lock provides one journal writer; use shared claims before overlapping tasks.
+  const rows = new Map(), seen = new Set(), confirmed = new Set(), unresolved = new Map();
+  let initialization, startup, writes = Promise.resolve(), authenticatedBot = botUserId;
+  let journalStatus = "unloaded", recoveryCutoff;
+  const key = (channel, ts) => JSON.stringify([teamId, channel, ts]);
+  const log = (level, reason) => emitPluginLog(logger, level, `dm catchup reason=${reason}`);
+  const timestamp = ts => { const [seconds, micros] = ts.split("."); return BigInt(seconds) * 1_000_000n + BigInt(micros); };
+  const recent = (ts, cutoff = now()) => canonicalSlackTimestamp(ts) !== null &&
+    timestamp(ts) >= BigInt(cutoff - DM_CATCHUP_LIMITS.windowMs) * 1000n && timestamp(ts) <= BigInt(cutoff) * 1000n;
+  const allowed = user => allowFrom.includes("*") || allowFrom.includes(user);
+
+  async function checkPath() {
+    const parent = catchupDirname(statePath);
+    await catchupFs.mkdir(parent, {recursive: true, mode: 0o700});
+    const directory = await catchupFs.lstat(parent);
+    if (directory.isSymbolicLink() || !directory.isDirectory()) throw new Error("unsafe journal directory");
+    await catchupFs.chmod(parent, 0o700);
+    try {
+      const file = await catchupFs.lstat(statePath);
+      if (!file.isFile() || file.isSymbolicLink() || file.size > 8 * 1024 * 1024) {
+        throw new Error("unsafe journal file");
+      }
+    } catch (error) {
+      if (error.code !== "ENOENT") throw error;
+    }
+  }
+
+  function ready() {
+    initialization ??= (async () => {
+      await checkPath();
+      let handle;
+      try {
+        handle = await catchupFs.open(statePath, catchupFsFlags.O_RDONLY | catchupFsFlags.O_NOFOLLOW);
+        const saved = JSON.parse(await handle.readFile("utf8"));
+        if (saved.v !== 1 || saved.team !== teamId || !Array.isArray(saved.entries)) {
+          throw new Error("invalid journal");
+        }
+        for (const row of saved.entries) {
+          if (!SLACK_DM_CHANNEL_RE.test(row?.channel ?? "") ||
+              canonicalSlackTimestamp(row?.ts) === null || !["started", "done"].includes(row.state)) {
+            throw new Error("invalid journal entry");
+          }
+          if (recent(row.ts)) rows.set(key(row.channel, row.ts), {
+            channel: row.channel, ts: row.ts, state: row.state,
+            ...(canonicalSlackTimestamp(row.replyTs) ? {replyTs: row.replyTs} : {}),
+          });
+        }
+        for (const entry of saved.unresolved ?? []) {
+          if (/^[a-z_]+$/u.test(entry?.reason ?? "") && Number.isSafeInteger(entry.count) && entry.count > 0) {
+            unresolved.set(entry.reason, entry.count);
+          }
+        }
+      } catch (error) {
+        if (error.code !== "ENOENT") throw error;
+      } finally { await handle?.close(); }
+      journalStatus = "ready";
+    })().catch(error => { initialization = undefined; journalStatus = "unavailable"; throw error; });
+    return initialization;
+  }
+
+  function persist() {
+    writes = writes.catch(() => {}).then(async () => {
+      await checkPath();
+      const oldest = BigInt(Math.min(now(), recoveryCutoff ?? now()) - DM_CATCHUP_LIMITS.windowMs) * 1000n;
+      for (const [id, row] of rows) if (timestamp(row.ts) < oldest) { rows.delete(id); seen.delete(id); confirmed.delete(id); }
+      const temporary = catchupJoin(catchupDirname(statePath), `.dm-catchup-${randomBytes(12).toString("hex")}`);
+      let handle;
+      try {
+        handle = await catchupFs.open(temporary,
+          catchupFsFlags.O_WRONLY | catchupFsFlags.O_CREAT | catchupFsFlags.O_EXCL | catchupFsFlags.O_NOFOLLOW, 0o600);
+        // v1 stores source/reply timestamps and status only; startup verifies saved done rows against Slack.
+        await handle.writeFile(JSON.stringify({v: 1, team: teamId, entries: [...rows.values()],
+          unresolved: [...unresolved].map(([reason, count]) => ({reason, count}))}));
+        await handle.sync();
+        await handle.close(); handle = null;
+        await catchupFs.rename(temporary, statePath);
+        journalStatus = "ready";
+      } finally {
+        await handle?.close();
+        await catchupFs.rm(temporary, {force: true});
+      }
+    });
+    return writes;
+  }
+
+  async function incomplete(reason, count = 1) {
+    log("warn", reason);
+    unresolved.set(reason, (unresolved.get(reason) ?? 0) + count);
+    if (!initialization) return;
+    try { await persist(); } catch { journalStatus = "unavailable"; log("warn", "journal_unavailable"); }
+  }
+
+  async function reserve(message, {source = "live", onUnavailable} = {}) {
+    if (!SLACK_DM_CHANNEL_RE.test(message?.channel ?? "") ||
+        !SLACK_USER_RE.test(message?.user ?? "") || message.user === authenticatedBot ||
+        !allowed(message.user) || message.bot_id ||
+        (message.subtype && !(message.subtype === "file_share" &&
+          typeof message.text === "string" && message.text.trim())) ||
+        (message.type !== undefined && message.type !== "message") ||
+        !recent(message.ts, source === "live" ? now() : recoveryCutoff ?? now()) ||
+        (message.team !== undefined && message.team !== teamId) ||
+        (message.team_id !== undefined && message.team_id !== teamId) ||
+        !["live", "replay", "history"].includes(source)) return false;
+    try {
+      await ready();
+      const id = key(message.channel, message.ts);
+      if (seen.has(id) || rows.get(id)?.state === "done") return false;
+      seen.add(id);
+      rows.set(id, {channel: message.channel, ts: message.ts, state: "started"});
+      await persist();
+      return true;
+    } catch {
+      seen.delete(key(message.channel, message.ts));
+      journalStatus = "unavailable"; log("warn", "journal_unavailable");
+      onUnavailable?.();
+      return false;
+    }
+  }
+
+  async function accept(message, options) {
+    if (!await reserve(message, options)) return false;
+    await dispatch(message, {source: options?.source ?? "live", cutoff: recoveryCutoff ?? now()});
+    return true;
+  }
+
+  async function markUnresolved(reason, count = 1) {
+    if (!["no_final_reply", "metadata_update_failed"].includes(reason) ||
+        !Number.isSafeInteger(count) || count < 1) throw new Error("invalid recovery reason");
+    try { await ready(); } catch { log("warn", "journal_unavailable"); return false; }
+    await incomplete(reason, count);
+    return journalStatus === "ready";
+  }
+
+  async function markReplied({channel, sourceTs, replyTs, kind = "answer", complete = true} = {}) {
+    if (kind !== "answer" || complete !== true || !SLACK_DM_CHANNEL_RE.test(channel ?? "") ||
+        !(recent(sourceTs) || (recoveryCutoff !== undefined && recent(sourceTs, recoveryCutoff))) ||
+        canonicalSlackTimestamp(replyTs) === null || timestamp(replyTs) < timestamp(sourceTs)) return false;
+    try {
+      await ready();
+      rows.set(key(channel, sourceTs), {channel, ts: sourceTs, state: "done", replyTs});
+      await persist();
+      confirmed.add(key(channel, sourceTs));
+      return true;
+    } catch { journalStatus = "unavailable"; log("warn", "journal_unavailable"); return false; }
+  }
+
+  const slack = (method, body = {}) => callSlackApi({fetchFn, botToken, method, body,
+    timeoutMs: SLACK_API_TIMEOUT_MS, sleepFn: ms => new Promise(resolve => setTimeout(resolve, ms))});
+  async function scan() {
+    let replayed = 0, scanned = 0;
+    try {
+      await ready();
+      const auth = await slack("auth.test");
+      if (auth.team_id !== teamId || !SLACK_USER_RE.test(auth.user_id ?? "") ||
+          (botUserId && botUserId !== auth.user_id)) throw new Error("Slack identity mismatch");
+      authenticatedBot = auth.user_id;
+      if (waitForTransportReady) {
+        try { await waitForTransportReady(); }
+        catch {
+          await incomplete("transport_not_ready");
+          return {replayed, scanned};
+        }
+      }
+      const cutoff = now(), oldest = `${Math.floor((cutoff - DM_CATCHUP_LIMITS.windowMs) / 1000)}.${String((cutoff - DM_CATCHUP_LIMITS.windowMs) % 1000).padStart(3, "0")}000`;
+      recoveryCutoff = cutoff;
+      let cursor = "";
+      const listCursors = new Set();
+      do {
+        const list = await slack("conversations.list", {types: "im", limit: DM_CATCHUP_LIMITS.maxDms, cursor});
+        if (!Array.isArray(list.channels)) throw new Error("invalid conversation list");
+        for (const channel of list.channels) {
+          if (!SLACK_DM_CHANNEL_RE.test(channel?.id ?? "") || !SLACK_USER_RE.test(channel.user ?? "")) {
+            await incomplete("invalid_dm_identity"); continue;
+          }
+          if (!allowed(channel.user)) continue;
+          if (scanned >= DM_CATCHUP_LIMITS.maxDms) { await incomplete("dm_limit_incomplete"); return {replayed, scanned}; }
+          scanned++;
+          const priorDone = [...rows].filter(([id, row]) => row.channel === channel.id &&
+            row.state === "done" && !confirmed.has(id));
+          const messages = [];
+          let historyCursor = "", complete = false;
+          try {
+            for (let page = 0; page < 2; page++) {
+              const history = await slack("conversations.history", {channel: channel.id, oldest,
+                latest: `${Math.floor(cutoff / 1000)}.${String(cutoff % 1000).padStart(3, "0")}000`, inclusive: true,
+                include_all_metadata: true, limit: 100, cursor: historyCursor});
+              if (!Array.isArray(history.messages)) break;
+              messages.push(...history.messages);
+              if (messages.length > DM_CATCHUP_LIMITS.maxHistory) break;
+              const next = history.response_metadata?.next_cursor ?? "";
+              if (!history.has_more && !next) { complete = true; break; }
+              if (!next || next === historyCursor || messages.length >= DM_CATCHUP_LIMITS.maxHistory) break;
+              historyCursor = next;
+            }
+          } catch (error) {
+            const missingScope = /missing_scope/u.test(error?.code ?? "");
+            await incomplete(missingScope ? "missing_scope" : "history_unavailable");
+            if (missingScope) return {replayed, scanned};
+            continue;
+          }
+          if (!complete) { await incomplete("history_limit_incomplete"); continue; }
+          let lastBotTs;
+          for (const message of messages) {
+            const topLevelBotPost = message.user === authenticatedBot &&
+              (message.type === undefined || message.type === "message") &&
+              (message.channel === undefined || message.channel === channel.id) &&
+              (message.team === undefined || message.team === teamId) &&
+              (message.team_id === undefined || message.team_id === teamId) &&
+              (message.thread_ts == null || message.thread_ts === message.ts) &&
+              !["message_changed", "message_deleted"].includes(message.subtype) && recent(message.ts, cutoff);
+            if (!topLevelBotPost) continue;
+            if (!lastBotTs || timestamp(message.ts) > timestamp(lastBotTs)) lastBotTs = message.ts;
+            const metadata = message.metadata;
+            const payload = metadata?.event_type === "teamagent.dm_answer_v1"
+              ? metadata.event_payload : metadata?.event_payload?.teamagent_dm_answer_v1;
+            if (payload?.complete === true && payload.source_channel === channel.id) {
+              await markReplied({channel: channel.id, sourceTs: payload.source_ts, replyTs: message.ts});
+            }
+          }
+          // Legacy replies have no source marker. The latest top-level bot post is the recovery boundary.
+          // Persist older source timestamps as done so a delayed Socket delivery shares the same decision.
+          if (lastBotTs) for (const message of messages) {
+            if (message.user === channel.user && recent(message.ts, cutoff) &&
+                timestamp(message.ts) < timestamp(lastBotTs)) {
+              await markReplied({channel: channel.id, sourceTs: message.ts, replyTs: lastBotTs});
+            }
+          }
+          let invalidated = false;
+          for (const [id, row] of priorDone) {
+            if (rows.get(id)?.replyTs !== row.replyTs || confirmed.has(id)) continue;
+            rows.set(id, {channel: row.channel, ts: row.ts, state: "started"});
+            seen.delete(id); invalidated = true;
+          }
+          if (invalidated) await persist();
+          let perDm = 0;
+          for (const message of messages.filter(item => recent(item?.ts, cutoff))
+            .sort((a, b) => timestamp(a.ts) < timestamp(b.ts) ? -1 : timestamp(a.ts) > timestamp(b.ts) ? 1 : 0)) {
+            if (message.user !== channel.user) continue;
+            if (perDm >= DM_CATCHUP_LIMITS.maxPerDm || replayed >= DM_CATCHUP_LIMITS.maxReplay) {
+              await incomplete("replay_limit_incomplete"); break;
+            }
+            try {
+              const candidate = {...message, channel: channel.id};
+              if (await reserve(candidate, {source: "replay"})) {
+                perDm++; replayed++;
+                await dispatch(candidate, {source: "replay", cutoff});
+              }
+            } catch (error) {
+              if (error?.code === "dm_catchup_unsupported_source") seen.delete(key(channel.id, message.ts));
+              await incomplete(error?.code === "dm_catchup_unsupported_source" ? "unsupported_source" : "dispatch_failed");
+            }
+          }
+        }
+        cursor = list.response_metadata?.next_cursor ?? "";
+        if (cursor && (scanned >= DM_CATCHUP_LIMITS.maxDms || listCursors.has(cursor))) {
+          await incomplete("dm_limit_incomplete"); break;
+        }
+        listCursors.add(cursor);
+      } while (cursor);
+    } catch (error) {
+      await incomplete(/missing_scope/u.test(error?.code ?? "") ? "missing_scope" : "startup_unavailable");
+    } finally {
+      recoveryCutoff = undefined;
+    }
+    return {replayed, scanned};
+  }
+  return {start: () => (startup ??= scan()), accept, reserve, markReplied, markUnresolved,
+    get stateStatus() { return journalStatus; }, get botUserId() { return authenticatedBot; }};
+}
+
 export function createCallerIdentityPlugin({
   env = process.env,
   now = () => Date.now(),
   randomBytesFn = randomBytes,
   fetchFn = globalThis.fetch,
+  waitForSlackReady = waitForSlackTransportReady,
   // 保証経路は hook から切り離して走らせる（下の startConnectGuarantee を参照）。
   // その「切り離した仕事」をテストから待てるようにするための注入口。既定は捨てるだけ。
   onBackgroundTask = () => {},
@@ -2522,6 +2823,29 @@ export function createCallerIdentityPlugin({
   if (!expectedTeamId) {
     fail("SLACK_TEAM_ID must be a canonical Slack T ID");
   }
+  let dmCatchup = null;
+  const rawCatchupUsers = typeof env.DM_CATCHUP_ALLOWED_USERS === "string" ? env.DM_CATCHUP_ALLOWED_USERS : "";
+  const suppliedCatchupUsers = rawCatchupUsers.split(",");
+  const catchupUsers = new Set(rawCatchupUsers.length <= 2048 && suppliedCatchupUsers.length <= 100 &&
+    (rawCatchupUsers === "*" || (suppliedCatchupUsers.every(user => SLACK_USER_RE.test(user)) &&
+      new Set(suppliedCatchupUsers).size === suppliedCatchupUsers.length)) ? suppliedCatchupUsers : []);
+  const dmCatchupEnabled = env.DM_CATCHUP_ENABLED === "1" && catchupUsers.size > 0;
+  const tracksCatchupUser = user => dmCatchup !== null &&
+    (catchupUsers.has("*") || catchupUsers.has(user));
+  function tracksCatchupInbound(event, ctx, hook) {
+    if (!dmCatchup) return false;
+    if (hook === "reply_dispatch") {
+      const senderId = normalizeSlackId(event?.ctx?.SenderId, SLACK_USER_RE);
+      return !senderId || tracksCatchupUser(senderId);
+    }
+    return catchupUsers.has("*") || [ctx?.senderId, event?.senderId, event?.metadata?.senderId]
+      .some(user => catchupUsers.has(normalizeSlackId(user, SLACK_USER_RE)));
+  }
+  const catchupAdmissions = new Map();
+  const catchupReplayKeys = new Set();
+  const catchupReplies = new Map();
+  const catchupReplySources = new Map();
+  const catchupKey = (channel, ts) => JSON.stringify([expectedTeamId, channel, ts]);
   // 診断行の転送先。connect_diagnostics.admin_name() と同じ env 名・同じ既定。
   const adminName =
     (typeof env[ADMIN_NAME_ENV] === "string" ? env[ADMIN_NAME_ENV].trim() : "") ||
@@ -3185,7 +3509,7 @@ export function createCallerIdentityPlugin({
     if (rejectedRuns.has(runId)) return false;
     const existing = ingressByRun.get(runId);
     if (existing) {
-      const matches = sameIngress(existing, ingress);
+      const matches = sameIngress(existing, ingress, tracksCatchupUser(ingress.senderId));
       if (matches) {
         // 同一 ingress の再通知（content を伴う側が後から来る経路）でも判定を失わない。
         //
@@ -3220,7 +3544,7 @@ export function createCallerIdentityPlugin({
       return matches;
     }
     for (const bound of ingressByRun.values()) {
-      if (sameIngress(bound, ingress)) return false;
+      if (sameIngress(bound, ingress, tracksCatchupUser(ingress.senderId))) return false;
     }
     ingressByRun.set(runId, ingress);
     rememberConnectIngress(runId, ingress);
@@ -3369,7 +3693,7 @@ export function createCallerIdentityPlugin({
       hasMedia,
     };
     const existing = pendingByMessage.get(pendingKey);
-    if (existing && !sameIngress(existing, ingress)) {
+    if (existing && !sameIngress(existing, ingress, tracksCatchupUser(ingress.senderId))) {
       pendingByMessage.delete(pendingKey);
       emitPluginLog(logger, "warn", "inbound rejected reason=conflicting_message_identity");
       return null;
@@ -3638,15 +3962,25 @@ export function createCallerIdentityPlugin({
 
   async function postConnectMessage({ ingress, text }) {
     const channel = await resolveCanonicalChannel(ingress);
-    const post = body =>
-      callSlackApi({
+    const post = async body => {
+      const complete = connectRuleAllowsSuppression(ingress.connectRequestRule);
+      const result = await callSlackApi({
         fetchFn,
         botToken: slackBotToken,
         method: "chat.postMessage",
-        body: { channel, text, ...body },
+        body: { channel, text, ...body, ...(tracksCatchupUser(ingress.senderId) && SLACK_DM_CHANNEL_RE.test(channel)
+          ? {metadata: catchupMetadata(channel, ingress.messageId, complete)} : {}) },
         timeoutMs: SLACK_API_TIMEOUT_MS,
         sleepFn,
       });
+      if (tracksCatchupUser(ingress.senderId) && complete && SLACK_DM_CHANNEL_RE.test(channel)) {
+        if (!result.warning && !result.response_metadata?.warnings?.length && canonicalSlackTimestamp(result.ts)) {
+          await dmCatchup.markReplied({channel, sourceTs: ingress.messageId, replyTs: result.ts});
+          completeCatchupAdmission(channel, ingress.messageId);
+        } else await dmCatchup.markUnresolved("metadata_update_failed");
+      }
+      return result;
+    };
     // チャンネルのスレッドで訊かれたらスレッドへ返す（会話面を移さない）。
     if (ingress.threadTs === null) return post({});
     try {
@@ -4268,7 +4602,9 @@ export function createCallerIdentityPlugin({
   function matchesConversation(ingress, { sessionKey, senderId, channelId, nowMs }) {
     const dmAlias = SLACK_DM_CHANNEL_RE.test(channelId) ? `DM:${senderId}` : null;
     const channelMatches =
-      ingress.channelId === channelId || (dmAlias !== null && ingress.channelId === dmAlias);
+      ingress.channelId === channelId ||
+      (tracksCatchupUser(ingress.senderId) && ingress.channelAliases?.includes(channelId)) ||
+      (dmAlias !== null && ingress.channelId === dmAlias);
     return (
       ingress.sessionKey === sessionKey &&
       ingress.senderId === senderId &&
@@ -4801,7 +5137,8 @@ export function createCallerIdentityPlugin({
       if (
         existing.sessionKey !== sessionKey ||
         existing.senderId !== senderId ||
-        existing.channelId !== channelId
+        (existing.channelId !== channelId &&
+          !(tracksCatchupUser(senderId) && existing.channelAliases?.includes(channelId)))
       ) {
         rejectRun(runId, nowMs);
         emitPluginLog(
@@ -6523,6 +6860,221 @@ export function createCallerIdentityPlugin({
     }
   }
 
+  function catchupMetadata(channel, sourceTs, complete = true) {
+    return {event_type: "teamagent.dm_answer_v1", event_payload: {
+      source_channel: channel, source_ts: sourceTs, complete,
+    }};
+  }
+
+  function completeCatchupAdmission(channel, sourceTs) {
+    const admission = catchupAdmissions.get(catchupKey(channel, sourceTs));
+    if (admission) admission.replied = true;
+  }
+
+  async function admitCatchupInbound(event, ctx, hook, logger) {
+    let ingress, dispatchInbound;
+    if (hook === "reply_dispatch") {
+      const source = event?.ctx;
+      if (source?.CommandSource === "native") return true;
+      const providers = [source?.Provider, source?.Surface, source?.OriginatingChannel]
+        .filter(value => typeof value === "string" && value.trim())
+        .map(value => value.trim().toLowerCase());
+      if (!providers.includes("slack")) return true;
+      const channelId = normalizeSlackId(source.NativeChannelId, SLACK_DM_CHANNEL_RE);
+      if (source.ChatType !== "direct" && !channelId) return true;
+      const senderId = normalizeSlackId(source.SenderId, SLACK_USER_RE);
+      const messageId = canonicalSlackTimestamp(source.MessageSid);
+      const sessionKey = consistentValue([source.SessionKey, event.sessionKey], value => nonBlank(value, 2048));
+      const runId = event.runId == null ? undefined : canonicalInvocationId(event.runId);
+      if (providers.some(value => value !== "slack") || source.ChatType !== "direct" ||
+          !channelId || !senderId || !messageId || !sessionKey || source.GroupSpace !== expectedTeamId ||
+          (event.runId != null && !runId)) {
+        emitPluginLog(logger, "warn", "dm catchup reason=invalid_dispatch_identity");
+        return false;
+      }
+      ingress = {channelId, senderId, messageId, sessionKey};
+      const target = `user:${senderId}`;
+      dispatchInbound = {
+        event: {from: `slack:${senderId}`, senderId, messageId, runId,
+          content: source.BodyForCommands ?? source.RawBody ?? source.BodyForAgent,
+          threadId: source.MessageThreadId, metadata: {guildId: expectedTeamId,
+            to: target, originatingTo: target, mediaPath: source.MediaPath, mediaUrl: source.MediaUrl,
+            mediaPaths: source.MediaPaths, mediaUrls: source.MediaUrls}},
+        ctx: {channelId: "slack", conversationId: target, sessionKey, senderId, messageId, runId},
+      };
+    } else {
+      if (ctx?.channelId !== "slack") return true;
+      const suppliedRunIds = [event?.runId, ctx?.runId].filter(value => value != null);
+      if (suppliedRunIds.length && !consistentValue(suppliedRunIds, canonicalInvocationId)) return false;
+      const sessionKey = consistentValue([ctx.sessionKey, event?.sessionKey], value => nonBlank(value, 2048));
+      const senderId = consistentValue([ctx.senderId, event?.senderId, event?.metadata?.senderId],
+        value => normalizeSlackId(value, SLACK_USER_RE));
+      const teamId = normalizeSlackId(event?.metadata?.guildId, SLACK_TEAM_RE);
+      const channelId = consistentSlackChannel([ctx.conversationId, event?.metadata?.to,
+        event?.metadata?.originatingTo, event?.from]);
+      const messageId = consistentValue([ctx.messageId, event?.messageId, event?.metadata?.messageId],
+        value => nonBlank(value, 512));
+      if (!sessionKey || !senderId || teamId !== expectedTeamId || !channelId || !messageId) return false;
+      // Rejected notifications must not replace the pending source for a later model run.
+      ingress = {channelId, senderId, messageId, sessionKey};
+    }
+    if (!ingress || !canonicalSlackTimestamp(ingress.messageId)) return true;
+    if (!SLACK_DM_CHANNEL_RE.test(ingress.channelId) &&
+        ingress.channelId !== `DM:${ingress.senderId}`) return true;
+    let channel;
+    try { channel = await resolveCanonicalChannel(ingress); }
+    catch {
+      emitPluginLog(logger, "warn", "dm catchup reason=canonical_channel_unavailable");
+      return false;
+    }
+    const key = catchupKey(channel, ingress.messageId);
+    let admission = catchupAdmissions.get(key);
+    if (admission && admission.senderId !== ingress.senderId) return false;
+    if (admission?.hooks.has(hook)) return false;
+    if (!admission) {
+      const promise = catchupReplayKeys.has(key) ? Promise.resolve(true)
+        : (async () => {
+          let unavailable = false;
+          const admitted = await dmCatchup.reserve({channel, user: ingress.senderId, ts: ingress.messageId,
+            team: expectedTeamId}, {source: "live", onUnavailable: () => { unavailable = true; }});
+          if (unavailable) emitPluginLog(logger, "warn", "dm catchup reason=live_tracking_unavailable");
+          return admitted || unavailable;
+        })();
+      admission = {hooks: new Set(), promise, senderId: ingress.senderId,
+        sessionKey: ingress.sessionKey, at: now()};
+      catchupAdmissions.set(key, admission);
+      for (const [id, value] of catchupAdmissions) {
+        if (value.at < now() - DM_CATCHUP_LIMITS.windowMs) catchupAdmissions.delete(id);
+      }
+    }
+    if (hook === "reply_dispatch") {
+      const admitted = await admission.promise;
+      if (!admitted && !catchupReplayKeys.has(key)) return false;
+      if (admission.hooks.has(hook)) return false;
+      admission.hooks.add(hook);
+      const recorded = rememberInbound(dispatchInbound.event, dispatchInbound.ctx, logger);
+      if (!recorded) return false;
+      dmChannelBySender.set(ingress.senderId, channel);
+      startConnectGuarantee(dispatchInbound.event, dispatchInbound.ctx, logger, hook);
+      const trusted = dispatchInbound.ctx.runId ? ingressByRun.get(dispatchInbound.ctx.runId)
+        : pendingByMessage.get(recorded.pendingKey);
+      if (!trusted) return false;
+      trusted.channelAliases = [...new Set([...(trusted.channelAliases ?? []), trusted.channelId,
+        `DM:${ingress.senderId}`, channel])];
+      trusted.channelId = channel;
+      return true;
+    }
+    admission.hooks.add(hook);
+    return admission.promise;
+  }
+
+  async function rememberCatchupReply(event, ctx, result, logger) {
+    if (!dmCatchup || result?.cancel || (event?.kind !== undefined && event.kind !== "final")) return result;
+    const payload = result?.payload ?? event?.payload;
+    const runId = canonicalInvocationId(event?.runId);
+    const ingress = runId && runId === canonicalInvocationId(ctx?.runId)
+      ? connectIngressByRun.get(runId) : null;
+    if (!ingress || !tracksCatchupUser(ingress.senderId) || ingress.ingressKind !== "message" || !canonicalSlackTimestamp(ingress.messageId) ||
+        typeof payload?.text !== "string" || !payload.text.trim() ||
+        payload.isReasoning || payload.isCommentary || payload.text.trim() === "NO_REPLY") return result;
+    let channel;
+    try { channel = await resolveCanonicalChannel(ingress); }
+    catch { return result; }
+    if (!SLACK_DM_CHANNEL_RE.test(channel)) return result;
+    const sourceKey = catchupKey(channel, ingress.messageId);
+    // Replay commits its own exact source marker in the final post.
+    if (runId.startsWith("catchup-") && catchupReplayKeys.has(sourceKey)) return result;
+    let proof = catchupReplySources.get(runId);
+    if (!proof) {
+      const active = [...catchupAdmissions].filter(([, entry]) => entry.sessionKey === ingress.sessionKey &&
+        entry.hooks.has("reply_dispatch") && !entry.replied);
+      proof = {key: active.length === 1 && active[0][0] === sourceKey ? sourceKey : null, at: now()};
+      catchupReplySources.set(runId, proof);
+      for (const [id, entry] of catchupReplySources) {
+        if (entry.at < now() - DM_CATCHUP_LIMITS.windowMs) catchupReplySources.delete(id);
+      }
+    }
+    if (proof.key !== sourceKey) {
+      await dmCatchup.markUnresolved("metadata_update_failed");
+      emitPluginLog(logger, "warn", "dm catchup reason=ambiguous_source_unresolved");
+      return result;
+    }
+    const hash = createHash("sha256").update(payload.text.trim()).digest("hex");
+    const key = JSON.stringify([ingress.sessionKey, hash]);
+    const entries = catchupReplies.get(key) ?? [];
+    if (!entries.some(entry => entry.sourceTs === ingress.messageId)) {
+      entries.push({channel, sourceTs: ingress.messageId, at: now()});
+      catchupReplies.set(key, entries);
+    }
+    for (const [id, values] of catchupReplies) {
+      if (values.every(value => value.at < now() - DM_CATCHUP_LIMITS.windowMs)) catchupReplies.delete(id);
+    }
+    return result;
+  }
+
+  async function tagCatchupReply(event, ctx, logger) {
+    if (!dmCatchup || ctx?.channelId !== "slack" || event?.success !== true ||
+        typeof event.content !== "string" || !canonicalSlackTimestamp(event.messageId)) return;
+    const sessionKey = ctx.sessionKey ?? event.sessionKey;
+    const hash = createHash("sha256").update(event.content.trim()).digest("hex");
+    const recipient = resolveSlackChannel(event.to);
+    const channel = recipient?.startsWith("DM:") ? dmChannelBySender.get(recipient.slice(3)) : recipient;
+    const matches = [...catchupReplies].filter(([id, entries]) => {
+      const [sourceSession, sourceHash] = JSON.parse(id);
+      return sourceHash === hash && (sessionKey ? sourceSession === sessionKey
+        : channel && entries.every(entry => entry.channel === channel));
+    });
+    if (matches.length !== 1) {
+      if ([...catchupReplies.values()].some(entries => entries.some(entry => entry.channel === channel))) {
+        await dmCatchup.markUnresolved("metadata_update_failed");
+        emitPluginLog(logger, "warn", "dm catchup reason=reply_correlation_unresolved");
+      }
+      return;
+    }
+    const [key, entries] = matches[0];
+    if (entries?.length !== 1) {
+      if (entries?.length) {
+        emitPluginLog(logger, "warn", "dm catchup reason=ambiguous_reply_unresolved");
+        await dmCatchup.markUnresolved("metadata_update_failed", entries.length);
+      }
+      return;
+    }
+    const entry = entries[0];
+    try {
+      const history = await callSlackApi({fetchFn, botToken: slackBotToken,
+        method: "conversations.history", body: {channel: entry.channel, oldest: event.messageId,
+          latest: event.messageId, inclusive: true, include_all_metadata: true, limit: 1},
+        timeoutMs: SLACK_API_TIMEOUT_MS, sleepFn});
+      const sent = history.messages?.find(message => message.ts === event.messageId);
+      if (!sent || sent.user !== dmCatchup.botUserId) throw new Error("reply not readable");
+      const marker = catchupMetadata(entry.channel, entry.sourceTs);
+      const metadata = sent.metadata?.event_type && sent.metadata.event_type !== marker.event_type
+        ? {...sent.metadata, event_payload: {...sent.metadata.event_payload,
+          teamagent_dm_answer_v1: marker.event_payload}} : marker;
+      // shortcut: native delivery adds exact metadata afterward; use the broad bot-post boundary until atomic metadata is available.
+      const updated = await callSlackApi({fetchFn, botToken: slackBotToken, method: "chat.update",
+        body: {channel: entry.channel, ts: event.messageId, metadata},
+        timeoutMs: SLACK_API_TIMEOUT_MS, sleepFn, retryOnTimeout: false});
+      if (updated.warning || updated.response_metadata?.warnings?.length) throw new Error("reply metadata rejected");
+      const verified = await callSlackApi({fetchFn, botToken: slackBotToken,
+        method: "conversations.history", body: {channel: entry.channel, oldest: event.messageId,
+          latest: event.messageId, inclusive: true, include_all_metadata: true, limit: 1},
+        timeoutMs: SLACK_API_TIMEOUT_MS, sleepFn});
+      const saved = verified.messages?.find(message => message.ts === event.messageId &&
+        message.user === dmCatchup.botUserId)?.metadata;
+      const savedMarker = saved?.event_type === marker.event_type
+        ? saved.event_payload : saved?.event_payload?.teamagent_dm_answer_v1;
+      if (savedMarker?.source_channel !== entry.channel || savedMarker?.source_ts !== entry.sourceTs ||
+          savedMarker?.complete !== true) throw new Error("reply metadata unreadable");
+      await dmCatchup.markReplied({channel: entry.channel, sourceTs: entry.sourceTs, replyTs: event.messageId});
+      completeCatchupAdmission(entry.channel, entry.sourceTs);
+      catchupReplies.delete(key);
+    } catch {
+      await dmCatchup.markUnresolved("metadata_update_failed");
+      emitPluginLog(logger, "warn", "dm catchup reason=reply_metadata_unresolved");
+    }
+  }
+
   return {
     id: PLUGIN_ID,
     name: "TeamAgent Caller Identity",
@@ -6530,6 +7082,47 @@ export function createCallerIdentityPlugin({
     register(api) {
       if (typeof api?.registerInteractiveHandler !== "function") {
         fail("fixed OpenClaw interactive handler API is unavailable");
+      }
+      if (dmCatchupEnabled && env.OPENCLAW_STATE_DIR && slackBotToken && typeof api.registerService === "function") {
+        const readinessAbort = new AbortController();
+        api.registerService({id: "teamagent-dm-catchup", stop: () => readinessAbort.abort(), start: ({config}) => {
+          const slack = config?.channels?.slack;
+          if (slack?.enabled === false) return;
+          const nativeAllowFrom = slack?.dmPolicy === "open" ? ["*"] : slack?.allowFrom ?? [];
+          const allowFrom = catchupUsers.has("*") ? nativeAllowFrom : [...catchupUsers]
+            .filter(user => nativeAllowFrom.includes("*") || nativeAllowFrom.includes(user));
+          dmCatchup = createDmCatchup({
+            statePath: catchupJoin(env.OPENCLAW_STATE_DIR, "slack-catchup", "journal.json"),
+            teamId: expectedTeamId, botToken: slackBotToken, fetchFn, now, allowFrom, logger: api.logger,
+            waitForTransportReady: () => waitForSlackReady({config, env, now, abortSignal: readinessAbort.signal}),
+            dispatch: async (message, {cutoff}) => {
+              const key = catchupKey(message.channel, message.ts);
+              dmChannelBySender.set(message.user, message.channel);
+              catchupReplayKeys.add(key);
+              try {
+                const reply = await dispatchCaughtUpDm({api, config, message,
+                  teamId: expectedTeamId, botToken: slackBotToken, fetchFn, now: () => cutoff});
+                if (reply.finalReplyTs) {
+                  await dmCatchup.markReplied({channel: message.channel,
+                    sourceTs: message.ts, replyTs: reply.finalReplyTs});
+                  completeCatchupAdmission(message.channel, message.ts);
+                  for (const [id, entries] of catchupReplies) {
+                    const remaining = entries.filter(entry => entry.channel !== message.channel || entry.sourceTs !== message.ts);
+                    if (remaining.length) catchupReplies.set(id, remaining);
+                    else catchupReplies.delete(id);
+                  }
+                } else if (!catchupAdmissions.get(key)?.replied) await dmCatchup.markUnresolved("no_final_reply");
+              } finally { catchupReplayKeys.delete(key); }
+            },
+          });
+          if (!allowFrom.length) return;
+          const task = dmCatchup.start().then(({scanned, replayed}) => {
+            emitPluginLog(api.logger, "info", `dm catchup completed scanned=${scanned} replayed=${replayed}`);
+          }).catch(() => {
+            emitPluginLog(api.logger, "warn", "dm catchup reason=startup_unavailable");
+          });
+          onBackgroundTask(task);
+        }});
       }
       // 束縛表の action_id ごとに 1 つずつ登録する（上流は data の最初の ":" より前を namespace とし、
       // 登録の無い namespace の押下は plugin を通らない＝捕捉も束縛もされない）。
@@ -6590,10 +7183,30 @@ export function createCallerIdentityPlugin({
       // 一度も動かず層1 の二の舞になる。両方に掛け、一回性は
       // connectAnsweredByMessage（pendingKey 基準）が保証する＝二重投稿しない。
       observe("inbound_claim", (event, ctx) => {
+        if (tracksCatchupInbound(event, ctx, "inbound_claim")) return admitCatchupInbound(event, ctx, "inbound_claim", api.logger)
+          .then(admitted => {
+            if (!admitted) return {handled: true};
+            startConnectGuarantee({...event, runId: undefined}, {...ctx, runId: undefined},
+              api.logger, "inbound_claim");
+            return undefined;
+          });
         startConnectGuarantee(event, ctx, api.logger, "inbound_claim");
       });
       observe("message_received", (event, ctx) => {
+        if (tracksCatchupInbound(event, ctx, "message_received")) return admitCatchupInbound(event, ctx, "message_received", api.logger)
+          .then(admitted => {
+            if (admitted) startConnectGuarantee({...event, runId: undefined}, {...ctx, runId: undefined},
+              api.logger, "message_received");
+          });
         startConnectGuarantee(event, ctx, api.logger, "message_received");
+      });
+      // Unlike message_received, core awaits this hook before starting the model.
+      if (dmCatchupEnabled) observe("reply_dispatch", async (event, ctx) => {
+        if (tracksCatchupInbound(event, ctx, "reply_dispatch") &&
+            !await admitCatchupInbound(event, ctx, "reply_dispatch", api.logger)) {
+          return {handled: true, queuedFinal: false, counts: {tool: 0, block: 0, final: 0}};
+        }
+        return undefined;
       });
       // 連携（層1）を先に評価し、答えなかったときだけ本人メモ（コマンド→observe）を見る。
       observe("before_agent_reply", async (event, ctx) => {
@@ -6688,15 +7301,20 @@ export function createCallerIdentityPlugin({
       }
       observe("reply_payload_sending", (event, ctx) => {
         const direct = suppressSearchReply(event, ctx);
-        return direct?.then ? direct.then(result => result ?? sendReply(event, ctx))
+        const result = direct?.then ? direct.then(result => result ?? sendReply(event, ctx))
           : direct ?? sendReply(event, ctx);
+        return tracksCatchupUser(connectIngressByRun.get(canonicalInvocationId(event?.runId))?.senderId) ? Promise.resolve(result)
+          .then(value => rememberCatchupReply(event, ctx, value, api.logger)) : result;
       });
+      if (dmCatchupEnabled) observe("message_sent", (event, ctx) => tagCatchupReply(event, ctx, api.logger));
       observe("agent_end", (event, ctx) => {
         rescueEmptyRevisedReply(event, ctx, api.logger);
         releaseAgentRun(event, ctx);
       });
       // 実登録と期待値の乖離は起動時に落とす（テストが緑のまま前提が壊れるのを防ぐ）。
-      if (registeredHooks.join(",") !== REGISTERED_HOOKS.join(",")) {
+      const expectedHooks = dmCatchupEnabled ? REGISTERED_HOOKS
+        : REGISTERED_HOOKS.filter(name => name !== "reply_dispatch" && name !== "message_sent");
+      if (registeredHooks.join(",") !== expectedHooks.join(",")) {
         fail(
           `registered hooks drifted from REGISTERED_HOOKS: [${registeredHooks.join(",")}]`,
         );
@@ -6721,6 +7339,204 @@ export function createCallerIdentityPlugin({
       );
     },
   };
+}
+
+// Public SDK client only: read the current process's authenticated runtime status.
+// Socket connected/lastConnectedAt are published after Slack's hello, not channel task startup.
+export async function waitForSlackTransportReady({
+  config, env = process.env, now = () => Date.now(),
+  loadClient = async () => (await import("openclaw/plugin-sdk/gateway-runtime")).GatewayClient,
+  sleepFn = ms => new Promise(resolve => setTimeout(resolve, ms)),
+  timeoutMs = 120_000, pollIntervalMs = 1000, abortSignal,
+} = {}) {
+  const failed = () => Object.assign(new Error("DM catchup transport_not_ready"),
+    {code: "dm_catchup_transport_not_ready"});
+  const port = config?.gateway?.port;
+  const token = env.OPENCLAW_GATEWAY_TOKEN;
+  if (!Number.isInteger(port) || port < 1 || port > 65535 ||
+      typeof token !== "string" || !token.trim() || token.includes("${") ||
+      !Number.isFinite(timeoutMs) || timeoutMs <= 0 || !Number.isFinite(pollIntervalMs) || pollIntervalMs <= 0 ||
+      abortSignal?.aborted) throw failed();
+  // Reserve one second of the 120-second total bound for closing the transient client.
+  const budget = Math.min(timeoutMs, 119_000), deadline = now() + budget;
+  const requestAbort = new AbortController();
+  let client, timer, rejectWait;
+  const stopped = new Promise((_, reject) => { rejectWait = reject; });
+  const abort = () => { requestAbort.abort(); rejectWait(failed()); };
+  timer = setTimeout(abort, budget);
+  abortSignal?.addEventListener("abort", abort, {once: true});
+  try {
+    const GatewayClient = await Promise.race([loadClient(), stopped]);
+    let connected;
+    const hello = new Promise(resolve => {connected = resolve;});
+    client = new GatewayClient({
+      url: `ws://127.0.0.1:${port}`, token: token.trim(),
+      clientName: "gateway-client", mode: "backend", role: "operator", scopes: ["operator.read"],
+      deviceIdentity: null, env: {}, requestTimeoutMs: Math.min(5000, budget),
+      onHelloOk: connected, onConnectError: () => {},
+      hostDeps: {logDebug: () => {}, logError: () => {}},
+    });
+    client.start();
+    await Promise.race([hello, stopped]);
+    while (now() < deadline) {
+      try {
+        const status = await Promise.race([client.request("channels.status", {channel: "slack", probe: false},
+          {timeoutMs: Math.max(1, Math.min(5000, deadline - now())), signal: requestAbort.signal}), stopped]);
+        const accountId = status?.channelDefaultAccountId?.slack;
+        const account = typeof accountId === "string" && Array.isArray(status?.channelAccounts?.slack)
+          ? status.channelAccounts.slack.find(item => item.accountId === accountId) : null;
+        if (account?.connected === true && account.enabled !== false && account.configured !== false &&
+            Number.isFinite(account.lastConnectedAt) && account.lastConnectedAt > 0 && account.lastConnectedAt <= now()) {
+          return {connectedAt: account.lastConnectedAt, observedAt: now()};
+        }
+      } catch {
+        if (requestAbort.signal.aborted) throw failed();
+      }
+      await Promise.race([sleepFn(Math.min(pollIntervalMs, Math.max(1, deadline - now()))), stopped]);
+    }
+    throw failed();
+  } catch { throw failed(); }
+  finally {
+    clearTimeout(timer);
+    abortSignal?.removeEventListener("abort", abort);
+    requestAbort.abort();
+    try { await client?.stopAndWait({timeoutMs: 1000}); } catch {}
+  }
+}
+
+// Replay only the bounded, authenticated history DM selected by createDmCatchup.
+// These are public plugin runtime APIs in openclaw@2026.7.1; do not import core internals.
+export async function dispatchCaughtUpDm({
+  api, config, message, teamId, botToken, fetchFn = globalThis.fetch, now = () => Date.now(),
+} = {}) {
+  const reject = reason => {
+    const error = new Error(`DM catchup ${reason}`);
+    error.code = `dm_catchup_${reason}`;
+    throw error;
+  };
+  const slack = config?.channels?.slack;
+  const allowFrom = slack?.allowFrom;
+  const authorized = Array.isArray(allowFrom) && (
+    (slack.dmPolicy === "open" && allowFrom.length === 1 && allowFrom[0] === "*") ||
+    (slack.dmPolicy === "allowlist" && allowFrom.includes(message?.user))
+  );
+  const sourceTs = canonicalSlackTimestamp(message?.ts);
+  const sourceTime = sourceTs === null ? NaN : Number(sourceTs) * 1000;
+  if (slack?.enabled === false || !authorized || !SLACK_TEAM_RE.test(teamId ?? "") ||
+      !SLACK_DM_CHANNEL_RE.test(message?.channel ?? "") || !SLACK_USER_RE.test(message?.user ?? "") ||
+      message?.type !== "message" || message.bot_id ||
+      (message.subtype && message.subtype !== "file_share") || sourceTs === null ||
+      !Number.isFinite(sourceTime) || sourceTime > now() || now() - sourceTime > DM_CATCHUP_LIMITS.windowMs ||
+      (message.team !== undefined && message.team !== teamId) ||
+      (message.team_id !== undefined && message.team_id !== teamId) ||
+      typeof botToken !== "string" || !botToken.trim() || botToken.includes("${")) reject("invalid_source");
+  // shortcut: attachment_assist reads the newest DM files; replaying old files needs exact-source media preparation.
+  // Thread/control events also require channel-specific preparation; leave them unresolved.
+  const text = typeof message.text === "string" ? message.text.trim() : "";
+  if (!text || message.subtype === "file_share" || message.files?.length ||
+      (message.thread_ts && message.thread_ts !== sourceTs) || /^\//u.test(text)) {
+    reject("unsupported_source");
+  }
+  const runtime = api?.runtime?.channel;
+  if (typeof runtime?.routing?.resolveAgentRoute !== "function" ||
+      typeof runtime?.inbound?.buildContext !== "function" ||
+      typeof runtime?.session?.resolveStorePath !== "function" ||
+      typeof runtime?.session?.recordInboundSession !== "function" ||
+      typeof runtime?.reply?.dispatchReplyWithBufferedBlockDispatcher !== "function") {
+    reject("runtime_unavailable");
+  }
+  const route = runtime.routing.resolveAgentRoute({cfg: config, channel: "slack", teamId,
+    peer: {kind: "direct", id: message.user}});
+  if (!route?.agentId || !route?.accountId || !route?.sessionKey) reject("route_unavailable");
+  const to = `user:${message.user}`;
+  const ctx = runtime.inbound.buildContext({
+    channel: "slack", accountId: route.accountId, messageId: sourceTs, timestamp: sourceTime,
+    from: `slack:${message.user}`, sender: {id: message.user, displayLabel: message.user},
+    conversation: {kind: "direct", id: message.channel, label: message.user,
+      spaceId: teamId, nativeChannelId: message.channel},
+    route: {agentId: route.agentId, accountId: route.accountId, routeSessionKey: route.sessionKey},
+    // Keep the native user-scoped route: agent hooks derive this same DM alias
+    // from SessionKey. NativeChannelId separately preserves the physical D ID.
+    reply: {to, originatingTo: to, nativeChannelId: message.channel},
+    message: {inboundEventKind: "user_request", rawBody: text, bodyForAgent: text,
+      body: `${text}\n[slack message id: ${sourceTs} channel: ${message.channel}]`, commandBody: text},
+    access: {commands: {authorized: false}},
+  });
+  ctx.ReplyToMode = "off";
+  let recordFailed = false;
+  try {
+    await runtime.session.recordInboundSession({
+      storePath: runtime.session.resolveStorePath(config.session?.store, {agentId: route.agentId}),
+      sessionKey: route.sessionKey, ctx,
+      updateLastRoute: {sessionKey: route.sessionKey, channel: "slack", to, accountId: route.accountId},
+      onRecordError: () => { recordFailed = true; },
+    });
+  } catch { reject("session_failed"); }
+  if (recordFailed) reject("session_failed");
+  const metadata = complete => ({event_type: "teamagent.dm_answer_v1", event_payload: {
+    source_channel: message.channel, source_ts: sourceTs, complete,
+  }});
+  const receipts = [], finals = [];
+  const post = async (body, kind, complete) => {
+    // Do not retry ambiguous writes. A timeout may follow a successful Slack post.
+    const posted = await callSlackApiOnce({fetchFn, botToken, method: "chat.postMessage",
+      timeoutMs: SLACK_API_TIMEOUT_MS, body: {...body, metadata: metadata(complete)}});
+    const ts = canonicalSlackTimestamp(posted.ts);
+    const returnedMetadata = posted.message?.metadata;
+    if (ts === null || (posted.channel !== undefined && posted.channel !== message.channel) ||
+        posted.warning || posted.response_metadata?.warnings?.length ||
+        (returnedMetadata !== undefined && (returnedMetadata?.event_type !== "teamagent.dm_answer_v1" ||
+          returnedMetadata?.event_payload?.source_channel !== message.channel ||
+          returnedMetadata?.event_payload?.source_ts !== sourceTs ||
+          returnedMetadata?.event_payload?.complete !== complete))) reject("invalid_receipt");
+    const receipt = {channel: message.channel, ts, kind};
+    receipts.push(receipt);
+    return receipt;
+  };
+  let deliveryFailed = false, result;
+  try {
+    result = await runtime.reply.dispatchReplyWithBufferedBlockDispatcher({ctx, cfg: config,
+      // reply_dispatch receives this ID before the model starts, so the plugin
+      // can bind the exact source rather than choosing a newer pending DM.
+      replyOptions: {runId: `catchup-${randomBytes(16).toString("hex")}`, disableBlockStreaming: true},
+      dispatcherOptions: {
+        deliver: async (payload, info) => {
+          // The public buffered dispatcher applies reply_payload_sending (including this
+          // plugin's scrub/suppression) before deliver: v2026.7.1 src/auto-reply/dispatch.ts:568-578.
+          // Running that hook again here would turn a once-only fallback into cancellation.
+          const slackData = payload.channelData?.slack;
+          if (payload.mediaUrl || payload.mediaUrls?.length || payload.presentation || payload.interactive ||
+              payload.audioAsVoice || payload.ttsSupplement || payload.spokenText || payload.delivery ||
+              payload.replyToId || (payload.channelData && Object.keys(payload.channelData).some(key => key !== "slack")) ||
+              (slackData && Object.keys(slackData).some(key => key !== "blocks")) ||
+              (slackData?.blocks !== undefined && !Array.isArray(slackData.blocks)) ||
+              (payload.text !== undefined && typeof payload.text !== "string") ||
+              (payload.text?.length ?? 0) > 40_000 ||
+              (!payload.text?.trim() && !slackData?.blocks?.length)) reject("unsupported_reply");
+          const body = {channel: message.channel, text: payload.text ?? "",
+            ...(slackData?.blocks ? {blocks: structuredClone(slackData.blocks)} : {})};
+          if (info.kind === "final") {
+            finals.push(body);
+            return {visibleReplySent: false};
+          }
+          await post(body, info.kind, false);
+          return {visibleReplySent: true};
+        },
+        // Core buffers delivery failures instead of throwing them from dispatch.
+        onError: () => { deliveryFailed = true; },
+      }});
+  } catch { reject("dispatch_failed"); }
+  if (deliveryFailed || Object.values(result?.failedCounts ?? {}).some(count => count > 0)) reject("delivery_failed");
+  // Commit the answer and its source marker in the same Slack write. A crash after
+  // Slack accepted the last final is repaired from history, without a second update.
+  let final;
+  try {
+    for (let index = 0; index < finals.length; index++) {
+      const receipt = await post(finals[index], "final", index === finals.length - 1);
+      if (index === finals.length - 1) final = receipt;
+    }
+  } catch { reject("delivery_failed"); }
+  return {...result, receipts, finalReplyTs: final?.ts, replyTs: final?.ts};
 }
 
 export default {
