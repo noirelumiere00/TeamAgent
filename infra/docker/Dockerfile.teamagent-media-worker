@@ -28,6 +28,9 @@ RUN set -eu; \
     printf '%s  %s\n' "$NPM_BINARY_SHA256" /usr/local/bin/npm | sha256sum -c -
 
 COPY tools/tiktok_scraper/package.json tools/tiktok_scraper/package-lock.json ./
+# Tracked inputs are covered by the signed canonical context; literal hashes cannot be overridden.
+COPY tools/first_visit/kit.lock.json /tmp/first-visit-kit.lock.json
+COPY tools/first_visit/tiktok-skills-kit-7c39099.tar.gz /tmp/first-visit-kit.tar.gz
 RUN --mount=type=cache,id=teamagent-media-npm-arm64,target=/root/.npm,sharing=locked \
     --mount=type=secret,id=teamagent_ca,required=false \
     set -eu; \
@@ -44,7 +47,15 @@ RUN --mount=type=cache,id=teamagent-media-npm-arm64,target=/root/.npm,sharing=lo
     test "$(node -p "require('playwright-core/package.json').version")" = "$PLAYWRIGHT_VERSION"; \
     test "$(node -p "require('puppeteer-core/package.json').version")" = "$PUPPETEER_VERSION"; \
     test "$(node -p "require('ipaddr.js/package.json').version")" = "$IPADDR_JS_VERSION"; \
-    rm -f /tmp/teamagent-build-ca.pem
+    printf '%s  %s\n' cc5e615c8a37b0d7346e3b1c53364aea0a81c62977791ba6f25a207d8856243d /tmp/first-visit-kit.lock.json | sha256sum -c -; \
+    printf '%s  %s\n' 729bf79d362fe01b06f4e0f0efd719fac8804251e2862f4bf0f6f00397f09a10 /tmp/first-visit-kit.tar.gz | sha256sum -c -; \
+    mkdir /deps/first-visit-kit; \
+    tar -xzf /tmp/first-visit-kit.tar.gz -C /deps/first-visit-kit; \
+    cd /deps/first-visit-kit/tiktok-deck; \
+    printf '%s  %s\n' a5f672b466c6e56616694cac9d1955e2b0098d7701e8be66daa56febf2d8645e package-lock.json | sha256sum -c -; \
+    npm ci --omit=dev --ignore-scripts --no-audit --no-fund; \
+    test "$(node -p "require('pptxgenjs/package.json').version")" = "3.12.0"; \
+    rm -f /tmp/teamagent-build-ca.pem /tmp/first-visit-kit.tar.gz
 
 FROM ghcr.io/astral-sh/uv:latest@${UV_ARM64_DIGEST} AS uv
 
@@ -336,6 +347,9 @@ COPY --from=python-deps /usr/share/teamagent/provenance/yt-dlp-sanitization.json
   /usr/share/teamagent/provenance/yt-dlp-sanitization.json
 COPY --from=js-deps --chown=10001:10001 /deps/node_modules/ \
   /app/tools/tiktok_scraper/node_modules/
+COPY --from=js-deps --chown=10001:10001 /deps/first-visit-kit/ /app/tools/tiktok-skills-kit/
+COPY --from=js-deps /tmp/first-visit-kit.lock.json \
+  /usr/share/teamagent/provenance/first-visit-kit.lock.json
 COPY --chown=10001:10001 tools/tiktok_scraper/search.mjs \
   /app/tools/tiktok_scraper/search.mjs
 COPY --chown=10001:10001 tools/tiktok_scraper/dns_pinned_proxy.mjs \
