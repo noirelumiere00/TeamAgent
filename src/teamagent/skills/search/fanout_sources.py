@@ -19,7 +19,7 @@ search 1 回で金庫・本人の Slack・取引先カルテ・事例・案件�
   R2 失敗は例外を投げず、状態（ok / zero / failed(reason) / skipped(reason)）で返す。
      接続待ちの時間切れ（PoolTimeoutError）・statement timeout（QueryCanceled）を
      「0 件」と取り違えない（「無い」と「探せなかった」を分ける：composite.py の S3 と同じ）。
-  R3 名指しが無い・業種が無いときは SQL を 1 本も打たない（接続も借りない）。
+  R3 名指し・業種・明示された商材のいずれも無いときは SQL を打たない。
   R4 検索本体の接続を借りて読むときは、1 本ごとに SAVEPOINT で囲む。statement timeout で
      止まった SQL が本体のトランザクションを中断状態にし、後続の検索を全部失敗させない。
   R5 ログは件数・状態・理由コードだけ（取引先名・業種・本文を出さない）。
@@ -115,7 +115,7 @@ class SourceResult(Generic[T]):
       ログには出さない。
     - ``excluded``: 名前の一部だけが一致した別の取引先として除いた件数。
     - ``incomplete``: 一部の SQL が失敗した（見つかった分だけ返している）。
-    - ``stage``: 事例で当たった段（1・2・4。当たらなければ 0）。カルテは常に 0。
+    - ``stage``: 事例で当たった段（1・2・4・5。当たらなければ 0）。カルテは常に 0。
     """
 
     source: SourceName
@@ -647,24 +647,27 @@ def case_lookup_by_industry(
     main_hits: Sequence[SearchHit],
     query_client: str | None = None,
     request_id: str | None = None,
+    product: str | None = None,
+    limit: int = CASE_LIMIT,
 ) -> SourceResult[CaseRow]:
     """事例集から事例を引く（例外は投げない）。
 
-    段の意味は list_case_studies のとおり（pgvector_client.py:1031-1045）:
+    段の意味は list_case_studies のとおり:
     1＝client_name か case_brand の完全一致、2＝同じ 2 キーの部分一致、4＝同業種のみ。
 
     - 名指しの取引先があれば 段 1 → 段 2（段 2 は 3 文字以上だけ・pre_meeting_brief と同じ
       ``is_usable_partial``）。段 2 の部分一致は語境界つきで別会社を除く。
     - 名指しで当たらず、``industry`` が正準業種で、かつ主ヒットに事例・施策実績が無いときだけ
       段 4 を引く（limit 3）。業種は推測しない（正準値でなければ引かない）。
-    - どちらにも当たらなければ SQL を 1 本も打たず、接続も借りない（R3）。
+    - 業種不明でも明示された商材があれば段 5 で資料名・商材を照合する。
+    - 以上の条件が無ければ SQL を打たず、接続も借りない（R3）。
     """
     started = time.perf_counter()
     client = case_client_name(query_client)
     canonical = _canonical_industry(industry)
     has_cases = classify_hits(main_hits).has_case_or_campaign
     want_industry = canonical is not None and not has_cases
-    if client is None and not want_industry:
+    if client is None and not want_industry and not product:
         # 名指しが無い（使えない）うえに、業種が無い／主ヒットに事例・施策実績がもうある。
         reason = REASON_NO_INDUSTRY if canonical is None else REASON_MAIN_HAS_CASES
         skipped: SourceResult[CaseRow] = SourceResult(
@@ -684,7 +687,7 @@ def case_lookup_by_industry(
             if client is not None:
                 with conn.transaction():
                     found = pgvector.list_case_studies(
-                        conn, client_name=client, limit=CASE_LIMIT, stage=1, request_id=request_id
+                        conn, client_name=client, limit=limit, stage=1, request_id=request_id
                     )
                 searched.append(client)
                 if found:
@@ -694,7 +697,7 @@ def case_lookup_by_industry(
                         found = pgvector.list_case_studies(
                             conn,
                             client_name=client,
-                            limit=CASE_LIMIT,
+                            limit=limit,
                             stage=2,
                             request_id=request_id,
                         )
@@ -707,10 +710,23 @@ def case_lookup_by_industry(
                     excluded = len(found) - len(same)
                     if same:
                         rows, stage = same, 2
+            if not rows and product:
+                with conn.transaction():
+                    found = pgvector.list_case_studies(
+                        conn,
+                        product=product,
+                        industry=None,
+                        limit=5,
+                        stage=5,
+                        request_id=request_id,
+                    )
+                searched.append(product)
+                if found:
+                    rows, stage = list(found), 5
             if not rows and want_industry and canonical is not None:
                 with conn.transaction():
                     found = pgvector.list_case_studies(
-                        conn, industry=canonical, limit=CASE_LIMIT, stage=4, request_id=request_id
+                        conn, industry=canonical, limit=limit, stage=4, request_id=request_id
                     )
                 searched.append(canonical)
                 if found:

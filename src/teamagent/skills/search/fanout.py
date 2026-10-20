@@ -22,7 +22,7 @@ from teamagent.adapters.retry import RetryPolicy
 from teamagent.mcp_gateway.allowlist import email_allowed
 from teamagent.skills.base import SkillContext
 from teamagent.skills.search import compact, timeline_status
-from teamagent.skills.search.answer_mode import classify_answer_mode
+from teamagent.skills.search.answer_mode import classify_answer_mode, is_case_list
 from teamagent.skills.search.answer_sections import (
     ANSWER_MAX_CHARS,
     SCOPE_PREFIX,
@@ -191,6 +191,10 @@ def collect_named_sources(
         main_hits=(),
         query_client=client,
         request_id=ctx.request_id,
+        product=case_query_target(str(probe["case_query"]))
+        if probe.get("case_query") and not industry and not client
+        else None,
+        limit=5 if probe.get("case_query") else 3,
     )
     started = time.perf_counter()
     status: LaneState = "skipped"
@@ -422,6 +426,8 @@ def run_fanout(skill: Any, input: SearchInput, ctx: SkillContext) -> SearchOutpu
         )
         and not is_comparison_query(input.query)
     )
+    if is_case_list(input.query) and found and input.include_answer:
+        list_fast = True
     if list_fast:
         head = LIST_FAST_HEAD
         if skill._direct_answer_allowed(ctx, "list_fast"):
@@ -680,6 +686,28 @@ def run_fanout(skill: Any, input: SearchInput, ctx: SkillContext) -> SearchOutpu
                 scope = "社内資料・施策実績"
                 scope += "・Slack" if slack.status == "ok" else "（Slackは検索未完了）"
                 answer = build_scoped_not_found_answer(case_target, scope=scope, complete=complete)
+    case_listing = is_case_list(input.query) and input.include_answer
+    if case_listing:
+        from teamagent.skills.search.case_list import render, slack_cases
+
+        listed = render(
+            [*_case_hits(cases), *summary_hits, *named, *expanded.hits, *slack_cases(slack.items)],
+            case_target,
+            lambda h: skill._hit_url(h, file_urls=file_urls),
+        )
+        if listed:
+            answer, found, visible_found = listed, True, True
+            if skill._direct_answer_allowed(ctx, "list_fast"):
+                direct_kind = "list_fast"
+        elif slack.hidden_count:
+            answer = "Slackの非公開の場所に一致がありますが、この会話では内容を表示できません。"
+        elif visible_found:
+            answer = "資料リンクを確認できる事例は確認できませんでした。"
+        else:
+            scope = "社内資料・施策実績・Slack"
+            if lanes["expand"].kind == "failed":
+                scope += "・言い換え ✗（未完了）"
+            answer = build_scoped_not_found_answer(case_target, scope=scope, complete=complete)
     logger.info(
         "search_found_decision",
         request_id=ctx.request_id,
@@ -772,7 +800,7 @@ def run_fanout(skill: Any, input: SearchInput, ctx: SkillContext) -> SearchOutpu
         answer_format="compact"
         if compact_mode
         else "list"
-        if compact_enabled and list_fast
+        if (compact_enabled and list_fast) or case_listing
         else None,
         direct_answer=answer if direct_kind is not None else None,
         direct_answer_kind=direct_kind,
@@ -786,7 +814,9 @@ def run_fanout(skill: Any, input: SearchInput, ctx: SkillContext) -> SearchOutpu
             {"lane": r.lane, "status": r.status, "reason": r.reason, "count": r.count}
             for r in results
         ],
-        suggested_next=suggest_next_move(
+        suggested_next=None
+        if case_listing
+        else suggest_next_move(
             query=input.query,
             found=found,
             slack_status=slack.status,

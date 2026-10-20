@@ -15,6 +15,9 @@
 !src/teamagent/media/tool_worker.py
 !src/teamagent/media/url_policy.py
 !tools/
+!tools/first_visit/
+!tools/first_visit/kit.lock.json
+!tools/first_visit/tiktok-skills-kit-7c39099.tar.gz
 !tools/tiktok_scraper/
 !tools/tiktok_scraper/package.json
 !tools/tiktok_scraper/package-lock.json
