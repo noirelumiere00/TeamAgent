@@ -208,7 +208,7 @@ def test_unrelated_changes_still_pass(base: str, head: str, reason: str) -> None
 
 
 def test_unlock_matches_the_committed_declaration() -> None:
-    """unlock は「無し」か「本 PR が宣言した 2 path ちょうど」のどちらかに固定する。
+    """unlock は「無し」か「本 PR が宣言した 1 path ちょうど」のどちらかに固定する。
 
     旧テスト（test_unlock_is_inactive_and_empty_by_default）は inactive を無条件に
     要求しており、frozen surface を正当に触る PR が unlock を宣言すると構造的に
@@ -232,20 +232,27 @@ def test_unlock_matches_the_committed_declaration() -> None:
     """
     unlock = _freeze_doc()["unlock"]
     if unlock["active"]:
-        # 2026-10-19 human gate: libexpat 2.8.5-r0 が上流から消えたため、scope を core_media 契約 1 path へ切り替えた。
-        assert unlock["scope_paths"] == [
+        assert unlock["scope_paths"] == ["infra/codebuild/release_evidence.py"]
+        assert "2026-12-15T00:00:00Z" in unlock["reason"]
+        assert "2026-12-22T00:00:00Z" in unlock["reason"]
+        assert unlock["gate"] == (
+            "human gate 2026-10-19（小俣さん承認: 初回リリース免除の期限を 12/15 へ延長）"
+        )
+        previous = unlock["previous_scope_20261019_core_media_apk"]
+        assert previous["scope_paths"] == [
             "infra/codebuild/teamagent_core_media_release_contract.json",
         ]
-        assert "libexpat 2.8.5-r0→2.9.0-r0" in unlock["reason"]
-        assert "libx11 1.8.13-r0" in unlock["reason"]
-        assert "1.8.14-r0" in unlock["reason"]
-        assert "libxi 1.8.3-r0" in unlock["reason"]
-        assert "1.8.4-r0" in unlock["reason"]
-        assert "libxrender 0.9.12-r0" in unlock["reason"]
-        assert "0.9.13-r0" in unlock["reason"]
-        assert "libxtst 1.2.5-r0" in unlock["reason"]
-        assert "1.2.6-r0" in unlock["reason"]
-        assert "human gate 2026-10-19" in unlock["gate"]
+        assert "libexpat 2.8.5-r0→2.9.0-r0" in previous["reason"]
+        assert "libx11 1.8.13-r0" in previous["reason"]
+        assert "1.8.14-r0" in previous["reason"]
+        assert "libxi 1.8.3-r0" in previous["reason"]
+        assert "1.8.4-r0" in previous["reason"]
+        assert "libxrender 0.9.12-r0" in previous["reason"]
+        assert "0.9.13-r0" in previous["reason"]
+        assert "libxtst 1.2.5-r0" in previous["reason"]
+        assert "1.2.6-r0" in previous["reason"]
+        assert "human gate 2026-10-19" in previous["gate"]
+        assert "r64 段3" in previous["gate"]
         prev_oc = unlock["previous_scope_20261019_openclaw_bundle_contract"]
         assert prev_oc["scope_paths"] == ["infra/codebuild/openclaw_bundle_contract.json"]
         assert "glibc 2.44-r8" in prev_oc["reason"]

@@ -45,7 +45,12 @@ from teamagent.skills.base import BaseSkill, SkillContext, register
 from teamagent.skills.search import compact, timeline_status
 from teamagent.skills.search.aggregation import extract_aggregation_filter
 from teamagent.skills.search.alias_expansion import retry_inputs, scope_footer
-from teamagent.skills.search.answer_mode import MODE_INSTRUCTIONS, classify_answer_mode
+from teamagent.skills.search.answer_mode import (
+    MODE_INSTRUCTIONS,
+    classify_answer_mode,
+    is_case_list,
+    strip_advice,
+)
 from teamagent.skills.search.campaign_files import (
     VIDEO_ROWS_FOOTER_HEADING,
     advertiser_pattern,
@@ -575,6 +580,7 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
 
             if fanout_active(ctx):
                 return run_fanout(self, input, ctx)
+        case_listing = ctx.metadata.get(compact.CTX_KEY) is True and is_case_list(input.query)
         compact_mode = ctx.metadata.get(compact.CTX_KEY) is True and not compact.explicit_list(
             input.query
         )
@@ -611,7 +617,19 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
             )
             else None
         )
-        hits = self._retrieve(embedding, input, ctx, timings=timings, probe=probe)
+        case_probe: dict[str, Any] = {}
+        hits = self._retrieve(
+            embedding,
+            input,
+            ctx,
+            timings=timings,
+            probe=probe,
+            **({"fanout_probe": case_probe} if case_listing else {}),
+        )
+        if case_probe.get("case"):
+            from teamagent.skills.search.fanout import _case_hits
+
+            hits = [*hits, *_case_hits(case_probe["case"])]
         timings["retrieve_ms"] = (time.perf_counter() - _t) * 1000
 
         # 2-a. 「該当なし」の判定（retrieval の実数値とメタだけ・LLM に任せない）。
@@ -749,6 +767,7 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
             input.include_answer
             and direct_kind is None
             and not compact_mode
+            and not case_listing
             and self._should_defer_answer(hits, ctx)
         ):
             answer = self._start_followup_answer(
@@ -768,6 +787,15 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
             )
             cost_usd = 0.0
             deferred = True
+        elif input.include_answer and case_listing:
+            from teamagent.skills.search.case_list import render, slack_cases
+
+            answer = render(
+                [*summary_hits, *slack_cases(slack_items)],
+                case_target,
+                lambda h: self._hit_url(h, file_urls=file_urls),
+            )
+            cost_usd = 0.0
         elif input.include_answer:
             _t = time.perf_counter()
             answer, cost_usd = self._summarize(
@@ -974,9 +1002,30 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
                     scope += "・Slack" if slack_lookup.status == "ok" else "（Slackは検索未完了）"
                 answer = build_scoped_not_found_answer(case_target, scope=scope, complete=complete)
 
+        if case_listing and input.include_answer:
+            from teamagent.skills.search.case_list import render, slack_cases
+
+            listed = render(
+                [*summary_hits, *slack_cases(slack_items)],
+                case_target,
+                lambda h: self._hit_url(h, file_urls=file_urls),
+            )
+            if listed:
+                answer = listed
+            elif slack_lookup is not None and slack_lookup.hidden_count:
+                answer = "Slackの非公開の場所に一致がありますが、この会話では内容を表示できません。"
+            elif found:
+                answer = "資料リンクを確認できる事例は確認できませんでした。"
+            else:
+                answer = build_scoped_not_found_answer(
+                    case_target,
+                    scope="社内資料・施策実績" + ("・Slack" if slack_lookup is not None else ""),
+                    complete=complete,
+                )
+            suggested_next = None
         output = SearchOutput(
             answer=answer,
-            answer_format="compact" if compact_mode else None,
+            answer_format="list" if case_listing else "compact" if compact_mode else None,
             direct_answer=answer if direct_kind is not None else None,
             direct_answer_kind=direct_kind,
             hits=search_hits,
@@ -1504,6 +1553,8 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
             if fanout_probe is not None:
                 from teamagent.skills.search.fanout import collect_named_sources
 
+                if is_case_list(input.query):
+                    fanout_probe["case_query"] = input.query
                 collect_named_sources(
                     self,
                     conn,
@@ -2701,6 +2752,10 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
             answer = comparison + ("\n\n" + answer if answer.strip() else "")
         if compact_sources is None and canonical_campaign_totals and answer.strip():
             answer = "\n\n".join(part for part in (answer, canonical_campaign_totals) if part)
+        cleaned = strip_advice(answer, query)
+        if cleaned != answer:
+            logger.info("search_answer_advice_filtered", request_id=request_id, layer="search")
+        answer = cleaned
         return answer, resp.usage.cost_usd
 
     @staticmethod

@@ -67,10 +67,10 @@ def test_explicit_food_case_fallback_reaches_summary_and_sources(
     assert "見つかりませんでした" not in out.answer
     assert row["source_uri"] in out.answer
     assert "近隣" not in out.answer
-    summary.assert_called_once()
-    roots = summary.call_args.args[1]
+    summary.assert_not_called()
+    roots = out.hits
     assert roots and row["case_effect"] in roots[0].content
-    assert roots[0].metadata["case_industry"] == "食品"
+    assert "食品" in out.model_dump_json()
     assert any(hit.url == row["source_uri"] for hit in out.hits)
     assert any(
         call.kwargs.get("industry") == "食品" for call in pg.list_case_studies.call_args_list

@@ -1196,7 +1196,9 @@ async def dispatch_tool(
         metadata[_OWNER_KEY] = (
             verified_caller.slack_team_id + "\x1f" + verified_caller.slack_user_id
         )
-        destination = detached_jobs.destination_from_claim(verified_caller)
+        destination = detached_jobs.destination_from_claim(
+            verified_caller, threaded=name in _ASYNC_JOB_TOOLS
+        )
         if enabled() and destination is not None:
             metadata[ORIGIN_KEY] = Origin(
                 destination.channel_id,
