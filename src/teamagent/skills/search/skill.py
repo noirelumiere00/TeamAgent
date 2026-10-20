@@ -587,6 +587,8 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
         compact_mode = ctx.metadata.get(compact.CTX_KEY) is True and not compact.explicit_list(
             input.query
         )
+        compact_answer = ""
+        compact_fallback_cards = ""
         log = ctx.bind_logger(self.name)
         log.info(
             "search_skill_start",
@@ -831,6 +833,60 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
             timings["converse_ms"] = (time.perf_counter() - _t) * 1000
             if not answer.strip():
                 direct_kind = None
+            if compact_mode and found:
+                compact_answer = compact.build(
+                    answer,
+                    summary_hits,
+                    slack_items,
+                    lambda h: self._hit_url(h, file_urls=file_urls),
+                    query=input.query,
+                    asked_industry=asked_industry,
+                    notice=guard_header,
+                )
+                if compact.is_empty(compact_answer, notice=guard_header):
+                    compact_mode = False
+                    compact_fallback_cards = compact.fallback_cards(
+                        input.query,
+                        summary_hits,
+                        slack_items,
+                        lambda h: self._hit_url(h, file_urls=file_urls),
+                        target=case_target,
+                    )
+                    log.info(
+                        "search_compact_fallback",
+                        mode="cards" if compact_fallback_cards else "normal",
+                    )
+                    if compact_fallback_cards:
+                        case_listing = True
+                        answer = compact_fallback_cards
+                    else:
+                        _t = time.perf_counter()
+                        try:
+                            answer, fallback_cost = self._summarize(
+                                input.query,
+                                summary_hits,
+                                ctx.request_id,
+                                slack_items=slack_items,
+                                asked_industry=asked_industry,
+                                canonical_campaign_totals=(
+                                    campaign_totals_block(summary_hits)
+                                    if ctx.metadata.get("_search_direct_answer") is True
+                                    else ""
+                                ),
+                            )
+                            cost_usd += fallback_cost
+                            answer = compact.normal_answer(answer)
+                        except Exception as exc:
+                            log.warning("search_compact_fallback_failed", error=type(exc).__name__)
+                            answer = ""
+                            direct_kind = None
+                        timings["converse_ms"] += (time.perf_counter() - _t) * 1000
+                        if not answer:
+                            direct_kind = None
+                            answer = "資料は見つかりました。取得した根拠を示します。"
+                            answer += self._source_links_block(
+                                summary_hits, file_urls=file_urls, slack_items=slack_items
+                            )
             # 資料リンク・「シートのみ」と、動画ごとの数字・リンクをコードで足す。
             if not compact_mode:
                 answer = self._append_campaign_footer(
@@ -1000,15 +1056,7 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
 
         if compact_mode and input.include_answer:
             if found:
-                answer = compact.build(
-                    answer,
-                    summary_hits,
-                    slack_items,
-                    lambda h: self._hit_url(h, file_urls=file_urls),
-                    query=input.query,
-                    asked_industry=asked_industry,
-                    notice=guard_header,
-                )
+                answer = compact_answer
             elif slack_lookup is not None and slack_lookup.hidden_count:
                 answer = "Slackの非公開の場所に一致がありますが、この会話では内容を表示できません。"
             else:
@@ -1028,9 +1076,12 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
                 case_target,
                 lambda h: self._hit_url(h, file_urls=file_urls),
                 displayed_refs=displayed_refs,
+                cards=bool(compact_fallback_cards),
             )
             if listed:
                 answer = listed
+                if compact_fallback_cards and self._direct_answer_allowed(ctx, "list_fast"):
+                    direct_kind = "list_fast"
             elif slack_lookup is not None and slack_lookup.hidden_count:
                 answer = "Slackの非公開の場所に一致がありますが、この会話では内容を表示できません。"
             elif found:
@@ -1042,6 +1093,13 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
                     complete=complete,
                 )
             suggested_next = None
+        if found and input.include_answer:
+            answer = answer.replace(compact.EMPTY_ANSWER, "").strip()
+            if compact.is_empty(answer):
+                answer = "資料は見つかりました。取得した根拠を示します。"
+                answer += self._source_links_block(
+                    summary_hits, file_urls=file_urls, slack_items=slack_items
+                )
         output = SearchOutput(
             answer=answer,
             displayed_refs=displayed_refs,

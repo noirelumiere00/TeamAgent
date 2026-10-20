@@ -443,6 +443,18 @@ def run_fanout(skill: Any, input: SearchInput, ctx: SkillContext) -> SearchOutpu
         if timeline_status.enabled()
         else None
     )
+    guard_header = (
+        build_result_header(
+            query=input.query,
+            hits=summary_hits,
+            weak_threshold=skill._weak_result_threshold,
+            query_client=client,
+            asked_industry=input.filter_industry,
+            use_entities=skill._client_guard_entities,
+        )
+        if found and skill._result_guard
+        else ""
+    )
     head, summary_cost = (
         (
             build_case_not_found_answer(case_target or "")
@@ -524,6 +536,47 @@ def run_fanout(skill: Any, input: SearchInput, ctx: SkillContext) -> SearchOutpu
         summary_ms = int((time.perf_counter() - summary_started) * 1000)
         if summary_state != "ok" or not head.strip():
             direct_kind = None
+    compact_answer = ""
+    compact_fallback_cards = ""
+    if compact_mode and found and input.include_answer:
+        compact_answer = compact.build(
+            head,
+            summary_hits,
+            slack.items,
+            lambda h: skill._hit_url(h, file_urls=file_urls),
+            query=input.query,
+            asked_industry=asked_industry,
+            karte_hits=karte.items,
+            notice=guard_header,
+        )
+        if compact.is_empty(compact_answer, notice=guard_header):
+            compact_mode = False
+            compact_fallback_cards = compact.fallback_cards(
+                input.query,
+                summary_hits,
+                slack.items,
+                lambda h: skill._hit_url(h, file_urls=file_urls),
+                target=case_target,
+            )
+            log.info(
+                "search_compact_fallback", mode="cards" if compact_fallback_cards else "normal"
+            )
+            head = ""
+            if compact_fallback_cards:
+                list_fast = True
+            elif summary_hits or slack.items:
+                summary_started = time.perf_counter()
+                head, cost, summary_state = _collect(
+                    _submit(summarize, "summary_fallback"),
+                    summary_started,
+                    SUMMARY_DEADLINE_S,
+                    ("", 0.0, "timeout"),
+                )
+                summary_cost += cost
+                summary_ms += int((time.perf_counter() - summary_started) * 1000)
+                head = compact.normal_answer(head)
+                if summary_state != "ok" or not head:
+                    direct_kind = None
     if found and input.include_answer and not compact_mode:
         head = skill._append_campaign_footer(head, summary_hits, asked_industry=asked_industry)
     # 広げる処理は 10s 以内。回収の追加待ちは該当ありで 1s、該当なしで 0s に抑える。
@@ -650,16 +703,7 @@ def run_fanout(skill: Any, input: SearchInput, ctx: SkillContext) -> SearchOutpu
             if hits
             else LaneStatus.failed("search_failed")
         )
-    guard_header = ""
     if found and skill._result_guard:
-        guard_header = build_result_header(
-            query=input.query,
-            hits=summary_hits,
-            weak_threshold=skill._weak_result_threshold,
-            query_client=client,
-            asked_industry=input.filter_industry,
-            use_entities=skill._client_guard_entities,
-        )
         head = prefix_header(guard_header, head)
         if WEAK_RESULT_NOTICE in guard_header:
             direct_kind = None
@@ -728,16 +772,7 @@ def run_fanout(skill: Any, input: SearchInput, ctx: SkillContext) -> SearchOutpu
     )
     if compact_mode and input.include_answer:
         if found:
-            answer = compact.build(
-                head,
-                summary_hits,
-                slack.items,
-                lambda h: skill._hit_url(h, file_urls=file_urls),
-                query=input.query,
-                asked_industry=asked_industry,
-                karte_hits=karte.items,
-                notice=guard_header,
-            )
+            answer = compact_answer
         elif not visible_found:
             if slack.hidden_count:
                 answer = "Slackの非公開の場所に一致がありますが、この会話では内容を表示できません。"
@@ -745,7 +780,9 @@ def run_fanout(skill: Any, input: SearchInput, ctx: SkillContext) -> SearchOutpu
                 scope = "社内資料・施策実績"
                 scope += "・Slack" if slack.status == "ok" else "（Slackは検索未完了）"
                 answer = build_scoped_not_found_answer(case_target, scope=scope, complete=complete)
-    case_listing = is_case_list(input.query) and input.include_answer
+    case_listing = (
+        is_case_list(input.query) or bool(compact_fallback_cards)
+    ) and input.include_answer
     displayed_refs: list[DocumentReference] | None = [] if drive_mode else None
     if case_listing:
         from teamagent.skills.search.case_list import render, slack_cases
@@ -761,6 +798,7 @@ def run_fanout(skill: Any, input: SearchInput, ctx: SkillContext) -> SearchOutpu
             case_target,
             lambda h: skill._hit_url(h, file_urls=file_urls),
             displayed_refs=displayed_refs,
+            cards=bool(compact_fallback_cards),
         )
         if listed:
             answer, found, visible_found = listed, True, True
@@ -862,6 +900,8 @@ def run_fanout(skill: Any, input: SearchInput, ctx: SkillContext) -> SearchOutpu
         hit_count=len(hits),
         deferred=False,
     )
+    if found and input.include_answer:
+        answer = answer.replace(compact.EMPTY_ANSWER, "").strip()
     return SearchOutput(
         answer=answer,
         answer_format="compact"

@@ -85,10 +85,13 @@ def render(
     url_of: Callable[[SearchHit], str | None],
     *,
     displayed_refs: list[DocumentReference] | None = None,
+    cards: bool = False,
 ) -> str:
     lines: list[str] = []
     separator = (
-        "\n\n" if any((h.metadata or {}).get(drive_first.REFERENCE_KEY) for h in hits) else "\n"
+        "\n\n"
+        if cards or any((h.metadata or {}).get(drive_first.REFERENCE_KEY) for h in hits)
+        else "\n"
     )
     seen: set[tuple[str, str]] = set()
     for hit in case_target_hits(hits, target):
@@ -96,6 +99,8 @@ def render(
         url = _safe_url(entry.url)
         link_label = "資料"
         ref = (hit.metadata or {}).get(drive_first.REFERENCE_KEY)
+        if cards and ref is None:
+            ref = drive_first.canonical_reference(hit.metadata or {}, hit.content)
         if ref is not None:
             url = _safe_url(ref.url)
             link_label = drive_first.label(ref)
@@ -174,6 +179,8 @@ def slack_cases(items: Sequence[SlackItem]) -> list[SearchHit]:
                 "title": item.text.splitlines()[0][:100] if item.text else "Slackの事例記録",
                 "source_uri": item.hit.permalink,
                 "source_type": "slack",
+                "file_names": list(item.original_file_names or item.hit.file_names),
+                "slack_file_ids": item.hit.file_ids,
                 **({drive_first.REFERENCE_KEY: item.hit.reference} if item.hit.reference else {}),
             },
         )
