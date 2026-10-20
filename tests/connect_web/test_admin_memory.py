@@ -115,3 +115,7 @@ def test_memory_has_shared_admin_navigation(client: TestClient) -> None:
     page = client.get("/admin/memory", cookies=_cookies(_OWNER))
     assert 'href="/admin"' in page.text
     assert 'href="/admin/history"' in page.text
+    assert '<aside class="sidebar"' in page.text
+    assert '<main id="main" class="admin-content">' in page.text
+    assert 'aria-label="本人メモ" aria-current="page"' in page.text
+    assert "'unsafe-inline'" not in page.headers["content-security-policy"]

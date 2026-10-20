@@ -1,6 +1,7 @@
 """管理画面の期間・匿名化・モデル分類をサーバーで数える契約。"""
 
 from datetime import datetime, timedelta, timezone
+from html.parser import HTMLParser
 from types import SimpleNamespace
 
 import pytest
@@ -75,23 +76,96 @@ def test_admin_renderer_orders_sections_and_preserves_unknowns() -> None:
     labels = [
         "利用状況",
         "直近7日",
-        "報告用の一言",
         "利用人数",
-        "日別推移",
         "先に確認するやり取り",
-        "誰が使っているか",
-        "何に使っているか",
+        "日別推移",
+        "回答への評価",
+        "次に、どこを直す？",
+        "報告用の一言",
+        "社員ごとの利用",
+        "作業の内訳",
         "最近の質問",
         "技術・費用の詳細",
     ]
     positions = [page.index(label) for label in labels]
     assert positions == sorted(positions)
     assert "取得できません" in page
-    assert "<svg" not in page  # 未取得を0件のグラフにしない
+    trend = page[page.index('<section class="panel chart-panel">') :].split("</section>", 1)[0]
+    assert "<svg" not in trend  # 未取得を0件のグラフにしない（ナビのアイコンは除く）
     assert 'href="/admin/history"' in page
     assert 'href="/admin/memory"' in page
     assert "cdn.jsdelivr.net" not in page
     assert "@media" in page
+
+
+@pytest.mark.parametrize("key, days", [("today", 1), ("7d", 8), ("30d", 31)])
+def test_admin_daily_chart_uses_actual_values_and_jst_dates(key: str, days: int) -> None:
+    period = insights.admin_period(key, now=datetime(2026, 10, 19, 15, 30, tzinfo=JST))
+    page = render_usage_admin(
+        {"period": period, "daily": [{"day": period.start.date(), "requests": 37}]}
+    )
+    assert f"{period.start.date()}: 37回" in page
+    assert page.count('class="daily-bar') == days
+    assert page.count(": 0回</title>") == days - 1
+    assert '<text x="24" y="39.0" text-anchor="end">40</text>' in page
+    assert "期間の最初と最後の日は一部の時間のみ" in page
+    assert "日別の作業回数" in page
+
+
+def test_admin_attention_labels_links_unknowns_and_escaping_survive_layout() -> None:
+    period = insights.admin_period("7d")
+    row = {
+        "occurred_at": period.end,
+        "who": "<社員>",
+        "user_id": "U0123456789",
+        "query_text": "<質問>",
+        "skill": "search",
+        "status": "ok",
+        "found": False,
+    }
+    page = render_usage_admin(
+        {
+            "period": period,
+            "summary": {
+                "current": {
+                    "users": 1,
+                    "requests": 17,
+                    "attention_events": 2,
+                    "not_found": 1,
+                    "unknown_search": 11,
+                    "cost_usd": 0.05,
+                },
+                "previous": {"users": 1, "requests": 20, "attention_events": 1},
+            },
+            "feedback": {
+                "up": 3,
+                "down": 1,
+                "previous_down": 0,
+                "downs": [{"created_at": period.end, "who": "unknown", "query": "<評価>"}],
+            },
+            "errors": [row, {**row, "status": "error"}],
+            "questions": [row],
+        }
+    )
+    assert 'class="badge empty">検索で該当なし' in page
+    assert 'class="badge error">エラー・拒否・該当なし' in page
+    assert 'class="badge feedback">👎 評価' in page
+    assert 'href="/admin/history?user=U0123456789"' in page
+    assert 'href="/admin/history">会話を読む' in page
+    assert "判定の記録がない検索<strong>11件</strong>（不明・0件扱いしません）" in page
+    assert "要注意は3件" in page
+    assert "利用は増加" not in page
+    assert "&lt;質問&gt;" in page and "&lt;評価&gt;" in page and "&lt;社員&gt;" in page
+    assert "<質問>" not in page and "<社員>" not in page
+    assert page.index("先に確認するやり取り") < page.index("最近の質問</h2>")
+
+    class Attributes(HTMLParser):
+        def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+            assert not any(name == "style" or name.startswith("on") for name, _ in attrs)
+            if tag in {"script", "link", "img"}:
+                assert not any(name in {"src", "href"} for name, _ in attrs)
+
+    Attributes().feed(page)
 
 
 def test_admin_analysis_matches_negative_feedback_and_rejects_invented_counts() -> None:
@@ -144,7 +218,13 @@ def test_admin_renderer_links_only_valid_slack_ids_and_escapes_xss() -> None:
                     "who": "社員",
                     "skill": "search",
                     "query_text": "<img src=x onerror=alert(1)>",
-                }
+                },
+                {
+                    "occurred_at": "<bad time>",
+                    "who": "社員",
+                    "skill": "search",
+                    "query_text": "日時の記録が不正な質問",
+                },
             ],
         }
     )
@@ -152,6 +232,7 @@ def test_admin_renderer_links_only_valid_slack_ids_and_escapes_xss() -> None:
     assert "<img src=x" not in page
     assert "history?user=" not in page
     assert "&lt;img" in page
+    assert '<span class="when">&lt;bad time&gt;</span>' in page
     assert "innerHTML" not in page
 
 

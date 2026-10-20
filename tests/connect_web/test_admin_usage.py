@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import html
+import re
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from typing import Any
@@ -242,8 +244,11 @@ def test_admin_escapes_question_text_and_renders_jst(monkeypatch: pytest.MonkeyP
     assert response.status_code == 200
     assert '<script>alert("x")</script>' not in response.text
     assert "&lt;script&gt;alert(&quot;x&quot;)&lt;/script&gt;" in response.text
-    assert "2026-08-13 09:30:00 JST" in response.text
-    assert "Aico 利用状況（管理）" in response.text
+    assert (
+        '<time datetime="2026-08-13T09:30:00+09:00" title="2026-08-13 09:30:00 JST">08/13 09:30</time>'
+        in response.text
+    )
+    assert "<title>利用状況 | Aico 管理画面</title>" in response.text
 
 
 def test_admin_empty_usage_events_renders_empty_period(
@@ -257,23 +262,36 @@ def test_admin_empty_usage_events_renders_empty_period(
 
 
 def test_admin_renders_work_type_bars(monkeypatch: pytest.MonkeyPatch) -> None:
-    """作業束の横棒バーが出る（外部ライブラリ非依存の CSS 幅指定で描く）。"""
+    """作業束の割合と件数が一致し、CSPで許可されたSVG属性で描く。"""
     monkeypatch.delenv("CONNECT_ADMIN_EMAILS", raising=False)
     client, _ = _client()
     response = client.get("/admin", cookies=_cookies(_OWNER))
     assert response.status_code == 200
-    assert "何に使っているか" in response.text
+    assert "作業の内訳" in response.text
     assert "作業の内訳（直近30日・全体）" in response.text
     for work_type in ("調べる", "作る", "整える", "秘書"):
         assert work_type in response.text
     # search 6 / mail_draft 2 / slack_summary 1 / mail_summary 1 = 10 件
-    assert 'class="bar-fill" style="width:60.0%"' in response.text
-    assert "60.0% / 6件" in response.text
-    assert "20.0% / 2件" in response.text
-    assert "10.0% / 1件" in response.text
+    mix = re.search(
+        r'<div class="usage-grid">.*?<div class="work-mix">(.*?)</section>', response.text, re.S
+    )
+    assert mix is not None
+    assert re.findall(r'<rect class="mix-color-\d" x="([\d.]+)" width="([\d.]+)"', mix[1]) == [
+        ("0.0", "60.0"),
+        ("60.0", "20.0"),
+        ("80.0", "10.0"),
+        ("90.0", "10.0"),
+    ]
+    rows = re.findall(r'<div class="mix-row">(.*?)</div>', mix[1])
+    assert [re.sub(r"<[^>]+>", " ", row).split() for row in rows] == [
+        ["調べる", "60.0%", "6件"],
+        ["作る", "20.0%", "2件"],
+        ["整える", "10.0%", "1件"],
+        ["秘書", "10.0%", "1件"],
+    ]
     # 未知ツールが無いので「その他」の行は出さない。
     assert "その他" not in response.text
-    # 外部 CDN を新たに引き込んでいない（/admin はスクリプト無しのまま）。
+    # 外部 CDN を引き込まない。
     assert "cdn.jsdelivr.net" not in response.text
 
 
@@ -402,12 +420,20 @@ def test_admin_renders_answer_feedback_summary(monkeypatch: pytest.MonkeyPatch) 
     client, pg = _client()
     response = client.get("/admin", cookies=_cookies(_OWNER))
     assert response.status_code == 200
-    assert "回答の評価（Slack・直近7日）" in response.text
-    assert "👍 3件" in response.text
-    assert "👎 1件" in response.text
+    panel = re.search(r'<section class="panel feedback-panel">(.*?)</section>', response.text, re.S)
+    assert panel is not None
+    assert "回答への評価" in panel[1]
+    assert "Slackで届いた声・直近7日" in panel[1]
+    assert [
+        html.unescape(re.sub(r"<[^>]+>", " ", item)).split()
+        for item in re.findall(r'<div class="feedback-item">(.*?)</div>', panel[1])
+    ] == [["👍", "評価", "3", "件"], ["👎", "評価", "1", "件"]]
     assert "&lt;b&gt;JAL&lt;/b&gt; の過去提案" in response.text
     assert "<b>JAL</b>" not in response.text
-    assert "2026-10-06 10:00:00 JST" in response.text
+    assert (
+        '<time datetime="2026-10-06T10:00:00+09:00" title="2026-10-06 10:00:00 JST">10/06 10:00</time>'
+        in response.text
+    )
     feedback_sql = [(sql, params) for sql, params in pg.executed if "FROM search_feedback" in sql]
     assert len(feedback_sql) == 3
     assert all(params["days"] == 7 and params["limit"] == 200 for _, params in feedback_sql)
@@ -427,7 +453,7 @@ def test_admin_feedback_permission_denied_does_not_break_page(
     assert response.status_code == 200
     assert "評価データはまだ表示できません。" in response.text
     assert "answer_feedback_summary は現在表示できません（PermissionError）。" in response.text
-    assert "何に使っているか" in response.text
+    assert "作業の内訳" in response.text
 
 
 def test_admin_v2_has_navigation_and_agent_post_is_gated() -> None:
@@ -443,6 +469,25 @@ def test_admin_v2_has_navigation_and_agent_post_is_gated() -> None:
     response = client.post("/admin/analyze", cookies=_cookies(_OWNER), json={"period": "7d"})
     assert response.status_code == 403
     assert len(pg.connection_kwargs) == before
+
+
+def test_admin_styles_and_script_use_fresh_csp_nonce() -> None:
+    client, _ = _client()
+    first = client.get("/admin", cookies=_cookies(_OWNER))
+    second = client.get("/admin", cookies=_cookies(_OWNER))
+    nonces = []
+    for response in (first, second):
+        csp = response.headers["content-security-policy"]
+        nonce = re.search(r"'nonce-([^']+)'", csp)
+        assert nonce is not None
+        nonces.append(nonce[1])
+        assert f'<style nonce="{nonce[1]}">' in response.text
+        assert f'<script nonce="{nonce[1]}">' in response.text
+        assert "'unsafe-inline'" not in csp
+        assert "no-store" in response.headers["cache-control"]
+        assert response.headers["x-robots-tag"] == "noindex"
+        assert not re.search(r"<[^>]+\s(?:style|on\w+)=", response.text)
+    assert nonces[0] != nonces[1]
 
 
 @pytest.mark.parametrize(

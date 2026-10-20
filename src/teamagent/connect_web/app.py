@@ -21,6 +21,7 @@ import json
 import logging
 import os
 import re
+import secrets
 import threading
 import time
 from collections import Counter, deque
@@ -74,7 +75,7 @@ from teamagent.dashboard.auth import (
 )
 from teamagent.dashboard.config import DashboardConfig
 from teamagent.dashboard.insights import AdminPeriod, admin_period, analyze_questions
-from teamagent.dashboard.render import render_admin_nav, render_usage_admin
+from teamagent.dashboard.render import render_admin_page, render_usage_admin
 
 logger = structlog.get_logger(__name__)
 
@@ -5228,7 +5229,7 @@ def create_app(
         filter_user = (request.query_params.get("user") or "").strip()
         if len(filter_user) > _ADMIN_FILTER_USER_MAX:
             filter_user = ""
-        return HTMLResponse(render_usage_admin(_usage_data(period, filter_user)))
+        return _admin_html(render_usage_admin(_usage_data(period, filter_user)))
 
     @app.post("/admin/analyze")
     async def usage_admin_analyze(request: Request) -> Response:
@@ -5311,20 +5312,16 @@ def create_app(
             return RedirectResponse("/search/login?next=/admin/memory", status_code=303)
         if not is_admin(email):
             raise HTTPException(status_code=404)
-        headers = {"Cache-Control": "no-store", "X-Robots-Tag": "noindex"}
         target = (request.query_params.get("user") or "").strip().upper()[:32]
         team = os.environ.get("SLACK_TEAM_ID", "").strip()
         if not target:
-            return HTMLResponse(
-                render_memory_admin(rows=None, target="", error=""), headers=headers
-            )
+            return _admin_html(render_memory_admin(rows=None, target="", error=""))
         if not valid_principal(team, target):
-            return HTMLResponse(
+            return _admin_html(
                 render_memory_admin(
                     rows=None, target="", error="Slack のユーザー ID（U…）を入れてください。"
                 ),
                 status_code=400,
-                headers=headers,
             )
         admin = pm_admin_holder.get("admin")
         if admin is None:
@@ -5333,30 +5330,26 @@ def create_app(
             rows = admin.view(admin_email=email, team_id=team, slack_user_id=target)
         except PersonalMemoryAdminError as exc:
             logger.warning("personal_memory_admin_page_failed", code=exc.code)
-            return HTMLResponse(
-                _page(
+            return _admin_html(
+                render_admin_page(
                     "本人メモ",
-                    render_admin_nav("memory")
-                    + "いま表示できません。閲覧の記録に失敗したため、何も表示していません。",
-                    accent="#e0a040",
+                    "いま表示できません。閲覧の記録に失敗したため、何も表示していません。",
+                    active="memory",
                 ),
                 status_code=503,
-                headers=headers,
             )
-        return HTMLResponse(
-            render_memory_admin(rows=rows, target=target, error=""), headers=headers
-        )
+        return _admin_html(render_memory_admin(rows=rows, target=target, error=""))
 
     history_holder: dict[str, Any] = {}
     history_headers = {"Cache-Control": "no-store", "X-Robots-Tag": "noindex"}
 
     def _history_unavailable(reason: str, *, admin: bool = False) -> HTMLResponse:
+        if admin:
+            return _admin_html(
+                render_admin_page("質問と回答の履歴", reason, active="history"), status_code=503
+            )
         return HTMLResponse(
-            _page(
-                "質問と回答の履歴",
-                (render_admin_nav("history") if admin else "") + reason,
-                accent="#e0a040",
-            ),
+            _page("質問と回答の履歴", reason, accent="#e0a040"),
             status_code=503,
             headers=history_headers,
         )
@@ -5381,14 +5374,13 @@ def create_app(
         target = (request.query_params.get("user") or "").strip().upper()[:32]
         team = os.environ.get("SLACK_TEAM_ID", "").strip()
         if target and not dh.valid_user_id(target):
-            return HTMLResponse(
+            return _admin_html(
                 render_history_page(
                     admin=True,
                     heading="質問と回答の履歴（管理者）",
                     error="Slack のユーザー ID（U…）が正しくありません。",
                 ),
                 status_code=400,
-                headers=history_headers,
             )
         try:
             reader = dh.DmHistoryReader.from_env()
@@ -5405,9 +5397,8 @@ def create_app(
                 return _history_unavailable(
                     "いま一覧を表示できません（Slack から読めませんでした）。", admin=True
                 )
-            return HTMLResponse(
+            return _admin_html(
                 render_history_page(heading="質問と回答の履歴（管理者）", users=users, admin=True),
-                headers=history_headers,
             )
         if not dh.valid_team_id(team):
             logger.warning("history_admin_unavailable", code="no_team_id")
@@ -5433,7 +5424,7 @@ def create_app(
             return _history_unavailable(
                 "いま表示できません（Slack から読めませんでした）。", admin=True
             )
-        return HTMLResponse(
+        return _admin_html(
             render_history_page(
                 admin=True,
                 heading=f"{target} と Aico の会話（直近 {dh.HISTORY_DAYS_MAX} 日）",
@@ -5441,7 +5432,6 @@ def create_app(
                 truncated=read.truncated,
                 back_href="/admin/history",
             ),
-            headers=history_headers,
         )
 
     @app.get("/app/history", response_class=HTMLResponse)
@@ -5487,6 +5477,23 @@ def create_app(
     return app
 
 
+def _admin_html(page: str, *, status_code: int = 200) -> HTMLResponse:
+    nonce = secrets.token_urlsafe(24)
+    page = page.replace("<style>", f'<style nonce="{nonce}">')
+    page = page.replace("<script>", f'<script nonce="{nonce}">')
+    return HTMLResponse(
+        page,
+        status_code=status_code,
+        headers={
+            "Cache-Control": "no-store",
+            "X-Robots-Tag": "noindex",
+            "Content-Security-Policy": _CONTENT_SECURITY_POLICY.replace(
+                "'unsafe-inline'", f"'nonce-{nonce}'"
+            ),
+        },
+    )
+
+
 def render_memory_admin(*, rows: list[Any] | None, target: str, error: str) -> str:
     """本人メモの管理者閲覧ページ（入力欄＋表）。値はすべてエスケープする。"""
     form = (
@@ -5510,19 +5517,10 @@ def render_memory_admin(*, rows: list[Any] | None, target: str, error: str) -> s
             )
         else:
             parts.append(f"<p>{html.escape(target)} の本人メモはありません。</p>")
-    return (
-        '<!doctype html><html lang="ja"><head><meta charset="utf-8">'
-        '<meta name="viewport" content="width=device-width, initial-scale=1">'
-        "<title>本人メモ（管理者）</title><style>"
-        "body{background:#0f1420;color:#e8edf7;font-family:-apple-system,'Hiragino Sans',"
-        "'Noto Sans JP',sans-serif;padding:32px}table{border-collapse:collapse;margin-top:12px}"
-        "td,th{border:1px solid #283450;padding:6px 10px;text-align:left}"
-        ".note{color:#93a1bd}.err{color:#f08080}</style></head><body>"
-        + render_admin_nav("memory")
-        + "<h1>本人メモ（管理者閲覧）</h1>"
-        + form
-        + "".join(parts)
-        + "</body></html>"
+    return render_admin_page(
+        "本人メモ（管理者）",
+        "<h1>本人メモ（管理者閲覧）</h1>" + form + "".join(parts),
+        active="memory",
     )
 
 
@@ -5589,7 +5587,7 @@ def render_history_page(
     admin: bool = False,
 ) -> str:
     """質問と回答の履歴のページ（管理者・本人で共用）。新しい往復が上。値はすべてエスケープする。"""
-    parts: list[str] = [render_admin_nav("history")] if admin else []
+    parts: list[str] = []
     if back_href:
         parts.append(f'<p><a href="{html.escape(back_href, quote=True)}">← 一覧へ</a></p>')
     if error:
@@ -5637,6 +5635,12 @@ def render_history_page(
                 f'<div class="msg user">{slack_text_to_html(ex.user_text)}</div>{files}'
                 f"{replies}{more}</section>"
             )
+    if admin:
+        return render_admin_page(
+            "質問と回答の履歴",
+            f"<h1>{html.escape(heading)}</h1>" + "".join(parts),
+            active="history",
+        )
     return (
         '<!doctype html><html lang="ja"><head><meta charset="utf-8">'
         '<meta name="viewport" content="width=device-width, initial-scale=1">'
