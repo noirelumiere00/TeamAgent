@@ -582,6 +582,7 @@ class CaseRow:
     updated_at: str
     stage: int
     in_main: bool
+    document_id: str | None = None
 
 
 def case_client_name(query_client: str | None) -> str | None:
@@ -636,6 +637,7 @@ def _to_case_row(row: Mapping[str, Any], *, stage: int, main: set[tuple[str, str
         updated_at=_text(row, "updated_at"),
         stage=stage,
         in_main=(uri, title) in main,
+        document_id=_text(row, "document_id") or None,
     )
 
 

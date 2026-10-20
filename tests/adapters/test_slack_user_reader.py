@@ -130,6 +130,32 @@ def test_search_checked_non_bool_flags_become_unknown() -> None:
     assert hit.channel_is_private is None and hit.channel_is_mpim is None
 
 
+def test_search_checked_preserves_only_valid_attached_file_ids() -> None:
+    match = {
+        "ts": "1.1",
+        "files": [
+            {"id": "F012ABC", "name": "資料.pdf"},
+            {"id": "F012ABC", "name": "資料.pdf"},
+            {"id": 123},
+            {"id": "https://example.test/file"},
+            {"id": "F_BAD"},
+            "FNOTAMAPPING",
+            *[{"id": f"F00000{i}"} for i in range(7)],
+        ],
+    }
+    client = _client(search_messages=AsyncMock(return_value=_search_ok([match])))
+    hit = SlackUserReader("xoxp-x", client=client).search_checked("資料", "req").matches[0]
+    assert hit.file_ids == ("F012ABC", "F000000", "F000001", "F000002", "F000003")
+    assert hit.file_names == ("資料.pdf",)
+
+
+@pytest.mark.parametrize("files", [None, {}, "F012ABC"])
+def test_search_checked_missing_file_ids_stay_empty(files: object) -> None:
+    client = _client(search_messages=AsyncMock(return_value=_search_ok([{"files": files}])))
+    hit = SlackUserReader("xoxp-x", client=client).search_checked("資料", "req").matches[0]
+    assert hit.file_ids == ()
+
+
 @pytest.mark.parametrize("code", ["invalid_auth", "missing_scope", "ratelimited"])
 def test_search_checked_surfaces_slack_error_code(code: str) -> None:
     err = SlackApiError(f"failed ({code})", {"ok": False, "error": code})

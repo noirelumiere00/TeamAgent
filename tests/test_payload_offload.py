@@ -247,3 +247,27 @@ async def test_slow_offload_allows_another_request(monkeypatch: pytest.MonkeyPat
         release.set()
         await slow
     assert progressed.is_set()
+
+
+def test_displayed_document_references_and_direct_answer_never_enter_public_offload(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    uploaded = _fake_publish(monkeypatch, _PRESIGNED)
+    reference = {
+        "title": "private-reference-title",
+        "drive_file_id": "PRIVATE_FILE_ID",
+        "url": "https://drive.google.com/file/d/PRIVATE_FILE_ID/view",
+    }
+    data = {
+        "displayed_refs": [reference],
+        "answer": "private-reference-answer" * 100,
+        "direct_delivery": {"answer": "private-reference-answer" * 100},
+        "document_followup_available": True,
+    }
+    out = po.maybe_offload("search", data, request_id="private-reference")
+    published = json.loads(uploaded[0])
+    assert "displayed_refs" not in published
+    assert "answer" not in published and "direct_delivery" not in published
+    assert "PRIVATE_FILE_ID" not in uploaded[0]
+    assert out["displayed_refs"] == [reference]
+    assert out["answer"].startswith("private-reference-answer")

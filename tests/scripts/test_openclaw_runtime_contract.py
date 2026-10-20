@@ -986,6 +986,8 @@ def test_entrypoint_is_readonly_secret_safe_and_environment_allowlisted() -> Non
         "SEARCH_DIRECT_ANSWER",
         "SEARCH_DIRECT_ANSWER_ALLOWED_EMAILS",
         "SEARCH_DIRECT_ANSWER_KINDS",
+        "SEARCH_DRIVE_FIRST",
+        "SEARCH_DRIVE_FIRST_ALLOWED_EMAILS",
         "DM_CATCHUP_ENABLED",
         "DM_CATCHUP_ALLOWED_USERS",
     }
@@ -1038,6 +1040,8 @@ process.stdout.write(child.stdout);
             "SEARCH_DIRECT_ANSWER": flag,
             "SEARCH_DIRECT_ANSWER_ALLOWED_EMAILS": allowed,
             "SEARCH_DIRECT_ANSWER_KINDS": "not_found",
+            "SEARCH_DRIVE_FIRST": flag,
+            "SEARCH_DRIVE_FIRST_ALLOWED_EMAILS": allowed,
             "DM_CATCHUP_ENABLED": flag,
             "DM_CATCHUP_ALLOWED_USERS": catchup_users,
             "NODE_OPTIONS": "--no-warnings",
@@ -1053,6 +1057,8 @@ process.stdout.write(child.stdout);
     assert child["SEARCH_DIRECT_ANSWER"] == flag
     assert child["SEARCH_DIRECT_ANSWER_ALLOWED_EMAILS"] == allowed
     assert child["SEARCH_DIRECT_ANSWER_KINDS"] == "not_found"
+    assert child["SEARCH_DRIVE_FIRST"] == flag
+    assert child["SEARCH_DRIVE_FIRST_ALLOWED_EMAILS"] == allowed
     assert child["DM_CATCHUP_ENABLED"] == flag
     assert child["DM_CATCHUP_ALLOWED_USERS"] == catchup_users
     assert "NODE_OPTIONS" not in child
@@ -1420,6 +1426,12 @@ def _render_task(task: dict[str, Any], image: str) -> subprocess.CompletedProces
         [{"name": "SEARCH_DIRECT_ANSWER_KINDS", "value": "not_found"}],
         [{"name": "SEARCH_DIRECT_ANSWER_KINDS", "value": ""}],
         [{"name": "SEARCH_DIRECT_ANSWER_ALLOWED_EMAILS", "value": "*"}],
+        [{"name": "SEARCH_DRIVE_FIRST", "value": "0"}],
+        [{"name": "SEARCH_DRIVE_FIRST_ALLOWED_EMAILS", "value": ""}],
+        [
+            {"name": "SEARCH_DRIVE_FIRST", "value": "1"},
+            {"name": "SEARCH_DRIVE_FIRST_ALLOWED_EMAILS", "value": "me@example.test"},
+        ],
         [{"name": "DM_CATCHUP_ENABLED", "value": "0"}],
         [{"name": "DM_CATCHUP_ALLOWED_USERS", "value": ""}],
         [
@@ -1460,6 +1472,8 @@ def test_task_hardening_preserves_legacy_inputs_and_optional_search_delivery_inp
         "SEARCH_DIRECT_ANSWER",
         "SEARCH_DIRECT_ANSWER_ALLOWED_EMAILS",
         "SEARCH_DIRECT_ANSWER_KINDS",
+        "SEARCH_DRIVE_FIRST",
+        "SEARCH_DRIVE_FIRST_ALLOWED_EMAILS",
         "DM_CATCHUP_ENABLED",
         "DM_CATCHUP_ALLOWED_USERS",
     ],

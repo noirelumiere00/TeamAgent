@@ -16,6 +16,15 @@ from teamagent.skills.knowledge_deliver.skill import (
 from teamagent.skills.search.schema import SearchHitOut, SearchOutput
 
 
+def test_drop_drive_first_links_for_excluded_document() -> None:
+    from teamagent.skills.knowledge_deliver.skill import _drop_link_lines
+
+    url = "https://drive.google.com/file/d/EXCLUDED/view"
+    answer = f"要約\n\n📎 *出典*\n- Drive資料: [proposal_alpha.pdf]({url})"
+    assert _drop_link_lines(answer, {url}, canonical=True).strip() == "要約"
+    assert _drop_link_lines(answer, {url}) == answer
+
+
 # ── file_id 抽出 ────────────────────────────────────────────────
 def test_extract_file_id_gdrive_scheme() -> None:
     assert extract_drive_file_id("gdrive://ABC123_-xyz") == "ABC123_-xyz"

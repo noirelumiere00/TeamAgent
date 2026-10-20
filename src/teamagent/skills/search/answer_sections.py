@@ -68,6 +68,7 @@ from teamagent.ingest.industry_taxonomy import normalize_industry
 from teamagent.observability import scrub_value
 from teamagent.skills._shared.slack_blocks import plain
 from teamagent.skills._shared.source_url import hit_doc_url
+from teamagent.skills.search import drive_first
 from teamagent.skills.search.campaign_files import (
     UNKNOWN_INDUSTRY,
     VIDEO_METRICS_HEADING,
@@ -75,7 +76,7 @@ from teamagent.skills.search.campaign_files import (
 )
 from teamagent.skills.search.composite import SlackLookup, slack_query_terms
 from teamagent.skills.search.dates import extract_title_date
-from teamagent.skills.search.schema import SlackHitOut
+from teamagent.skills.search.schema import DocumentReference, SlackHitOut
 from teamagent.skills.search_surface_check.summary import slack_safe
 from teamagent.util.grapheme_cut import truncate_graphemes
 
@@ -154,6 +155,7 @@ class Entry:
     case_external_use: str | None = None
     document_id: str | None = None
     source_title: str = ""
+    reference: DocumentReference | None = None
 
 
 @dataclass(frozen=True)
@@ -451,6 +453,7 @@ def entry_from_hit(hit: SearchHit, *, url: str | None) -> Entry:
         )
         return Entry(
             title=title if is_campaign_hit(hit) else case_title or title,
+            reference=meta.get(drive_first.REFERENCE_KEY),
             url=url,
             date=date,
             industry=_hit_industry(meta),
@@ -465,6 +468,7 @@ def entry_from_hit(hit: SearchHit, *, url: str | None) -> Entry:
         client = str(meta.get("client_name") or "").strip()
         return Entry(
             title=f"{client} {phase}" if client else phase,
+            reference=meta.get(drive_first.REFERENCE_KEY),
             url=url,
             date=date,
             detail=_karte_detail(meta),
@@ -472,6 +476,7 @@ def entry_from_hit(hit: SearchHit, *, url: str | None) -> Entry:
         )
     return Entry(
         title=title,
+        reference=meta.get(drive_first.REFERENCE_KEY),
         url=url,
         date=date,
         industry=_hit_industry(meta),
@@ -488,7 +493,10 @@ def entry_from_case_row(row: Mapping[str, Any]) -> Entry:
     )
     return Entry(
         title=title if row.get("case_source") == "campaign_db" else case_title or title or "事例",
-        url=hit_doc_url({"source_uri": row.get("source_uri")}),
+        reference=row.get(drive_first.REFERENCE_KEY),
+        url=row[drive_first.REFERENCE_KEY].url
+        if row.get(drive_first.REFERENCE_KEY)
+        else hit_doc_url({"source_uri": row.get("source_uri")}),
         date=_date_text(row.get("updated_at")) or _date_text(extract_title_date(title)),
         industry=normalize_industry(str(row.get("case_industry") or "") or None),
         detail=_clean(row.get("case_effect"), _EFFECT_CHARS),
@@ -507,6 +515,7 @@ def entries_from_karte(
     entries = [
         Entry(
             title=str((h.metadata or {}).get("deal_phase") or "").strip() or "営業FB",
+            reference=(h.metadata or {}).get(drive_first.REFERENCE_KEY),
             url=resolve(h),
             date=_hit_date(h.metadata or {}, ""),
             detail=_karte_detail(h.metadata or {}),
@@ -526,7 +535,8 @@ def entries_from_slack(hits: Sequence[SlackHitOut]) -> list[Entry]:
         out.append(
             Entry(
                 title=hit.channel or "Slack",
-                url=hit.permalink or None,
+                reference=hit.reference,
+                url=hit.reference.url if hit.reference else hit.permalink or None,
                 date=hit.posted_on or None,
                 detail=f"「{excerpt}」" if excerpt else "",
                 kind="slack",
@@ -612,6 +622,8 @@ def _header(key: SectionKey, count: int, sections: Sections) -> str:
 def _line(entry: Entry, key: SectionKey) -> str:
     label = _clean(entry.title, _TITLE_CHARS) or "資料"
     text = f"- {_link(label, _safe_url(entry.url))}"
+    if entry.reference is not None:
+        text = f"- {drive_first.label(entry.reference)}: {_link(label, _safe_url(entry.url))}"
     meta: list[str] = []
     date = _date_text(entry.date)
     if date:

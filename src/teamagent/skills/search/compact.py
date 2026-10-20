@@ -10,6 +10,7 @@ from urllib.parse import urlsplit
 from teamagent.adapters.pgvector_client import SearchHit
 from teamagent.prompts.loader import load_prompt
 from teamagent.skills._shared.grounding import NumberGrounder
+from teamagent.skills.search import drive_first
 from teamagent.skills.search.campaign_files import (
     VIDEO_METRICS_HEADING,
     _footer_campaigns,
@@ -59,13 +60,21 @@ def source_map(
     sources: Sources = {}
     for hit in hits:
         meta = hit.metadata or {}
+        ref = meta.get(drive_first.REFERENCE_KEY)
         sources[str(hit.chunk_id)] = (
-            str(meta.get("title") or meta.get("file_name") or "資料"),
+            f"{drive_first.label(ref)}: {ref.title}"
+            if ref
+            else str(meta.get("title") or meta.get("file_name") or "資料"),
             url_of(hit) or "",
             hit.content + "\n" + str(meta.get("updated_at") or ""),
         )
     for i, item in enumerate(slack_items):
-        sources[f"slack{i}"] = (item.hit.channel or "Slack", item.hit.permalink, item.text)
+        ref = item.hit.reference
+        sources[f"slack{i}"] = (
+            f"{drive_first.label(ref)}: {ref.title}" if ref else item.hit.channel or "Slack",
+            ref.url or "" if ref else item.hit.permalink,
+            item.text,
+        )
     return sources
 
 
