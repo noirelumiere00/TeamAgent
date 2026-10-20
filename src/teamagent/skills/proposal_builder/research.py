@@ -9,7 +9,8 @@ from collections.abc import Mapping
 from typing import Any, get_args
 from urllib.parse import urlsplit
 
-from pydantic import BaseModel
+import structlog
+from pydantic import BaseModel, ValidationError
 
 from teamagent.skills.proposal_builder.schema import (
     GEMINI_RESEARCH_OBJECT_SEMANTICS,
@@ -33,6 +34,27 @@ _CODE_FENCE_RE = re.compile(
 _URL_RE = re.compile(r"https?://[^\s<>{}()（）\\^`\"']+", flags=re.IGNORECASE)
 _URL_TRAILING_PUNCTUATION = ".,;:!?)]}、。；：！？）】」』＞"
 _UNVERIFIED_REPLACEMENT = "要確認（出典URL未取得）"
+logger = structlog.get_logger(__name__)
+
+
+def research_validation_errors(exc: Exception) -> list[dict[str, Any]]:
+    """Return schema locations/types only; even extra-property names may be private input."""
+    if not isinstance(exc, ValidationError):
+        return [{"loc": (), "type": type(exc).__name__}]
+    schema = GeminiResearch.model_json_schema()
+    names = set(schema["properties"])
+    for definition in schema.get("$defs", {}).values():
+        names.update(definition.get("properties", {}))
+    return [
+        {
+            "loc": tuple(
+                part if isinstance(part, int) or part in names else "<extra>"
+                for part in issue["loc"]
+            ),
+            "type": issue["type"],
+        }
+        for issue in exc.errors(include_input=False, include_context=False, include_url=False)
+    ]
 
 
 def _strip_code_fence(text: str) -> str:
@@ -139,13 +161,17 @@ def parse_gemini_research(raw: Mapping[str, Any] | str) -> GeminiResearch:
     before ``json.loads``; semantic gaps are never filled.
     """
 
-    if isinstance(raw, str):
-        payload: Any = json.loads(repair_json_syntax(raw))
-    elif isinstance(raw, Mapping):
-        payload = copy.deepcopy(dict(raw))
-    else:
-        raise TypeError("Gemini research must be a mapping or JSON string")
-    return GeminiResearch.model_validate(payload, strict=True)
+    try:
+        if isinstance(raw, str):
+            payload: Any = json.loads(repair_json_syntax(raw))
+        elif isinstance(raw, Mapping):
+            payload = copy.deepcopy(dict(raw))
+        else:
+            raise TypeError("Gemini research must be a mapping or JSON string")
+        return GeminiResearch.model_validate(payload, strict=True)
+    except (ValidationError, ValueError, TypeError) as exc:
+        logger.warning("gemini_research_validation_failed", errors=research_validation_errors(exc))
+        raise
 
 
 def _json_path(parent: str, key: object) -> str:
@@ -428,5 +454,6 @@ __all__ = [
     "parse_gemini_research",
     "redact_unverified_quantities",
     "repair_json_syntax",
+    "research_validation_errors",
     "sanitize_unverified_numbers",
 ]
