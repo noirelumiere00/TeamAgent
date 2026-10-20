@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
+from datetime import UTC
 from typing import Any
 
 from teamagent.dashboard.queries import (
@@ -223,3 +224,63 @@ def test_answer_feedback_summary_empty() -> None:
     with pg.connection(app_role="teamagent_dashboard", user_role="admin") as conn:
         out = answer_feedback_summary(conn, 30)
     assert out == {"days": 30, "up": 0, "down": 0, "downs": []}
+
+
+def test_admin_period_summary_binds_both_windows_and_does_not_sum_daily_users() -> None:
+    from datetime import datetime, timedelta
+
+    from teamagent.dashboard import queries
+
+    end = datetime(2026, 10, 19, 9, tzinfo=UTC)
+    start = end - timedelta(days=7)
+    pg = _FakePg(
+        [
+            [
+                {
+                    "period": "current",
+                    "requests": 5,
+                    "users": 2,
+                    "attention_events": 2,
+                    "not_found": 1,
+                    "unknown_search": 3,
+                }
+            ]
+        ]
+    )
+    with pg.connection(app_role="teamagent_dashboard", user_role="admin") as conn:
+        result = queries.period_summary(conn, start=start, end=end, who="a@example.com")
+    sql, params = pg.executed[0]
+    assert "COUNT(DISTINCT" in sql
+    assert "a@example.com" not in sql
+    assert params["previous_start"] == start - timedelta(days=7)
+    assert params["end"] == end
+    assert result["current"]["users"] == 2
+    assert result["current"]["unknown_search"] == 3
+
+
+def test_admin_questions_return_verified_slack_id_and_unknown_found() -> None:
+    from datetime import datetime
+
+    row = {
+        "occurred_at": "2026-10-19",
+        "who": "a@example.com",
+        "user_id": "U0123456789",
+        "skill": "search",
+        "query_text": "資料",
+        "status": "ok",
+        "latency_ms": None,
+        "cost_usd": 0,
+        "found": None,
+    }
+    pg = _FakePg([[row]])
+    with pg.connection(app_role="teamagent_dashboard", user_role="admin") as conn:
+        result = recent_questions(
+            conn,
+            start=datetime(2026, 10, 18, tzinfo=UTC),
+            end=datetime(2026, 10, 19, tzinfo=UTC),
+        )
+    assert result[0]["user_id"] == "U0123456789"
+    assert result[0]["found"] is None
+    sql, params = pg.executed[0]
+    assert "occurred_at < %(end)s" in sql
+    assert "start" in params
