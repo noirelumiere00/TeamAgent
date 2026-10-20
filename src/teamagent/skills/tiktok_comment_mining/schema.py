@@ -8,6 +8,8 @@ from __future__ import annotations
 
 from pydantic import BaseModel, Field
 
+from teamagent.skills._shared.voice_evidence import VoiceStatus
+
 
 class CommentBucket(BaseModel):
     """反応分類1カテゴリ（カタログ⑤の分類軸）。"""
@@ -24,6 +26,9 @@ class CommentBucket(BaseModel):
 class VideoCommentInsight(BaseModel):
     video_url: str
     total_comments: int = 0
+    classified_comments: int = 0
+    unclassified_comments: int = 0
+    status: VoiceStatus = "not_requested"
     buckets: list[CommentBucket] = Field(default_factory=list)
     consumer_vocabulary: list[str] = Field(
         default_factory=list, description="生活者の語彙（商品の呼び名・比喩・定型文）"
@@ -47,6 +52,7 @@ class CommentMiningInput(BaseModel):
 
 
 class CommentMiningOutput(BaseModel):
+    status: VoiceStatus = "not_requested"
     videos: list[VideoCommentInsight] = Field(default_factory=list)
     cross_vocabulary: list[str] = Field(
         default_factory=list, description="複数動画横断で頻出する生活者語彙"

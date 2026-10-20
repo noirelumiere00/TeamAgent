@@ -11,6 +11,8 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field, model_validator
 
+from teamagent.skills._shared.voice_evidence import VoiceStatus
+
 _MAX_PERIOD_DAYS = 62  # ④の取得期間上限（1日ずつ分割取得するためコスト直結）
 
 
@@ -63,6 +65,7 @@ class XVoiceSearchInput(BaseModel):
 
 
 class XVoiceSearchOutput(BaseModel):
+    status: VoiceStatus = "not_requested"
     product_name: str
     posts: list[XPostCard] = Field(default_factory=list)
     searched: int = 0
@@ -101,6 +104,7 @@ class XNeedsMiningInput(BaseModel):
 
 
 class XNeedsMiningOutput(BaseModel):
+    status: VoiceStatus = "not_requested"
     theme: str
     posts: list[XPostCard] = Field(default_factory=list)
     clusters: list[NeedCluster] = Field(default_factory=list)

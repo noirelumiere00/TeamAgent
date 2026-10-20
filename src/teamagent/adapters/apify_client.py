@@ -30,6 +30,7 @@ from urllib.parse import urlsplit
 import httpx
 import structlog
 
+from teamagent.adapters.cost_guard import CostLimitExceededError
 from teamagent.adapters.retry import RetryPolicy, call_with_retry
 
 logger = structlog.get_logger(__name__)
@@ -403,7 +404,13 @@ class ApifyClient:
     # ---- 低レベル: run 実行 -------------------------------------------------
 
     def _request(
-        self, method: str, path: str, *, deadline_at: float | None = None, **kwargs: Any
+        self,
+        method: str,
+        path: str,
+        *,
+        deadline_at: float | None = None,
+        retry_attempts: int = 3,
+        **kwargs: Any,
     ) -> httpx.Response:
         # トークンは Authorization ヘッダで送る（URLクエリに載せない）。
         # httpx の例外メッセージは "for url '{response.url}'" 形式で URL 全体を含むため、
@@ -436,7 +443,7 @@ class ApifyClient:
             return call_with_retry(
                 _call,
                 is_retryable=_is_httpx_retryable,
-                policy=RetryPolicy(max_attempts=3, base_delay_s=1.0, max_delay_s=8.0),
+                policy=RetryPolicy(max_attempts=retry_attempts, base_delay_s=1.0, max_delay_s=8.0),
                 sleep=_sleep_with_deadline,
             )
         except httpx.HTTPError:
@@ -524,6 +531,7 @@ class ApifyClient:
         deadline_s: int = _DEFAULT_DEADLINE_S,
         request_id: str = "apify",
         user_email: str = "",
+        require_cost_reservation: bool = False,
     ) -> ApifyRunResult:
         """actor run を起動し、完了までポーリングして dataset items を返す。
 
@@ -534,6 +542,11 @@ class ApifyClient:
         unit_price = _ACTOR_PRICE_PER_ITEM.get(actor_id, 0.001)
         est_cost = round(unit_price * max_items, 6)
         warnings, reservation = self._reserve_cost(user_email, est_cost, request_id)
+        if require_cost_reservation and not getattr(reservation, "global_reserved", False):
+            self._settle_cost(
+                user_email, cost_usd=0, units=0, request_id=request_id, reservation=reservation
+            )
+            raise CostLimitExceededError("費用予約を確認できないため、新規取得を停止しました")
 
         # 予約は「必ず解放が要る状態」を持つ。reserve〜settle の間で想定外例外（Apify GW が
         # data:null / 非JSON / 想定外形状を返した時の AttributeError/JSONDecodeError 等）が
@@ -559,28 +572,32 @@ class ApifyClient:
         try:
             try:
                 resp = self._request(
-                    "POST", f"/acts/{actor_id}/runs", json=run_input, deadline_at=deadline_at
+                    "POST",
+                    f"/acts/{actor_id}/runs",
+                    json=run_input,
+                    deadline_at=deadline_at,
+                    retry_attempts=1 if require_cost_reservation else 3,
                 )
             except _DeadlineExceededError:
-                _settle_once(0.0, 0)
+                _settle_once(est_cost if require_cost_reservation else 0.0, 0)
                 raise ApifyError(
                     f"APIFY_TIMEOUT: {actor_id} を {deadline_s}s 以内に開始できませんでした"
                 ) from None
             except httpx.HTTPStatusError as e:
-                _settle_once(0.0, 0)
+                _settle_once(est_cost if require_cost_reservation else 0.0, 0)
                 raise ApifyError(
                     f"APIFY_HTTP: actor起動に失敗しました ({actor_id}, "
                     f"status={e.response.status_code})"
                 ) from e
             except httpx.HTTPError as e:
-                _settle_once(0.0, 0)
+                _settle_once(est_cost if require_cost_reservation else 0.0, 0)
                 raise ApifyError(f"APIFY_HTTP: actor起動に失敗しました ({actor_id})") from e
             run = _as_dict(resp.json().get("data") if isinstance(resp.json(), dict) else None)
             run_id = str(run.get("id", ""))
             if not run_id:
                 # POST は 2xx だが run が生成されていない（data:null 等）＝起動失敗。
-                # 課金は発生していないので予約を全解放（settle 0）して弾く。
-                _settle_once(0.0, 0)
+                # 厳格な経路は課金状態不明として概算を残す。
+                _settle_once(est_cost if require_cost_reservation else 0.0, 0)
                 raise ApifyError(f"APIFY_HTTP: actor起動応答が不正です ({actor_id}, run_id無し)")
             logger.info("apify_run_started", request_id=request_id, actor=actor_id, run_id=run_id)
 
@@ -678,7 +695,7 @@ class ApifyClient:
                 f"APIFY_UNEXPECTED: {actor_id} の実行中に想定外のエラーが発生しました"
             ) from None
         finally:
-            _settle_once(0.0, 0)  # まだ精算していなければ予約を解放（幻の予約リーク防止）
+            _settle_once(est_cost if require_cost_reservation else 0.0, 0)
 
     # ---- 型付き入口: X ------------------------------------------------------
 
@@ -869,11 +886,14 @@ class ApifyClient:
         deadline_s: int = _DEFAULT_DEADLINE_S,
         request_id: str = "apify",
         user_email: str = "",
+        require_cost_reservation: bool = False,
     ) -> tuple[list[dict[str, Any]], float]:
         """TikTok動画コメント取得（clockworks）。chromium一次経路の縮退先。
 
         戻り値 items: [{text, likes, author}, ...]（adapters.tiktok_scraper.TikTokComment 互換）。
         """
+        if not tiktok_post_url_allowed(video_url):
+            raise ApifyError("APIFY_URL_NOT_ALLOWED: TikTok HTTPS URL required")
         res = self.run_actor_sync(
             ACTOR_TIKTOK_COMMENTS,
             {"postURLs": [video_url], "commentsPerPost": max_comments},
@@ -881,21 +901,32 @@ class ApifyClient:
             deadline_s=deadline_s,
             request_id=request_id,
             user_email=user_email,
+            require_cost_reservation=require_cost_reservation,
         )
         comments: list[dict[str, Any]] = []
+        seen_ids: set[str] = set()
         for it in res.items:
-            text = str(_first(it, "text", "comment", default="")).strip()
-            if not text:
+            text = _first(it, "text", "comment", default="")
+            if not isinstance(text, str) or not text.strip():
                 continue
+            comment_id = str(_first(it, "cid", "id", "commentId", default=""))
+            if comment_id and comment_id in seen_ids:
+                continue
+            if comment_id:
+                seen_ids.add(comment_id)
             comments.append(
                 {
                     "text": text,
+                    "id": comment_id,
+                    "run_id": res.run_id,
                     "likes": _as_int(_first(it, "diggCount", "likesCount", "likes", default=0)),
                     "author": str(_first(it, "uniqueId", "username", "author", default="")).lstrip(
                         "@"
                     ),
                 }
             )
+        if res.items and not comments:
+            raise ApifyError("APIFY_DATA_INVALID: response contained no readable comments")
         return comments, res.estimated_cost_usd
 
     # ---- 低レベル: Key-Value store（動画 record の取得） -------------------------
