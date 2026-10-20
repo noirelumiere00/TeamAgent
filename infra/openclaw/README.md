@@ -202,3 +202,112 @@ See `docs/openclaw/deploy_runbook.md`. Production remains NO-GO until the
 media/bundle integration is complete, an independent review approves the
 final commit, and real signed rollout and forced-rollback
 CodeBuild/ECR/Fargate/Slack/Bedrock/tools-list evidence passes.
+
+## Startup DM catchup
+
+The caller-identity plugin starts recovery inside the existing gateway process.
+It does not add a service, change upstream OpenClaw, add drain handling, or
+change the ECS task size, count, deployment policy, or Terraform inputs.
+The canonical implementation remains `caller-identity-plugin/dist/index.js`.
+
+Recovery is **OFF by default**. Only `DM_CATCHUP_ENABLED=1` enables it, and
+`DM_CATCHUP_ALLOWED_USERS` independently limits the users eligible for recovery.
+Use a comma-separated list of 1–100 unique Slack `U...` IDs, with no whitespace,
+or `*` alone for all users already allowed by the normal Slack DM policy.
+Unset/empty scopes, invalid IDs, duplicates, mixed wildcard/IDs, values over
+2048 characters, and any enabled value other than `1` leave recovery disabled.
+Disabled or empty-scope startup does not register the extra recovery hooks,
+call Slack history/readiness APIs, or inspect/create/change the catchup directory
+or journal. Existing state is preserved.
+
+When enabled for eligible users, each startup reads one-to-one DM history for
+the preceding 30 minutes, with
+that cutoff fixed for the whole scan. Before taking the cutoff, recovery waits
+up to 120 seconds for authenticated localhost `channels.status` to report the
+Slack account connected. The public gateway client requests only `operator.read`
+and does not create a device identity. Readiness failure records an unresolved
+reason and leaves startup/live reception available. This wait stays in the
+background so gateway startup can finish. Limits are 100 DM conversations, 200
+history messages per DM (two pages), 20 replayed questions per DM, and 200
+replayed questions overall. Questions run oldest first within each DM.
+An incomplete history page budget skips that DM: without the complete reply
+history, replay could duplicate an existing answer. An exhausted replay or
+conversation budget records an unresolved reason rather than silently claiming
+that recovery completed. There is no periodic backfill worker.
+
+Live reception and history share a durable `(team, channel, ts)` reservation.
+The public `reply_dispatch` hook checks that exact source before model execution;
+`message_received` alone cannot stop the ordinary core dispatch path.
+`OPENCLAW_STATE_DIR/slack-catchup/journal.json` stores source/reply timestamps,
+started/done states, and unresolved reason counters. It contains no question,
+answer, email, or token. The directory is mode 0700, atomic journal writes are
+mode 0600, and symlink/corrupt state is rejected. Existing SQLite is untouched.
+The existing single-writer gateway lock remains a prerequisite; this is not a
+claim service for overlapping gateway tasks. A failed journal disables replay
+but leaves normal authorized live processing available, with a warning.
+
+To avoid repeating replies from older images, recovery uses the authenticated
+bot's most recent top-level post in each DM as a conservative boundary. Questions
+older than that post are skipped and recorded as done for delayed live delivery.
+This includes progress, feedback, and digest posts: an unanswered question before
+such a post can be missed. This first rollout accepts that loss to prioritize
+avoiding duplicate answers; the boundary does not prove that every older question
+was answered.
+
+A completed answer also has Slack metadata with `event_type=teamagent.dm_answer_v1`
+and `event_payload={source_channel, source_ts, complete:true}`. When an existing
+Slack metadata type must be preserved, the marker is nested under its
+`event_payload.teamagent_dm_answer_v1`. Exact markers are accepted only from
+the authenticated bot. Saved done rows are checked against Slack again after restart.
+Replay buffers final payloads and sends the last final and its complete marker
+in the same `chat.postMessage`. The public buffered dispatcher applies existing
+reply suppression and scrubbing before the plugin sends the prepared payload.
+
+Ordinary native replies retain the native formatting/delivery path. The plugin
+correlates the final payload to `message_sent`, attaches the marker with a
+metadata-only `chat.update`, and reads it back before marking the journal done.
+Overlapping native questions, identical replies, or
+transformed reply text can prevent unambiguous correlation; failures are
+unresolved rather than guessed as a matching source. The conservative bot-post
+boundary still applies on the next startup. An upstream atomic source-metadata
+send hook would allow that broad boundary to be narrowed later.
+
+Text questions in top-level DMs are supported. Attachment questions, thread-only
+messages, slash/control messages and unsupported outbound media remain unresolved
+rather than risk fetching a different question's attachment. Slack DM history
+does not enumerate thread replies; those need a separate bounded replies scan.
+Questions outside the 30-minute window are not processed. The replay has the
+normal DM route and identity, but re-executing a run interrupted after an external
+tool action can repeat that action; this is not a transaction across Slack and
+all tools.
+
+`im:read` and `im:history` must be granted to the installed bot token. A
+`missing_scope` response skips catchup and allows startup/live reception to
+continue. Do not print tokens to inspect grants. Check app configuration and
+safe API response fields, plus successful metadata persistence/readback, on a
+canary installation. Logs use fixed `dm catchup reason=...` codes and a summary
+`dm catchup completed scanned=N replayed=N`; unresolved counters persist in the
+journal. The replayed count measures dispatches started, not successful answers.
+
+Ship the plugin and entrypoint in the normal OC image release with recovery OFF;
+no added ECS cost is needed. Enable `DM_CATCHUP_ENABLED=1` with only 小俣さん's
+verified Slack U ID in `DM_CATCHUP_ALLOWED_USERS`, then run real replacement-time
+DM, live/history-overlap, already-answered, and ordinary reply checks on the exact
+image. Confirm the conservative bot-post skipping behavior before changing the
+scope to `*`. Return `DM_CATCHUP_ENABLED=0` to stop recovery without removing state.
+
+Inject both recovery inputs through the operational `register_oc_td_image_env.sh`
+path, first scoped only to 小俣さん's verified Slack U ID. That script is not
+checked into this repository and was unavailable for inspection; its own
+environment replacement/preservation behavior remains unverified. The reviewed
+task-definition hardener accepts and preserves these two optional string inputs,
+and the entrypoint passes them to the gateway through its explicit environment
+allowlist.
+
+Checked-in image promotion uses the existing full `-var-file` saved-plan/guard
+path described above. Roll back the image through that same guarded release path.
+Keep the journal during rollback; older images ignore it, and a later startup
+rechecks it against Slack. Neither rollout nor rollback should delete SQLite or
+EFS state. Verify downtime recovery, live/history overlap, already answered DM
+skipping, missing scopes, private-file permissions, unresolved counters and
+normal native reply metadata on the exact production image before rollout.
