@@ -375,10 +375,10 @@
   "unlock": {
     "active": true,
     "scope_paths": [
-      "infra/codebuild/teamagent_core_media_release_contract.json"
+      "infra/codebuild/release_evidence.py"
     ],
-    "reason": "【media の apk ロック追随】 【2026-10-19 apk ロック追随】Alpine v3.24 / edge の索引で libexpat 2.8.5-r0→2.9.0-r0 に入れ替わり、Dockerfile の明示 pin が \"unable to select packages\" で解決不能になる。apk 段の実ビルドで lock 差分 -1 +1（241→241 行）。lock の sha256 が動くため契約の artifact.apk-lock.sha256 と release 契約の sha が動き、世代 publish を再度強制する。scope は core_media 契約 1 path のまま。 【2026-10-19 apk ロック追随】Alpine v3.24 / edge の索引で libx11 1.8.13-r0→1.8.14-r0・libxi 1.8.3-r0→1.8.4-r0・libxrender 0.9.12-r0→0.9.13-r0・libxtst 1.2.5-r0→1.2.6-r0 に入れ替わり、Dockerfile の明示 pin が \"unable to select packages\" で解決不能になる。apk 段の実ビルドで lock 差分 -4 +4（241→241 行）。lock の sha256 が動くため契約の artifact.apk-lock.sha256 と release 契約の sha が動き、世代 publish を再度強制する。scope は core_media 契約 1 path のまま。",
-    "gate": "human gate 2026-10-19（小俣さん「私への公開であれば本番への書き込みの承認は不要」・r64 段3 で base 同梱の X11 系 4 パッケージに HIGH。HIGH は例外にせず版上げで直す既存規律）",
+    "reason": "【2026-10-19 初回リリース免除の延長】INITIAL_RELEASE_EXEMPTION_SUNSET_UTC を 2026-11-15T00:00:00Z から 2026-12-15T00:00:00Z、campaign expiry を 2026-11-22T00:00:00Z から 2026-12-22T00:00:00Z へ延長し、12/5 稼働判定後の通常便を確保する。drill の NO-GO 解消は別 PR。release_evidence.py は generation input のため source-publisher / attestor / promoter の base64 と image-builder の SHA を含む世代 4 本の再導出・再公開が必要。世代台帳 3 ファイルの更新は live S3 本文からの導出待ち。runtime / core_media / openclaw 契約は変更しない。",
+    "gate": "human gate 2026-10-19（小俣さん承認: 初回リリース免除の期限を 12/15 へ延長）",
     "folded_2026_08_28": {
       "decision": "裁定③（relock せず相乗り）を打ち切り、本 PR で unlock を畳む。Human Gate ⑤ を 2026-08-28 にユーザーが通した。",
       "why_now": "①本 PR は frozen surface を 1 path も変更していない（assert-frozen-surface --base origin/dev --head HEAD が「frozen surface 無変更（監視対象 21 path）」を返す実測）。∴ この unlock は本 PR には不要。②active のままだと test_unlock_is_inactive_and_empty_by_default が落ち、CI が 1 failed / 7,474 passed で恒常的に赤になる（3.11 / 3.13 / 3.14 すべてで実測）。本物の失敗と見分けがつかなくなる。③裁定③の rationale「いま relock すると同じ宣言を立て直す往復が発生する」は成立しない。retention_ruling_2026_08_27.landmine_partial_scope のとおり、相乗り PR は scope_paths を自分の変更集合へ絞り込まねばならず、**どのみち書き直しが必須**だから。",
@@ -465,6 +465,14 @@
       "reason": "【2026-10-12 OpenClaw の runtime ベースを glibc 2.44-r8 の世代へ】10-08 の oc17 の provenance builder 段で Chainguard node:latest 同梱の glibc 2.44-r7 に CVE-2026-8674 / 86805 / 89092（MEDIUM）・95818（LOW）が出て、#568 の期限つき例外（16 件・2026-10-22 失効）で通していた。runtime ベース（cgr.dev/chainguard/node:latest）を 10-12 世代（sha256:f99475923192…・node 26.11.1・glibc 2.44-r8・openssl 4.0.3-r6）へ上げ、#568 の例外 16 件を外す。新ベースの /usr/bin/node を実測し、契約の binary_probes の sha256 を 12929629… → 5a7e0d20… へ（#503→#507 の \"actual-image binary hash mismatch: /usr/bin/node\" の再発防止）。この契約は image-attestor 世代の入力（base64 で焼き込み）なので世代 publish を強制する。publish 儀式（S3 → UpdateProject → ロール読み取りピン）とOC provenance builder の inline buildspec の契約 sha ピンの差し替えは republish_oc_contract で行う。",
       "gate": "human gate 2026-10-12（小俣さん明示承認: OpenClaw の runtime ベースを glibc 2.44-r8 の世代へ上げ、#568 の期限つき例外 16 件を外す・10-12 チャット「２OK」）",
       "note": "dev 取り込み済みで本 PR では触らないため scope から外す（過剰 unlock の禁止）。human gate 2026-10-19（小俣さん明示承認「凍結の宣言を OpenClaw 向けからリリース契約向けに切り替えてよい OK」）"
+    },
+    "previous_scope_20261019_core_media_apk": {
+      "scope_paths": [
+        "infra/codebuild/teamagent_core_media_release_contract.json"
+      ],
+      "reason": "【media の apk ロック追随】 【2026-10-19 apk ロック追随】Alpine v3.24 / edge の索引で libexpat 2.8.5-r0→2.9.0-r0 に入れ替わり、Dockerfile の明示 pin が \"unable to select packages\" で解決不能になる。apk 段の実ビルドで lock 差分 -1 +1（241→241 行）。lock の sha256 が動くため契約の artifact.apk-lock.sha256 と release 契約の sha が動き、世代 publish を再度強制する。scope は core_media 契約 1 path のまま。 【2026-10-19 apk ロック追随】Alpine v3.24 / edge の索引で libx11 1.8.13-r0→1.8.14-r0・libxi 1.8.3-r0→1.8.4-r0・libxrender 0.9.12-r0→0.9.13-r0・libxtst 1.2.5-r0→1.2.6-r0 に入れ替わり、Dockerfile の明示 pin が \"unable to select packages\" で解決不能になる。apk 段の実ビルドで lock 差分 -4 +4（241→241 行）。lock の sha256 が動くため契約の artifact.apk-lock.sha256 と release 契約の sha が動き、世代 publish を再度強制する。scope は core_media 契約 1 path のまま。",
+      "gate": "human gate 2026-10-19（小俣さん「私への公開であれば本番への書き込みの承認は不要」・r64 段3 で base 同梱の X11 系 4 パッケージに HIGH。HIGH は例外にせず版上げで直す既存規律）",
+      "note": "10/19 の core_media APK 更新の宣言を退避。本変更は release_evidence.py だけを変更するため scope から外す（過剰 unlock 禁止）。"
     }
   },
   "production_deployment_freeze": {
