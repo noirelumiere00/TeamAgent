@@ -159,7 +159,9 @@ class Origin:
                         request_id=request_id,
                         channel_id=channel_id or self.channel_id,
                         thread_ts=self.thread_ts
-                        if channel_id is None and dm_user_id is None
+                        if channel_id in (None, self.channel_id)
+                        and dm_user_id is None
+                        and thread_ts is None
                         else thread_ts,
                         dm_user_id=dm_user_id,
                         deliver_on_failure=deliver_on_failure,

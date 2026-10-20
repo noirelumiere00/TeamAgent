@@ -25,7 +25,7 @@ _INSIGHT_RE = re.compile(
     r"傾向|パターン|共通点|勝ち筋|勝ちパターン|示唆|インサイト|戦略|打ち手|攻め方|攻めれば|"
     r"どう(?:攻め|動け|提案す|切り返|進め|すれば|したら)|刺さ(?:る|った|りやすい)|"
     r"切り返し|改善点|アイデア|ヒント|学び|教訓|コツ|ポイントを?(?:教えて|まとめて)|"
-    r"なぜ(?:受注|失注|刺さ|決ま)|"
+    r"なぜ(?:受注|失注|刺さ|決ま)|何が効いた|効いたのは|"
     # 資料を材料に案を作ってほしい依頼（10-01 BU1 ヒアリング: 提案コンセプトづくりで
     # 「適したものが出てきた」と評価された使い方。事実確認に倒すと提言が消える）。
     # 「提案してた資料」「提案を出して（＝過去の提案書）」は資料探しなので含めない。
@@ -50,7 +50,9 @@ _LIST_RE = re.compile(
     r"(?:出|見せ|教え|挙げ|並べ|リスト)|"
     # 案件・施策・事例を（複数ありうる前提で）知りたい依頼。10-01 杉浦さん
     # 「ADK 経由で受注したショート動画施策を知りたい」は 1 件ではなく並べてほしい質問。
-    r"(?:案件|施策|事例|実績)(?:を|が)?(?:知りたい|教えて)|どんな(?:案件|施策|事例|実績)"
+    r"(?:案件|施策|事例|実績)(?:を|が|って)?(?:知りたい|教えて|出して|見せて|ある[？?]?|ちょうだい)|"
+    # 「施策実績」だけでは列挙を求めていない。名詞止めは対象付きに限る。
+    r"\S[^\n]*の[^\n]*(?:案件|施策|事例|実績)\s*[？?。]?\s*$|どんな(?:案件|施策|事例|実績)"
 )
 
 
@@ -62,6 +64,41 @@ def classify_answer_mode(query: str) -> AnswerMode:
     if _LIST_RE.search(text):
         return "list"
     return "fact"
+
+
+def is_case_list(query: str) -> bool:
+    from teamagent.skills.search.comparison import is_comparison_query
+
+    return (
+        classify_answer_mode(query) == "list"
+        and not is_comparison_query(query)
+        and not re.search(r"資料|カルテ|議事録|提案書", query)
+        and bool(re.search(r"事例|実績|案件|施策", query))
+    )
+
+
+def strip_advice(answer: str, query: str) -> str:
+    """事実・一覧では、モデルが混ぜた提言の段落を出さない。"""
+    if classify_answer_mode(query) == "insight":
+        return answer
+    kept = []
+    dropping = False
+    for paragraph in re.split(r"\n\s*\n", answer):
+        if re.search(
+            r"推奨アクション|次の一手|おすすめ(?:の施策|アクション)|効くパターン(?:です|と)|有効なパターン",
+            paragraph,
+        ):
+            dropping = True
+            continue
+        if (
+            dropping
+            and not re.match(r"\s*[#*📎 ]*(?:出典|根拠|資料リンク|事実|結果)", paragraph)
+            and "[S:" not in paragraph
+        ):
+            continue
+        dropping = False
+        kept.append(paragraph)
+    return "\n\n".join(kept).strip()
 
 
 # user message に足す回答モードの指示（system prompt v3 の各節と対応する）。

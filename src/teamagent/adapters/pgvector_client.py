@@ -1121,7 +1121,7 @@ class PgVectorClient:
         stage: int = 1,
         request_id: str | None = None,
     ) -> list[dict[str, Any]]:
-        """事例集から 1 段ぶんの候補を返す（段は呼び出し側が 1→2→3→4 と進める）。
+        """事例集から 1 段ぶんの候補を返す（段の選択は呼び出し側が行う）。
 
         段の意味:
           1. 完全一致（``client_name`` または ``case_brand`` 等価）— **長さを問わず採用**
@@ -1130,6 +1130,7 @@ class PgVectorClient:
              — 最小長は呼び出し側が担保
           3. 同業種 AND 商材一致
           4. 同業種のみ
+          5. 業種を限定せず資料名・商材が一致（業種を確定できない事例要求用）
 
         ``case_brand`` は事例集 deck の表題のブランド（「◯◯様：<ブランド>様」・2026-10-06）。
         予定にブランド名で書かれた社外 MTG（「【社外】<ブランド>様」）でも当たるようにする。
@@ -1171,6 +1172,14 @@ class PgVectorClient:
             )
             params["industry"] = industry
             params["product_like"] = f"%{self._escape_like(product)}%"
+        elif stage == 5:
+            if not product or not product.strip():
+                return []
+            where = (
+                " AND (d.title ILIKE %(product_like)s ESCAPE '\\'"
+                " OR d.metadata->>'case_product' ILIKE %(product_like)s ESCAPE '\\')"
+            )
+            params["product_like"] = f"%{self._escape_like(product.strip())}%"
         elif stage == 4:
             if not industry:
                 return []

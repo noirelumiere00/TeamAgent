@@ -188,3 +188,21 @@ def test_projection_carries_case_source_for_the_source_label() -> None:
     _client().list_case_studies(conn, client_name="花王", stage=1)  # type: ignore[arg-type]
     assert "d.metadata->>'case_source'" in conn.sql[0]
     assert "AS case_source" in conn.sql[0]
+
+
+def test_product_cases_cross_industry_keep_corpus_and_escape_like():
+    from unittest.mock import MagicMock
+
+    from teamagent.adapters.pgvector_client import PgVectorClient
+
+    client = PgVectorClient.__new__(PgVectorClient)
+    conn = MagicMock()
+    cur = conn.cursor.return_value.__enter__.return_value
+    cur.fetchall.return_value = []
+    client.list_case_studies(conn, product="ベビー%_", stage=5, limit=5)
+    sql, params = cur.execute.call_args.args
+    assert "case_corpus' = 'true'" in sql
+    assert "d.title ILIKE" in sql and "case_product' ILIKE" in sql
+    assert params["product_like"] == "%ベビー\\%\\_%"
+    assert "industry" not in params
+    assert params["limit"] == 5
