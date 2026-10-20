@@ -52,6 +52,7 @@ def _video_section(ins: VideoCommentInsight) -> str:
     parts = [f"<h2>{_title}</h2>"]
     parts.append(
         f"<div class='meta'>コメント {ins.total_comments}件・"
+        f"分類{ins.classified_comments}件・未分類{ins.unclassified_comments}件・状態{ins.status}・"
         f"全体トーン: {_esc(ins.overall_sentiment or '不明')}・取得経路: {_esc(ins.source)}</div>"
     )
     if ins.buckets:
@@ -114,7 +115,7 @@ def render_comment_report(
         f"<div class='meta'>{_esc(client)}{len(videos)}動画・計{total}コメント・実測 {today}</div>"
         f"{''.join(parts)}"
         "<div class='footer'>代表コメントは原文のまま掲載（創作・要約なし）。"
-        "コメントの少ない動画では取得0件になる場合があります。</div></div></body></html>"
+        "取得0件・取得失敗・未分類は区別して表示します。媒体全体の不在は断定しません。</div></div></body></html>"
     )
 
 

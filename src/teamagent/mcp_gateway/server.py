@@ -378,8 +378,15 @@ def _format_proposal_completion(output: Any) -> str:
 
         return "❌ 提案書生成に失敗しました。" + failure_reason(output.error_code)
     result_message = output.result_message or output.message
+    length_warnings = [
+        line for line in getattr(output, "warnings", []) if line.startswith("文字数調整 {")
+    ]
     if result_message:
+        result_message = "\n".join(
+            line for line in result_message.splitlines() if line not in length_warnings
+        )
         lines.append(result_message[:1000])
+    lines.extend(length_warnings)
     if output.proposal_status:
         lines.append(f"結果: {output.proposal_status}")
     if output.filled_count is not None and output.skipped_count is not None:

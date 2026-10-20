@@ -140,6 +140,19 @@ class EvidenceImage(BaseModel):
         return self
 
 
+class PlaceholderLengthError(ValueError):
+    """他の契約違反と区別して、文字数だけを局所修復する。"""
+
+    def __init__(self, texts: dict[int, str]) -> None:
+        self.texts = texts
+        super().__init__(
+            "; ".join(
+                f"{{{pid}}} length {len(text)} out of {list(LENGTH_RULES[pid])}"
+                for pid, text in texts.items()
+            )
+        )
+
+
 class ComposerOutput(BaseModel):
     """Composer 出力（FMT v2 / 95 placeholder 完全網羅契約）。renderer の入力。
 
@@ -231,14 +244,14 @@ class ComposerOutput(BaseModel):
             raise ValueError(
                 f"uncovered placeholders (must fill or skip all 95 ids): {sorted(missing)}"
             )
-        length_errors: list[str] = []
+        length_errors: dict[int, str] = {}
         for pid, (lo, hi) in LENGTH_RULES.items():
             if pid in self.placeholders:
                 n = len(self.placeholders[pid])
                 if not (lo <= n <= hi):
-                    length_errors.append(f"{{{pid}}} length {n} out of [{lo}, {hi}]")
+                    length_errors[pid] = self.placeholders[pid]
         if length_errors:
-            raise ValueError("; ".join(length_errors))
+            raise PlaceholderLengthError(length_errors)
         return self
 
     @property
@@ -253,5 +266,6 @@ __all__ = [
     "VALID_IDS",
     "ComposerOutput",
     "EvidenceImage",
+    "PlaceholderLengthError",
     "SkippedPlaceholder",
 ]

@@ -66,7 +66,7 @@ def test_compose_deterministically_overrides_model_evidence(tmp_path: Path) -> N
     )
     skill = ProposalDeckSkill(bedrock=bedrock)
 
-    composer, _cost = skill._compose(
+    composer, _cost, _warnings = skill._compose(
         ProposalDeckInput(
             product_name="商品",
             goal="認知",

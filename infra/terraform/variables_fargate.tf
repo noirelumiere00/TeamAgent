@@ -82,6 +82,18 @@ variable "enable_omiyage_report" {
   default     = false
 }
 
+variable "enable_deck_voice_research" {
+  description = "両資料に共通の声取得部品。既定OFF。本人確認と専用allowlistも必須。資料のページは変更しない。"
+  type        = bool
+  default     = false
+}
+
+variable "deck_voice_allowed_emails" {
+  description = "声取得だけの段階公開。空=拒否、*=本人確認済み全員。Xの既存公開範囲には使わない。"
+  type        = string
+  default     = ""
+}
+
 variable "proposal_builder_publish_ready" {
   description = "ready提案書のS3公開(presigned URL発行)を許可する。既定OFF＝Slack添付のみ。"
   type        = bool

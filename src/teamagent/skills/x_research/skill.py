@@ -272,6 +272,7 @@ class _XSyncBase:
     ) -> tuple[list[XPost], float]:
         """クエリ群を並列検索（クエリ単位の失敗は警告に落として続行）。"""
         cost = 0.0
+        succeeded = 0
         results: list[XPost] = []
 
         def _one(q: str) -> tuple[list[XPost], float]:
@@ -289,12 +290,15 @@ class _XSyncBase:
             for fut, q in futures.items():
                 try:
                     posts, c = fut.result()
+                    succeeded += 1
                     results.extend(posts)
                     cost += c
                 except CostLimitExceededError:
                     raise
                 except ApifyError as e:
                     warnings.append(f"クエリ『{q}』の検索に失敗: {str(e)[:80]}")
+        if not succeeded:
+            raise ApifyError("X_SEARCH_FAILED: すべての検索に失敗しました")
         return results, cost
 
     def _verify_selected(
@@ -431,7 +435,9 @@ class XVoiceSearchSkill(_XSyncBase, BaseSkill[XVoiceSearchInput, XVoiceSearchOut
         user = _user_of(ctx)
         if not rollout_allowed(_ALLOWLIST_ENV, user):
             return XVoiceSearchOutput(
-                product_name=input.product_name, slack_summary=ROLLOUT_DENIED_MESSAGE
+                product_name=input.product_name,
+                status="skipped",
+                slack_summary=ROLLOUT_DENIED_MESSAGE,
             )
         start = time.monotonic()
         warnings: list[str] = []
@@ -455,11 +461,13 @@ class XVoiceSearchSkill(_XSyncBase, BaseSkill[XVoiceSearchInput, XVoiceSearchOut
             if not posts:
                 return XVoiceSearchOutput(
                     product_name=input.product_name,
+                    status="partial" if warnings else "ok_empty",
                     warnings=warnings,
                     total_cost_usd=round(total_cost, 4),
                     slack_summary=(
-                        f"「{input.product_name}」のX投稿は0件でした"
-                        "（クエリを変えて再実行してみてください）。"
+                        "一部の検索に失敗しました。成功した検索では該当する投稿はありませんでした。"
+                        if warnings
+                        else f"「{input.product_name}」の今回のX検索結果は0件でした。"
                     ),
                 )
 
@@ -553,11 +561,15 @@ class XVoiceSearchSkill(_XSyncBase, BaseSkill[XVoiceSearchInput, XVoiceSearchOut
             total_cost += cost
         except CostLimitExceededError as e:
             return XVoiceSearchOutput(
-                product_name=input.product_name, slack_summary=str(e), warnings=[str(e)]
+                product_name=input.product_name,
+                status="skipped",
+                slack_summary=str(e),
+                warnings=[str(e)],
             )
         except ApifyError as e:
             return XVoiceSearchOutput(
                 product_name=input.product_name,
+                status="failed",
                 slack_summary=f"X検索に失敗しました: {e}",
                 warnings=[str(e)],
             )
@@ -571,8 +583,13 @@ class XVoiceSearchSkill(_XSyncBase, BaseSkill[XVoiceSearchInput, XVoiceSearchOut
         report_url = self._publish_html(html, request_id=ctx.request_id, query=input.product_name)
         # HTML へ焼き込んだ後に応答から base64 を落とす（切り詰めで url が消えるのを防ぐ）
         _strip_card_images(cards)
+        from teamagent.skills._shared.voice_research import deck_voice_allowed, remember_verified_x
+
+        if deck_voice_allowed(ctx):
+            remember_verified_x(ctx, input.product_name, cards)
         verified_count = sum(1 for c in cards if c.verified)
         out = XVoiceSearchOutput(
+            status="partial" if warnings else "ok_nonempty",
             product_name=input.product_name,
             posts=cards,
             searched=len(posts),
@@ -654,7 +671,9 @@ class XNeedsMiningSkill(_XSyncBase, BaseSkill[XNeedsMiningInput, XNeedsMiningOut
         log = ctx.bind_logger(self.name)
         user = _user_of(ctx)
         if not rollout_allowed(_ALLOWLIST_ENV, user):
-            return XNeedsMiningOutput(theme=input.theme, slack_summary=ROLLOUT_DENIED_MESSAGE)
+            return XNeedsMiningOutput(
+                theme=input.theme, status="skipped", slack_summary=ROLLOUT_DENIED_MESSAGE
+            )
         start = time.monotonic()
         warnings: list[str] = []
         total_cost = 0.0
@@ -678,11 +697,13 @@ class XNeedsMiningSkill(_XSyncBase, BaseSkill[XNeedsMiningInput, XNeedsMiningOut
             if not posts:
                 return XNeedsMiningOutput(
                     theme=input.theme,
+                    status="partial" if warnings else "ok_empty",
                     warnings=warnings,
                     total_cost_usd=round(total_cost, 4),
                     slack_summary=(
-                        f"「{input.theme}」×感情ワードで いいね{input.min_faves}以上の投稿は"
-                        "0件でした（min_faves を下げるかワードを変えてみてください）。"
+                        "一部の検索に失敗しました。成功した検索では条件に合う投稿はありませんでした。"
+                        if warnings
+                        else f"「{input.theme}」の今回の条件に合う検索結果は0件でした。"
                     ),
                 )
 
@@ -742,10 +763,13 @@ class XNeedsMiningSkill(_XSyncBase, BaseSkill[XNeedsMiningInput, XNeedsMiningOut
                 for c in clusters
             ]
         except CostLimitExceededError as e:
-            return XNeedsMiningOutput(theme=input.theme, slack_summary=str(e), warnings=[str(e)])
+            return XNeedsMiningOutput(
+                theme=input.theme, status="skipped", slack_summary=str(e), warnings=[str(e)]
+            )
         except ApifyError as e:
             return XNeedsMiningOutput(
                 theme=input.theme,
+                status="failed",
                 slack_summary=f"X検索に失敗しました: {e}",
                 warnings=[str(e)],
             )
@@ -761,6 +785,7 @@ class XNeedsMiningSkill(_XSyncBase, BaseSkill[XNeedsMiningInput, XNeedsMiningOut
         # HTML へ焼き込んだ後に応答から base64 を落とす（切り詰めで url が消えるのを防ぐ）
         _strip_card_images(cards)
         out = XNeedsMiningOutput(
+            status="partial" if warnings else "ok_nonempty",
             theme=input.theme,
             posts=cards,
             clusters=clusters,

@@ -69,6 +69,26 @@ class _FakeApify:
         return ApifyClient("tok", http=http, poll_interval_s=0.0)
 
 
+def test_required_cost_reservation_blocks_before_actor_start() -> None:
+    fake = _FakeApify()
+    with pytest.raises(CostLimitExceededError):
+        fake.client().tiktok_comments(
+            "https://www.tiktok.com/@a/video/1", require_cost_reservation=True
+        )
+    assert fake.calls == []
+
+
+def test_comment_ids_and_raw_whitespace_are_preserved() -> None:
+    fake = _FakeApify()
+    fake.items_by_actor["clockworks~tiktok-comments-scraper"] = [
+        {"cid": "1", "text": "  合成本文\n"},
+        {"cid": "2", "text": "  合成本文\n"},
+    ]
+    comments, _ = fake.client().tiktok_comments("https://www.tiktok.com/@a/video/1")
+    assert [c["id"] for c in comments] == ["1", "2"]
+    assert all(c["text"] == "  合成本文\n" for c in comments)
+
+
 _X_ITEM = {
     "id": "111",
     "url": "https://x.com/user_a/status/111",
@@ -176,7 +196,15 @@ def test_tiktok_comments_normalized() -> None:
     comments, _ = fake.client().tiktok_comments(
         "https://www.tiktok.com/@a/video/1", max_comments=10, request_id="t"
     )
-    assert comments == [{"text": "美味しそう", "likes": 16, "author": "mayo"}]
+    assert comments == [
+        {
+            "text": "美味しそう",
+            "likes": 16,
+            "author": "mayo",
+            "id": "",
+            "run_id": "run-clockworks~tiktok-comments-scraper",
+        }
+    ]
 
 
 class _DenyLedger:
@@ -250,6 +278,31 @@ def test_ledger_reservation_is_settled_with_actual_cost() -> None:
     client.run_actor_sync(ACTOR_X_SEARCH, {"query": "x"}, max_items=5, request_id="t")
     assert ledger.reserved
     assert ledger.settled == [(ledger.token, 0.00025, 1)]
+
+
+def test_strict_comment_start_is_not_retried_and_unknown_charge_is_reserved(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from types import SimpleNamespace
+
+    monkeypatch.setattr("teamagent.adapters.apify_client.time.sleep", lambda _: None)
+    ledger = _ReservationLedger()
+    ledger.token = SimpleNamespace(global_reserved=True)
+    starts: list[str] = []
+
+    def timeout(request: httpx.Request) -> httpx.Response:
+        starts.append(request.method)
+        raise httpx.ReadTimeout("fake: actor may have started", request=request)
+
+    client = ApifyClient(
+        "fake", ledger=ledger, http=httpx.Client(transport=httpx.MockTransport(timeout))
+    )
+    with pytest.raises(ApifyError):
+        client.tiktok_comments(
+            "https://www.tiktok.com/@s/video/1", max_comments=100, require_cost_reservation=True
+        )
+    assert starts == ["POST"]
+    assert ledger.settled[0][1] == 0.1
 
 
 def test_unexpected_response_releases_reservation_no_phantom_leak() -> None:
