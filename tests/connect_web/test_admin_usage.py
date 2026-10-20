@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import html
+import re
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from typing import Any
@@ -45,7 +47,22 @@ class _FakeCursor:
 
     def execute(self, sql: str, params: Any = None) -> None:
         self._pg.executed.append((sql, params))
-        if "GROUP BY skill" in sql and "percentile_cont" not in sql:
+        if "GROUP BY period" in sql:
+            self._rows = [
+                {
+                    "period": "current",
+                    "requests": 0 if self._pg.empty else 9,
+                    "users": 0 if self._pg.empty else 1,
+                    "attention_events": 0,
+                    "not_found": 0,
+                    "unknown_search": 0,
+                    "questions": 0 if self._pg.empty else 1,
+                    "cost_usd": 0 if self._pg.empty else 0.09,
+                }
+            ]
+        elif "request_id, skill, status, error_code" in sql:
+            self._rows = []
+        elif "GROUP BY skill" in sql and "percentile_cont" not in sql:
             # work_type_breakdown（束の畳み込み元データ）
             self._rows = (
                 []
@@ -83,6 +100,8 @@ class _FakeCursor:
                         "who": _OWNER,
                         "skill": "search",
                         "query_text": '<script>alert("x")</script>',
+                        "user_id": "U0123456789",
+                        "found": None,
                         "status": "ok",
                         "latency_ms": 123,
                         "cost_usd": 0.01,
@@ -114,7 +133,13 @@ class _FakeCursor:
                 []
                 if self._pg.empty
                 else [
-                    {"who": _OWNER, "requests": 9, "cost_usd": 0.09},
+                    {
+                        "who": _OWNER,
+                        "requests": 9,
+                        "previous_requests": 5,
+                        "user_id": "U0123456789",
+                        "cost_usd": 0.09,
+                    },
                 ]
             )
         else:
@@ -219,38 +244,54 @@ def test_admin_escapes_question_text_and_renders_jst(monkeypatch: pytest.MonkeyP
     assert response.status_code == 200
     assert '<script>alert("x")</script>' not in response.text
     assert "&lt;script&gt;alert(&quot;x&quot;)&lt;/script&gt;" in response.text
-    assert "2026-08-13 09:30:00 JST" in response.text
-    assert "Aico 利用状況（管理）" in response.text
+    assert (
+        '<time datetime="2026-08-13T09:30:00+09:00" title="2026-08-13 09:30:00 JST">08/13 09:30</time>'
+        in response.text
+    )
+    assert "<title>利用状況 | Aico 管理画面</title>" in response.text
 
 
-def test_admin_empty_usage_events_renders_deployment_note(
+def test_admin_empty_usage_events_renders_empty_period(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.delenv("CONNECT_ADMIN_EMAILS", raising=False)
     client, _ = _client(_FakePg(empty=True))
     response = client.get("/admin", cookies=_cookies(_OWNER))
     assert response.status_code == 200
-    assert "まだ記録がありません。記録は mcp の次回デプロイから始まります" in response.text
+    assert "この期間の利用記録はありません。" in response.text
 
 
 def test_admin_renders_work_type_bars(monkeypatch: pytest.MonkeyPatch) -> None:
-    """作業束の横棒バーが出る（外部ライブラリ非依存の CSS 幅指定で描く）。"""
+    """作業束の割合と件数が一致し、CSPで許可されたSVG属性で描く。"""
     monkeypatch.delenv("CONNECT_ADMIN_EMAILS", raising=False)
     client, _ = _client()
     response = client.get("/admin", cookies=_cookies(_OWNER))
     assert response.status_code == 200
-    assert "作業の内訳（直近7日）" in response.text
-    assert "作業の内訳（直近30日）" in response.text
+    assert "作業の内訳" in response.text
+    assert "作業の内訳（直近30日・全体）" in response.text
     for work_type in ("調べる", "作る", "整える", "秘書"):
         assert work_type in response.text
     # search 6 / mail_draft 2 / slack_summary 1 / mail_summary 1 = 10 件
-    assert 'class="bar-fill" style="width:60.0%"' in response.text
-    assert "60.0% / 6件" in response.text
-    assert "20.0% / 2件" in response.text
-    assert "10.0% / 1件" in response.text
+    mix = re.search(
+        r'<div class="usage-grid">.*?<div class="work-mix">(.*?)</section>', response.text, re.S
+    )
+    assert mix is not None
+    assert re.findall(r'<rect class="mix-color-\d" x="([\d.]+)" width="([\d.]+)"', mix[1]) == [
+        ("0.0", "60.0"),
+        ("60.0", "20.0"),
+        ("80.0", "10.0"),
+        ("90.0", "10.0"),
+    ]
+    rows = re.findall(r'<div class="mix-row">(.*?)</div>', mix[1])
+    assert [re.sub(r"<[^>]+>", " ", row).split() for row in rows] == [
+        ["調べる", "60.0%", "6件"],
+        ["作る", "20.0%", "2件"],
+        ["整える", "10.0%", "1件"],
+        ["秘書", "10.0%", "1件"],
+    ]
     # 未知ツールが無いので「その他」の行は出さない。
     assert "その他" not in response.text
-    # 外部 CDN を新たに引き込んでいない（/admin はスクリプト無しのまま）。
+    # 外部 CDN を引き込まない。
     assert "cdn.jsdelivr.net" not in response.text
 
 
@@ -259,7 +300,7 @@ def test_admin_user_rows_link_to_drilldown(monkeypatch: pytest.MonkeyPatch) -> N
     client, _ = _client()
     response = client.get("/admin", cookies=_cookies(_OWNER))
     assert response.status_code == 200
-    assert '<a href="/admin?user=s-komata%40vectorinc.co.jp">' in response.text
+    assert '<a href="/admin?user=s-komata%40vectorinc.co.jp&amp;period=7d">' in response.text
 
 
 def test_admin_drilldown_filters_questions_by_user(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -272,7 +313,7 @@ def test_admin_drilldown_filters_questions_by_user(monkeypatch: pytest.MonkeyPat
     question_sql = [sql for sql, _ in pg.executed if "query_text" in sql]
     assert question_sql and all(_OWNER not in sql for sql in question_sql)
     assert "で絞り込み中" in response.text
-    assert '<a href="/admin">絞り込みを解除</a>' in response.text
+    assert '<a href="/admin?period=7d">絞り込みを解除</a>' in response.text
     assert "&lt;script&gt;alert(&quot;x&quot;)&lt;/script&gt;" in response.text
 
 
@@ -282,7 +323,7 @@ def test_admin_drilldown_other_user_shows_empty_feed(monkeypatch: pytest.MonkeyP
     response = client.get(f"/admin?user={_OTHER}", cookies=_cookies(_OWNER))
     assert response.status_code == 200
     assert pg.question_who == [_OTHER]
-    assert "この利用者の質問はまだ記録がありません。" in response.text
+    assert "この利用者・期間の質問はまだ記録がありません。" in response.text
     assert "&lt;script&gt;" not in response.text
 
 
@@ -379,15 +420,25 @@ def test_admin_renders_answer_feedback_summary(monkeypatch: pytest.MonkeyPatch) 
     client, pg = _client()
     response = client.get("/admin", cookies=_cookies(_OWNER))
     assert response.status_code == 200
-    assert "回答の評価（Slack・直近30日）" in response.text
-    assert '<div class="label">👍 役に立った</div><div class="value">3</div>' in response.text
-    assert '<div class="label">👎 いまいち</div><div class="value">1</div>' in response.text
+    panel = re.search(r'<section class="panel feedback-panel">(.*?)</section>', response.text, re.S)
+    assert panel is not None
+    assert "回答への評価" in panel[1]
+    assert "Slackで届いた声・直近7日" in panel[1]
+    assert [
+        html.unescape(re.sub(r"<[^>]+>", " ", item)).split()
+        for item in re.findall(r'<div class="feedback-item">(.*?)</div>', panel[1])
+    ] == [["👍", "評価", "3", "件"], ["👎", "評価", "1", "件"]]
     assert "&lt;b&gt;JAL&lt;/b&gt; の過去提案" in response.text
     assert "<b>JAL</b>" not in response.text
-    assert "2026-10-06 10:00:00 JST" in response.text
+    assert (
+        '<time datetime="2026-10-06T10:00:00+09:00" title="2026-10-06 10:00:00 JST">10/06 10:00</time>'
+        in response.text
+    )
     feedback_sql = [(sql, params) for sql, params in pg.executed if "FROM search_feedback" in sql]
-    assert len(feedback_sql) == 2
-    assert all(params == {"days": 30, "limit": 50} for _, params in feedback_sql)
+    assert len(feedback_sql) == 3
+    assert all(params["days"] == 7 and params["limit"] == 200 for _, params in feedback_sql)
+    assert feedback_sql[0][1]["start"] < feedback_sql[0][1]["end"]
+    assert feedback_sql[-1][1]["end"] == feedback_sql[0][1]["start"]
     assert all("slack-%%" in sql for sql, _ in feedback_sql)
     assert {"app_role": "teamagent_dashboard", "user_role": "admin"} in pg.connection_kwargs
 
@@ -402,4 +453,144 @@ def test_admin_feedback_permission_denied_does_not_break_page(
     assert response.status_code == 200
     assert "評価データはまだ表示できません。" in response.text
     assert "answer_feedback_summary は現在表示できません（PermissionError）。" in response.text
-    assert "作業の内訳（直近7日）" in response.text
+    assert "作業の内訳" in response.text
+
+
+def test_admin_v2_has_navigation_and_agent_post_is_gated() -> None:
+    client, pg = _client()
+    page = client.get("/admin", cookies=_cookies(_OWNER))
+    assert 'href="/admin/history"' in page.text
+    assert 'href="/admin/memory"' in page.text
+    assert "ツール実行数" in page.text
+    before = len(pg.connection_kwargs)
+    response = client.post("/admin/analyze", cookies=_cookies(_OTHER), json={"period": "7d"})
+    assert response.status_code == 404
+    assert len(pg.connection_kwargs) == before
+    response = client.post("/admin/analyze", cookies=_cookies(_OWNER), json={"period": "7d"})
+    assert response.status_code == 403
+    assert len(pg.connection_kwargs) == before
+
+
+def test_admin_styles_and_script_use_fresh_csp_nonce() -> None:
+    client, _ = _client()
+    first = client.get("/admin", cookies=_cookies(_OWNER))
+    second = client.get("/admin", cookies=_cookies(_OWNER))
+    nonces = []
+    for response in (first, second):
+        csp = response.headers["content-security-policy"]
+        nonce = re.search(r"'nonce-([^']+)'", csp)
+        assert nonce is not None
+        nonces.append(nonce[1])
+        assert f'<style nonce="{nonce[1]}">' in response.text
+        assert f'<script nonce="{nonce[1]}">' in response.text
+        assert "'unsafe-inline'" not in csp
+        assert "no-store" in response.headers["cache-control"]
+        assert response.headers["x-robots-tag"] == "noindex"
+        assert not re.search(r"<[^>]+\s(?:style|on\w+)=", response.text)
+    assert nonces[0] != nonces[1]
+
+
+@pytest.mark.parametrize(
+    "origin", [None, "https://evil.example", "null", "http://testserver.evil.example"]
+)
+def test_admin_analysis_rejects_cross_origin_before_queries(
+    monkeypatch: pytest.MonkeyPatch, origin: str | None
+) -> None:
+    monkeypatch.setenv("CONNECT_BASE_URL", "http://testserver")
+    client, pg = _client()
+    headers = {"Origin": origin} if origin is not None else {}
+    response = client.post(
+        "/admin/analyze", cookies=_cookies(_OWNER), headers=headers, json={"period": "7d"}
+    )
+    assert response.status_code == 403
+    assert not pg.connection_kwargs
+    assert "no-store" in response.headers["cache-control"]
+
+
+def test_admin_analysis_uses_server_data_and_readonly_connections(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("CONNECT_BASE_URL", "http://testserver")
+    calls: list[Any] = []
+
+    def analyze(questions: Any, downs: Any, metrics: Any, *, request_id: str) -> dict[str, Any]:
+        calls.append((questions, downs, metrics, request_id))
+        return {
+            "themes": [{"title": "資料", "count": 1}],
+            "blocked_themes": [],
+            "actions": ["確認する"] * 3,
+            "sample_size": 1,
+            "classified_size": 1,
+        }
+
+    monkeypatch.setattr(connect_app, "analyze_questions", analyze)
+    client, pg = _client()
+    assert client.get("/admin", cookies=_cookies(_OWNER)).status_code == 200
+    assert calls == []
+    response = client.post(
+        "/admin/analyze",
+        cookies=_cookies(_OWNER),
+        headers={"Origin": "http://testserver"},
+        json={
+            "period": "today",
+            "questions": ["クライアントが偽造した質問"],
+            "metrics": {"requests": 9999},
+        },
+    )
+    assert response.status_code == 200
+    assert response.json()["period"] == "今日"
+    assert len(calls) == 1
+    assert "クライアントが偽造した質問" not in repr(calls)
+    assert calls[0][2]["requests"] == 9
+    assert pg.connection_kwargs and all(
+        k == {"app_role": "teamagent_dashboard", "user_role": "admin"} for k in pg.connection_kwargs
+    )
+    assert "no-store" in response.headers["cache-control"]
+
+
+@pytest.mark.parametrize(
+    "payload", [{"period": "week"}, {"period": []}, {"user": []}, {"user": "x" * 255}, []]
+)
+def test_admin_analysis_rejects_invalid_payload_without_queries(
+    monkeypatch: pytest.MonkeyPatch, payload: Any
+) -> None:
+    monkeypatch.setenv("CONNECT_BASE_URL", "http://testserver")
+    client, pg = _client()
+    response = client.post(
+        "/admin/analyze",
+        cookies=_cookies(_OWNER),
+        headers={"Origin": "http://testserver"},
+        json=payload,
+    )
+    assert response.status_code == 400
+    assert not pg.connection_kwargs
+
+
+def test_admin_analysis_failure_never_logs_question_or_email(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("CONNECT_BASE_URL", "http://testserver")
+    captured: list[Any] = []
+
+    def fail(*args: Any, **kwargs: Any) -> None:
+        raise RuntimeError("社外秘の質問 " + _OWNER)
+
+    monkeypatch.setattr(connect_app, "analyze_questions", fail)
+    monkeypatch.setattr(connect_app.logger, "warning", lambda *a, **k: captured.append((a, k)))
+    client, _ = _client()
+    response = client.post(
+        "/admin/analyze",
+        cookies=_cookies(_OWNER),
+        headers={"Origin": "http://testserver"},
+        json={"period": "7d"},
+    )
+    assert response.status_code == 503
+    assert captured and _OWNER not in repr(captured) and "社外秘" not in repr(captured)
+    assert "社外秘" not in response.text
+
+
+def test_admin_period_is_validated_after_authorization() -> None:
+    client, pg = _client()
+    assert client.get("/admin?period=week", cookies=_cookies(_OTHER)).status_code == 404
+    assert client.get("/admin?period=week", cookies=_cookies(_OWNER)).status_code == 400
+    assert not pg.connection_kwargs

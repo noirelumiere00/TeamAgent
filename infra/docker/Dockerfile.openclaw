@@ -55,6 +55,9 @@ RUN set -eux; \
     node -e 'const fs=require("fs");const checks=[["/opt/teamagent/plugins/slack/package.json","@openclaw/slack","2026.7.1",true],["/opt/teamagent/plugins/amazon-bedrock/package.json","@openclaw/amazon-bedrock-provider","2026.7.1",true],["/opt/teamagent/plugins/teamagent-caller-identity/package.json","@teamagent/openclaw-caller-identity","1.0.0",false]];for(const [p,n,v,official] of checks){const x=JSON.parse(fs.readFileSync(p));if(x.name!==n||x.version!==v||(official&&x.peerDependencies?.openclaw!==">=2026.7.1"))throw new Error(`plugin contract mismatch: ${n}`)}'; \
     ln -s /app /opt/teamagent/plugins/slack/node_modules/openclaw; \
     ln -s /app /opt/teamagent/plugins/amazon-bedrock/node_modules/openclaw; \
+    mkdir -p /opt/teamagent/plugins/teamagent-caller-identity/node_modules; \
+    ln -s /app /opt/teamagent/plugins/teamagent-caller-identity/node_modules/openclaw; \
+    (cd /opt/teamagent/plugins/teamagent-caller-identity && node --input-type=module -e 'const {GatewayClient}=await import("openclaw/plugin-sdk/gateway-runtime"); if(typeof GatewayClient !== "function") throw new Error("public gateway SDK unavailable")'); \
     mkdir -p /tmp/teamagent-openclaw/config /tmp/teamagent-openclaw/state /tmp/teamagent-openclaw/home /opt/teamagent/state-seed; \
     cp /opt/teamagent/openclaw.template.json /tmp/teamagent-openclaw/config/openclaw.json; \
     HOME=/tmp/teamagent-openclaw/home OPENCLAW_STATE_DIR=/tmp/teamagent-openclaw/state OPENCLAW_CONFIG_PATH=/tmp/teamagent-openclaw/config/openclaw.json TEAMAGENT_CALLER_CLAIM_SECRET=build-placeholder-caller-claim-secret-32-bytes SLACK_TEAM_ID=T0123456789 node /app/openclaw.mjs plugins install --link /opt/teamagent/plugins/slack >/dev/null; \

@@ -233,5 +233,5 @@ def test_work_type_breakdown_passes_days_as_bound_parameter() -> None:
     work_type_breakdown(conn, 30)
     sql, params = conn.executed[0]
     assert "GROUP BY skill" in sql
-    assert "days')::interval" in sql
-    assert params == ["30"]
+    assert "make_interval(days => %(days)s)" in sql
+    assert params == {"days": 30}

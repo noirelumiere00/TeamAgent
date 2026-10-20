@@ -18,7 +18,6 @@ import {
   createCallerIdentityPlugin,
   unwrapToolArguments,
   canonicalRequestSha256,
-  REGISTERED_HOOKS,
   connectRequestShape,
   classifyConnectRequest,
   classifyVideoUrl,
@@ -1699,7 +1698,7 @@ function hookObservabilityReport() {
   const before = consoleLines.length;
   warmUpHooks(captured.value.handlers);
   return {
-    registeredHooks: [...REGISTERED_HOOKS],
+    registeredHooks: [...captured.value.handlers.keys()],
     // 実際に api.on された名前（バナーがハードコード定数と非結合にならないことの固定）。
     handlerKeys: [...captured.value.handlers.keys()],
     bannerLine: lines.find((line) => line.includes("registered hooks=")) ?? null,

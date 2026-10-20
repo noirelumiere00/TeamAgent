@@ -21,6 +21,7 @@ import json
 import logging
 import os
 import re
+import secrets
 import threading
 import time
 from collections import Counter, deque
@@ -73,7 +74,8 @@ from teamagent.dashboard.auth import (
     verify_session,
 )
 from teamagent.dashboard.config import DashboardConfig
-from teamagent.dashboard.render import render_usage_admin
+from teamagent.dashboard.insights import AdminPeriod, admin_period, analyze_questions
+from teamagent.dashboard.render import render_admin_page, render_usage_admin
 
 logger = structlog.get_logger(__name__)
 
@@ -5175,92 +5177,117 @@ def create_app(
             return JSONResponse({"error": "karte_failed"}, status_code=500)
         return JSONResponse(payload)
 
-    @app.get("/admin", response_class=HTMLResponse)
-    def usage_admin(request: Request) -> Response:
-        """小俣さん限定の利用状況・質問フィード。
-
-        非許可ユーザーにはページの存在を秘匿する。``?user=<email>`` を付けると質問
-        フィードだけをその利用者に絞り込む（admin ゲート通過後にのみ解釈する）。
-        絞り込み値は WHERE 句へプレースホルダで渡し、ログにも出さない（G8）。
-        """
-        email = _search_email(request)
-        if email is None:
-            return RedirectResponse("/search/login?next=/admin", status_code=303)
-        if email.strip().lower() not in _admin_emails():
-            # 未登録ルートと同じ FastAPI 標準404に揃え、body/content-type でも
-            # 存在を秘匿する。
-            raise HTTPException(status_code=404)
-
-        # ドリルダウン対象。email/Slack ID より長い値は捨てる（無意味な全表スキャン避け）。
-        filter_user = (request.query_params.get("user") or "").strip()
-        if len(filter_user) > _ADMIN_FILTER_USER_MAX:
-            filter_user = ""
-
-        data: dict[str, Any] = {
-            "email": email,
-            "kpis": {},
-            "daily": [],
-            "questions": [],
-            "skills": [],
-            "users": [],
-            "errors": [],
-            "notes": [],
-            "work_types_7d": [],
-            "work_types_30d": [],
-            "feedback": {},
-            "filter_user": filter_user,
-        }
-        successful: set[str] = set()
+    def _usage_data(period: AdminPeriod, filter_user: str) -> dict[str, Any]:
+        data: dict[str, Any] = {"period": period, "filter_user": filter_user, "notes": []}
         try:
             query_module = importlib.import_module("teamagent.dashboard.queries")
             pg = _get_admin_pg()
         except Exception as exc:
-            logger.warning("usage_admin_setup_failed", error=type(exc).__name__, exc_info=True)
+            logger.warning("usage_admin_setup_failed", error=type(exc).__name__)
             data["notes"].append("利用状況データへ接続できませんでした。")
-        else:
-            query_specs: tuple[tuple[str, str, tuple[Any, ...], dict[str, Any]], ...] = (
-                ("kpis", "kpis", (), {}),
-                ("daily", "daily_series", (30,), {}),
-                ("skills", "skill_breakdown", (7,), {}),
-                ("work_types_7d", "work_type_breakdown", (7,), {}),
-                ("work_types_30d", "work_type_breakdown", (30,), {}),
-                ("users", "user_breakdown", (), {}),
-                ("errors", "error_list", (50,), {}),
-                ("questions", "recent_questions", (200,), {"who": filter_user or None}),
-                # 回答評価（search_feedback）。dashboard ロールに同表の SELECT が無い環境では
-                # この 1 件だけが失敗して notes に出る（他の集計は巻き込まない）。
-                ("feedback", "answer_feedback_summary", (30,), {}),
-            )
-            for target, function_name, args, kwargs in query_specs:
-                try:
-                    query_fn = getattr(query_module, function_name)
-                    # SQL エラーで transaction が abort しても他の集計を
-                    # 巻き込まないよう、
-                    # 関数ごとに read-only 接続境界を分ける。
-                    with pg.connection(app_role="teamagent_dashboard", user_role="admin") as conn:
-                        data[target] = query_fn(conn, *args, **kwargs)
-                    successful.add(target)
-                except Exception as exc:
-                    logger.warning(
-                        "usage_admin_query_failed",
-                        query=function_name,
-                        error=type(exc).__name__,
-                        exc_info=True,
-                    )
-                    error_name = type(exc).__name__
-                    data["notes"].append(f"{function_name} は現在表示できません（{error_name}）。")
+            return data
+        window = {"start": period.start, "end": period.end, "who": filter_user or None}
+        query_specs: tuple[tuple[str, str, tuple[Any, ...], dict[str, Any]], ...] = (
+            ("summary", "period_summary", (), window),
+            ("daily", "daily_series", (period.days,), window),
+            ("skills", "skill_breakdown", (period.days,), window),
+            ("work_types", "work_type_breakdown", (period.days,), window),
+            ("users", "user_breakdown", (), {**window, "days": period.days, "limit": 200}),
+            ("errors", "error_list", (200,), window),
+            ("questions", "recent_questions", (200,), window),
+            ("feedback", "answer_feedback_summary", (period.days,), {**window, "limit": 200}),
+            ("kpis", "kpis", (), {}),
+            ("work_types_30d", "work_type_breakdown", (30,), {}),
+        )
+        for target, function_name, args, kwargs in query_specs:
+            try:
+                # 1クエリ関数ごとのread-only境界。評価の権限不足などを他の集計へ波及させない。
+                with pg.connection(app_role="teamagent_dashboard", user_role="admin") as conn:
+                    data[target] = getattr(query_module, function_name)(conn, *args, **kwargs)
+            except Exception as exc:
+                # DB例外の本文やtracebackにはSQLパラメーターが含まれ得るため出さない（G8）。
+                logger.warning(
+                    "usage_admin_query_failed", query=function_name, error=type(exc).__name__
+                )
+                data["notes"].append(
+                    f"{function_name} は現在表示できません（{type(exc).__name__}）。"
+                )
+        return data
 
-        metrics = data["kpis"]
-        if "kpis" in successful:
-            data["empty"] = metrics.get("total_events", 0) == 0
-        else:
-            # work_types は 0 件でも中核4束を返す（＝空判定の材料にしない）。
-            data["empty"] = (
-                "daily" in successful
-                and not data["daily"]
-                and not any((data["questions"], data["skills"], data["users"], data["errors"]))
+    @app.get("/admin", response_class=HTMLResponse)
+    def usage_admin(request: Request) -> Response:
+        """認可後にだけ期間・社員を解釈して集計する。GETはLLM/Slackを呼ばない。"""
+        email = _search_email(request)
+        if email is None:
+            return RedirectResponse("/search/login?next=/admin", status_code=303)
+        if email.strip().lower() not in _admin_emails():
+            raise HTTPException(status_code=404)
+        try:
+            period = admin_period(request.query_params.get("period", "7d"))
+        except ValueError:
+            raise HTTPException(status_code=400, detail="期間が正しくありません。") from None
+        filter_user = (request.query_params.get("user") or "").strip()
+        if len(filter_user) > _ADMIN_FILTER_USER_MAX:
+            filter_user = ""
+        return _admin_html(render_usage_admin(_usage_data(period, filter_user)))
+
+    @app.post("/admin/analyze")
+    async def usage_admin_analyze(request: Request) -> Response:
+        """その場限りの質問テーマ分析。クライアントの質問・集計値は信用せずDBから読む。"""
+        from urllib.parse import urlsplit
+        from uuid import uuid4
+
+        email = _search_email(request)
+        if email is None or email.strip().lower() not in _admin_emails():
+            raise HTTPException(status_code=404)
+        base = urlsplit(os.environ.get("CONNECT_BASE_URL") or str(request.base_url))
+        expected_origin = f"{base.scheme}://{base.netloc}"
+        if request.headers.get("origin") != expected_origin:
+            raise HTTPException(status_code=403)
+        if request.headers.get("content-type", "").split(";", 1)[0] != "application/json":
+            raise HTTPException(status_code=415)
+        raw = await request.body()
+        if len(raw) > 2048:
+            raise HTTPException(status_code=400)
+        try:
+            payload = json.loads(raw)
+            if not isinstance(payload, dict):
+                raise ValueError("invalid_payload")
+            period = admin_period(payload.get("period", "7d"))
+            filter_user = payload.get("user", "")
+            if not isinstance(filter_user, str) or len(filter_user) > _ADMIN_FILTER_USER_MAX:
+                raise ValueError("invalid_user")
+        except (ValueError, TypeError):
+            raise HTTPException(status_code=400, detail="入力が正しくありません。") from None
+        data = await asyncio.to_thread(_usage_data, period, filter_user.strip())
+        if any(key not in data for key in ("questions", "summary", "feedback")):
+            return JSONResponse(
+                {"error": "必要なデータを取得できません。時間をおいてお試しください。"},
+                status_code=503,
             )
-        return HTMLResponse(render_usage_admin(data))
+        try:
+            result = await asyncio.to_thread(
+                analyze_questions,
+                data["questions"],
+                data["feedback"]["downs"],
+                data["summary"]["current"],
+                request_id=uuid4().hex,
+            )
+        except Exception as exc:
+            logger.warning("usage_admin_analysis_failed", error=type(exc).__name__)
+            return JSONResponse(
+                {"error": "分析できませんでした。質問の記録や接続状況を確認してください。"},
+                status_code=503,
+            )
+        return JSONResponse(
+            {
+                **result,
+                "period": period.label,
+                "start": period.start.isoformat(),
+                "end": period.end.isoformat(),
+                "total_questions": data["summary"]["current"]["questions"],
+            }
+        )
 
     @app.get("/admin/quality", response_class=HTMLResponse)
     def quality_admin(request: Request) -> Response:
@@ -5298,20 +5325,16 @@ def create_app(
             return RedirectResponse("/search/login?next=/admin/memory", status_code=303)
         if not is_admin(email):
             raise HTTPException(status_code=404)
-        headers = {"Cache-Control": "no-store", "X-Robots-Tag": "noindex"}
         target = (request.query_params.get("user") or "").strip().upper()[:32]
         team = os.environ.get("SLACK_TEAM_ID", "").strip()
         if not target:
-            return HTMLResponse(
-                render_memory_admin(rows=None, target="", error=""), headers=headers
-            )
+            return _admin_html(render_memory_admin(rows=None, target="", error=""))
         if not valid_principal(team, target):
-            return HTMLResponse(
+            return _admin_html(
                 render_memory_admin(
                     rows=None, target="", error="Slack のユーザー ID（U…）を入れてください。"
                 ),
                 status_code=400,
-                headers=headers,
             )
         admin = pm_admin_holder.get("admin")
         if admin is None:
@@ -5320,23 +5343,24 @@ def create_app(
             rows = admin.view(admin_email=email, team_id=team, slack_user_id=target)
         except PersonalMemoryAdminError as exc:
             logger.warning("personal_memory_admin_page_failed", code=exc.code)
-            return HTMLResponse(
-                _page(
+            return _admin_html(
+                render_admin_page(
                     "本人メモ",
                     "いま表示できません。閲覧の記録に失敗したため、何も表示していません。",
-                    accent="#e0a040",
+                    active="memory",
                 ),
                 status_code=503,
-                headers=headers,
             )
-        return HTMLResponse(
-            render_memory_admin(rows=rows, target=target, error=""), headers=headers
-        )
+        return _admin_html(render_memory_admin(rows=rows, target=target, error=""))
 
     history_holder: dict[str, Any] = {}
     history_headers = {"Cache-Control": "no-store", "X-Robots-Tag": "noindex"}
 
-    def _history_unavailable(reason: str) -> HTMLResponse:
+    def _history_unavailable(reason: str, *, admin: bool = False) -> HTMLResponse:
+        if admin:
+            return _admin_html(
+                render_admin_page("質問と回答の履歴", reason, active="history"), status_code=503
+            )
         return HTMLResponse(
             _page("質問と回答の履歴", reason, accent="#e0a040"),
             status_code=503,
@@ -5363,34 +5387,37 @@ def create_app(
         target = (request.query_params.get("user") or "").strip().upper()[:32]
         team = os.environ.get("SLACK_TEAM_ID", "").strip()
         if target and not dh.valid_user_id(target):
-            return HTMLResponse(
+            return _admin_html(
                 render_history_page(
+                    admin=True,
                     heading="質問と回答の履歴（管理者）",
                     error="Slack のユーザー ID（U…）が正しくありません。",
                 ),
                 status_code=400,
-                headers=history_headers,
             )
         try:
             reader = dh.DmHistoryReader.from_env()
         except dh.DmHistoryError as exc:
             logger.warning("history_admin_unavailable", code=exc.code)
-            return _history_unavailable("準備中です（Slack の読み取りの設定がまだありません）。")
+            return _history_unavailable(
+                "準備中です（Slack の読み取りの設定がまだありません）。", admin=True
+            )
         if not target:
             try:
                 users = reader.list_users()
             except dh.DmHistoryError as exc:
                 logger.warning("history_admin_list_failed", code=exc.code)
                 return _history_unavailable(
-                    "いま一覧を表示できません（Slack から読めませんでした）。"
+                    "いま一覧を表示できません（Slack から読めませんでした）。", admin=True
                 )
-            return HTMLResponse(
-                render_history_page(heading="質問と回答の履歴（管理者）", users=users),
-                headers=history_headers,
+            return _admin_html(
+                render_history_page(heading="質問と回答の履歴（管理者）", users=users, admin=True),
             )
         if not dh.valid_team_id(team):
             logger.warning("history_admin_unavailable", code="no_team_id")
-            return _history_unavailable("準備中です（ワークスペースの設定がまだありません）。")
+            return _history_unavailable(
+                "準備中です（ワークスペースの設定がまだありません）。", admin=True
+            )
         audit = history_holder.get("audit")
         if audit is None:
             audit = history_holder.setdefault("audit", ha.HistoryAudit())
@@ -5401,21 +5428,23 @@ def create_app(
         except ha.HistoryAuditError as exc:
             logger.warning("history_admin_audit_failed", code=exc.code)
             return _history_unavailable(
-                "いま表示できません。閲覧の記録に失敗したため、何も表示していません。"
+                "いま表示できません。閲覧の記録に失敗したため、何も表示していません。", admin=True
             )
         try:
             read = reader.read(target, days=dh.HISTORY_DAYS_MAX)
         except dh.DmHistoryError as exc:
             logger.warning("history_admin_read_failed", code=exc.code)
-            return _history_unavailable("いま表示できません（Slack から読めませんでした）。")
-        return HTMLResponse(
+            return _history_unavailable(
+                "いま表示できません（Slack から読めませんでした）。", admin=True
+            )
+        return _admin_html(
             render_history_page(
+                admin=True,
                 heading=f"{target} と Aico の会話（直近 {dh.HISTORY_DAYS_MAX} 日）",
                 exchanges=dh.group_exchanges(read.messages),
                 truncated=read.truncated,
                 back_href="/admin/history",
             ),
-            headers=history_headers,
         )
 
     @app.get("/app/history", response_class=HTMLResponse)
@@ -5461,6 +5490,23 @@ def create_app(
     return app
 
 
+def _admin_html(page: str, *, status_code: int = 200) -> HTMLResponse:
+    nonce = secrets.token_urlsafe(24)
+    page = page.replace("<style>", f'<style nonce="{nonce}">')
+    page = page.replace("<script>", f'<script nonce="{nonce}">')
+    return HTMLResponse(
+        page,
+        status_code=status_code,
+        headers={
+            "Cache-Control": "no-store",
+            "X-Robots-Tag": "noindex",
+            "Content-Security-Policy": _CONTENT_SECURITY_POLICY.replace(
+                "'unsafe-inline'", f"'nonce-{nonce}'"
+            ),
+        },
+    )
+
+
 def render_memory_admin(*, rows: list[Any] | None, target: str, error: str) -> str:
     """本人メモの管理者閲覧ページ（入力欄＋表）。値はすべてエスケープする。"""
     form = (
@@ -5484,15 +5530,10 @@ def render_memory_admin(*, rows: list[Any] | None, target: str, error: str) -> s
             )
         else:
             parts.append(f"<p>{html.escape(target)} の本人メモはありません。</p>")
-    return (
-        '<!doctype html><html lang="ja"><head><meta charset="utf-8">'
-        '<meta name="viewport" content="width=device-width, initial-scale=1">'
-        "<title>本人メモ（管理者）</title><style>"
-        "body{background:#0f1420;color:#e8edf7;font-family:-apple-system,'Hiragino Sans',"
-        "'Noto Sans JP',sans-serif;padding:32px}table{border-collapse:collapse;margin-top:12px}"
-        "td,th{border:1px solid #283450;padding:6px 10px;text-align:left}"
-        ".note{color:#93a1bd}.err{color:#f08080}</style></head><body>"
-        "<h1>本人メモ（管理者閲覧）</h1>" + form + "".join(parts) + "</body></html>"
+    return render_admin_page(
+        "本人メモ（管理者）",
+        "<h1>本人メモ（管理者閲覧）</h1>" + form + "".join(parts),
+        active="memory",
     )
 
 
@@ -5556,6 +5597,7 @@ def render_history_page(
     users: list[Any] | None = None,
     error: str = "",
     back_href: str = "",
+    admin: bool = False,
 ) -> str:
     """質問と回答の履歴のページ（管理者・本人で共用）。新しい往復が上。値はすべてエスケープする。"""
     parts: list[str] = []
@@ -5606,6 +5648,12 @@ def render_history_page(
                 f'<div class="msg user">{slack_text_to_html(ex.user_text)}</div>{files}'
                 f"{replies}{more}</section>"
             )
+    if admin:
+        return render_admin_page(
+            "質問と回答の履歴",
+            f"<h1>{html.escape(heading)}</h1>" + "".join(parts),
+            active="history",
+        )
     return (
         '<!doctype html><html lang="ja"><head><meta charset="utf-8">'
         '<meta name="viewport" content="width=device-width, initial-scale=1">'
