@@ -447,3 +447,28 @@ def test_final_attempt_autoskip_works_when_feeder_placed_evidence_images(tmp_pat
     assert out.filled_count == 94 and out.skipped_count == 1
     events = [c.args[0] for c in logger.warning.call_args_list]
     assert "proposal_deck_provenance_autoskip" in events
+
+
+def test_rendered_deck_returns_length_adjustment_list(tmp_path: Path) -> None:
+    import json
+
+    from pptx import Presentation
+
+    payload = json.loads(_full_composer_json())
+    payload["placeholders"].update({"87": "あ" * 21, "90": "い" * 23})
+    bedrock = MagicMock(model_id="jp.anthropic.claude-sonnet-4-6")
+    bedrock.converse.return_value = _resp(json.dumps(payload, ensure_ascii=False))
+    out = ProposalDeckSkill(bedrock=bedrock).run(
+        _input(_dummy_template(tmp_path / "t.pptx"), tmp_path / "out"), SkillContext()
+    )
+    assert out.filled_count == 95 and out.skipped_count == 0
+    assert len(out.length_warnings) == 2
+    assert "{87}" in out.length_warnings[0] and "{90}" in out.length_warnings[1]
+    texts = "\n".join(
+        shape.text
+        for slide in Presentation(out.pptx_path).slides
+        for shape in slide.shapes
+        if shape.has_text_frame
+    )
+    assert texts.count("要確認（文字数調整）") == 2
+    assert "あ" * 21 not in texts and "い" * 23 not in texts

@@ -113,7 +113,10 @@ class ProposalDeckInput(BaseModel):
         description="出力ディレクトリ（既定: 環境変数 TEAMAGENT_DECK_OUT_DIR or /tmp）",
     )
     max_repair: int = Field(
-        default=4, ge=0, le=8, description="ComposerOutput 検証失敗時の自己修復回数"
+        default=4,
+        ge=0,
+        le=8,
+        description="自己修復回数（文字数は最大2回・追加0.10 USD/デッキ）",
     )
     emit_pdf: bool = Field(
         default=False,
@@ -264,6 +267,9 @@ class ProposalDeckOutput(BaseModel):
     skipped_count: int = Field(ge=0, description="要確認（データ未検出）の placeholder 数")
     coverage_ratio: float = Field(ge=0.0, le=1.0, description="埋め率（filled / 95）")
     skipped_ids: list[int] = Field(default_factory=list, description="要確認の placeholder ID")
+    length_warnings: list[str] = Field(
+        default_factory=list, description="文字数の局所修復・要確認置換を行った枠の一覧"
+    )
     review_slides: list[int] | None = Field(
         default=None, description="『要確認』が残る枚目（表示順・1始まり）。None は未検査"
     )
