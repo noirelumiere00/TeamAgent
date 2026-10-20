@@ -2,9 +2,9 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {createCallerIdentityPlugin} from '../dist/index.js';
 
-function setup(content = '施策は今どうなっている？') {
+function setup(content = '施策は今どうなっている？', threadId = undefined) {
   const hooks = new Map();
-  const ctx = {runId: 'short-run', sessionKey: 'agent:teamagent:slack:direct:u12345678',
+  const ctx = {threadId, runId: 'short-run', sessionKey: 'agent:teamagent:slack:direct:u12345678',
     senderId: 'U12345678', channelId: 'U12345678'};
   createCallerIdentityPlugin({env: {
     TEAMAGENT_CALLER_CLAIM_SECRET: 'x'.repeat(48), SLACK_TEAM_ID: 'T07MU5P2PBR',
@@ -152,4 +152,38 @@ test('only extra final text chunks are suppressed; requested media is retained',
     assert.notEqual(out?.cancel, true);
     assert.deepEqual(out?.payload ?? payload, payload);
   }
+});
+
+
+test('case list stays five backend lines without OC recommendations', () => {
+  const p = setup('ベビー用品の事例出して');
+  const answer = Array.from({length: 5}, (_, i) => `案件${i}（2026-10-20）— ベビー用品の施策 [資料](https://example.test/case${i})`).join('\n');
+  p.remember({answer_format: 'list', answer, found: true});
+  const out = p.send('事例は1件です。\n\n💡 推奨アクション\n営業に紹介します。\n\n共感が効くパターンです。');
+  assert.equal(out, answer);
+});
+
+test('fact reply removes advice added by OC', () => {
+  const p = setup('撮影日はいつ？');
+  p.remember({answer: '撮影日は10月20日です。', found: true});
+  assert.equal(p.send('撮影日は10月20日です。\n\n💡 推奨アクション\n確認しましょう。\n\n共感が効くパターンです。'), '撮影日は10月20日です。');
+});
+
+for (const query of ['JAL の過去提案で何が効いた？', 'JAL の過去提案で効いたのは？']) {
+  test('what worked keeps requested insight: ' + query, () => {
+    const p = setup(query);
+    const answer = '提案は採用されています。\n\n💡 推奨アクション\n同じ条件で試す。';
+    p.remember({answer, found: true});
+    assert.equal(p.send(answer), answer);
+  });
+}
+
+
+test('receipt thread from trusted Slack context is signed for omiyage', () => {
+  const p = setup('JTBとHISのお土産資料を作って', '1792461784.695389');
+  const toolName = 'teamagent__omiyage_report_submit', toolCallId = 'receipt-thread-call';
+  const result = p.hooks.get('before_tool_call')({toolName, toolCallId, runId: p.ctx.runId, params: {}}, {...p.ctx, toolName, toolCallId});
+  assert.equal(result?.params?._user_context?.thread_ts, '1792461784.695389');
+  const claim = JSON.parse(Buffer.from(result.params._user_context.caller_claim.split('.')[0], 'base64url'));
+  assert.equal(claim.thread, '1792461784.695389');
 });

@@ -35,12 +35,30 @@ function setup(query = '比較して何が効いた？', {postWait, conversation
     await hooks.get('agent_end')({runId: ctx.runId, messages, success: true}, ctx);
     await Promise.all(tasks);
   };
-  return {hooks, ctx, posts, tasks, finalize, send, end, postStarted};
+  const call = (tool, toolCallId) => hooks.get('before_tool_call')({runId: ctx.runId,
+    toolName: `teamagent__${tool}`, toolCallId, params: {}}, {...ctx,
+    sessionKey: 'agent:teamagent:slack:direct:u12345678', senderId: 'U12345678',
+    channelId: 'U12345678', toolName: `teamagent__${tool}`, toolCallId});
+  return {hooks, ctx, posts, tasks, finalize, send, end, postStarted, call};
 }
+
+test('an empty search retry preserves the original answer after scrubbing internal tool names', async () => {
+  const p = setup();
+  const source = 'https://example.test/search?tool=search';
+  const original = `施策Aが勝ちです。teamagent__search search\n${source}`;
+  assert.equal(p.finalize(original)?.action, 'revise');
+  await p.end([{role: 'assistant', content: []}]);
+  assert.equal(p.posts.length, 1);
+  assert.match(p.posts[0].text, /施策Aが勝ちです/u);
+  assert.ok(p.posts[0].text.includes(source), 'source URLs must remain intact');
+  assert.doesNotMatch(p.posts[0].text.replace(source, ''), /search|teamagent__/iu);
+  const normal = 'Google search で調べました。';
+  assert.equal(setup().send(normal)?.payload?.text ?? normal, normal);
+});
 
 for (const content of [[], [{type: 'text', text: '   '}], [{type: 'text', text: 'NO_REPLY'}],
   [{type: 'thinking', thinking: 'done'}]]) {
-  test(`iter3 empty revised pass delivers exactly one fallback: ${JSON.stringify(content)}`, async () => {
+  test(`iter3 empty revised pass delivers the original reply exactly once: ${JSON.stringify(content)}`, async () => {
     const p = setup();
     const draft = '平均171,325再生で施策Aが勝ちです。';
     assert.equal(p.finalize(draft)?.action, 'revise');
@@ -50,34 +68,33 @@ for (const content of [[], [{type: 'text', text: '   '}], [{type: 'text', text: 
     await p.end(messages);
     await p.end(messages);
     assert.equal(p.posts.length, 1);
-    assert.match(p.posts[0].text, /search.*確認/u);
-    assert.ok(!p.posts[0].text.includes('171,325'));
+    assert.equal(p.posts[0].text, draft);
     assert.equal(p.send('遅れて届いた本文')?.cancel, true);
   });
 }
 
 test('iter3 retry explicitly overrides no-rerun instruction and requires a visible answer', () => {
   const p = setup();
-  const out = p.finalize('施策Aです。');
+  const out = p.finalize('平均171,325再生で施策Aです。');
   assert.match(out.retry.instruction, /明示的にツール実行を要求します/u);
   assert.match(out.retry.instruction, /teamagent__search/u);
   assert.match(out.retry.instruction, /(?:NO_REPLY|空).*禁止/u);
   assert.equal(out.retry.maxAttempts, 1);
 });
 
-test('iter3 a second pass with no tools cannot publish the unverified comparison', () => {
+test('iter3 a second pass with no tools preserves the original comparison', () => {
   const p = setup();
-  p.finalize('施策Aです。');
+  const original = '平均171,325再生で施策Aです。';
+  p.finalize(original);
   assert.equal(p.finalize('181,200再生で勝ちました。'), undefined);
   const out = p.send('181,200再生で勝ちました。');
-  assert.match(out?.payload?.text ?? '', /search.*確認/u);
-  assert.ok(!out.payload.text.includes('181,200'));
+  assert.equal(out?.payload?.text, original);
   assert.equal(p.send('さらに168,900再生です。')?.cancel, true);
 });
 
 test('iter3 a successful revised search keeps its visible answer without fallback', async () => {
   const p = setup();
-  p.finalize('施策Aです。');
+  p.finalize('平均171,325再生で施策Aです。');
   p.hooks.get('after_tool_call')({toolName: 'teamagent__search', result: {text: '平均205,000再生'}}, p.ctx);
   const answer = '資料では平均205,000再生です。';
   // A completed tool call can skip before_agent_finalize in the upstream runtime.
@@ -88,7 +105,7 @@ test('iter3 a successful revised search keeps its visible answer without fallbac
 
 test('iter3 retained rejected draft is not treated as the revised final answer', async () => {
   const p = setup();
-  const draft = '施策Aが勝ちです。';
+  const draft = '平均171,325再生で施策Aが勝ちです。';
   p.finalize(draft);
   await p.end([{role: 'assistant', content: [{type: 'text', text: draft}]}]);
   assert.equal(p.posts.length, 1);
@@ -107,7 +124,7 @@ test('iter3 search can validate the unchanged draft without another finalize', a
 
 test('iter3 successful search without a final answer still gets empty-pass rescue', async () => {
   const p = setup();
-  const text = '施策Aです。';
+  const text = '平均171,325再生で施策Aです。';
   p.finalize(text);
   p.hooks.get('after_tool_call')({toolName: 'teamagent__search', result: {text}}, p.ctx);
   await p.end([{role: 'assistant', content: [{type: 'text', text}]},
@@ -119,7 +136,7 @@ test('iter3 progress payload does not replace or consume the final reply', async
   for (const options of [{kind: 'block'}, {payload: {isCommentary: true}},
     {payload: {isReasoning: true}}]) {
     const p = setup();
-    p.finalize('施策Aです。');
+    p.finalize('平均171,325再生で施策Aです。');
     const text = '確認しています。';
     const event = {runId: p.ctx.runId, ...options, payload: {text, ...options.payload}};
     const progress = p.hooks.get('reply_payload_sending')(event, p.ctx);
@@ -136,7 +153,7 @@ test('iter3 in-flight direct rescue and a late payload deliver one reply togethe
   let release;
   const postWait = new Promise(resolve => {release = resolve;});
   const p = setup('比較して何が効いた？', {postWait});
-  p.finalize('施策Aが勝ちです。');
+  p.finalize('平均171,325再生で施策Aが勝ちです。');
   const ended = p.end([]);
   await p.postStarted;
   const outgoing = p.send('遅れた未検証の比較です。');
@@ -148,10 +165,11 @@ test('iter3 in-flight direct rescue and a late payload deliver one reply togethe
 
 test('iter3 payload arriving before direct posting takes over without a duplicate post', async () => {
   const p = setup();
-  p.finalize('施策Aが勝ちです。');
+  const original = '平均171,325再生で施策Aが勝ちです。';
+  p.finalize(original);
   p.hooks.get('agent_end')({runId: p.ctx.runId, messages: []}, p.ctx);
   const out = p.send('未確認の比較です。');
-  assert.match(out?.payload?.text ?? '', /search.*確認/u);
+  assert.equal(out?.payload?.text, original);
   await Promise.all(p.tasks);
   assert.equal(p.posts.length, 0);
 });
@@ -159,7 +177,7 @@ test('iter3 payload arriving before direct posting takes over without a duplicat
 test('iter3 channel rescue replies in the original request thread', async () => {
   for (const threadId of [undefined, '1792041500.654321']) {
     const p = setup('比較して何が効いた？', {conversation: 'C12345678', threadId});
-    p.finalize('施策Aです。');
+    p.finalize('平均171,325再生で施策Aです。');
     await p.end([]);
     assert.equal(p.posts.length, 1);
     assert.equal(p.posts[0].channel, 'C12345678');
@@ -169,8 +187,9 @@ test('iter3 channel rescue replies in the original request thread', async () => 
 
 test('iter3 empty payload is rescued once even before agent_end', async () => {
   const p = setup();
-  p.finalize('施策Aです。');
-  assert.match(p.send('')?.payload?.text ?? '', /search.*確認/u);
+  const original = '平均171,325再生で施策Aです。';
+  p.finalize(original);
+  assert.equal(p.send('')?.payload?.text, original);
   await p.end([]);
   assert.equal(p.posts.length, 0);
 });
@@ -197,7 +216,7 @@ test('iter3 unrelated empty runs and mismatched run events do not post', async (
   await p.end([]);
   assert.equal(p.posts.length, 0);
   const other = setup();
-  other.finalize('施策Aです。');
+  other.finalize('平均171,325再生で施策Aです。');
   await other.hooks.get('agent_end')({runId: 'other-run', messages: []}, other.ctx);
   await Promise.all(other.tasks);
   assert.equal(other.posts.length, 0);
@@ -223,5 +242,19 @@ for (const tail of ['詳しく見ますか？', '比較表を作りましょう�
   test(`iter3 removes unsolicited ending: ${tail}`, () => {
     const p = setup('こんにちは');
     assert.equal(p.send(`結果をまとめました。${tail}`)?.payload?.text, '結果をまとめました。');
+  });
+}
+
+for (const unrelatedTool of [false, true]) {
+  test(`comparison preserves context reply after ${unrelatedTool ? 'one unrelated tool' : 'no tool'}`, async () => {
+    const p = setup('比較して何が効いた？');
+    if (unrelatedTool) assert.ok(p.call('chitchat', 'empty-retry-unrelated')?.params);
+    const original = 'この会話で挙げた構成なら、冒頭で用途を伝えた施策は商品の使い方が分かりやすくなっています。';
+    assert.equal(p.finalize(original), undefined);
+    const sent = p.send(original);
+    assert.equal(sent?.cancel, undefined);
+    assert.equal(sent?.payload?.text ?? original, original);
+    await p.end([{role: 'assistant', content: [{type: 'text', text: original}]}]);
+    assert.equal(p.posts.length, 0);
   });
 }

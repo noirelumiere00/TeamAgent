@@ -26,7 +26,8 @@ async function setup(t, {historyError, sentAuthor = BOT, metadataWarning = false
     DM_CATCHUP_ENABLED: '1', DM_CATCHUP_ALLOWED_USERS: USER, ...envOverrides}, now: () => NOW,
   waitForSlackReady,
   onBackgroundTask: task => tasks.push(task), fetchFn: async (url, options) => {
-    const method = url.split('/').at(-1), body = JSON.parse(options.body);
+    const target = new URL(url), method = target.pathname.split('/').at(-1);
+    const body = options.body ? JSON.parse(options.body) : Object.fromEntries(target.searchParams);
     requests.push({method, body});
     if (method === 'auth.test') return response({ok: true, team_id: TEAM, user_id: BOT});
     if (method === 'conversations.list') return response({ok: true, channels: channels ?? [{id: CHANNEL, user: USER, is_im: true}]});

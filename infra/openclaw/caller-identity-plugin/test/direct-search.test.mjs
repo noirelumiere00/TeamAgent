@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import {createCallerIdentityPlugin} from '../dist/index.js';
 
 const answer = '条件に合う事例は見つかりませんでした。';
+const originalDraft = '施策Aは171,325再生で最も伸びました。';
 test('direct compact source links are readable in Slack without a Markdown adapter', async () => {
   const answer = '施策は実施済みです。\n出典: [施策実績](https://example.test/used)';
   const p = setup({searchResult: {answer_format: 'compact', answer, found: true,
@@ -55,7 +56,7 @@ function setup({env = {}, query = '比較して何が効いた？', email = 'kom
   {...ctx, channelId: 'slack', sessionKey: 'agent:teamagent:slack:direct:u12345678',
     conversationId: conversation, senderId: 'U12345678', messageId: '1792041600.123456'});
   const finalize = (messages = []) => hooks.get('before_agent_finalize')({runId: ctx.runId,
-    lastAssistantMessage: '無関係な事例です。どの方向で進めますか？', messages}, ctx);
+    lastAssistantMessage: originalDraft, messages}, ctx);
   const remember = (data, event = {}, eventCtx = ctx) => hooks.get('after_tool_call')({
     toolName: 'teamagent__search', result: wrap(data), ...event}, eventCtx);
   const send = (text, eventCtx = ctx, eventRunId = eventCtx.runId) =>
@@ -116,11 +117,10 @@ test('iter5 zero-tool posts a successful summarized search answer without a mode
   assert.match(p.posts[0].text, /https:\/\/example.test\/doc/u);
   assert.equal((await p.send('モデルが追加した説明'))?.cancel, true);
 });
-test('iter5 only search failure uses rescue text; delivery failure permits model answer', async () => {
+test('iter5 search failure preserves the original reply; delivery failure permits model answer', async () => {
   const failed = setup({searchFails: true}); assert.equal(await failed.finalize(), undefined);
   const out = await failed.send('根拠のない数字171,325です。');
-  assert.match(out?.payload?.text ?? '', /確認を完了できませんでした/u);
-  assert.ok(!out.payload.text.includes('171,325'));
+  assert.equal(out?.payload?.text, originalDraft);
   assert.equal((await failed.send('二重'))?.cancel, true);
   const postFailed = setup({postFails: true, searchResult: {answer, direct_delivery: {answer_kind: 'not_found', answer}}});
   await postFailed.finalize(); assert.notEqual((await postFailed.send(answer))?.cancel, true);
