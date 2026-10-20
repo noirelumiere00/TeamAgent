@@ -320,6 +320,39 @@ def test_voice_search_cost_limit_message() -> None:
     assert "使い切りました" in out.slack_summary
 
 
+@pytest.mark.parametrize("needs", [False, True])
+def test_all_x_queries_failed_is_not_zero_results(needs: bool) -> None:
+    class Failed(_FakeApify):
+        def search_posts(self, query: str, **kw: Any) -> tuple[list[XPost], float]:
+            raise ApifyError("APIFY_TIMEOUT")
+
+    if needs:
+        output = XNeedsMiningSkill(apify=Failed(), publisher=_publisher).run(
+            XNeedsMiningInput(theme="合成テーマ"), _ctx()
+        )
+    else:
+        output = XVoiceSearchSkill(apify=Failed(), publisher=_publisher).run(
+            XVoiceSearchInput(product_name="合成商品", queries=["query-a", "query-b"]), _ctx()
+        )
+    assert output.status == "failed"
+    assert "失敗" in output.slack_summary
+    assert "0件" not in output.slack_summary
+
+
+def test_partly_failed_x_queries_do_not_claim_complete_zero_results() -> None:
+    class Partial(_FakeApify):
+        def search_posts(self, query: str, **kw: Any) -> tuple[list[XPost], float]:
+            if query == "failed":
+                raise ApifyError("APIFY_TIMEOUT")
+            return [], 0.001
+
+    output = XVoiceSearchSkill(apify=Partial(), publisher=_publisher).run(
+        XVoiceSearchInput(product_name="合成商品", queries=["failed", "empty"]), _ctx()
+    )
+    assert output.status == "partial"
+    assert "成功した検索" in output.slack_summary
+
+
 def test_voice_search_rollout_denied(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("X_RESEARCH_ALLOWED_EMAILS", "someone-else@vectorinc.co.jp")
     skill = XVoiceSearchSkill(apify=_FakeApify([]), publisher=_publisher)  # type: ignore[arg-type]

@@ -851,6 +851,8 @@ resource "aws_ecs_task_definition" "mcp" {
       # mcp スキル/オーケストレーターの Bedrock モデル指定（コスト方針 2026-06-29 = Haiku 既定）。
       # var.bedrock_model_id（Lambda 用・tfvars=Sonnet）とは分離した mcp 専用変数を使う。
       { name = "BEDROCK_MODEL_ID", value = var.mcp_model_id },
+      { name = "USE_DECK_VOICE_RESEARCH", value = var.enable_deck_voice_research ? "1" : "0" },
+      { name = "DECK_VOICE_ALLOWED_EMAILS", value = var.deck_voice_allowed_emails },
       # pgvector HNSW の探索幅（検索品質/レイテンシのチューニング値・live=100）。
       { name = "SEARCH_HNSW_EF_SEARCH", value = "100" },
       # ナレッジ回答の末尾に「資料リンク」を付与（@AiLa=openclaw が markdown を装飾リンクへ
