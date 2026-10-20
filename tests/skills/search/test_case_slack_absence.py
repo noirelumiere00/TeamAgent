@@ -76,7 +76,10 @@ def test_absent_delivery_cases_never_publish_unrelated_slack_candidates(
     assert len(out.slack_hits) == int(related)
     if related:
         assert "https://example.test/slack/delivery" in out.answer
-        summary.assert_called_once()
+        if fanout_enabled:
+            summary.assert_not_called()
+        else:
+            summary.assert_called_once()
     else:
         assert "事例は見つかりませんでした" in out.answer
         summary.assert_not_called()

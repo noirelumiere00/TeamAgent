@@ -164,7 +164,7 @@ def is_dm_channel(channel_id: object) -> bool:
     return isinstance(channel_id, str) and _DM_CHANNEL_RE.fullmatch(channel_id) is not None
 
 
-def destination_from_claim(verified_caller: Any) -> Destination | None:
+def destination_from_claim(verified_caller: Any, *, threaded: bool = False) -> Destination | None:
     """署名検証済み claim から宛先を作る。
 
     チャンネル直下へは投げない（スレッドが決まらなければ None）。
@@ -174,6 +174,10 @@ def destination_from_claim(verified_caller: Any) -> Destination | None:
         return None
     thread_ts = getattr(verified_caller, "thread_ts", None)
     thread_ts = thread_ts if isinstance(thread_ts, str) and thread_ts else None
+    if threaded and thread_ts is None:
+        message = getattr(verified_caller, "message_id", None)
+        if isinstance(message, str) and _SLACK_TS_RE.fullmatch(message):
+            thread_ts = message
     if is_dm_channel(channel) or thread_ts:
         return Destination(channel_id=channel, thread_ts=thread_ts)
     # チャンネル直下の依頼: 依頼メッセージ自体を親にしてスレッドへ返す。

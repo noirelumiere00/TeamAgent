@@ -40,7 +40,11 @@ Sources = dict[str, tuple[str, str, str]]
 
 
 def explicit_list(query: str) -> bool:
-    return bool(_EXPLICIT_LIST.search(query)) and not is_comparison_query(query)
+    from teamagent.skills.search.answer_mode import is_case_list
+
+    return (bool(_EXPLICIT_LIST.search(query)) or is_case_list(query)) and not is_comparison_query(
+        query
+    )
 
 
 def wants_metrics(query: str) -> bool:

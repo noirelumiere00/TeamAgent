@@ -3110,11 +3110,12 @@ export function createCallerIdentityPlugin({
       }
     }
     collect(event.result);
-    if (searchDirectEnabled && ["search", "teamagent__search"].includes(event?.toolName)) {
+    if (searchTool && (searchDirectEnabled || searchResultData(event.result)?.answer_format === "list")) {
       const data = searchResultData(event.result);
       // Only the trusted MCP envelope defines the final format; retrieved contents cannot opt in.
-      entry.compactModeSeen ||= data?.answer_format === "compact";
-      entry.compactAnswer = !entry.otherReplyRequired && data?.answer_format === "compact" &&
+      entry.compactModeSeen ||= ["compact", "list"].includes(data?.answer_format);
+      entry.listMode = data?.answer_format === "list";
+      entry.compactAnswer = !entry.otherReplyRequired && ["compact", "list"].includes(data?.answer_format) &&
         typeof data.answer === "string" && data.answer.trim() && data.answer.length <= 2500
         ? data.answer : null;
     }
@@ -3632,7 +3633,7 @@ export function createCallerIdentityPlugin({
     );
     const threadTs =
       consistentValue(
-        [event?.threadId, event?.metadata?.threadId],
+        [ctx?.threadId, event?.threadId, event?.metadata?.threadId],
         value => nonBlank(String(value), 128),
       ) ?? null;
     const suppliedRunIds = [ctx.runId, event?.runId].filter(
@@ -3727,6 +3728,7 @@ export function createCallerIdentityPlugin({
       teamId,
       channelId,
       threadTs,
+      searchInsightRequested: /傾向|パターン|共通点|勝ち筋|示唆|戦略|打ち手|攻め方|刺さ|改善|アイデア|ヒント|学び|教訓|コツ|提案して|案を|考えて|なぜ|何が効いた|効いたのは|どう(?:攻め|動|提案|進め|すれば|したら)/u.test(event?.content ?? ""),
       messageId,
       actionFingerprint: null,
       actionValue: null,
@@ -6251,7 +6253,7 @@ export function createCallerIdentityPlugin({
       const normalized = finalizeOutgoingText({payload: {text: data.direct_delivery.answer}}, logger, runId)?.payload?.text ?? data.direct_delivery.answer;
       const evidence = evidenceByRun.get(runId);
       const grounded = groundEvidenceReply(restoreEvidenceUrls(normalized, evidence?.urls), evidence);
-      const sourced = data.direct_delivery.answer_format === "compact"
+      const sourced = ["compact", "list"].includes(data.direct_delivery.answer_format)
         ? grounded : appendMissingSearchSources(grounded, evidence?.searchUrls);
       const linked = sourced.replace(/\[([^\]\n]+)\]\(<?(https?:\/\/[^\s<>)]+)>?\)/gu, "$1 $2");
       const text = scrubOutboundReplyText(linked, connectUrlsByRun.get(runId)?.urls).text
@@ -7385,10 +7387,22 @@ export function createCallerIdentityPlugin({
             return finishRevisedReply(event, ctx, {...result, cancel: true});
           }
           const compactText = finalTextOnly && evidence?.compactAnswer
-            ? (finalizeOutgoingText({payload: {...payload, text: evidence.compactAnswer}}, api.logger, runId)?.payload?.text ?? evidence.compactAnswer)
+            ? (evidence.listMode ? evidence.compactAnswer : finalizeOutgoingText({payload: {...payload, text: evidence.compactAnswer}}, api.logger, runId)?.payload?.text ?? evidence.compactAnswer)
             : null;
           if (compactText) evidence.compactPayload = event.payload;
-          const restored = restoreEvidenceUrls(compactText ?? payload.text, urls);
+          const noAdvice = finalTextOnly && evidence?.searchCompleted && !evidence.otherReplyRequired && !evidence.needsInput && !evidence.listMode &&
+            !connectIngressByRun.get(runId)?.searchInsightRequested;
+          const canonical = compactText ?? payload.text;
+          let droppingAdvice = false;
+          const cleanAnswer = noAdvice ? canonical.split(/\n\s*\n/u).filter(paragraph => {
+            if (/推奨アクション|次の一手|おすすめ(?:の施策|アクション)|効くパターン(?:です|と)|有効なパターン/u.test(paragraph)) {
+              droppingAdvice = true; return false;
+            }
+            if (droppingAdvice && !/^\s*[#*📎 ]*(?:出典|根拠|資料リンク|事実|結果)/u.test(paragraph) && !paragraph.includes("[S:")) return false;
+            droppingAdvice = false; return true;
+          }).join("\n\n").trim() : canonical;
+          if (cleanAnswer !== canonical) emitPluginLog(api.logger, "info", "search advice removed layer=oc");
+          const restored = restoreEvidenceUrls(cleanAnswer, urls);
           if (restored !== payload.text) emitPluginLog(api.logger, "info", "outbound URL restored diagnostic=CONNECT-Z04");
           const trimmed = authoritative ? groundEvidenceReply(restored, evidence) : restored;
           if (payload.text.trim() && !trimmed.trim()) {

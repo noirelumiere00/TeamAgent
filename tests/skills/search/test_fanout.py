@@ -295,7 +295,7 @@ def test_case_ng_and_deal_marks_and_safe_titles() -> None:
     skill, _ = make(hits)
     out = run(skill, query="施策事例")
     assert "社外展開NG（社内のみ）" in out.answer
-    assert "🤝" in out.answer and "実績ではありません" in out.answer
+    assert "実績ではありません" in out.answer
     assert "<!channel>" not in out.answer
 
 
@@ -737,8 +737,12 @@ def test_iter4_food_campaign_survives_missing_campaign_industry_without_false_ab
     assert out.found
     assert "見つかりません" not in out.answer
     assert "アパレル" not in out.answer
-    assert "https://example.test/food/1" in out.answer
-    assert [h.chunk_id for h in summary.call_args.args[1]] == [20]
+    if fanout_enabled:
+        assert "https://docs.google.com/spreadsheets/d/food/edit#gid=1" in out.answer
+        summary.assert_not_called()
+    else:
+        assert "https://example.test/food/1" in out.answer
+        assert [h.chunk_id for h in summary.call_args.args[1]] == [20]
 
 
 def test_iter4_fanout_answer_links_include_summary_slack_sources(
