@@ -377,6 +377,7 @@ async def test_dispatch_records_search_source_ids_and_answer_chars_in_metadata(
     assert event.metadata == {
         "source_ids": [{"external_id": "1FileIdAbc", "source_type": "gdrive"}],
         "answer_chars": len("回答12345"),
+        "found": True,
     }
     assert "社外秘" not in json.dumps(event.metadata, ensure_ascii=False)
     assert "https" not in json.dumps(event.metadata, ensure_ascii=False)

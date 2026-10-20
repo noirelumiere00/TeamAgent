@@ -17,6 +17,7 @@ import re
 import tempfile
 import unicodedata
 import uuid
+from datetime import UTC, datetime
 from typing import Any, ClassVar
 
 import structlog
@@ -27,6 +28,11 @@ from teamagent.adapters.cost_guard import CostGuard, CostLimitExceededError
 from teamagent.prompts.loader import load_prompt
 from teamagent.skills._shared.rollout import ROLLOUT_DENIED_MESSAGE, rollout_allowed
 from teamagent.skills._shared.text_safety import sanitize_llm_text
+from teamagent.skills._shared.voice_evidence import (
+    VoiceEvidence,
+    VoiceStatus,
+    aggregate_assignments,
+)
 from teamagent.skills.base import BaseSkill, SkillContext, register
 from teamagent.skills.tiktok_comment_mining.report import render_comment_report
 from teamagent.skills.tiktok_comment_mining.schema import (
@@ -177,7 +183,7 @@ class TikTokCommentMiningSkill(BaseSkill[CommentMiningInput, CommentMiningOutput
             raise
         except ApifyError as e:
             warnings.append(f"コメント取得に失敗: {str(e)[:80]}")
-            return [], "none", 0.0
+            return [], "none", round(max_comments * _APIFY_UNIT_USD, 6)
 
     # ---- 分析（Bedrock） ---------------------------------------------------------
 
@@ -190,19 +196,25 @@ class TikTokCommentMiningSkill(BaseSkill[CommentMiningInput, CommentMiningOutput
         request_id: str,
         warnings: list[str],
     ) -> tuple[VideoCommentInsight, float]:
-        insight = VideoCommentInsight(video_url=video_url, total_comments=len(comments))
+        insight = VideoCommentInsight(
+            video_url=video_url, total_comments=len(comments), unclassified_comments=len(comments)
+        )
         if not comments:
             return insight, 0.0
-        indexed_comments = [(f"c{i}", c) for i, c in enumerate(comments) if str(c["text"]).strip()]
-        comments_by_id = {cid: c for cid, c in indexed_comments}
-        comments_text = "\n".join(
-            f"[{cid}] {c['text']} (いいね: {c['likes']})" for cid, c in indexed_comments
-        )
+        indexed_comments: list[tuple[str, dict[str, Any]]] = []
+        comments_text = ""
+        for i, comment in enumerate(comments):
+            line = json.dumps({"id": f"c{i}", "text": comment["text"]}, ensure_ascii=False)
+            if len((comments_text + line).encode()) > 24000:
+                continue
+            indexed_comments.append((f"c{i}", comment))
+            comments_text += line + "\n"
+        comments_by_id = dict(indexed_comments)
         try:
             prompt = load_prompt("tiktok_comment_mining", "v1", "classify").format(
                 video_url=video_url,
                 client_context=client_name or "指定なし",
-                comments_text=comments_text[:24000],
+                comments_text=comments_text,
             )
             resp = self._get_bedrock().converse(
                 messages=[{"role": "user", "content": [{"text": prompt}]}],
@@ -213,33 +225,82 @@ class TikTokCommentMiningSkill(BaseSkill[CommentMiningInput, CommentMiningOutput
             if parsed is None:
                 warnings.append("コメント分類の解析に失敗しました（件数のみ）")
                 return insight, float(resp.usage.cost_usd)
-            buckets: list[CommentBucket] = []
-            for b in parsed.get("buckets") or []:
-                if not isinstance(b, dict):
-                    continue
-                # LLMには原文を書き直させずIDだけ選ばせる。存在するIDをコード側で
-                # 原コメントへ戻すため、創作・改変された「代表コメント」は混入できない。
-                example_ids = _str_list(b.get("example_ids"), limit=3)
-                selected = [comments_by_id[cid] for cid in example_ids if cid in comments_by_id]
-                selected.sort(key=lambda c: int(c.get("likes", 0) or 0), reverse=True)
+            categories = (
+                "推薦",
+                "売切れ嘆き",
+                "口コミ検証",
+                "ツッコミ・ネタ",
+                "質問",
+                "願望・欲しい",
+                "批判",
+                "その他",
+            )
+            evidence = [
+                VoiceEvidence(
+                    id=cid,
+                    platform="tiktok",
+                    url=video_url,
+                    text=str(c["text"]),
+                    fetched_at=datetime.now(UTC).isoformat(),
+                    source="comment_mining",
+                )
+                for cid, c in indexed_comments
+            ]
+            raw_groups = parsed.get("buckets") or []
+            groups = [
+                {**g, "ids": g.get("ids", g.get("example_ids", []))}
+                for g in raw_groups
+                if isinstance(g, dict)
+            ]
+            assignments, classified = aggregate_assignments(evidence, groups, categories=categories)
+            buckets = []
+            for category, ids in assignments.items():
+                selected = sorted(
+                    (comments_by_id[cid] for cid in ids),
+                    key=lambda c: int(c.get("likes", 0) or 0),
+                    reverse=True,
+                )
                 buckets.append(
                     CommentBucket(
-                        category=str(b.get("category") or "その他"),
-                        count=max(0, int(b.get("count", 0) or 0)),
-                        examples=[str(c["text"]) for c in selected],
+                        category=category,
+                        count=len(ids),
+                        examples=[str(c["text"]) for c in selected[:3]],
                     )
                 )
+            vocabulary = [
+                word
+                for word in _str_list(parsed.get("consumer_vocabulary"))
+                if any(word in str(c["text"]) for _, c in indexed_comments)
+            ]
+            axes = {
+                key: [
+                    str(comments_by_id[cid]["text"])
+                    for cid in _str_list(parsed.get(key), limit=3)
+                    if cid in comments_by_id
+                ]
+                for key in (
+                    "common_question_ids",
+                    "pain_point_ids",
+                    "desire_ids",
+                    "purchase_signal_ids",
+                )
+            }
+            sentiment = parsed.get("overall_sentiment")
             insight = VideoCommentInsight(
+                common_questions=axes["common_question_ids"],
+                pain_points=axes["pain_point_ids"],
+                desires=axes["desire_ids"],
+                purchase_signals=axes["purchase_signal_ids"],
+                overall_sentiment=(
+                    sentiment if sentiment in ("positive", "negative", "mixed", "neutral") else ""
+                ),
                 video_url=video_url,
                 total_comments=len(comments),
                 buckets=buckets,
-                consumer_vocabulary=_str_list(parsed.get("consumer_vocabulary")),
-                common_questions=_str_list(parsed.get("common_questions")),
-                pain_points=_str_list(parsed.get("pain_points")),
-                desires=_str_list(parsed.get("desires")),
-                purchase_signals=_str_list(parsed.get("purchase_signals")),
-                overall_sentiment=str(parsed.get("overall_sentiment") or ""),
-                key_themes=_str_list(parsed.get("key_themes"), limit=5),
+                classified_comments=classified,
+                unclassified_comments=len(comments) - classified,
+                consumer_vocabulary=vocabulary,
+                key_themes=list(assignments),
             )
             return insight, float(resp.usage.cost_usd)
         except Exception as e:
@@ -276,8 +337,8 @@ class TikTokCommentMiningSkill(BaseSkill[CommentMiningInput, CommentMiningOutput
                     warnings=[f"URL検証に失敗: {url[:60]}"],
                 )
 
-        try:
-            for url in valid_urls:
+        for url_index, url in enumerate(valid_urls):
+            try:
                 comments, source, cost = self._fetch_comments(
                     url,
                     input.max_comments_per_video,
@@ -297,20 +358,46 @@ class TikTokCommentMiningSkill(BaseSkill[CommentMiningInput, CommentMiningOutput
                     )
                     total_cost += llm_cost
                 else:
-                    insight = VideoCommentInsight(video_url=url, total_comments=len(comments))
+                    insight = VideoCommentInsight(
+                        video_url=url,
+                        total_comments=len(comments),
+                        unclassified_comments=len(comments),
+                    )
                 insight.source = source
+                insight.status = (
+                    "failed" if source == "none" else ("ok_nonempty" if comments else "ok_empty")
+                )
                 insights.append(insight)
-        except CostLimitExceededError as e:
-            return CommentMiningOutput(slack_summary=str(e), warnings=[str(e)])
+            except CostLimitExceededError as e:
+                warnings.append(str(e))
+                insights.extend(
+                    VideoCommentInsight(video_url=remaining, status="skipped")
+                    for remaining in valid_urls[url_index:]
+                )
+                break
+        successful = [v for v in insights if v.status in ("ok_nonempty", "ok_empty")]
+        state: VoiceStatus = (
+            "partial"
+            if len(successful) != len(insights) and successful
+            else "failed"
+            if not successful
+            else "ok_nonempty"
+            if scraped
+            else "ok_empty"
+        )
 
+        if input.classify and scraped and any(v.unclassified_comments for v in insights):
+            state = "partial"
         if scraped == 0:
             return CommentMiningOutput(
+                status=state,
                 videos=insights,
                 warnings=warnings,
                 total_cost_usd=round(total_cost, 4),
                 slack_summary=(
-                    "コメントを取得できませんでした（コメントが少ない動画では0件になる"
-                    "場合があります）。"
+                    "今回の取得結果は0件でした。対象全体のコメント不在を意味しません。"
+                    if state == "ok_empty"
+                    else "コメントを取得できませんでした（取得失敗）。"
                 ),
             )
 
@@ -330,6 +417,7 @@ class TikTokCommentMiningSkill(BaseSkill[CommentMiningInput, CommentMiningOutput
             html, request_id=ctx.request_id, query=input.client_name or "comments"
         )
         out = CommentMiningOutput(
+            status=state,
             videos=insights,
             cross_vocabulary=cross_vocab[:20],
             report_url=report_url,
@@ -375,7 +463,7 @@ class TikTokCommentMiningSkill(BaseSkill[CommentMiningInput, CommentMiningOutput
 
     def _slack_summary(self, out: CommentMiningOutput) -> str:
         lines = [
-            f"💬 **コメント欄マイニング** 完了"
+            f"💬 **コメント欄マイニング** {'一部取得' if out.status == 'partial' else '完了'}"
             f"（{len(out.videos)}動画・{out.scraped_comments}コメント）"
         ]
         for ins in out.videos:
@@ -385,7 +473,10 @@ class TikTokCommentMiningSkill(BaseSkill[CommentMiningInput, CommentMiningOutput
             # category はLLM生成なので sanitize（他スキルと整合）。examples は原文コメント＝
             # 原文保証のため sanitize しない（x_voice の投稿本文と同じ扱い）。
             dist = "・".join(f"{sanitize_llm_text(b.category, max_len=20)}{b.count}" for b in top)
-            lines.append(f"{ins.video_url}\n分布: {dist}（全{ins.total_comments}件）")
+            lines.append(
+                f"{ins.video_url}\n分布: {dist}（取得{ins.total_comments}件・"
+                f"分類{ins.classified_comments}件・未分類{ins.unclassified_comments}件）"
+            )
             ex = next((b.examples[0] for b in top if b.examples), None)
             if ex:
                 lines.append(f"代表: {ex}")

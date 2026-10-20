@@ -40,6 +40,7 @@ PROMPTS_ROOT = Path(teamagent.prompts.__file__).parent
 # USE_PROPOSAL_DECK_TOOLS=1 の本番導線が読むのは v1。v2 を明示するのは
 # proposal_builder/skill.py:555-557 で、こちらは別の env ゲート配下。両方を対象にする。
 HUMAN_FACING_PROMPTS = (
+    "admin_summary/v1/system.md",
     "chitchat/v1/system.md",
     "clientkarte/v1/system.md",
     # 案件検索 v3 PR 1（2026-10-01）: KARTE_PROMPT_VERSION=v2 / PROMPT_VERSION=v3 で切り替える新版。
@@ -51,6 +52,7 @@ HUMAN_FACING_PROMPTS = (
     "proposal_review/v1/system.md",
     "search/v2d/system.md",
     "search/v3/system.md",
+    "search/compact/system.md",
     # 複合検索（USE_COMPOSITE_SEARCH）で search の user message に足す節（出典の書き分け）。
     "search/composite/slack.md",
     # 施策実績のヒットがあるとき search の user message に足す節（資料リンク・業種の扱い）。
@@ -87,6 +89,8 @@ HUMAN_FACING_PROMPTS = (
 # 含まないもの（enum・ID・真偽値だけの JSON）は、地の文の書きぶりを模倣されても
 # 人に届く文章が無いので対象外にする。注入防止の安全指示かどうかは基準にしない。
 EXEMPT_PROMPTS = {
+    # 全 DM 品質の判定（Haiku に区分 JSON だけを返させる内部プロンプト）。人には見えない。
+    "dm_quality/v1/system.md": "内部 JSON（判定区分だけ）",
     # 時系列フラグ ON 時だけ本体へ足す規律。装飾の禁止節は v2d/v3 から継承する。
     "search/timeline/system.md": "search の system への時系列追記（装飾の決まりは本体側）",
     # 本番で読まれない版。装飾を直しても誰にも届かず、差分だけ増える。
@@ -176,6 +180,7 @@ _BAN_PROSE = (
 # JSON の値がそのまま人に出るプロンプト（video_algorithm・検索上位チェックの結論）は
 # JSON の値に効かせる別文面（`×` の行を持たない）。
 _JSON_VALUE_PROMPTS = (
+    "admin_summary/",
     "video_algorithm/",
     "video_algorithm_cover/",
     "search_surface_check/v1/analyze.md",

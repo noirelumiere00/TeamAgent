@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from unittest.mock import MagicMock
 
 import pytest
@@ -105,47 +106,170 @@ def _response(placeholders: dict[int, str], *, skipped_id: int | None = None) ->
     )
 
 
-@pytest.mark.parametrize("skip", [False, True])
-def test_self_repair_receives_limits_and_can_shorten_or_explicitly_skip(skip: bool) -> None:
+def test_self_repair_only_changes_bad_slots_and_receives_limits() -> None:
     invalid = _placeholders()
     invalid[64] = "あ" * 31
     invalid[61] = "あ" * 19
-    repaired = _placeholders()
-    repaired[64] = "あ" * 30
-    repaired[61] = "あ" * 18
-    if skip:
-        del repaired[64]
-    bedrock = MagicMock()
-    bedrock.converse.side_effect = [
-        _response(invalid),
-        _response(repaired, skipped_id=64 if skip else None),
-    ]
+    repaired = {64: "あ" * 30, 61: "あ" * 18, 1: "勝手な書き換え"}
+    bedrock = MagicMock(model_id="jp.anthropic.claude-sonnet-4-6")
+    bedrock.converse.side_effect = [_response(invalid), _response(repaired)]
     skill = ProposalDeckSkill(bedrock=bedrock)
-    output, cost = skill._compose(
+    output, cost, warnings = skill._compose(
         ProposalDeckInput(product_name="テスト", goal="認知", target_persona="成人", max_repair=1),
         SkillContext(),
     )
     assert bedrock.converse.call_count == 2
-    repair_text = bedrock.converse.call_args.kwargs["messages"][-1]["content"][0]["text"]
+    repair_call = bedrock.converse.call_args.kwargs
+    assert len(repair_call["messages"]) == 1
+    repair_text = repair_call["messages"][0]["content"][0]["text"]
     assert "{64} length 31 out of [1, 30]" in repair_text
     assert "{61} length 19 out of [1, 18]" in repair_text
+    assert "{2}" not in repair_text
+    assert repair_call["max_tokens"] == 2048
     assert cost == pytest.approx(0.02)
-    assert output.placeholders == repaired
-    assert [item.id for item in output.skipped_placeholders] == ([64] if skip else [])
+    assert output.placeholders == {**invalid, 64: repaired[64], 61: repaired[61]}
+    assert len(warnings) == 2 and all("再生成で修正" in line for line in warnings)
 
 
-def test_exhausted_length_repair_still_fails_without_automatic_skip() -> None:
+@pytest.mark.parametrize("max_repair,expected_calls", [(0, 1), (1, 2), (2, 3), (8, 3)])
+def test_exhausted_length_repair_completes_with_safe_text(
+    max_repair: int, expected_calls: int
+) -> None:
     placeholders = _placeholders()
     placeholders[64] = "あ" * 31
-    bedrock = MagicMock()
+    bedrock = MagicMock(model_id="jp.anthropic.claude-sonnet-4-6")
+    bedrock.converse.return_value = _response(placeholders)
+    output, cost, warnings = ProposalDeckSkill(bedrock=bedrock)._compose(
+        ProposalDeckInput(
+            product_name="テスト", goal="認知", target_persona="成人", max_repair=max_repair
+        ),
+        SkillContext(),
+    )
+    assert bedrock.converse.call_count == expected_calls
+    assert output.placeholders[64] == "要確認（文字数調整）"
+    assert len(warnings) == 1 and "{64}" in warnings[0] and "要確認" in warnings[0]
+    assert cost == pytest.approx(0.01 * expected_calls)
+
+
+@pytest.mark.parametrize("budget,calls", [(0.0, 1), (0.04, 2)])
+def test_repair_cost_is_reserved_before_each_call(
+    monkeypatch: pytest.MonkeyPatch, budget: float, calls: int
+) -> None:
+    from teamagent.skills.proposal_deck import skill as module
+
+    monkeypatch.setattr(module, "_LENGTH_REPAIR_BUDGET_USD", budget)
+    placeholders = _placeholders()
+    placeholders[87] = "あ" * 21
+    bedrock = MagicMock(model_id="jp.anthropic.claude-sonnet-4-6")
+    bedrock.converse.return_value = _response(placeholders)
+    output, cost, warnings = ProposalDeckSkill(bedrock=bedrock)._compose(
+        ProposalDeckInput(product_name="テスト", goal="認知", target_persona="成人"), SkillContext()
+    )
+    assert bedrock.converse.call_count == calls
+    assert cost == pytest.approx(0.01 * calls)
+    assert output.placeholders[87] == "要確認（文字数調整）"
+    assert len(warnings) == 1
+
+
+@pytest.mark.parametrize(
+    "reply", ["not-json", "[]", '{"placeholders": []}', '{"placeholders": {"87": ""}}']
+)
+def test_malformed_patch_falls_back_without_losing_valid_slots(reply: str) -> None:
+    placeholders = _placeholders()
+    placeholders[87] = "あ" * 21
+    bedrock = MagicMock(model_id="jp.anthropic.claude-sonnet-4-6")
+    bedrock.converse.side_effect = [
+        _response(placeholders),
+        replace(_response({}), text=reply),
+    ]
+    output, _, _ = ProposalDeckSkill(bedrock=bedrock)._compose(
+        ProposalDeckInput(product_name="テスト", goal="認知", target_persona="成人", max_repair=1),
+        SkillContext(),
+    )
+    assert output.placeholders == {**placeholders, 87: "要確認（文字数調整）"}
+
+
+@pytest.mark.parametrize("model", ["unknown-model", "jp.anthropic.claude-sonnet-4-6"])
+def test_unknown_price_or_repair_outage_uses_safe_text(model: str) -> None:
+    placeholders = _placeholders()
+    placeholders[2] = "あ" * 141
+    bedrock = MagicMock(model_id=model)
+    bedrock.converse.side_effect = [_response(placeholders), RuntimeError("service unavailable")]
+    output, cost, _ = ProposalDeckSkill(bedrock=bedrock)._compose(
+        ProposalDeckInput(product_name="テスト", goal="認知", target_persona="成人"), SkillContext()
+    )
+    assert bedrock.converse.call_count == (1 if model == "unknown-model" else 2)
+    assert cost == pytest.approx(0.01)
+    assert len(output.placeholders[2]) == 50
+    assert "要確認" in output.placeholders[2]
+
+
+@pytest.mark.parametrize("replacement", ["10万人", "PRIVATE-BRAND"])
+def test_length_patch_still_passes_provenance_and_confidentiality_checks(replacement: str) -> None:
+    from teamagent.skills.proposal_deck.provenance import ProvenanceValidationError
+
+    data = {"placeholders": {str(pid): text for pid, text in _placeholders().items()}}
+    data["placeholders"]["87"] = "あ" * 21
+    bedrock = MagicMock(model_id="jp.anthropic.claude-sonnet-4-6")
+    bedrock.converse.return_value = _response({87: replacement})
+    skill = ProposalDeckSkill(bedrock=bedrock)
+    input = ProposalDeckInput(
+        product_name="テスト",
+        goal="認知",
+        target_persona="成人",
+        max_repair=1,
+        enforce_provenance=True,
+        forbidden_output_terms=["PRIVATE-BRAND"],
+    )
+    skill._repair_lengths(data, input, SkillContext(), spent=0)
+    with pytest.raises(ProvenanceValidationError):
+        skill._finalize_composer(data, input)
+
+
+def test_second_patch_only_requests_the_remaining_bad_slot() -> None:
+    placeholders = _placeholders()
+    placeholders.update({87: "あ" * 21, 90: "い" * 23})
+    bedrock = MagicMock(model_id="jp.anthropic.claude-sonnet-4-6")
+    bedrock.converse.side_effect = [
+        _response(placeholders),
+        _response({87: "短い訴求", 90: "い" * 20}),
+        _response({87: "変更禁止", 90: "短い訴求の続き"}),
+    ]
+    output, cost, warnings = ProposalDeckSkill(bedrock=bedrock)._compose(
+        ProposalDeckInput(product_name="テスト", goal="認知", target_persona="成人"), SkillContext()
+    )
+    assert output.placeholders == {**placeholders, 87: "短い訴求", 90: "短い訴求の続き"}
+    second_prompt = bedrock.converse.call_args.kwargs["messages"][0]["content"][0]["text"]
+    assert "{87}" not in second_prompt
+    assert "{90} length 20 out of [1, 18]" in second_prompt
+    assert cost == pytest.approx(0.03) and len(warnings) == 2
+
+
+def test_budget_is_shared_across_other_contract_retries(monkeypatch: pytest.MonkeyPatch) -> None:
+    from teamagent.skills.proposal_deck import skill as module
+    from teamagent.skills.proposal_deck.provenance import ProvenanceValidationError
+
+    monkeypatch.setattr(module, "_LENGTH_REPAIR_BUDGET_USD", 0.04)
+    placeholders = _placeholders()
+    placeholders[87] = "あ" * 21
+    bedrock = MagicMock(model_id="jp.anthropic.claude-sonnet-4-6")
     bedrock.converse.return_value = _response(placeholders)
     skill = ProposalDeckSkill(bedrock=bedrock)
-    with pytest.raises(ValueError, match="compose failed after 3 attempts") as caught:
-        skill._compose(
-            ProposalDeckInput(
-                product_name="テスト", goal="認知", target_persona="成人", max_repair=2
-            ),
-            SkillContext(),
-        )
-    assert "{64} length 31 out of [1, 30]" in str(caught.value)
-    assert bedrock.converse.call_count == 3
+    finalize = skill._finalize_composer
+    calls = 0
+
+    def fail_once(data, input):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise ProvenanceValidationError(["confidential term remains"])
+        return finalize(data, input)
+
+    monkeypatch.setattr(skill, "_finalize_composer", fail_once)
+    output, cost, _ = skill._compose(
+        ProposalDeckInput(product_name="テスト", goal="認知", target_persona="成人", max_repair=1),
+        SkillContext(),
+    )
+    assert bedrock.converse.call_count == 3  # 全体2回 + 予算内の局所修復1回
+    assert cost == pytest.approx(0.03)
+    assert output.placeholders[87] == "要確認（文字数調整）"

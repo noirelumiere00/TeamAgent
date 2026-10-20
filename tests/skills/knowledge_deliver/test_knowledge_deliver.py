@@ -168,6 +168,157 @@ def test_respects_top_k_limit() -> None:
     assert slack.upload_file.await_count == 2
 
 
+def _compact_pdf_skill(
+    *, status: str = "posted"
+) -> tuple[KnowledgeDeliverSkill, MagicMock, SkillContext]:
+    hits = [
+        _hit(chunk_id=i, source_type="gdrive", source_uri=f"gdrive://F{i}", title=f"提案{i}.pdf")
+        for i in range(2)
+    ]
+    slack = _slack_mock()
+    slack.upload_files = AsyncMock(return_value=status)
+    search = _search_mock(
+        hits, answer="提案書を2件見つけました。\n小池さんか営業 DB でご確認ください。"
+    )
+    skill = KnowledgeDeliverSkill(search=search, slack=slack, gdrive=_gdrive_mock())
+    ctx = _ctx(thread_ts="111.222")
+    ctx.metadata["_search_compact_answer"] = True
+    return skill, slack, ctx
+
+
+def test_compact_pdf_delivery_is_one_post_with_verified_receipt() -> None:
+    skill, slack, ctx = _compact_pdf_skill()
+    out = skill.run(KnowledgeDeliverInput(query="提案書を出して", top_k=2), ctx)
+
+    assert out.delivered_count == 2
+    assert all(ref.delivered for ref in out.references)
+    slack.upload_file.assert_not_awaited()
+    slack.upload_files.assert_awaited_once()
+    call = slack.upload_files.await_args
+    assert call.args[0] == "D0SELF" and len(call.args[1]) == 2
+    assert call.kwargs["thread_ts"] == "111.222"
+    assert call.kwargs["initial_comment"] == "提案書を2件見つけました。"
+    assert "小池" not in out.answer and "営業" not in out.answer
+    assert out.delivery is not None
+    assert out.delivery.model_dump() == {
+        "kind": "knowledge_deliver",
+        "status": "posted",
+        "delivered_count": 2,
+    }
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        "要点は完成形の先出しです。小池さんか営業 DB でご確認ください。",
+        "小池さんか営業 DB でご確認ください。要点は完成形の先出しです。",
+    ],
+)
+def test_compact_pdf_removes_only_punt_sentence_and_keeps_summary_and_source(answer: str) -> None:
+    skill, slack, ctx = _compact_pdf_skill()
+    source = "\n出典: https://drive.google.com/file/d/F0/view"
+    skill._search.run.return_value.answer = answer + source
+    out = skill.run(KnowledgeDeliverInput(query="提案書を出して", top_k=2), ctx)
+    expected = "要点は完成形の先出しです。" + source
+    assert out.answer == expected
+    assert slack.upload_files.await_args.kwargs["initial_comment"] == expected
+    assert out.delivery is not None
+
+
+def test_compact_pdf_removes_recorded_required_handoff_and_keeps_summary() -> None:
+    skill, slack, ctx = _compact_pdf_skill()
+    summary = "要点は完成形の先出しです。"
+    source = "\n出典: https://drive.google.com/file/d/F0/view"
+    skill._search.run.return_value.answer = (
+        summary + "現在の進捗を確認するには、小池さんへ直接確認するか営業 DB で"
+        "最新の案件ステータスを見る必要があります。" + source
+    )
+    out = skill.run(KnowledgeDeliverInput(query="提案書を出して", top_k=2), ctx)
+    assert out.answer == summary + source
+    assert slack.upload_files.await_args.kwargs["initial_comment"] == summary + source
+    assert out.delivery is not None
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        "営業 DB で確認しました。施策は実施済みです。",
+        "営業 DB で確認しましたが、別の企画には追加提案が必要です。",
+    ],
+)
+def test_compact_pdf_keeps_completed_internal_confirmation(answer: str) -> None:
+    skill, slack, ctx = _compact_pdf_skill()
+    skill._search.run.return_value.answer = answer
+    out = skill.run(KnowledgeDeliverInput(query="提案書を出して", top_k=2), ctx)
+    assert out.answer == answer
+    assert slack.upload_files.await_args.kwargs["initial_comment"] == answer
+
+
+def test_compact_pdf_respects_no_punt_disable_flag(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("SEARCH_NO_PUNT", "0")
+    skill, slack, ctx = _compact_pdf_skill()
+    answer = "営業 DB で確認する必要があります。"
+    skill._search.run.return_value.answer = answer
+    out = skill.run(KnowledgeDeliverInput(query="提案書を出して", top_k=2), ctx)
+    assert out.answer == answer
+    assert slack.upload_files.await_args.kwargs["initial_comment"] == answer
+
+
+@pytest.mark.parametrize(
+    "punt",
+    [
+        "小池さんか営業 DB でご確認ください。",
+        "小池さんへ直接確認するか営業 DB で最新の案件ステータスを見る必要があります。",
+    ],
+)
+def test_legacy_pdf_does_not_change_sentence_spacing_or_punt_text(punt: str) -> None:
+    skill, slack, ctx = _compact_pdf_skill()
+    ctx.metadata.pop("_search_compact_answer")
+    answer = " 要点は完成形の先出しです。" + punt + "\n"
+    skill._search.run.return_value.answer = answer
+    out = skill.run(KnowledgeDeliverInput(query="提案書を出して", top_k=2), ctx)
+    assert out.answer == answer
+    assert slack.upload_file.await_args_list[0].kwargs["initial_comment"] == answer
+    slack.upload_files.assert_not_awaited()
+
+
+@pytest.mark.parametrize("status", ["failed", "uncertain"])
+def test_compact_pdf_failure_does_not_claim_delivery_or_retry(status: str) -> None:
+    skill, slack, ctx = _compact_pdf_skill(status=status)
+    out = skill.run(KnowledgeDeliverInput(query="提案書を出して", top_k=2), ctx)
+
+    assert out.delivered_count == 0
+    assert out.delivery is None
+    assert all(not ref.delivered for ref in out.references)
+    slack.upload_files.assert_awaited_once()
+    slack.upload_file.assert_not_awaited()
+    slack.lookup_user_id_by_email.assert_not_awaited()
+    assert "お送りしました" not in out.note
+    if status == "uncertain":
+        assert "完了を確認できませんでした" in out.note
+
+
+def test_compact_pdf_partial_download_does_not_emit_complete_receipt() -> None:
+    skill, slack, ctx = _compact_pdf_skill()
+    skill._gdrive.download_file_bytes.side_effect = [b"%PDF fake", RuntimeError("unavailable")]
+    out = skill.run(KnowledgeDeliverInput(query="提案書を出して", top_k=2), ctx)
+    assert out.delivered_count == 1
+    assert out.delivery is None
+    assert (
+        "一部の資料は取得できませんでした"
+        in slack.upload_files.await_args.kwargs["initial_comment"]
+    )
+
+
+def test_compact_pdf_shared_surface_keeps_summary_private() -> None:
+    skill, slack, ctx = _compact_pdf_skill()
+    ctx.metadata["channel_id"] = "C123"
+    out = skill.run(KnowledgeDeliverInput(query="提案書を出して", top_k=2), ctx)
+    assert out.answer == "" and out.references == [] and out.delivery is None
+    assert slack.upload_files.await_args.args[0] == "D1"
+    assert slack.upload_files.await_args.kwargs.get("thread_ts") is None
+
+
 def test_no_gdrive_hits_returns_answer_only() -> None:
     hits = [_hit(source_type="slack", source_uri="slack://C1/1.2", title="FB スレッド")]
     slack = _slack_mock()

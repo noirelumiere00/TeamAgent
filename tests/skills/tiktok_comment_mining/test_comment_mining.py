@@ -64,7 +64,7 @@ _CLASSIFY_JSON = json.dumps(
             {"category": "推薦", "count": 1, "example_ids": ["c0"]},
             {"category": "売切れ嘆き", "count": 1, "example_ids": ["c1"]},
         ],
-        "consumer_vocabulary": ["爆食", "ちょい足し"],
+        "consumer_vocabulary": ["美味しすぎ", "ちょい足し"],
         "common_questions": [],
         "pain_points": ["売切れ"],
         "desires": [],
@@ -102,7 +102,7 @@ def test_chromium_primary_path() -> None:
     assert ins.source == "chromium"
     assert [b.category for b in ins.buckets] == ["推薦", "売切れ嘆き"]
     assert ins.buckets[0].examples == ["メロンパンクッキー美味しすぎ"]
-    assert "爆食" in out.cross_vocabulary
+    assert "美味しすぎ" in out.cross_vocabulary
     assert out.report_url == "https://s3.example/comments"
     assert "コメント欄マイニング" in out.slack_summary
     # 見出しの太字は `**`（OpenClaw の Markdown→mrkdwn 変換で `*語*` 単独は斜体になる）。
@@ -200,7 +200,7 @@ def test_hallucinated_example_id_is_not_returned() -> None:
         comments_fn=_chromium_ok,
     )
     out = skill.run(CommentMiningInput(video_urls=[_URL]), _ctx())
-    assert out.videos[0].buckets[0].examples == []
+    assert out.videos[0].buckets == []
 
 
 def test_classify_false_skips_llm() -> None:
@@ -242,3 +242,83 @@ def test_invalid_url_rejected_before_any_fetch() -> None:
     out = skill.run(CommentMiningInput(video_urls=["https://evil.example/x?u=tiktok.com"]), _ctx())
     assert "不正なURL" in out.slack_summary
     assert apify.calls == 0 and out.scraped_comments == 0
+
+
+def test_success_empty_is_distinct_from_failure() -> None:
+    class Empty(_FakeApify):
+        def tiktok_comments(self, url: str, **kw: Any) -> tuple[list[dict[str, Any]], float]:
+            return [], 0
+
+    empty = TikTokCommentMiningSkill(apify=Empty(), comments_fn=_chromium_fail).run(
+        CommentMiningInput(video_urls=[_URL]), _ctx()
+    )
+    failed = TikTokCommentMiningSkill(apify=_FakeApify(fail=True), comments_fn=_chromium_fail).run(
+        CommentMiningInput(video_urls=[_URL]), _ctx()
+    )
+    assert empty.status == "ok_empty"
+    assert failed.status == "failed"
+    assert "0件" not in failed.slack_summary
+
+
+def test_bucket_count_is_computed_from_unique_ids() -> None:
+    model = _FakeBedrock(
+        json.dumps(
+            {
+                "buckets": [
+                    {"category": "推薦", "count": 999, "ids": ["c0", "c0", "c404"]},
+                    {"category": "批判", "count": 999, "ids": ["c0", "c1"]},
+                ],
+                "consumer_vocabulary": ["架空の語彙"],
+            }
+        )
+    )
+    output = TikTokCommentMiningSkill(
+        comments_fn=_chromium_ok, bedrock=model, publisher=_publisher
+    ).run(CommentMiningInput(video_urls=[_URL]), _ctx())
+    assert [b.count for b in output.videos[0].buckets] == [1, 1]
+    assert output.videos[0].classified_comments == 2
+    assert "架空の語彙" not in output.cross_vocabulary
+
+
+def test_question_and_pain_axes_keep_only_original_text_selected_by_id() -> None:
+    payload = {
+        "buckets": [{"category": "質問", "ids": ["c0"]}, {"category": "売切れ嘆き", "ids": ["c1"]}],
+        "common_question_ids": ["c0", "unknown"],
+        "pain_point_ids": ["c1"],
+        "overall_sentiment": "mixed",
+    }
+    output = TikTokCommentMiningSkill(
+        comments_fn=_chromium_ok, bedrock=_FakeBedrock(json.dumps(payload)), publisher=_publisher
+    ).run(CommentMiningInput(video_urls=[_URL]), _ctx())
+    assert output.videos[0].common_questions == ["メロンパンクッキー美味しすぎ"]
+    assert output.videos[0].pain_points == ["もう売ってなかった…"]
+    assert output.videos[0].overall_sentiment == "mixed"
+
+
+def test_comments_outside_prompt_budget_stay_in_unclassified_denominator() -> None:
+    def oversized(url: str, **kwargs: Any) -> TikTokCommentResult:
+        return TikTokCommentResult(
+            video_url=url,
+            comments=(
+                TikTokComment(text="字" * 9000, likes=1, author=""),
+                TikTokComment(text="合成の短い本文", likes=2, author=""),
+            ),
+        )
+
+    model = _FakeBedrock(
+        json.dumps(
+            {
+                "buckets": [
+                    {"category": "推薦", "ids": ["c0", "c1"], "count": 999},
+                ]
+            }
+        )
+    )
+    output = TikTokCommentMiningSkill(
+        comments_fn=oversized, bedrock=model, publisher=_publisher
+    ).run(CommentMiningInput(video_urls=[_URL]), _ctx())
+    video = output.videos[0]
+    assert video.total_comments == 2
+    assert video.classified_comments == video.unclassified_comments == 1
+    assert video.buckets[0].examples == ["合成の短い本文"]
+    assert output.status == "partial"

@@ -3,6 +3,15 @@ import assert from 'node:assert/strict';
 import {createCallerIdentityPlugin} from '../dist/index.js';
 
 const answer = '条件に合う事例は見つかりませんでした。';
+test('direct compact source links are readable in Slack without a Markdown adapter', async () => {
+  const answer = '施策は実施済みです。\n出典: [施策実績](https://example.test/used)';
+  const p = setup({searchResult: {answer_format: 'compact', answer, found: true,
+    direct_delivery: {answer_kind: 'comparison', answer_format: 'compact', answer}}});
+  await p.finalize();
+  assert.equal(p.posts.length, 1);
+  assert.doesNotMatch(p.posts[0].text, /\[施策実績\]\(/);
+  assert.match(p.posts[0].text, /施策実績 https:\/\/example.test\/used/u);
+});
 const posted = kind => ({status: 'posted', delivered: true,
   delivery: {kind: 'search_direct_answer', answer_kind: kind}, answer: '回答は投稿済みです。同じ内容を書かないでください。'});
 const wrap = data => ({content: [{type: 'text', text: JSON.stringify(data)}]});

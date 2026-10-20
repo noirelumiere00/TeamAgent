@@ -387,7 +387,9 @@ class ProposalBuilderInput(_StrictModel):
         default=4,
         ge=0,
         le=4,
-        description="Composer自己修復回数（初回を含む最大5回呼出しに固定）",
+        description=(
+            "Composerの全体修復回数。文字数は別途、枠単位で最大2回・追加0.10 USD/デッキ。"
+        ),
     )
 
     @field_validator("gemini_json")
