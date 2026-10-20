@@ -132,6 +132,8 @@ def case_query_target(query: str, asked_industry: str | None = None) -> str | No
         re.IGNORECASE,
     )
     if not match:
+        match = re.match(r"^([^の\s]+?)\s*事例", text, re.IGNORECASE)
+    if not match:
         return None
     target = match[1].strip(" 「」『』\"'")
     # ルーターの業種推定より、利用者が指定した元の対象語を優先する。
@@ -157,9 +159,11 @@ def case_query_target(query: str, asked_industry: str | None = None) -> str | No
         "その",
         "それ",
         "施策",
+        "提案",
         "動画",
         "ショート動画",
         "SNS",
+        "成功",
     }:
         return None
     target = re.sub(r"(?:の施策|施策|広告|活用|関連)$", "", target).strip()

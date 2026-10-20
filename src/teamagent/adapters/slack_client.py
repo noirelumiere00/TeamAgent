@@ -14,7 +14,7 @@ import os
 import re
 import time
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Literal
 from urllib.parse import urlsplit
 
 import httpx
@@ -321,6 +321,55 @@ class SlackClient:
             latency_ms=latency_ms,
         )
         return ok
+
+    async def upload_files(
+        self,
+        channel: str,
+        files: list[tuple[str, str]],
+        request_id: str,
+        *,
+        initial_comment: str | None = None,
+        thread_ts: str | None = None,
+    ) -> Literal["posted", "failed", "uncertain"]:
+        """複数添付を 1 投稿で共有。応答を失った場合は再送できないため uncertain。"""
+        if not files:
+            return "failed"
+        kwargs: dict[str, Any] = {
+            "channel": channel,
+            "file_uploads": [
+                {"file": path, "filename": filename, "title": filename} for path, filename in files
+            ],
+        }
+        if initial_comment is not None:
+            kwargs["initial_comment"] = initial_comment
+        if thread_ts is not None:
+            kwargs["thread_ts"] = thread_ts
+        try:
+            resp = await self._client.files_upload_v2(**kwargs)
+            completed = resp.get("files")
+            ids = (
+                {f.get("id") for f in completed if isinstance(f, dict) and f.get("id")}
+                if isinstance(completed, list)
+                else set()
+            )
+            status: Literal["posted", "failed", "uncertain"] = (
+                "failed"
+                if not resp.get("ok", False)
+                else "posted"
+                if len(ids) == len(files)
+                else "uncertain"
+            )
+        except Exception:
+            logger.exception("slack_upload_files_uncertain", request_id=request_id, channel=channel)
+            return "uncertain"
+        logger.info(
+            "slack_upload_files",
+            request_id=request_id,
+            channel=channel,
+            file_count=len(files),
+            status=status,
+        )
+        return status
 
     async def lookup_user_id_by_email(self, email: str, request_id: str) -> str | None:
         """会社メール → Slack user_id を解決（bot scope: users:read.email）。

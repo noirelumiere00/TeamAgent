@@ -42,7 +42,7 @@ from teamagent.skills._shared.next_step import (
 )
 from teamagent.skills._shared.source_url import hit_doc_url
 from teamagent.skills.base import BaseSkill, SkillContext, register
-from teamagent.skills.search import timeline_status
+from teamagent.skills.search import compact, timeline_status
 from teamagent.skills.search.aggregation import extract_aggregation_filter
 from teamagent.skills.search.alias_expansion import retry_inputs, scope_footer
 from teamagent.skills.search.answer_mode import MODE_INSTRUCTIONS, classify_answer_mode
@@ -146,7 +146,11 @@ _PUNT_WHO = (
 )
 _PUNT_ACT = r"(?:確認|検索|問い合わせ|問合せ|お問い合わせ|聞いて|聞く|探して|探す)"
 _PUNT_ASK = r"(?:お勧め|おすすめ|オススメ|推奨|ください|下さい|してみて|が確実|をお願い|いただ)"
-_PUNT_LINE_RE = re.compile(rf"{_PUNT_WHO}[^。\n]{{0,30}}{_PUNT_ACT}[^。\n]{{0,20}}{_PUNT_ASK}")
+_PUNT_LINE_RE = re.compile(
+    rf"{_PUNT_WHO}[^。\n]{{0,30}}{_PUNT_ACT}(?:[^。\n]{{0,20}}{_PUNT_ASK}|"
+    r"(?!した|しました|しています|していました|済み)[^。\n]{0,80}"
+    r"必要(?:があります|です|となります))"
+)
 _PUNT_LEAD_RE = re.compile(rf"(?:以下|次)の(?:方法|手段)[^。\n]{{0,10}}{_PUNT_ASK}")
 _PUNT_BULLET_RE = re.compile(rf"^\s*(?:[-・•*]|\d+[.)．])\s*.*{_PUNT_WHO}.*{_PUNT_ACT}")
 
@@ -571,6 +575,9 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
 
             if fanout_active(ctx):
                 return run_fanout(self, input, ctx)
+        compact_mode = ctx.metadata.get(compact.CTX_KEY) is True and not compact.explicit_list(
+            input.query
+        )
         log = ctx.bind_logger(self.name)
         log.info(
             "search_skill_start",
@@ -699,6 +706,8 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
             slack_items = tuple(i for i in slack_items if target_matches(i.text, case_target))
             hits = summary_hits
             found = bool((found and summary_hits) or slack_items)
+        if compact_mode and slack_items:
+            found = True
         case_miss = bool(case_target and not found)
 
         # 3. Bedrock で要約（chunk が 0 件のときはスキップ）。
@@ -736,7 +745,12 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
                 )
                 timings["converse_ms"] = (time.perf_counter() - _t) * 1000
                 answer = f"{answer}\n\n{slack_answer}"
-        elif input.include_answer and direct_kind is None and self._should_defer_answer(hits, ctx):
+        elif (
+            input.include_answer
+            and direct_kind is None
+            and not compact_mode
+            and self._should_defer_answer(hits, ctx)
+        ):
             answer = self._start_followup_answer(
                 input,
                 summary_hits,
@@ -764,17 +778,25 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
                 asked_industry=asked_industry,
                 canonical_campaign_totals=(
                     campaign_totals_block(summary_hits)
-                    if ctx.metadata.get("_search_direct_answer") is True
+                    if ctx.metadata.get("_search_direct_answer") is True and not compact_mode
                     else ""
+                ),
+                compact_sources=(
+                    compact.source_map(
+                        summary_hits, slack_items, lambda h: self._hit_url(h, file_urls=file_urls)
+                    )
+                    if compact_mode
+                    else None
                 ),
             )
             timings["converse_ms"] = (time.perf_counter() - _t) * 1000
             if not answer.strip():
                 direct_kind = None
             # 資料リンク・「シートのみ」と、動画ごとの数字・リンクをコードで足す。
-            answer = self._append_campaign_footer(
-                answer, summary_hits, asked_industry=asked_industry
-            )
+            if not compact_mode:
+                answer = self._append_campaign_footer(
+                    answer, summary_hits, asked_industry=asked_industry
+                )
         else:
             answer, cost_usd = "", 0.0
 
@@ -786,6 +808,7 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
             input.include_answer
             and not deferred
             and not case_miss
+            and not compact_mode
             and (_source_links_enabled() or direct_kind is not None)
         ):
             answer += self._source_links_block(
@@ -812,7 +835,7 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
         #        「実ファイルをお送りしますか？」を末尾に 1 個だけ足す（受け皿は
         #        knowledge_deliver。その tool が OFF の環境では出来ない約束をしない）。
         #        該当なしのときは近いものの実ファイルを勧めない。
-        if found:
+        if found and not compact_mode:
             answer = self._append_next_step(answer, query=input.query, file_urls=file_urls)
 
         # 3-quater. 結果に添える次の一手（既存ツールを 1 つだけ・モデルに 2 本目を選ばせる）。
@@ -827,7 +850,7 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
             requester=str(ctx.metadata.get("user_email") or "") or None,
         )
 
-        if input.include_answer and show_scope and not case_miss:
+        if input.include_answer and show_scope and not case_miss and not compact_mode:
             answer += "\n\n" + scope_footer(
                 searched_queries, slack=slack_lookup, incomplete=retries_incomplete
             )
@@ -932,8 +955,28 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
                 )
             )
 
+        if compact_mode and input.include_answer:
+            if found:
+                answer = compact.build(
+                    answer,
+                    summary_hits,
+                    slack_items,
+                    lambda h: self._hit_url(h, file_urls=file_urls),
+                    query=input.query,
+                    asked_industry=asked_industry,
+                    notice=guard_header,
+                )
+            elif slack_lookup is not None and slack_lookup.hidden_count:
+                answer = "Slackの非公開の場所に一致がありますが、この会話では内容を表示できません。"
+            else:
+                scope = "社内資料・施策実績"
+                if slack_lookup is not None:
+                    scope += "・Slack" if slack_lookup.status == "ok" else "（Slackは検索未完了）"
+                answer = build_scoped_not_found_answer(case_target, scope=scope, complete=complete)
+
         output = SearchOutput(
             answer=answer,
+            answer_format="compact" if compact_mode else None,
             direct_answer=answer if direct_kind is not None else None,
             direct_answer_kind=direct_kind,
             hits=search_hits,
@@ -1461,7 +1504,15 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
             if fanout_probe is not None:
                 from teamagent.skills.search.fanout import collect_named_sources
 
-                collect_named_sources(self, conn, self._asked_client(probe), ctx, fanout_probe)
+                collect_named_sources(
+                    self,
+                    conn,
+                    self._asked_client(probe),
+                    ctx,
+                    fanout_probe,
+                    industry=normalize_industry(input.filter_industry)
+                    or extract_query_industry(input.query),
+                )
             if self._use_new_schema:
                 # Sprint 5: 集約・一覧クエリモード。「BANT A の案件一覧」「失注案件」等は
                 # 意味検索では答えられないため、メタデータフィルタで FB を列挙する。
@@ -2497,6 +2548,7 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
         karte_hits: tuple[SearchHit, ...] = (),
         timeline_statuses: tuple[timeline_status.TimelineStatus, ...] | None = None,
         canonical_campaign_totals: str = "",
+        compact_sources: compact.Sources | None = None,
     ) -> tuple[str, float]:
         """Bedrock に system prompt + chunks + query を渡して要約させる。
 
@@ -2510,7 +2562,11 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
         if not hits and not slack_items:
             return ("該当する資料が見つかりませんでした。", 0.0)
 
-        system = load_prompt("search", self._prompt_version, "system")
+        system = (
+            compact.prompt()
+            if compact_sources is not None
+            else load_prompt("search", self._prompt_version, "system")
+        )
         if self._alias_expansion:
             system += "\n" + load_prompt("search", "retry", "system")
 
@@ -2548,7 +2604,7 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
             sections = [f"# 質問\n{query}\n\n# 参考資料（金庫の資料）\n{vault_block}"]
         else:
             sections = [f"# 質問\n{query}\n\n# 参考資料\n{primary_block}"]
-        comparison = comparison_table(query, primary_hits)
+        comparison = comparison_table(query, primary_hits) if compact_sources is None else ""
         if comparison:
             sections.append(comparison)
             sections.append(
@@ -2575,7 +2631,7 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
                 "上記で『関連度低・参考』と付記した資料は関連度が低い参考情報です。確証が持てない"
                 "場合は断定せず、『資料に明確な記載はないが関連しうる』等と不確実性を明示してください。"
             )
-        if related_hits:
+        if related_hits and compact_sources is None:
             related_block = "\n\n".join(
                 f"[chunk_id: {h.chunk_id}{self._date_header(h)}] "
                 f"{(h.metadata or {}).get('title', '')}\n{h.content}"
@@ -2587,8 +2643,12 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
                 "Drive に存在する関連 PDF / Doc の冒頭抜粋です。回答中で別途紹介してください。\n\n"
                 + related_block
             )
-        if self._campaign_files and any(
-            is_campaign_hit(h) and "related_files" in (h.metadata or {}) for h in primary_hits
+        if (
+            compact_sources is None
+            and self._campaign_files
+            and any(
+                is_campaign_hit(h) and "related_files" in (h.metadata or {}) for h in primary_hits
+            )
         ):
             # 施策実績の書き方（数字には資料リンク・無ければ「シートのみ」・業種の扱い）。
             if asked_industry:
@@ -2613,6 +2673,8 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
                 else timeline_status.resolve_statuses([*hits, *karte_hits])
             )
             sections.insert(0, timeline_status.prompt_block(statuses))
+        if compact_sources is not None:
+            sections.append(compact.source_prompt(compact_sources))
         user_message = "以下の社内資料から質問に答えてください。\n\n" + "\n\n".join(sections)
 
         resp = (bedrock if bedrock is not None else self._bedrock).converse(
@@ -2637,7 +2699,7 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
             )
             logger.info("search_comparison_grounding", request_id=request_id, dropped=len(dropped))
             answer = comparison + ("\n\n" + answer if answer.strip() else "")
-        if canonical_campaign_totals and answer.strip():
+        if compact_sources is None and canonical_campaign_totals and answer.strip():
             answer = "\n\n".join(part for part in (answer, canonical_campaign_totals) if part)
         return answer, resp.usage.cost_usd
 

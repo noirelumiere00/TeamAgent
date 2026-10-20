@@ -26,7 +26,7 @@ from tests.skills.search.test_fanout import _converse, make
 from tests.skills.search.test_fanout import setup as setup
 
 
-async def test_direct_metrics_keep_all_rows_and_no_repeated_blank_lines(
+async def test_direct_status_keeps_one_short_answer_without_unrequested_video_rows(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     enable(monkeypatch)
@@ -53,8 +53,8 @@ async def test_direct_metrics_keep_all_rows_and_no_repeated_blank_lines(
     skill, _ = make(campaigns)
     skill._campaign_files = True
     monkeypatch.setattr(skill, "_attach_campaign_files", lambda *a: None)
-    summary = "施策は完了し、商談は検討中です。" * 50
-    skill._summarize = MagicMock(return_value=(summary, 0.01))
+    summary = "施策は完了し、商談は検討中です。"
+    skill._summarize = MagicMock(return_value=(summary + "[S:20]", 0.01))
     slack = _FakeSlack()
     monkeypatch.setattr(detached_jobs, "_slack_client", lambda timeout_seconds: slack)
 
@@ -72,10 +72,10 @@ async def test_direct_metrics_keep_all_rows_and_no_repeated_blank_lines(
     assert posted.startswith(summary)
     # 2500 字以内へ押し込んだ場合に最終施策や行が「…」で切れる本番の形。
     assert len(video_stats_footer(campaigns, "")) > 2500
-    for hit in campaigns:
-        for n in range(1, 6):
-            assert f"https://example.test/{'video' * 30}/{hit.chunk_id - 20}/{n}" in posted
-    assert "探した範囲" in posted
+    assert "📊" not in posted and "https://example.test/" not in posted
+    assert "探した範囲" not in posted
+    assert "https://drive.google.com/file/d/CAMPAIGN_20/view" in posted
+    assert len(posted) <= 2500
     assert "\n\n\n" not in posted
 
 
@@ -93,10 +93,11 @@ async def test_gateway_delivers_comparison_or_exact_case_miss(
     ]
     for hit in campaigns:
         hit.metadata["cls_industry"] = "食品" if comparison else "運輸・交通"
+        hit.metadata["source_uri"] = f"gdrive://CAMPAIGN_{hit.chunk_id}"
     skill, _ = make(campaigns)
     skill._campaign_files = True
     monkeypatch.setattr(skill, "_attach_campaign_files", lambda *a: None)
-    skill._bedrock.converse.return_value = _converse("投稿の内容を紹介しています。")
+    skill._bedrock.converse.return_value = _converse("投稿の内容を紹介しています。[S:1]")
     monkeypatch.setattr(fanout, "build_summary_client", lambda: skill._bedrock)
     slack = _FakeSlack()
     monkeypatch.setattr(detached_jobs, "_slack_client", lambda timeout_seconds: slack)
@@ -115,7 +116,8 @@ async def test_gateway_delivers_comparison_or_exact_case_miss(
     posted = slack.posts[0]["text"]
     if comparison:
         assert payload["delivery"]["answer_kind"] == "comparison"
-        assert posted.startswith("# 施策比較表") and "結論:" in posted
+        assert "# 施策比較表" not in posted
+        assert "投稿の内容を紹介しています。" in posted
         metrics = posted.split("📊", 1)[1]
         assert "507,700" in metrics and "300,000" in metrics
         assert "https://example.test/1" in metrics and "https://example.test/2" in metrics

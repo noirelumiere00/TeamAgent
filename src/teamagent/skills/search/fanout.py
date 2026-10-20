@@ -21,7 +21,7 @@ from teamagent.adapters.pgvector_client import SearchHit
 from teamagent.adapters.retry import RetryPolicy
 from teamagent.mcp_gateway.allowlist import email_allowed
 from teamagent.skills.base import SkillContext
-from teamagent.skills.search import timeline_status
+from teamagent.skills.search import compact, timeline_status
 from teamagent.skills.search.answer_mode import classify_answer_mode
 from teamagent.skills.search.answer_sections import (
     ANSWER_MAX_CHARS,
@@ -34,7 +34,10 @@ from teamagent.skills.search.answer_sections import (
     lane_from_slack,
     scope_line,
 )
-from teamagent.skills.search.campaign_files import campaign_totals_block, is_campaign_hit
+from teamagent.skills.search.campaign_files import (
+    campaign_totals_block,
+    is_campaign_hit,
+)
 from teamagent.skills.search.client_match import hit_entities
 from teamagent.skills.search.comparison import is_comparison_query
 from teamagent.skills.search.composite import (
@@ -168,7 +171,13 @@ def bounded_connection(connect: Callable[[], Any], deadline_at: float) -> Callab
 
 
 def collect_named_sources(
-    skill: Any, conn: Any, client: str | None, ctx: SkillContext, probe: dict[str, Any]
+    skill: Any,
+    conn: Any,
+    client: str | None,
+    ctx: SkillContext,
+    probe: dict[str, Any],
+    *,
+    industry: str | None = None,
 ) -> None:
     """金庫の接続で名指し資料・カルテ・事例を読む。SAVEPOINT で本体を守る。"""
     connect = bounded_connection(reuse_connection(conn), time.perf_counter() + 3.0)
@@ -178,7 +187,7 @@ def collect_named_sources(
     probe["case"] = case_lookup_by_industry(
         skill._pgvector,
         connect,
-        industry=None,
+        industry=industry,
         main_hits=(),
         query_client=client,
         request_id=ctx.request_id,
@@ -225,9 +234,27 @@ def _case_rows(result: SourceResult[Any]) -> list[dict[str, Any]]:
     ]
 
 
+def _case_hits(result: SourceResult[Any]) -> list[SearchHit]:
+    """構造化検索の事例も、取得済みの効果・URLを本文の根拠へ渡す。"""
+    return [
+        SearchHit(
+            # 事例集は文書単位の検索なので、chunk の実IDと衝突しない内部IDを使う。
+            chunk_id=-index,
+            content="\n".join(
+                str(row[key] or "") for key in ("title", "case_product", "case_effect")
+            ),
+            score=1.0,
+            metadata={**row, "case_corpus": "true", "client_name": row["case_client"]},
+        )
+        for index, row in enumerate(_case_rows(result), 1)
+    ]
+
+
 def run_fanout(skill: Any, input: SearchInput, ctx: SkillContext) -> SearchOutput:
     """並行取得→従来の found 判定→専用要約→コードの節と探した範囲。"""
     started = time.perf_counter()
+    compact_enabled = ctx.metadata.get(compact.CTX_KEY) is True
+    compact_mode = compact_enabled and not compact.explicit_list(input.query)
     log = ctx.bind_logger(skill.name)
     log.info(
         "search_skill_start",
@@ -348,9 +375,14 @@ def run_fanout(skill: Any, input: SearchInput, ctx: SkillContext) -> SearchOutpu
                 )
             ),
         )
+    if case_target and cases.items:
+        # 対象に一致した構造化事例も、意味検索と同じ回答の根拠にする。
+        summary_hits = [*summary_hits, *_case_hits(cases)]
     if case_target:
         found = bool((found and summary_hits) or slack.items or cases.items or extra["named"])
         hits = summary_hits
+    if compact_mode and slack.items:
+        found = True
     case_miss = bool(case_target and not found)
     statuses = (
         timeline_status.resolve_statuses([*summary_hits, *extra.get("named", []), *karte.items])
@@ -380,8 +412,14 @@ def run_fanout(skill: Any, input: SearchInput, ctx: SkillContext) -> SearchOutpu
     list_fast = (
         found
         and input.include_answer
-        and os.environ.get("SEARCH_FANOUT_LIST_FAST", "") == "1"
-        and classify_answer_mode(input.query) == "list"
+        and (
+            compact.explicit_list(input.query)
+            if compact_enabled
+            else (
+                os.environ.get("SEARCH_FANOUT_LIST_FAST", "") == "1"
+                and classify_answer_mode(input.query) == "list"
+            )
+        )
         and not is_comparison_query(input.query)
     )
     if list_fast:
@@ -404,7 +442,18 @@ def run_fanout(skill: Any, input: SearchInput, ctx: SkillContext) -> SearchOutpu
                     **({"timeline_statuses": statuses} if statuses is not None else {}),
                     **(
                         {"canonical_campaign_totals": campaign_totals_block(summary_hits)}
-                        if direct_mode
+                        if direct_mode and not compact_mode
+                        else {}
+                    ),
+                    **(
+                        {
+                            "compact_sources": compact.source_map(
+                                [*summary_hits, *karte.items],
+                                slack.items,
+                                lambda h: skill._hit_url(h, file_urls=file_urls),
+                            )
+                        }
+                        if compact_mode
                         else {}
                     ),
                 )
@@ -419,7 +468,7 @@ def run_fanout(skill: Any, input: SearchInput, ctx: SkillContext) -> SearchOutpu
         summary_ms = int((time.perf_counter() - summary_started) * 1000)
         if summary_state != "ok" or not head.strip():
             direct_kind = None
-    if found and input.include_answer:
+    if found and input.include_answer and not compact_mode:
         head = skill._append_campaign_footer(head, summary_hits, asked_industry=asked_industry)
     # 広げる処理は 10s 以内。回収の追加待ちは該当ありで 1s、該当なしで 0s に抑える。
     collection_deadline = time.perf_counter() + (1.0 if found else 0.0)
@@ -536,6 +585,7 @@ def run_fanout(skill: Any, input: SearchInput, ctx: SkillContext) -> SearchOutpu
             if hits
             else LaneStatus.failed("search_failed")
         )
+    guard_header = ""
     if found and skill._result_guard:
         guard_header = build_result_header(
             query=input.query,
@@ -559,7 +609,7 @@ def run_fanout(skill: Any, input: SearchInput, ctx: SkillContext) -> SearchOutpu
         skill._source_links_block(
             summary_hits[:3], file_urls=file_urls, slack_items=slack.items[:3]
         )
-        if found and not list_fast
+        if found and not list_fast and not compact_mode
         else ""
     )
     # 広げた候補は元の問いの根拠ではないため、不在判定の必須レーンに含めない。
@@ -611,6 +661,25 @@ def run_fanout(skill: Any, input: SearchInput, ctx: SkillContext) -> SearchOutpu
         if input.include_answer
         else ""
     )
+    if compact_mode and input.include_answer:
+        if found:
+            answer = compact.build(
+                head,
+                summary_hits,
+                slack.items,
+                lambda h: skill._hit_url(h, file_urls=file_urls),
+                query=input.query,
+                asked_industry=asked_industry,
+                karte_hits=karte.items,
+                notice=guard_header,
+            )
+        elif not visible_found:
+            if slack.hidden_count:
+                answer = "Slackの非公開の場所に一致がありますが、この会話では内容を表示できません。"
+            else:
+                scope = "社内資料・施策実績"
+                scope += "・Slack" if slack.status == "ok" else "（Slackは検索未完了）"
+                answer = build_scoped_not_found_answer(case_target, scope=scope, complete=complete)
     logger.info(
         "search_found_decision",
         request_id=ctx.request_id,
@@ -700,6 +769,11 @@ def run_fanout(skill: Any, input: SearchInput, ctx: SkillContext) -> SearchOutpu
     )
     return SearchOutput(
         answer=answer,
+        answer_format="compact"
+        if compact_mode
+        else "list"
+        if compact_enabled and list_fast
+        else None,
         direct_answer=answer if direct_kind is not None else None,
         direct_answer_kind=direct_kind,
         hits=_output_hits(skill, hits, file_urls),

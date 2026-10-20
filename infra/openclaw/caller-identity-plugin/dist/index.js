@@ -16,6 +16,31 @@ const CLAIM_TTL_SECONDS = 60;
 const INBOUND_CONTEXT_TTL_MS = 10 * 60 * 1000;
 const ACTION_CONTEXT_TTL_MS = 5 * 60 * 1000;
 const MAX_TRACKED_CONTEXTS = 1000;
+const VIDEO_REQUEST_TTL_MS = 45 * 60 * 1000;
+const HEAVY_VIDEO_TOOLS = new Set([
+  "video_algorithm", "video_analysis", "tiktok_acquire", "search_surface_check",
+]);
+
+function videoQueryHash(query) {
+  return createHash("sha256").update(String(query ?? "").normalize("NFKC")
+    .toLowerCase().trim().replace(/\s+/gu, " "), "utf8").digest("hex");
+}
+
+function explicitVideoQuerySlots(content) {
+  if (typeof content !== "string" || !/(?:複数|それぞれ|各(?:KW|キーワード)|[2-9２-９](?:個|つ|KW|キーワード))/u.test(content) ||
+      !/(?:動画|映像|TikTok)/iu.test(content) || !/(?:KW|キーワード|検索語|検索ワード)/iu.test(content) ||
+      !/(?:分析して|解析して|調べて|取得して|検索して|集めて|収集して)/u.test(content)) return [];
+  const labels = [...content.slice(0, 4096).matchAll(/[「『"]([^」』"\n]{1,120})[」』"]/gu)]
+    .map(match => videoQueryHash(match[1]));
+  const slots = [...new Set(labels)];
+  return slots.length > 1 ? slots : [];
+}
+
+function explicitlyRequestsFreshVideoAnalysis(content) {
+  if (typeof content !== "string") return false;
+  if (classifyVideoUrl(content) && /(?:動画|映像).{0,12}(?:見比べて|観比べて)/u.test(content)) return true;
+  return explicitVideoQuerySlots(content).length > 1 || /(?:動画|映像)(?:自体|そのもの)?を(?:見て|観て|視聴して|分析して|解析して)|実(?:映像|際の動画).{0,12}(?:見て|観て|視聴して|分析して)|(?:動画|TikTok).{0,32}(?:取得して|集めて|収集して)|(?:競合|市場|検索KW|検索キーワード).{0,32}上位動画.{0,16}(?:分析して|比較して)/iu.test(content);
+}
 const TEAMAGENT_TOOL_PREFIX = "teamagent__";
 const USER_CONTEXT_KEY = "_user_context";
 const CLAIM_FIELD = "caller_claim";
@@ -415,7 +440,7 @@ const VIDEO_URL_RULES = [
 // （相互検証 2026-09-25: 「明日10:00の会議で使います＋URL」で差し戻していた）。
 // 切り出しの依頼は「切り出し」「画像に」「キャプチャ」「シーン」「サムネ用」で拾う。
 const VIDEO_REQUEST_RE =
-  /(分析|構成|フック|CTA|解説|要約|切り出|切出|キャプチャ|画像に|画像で|静止画|サムネ用|シーン|評価|比較|読み解|勝ち筋|どう作|作りを|内容を)/iu;
+  /(分析|構成|フック|CTA|解説|要約|切り出|切出|キャプチャ|画像に|画像で|静止画|サムネ用|シーン|評価|比較|見比べ|観比べ|読み解|勝ち筋|どう作|作りを|内容を)/iu;
 // 下書きが断りの形か（本番の断り「取得不可です…ファイル添付でお願いします」を含む）。
 // 「できない」単独は拾わない（「明日は参加できない」等）。動画の取得・分析・切り出しに掛かる形に限る。
 // 下書きは判定にだけ使い、保持も記録もしない。
@@ -2984,6 +3009,8 @@ export function createCallerIdentityPlugin({
   const ingressByRun = new Map();
   const rejectedRuns = new Map();
   const consumedInvocations = new Map();
+  // 同じ受信を query の言い換えや別 run で二重起動させない。署名成功後だけ記録する。
+  const videoRequestsByMessage = new Map();
   const toolCallsByRun = new Map();
   const connectRevisionsByRun = new Map();
   // 動画 URL × 0 tool call の層2 の予算（1 run につき revise は 1 回）。連携とは別の台帳。
@@ -3011,12 +3038,26 @@ export function createCallerIdentityPlugin({
   }
   function rememberEvidenceToolResult(event, ctx) {
     const runId = canonicalInvocationId(ctx?.runId);
-    if (!runId || (event?.runId && event.runId !== runId) || event?.error ||
-        event?.result?.isError) return;
+    if (!runId || (event?.runId && event.runId !== runId)) return;
     pruneConnectGuardState(now());
     const entry = evidenceByRun.get(runId) ?? {urls: new Set(), numbers: new Set(),
       metricEvidence: {play: new Set(), save: new Set()}, needsInput: false};
-    if (["search", "teamagent__search"].includes(event?.toolName)) entry.searchCompleted = true;
+    const searchTool = ["search", "teamagent__search"].includes(event?.toolName);
+    if (!searchTool) {
+      entry.compactAnswer = null;
+      const pdfDelivered = !event?.error && !event?.result?.isError &&
+        ["knowledge_deliver", "teamagent__knowledge_deliver"].includes(event?.toolName) &&
+        deliveredPdfBatch(searchResultData(event.result));
+      if (!pdfDelivered) entry.otherReplyRequired = true;
+    }
+    if (event?.error || event?.result?.isError) {
+      if (!searchTool) {
+        entry.updatedAtMs = now();
+        evidenceByRun.set(runId, entry);
+      }
+      return;
+    }
+    if (searchTool) entry.searchCompleted = true;
     if (["oauth_connect", "teamagent__oauth_connect"].includes(event?.toolName)) entry.needsInput = true;
     function collect(value, depth = 0, kind = null) {
       if (depth > 12) return;
@@ -3069,6 +3110,14 @@ export function createCallerIdentityPlugin({
       }
     }
     collect(event.result);
+    if (searchDirectEnabled && ["search", "teamagent__search"].includes(event?.toolName)) {
+      const data = searchResultData(event.result);
+      // Only the trusted MCP envelope defines the final format; retrieved contents cannot opt in.
+      entry.compactModeSeen ||= data?.answer_format === "compact";
+      entry.compactAnswer = !entry.otherReplyRequired && data?.answer_format === "compact" &&
+        typeof data.answer === "string" && data.answer.trim() && data.answer.length <= 2500
+        ? data.answer : null;
+    }
     if (entry.searchCompleted && ["search", "teamagent__search"].includes(event?.toolName)) {
       entry.searchUrls = new Set();
       collectSearchSourceUrls(event.result, entry.searchUrls);
@@ -3341,6 +3390,12 @@ export function createCallerIdentityPlugin({
   }
 
   function pruneConnectGuardState(nowMs) {
+    for (const [key, atMs] of videoRequestsByMessage) {
+      if (nowMs - atMs > VIDEO_REQUEST_TTL_MS) videoRequestsByMessage.delete(key);
+    }
+    while (videoRequestsByMessage.size > MAX_TRACKED_CONTEXTS) {
+      videoRequestsByMessage.delete(videoRequestsByMessage.keys().next().value);
+    }
     for (const ledger of [
       evidenceByRun,
       evidenceBySession,
@@ -3535,6 +3590,7 @@ export function createCallerIdentityPlugin({
           existing.videoRequestIntent = ingress.videoRequestIntent === true;
         }
         if (ingress.searchRequired) existing.searchRequired = ingress.searchRequired;
+        if (ingress.videoAnalysisQuerySlots?.length) existing.videoAnalysisQuerySlots = ingress.videoAnalysisQuerySlots;
         // 再通知でも抑止用台帳を確実に持つ（agent_end 後に ingressByRun 側が消えた後、
         // 同じ受信の再通知が来る順序でも判定が失われないように）。
         rememberConnectIngress(runId, existing);
@@ -3685,8 +3741,11 @@ export function createCallerIdentityPlugin({
       connectShape,
       videoUrlKind,
       videoRequestIntent,
+      videoAnalysisQuerySlots: explicitVideoQuerySlots(event?.content),
       searchRequired: typeof event?.content === "string" && (
-        /比較|何が効|どっちが|どちらが|勝ち|効果/u.test(event.content) ? "comparison" :
+        explicitlyRequestsFreshVideoAnalysis(event.content) ? null :
+        /比較|比べ|何が効|どっちが|どちらが|勝ち|効果/u.test(event.content) ? "comparison" :
+        /一覧|リスト(?:アップ)?|列挙|(?:資料|事例|案件)を全部|全部(?:の資料)?を?(?:出|見せ|並べ)/u.test(event.content) ? "list" :
         /ビデオリリース|\bTTO\b|切り抜き|\bVVS\b|タテガタ|ショートドラマ|スワイプ\s*LP|ソリューションプラン|\bVSEO\b|検索面|お土産資料|ケイパ|感触|BANT|営業\s*FB|カルテ|二次利用費/iu.test(event.content)
           ? "internal_term" : /元の資料|根拠|資料を(?:もと|基)に|ソース/u.test(event.content)
             ? "source" : null),
@@ -3711,7 +3770,10 @@ export function createCallerIdentityPlugin({
       ingress.videoRequestIntent = existing.videoRequestIntent === true;
     }
     if (existing?.searchRequired && !ingress.searchRequired) ingress.searchRequired = existing.searchRequired;
-    if (searchDirectEnabled && typeof event?.content === "string" && event.content.trim()) {
+    if (existing?.videoAnalysisQuerySlots?.length && !ingress.videoAnalysisQuerySlots.length) {
+      ingress.videoAnalysisQuerySlots = existing.videoAnalysisQuerySlots;
+    }
+    if (typeof event?.content === "string" && event.content.trim()) {
       searchQueryByPending.set(pendingKey, {query: event.content.slice(0, 4096), updatedAtMs: nowMs});
     }
     if (answerFeedbackEnabled && answerFeedbackTargets(senderId)) {
@@ -5628,6 +5690,32 @@ export function createCallerIdentityPlugin({
       );
     }
 
+    if (tool === "search" && trusted.searchRequired === "list") {
+      const saved = searchQueryByPending.get(trusted.pendingKey);
+      if (saved?.context) params = {...params,
+        query: [saved.query, saved.context].filter(Boolean).join("\n").slice(0, 1000)};
+    }
+
+    if (trusted.searchRequired === "comparison" && HEAVY_VIDEO_TOOLS.has(tool)) {
+      return {block: true, blockReason:
+        "既存施策の比較は teamagent__search を使い、取得済みの数字と投稿文で答えてください。新しい動画分析は開始しないでください。"};
+    }
+    if (tool === "video_algorithm" && trusted.videoAnalysisQuerySlots?.length && typeof params.query !== "string") {
+      return {block: true, blockReason: "動画分析の検索語を文字列で指定してください。"};
+    }
+    const videoSlot = tool === "video_algorithm" && trusted.videoAnalysisQuerySlots?.length
+      ? videoQueryHash(params.query) : null;
+    if (tool === "video_algorithm" && videoSlot && !trusted.videoAnalysisQuerySlots.includes(videoSlot)) {
+      return {block: true, blockReason: "依頼者が指定した各キーワードをそのまま query に使ってください。"};
+    }
+    const videoRequestKey = tool === "video_algorithm" && trusted.ingressKind === "message"
+      ? JSON.stringify([trusted.teamId, trusted.senderId, trusted.sessionKey,
+        trusted.channelId, trusted.messageId, videoSlot]) : null;
+    if (videoRequestKey && videoRequestsByMessage.has(videoRequestKey)) {
+      return {block: true, blockReason:
+        "この依頼の動画分析は既に受け付けています。検索語を変えて再起動せず、先の受付・結果を使ってください。"};
+    }
+
     const nonceBytes =
       trusted.ingressKind === "action"
         ? actionNonceBytes(trusted.actionFingerprint)
@@ -5663,6 +5751,7 @@ export function createCallerIdentityPlugin({
       runId: eventRunId,
       consumedAtMs: nowMs,
     });
+    if (videoRequestKey) videoRequestsByMessage.set(videoRequestKey, nowMs);
     // 第3層の権威条件 (a): この run で teamagent tool call が発生したことの記録。
     const priorToolCalls = toolCallsByRun.get(eventRunId)?.count ?? 0;
     // Map の挿入順は既存キーへの再 set では更新されない（実測）。
@@ -6013,8 +6102,11 @@ export function createCallerIdentityPlugin({
     const runId = authoritativeRunId(event, ctx, logger, "before_agent_finalize");
     if (!runId) return undefined;
     const ingress = connectIngressByRun.get(runId);
+    const searched = evidenceByRun.get(runId)?.searchCompleted === true;
+    const unrelatedToolSatisfies = !["comparison", "list"].includes(ingress?.searchRequired) &&
+      ((toolCallsByRun.get(runId)?.count ?? 0) > 0 || evidenceByRun.has(runId));
     if (!ingress?.searchRequired || ingress.connectRequest ||
-        (toolCallsByRun.get(runId)?.count ?? 0) > 0 || evidenceByRun.has(runId) ||
+        searched || unrelatedToolSatisfies ||
         typeof event?.lastAssistantMessage !== "string" || !event.lastAssistantMessage.trim() ||
         searchRevisionsByRun.has(runId) ||
         connectRevisionsByRun.has(runId) || videoRevisionsByRun.has(runId)) return undefined;
@@ -6058,14 +6150,26 @@ export function createCallerIdentityPlugin({
     } catch { return null; }
   }
 
+  function deliveredPdfBatch(data) {
+    return data?.delivery?.kind === "knowledge_deliver" && data.delivery.status === "posted" &&
+      Number.isInteger(data.delivered_count) && data.delivered_count > 0 &&
+      data.delivery.delivered_count === data.delivered_count;
+  }
+
   function rememberSearchDelivery(event, ctx, logger) {
     if (!searchDirectEnabled || !searchDirectAllowlist.size || event?.error ||
-        !["search", "teamagent__search"].includes(event?.toolName)) return;
+        !["search", "teamagent__search", "knowledge_deliver", "teamagent__knowledge_deliver"].includes(event?.toolName)) return;
     const runId = canonicalInvocationId(ctx?.runId);
     if (!runId || (event?.runId && event.runId !== runId) || !connectIngressByRun.has(runId)) return;
     const data = searchResultData(event.result);
-    if (data?.status !== "posted" || data.delivered !== true ||
-        data.delivery?.kind !== "search_direct_answer") return;
+    const pdfReceipt = ["knowledge_deliver", "teamagent__knowledge_deliver"].includes(event?.toolName) &&
+      deliveredPdfBatch(data);
+    const searchReceipt = ["search", "teamagent__search"].includes(event?.toolName) &&
+      data?.status === "posted" && data.delivered === true && data.delivery?.kind === "search_direct_answer";
+    if (!pdfReceipt && !searchReceipt) return;
+    const evidence = evidenceByRun.get(runId);
+    if (pdfReceipt && (evidence?.otherReplyRequired ||
+        (evidence?.compactModeSeen && !evidence.compactPayload))) return;
     const entry = searchDirectByRun.get(runId) ?? {};
     entry.delivered = true;
     entry.updatedAtMs = now();
@@ -6075,10 +6179,11 @@ export function createCallerIdentityPlugin({
   }
 
   function rememberSearchConversation(event, ctx) {
-    if (!searchDirectEnabled) return;
     const runId = canonicalInvocationId(ctx?.runId);
     if (!runId || (event?.runId && event.runId !== runId)) return;
     const ingress = connectIngressByRun.get(runId);
+    if (!ingress || (!SLACK_DM_CHANNEL_RE.test(ingress.channelId) &&
+        ingress.channelId !== `DM:${ingress.senderId}`)) return;
     const entry = ingress && searchQueryByPending.get(ingress.pendingKey);
     if (!entry || !Array.isArray(event?.messages) || !event.messages.length) return;
     // Earlier user turns carry client/campaign names; assistant guesses are not search inputs.
@@ -6146,8 +6251,10 @@ export function createCallerIdentityPlugin({
       const normalized = finalizeOutgoingText({payload: {text: data.direct_delivery.answer}}, logger, runId)?.payload?.text ?? data.direct_delivery.answer;
       const evidence = evidenceByRun.get(runId);
       const grounded = groundEvidenceReply(restoreEvidenceUrls(normalized, evidence?.urls), evidence);
-      const sourced = appendMissingSearchSources(grounded, evidence?.searchUrls);
-      const text = scrubOutboundReplyText(sourced, connectUrlsByRun.get(runId)?.urls).text
+      const sourced = data.direct_delivery.answer_format === "compact"
+        ? grounded : appendMissingSearchSources(grounded, evidence?.searchUrls);
+      const linked = sourced.replace(/\[([^\]\n]+)\]\(<?(https?:\/\/[^\s<>)]+)>?\)/gu, "$1 $2");
+      const text = scrubOutboundReplyText(linked, connectUrlsByRun.get(runId)?.urls).text
         .replace(/<[@!][^>\n]*>/gu, escapeSlackText);
       if (!text.trim()) return;
       await postButtonMessage({channel, threadTs}, {text});
@@ -6170,6 +6277,7 @@ export function createCallerIdentityPlugin({
         payload?.isReasoning === true || payload?.isCommentary === true) return;
     const entry = searchDirectByRun.get(runId);
     if (!entry) return;
+    if (evidenceByRun.get(runId)?.otherReplyRequired) return;
     if (entry.pending) return entry.task.then(() => suppressSearchReply(event, ctx));
     if (entry.delivered || entry.replaced) return {cancel: true, reason: "search answer already delivered"};
     if (entry.failed) {
@@ -7269,13 +7377,25 @@ export function createCallerIdentityPlugin({
           const evidence = authoritative ? evidenceByRun.get(runId) : undefined;
           const session = authoritative ? evidenceSessionKey(runId) : null;
           const urls = evidence?.urls?.size ? evidence.urls : evidenceBySession.get(session)?.urls;
-          const restored = restoreEvidenceUrls(payload.text, urls);
+          const finalTextOnly = (event.kind === undefined || event.kind === "final") &&
+            payload.isCommentary !== true && payload.isReasoning !== true &&
+            !payload.mediaUrl && !payload.mediaUrls?.length && !payload.attachments?.length &&
+            !payload.blocks?.length && !payload.files?.length && !payload.channelData;
+          if (finalTextOnly && evidence?.compactAnswer && evidence.compactPayload && evidence.compactPayload !== event.payload) {
+            return finishRevisedReply(event, ctx, {...result, cancel: true});
+          }
+          const compactText = finalTextOnly && evidence?.compactAnswer
+            ? (finalizeOutgoingText({payload: {...payload, text: evidence.compactAnswer}}, api.logger, runId)?.payload?.text ?? evidence.compactAnswer)
+            : null;
+          if (compactText) evidence.compactPayload = event.payload;
+          const restored = restoreEvidenceUrls(compactText ?? payload.text, urls);
           if (restored !== payload.text) emitPluginLog(api.logger, "info", "outbound URL restored diagnostic=CONNECT-Z04");
           const trimmed = authoritative ? groundEvidenceReply(restored, evidence) : restored;
           if (payload.text.trim() && !trimmed.trim()) {
             return finishRevisedReply(event, ctx, { ...result, cancel: true });
           }
-          const sourced = authoritative ? appendMissingSearchSources(trimmed, evidence?.searchUrls) : trimmed;
+          const sourced = authoritative && !evidence?.compactModeSeen
+            ? appendMissingSearchSources(trimmed, evidence?.searchUrls) : trimmed;
           const scrubbed = scrubOutboundReplyText(sourced, replacements);
           if (scrubbed.text !== payload.text) {
             const { signedUrls, toolNames, urlSeparators, unverifiedConnectUrls = 0 } = scrubbed.counts;

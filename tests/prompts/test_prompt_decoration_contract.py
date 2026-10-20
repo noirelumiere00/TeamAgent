@@ -52,6 +52,7 @@ HUMAN_FACING_PROMPTS = (
     "proposal_review/v1/system.md",
     "search/v2d/system.md",
     "search/v3/system.md",
+    "search/compact/system.md",
     # 複合検索（USE_COMPOSITE_SEARCH）で search の user message に足す節（出典の書き分け）。
     "search/composite/slack.md",
     # 施策実績のヒットがあるとき search の user message に足す節（資料リンク・業種の扱い）。

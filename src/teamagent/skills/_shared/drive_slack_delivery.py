@@ -161,6 +161,7 @@ async def deliver_files(
     thread_ts: str | None = None,
     email: str | None = None,
     dm_channel: str | None = None,
+    single_post: bool = False,
 ) -> tuple[set[str], str]:
     """prepared を配信。返り値 (配信できた file_id 集合, 配信先種別 ``"thread"|"dm"|""``)。
 
@@ -168,7 +169,31 @@ async def deliver_files(
     ``users.lookupByEmail`` / ``conversations.open`` を叩かない。同じリクエストで
     テキストも DM へ投げる呼び出し元（clientkarte）が 1 度だけ解決した結果を共有し、
     往復を二重に撃たないため（2026-08-20 レビュー 要修正3(a)）。
+
+    ``single_post`` は全ファイルを 1 投稿に同梱する。部分応答・タイムアウトは
+    ``"uncertain"`` とし、既に配信された可能性があるため他の配信先へ再送しない。
     """
+    if single_post:
+        destination = channel_id or dm_channel
+        where = "thread" if channel_id else "dm"
+        if not destination and email:
+            user_id = await slack.lookup_user_id_by_email(email, request_id)
+            if user_id:
+                destination = await slack.open_dm(user_id, request_id)
+            thread_ts = None
+        if not destination or not prepared:
+            return set(), ""
+        status = await slack.upload_files(
+            destination,
+            [(path, filename) for _, path, filename in prepared],
+            request_id,
+            initial_comment=comment,
+            thread_ts=thread_ts,
+        )
+        if status == "posted":
+            return {file_id for file_id, _, _ in prepared}, where
+        return set(), "uncertain" if status == "uncertain" else ""
+
     if channel_id:
         delivered = await upload_all(slack, channel_id, thread_ts, prepared, comment, request_id)
         if delivered:

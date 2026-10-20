@@ -1207,17 +1207,20 @@ async def dispatch_tool(
 
     metadata.pop(direct_search_answer.CTX_KEY, None)
     metadata.pop(direct_search_answer.KINDS_CTX_KEY, None)
+    metadata.pop("_search_compact_answer", None)
     search_direct_kinds = direct_search_answer.allowed_kinds()
     search_direct_destination = None
-    if name == SEARCH_TOOL_NAME:
+    if name in {SEARCH_TOOL_NAME, "knowledge_deliver"}:
         search_direct_destination, _ = direct_summary.decide_destination(
             direct_search_answer.load_policy(),
             verified_caller=verified_caller,
             metadata=metadata,
         )
         if search_direct_destination is not None:
-            metadata[direct_search_answer.CTX_KEY] = True
-            metadata[direct_search_answer.KINDS_CTX_KEY] = tuple(search_direct_kinds)
+            metadata["_search_compact_answer"] = True
+            if name == SEARCH_TOOL_NAME:
+                metadata[direct_search_answer.CTX_KEY] = True
+                metadata[direct_search_answer.KINDS_CTX_KEY] = tuple(search_direct_kinds)
     ctx = SkillContext(user_id=metadata.get("user_email"), metadata=metadata)
 
     # ── video_algorithm の切り離し（USE_VIDEO_ALGORITHM_DETACH 既定OFF＝以下は素通り）─────
@@ -1580,6 +1583,8 @@ async def dispatch_tool(
             and direct_kind in search_direct_kinds
         ):
             candidate = {"answer_kind": direct_kind, "answer": direct_answer}
+            if data.get("answer_format") is not None:
+                candidate["answer_format"] = data["answer_format"]
             data["direct_delivery"] = candidate
             search_direct_attempted = True
             posted = await asyncio.to_thread(
@@ -1594,7 +1599,12 @@ async def dispatch_tool(
                 return [TextContent(type="text", text=json.dumps(posted, ensure_ascii=False))]
             if posted is not None:
                 data["delivery"] = posted["delivery"]
-    if name == SEARCH_TOOL_NAME and isinstance(data, dict) and not search_direct_attempted:
+    if (
+        name == SEARCH_TOOL_NAME
+        and isinstance(data, dict)
+        and not search_direct_attempted
+        and data.get("answer_format") != "compact"
+    ):
         await asyncio.to_thread(
             direct_video_metrics.maybe_post,
             data,
