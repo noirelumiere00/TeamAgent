@@ -1180,6 +1180,9 @@ class ProposalBuilderSkill(BaseSkill[ProposalBuilderInput, ProposalBuilderOutput
                 deck_warning = "\n" + UNAVAILABLE_WARNING
                 log.warning("proposal_builder_review_format_failed", error_type=type(exc).__name__)
             warnings.extend(deck_lines)
+            warnings.extend(deck_output.length_warnings)
+            if deck_output.length_warnings:
+                deck_warning += "\n" + "\n".join(deck_output.length_warnings)
             ready_message = (
                 "提案書を生成しました。出典の無い数値は『要確認』に置き換えています。"
                 if deck_output.review_slides

@@ -4,8 +4,9 @@
 python-pptx（renderer）。teamagent_consulting で AWS Bedrock 実走まで実証した Composer を
 本番 Skill 化したもの。研究素材（過去事例/Slack/Mail/Web）は Agent が他 Skill で集めて渡す。
 
-ComposerOutput の検証（網羅・文字数・citations）違反は、そのエラー文を次ターンに渡して
-self-repair（最大 input.max_repair 回）。converse は tool を使わず、モデルに JSON のみを
+文字数違反は該当枠だけ最大2回・追加0.10 USD/デッキの範囲で再生成し、残りは要確認文にする。
+他の契約違反はエラー文を次ターンに渡して self-repair（最大 input.max_repair 回）。
+converse は tool を使わず、モデルに JSON のみを
 出力させて parse する（コードフェンス/前後文は _extract_json が許容）。
 """
 
@@ -25,12 +26,17 @@ from typing import Any, ClassVar
 import structlog
 from pydantic import BaseModel, ValidationError
 
-from teamagent.adapters.bedrock_client import BedrockClient
+from teamagent.adapters.bedrock_client import BedrockClient, _estimate_cost
 from teamagent.prompts.loader import load_prompt
 from teamagent.skills._shared.deck_review import review_slides
 from teamagent.skills.base import BaseSkill, SkillContext, register
 from teamagent.skills.proposal_deck.confidentiality import contains_forbidden_term
-from teamagent.skills.proposal_deck.contract import ComposerOutput, SkippedPlaceholder
+from teamagent.skills.proposal_deck.contract import (
+    LENGTH_RULES,
+    ComposerOutput,
+    PlaceholderLengthError,
+    SkippedPlaceholder,
+)
 from teamagent.skills.proposal_deck.provenance import (
     ProvenanceValidationError,
     extract_evidence_urls,
@@ -43,6 +49,8 @@ logger = structlog.get_logger(__name__)
 _JSON_FENCE = re.compile(r"```(?:json)?\s*(\{.*\})\s*```", re.DOTALL)
 _SAFE_NAME = re.compile(r"[^\w\-]+", re.UNICODE)
 _MAX_RENDER_EVIDENCE = 20
+_LENGTH_REPAIR_BUDGET_USD = 0.10
+_LENGTH_REPAIR_MAX_TOKENS = 2048
 
 
 def _envflag(name: str) -> bool:
@@ -164,7 +172,7 @@ class ProposalDeckSkill(BaseSkill[ProposalDeckInput, ProposalDeckOutput]):
             max_repair=input.max_repair,
         )
 
-        composer_out, cost_usd = self._compose(input, ctx)
+        composer_out, cost_usd, length_warnings = self._compose(input, ctx)
 
         # 版 ID: 再生成ごとに一意。版管理/差し替え追跡の anchor（提案#12,#19）。
         version_id = f"v-{uuid.uuid4().hex[:12]}"
@@ -229,6 +237,7 @@ class ProposalDeckSkill(BaseSkill[ProposalDeckInput, ProposalDeckOutput]):
                 skipped_count=len(skipped_ids),
                 coverage_ratio=composer_out.coverage_ratio,
                 skipped_ids=skipped_ids,
+                length_warnings=length_warnings,
                 review_slides=review,
                 total_cost_usd=cost_usd,
             )
@@ -467,12 +476,98 @@ class ProposalDeckSkill(BaseSkill[ProposalDeckInput, ProposalDeckOutput]):
             raise FileNotFoundError(f"FMT テンプレが見つかりません: {path}")
         return path
 
-    def _compose(self, input: ProposalDeckInput, ctx: SkillContext) -> tuple[ComposerOutput, float]:
+    def _repair_lengths(
+        self,
+        data: dict[str, Any],
+        input: ProposalDeckInput,
+        ctx: SkillContext,
+        *,
+        spent: float,
+    ) -> tuple[float, list[str]]:
+        """正常な枠・出典を保持し、初回込み3回で収まらない枠だけ既定文にする。"""
+        try:
+            ComposerOutput.model_validate(data)
+        except ValidationError as exc:
+            errors = exc.errors()
+            cause = errors[0].get("ctx", {}).get("error")
+            if len(errors) != 1 or not isinstance(cause, PlaceholderLengthError):
+                raise
+            invalid = cause.texts.copy()
+        else:
+            return 0.0, []
+
+        original = invalid.copy()
+        cost = 0.0
+        for _ in range(min(input.max_repair, 2)):
+            if not invalid:
+                break
+            prompt = (
+                "次の文字数違反の枠だけを書き直してください。意味・事実を保ち、"
+                '新たな主張や数値を追加しないこと。JSON {"placeholders": '
+                '{"ID": "修正文"}} のみを返してください。\n'
+                + "\n".join(
+                    f"{{{pid}}} length {len(text)} out of {list(LENGTH_RULES[pid])}: "
+                    + json.dumps(text, ensure_ascii=False)
+                    for pid, text in invalid.items()
+                )
+            )
+            # UTF-8バイト数＋通信枠を入力tokenの保守的上限とし、出力上限も予約する。
+            reserve = _estimate_cost(
+                self._bedrock.model_id,
+                len(prompt.encode("utf-8")) + 1024,
+                _LENGTH_REPAIR_MAX_TOKENS,
+            )
+            # 未知の料金モデルでは有料修復せず、上限内の既定文へ進む。
+            if reserve <= 0 or spent + cost + reserve > _LENGTH_REPAIR_BUDGET_USD:
+                break
+            try:
+                resp = self._bedrock.converse(
+                    messages=[{"role": "user", "content": [{"text": prompt}]}],
+                    request_id=ctx.request_id,
+                    max_tokens=_LENGTH_REPAIR_MAX_TOKENS,
+                )
+            except Exception as exc:
+                ctx.bind_logger(self.name).warning(
+                    "proposal_deck_length_repair_unavailable", error_type=type(exc).__name__
+                )
+                break
+            cost += resp.usage.cost_usd
+            try:
+                patch = json.loads(_extract_json(resp.text))
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(patch, dict) or not isinstance(patch.get("placeholders"), dict):
+                continue
+            for pid in list(invalid):
+                text = patch["placeholders"].get(str(pid))
+                if not isinstance(text, str) or not text.strip():
+                    continue
+                invalid[pid] = text
+                lo, hi = LENGTH_RULES[pid]
+                if lo <= len(text) <= hi:
+                    data["placeholders"][str(pid)] = text
+                    del invalid[pid]
+
+        for pid in invalid:
+            lo, hi = LENGTH_RULES[pid]
+            data["placeholders"][str(pid)] = "要確認（文字数調整）"[:hi].ljust(lo, "　")
+            data.get("citations_per_placeholder", {}).pop(str(pid), None)
+        return cost, [
+            f"文字数調整 {{{pid}}}: {len(original[pid])}字 → "
+            f"{len(data['placeholders'][str(pid)])}字（上限{LENGTH_RULES[pid][1]}字、"
+            + ("要確認の既定文に置換）" if pid in invalid else "再生成で修正）")
+            for pid in sorted(original)
+        ]
+
+    def _compose(
+        self, input: ProposalDeckInput, ctx: SkillContext
+    ) -> tuple[ComposerOutput, float, list[str]]:
         system = load_prompt("proposal_deck", self._prompt_version, "system")
         messages: list[dict[str, Any]] = [
             {"role": "user", "content": [{"text": self._build_user_message(input)}]}
         ]
         total_cost = 0.0
+        length_repair_cost = 0.0
         last_error: str | None = None
         for attempt in range(input.max_repair + 1):
             resp = self._bedrock.converse(
@@ -484,6 +579,7 @@ class ProposalDeckSkill(BaseSkill[ProposalDeckInput, ProposalDeckOutput]):
             )
             total_cost += resp.usage.cost_usd
             data: Any = None
+            length_warnings: list[str] = []
             try:
                 data = json.loads(_extract_json(resp.text))
                 # evidence は上流フィーダだけを信頼し、モデルが出した値は検証前に破棄する。
@@ -494,7 +590,12 @@ class ProposalDeckSkill(BaseSkill[ProposalDeckInput, ProposalDeckOutput]):
                     # 列挙すると contract で弾かれ repair を 1 回浪費するので、検証前に落とす
                     # （2026-09-16 実走で発生。placeholders 側の 48〜55 も同様に無視する）。
                     _drop_merged_placeholder_ids(data)
-                return self._finalize_composer(data, input), total_cost
+                    repair_cost, length_warnings = self._repair_lengths(
+                        data, input, ctx, spent=length_repair_cost
+                    )
+                    length_repair_cost += repair_cost
+                    total_cost += repair_cost
+                return self._finalize_composer(data, input), total_cost, length_warnings
             except (
                 json.JSONDecodeError,
                 ValidationError,
@@ -521,7 +622,7 @@ class ProposalDeckSkill(BaseSkill[ProposalDeckInput, ProposalDeckOutput]):
                                     skipped_ids=skipped_ids,
                                     total_cost_usd=round(total_cost, 4),
                                 )
-                                return composer_out, total_cost
+                                return composer_out, total_cost, length_warnings
                     break
                 messages.append({"role": "assistant", "content": [{"text": resp.text[:4000]}]})
                 messages.append(
