@@ -301,12 +301,15 @@ class SlackHitOut(BaseModel):
 _OMIT_WHEN_NONE: tuple[str, ...] = ("slack_hits", "slack_status", "suggested_next", "sources")
 
 
+SearchDirectAnswerKind = Literal["not_found", "comparison", "list_fast", "video_metrics"]
+
+
 class SearchOutput(BaseModel):
     """検索 Skill の出力。"""
 
     answer: str = Field(description="Claude による要約（引用付き）")
     direct_answer: str | None = Field(default=None, exclude=True)
-    direct_answer_kind: str | None = Field(default=None, exclude=True)
+    direct_answer_kind: SearchDirectAnswerKind | None = Field(default=None, exclude=True)
     hits: list[SearchHitOut] = Field(default_factory=list, description="検索ヒット一覧")
     total_cost_usd: float = Field(ge=0.0, description="この検索実行の概算コスト")
     found: bool = Field(

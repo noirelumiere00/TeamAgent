@@ -144,7 +144,18 @@ def test_direct_campaign_answers_keep_canonical_totals_with_model_summary(
         skill = _skill(_Pg([campaign, related], []), answer=model_answer)
         result = skill.run(
             SearchInput(query="施策実績"),
-            SkillContext(metadata={"user_email": ME, "_search_direct_answer": True}),
+            SkillContext(
+                metadata={
+                    "user_email": ME,
+                    "_search_direct_answer": True,
+                    "_search_direct_answer_kinds": (
+                        "not_found",
+                        "comparison",
+                        "list_fast",
+                        "video_metrics",
+                    ),
+                }
+            ),
         )
         skill._bedrock.converse.assert_called_once()
         assert result.answer.startswith(model_answer)

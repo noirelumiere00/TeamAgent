@@ -644,6 +644,7 @@ resource "aws_ecs_task_definition" "mcp" {
       # OC の抑止を先に ON にしてから MCP の直接投稿を ON にする。許可リストは共通。
       { name = "SEARCH_DIRECT_ANSWER", value = var.search_direct_answer },
       { name = "SEARCH_DIRECT_ANSWER_ALLOWED_EMAILS", value = var.search_direct_answer_allowed_emails },
+      { name = "SEARCH_DIRECT_ANSWER_KINDS", value = var.search_direct_answer_kinds },
       # Conditional PutItemでrolling taskを跨いだnonce one-useを保証。障害時は認可fail-closed。
       { name = "TEAMAGENT_CALLER_CLAIM_REPLAY_TABLE", value = aws_dynamodb_table.mcp_caller_claim_nonces.name },
       # v0.3 Task6: AiLaVault リンク注入の発火条件（未設定だと build_search_web_links が
@@ -1142,6 +1143,7 @@ resource "aws_ecs_task_definition" "openclaw" {
       { name = "SLACK_DM_ALLOWLIST", value = var.slack_dm_allowlist },
       { name = "SEARCH_DIRECT_ANSWER", value = var.openclaw_search_direct_answer },
       { name = "SEARCH_DIRECT_ANSWER_ALLOWED_EMAILS", value = var.search_direct_answer_allowed_emails },
+      { name = "SEARCH_DIRECT_ANSWER_KINDS", value = var.search_direct_answer_kinds },
     ]
     secrets = [
       { name = "TEAMAGENT_MCP_BEARER", valueFrom = data.aws_secretsmanager_secret.bearer.arn },

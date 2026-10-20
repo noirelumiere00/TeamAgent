@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import re
 from typing import Any
 
@@ -14,6 +15,8 @@ logger = structlog.get_logger(__name__)
 ENABLED_ENV = "SEARCH_DIRECT_ANSWER"
 ALLOWED_EMAILS_ENV = "SEARCH_DIRECT_ANSWER_ALLOWED_EMAILS"
 CTX_KEY = "_search_direct_answer"
+KINDS_ENV = "SEARCH_DIRECT_ANSWER_KINDS"
+KINDS_CTX_KEY = "_search_direct_answer_kinds"
 KINDS = frozenset({"not_found", "comparison", "list_fast", "video_metrics"})
 POSTED_TEXT = "回答はこの会話に投稿済みです。同じ内容の要約・補足は書かないでください。"
 _MARKDOWN_LINK = re.compile(r"\[([^\]\n]+)\]\(<?(https?://[^\s<>)]+)>?\)")
@@ -25,6 +28,13 @@ def load_policy() -> direct_summary.DirectPolicy:
     )
 
 
+def allowed_kinds() -> frozenset[str]:
+    kinds = frozenset(
+        value.strip() for value in os.environ.get(KINDS_ENV, "").split(",") if value.strip()
+    )
+    return kinds if kinds <= KINDS else frozenset()
+
+
 def deliver(
     answer: str,
     kind: str,
@@ -33,7 +43,7 @@ def deliver(
     request_id: str,
 ) -> dict[str, Any] | None:
     """投稿成功だけを抑止の根拠にする。失敗時は元のツール結果を返す。"""
-    if kind not in KINDS or not answer.strip():
+    if kind not in allowed_kinds() or not answer.strip():
         return None
     # URL を Markdown の括弧から外し、共通の Slack エスケープを 1 回だけ掛ける。
     text = markdown_bold_to_mrkdwn(_MARKDOWN_LINK.sub(r"\1 \2", answer))

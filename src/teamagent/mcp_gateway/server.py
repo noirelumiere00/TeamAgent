@@ -1199,6 +1199,8 @@ async def dispatch_tool(
             )
 
     metadata.pop(direct_search_answer.CTX_KEY, None)
+    metadata.pop(direct_search_answer.KINDS_CTX_KEY, None)
+    search_direct_kinds = direct_search_answer.allowed_kinds()
     search_direct_destination = None
     if name == SEARCH_TOOL_NAME:
         search_direct_destination, _ = direct_summary.decide_destination(
@@ -1208,6 +1210,7 @@ async def dispatch_tool(
         )
         if search_direct_destination is not None:
             metadata[direct_search_answer.CTX_KEY] = True
+            metadata[direct_search_answer.KINDS_CTX_KEY] = tuple(search_direct_kinds)
     ctx = SkillContext(user_id=metadata.get("user_email"), metadata=metadata)
 
     # ── video_algorithm の切り離し（USE_VIDEO_ALGORITHM_DETACH 既定OFF＝以下は素通り）─────
@@ -1564,7 +1567,13 @@ async def dispatch_tool(
     ):
         direct_answer = getattr(output, "direct_answer", None)
         direct_kind = getattr(output, "direct_answer_kind", None)
-        if isinstance(direct_answer, str) and direct_kind in direct_search_answer.KINDS:
+        if (
+            isinstance(direct_answer, str)
+            and direct_answer.strip()
+            and direct_kind in search_direct_kinds
+        ):
+            candidate = {"answer_kind": direct_kind, "answer": direct_answer}
+            data["direct_delivery"] = candidate
             search_direct_attempted = True
             posted = await asyncio.to_thread(
                 direct_search_answer.deliver,
@@ -1574,6 +1583,7 @@ async def dispatch_tool(
                 request_id=ctx.request_id,
             )
             if posted is not None and posted.get("delivered") is True:
+                posted["direct_delivery"] = candidate
                 return [TextContent(type="text", text=json.dumps(posted, ensure_ascii=False))]
             if posted is not None:
                 data["delivery"] = posted["delivery"]

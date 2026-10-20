@@ -244,6 +244,7 @@ def test_search_direct_answer_rollout_is_ordered_and_denied_by_default() -> None
         block = _block(TF_ROOT / "fargate.tf", "aws_ecs_task_definition", task)
         for env_name, variable, default in (
             ("SEARCH_DIRECT_ANSWER", flag, "0"),
+            ("SEARCH_DIRECT_ANSWER_KINDS", "search_direct_answer_kinds", ""),
             ("SEARCH_DIRECT_ANSWER_ALLOWED_EMAILS", "search_direct_answer_allowed_emails", ""),
         ):
             assert f'{{ name = "{env_name}", value = var.{variable} }}' in block

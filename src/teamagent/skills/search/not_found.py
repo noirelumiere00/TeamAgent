@@ -201,10 +201,22 @@ def case_target_hits(hits: Sequence[SearchHit], target: str | None) -> list[Sear
     return [hit for hit in hits if target_matches(_haystack(hit), target)]
 
 
-def build_case_not_found_answer(target: str, *, unavailable: str = "") -> str:
+def build_case_not_found_answer(
+    target: str, *, unavailable: str = "", scope: str = "社内資料・施策実績・Slack"
+) -> str:
     """一致事例 0 件の回答は無関係な事例・探し直しの依頼を付けずに確定する。"""
-    scope = "社内資料・施策実績・Slack" + (f"／{unavailable}" if unavailable else "")
+    scope += f"／{unavailable}" if unavailable else ""
     return f"{target}の事例は見つかりませんでした（探した範囲: {scope}）。"
+
+
+def build_scoped_not_found_answer(target: str | None, *, scope: str, complete: bool) -> str:
+    """検索未完了を不在と区別し、短文に無関係な候補を混ぜない。"""
+    if not complete:
+        subject = f"{target}の事例の有無" if target else "該当する資料の有無"
+        return f"{subject}は検索が完了せず確認できませんでした（探した範囲: {scope}）。"
+    if target:
+        return build_case_not_found_answer(target, scope=scope)
+    return f"{NOT_FOUND_HEAD}（探した範囲: {scope}）。"
 
 
 def _haystack(hit: SearchHit) -> str:
@@ -341,6 +353,7 @@ __all__ = [
     "FoundDecision",
     "build_case_not_found_answer",
     "build_not_found_answer",
+    "build_scoped_not_found_answer",
     "case_query_target",
     "case_target_hits",
     "judge_found",

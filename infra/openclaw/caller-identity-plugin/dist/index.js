@@ -2560,6 +2560,10 @@ export function createCallerIdentityPlugin({
   // heartbeat run を bindSlackActionRun で束縛）のまま。register のバナーに button_direct を出す。
   const buttonDirect =
     mcpBearer !== null && slackBotToken !== null && typeof fetchFn === "function";
+  const searchDirectKnownKinds = new Set(["not_found", "comparison", "list_fast", "video_metrics"]);
+  const searchDirectKinds = new Set(String(env.SEARCH_DIRECT_ANSWER_KINDS ?? "")
+    .split(",").map(value => value.trim()).filter(Boolean));
+  if ([...searchDirectKinds].some(kind => !searchDirectKnownKinds.has(kind))) searchDirectKinds.clear();
   const searchDirectEnabled = ["1", "true", "yes"].includes(String(env.SEARCH_DIRECT_ANSWER ?? "").trim().toLowerCase());
   const searchDirectAllowlist = new Set(String(env.SEARCH_DIRECT_ANSWER_ALLOWED_EMAILS ?? "")
     .split(",").map(value => value.trim().toLowerCase()).filter(Boolean));
@@ -5787,7 +5791,13 @@ export function createCallerIdentityPlugin({
       rememberSearchDelivery({toolName: "search", result, runId}, {runId}, logger);
       if (entry.delivered || (data.delivery?.kind === "search_direct_answer" &&
           ["failed", "uncertain"].includes(data.delivery.status))) return;
-      if (typeof data.answer !== "string" || !data.answer.trim()) throw new ConnectPathError("mcp_invalid_result");
+      const candidate = data.direct_delivery;
+      if (!isPlainObject(candidate) || !searchDirectKinds.has(candidate.answer_kind) ||
+          typeof candidate.answer !== "string" || !candidate.answer.trim()) {
+        // 種類外は直接投稿しない。検索していない下書きを出さないよう、フラグ OFF と同じ再パスへ戻す。
+        emitPluginLog(logger, "info", "search direct outcome=skipped reason=kind");
+        return reviseSearchZeroTool(runId, ingress, logger, event);
+      }
     } catch (error) {
       entry.failed = true;
       emitPluginLog(logger, "warn", `search direct outcome=failed reason=${connectPathReason(error)}`);
@@ -5796,7 +5806,7 @@ export function createCallerIdentityPlugin({
     const data = searchResultData(result);
     try {
       const threadTs = ingress.threadTs;
-      const normalized = finalizeOutgoingText({payload: {text: data.answer}}, logger, runId)?.payload?.text ?? data.answer;
+      const normalized = finalizeOutgoingText({payload: {text: data.direct_delivery.answer}}, logger, runId)?.payload?.text ?? data.direct_delivery.answer;
       const evidence = evidenceByRun.get(runId);
       const grounded = groundEvidenceReply(restoreEvidenceUrls(normalized, evidence?.urls), evidence);
       const sourced = appendMissingSearchSources(grounded, evidence?.searchUrls);

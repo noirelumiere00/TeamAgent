@@ -975,6 +975,7 @@ def test_entrypoint_is_readonly_secret_safe_and_environment_allowlisted() -> Non
         "TEAMAGENT_FIRST_MESSAGE_RESTORE",
         "SEARCH_DIRECT_ANSWER",
         "SEARCH_DIRECT_ANSWER_ALLOWED_EMAILS",
+        "SEARCH_DIRECT_ANSWER_KINDS",
     }
     # 秘密値の受け皿にしない（allowlist の意味が消える）。
     assert diagnostic.isdisjoint(passthrough)
@@ -1021,6 +1022,7 @@ process.stdout.write(child.stdout);
             "PATH": os.environ["PATH"],
             "SEARCH_DIRECT_ANSWER": flag,
             "SEARCH_DIRECT_ANSWER_ALLOWED_EMAILS": allowed,
+            "SEARCH_DIRECT_ANSWER_KINDS": "not_found",
             "NODE_OPTIONS": "--no-warnings",
             "UNAPPROVED_ENV": "must-not-reach-child",
         },
@@ -1033,6 +1035,7 @@ process.stdout.write(child.stdout);
     child = json.loads(result.stdout)
     assert child["SEARCH_DIRECT_ANSWER"] == flag
     assert child["SEARCH_DIRECT_ANSWER_ALLOWED_EMAILS"] == allowed
+    assert child["SEARCH_DIRECT_ANSWER_KINDS"] == "not_found"
     assert "NODE_OPTIONS" not in child
     assert "UNAPPROVED_ENV" not in child
 
@@ -1395,6 +1398,8 @@ def _render_task(task: dict[str, Any], image: str) -> subprocess.CompletedProces
     [
         [],
         [{"name": "SEARCH_DIRECT_ANSWER", "value": "1"}],
+        [{"name": "SEARCH_DIRECT_ANSWER_KINDS", "value": "not_found"}],
+        [{"name": "SEARCH_DIRECT_ANSWER_KINDS", "value": ""}],
         [{"name": "SEARCH_DIRECT_ANSWER_ALLOWED_EMAILS", "value": "*"}],
         [
             {"name": "SEARCH_DIRECT_ANSWER", "value": "0"},
@@ -1420,7 +1425,10 @@ def test_task_hardening_preserves_legacy_inputs_and_optional_search_delivery_inp
     assert json.loads(rendered.stdout)["containerDefinitions"][0]["environment"] == environment
 
 
-@pytest.mark.parametrize("name", ["SEARCH_DIRECT_ANSWER", "SEARCH_DIRECT_ANSWER_ALLOWED_EMAILS"])
+@pytest.mark.parametrize(
+    "name",
+    ["SEARCH_DIRECT_ANSWER", "SEARCH_DIRECT_ANSWER_ALLOWED_EMAILS", "SEARCH_DIRECT_ANSWER_KINDS"],
+)
 @pytest.mark.parametrize("value", [None, True, 1, [], {}])
 def test_task_hardening_rejects_non_string_search_delivery_inputs(name: str, value: Any) -> None:
     task = json.loads(TASK_FIXTURE.read_text())

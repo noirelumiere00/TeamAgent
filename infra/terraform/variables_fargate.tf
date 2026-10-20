@@ -652,6 +652,12 @@ variable "openclaw_search_direct_answer" {
   default     = "0"
 }
 
+variable "search_direct_answer_kinds" {
+  description = "直接配信する検索回答の種類（MCP・OC 共通）。空は全拒否。初回は not_found のみ。"
+  type        = string
+  default     = ""
+}
+
 variable "search_direct_answer_allowed_emails" {
   description = "検索の直接配信の本人メール許可リスト（MCP・OC 共通）。空は全員拒否、* は本人確認済みの全員。初回は小俣さんのメールのみ指定する。"
   type        = string

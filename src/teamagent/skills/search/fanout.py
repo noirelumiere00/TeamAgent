@@ -14,6 +14,8 @@ from contextlib import contextmanager
 from dataclasses import asdict, dataclass, replace
 from typing import Any, Literal, TypeVar, cast
 
+import structlog
+
 from teamagent.adapters.bedrock_client import BedrockClient
 from teamagent.adapters.pgvector_client import SearchHit
 from teamagent.adapters.retry import RetryPolicy
@@ -61,6 +63,7 @@ from teamagent.skills.search.next_move import suggest_next_move
 from teamagent.skills.search.not_found import (
     NOT_FOUND_HEAD,
     build_case_not_found_answer,
+    build_scoped_not_found_answer,
     case_query_target,
     case_target_hits,
     target_matches,
@@ -71,6 +74,8 @@ from teamagent.skills.search.result_guard import (
     prefix_header,
 )
 from teamagent.skills.search.schema import RelatedFileOut, SearchHitOut, SearchInput, SearchOutput
+
+logger = structlog.get_logger(__name__)
 
 SLACK_DEADLINE_S = 8.0
 EXPAND_DEADLINE_S = 10.0
@@ -370,8 +375,8 @@ def run_fanout(skill: Any, input: SearchInput, ctx: SkillContext) -> SearchOutpu
         if direct_mode and input.include_answer and found
         else None
     )
-    if direct_mode and input.include_answer and not found:
-        direct_kind = "not_found"
+    if not skill._direct_answer_allowed(ctx, direct_kind):
+        direct_kind = None
     list_fast = (
         found
         and input.include_answer
@@ -381,7 +386,7 @@ def run_fanout(skill: Any, input: SearchInput, ctx: SkillContext) -> SearchOutpu
     )
     if list_fast:
         head = LIST_FAST_HEAD
-        if direct_mode:
+        if skill._direct_answer_allowed(ctx, "list_fast"):
             direct_kind = "list_fast"
     elif found and input.include_answer and (summary_hits or slack.items):
         summary_started = time.perf_counter()
@@ -557,7 +562,32 @@ def run_fanout(skill: Any, input: SearchInput, ctx: SkillContext) -> SearchOutpu
         if found and not list_fast
         else ""
     )
-    if case_miss:
+    # 広げた候補は元の問いの根拠ではないため、不在判定の必須レーンに含めない。
+    complete = (
+        not extra.get("incomplete")
+        and not probe.get("incomplete")
+        and all(
+            status.kind != "failed" and not status.partial
+            for name, status in lanes.items()
+            if name not in {"expand", "sns"}
+        )
+    )
+    visible_found = bool(found or slack.items or cases.items or karte.items or named)
+    # 本人限定フラグ（種類 not_found）が ON のときだけ短文にする。OFF は従来の文。
+    negative_short = (
+        input.include_answer
+        and not visible_found
+        # 非公開の場所に一致があるときは 🔒 の案内を出す従来の文のまま（「無い」とは言わない）。
+        and not slack.hidden_count
+        and skill._direct_answer_allowed(ctx, "not_found")
+    )
+    if negative_short:
+        scope = "社内資料・施策実績"
+        scope += "・Slack" if slack.status == "ok" else "（Slackは検索未完了）"
+        head = build_scoped_not_found_answer(case_target, scope=scope, complete=complete)
+        if complete:
+            direct_kind = "not_found"
+    elif case_miss:
         failed_lanes = {key: status for key, status in lanes.items() if status.kind == "failed"}
         head = build_case_not_found_answer(
             case_target or "",
@@ -566,7 +596,7 @@ def run_fanout(skill: Any, input: SearchInput, ctx: SkillContext) -> SearchOutpu
     answer = (
         (
             head
-            if case_miss
+            if case_miss or negative_short
             else compose_answer(
                 head=head,
                 sections=sections,
@@ -580,6 +610,25 @@ def run_fanout(skill: Any, input: SearchInput, ctx: SkillContext) -> SearchOutpu
         )
         if input.include_answer
         else ""
+    )
+    logger.info(
+        "search_found_decision",
+        request_id=ctx.request_id,
+        found=visible_found,
+        complete=bool(complete),
+        reason=(
+            "incomplete_search"
+            if not complete
+            else "ok"
+            if visible_found
+            else "case_target_mismatch"
+            if case_miss
+            else "no_matching_evidence"
+        ),
+        hit_count=len(summary_hits) if found else 0,
+        slack_count=len(slack.items),
+        case_count=len(cases.items),
+        named_count=len(named),
     )
     vault_cost = 0.002 if timings.get("rerank_ms", 0.0) > 0.0 else 0.0
     results = [

@@ -15,7 +15,8 @@ function setup({env = {}, query = '比較して何が効いた？', email = 'kom
   createCallerIdentityPlugin({env: {
     TEAMAGENT_CALLER_CLAIM_SECRET: 'x'.repeat(48), SLACK_TEAM_ID: 'T07MU5P2PBR',
     TEAMAGENT_MCP_BEARER: 'test-bearer', SLACK_BOT_TOKEN: 'test-token',
-    SEARCH_DIRECT_ANSWER: '1', SEARCH_DIRECT_ANSWER_ALLOWED_EMAILS: 'komata@example.test', ...env,
+    SEARCH_DIRECT_ANSWER: '1', SEARCH_DIRECT_ANSWER_ALLOWED_EMAILS: 'komata@example.test',
+    SEARCH_DIRECT_ANSWER_KINDS: 'not_found,comparison,list_fast,video_metrics', ...env,
   }, ...(now ? {now} : {}), sleepFn: async () => {}, onBackgroundTask: task => tasks.push(task),
   fetchFn: async (url, options) => {
     const body = JSON.parse(options.body);
@@ -100,7 +101,7 @@ for (const query of ['比較して何が効いた？', '社内でいうTTOとは
   });
 }
 test('iter5 zero-tool posts a successful summarized search answer without a model pass', async () => {
-  const p = setup({searchResult: {found: true, answer: '社内の説明です。', sources: [{url: 'https://example.test/doc'}]}});
+  const p = setup({searchResult: {found: true, answer: '社内の説明です。', direct_delivery: {answer_kind: 'list_fast', answer: '社内の説明です。'}, sources: [{url: 'https://example.test/doc'}]}});
   assert.equal(await p.finalize(), undefined); assert.equal(p.posts.length, 1);
   assert.match(p.posts[0].text, /社内の説明です。.*出典/su);
   assert.match(p.posts[0].text, /https:\/\/example.test\/doc/u);
@@ -112,7 +113,7 @@ test('iter5 only search failure uses rescue text; delivery failure permits model
   assert.match(out?.payload?.text ?? '', /確認を完了できませんでした/u);
   assert.ok(!out.payload.text.includes('171,325'));
   assert.equal((await failed.send('二重'))?.cancel, true);
-  const postFailed = setup({postFails: true, searchResult: {answer}});
+  const postFailed = setup({postFails: true, searchResult: {answer, direct_delivery: {answer_kind: 'not_found', answer}}});
   await postFailed.finalize(); assert.notEqual((await postFailed.send(answer))?.cancel, true);
 });
 for (const [flag, allowlist, email] of [['0', '*', 'komata@example.test'],
@@ -256,7 +257,7 @@ test('iter5 uncertain MCP delivery is not retried or used as a delivery receipt'
 
 test('iter5 direct summarized answers use the same ending cleanup as model replies', async () => {
   for (const tail of ['何か別の確認が要りますか？', 'どの方向で進めますか？']) {
-    const p = setup({searchResult: {found: true, answer: `社内の説明です。${tail}`,
+    const p = setup({searchResult: {found: true, answer: `社内の説明です。${tail}`, direct_delivery: {answer_kind: 'list_fast', answer: `社内の説明です。${tail}`},
       sources: [{url: 'https://example.test/doc'}]}});
     await p.finalize();
     assert.equal(p.posts.length, 1);
@@ -264,14 +265,14 @@ test('iter5 direct summarized answers use the same ending cleanup as model repli
     assert.equal((await p.send('モデルの追加'))?.cancel, true);
   }
   const required = '入力が必要です。どの方向で進めますか？';
-  const p = setup({searchResult: {status: 'needs_input', answer: required}});
+  const p = setup({searchResult: {status: 'needs_input', answer: required, direct_delivery: {answer_kind: 'list_fast', answer: required}}});
   await p.finalize();
   assert.equal(p.posts[0].text, required);
 });
 
 test('iter5 direct summarized answers scrub internal names and signed URLs, and escape Slack notifications', async () => {
-  const p = setup({searchResult: {answer:
-    'teamagent__search を呼んで、社内の説明です。 <@U87654321> <!here>\nhttps://example.test/report?X-Amz-Signature=private-value'}});
+  const text = 'teamagent__search を呼んで、社内の説明です。 <@U87654321> <!here>\nhttps://example.test/report?X-Amz-Signature=private-value';
+  const p = setup({searchResult: {answer: text, direct_delivery: {answer_kind: 'list_fast', answer: text}}});
   await p.finalize();
   assert.equal(p.posts.length, 1);
   assert.match(p.posts[0].text, /社内の説明です/u);
@@ -280,8 +281,8 @@ test('iter5 direct summarized answers scrub internal names and signed URLs, and 
 });
 
 test('iter5 direct summarized answers validate numeric ratios with the shared grounding logic', async () => {
-  const p = setup({searchResult: {answer:
-    '社内の説明です。\n動画ごとの保存数は261件と110件で、約1.6倍です。\nどの方向で進めますか？',
+  const text = '社内の説明です。\n動画ごとの保存数は261件と110件で、約1.6倍です。\nどの方向で進めますか？';
+  const p = setup({searchResult: {answer: text, direct_delivery: {answer_kind: 'video_metrics', answer: text},
     posts: [{save_count: 261}, {save_count: 110}]}});
   await p.finalize();
   assert.equal(p.posts.length, 1);
@@ -313,4 +314,38 @@ test('iter5 empty-pass rescue rechecks direct search delivery immediately before
   await Promise.all(p.tasks);
   assert.equal(p.posts.length, 0);
   assert.equal((await p.send('遅れたモデル文'))?.cancel, true);
+});
+
+for (const kinds of [undefined, '', 'unknown', 'not_found,unknown', 'not_found']) {
+  test(`s1 zero-tool searches but never directly posts a disallowed or missing kind: ${kinds}`, async () => {
+    for (const candidate of [undefined, {answer_kind: 'comparison', answer},
+      {answer_kind: 'unknown', answer}]) {
+      const p = setup({env: {SEARCH_DIRECT_ANSWER_KINDS: kinds},
+        searchResult: {answer, ...(candidate ? {direct_delivery: candidate} : {})}});
+      // 種類外は直接投稿せず、検索していない下書きも出さずにフラグ OFF と同じ再パスへ戻る。
+      assert.equal((await p.finalize())?.action, 'revise');
+      assert.equal(p.calls.length, 1);
+      assert.equal(p.posts.length, 0);
+      assert.ok(!p.logs.some(line => line.includes('outcome=failed')));
+    }
+  });
+}
+test('s1 zero-tool delivers the permitted MCP candidate, not the legacy answer', async () => {
+  const p = setup({env: {SEARCH_DIRECT_ANSWER_KINDS: 'not_found'}, searchResult: {
+    answer: '無関係な事例です。どの方向で進めますか？',
+    direct_delivery: {answer_kind: 'not_found', answer},
+  }});
+  await p.finalize();
+  assert.equal(p.calls.length, 1);
+  assert.equal(p.posts.length, 1);
+  assert.equal(p.posts[0].text, answer);
+  assert.equal((await p.send('モデルの書き足し'))?.cancel, true);
+});
+test('s1 nested or empty candidates never authorize direct delivery', async () => {
+  for (const data of [{answer, hits: [{direct_delivery: {answer_kind: 'not_found', answer}}]},
+    {answer, direct_delivery: {answer_kind: 'not_found', answer: ''}}]) {
+    const p = setup({env: {SEARCH_DIRECT_ANSWER_KINDS: 'not_found'}, searchResult: data});
+    assert.equal((await p.finalize())?.action, 'revise');
+    assert.equal(p.posts.length, 0);
+  }
 });
