@@ -56,6 +56,16 @@ SLACK_CANARY_SKIP_REASON_CODES = [
 SLACK_CANARY_TOKEN_SHA256 = "34fc25aac72a3608fc4fe8c0914f128c51aa767b93d2d4ff4915d35aa9415e19"  # gitleaks:allow トークンの sha256 ハッシュ（秘密そのものではない）
 
 
+def test_caller_identity_plugin_resolves_public_gateway_sdk_in_image() -> None:
+    dockerfile = DOCKERFILE.read_text()
+    plugin_root = "/opt/teamagent/plugins/teamagent-caller-identity"
+    assert f"mkdir -p {plugin_root}/node_modules" in dockerfile
+    assert f"ln -s /app {plugin_root}/node_modules/openclaw" in dockerfile
+    assert f"cd {plugin_root} && node --input-type=module" in dockerfile
+    assert 'import("openclaw/plugin-sdk/gateway-runtime")' in dockerfile
+    assert 'typeof GatewayClient !== "function"' in dockerfile
+
+
 def _strip_json5_comments(source: str) -> str:
     output: list[str] = []
     index = 0
@@ -976,6 +986,8 @@ def test_entrypoint_is_readonly_secret_safe_and_environment_allowlisted() -> Non
         "SEARCH_DIRECT_ANSWER",
         "SEARCH_DIRECT_ANSWER_ALLOWED_EMAILS",
         "SEARCH_DIRECT_ANSWER_KINDS",
+        "DM_CATCHUP_ENABLED",
+        "DM_CATCHUP_ALLOWED_USERS",
     }
     # 秘密値の受け皿にしない（allowlist の意味が消える）。
     assert diagnostic.isdisjoint(passthrough)
@@ -992,9 +1004,12 @@ def test_entrypoint_is_readonly_secret_safe_and_environment_allowlisted() -> Non
     assert "writeFile(templatePath" not in entrypoint
 
 
-@pytest.mark.parametrize(("flag", "allowed"), [("0", ""), ("1", "me@example.test"), ("true", "*")])
+@pytest.mark.parametrize(
+    ("flag", "allowed", "catchup_users"),
+    [("0", "", ""), ("1", "me@example.test", "U01234567,U76543210"), ("true", "*", "*")],
+)
 def test_entrypoint_forwards_search_direct_answer_to_actual_child_environment(
-    flag: str, allowed: str
+    flag: str, allowed: str, catchup_users: str
 ) -> None:
     script = r"""
 import assert from "node:assert/strict";
@@ -1023,6 +1038,8 @@ process.stdout.write(child.stdout);
             "SEARCH_DIRECT_ANSWER": flag,
             "SEARCH_DIRECT_ANSWER_ALLOWED_EMAILS": allowed,
             "SEARCH_DIRECT_ANSWER_KINDS": "not_found",
+            "DM_CATCHUP_ENABLED": flag,
+            "DM_CATCHUP_ALLOWED_USERS": catchup_users,
             "NODE_OPTIONS": "--no-warnings",
             "UNAPPROVED_ENV": "must-not-reach-child",
         },
@@ -1036,6 +1053,8 @@ process.stdout.write(child.stdout);
     assert child["SEARCH_DIRECT_ANSWER"] == flag
     assert child["SEARCH_DIRECT_ANSWER_ALLOWED_EMAILS"] == allowed
     assert child["SEARCH_DIRECT_ANSWER_KINDS"] == "not_found"
+    assert child["DM_CATCHUP_ENABLED"] == flag
+    assert child["DM_CATCHUP_ALLOWED_USERS"] == catchup_users
     assert "NODE_OPTIONS" not in child
     assert "UNAPPROVED_ENV" not in child
 
@@ -1401,6 +1420,16 @@ def _render_task(task: dict[str, Any], image: str) -> subprocess.CompletedProces
         [{"name": "SEARCH_DIRECT_ANSWER_KINDS", "value": "not_found"}],
         [{"name": "SEARCH_DIRECT_ANSWER_KINDS", "value": ""}],
         [{"name": "SEARCH_DIRECT_ANSWER_ALLOWED_EMAILS", "value": "*"}],
+        [{"name": "DM_CATCHUP_ENABLED", "value": "0"}],
+        [{"name": "DM_CATCHUP_ALLOWED_USERS", "value": ""}],
+        [
+            {"name": "DM_CATCHUP_ENABLED", "value": "1"},
+            {"name": "DM_CATCHUP_ALLOWED_USERS", "value": "U01234567,U76543210"},
+        ],
+        [
+            {"name": "DM_CATCHUP_ENABLED", "value": "1"},
+            {"name": "DM_CATCHUP_ALLOWED_USERS", "value": "*"},
+        ],
         [
             {"name": "SEARCH_DIRECT_ANSWER", "value": "0"},
             {"name": "SEARCH_DIRECT_ANSWER_ALLOWED_EMAILS", "value": ""},
@@ -1427,7 +1456,13 @@ def test_task_hardening_preserves_legacy_inputs_and_optional_search_delivery_inp
 
 @pytest.mark.parametrize(
     "name",
-    ["SEARCH_DIRECT_ANSWER", "SEARCH_DIRECT_ANSWER_ALLOWED_EMAILS", "SEARCH_DIRECT_ANSWER_KINDS"],
+    [
+        "SEARCH_DIRECT_ANSWER",
+        "SEARCH_DIRECT_ANSWER_ALLOWED_EMAILS",
+        "SEARCH_DIRECT_ANSWER_KINDS",
+        "DM_CATCHUP_ENABLED",
+        "DM_CATCHUP_ALLOWED_USERS",
+    ],
 )
 @pytest.mark.parametrize("value", [None, True, 1, [], {}])
 def test_task_hardening_rejects_non_string_search_delivery_inputs(name: str, value: Any) -> None:

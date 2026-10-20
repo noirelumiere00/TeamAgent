@@ -9,6 +9,7 @@ dashboard ロールは SELECT のみ・暗号化列は GRANT 対象外）。本�
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Any
 
 # ---------------------------------------------------------------------------
@@ -211,8 +212,83 @@ def kpis(conn: Any) -> dict[str, Any]:
     }
 
 
-def daily_series(conn: Any, days: int = 30) -> list[dict[str, Any]]:
+def _usage_scope(
+    days: int, start: datetime | None, end: datetime | None, who: str | None
+) -> tuple[str, dict[str, Any]]:
+    if (start is None) != (end is None):
+        raise ValueError("both_window_bounds_required")
+    params: dict[str, Any] = {}
+    if start is not None and end is not None:
+        clause = "occurred_at >= %(start)s AND occurred_at < %(end)s"
+        params.update(start=start, end=end)
+    else:
+        clause = "occurred_at >= NOW() - make_interval(days => %(days)s)"
+        params["days"] = int(days)
+    if who:
+        clause += " AND lower(COALESCE(user_email, user_id, '(unknown)')) = lower(%(who)s)"
+        params["who"] = who
+    return clause, params
+
+
+def period_summary(
+    conn: Any, *, start: datetime, end: datetime, who: str | None = None
+) -> dict[str, Any]:
+    """同じ長さの2区間。要注意は失敗または明示found=falseの実行を重複なく数える。"""
+    scope, params = _usage_scope(0, start - (end - start), end, who)
+    params.update(start=start, previous_start=start - (end - start))
+    scope = scope.replace("%(start)s", "%(previous_start)s")
+    rows = _select_conn(
+        conn,
+        """
+        SELECT CASE WHEN occurred_at >= %(start)s THEN 'current' ELSE 'previous' END AS period,
+               COUNT(*) AS requests,
+               COUNT(DISTINCT lower(COALESCE(user_email, user_id, '(unknown)'))) AS users,
+               COUNT(*) FILTER (WHERE status <> 'ok' OR
+                   (skill = 'search' AND metadata->'found' = 'false'::jsonb)) AS attention_events,
+               COUNT(*) FILTER (WHERE status <> 'ok') AS errors,
+               COUNT(*) FILTER (WHERE skill = 'search'
+                   AND metadata->'found' = 'false'::jsonb) AS not_found,
+               COUNT(*) FILTER (WHERE skill = 'search' AND
+                   (metadata->'found' IS NULL OR metadata->'found'
+                       NOT IN ('true'::jsonb, 'false'::jsonb))) AS unknown_search,
+               COUNT(*) FILTER (WHERE query_text IS NOT NULL) AS questions,
+               COALESCE(SUM(cost_usd), 0) AS cost_usd
+        FROM usage_events WHERE """  # nosec B608 # Fixed SQL fragments; all values use bound parameters.
+        + scope
+        + " GROUP BY period",
+        params,
+    )  # nosec B608 -- scope is fixed SQL; values are bound
+    keys = (
+        "requests",
+        "users",
+        "attention_events",
+        "errors",
+        "not_found",
+        "unknown_search",
+        "questions",
+    )
+    result = {
+        period: {**dict.fromkeys(keys, 0), "cost_usd": 0.0} for period in ("current", "previous")
+    }
+    for row in rows:
+        period = str(row["period"])
+        result[period] = {
+            **{key: int(row.get(key) or 0) for key in keys},
+            "cost_usd": float(row.get("cost_usd") or 0),
+        }
+    return result
+
+
+def daily_series(
+    conn: Any,
+    days: int = 30,
+    *,
+    start: datetime | None = None,
+    end: datetime | None = None,
+    who: str | None = None,
+) -> list[dict[str, Any]]:
     """日次の件数とコスト（JST）。"""
+    scope, params = _usage_scope(days, start, end, who)
     rows = _select_conn(
         conn,
         """
@@ -220,10 +296,12 @@ def daily_series(conn: Any, days: int = 30) -> list[dict[str, Any]]:
                COUNT(*) AS requests,
                ROUND(SUM(cost_usd), 4) AS cost_usd
         FROM usage_events
-        WHERE occurred_at >= NOW() - (%s || ' days')::interval
+        WHERE """  # nosec B608 # Fixed SQL fragments; all values use bound parameters.
+        + scope
+        + """
         GROUP BY day ORDER BY day
         """,
-        [str(int(days))],
+        params,  # nosec B608 -- scope contains only fixed SQL fragments
     )
     return [
         {
@@ -235,8 +313,16 @@ def daily_series(conn: Any, days: int = 30) -> list[dict[str, Any]]:
     ]
 
 
-def skill_breakdown(conn: Any, days: int = 7) -> list[dict[str, Any]]:
+def skill_breakdown(
+    conn: Any,
+    days: int = 7,
+    *,
+    start: datetime | None = None,
+    end: datetime | None = None,
+    who: str | None = None,
+) -> list[dict[str, Any]]:
     """skill 別の件数・コスト・p50/p95 レイテンシ。"""
+    scope, params = _usage_scope(days, start, end, who)
     rows = _select_conn(
         conn,
         """
@@ -248,10 +334,12 @@ def skill_breakdown(conn: Any, days: int = 7) -> list[dict[str, Any]]:
                percentile_cont(0.95) WITHIN GROUP (ORDER BY latency_ms)
                    FILTER (WHERE latency_ms IS NOT NULL) AS p95_ms
         FROM usage_events
-        WHERE occurred_at >= NOW() - (%s || ' days')::interval
+        WHERE """  # nosec B608 # Fixed SQL fragments; all values use bound parameters.
+        + scope
+        + """
         GROUP BY skill ORDER BY n DESC
         """,
-        [str(int(days))],
+        params,  # nosec B608 -- scope contains only fixed SQL fragments
     )
     return [
         {
@@ -265,7 +353,14 @@ def skill_breakdown(conn: Any, days: int = 7) -> list[dict[str, Any]]:
     ]
 
 
-def work_type_breakdown(conn: Any, days: int = 7) -> list[dict[str, Any]]:
+def work_type_breakdown(
+    conn: Any,
+    days: int = 7,
+    *,
+    start: datetime | None = None,
+    end: datetime | None = None,
+    who: str | None = None,
+) -> list[dict[str, Any]]:
     """作業束（調べる/作る/整える/秘書/その他）別の件数・コスト・割合。
 
     集計は skill_breakdown と同型（同じ WHERE・同じ GROUP BY skill）。tool→束 の対応だけ
@@ -273,6 +368,7 @@ def work_type_breakdown(conn: Any, days: int = 7) -> list[dict[str, Any]]:
     中核4束は 0 件でも必ず行として返す（バーが消えて「無かったこと」にならないように）。
     「その他」は 1 件以上あるときだけ出す（未知ツールが出た事実を可視化する）。
     """
+    scope, params = _usage_scope(days, start, end, who)
     rows = _select_conn(
         conn,
         """
@@ -280,10 +376,12 @@ def work_type_breakdown(conn: Any, days: int = 7) -> list[dict[str, Any]]:
                COUNT(*) AS n,
                ROUND(SUM(cost_usd), 4) AS cost_usd
         FROM usage_events
-        WHERE occurred_at >= NOW() - (%s || ' days')::interval
+        WHERE """  # nosec B608 # Fixed SQL fragments; all values use bound parameters.
+        + scope
+        + """
         GROUP BY skill
         """,
-        [str(int(days))],
+        params,  # nosec B608 -- scope contains only fixed SQL fragments
     )
     requests: dict[str, int] = {work_type: 0 for work_type in WORK_TYPE_ORDER}
     costs: dict[str, float] = {work_type: 0.0 for work_type in WORK_TYPE_ORDER}
@@ -308,43 +406,102 @@ def work_type_breakdown(conn: Any, days: int = 7) -> list[dict[str, Any]]:
     return out
 
 
-def user_breakdown(conn: Any, *, days: int = 30, limit: int = 20) -> list[dict[str, Any]]:
-    """ユーザ別の件数・コスト（コスト降順）。"""
+def user_breakdown(
+    conn: Any,
+    *,
+    days: int = 30,
+    limit: int = 20,
+    start: datetime | None = None,
+    end: datetime | None = None,
+    who: str | None = None,
+) -> list[dict[str, Any]]:
+    """期間指定時は実行数順・前期実行数付き。既定は従来の30日コスト順。"""
+    scope, params = _usage_scope(days, start, end, who)
+    params["limit"] = int(limit)
+    count = "COUNT(*)"
+    previous = "0"
+    cost = "SUM(cost_usd)"
+    if start is not None and end is not None:
+        params["previous_start"] = start - (end - start)
+        scope = scope.replace("%(start)s", "%(previous_start)s")
+        count = "COUNT(*) FILTER (WHERE occurred_at >= %(start)s)"
+        previous = "COUNT(*) FILTER (WHERE occurred_at < %(start)s)"
+        cost = "SUM(cost_usd) FILTER (WHERE occurred_at >= %(start)s)"
     rows = _select_conn(
         conn,
         """
-        SELECT COALESCE(user_email, user_id, '(unknown)') AS who,
-               COUNT(*) AS requests,
-               ROUND(SUM(cost_usd), 4) AS cost_usd
-        FROM usage_events
-        WHERE occurred_at >= NOW() - (%s || ' days')::interval
-        GROUP BY who ORDER BY cost_usd DESC NULLS LAST LIMIT %s
-        """,
-        [str(int(days)), int(limit)],
-    )
+        SELECT lower(COALESCE(user_email, user_id, '(unknown)')) AS who,
+               """  # nosec B608 # Fixed SQL fragments; all values use bound parameters.
+        + count
+        + " AS requests, "
+        + previous
+        + " AS previous_requests,"
+        + """
+               MAX(user_id) FILTER (WHERE user_id ~ '^U[A-Z0-9]{8,}$') AS user_id,
+               ROUND("""
+        + cost
+        + """, 4) AS cost_usd
+        FROM usage_events WHERE """
+        + scope
+        + " GROUP BY who "
+        + (
+            " ORDER BY requests DESC, who"
+            if start is not None
+            else " ORDER BY cost_usd DESC NULLS LAST"
+        )
+        + " LIMIT %(limit)s",
+        params,
+    )  # nosec B608 -- SQL fragments are constants
     return [
         {
             "who": str(row["who"]),
             "requests": int(row["requests"]),
             "cost_usd": float(row["cost_usd"] or 0),
+            **(
+                {
+                    "previous_requests": int(row.get("previous_requests") or 0),
+                    "user_id": row.get("user_id"),
+                }
+                if start is not None
+                else {}
+            ),
         }
         for row in rows
     ]
 
 
-def error_list(conn: Any, limit: int = 50) -> list[dict[str, Any]]:
-    """直近のエラー/拒否を返す（本文は含めない）。"""
+def error_list(
+    conn: Any,
+    limit: int = 50,
+    *,
+    start: datetime | None = None,
+    end: datetime | None = None,
+    who: str | None = None,
+) -> list[dict[str, Any]]:
+    """期間指定時は検索の該当なしも含む。従来のエラー詳細を維持。"""
+    scope, params = _usage_scope(30, start, end, who)
+    if start is None:
+        scope, params = "TRUE", {}
+    params["limit"] = int(limit)
+    condition = "status <> 'ok'"
+    extra = ""
+    if start is not None:
+        condition += " OR (skill = 'search' AND metadata->'found' = 'false'::jsonb)"
+        extra = ", user_id, query_text, metadata->'found' AS found"
     rows = _select_conn(
         conn,
         """
         SELECT occurred_at, request_id, skill, status, error_code,
                COALESCE(user_email, user_id, '(unknown)') AS who
-        FROM usage_events
-        WHERE status <> 'ok'
-        ORDER BY occurred_at DESC LIMIT %s
-        """,
-        [int(limit)],
-    )
+        """  # nosec B608 # Fixed SQL fragments; all values use bound parameters.
+        + extra
+        + " FROM usage_events WHERE ("
+        + condition
+        + ") AND "
+        + scope
+        + " ORDER BY occurred_at DESC LIMIT %(limit)s",
+        params,
+    )  # nosec B608 -- values are bound
     return [
         {
             "occurred_at": row["occurred_at"],
@@ -353,13 +510,27 @@ def error_list(conn: Any, limit: int = 50) -> list[dict[str, Any]]:
             "status": str(row["status"]),
             "error_code": row["error_code"],
             "who": str(row["who"]),
+            **(
+                {
+                    "user_id": row.get("user_id"),
+                    "query_text": row.get("query_text"),
+                    "found": row.get("found"),
+                }
+                if start is not None
+                else {}
+            ),
         }
         for row in rows
     ]
 
 
 def recent_questions(
-    conn: Any, limit: int = 200, *, who: str | None = None
+    conn: Any,
+    limit: int = 200,
+    *,
+    who: str | None = None,
+    start: datetime | None = None,
+    end: datetime | None = None,
 ) -> list[dict[str, Any]]:
     """質問本文を含む直近の usage_events を管理ページ向けに返す。
 
@@ -373,11 +544,14 @@ def recent_questions(
     if who:
         params["who"] = str(who)
         who_clause = "  AND lower(COALESCE(user_email, user_id, '(unknown)')) = lower(%(who)s)\n"
+    if start is not None and end is not None:
+        params.update(start=start, end=end)
+        who_clause += " AND occurred_at >= %(start)s AND occurred_at < %(end)s\n"
     sql = (
         """
         SELECT occurred_at,
                COALESCE(user_email, user_id, '(unknown)') AS who,
-               skill, query_text, status, latency_ms, cost_usd
+               skill, query_text, status, latency_ms, cost_usd, user_id, metadata->'found' AS found
         FROM usage_events
         WHERE query_text IS NOT NULL
         """  # nosec B608  # who_clause は定数2択・who/limit は placeholder（下で bind）
@@ -397,6 +571,8 @@ def recent_questions(
             "status": str(row["status"]),
             "latency_ms": int(row["latency_ms"]) if row["latency_ms"] is not None else None,
             "cost_usd": float(row["cost_usd"] or 0),
+            "user_id": row.get("user_id"),
+            "found": row.get("found"),
         }
         for row in rows
     ]
@@ -420,16 +596,37 @@ _ANSWER_FEEDBACK_LATEST_CTE = """
 """
 
 
-def answer_feedback_summary(conn: Any, days: int = 30, *, limit: int = 50) -> dict[str, Any]:
+def answer_feedback_summary(
+    conn: Any,
+    days: int = 30,
+    *,
+    limit: int = 50,
+    start: datetime | None = None,
+    end: datetime | None = None,
+    who: str | None = None,
+) -> dict[str, Any]:
     """直近 ``days`` 日の Aico 回答評価（👍/👎 の件数と 👎 の質問一覧）を返す。
 
     ``search_feedback`` を読むので、接続ロール（teamagent_dashboard）に同表の SELECT が要る。
     値はすべてプレースホルダ（days・limit）。回答本文は保存していないので返さない。
     """
     params: dict[str, Any] = {"days": int(days), "limit": int(limit)}
+    cte = _ANSWER_FEEDBACK_LATEST_CTE
+    if start is not None and end is not None:
+        params.update(start=start, end=end)
+        cte = cte.replace(
+            "created_at >= now() - make_interval(days => %(days)s)",
+            "created_at >= %(start)s AND created_at < %(end)s",
+        )
+    if who:
+        params["who"] = who
+        cte = cte.replace(
+            "AND answer_id IS NOT NULL",
+            "AND answer_id IS NOT NULL AND lower(user_email) = lower(%(who)s)",
+        )
     counts = _select_conn(
         conn,
-        _ANSWER_FEEDBACK_LATEST_CTE
+        cte
         + """
         SELECT COUNT(*) FILTER (WHERE rating = 1) AS up,
                COUNT(*) FILTER (WHERE rating = -1) AS down
@@ -439,7 +636,7 @@ def answer_feedback_summary(conn: Any, days: int = 30, *, limit: int = 50) -> di
     )
     downs = _select_conn(
         conn,
-        _ANSWER_FEEDBACK_LATEST_CTE
+        cte
         + """
         SELECT created_at, user_email AS who, query
         FROM latest
@@ -450,7 +647,7 @@ def answer_feedback_summary(conn: Any, days: int = 30, *, limit: int = 50) -> di
         params,
     )
     head = counts[0] if counts else {}
-    return {
+    result = {
         "days": int(days),
         "up": int(head.get("up") or 0),
         "down": int(head.get("down") or 0),
@@ -459,6 +656,16 @@ def answer_feedback_summary(conn: Any, days: int = 30, *, limit: int = 50) -> di
             for row in downs
         ],
     }
+
+    if start is not None and end is not None:
+        previous_params = {**params, "start": start - (end - start), "end": start}
+        previous = _select_conn(
+            conn,
+            cte + " SELECT COUNT(*) FILTER (WHERE rating = -1) AS down FROM latest",  # nosec B608 # Fixed SQL fragments; all values use bound parameters.
+            previous_params,
+        )  # nosec B608 -- constant CTE
+        result["previous_down"] = int(previous[0].get("down") or 0) if previous else 0
+    return result
 
 
 class DashboardQueries:

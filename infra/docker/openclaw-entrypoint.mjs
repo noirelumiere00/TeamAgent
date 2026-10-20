@@ -99,6 +99,9 @@ const DIAGNOSTIC_ENV = [
   "SEARCH_DIRECT_ANSWER",
   "SEARCH_DIRECT_ANSWER_ALLOWED_EMAILS",
   "SEARCH_DIRECT_ANSWER_KINDS",
+  // DM recovery is opt-in and restricted independently from ordinary Slack access.
+  "DM_CATCHUP_ENABLED",
+  "DM_CATCHUP_ALLOWED_USERS",
 ];
 
 function fail(message) {
@@ -230,6 +233,17 @@ async function rejectSymlink(path) {
   }
 }
 
+function isDmCatchupEnabled(env) {
+  const users = env.DM_CATCHUP_ALLOWED_USERS;
+  if (env.DM_CATCHUP_ENABLED !== "1" || typeof users !== "string" || users.length > 2048) {
+    return false;
+  }
+  if (users === "*") return true;
+  const entries = users.split(",");
+  return entries.length <= 100 && entries.every(user => /^U[A-Z0-9]{8,}$/.test(user)) &&
+    new Set(entries).size === entries.length;
+}
+
 async function prepareRuntime() {
   const runtimeSecrets = new Map();
   for (const name of REQUIRED_SECRETS) {
@@ -268,6 +282,8 @@ async function prepareRuntime() {
 
   const stateDir = join(runtimeRoot, "state");
   const stateDatabaseDir = join(stateDir, "state");
+  const catchupDir = join(stateDir, "slack-catchup");
+  const catchupEnabled = isDmCatchupEnabled(process.env);
   const workspaceDir = join(stateDir, "workspace");
   const homeDir = join(runtimeRoot, "home");
   const cacheDir = join(runtimeRoot, "cache");
@@ -276,6 +292,7 @@ async function prepareRuntime() {
   for (const path of [
     stateDir,
     stateDatabaseDir,
+    ...(catchupEnabled ? [catchupDir] : []),
     workspaceDir,
     homeDir,
     cacheDir,
@@ -286,6 +303,7 @@ async function prepareRuntime() {
     await chmod(path, 0o700);
   }
   await rejectSymlink(configPath);
+  if (catchupEnabled) await rejectSymlink(join(catchupDir, "journal.json"));
 
   const stateDatabasePath = join(stateDatabaseDir, "openclaw.sqlite");
   await rejectSymlink(stateDatabasePath);
