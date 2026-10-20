@@ -308,3 +308,20 @@ def test_nonfanout_live_slack_case_uses_same_resolver(setup_search, monkeypatch)
     )
     assert DRIVE in out.answer
     assert out.displayed_refs[0].drive_file_id == "ALPHA"
+
+
+def test_record_sheet_url_is_never_offered_as_the_document() -> None:
+    # 10-20 小俣さん: 自動保管シート等の記録シートは資料ではない。資料そのものの URL だけを出す。
+    sheet = "https://docs.google.com/spreadsheets/d/1SHEETabcdefghijklmnopqrstuvwxyz0123/edit#gid=1"
+    ref = drive_first.canonical_reference(
+        {
+            "source_type": "gsheets",
+            "source_uri": sheet,
+            "drive_url": sheet,
+            "title": "ファイル記録",
+        },
+        file_urls={"ファイル記録": sheet},
+    )
+    assert ref.kind == "sheet"
+    assert ref.drive_file_id is None
+    assert "/file/d/" not in (ref.url or "")

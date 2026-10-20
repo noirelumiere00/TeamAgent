@@ -98,6 +98,9 @@ def canonical_reference(
     ids = list(dict.fromkeys(file_ids or meta.get("slack_file_ids", ())))
     title = str(meta.get("title") or meta.get("file_name") or (names[0] if names else "記録"))
     direct = str(meta.get("drive_url") or "")
+    # 記録シート（自動保管の台帳・事例シート等）の URL は資料そのものではないので原本に使わない。
+    if "/spreadsheets/" in direct:
+        direct = ""
     # source_uri はその文書自体の出典。シート行を資料ファイルへ読み替えない。
     own = (
         drive_file_id(uri)
@@ -105,6 +108,7 @@ def canonical_reference(
         else None
     )
     file_urls = {} if source_type == "slack" else (file_urls or {})
+    file_urls = {k: v for k, v in file_urls.items() if "/spreadsheets/" not in str(v or "")}
     resolved = {drive_file_id(file_urls.get(name)) for name in names} - {None}
     complete_match = bool(names) and all(drive_file_id(file_urls.get(name)) for name in names)
     fid = (
