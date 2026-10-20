@@ -4076,6 +4076,32 @@ def test_exemption_accepts_pinned_provisional(
     assert evidence is not None
 
 
+@pytest.mark.parametrize("operation", ["build", "authorize"])
+@pytest.mark.parametrize(
+    "timestamp",
+    ["2026-11-15T00:00:01Z", "2026-12-05T00:00:00Z", "2026-12-14T23:59:59Z"],
+)
+def test_exemption_accepts_pinned_provisional_in_extended_window(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    operation: str,
+    timestamp: str,
+) -> None:
+    now = dt.datetime.fromisoformat(timestamp)
+    evidence = _exemption_call(
+        tmp_path,
+        monkeypatch,
+        operation=operation,
+        gate=_pinned_exemption_gate(expires_at_utc="2026-12-22T00:00:00Z"),
+        now=now,
+        approved_at=(now - dt.timedelta(minutes=30)).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        observed_at=(now - dt.timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        expires_at=(now + dt.timedelta(minutes=30)).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        retention_until="2037-01-01T00:00:00+00:00",
+    )
+    assert evidence is not None
+
+
 @pytest.mark.parametrize(
     "overrides",
     [
@@ -4119,27 +4145,31 @@ def test_exemption_is_not_granted_to_other_operations(
         )
 
 
+@pytest.mark.parametrize("operation", ["build", "authorize"])
+@pytest.mark.parametrize(
+    "timestamp",
+    ["2026-12-15T00:00:00Z", "2026-12-15T00:00:01Z", "2026-12-16T00:00:00Z"],
+)
 def test_exemption_closes_at_the_code_sunset(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    operation: str,
+    timestamp: str,
 ) -> None:
-    # Wall-clock literals on purpose: sliding the sunset constant must turn this
-    # red.  2026-09-16: sunset slid 2026-09-15 -> 2026-10-15 (human gate, r24 blocked;
-    # drill path still NO-GO), literals moved with it.  2026-10-06: slid again
-    # 2026-10-15 -> 2026-11-15 (human gate 2026-09-24, drill still NO-GO).  The approval itself is dated just before the sunset so that it is
-    # still live at that instant -- otherwise "approval is expired" would fire
-    # first and the test would pass for the wrong reason.
+    # Human gate 2026-10-19 moved the sunset to 12/15; literals seal that boundary.
+    # Keep the approval live so expiry cannot mask a missing sunset check.
+    now = dt.datetime.fromisoformat(timestamp)
     with pytest.raises(EVIDENCE.EvidenceError, match="forced rollback state mismatch"):
         _exemption_call(
             tmp_path,
             monkeypatch,
-            operation="build",
-            gate=_pinned_exemption_gate(),
-            now=dt.datetime(2026, 11, 15, 0, 0, tzinfo=dt.UTC),
-            approved_at="2026-11-14T23:30:00Z",
-            observed_at="2026-11-14T23:00:00Z",
-            expires_at="2026-11-15T00:30:00Z",
-            retention_until="2036-12-01T00:00:00+00:00",
+            operation=operation,
+            gate=_pinned_exemption_gate(expires_at_utc="2026-12-22T00:00:00Z"),
+            now=now,
+            approved_at=(now - dt.timedelta(minutes=30)).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            observed_at=(now - dt.timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            expires_at=(now + dt.timedelta(minutes=30)).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            retention_until="2037-01-01T00:00:00+00:00",
         )
 
 
