@@ -92,13 +92,13 @@ def test_media_adds_no_apk_and_keeps_fixed_inputs_in_the_build_context() -> None
     apk = (ROOT / "infra/docker/media-apk.lock").read_bytes()
     assert len(apk.splitlines()) == 241
     assert hashlib.sha256(apk).hexdigest() == (
-        "7a917a661038aa7c4b01735e58d5ede39fdc8b93f7698f18a30d235cb94c9718"
+        "ef94d8a3647535224341cf325bc9fc130ee28686189db2b1930d2c8bd4238e5a"
     )
     packages = docker[
         docker.index("FROM 718959508629") : docker.index("FROM runtime-packages AS python-deps")
     ]
     assert hashlib.sha256(packages.encode()).hexdigest() == (
-        "55ab8c7e1336237641734ad08c0a3114dc897395139cd973ace6fda776563281"
+        "fab1ed425697dc567d7e1a70296c16bca1c109c58fc5d9a6acbfe794620de5d9"
     )
     assert "COPY tools/first_visit/kit.lock.json" in docker
     assert "COPY tools/first_visit/tiktok-skills-kit-7c39099.tar.gz" in docker

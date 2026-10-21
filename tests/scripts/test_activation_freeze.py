@@ -229,15 +229,30 @@ def test_unlock_matches_the_committed_declaration() -> None:
     変わる。相乗り規約 ``retention_ruling_2026_08_27.landmine_partial_scope`` の
     とおり、scope はこの PR の変更集合ちょうどへ絞り込んである。**この 1 path
     以外への拡大は、この assert が引き続き検出する。**
+
+    2026-10-21 human gate で scope を core_media 契約 1 path へ切り替え、ca-certificates
+    20260909-r0 → 20261020-r0 の上流入替へ追随する。#650 の release_evidence.py 宣言は
+    ``previous_scope_20261021_release_evidence`` に退避し、その内容も完全一致で封印する。
     """
     unlock = _freeze_doc()["unlock"]
     if unlock["active"]:
-        assert unlock["scope_paths"] == ["infra/codebuild/release_evidence.py"]
-        assert "2026-12-15T00:00:00Z" in unlock["reason"]
-        assert "2026-12-22T00:00:00Z" in unlock["reason"]
-        assert unlock["gate"] == (
-            "human gate 2026-10-19（小俣さん承認: 初回リリース免除の期限を 12/15 へ延長）"
+        assert unlock["scope_paths"] == [
+            "infra/codebuild/teamagent_core_media_release_contract.json"
+        ]
+        assert (
+            unlock["reason"]
+            == "【media の apk ロック追随】 【2026-10-21 apk ロック追随】mcp 便 r67 の空撃ちで、Alpine v3.24 / edge の ca-certificates 20260909-r0 が上流にもベース同梱にも無く、上流は 20261020-r0 へ入れ替わっていることを確認した。Dockerfile の明示 pin を 20261020-r0 へ追随させ、人が作成した lock の 1 行を差し替える（241→241 行）。社内網では手元の Docker 実ビルドができないため、実インベントリとの一致は段 3 の AWS image-builder が cmp で照合する。lock の sha256 が動くため契約の artifact.apk-lock.sha256 と release 契約の sha が動き、世代 4 本を再導出する。scope は core_media 契約 1 path。"
         )
+        assert (
+            unlock["gate"]
+            == "human gate 2026-10-21（小俣さん「マージまで全て任せる」・Alpine 上流で ca-certificates 20260909-r0 → 20261020-r0 入替）"
+        )
+        assert unlock["previous_scope_20261021_release_evidence"] == {
+            "scope_paths": ["infra/codebuild/release_evidence.py"],
+            "reason": "【2026-10-19 初回リリース免除の延長】INITIAL_RELEASE_EXEMPTION_SUNSET_UTC を 2026-11-15T00:00:00Z から 2026-12-15T00:00:00Z、campaign expiry を 2026-11-22T00:00:00Z から 2026-12-22T00:00:00Z へ延長し、12/5 稼働判定後の通常便を確保する。drill の NO-GO 解消は別 PR。release_evidence.py は generation input のため source-publisher / attestor / promoter の base64 と image-builder の SHA を含む世代 4 本の再導出・再公開が必要。世代台帳 3 ファイルの更新は live S3 本文からの導出待ち。runtime / core_media / openclaw 契約は変更しない。",
+            "gate": "human gate 2026-10-19（小俣さん承認: 初回リリース免除の期限を 12/15 へ延長）",
+            "note": "dev 取り込み済みで本 PR では触らないため scope から外す（過剰 unlock の禁止）。human gate 2026-10-21（小俣さん「マージまで全て任せる」: ca-certificates の上流入替に追随するため凍結 scope を release_evidence.py から core_media 契約へ切り替え）",
+        }
         previous = unlock["previous_scope_20261019_core_media_apk"]
         assert previous["scope_paths"] == [
             "infra/codebuild/teamagent_core_media_release_contract.json",
