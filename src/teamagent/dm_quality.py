@@ -6,6 +6,7 @@ import hashlib
 import json
 import math
 import os
+import re
 import tempfile
 from collections import Counter
 from datetime import datetime
@@ -140,6 +141,13 @@ class Judge(Protocol):
     def judge(self, exchange: QualityExchange) -> Judgement: ...
 
 
+def _strip_json_fence(text: str) -> str:
+    """前後の ``` / ```json の囲みだけを外す。中身の JSON 検査は呼び出し側で厳格に行う。"""
+    stripped = text.strip()
+    match = re.fullmatch(r"```(?:json)?\s*\n?(.*?)\n?```", stripped, re.S)
+    return match.group(1).strip() if match else stripped
+
+
 class HaikuJudge:
     def __init__(self, client: Any) -> None:
         if client.model_id != HAIKU_MODEL:
@@ -164,7 +172,8 @@ class HaikuJudge:
             raise ValueError("judgement_incomplete")
         try:
             # モデル自身に費用や自由記述を申告させない。
-            raw = json.loads(response.text)
+            # Haiku は ```json の囲みを付けることがある（10-21 初回測定の 187 件すべて）。
+            raw = json.loads(_strip_json_fence(response.text))
             if not isinstance(raw, dict) or set(raw) != {"verdict"}:
                 raise ValueError
             return Judgement(verdict=raw["verdict"], cost_usd=response.usage.cost_usd)
