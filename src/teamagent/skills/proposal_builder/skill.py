@@ -188,9 +188,18 @@ def _research_summary_lines(
         if delivery_status == "pending"
         else "調査の JSON を添付しました。直して渡せば、その JSON から作り直せます"
     )
+    excluded_reason = "出典・形式を" if output.summary.review_required else "出典が"
     return (
         f"調査: 出典 {output.summary.source_count} 件（{confirmation}）・"
-        f"出典が確かめられず外した主張 {output.summary.discarded_count} 件\n" + attachment
+        f"{excluded_reason}確かめられず外した主張 {output.summary.discarded_count} 件\n"
+        + (
+            "要確認: "
+            + "、".join(dict.fromkeys(issue.message for issue in output.summary.review_required))
+            + "\n"
+            if output.summary.review_required
+            else ""
+        )
+        + attachment
     )
 
 
@@ -1146,6 +1155,11 @@ class ProposalBuilderSkill(BaseSkill[ProposalBuilderInput, ProposalBuilderOutput
         try:
             deck_output = retry_once(lambda: self._deck.run(deck_input, ctx))
             issues = [f"{issue.code}:{issue.path}" for issue in sanitized.issues]
+            if automatic_research:
+                issues.extend(
+                    f"{issue.code}:{issue.path}"
+                    for issue in automatic_research.summary.review_required
+                )
             if rag_failed:
                 issues.append("case_rag_unavailable")
             elif not cases:

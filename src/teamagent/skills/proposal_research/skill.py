@@ -15,7 +15,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, ClassVar, Protocol
 from urllib.parse import urlsplit
 
-from pydantic import BaseModel, ValidationError
+from pydantic import BaseModel, ValidationError, create_model
 
 from teamagent.adapters.gemini_client import (
     GeminiClient,
@@ -37,7 +37,16 @@ from teamagent.skills.omiyage_report.skill import (
     _configured_search_timeout_seconds,
     configured_search_depth,
 )
-from teamagent.skills.proposal_builder.research import parse_gemini_research
+from teamagent.skills.proposal_builder.research import (
+    build_evidence_registry,
+    parse_gemini_research,
+    research_validation_errors,
+)
+from teamagent.skills.proposal_builder.schema import (
+    EvidenceReference,
+    GeminiResearch,
+    ResearchIssue,
+)
 from teamagent.skills.proposal_research.brief import ResearchBrief
 from teamagent.skills.proposal_research.schema import (
     IntermediateProductMeta,
@@ -57,6 +66,8 @@ _SECTIONS = (
 )
 #: 利用者へ返る失敗の文に出す区分名（内部の区分キーは出さない）。
 _SECTION_LABELS = {
+    "brand": "商材名",
+    "research_date": "調査日",
     "A_market_data": "市場・インサイト",
     "B_social_trend": "ソーシャルの動き",
     "C_tiktok": "TikTok の代表投稿",
@@ -90,6 +101,14 @@ _TIKTOK_TERMS = 6
 # 検索語を並べる本数（media のタスクを同時に起動する数）。
 _TIKTOK_PARALLEL = 3
 SOURCE_STAGE_DEADLINE_S = 60.0
+_FINAL_RETRY_SECTION_USD = 0.10
+_FINAL_RETRY_TOTAL_USD = 0.30
+_OPTIONAL_LISTS = {
+    "A_market_data": "alt_data",
+    "B_social_trend": "alt_data",
+    "E_community": "tiktok_tags",
+    "D_publicity": "recommended_media",
+}
 
 
 class ResearchError(ValueError):
@@ -113,6 +132,7 @@ class _Gemini(Protocol):
         *,
         system: str | None = None,
         json_mode: bool = False,
+        max_cost_usd: float | None = None,
     ) -> GeminiResponse: ...
 
 
@@ -661,10 +681,13 @@ class ProposalResearchSkill(BaseSkill[ResearchBrief, ProposalResearchOutput]):
         searches = self._fill_tiktok(data, intermediate, brief, ctx)
         data["research_date"] = datetime.now(_JST).date().isoformat()
         data["brand"] = unicodedata.normalize("NFKC", brief.product_name)
-        try:
-            validated = parse_gemini_research(data)
-        except (ValidationError, ValueError, TypeError):
-            raise ResearchError("調査結果の最終確認に失敗しました") from None
+        validated, repairs, review = self._finalize(
+            data, intermediate, sources, memo_refs, memos, catalog, brief, ctx, discarded
+        )
+        all_responses.extend(repairs)
+        cost += sum(response.cost_usd for response in repairs)
+        retained_urls = {ref.url for ref in build_evidence_registry(validated).references}
+        used = {ref for ref, source in sources.by_number.items() if source.url in retained_urls}
         summary = ResearchSummary(
             source_count=len(used),
             unconfirmed_count=sum(not sources.by_number[ref].confirmed for ref in used),
@@ -673,6 +696,7 @@ class ProposalResearchSkill(BaseSkill[ResearchBrief, ProposalResearchOutput]):
             elapsed_seconds=max(0, self._clock() - start),
             gemini_cost_usd=round(cost, 6),
             tiktok_search_count=searches,
+            review_required=review,
         )
         log.info(
             "proposal_research_done",
@@ -692,6 +716,171 @@ class ProposalResearchSkill(BaseSkill[ResearchBrief, ProposalResearchOutput]):
             research_json=validated.model_dump(by_alias=True), summary=summary
         )
 
+    def _finalize(
+        self,
+        data: dict[str, Any],
+        intermediate: IntermediateResearch,
+        sources: _Sources,
+        memo_refs: dict[str, set[str]],
+        memos: dict[str, str],
+        catalog: list[dict[str, Any]],
+        brief: ResearchBrief,
+        ctx: SkillContext,
+        discarded: Counter[str],
+    ) -> tuple[GeminiResearch, list[GeminiResponse], list[ResearchIssue]]:
+        log = ctx.bind_logger(self.name)
+        attempted: set[str] = set()
+        reserved = 0.0
+        responses: list[GeminiResponse] = []
+        review: list[ResearchIssue] = []
+        while True:
+            try:
+                return parse_gemini_research(data), responses, review
+            except (ValidationError, ValueError, TypeError) as exc:
+                errors = research_validation_errors(exc)
+                log.warning("proposal_research_final_validation_failed", errors=errors)
+            removals: set[tuple[str, int, str, int | None]] = set()
+            required: set[str] = set()
+            for error in errors:
+                loc = error["loc"]
+                section = str(loc[0]) if loc else ""
+                if (
+                    len(loc) >= 3
+                    and isinstance(loc[1], int)
+                    and loc[2] == _OPTIONAL_LISTS.get(section)
+                ):
+                    index = loc[3] if len(loc) > 3 and isinstance(loc[3], int) else None
+                    removals.add((section, loc[1], loc[2], index))
+                else:
+                    required.add(section)
+            # Reverse indices keep sibling supplements in place when several fail together.
+            for section, parent, field, index in sorted(
+                removals,
+                key=lambda item: (*item[:3], -1 if item[3] is None else item[3]),
+                reverse=True,
+            ):
+                items = data[section][parent].get(field)
+                path = f"$.{section}[{parent}].{field}"
+                if index is None:
+                    count = len(items) if isinstance(items, list) else 1
+                    data[section][parent][field] = []
+                else:
+                    count = 1
+                    items.pop(index)
+                    path += f"[{index}]"
+                discarded[section] += count
+                review.append(
+                    ResearchIssue(
+                        path=path,
+                        code="invalid_optional_field",
+                        message=f"{_label(section)}の補足を除外（形式・出典の確認が必要）",
+                    )
+                )
+                log.warning("proposal_research_optional_dropped", path=path)
+            for section in sorted(required):
+                label = _label(section) if section in _SECTION_LABELS else "調査結果の形式"
+                if (
+                    section in attempted
+                    or section not in data
+                    or reserved + _FINAL_RETRY_SECTION_USD > _FINAL_RETRY_TOTAL_USD + 1e-9
+                ):
+                    raise ResearchError(
+                        f"調査結果の最終確認に失敗しました（不足・要確認: {label}）"
+                    )
+                attempted.add(section)
+                reserved += _FINAL_RETRY_SECTION_USD
+                log.info(
+                    "proposal_research_section_retry",
+                    section=section,
+                    max_cost_usd=_FINAL_RETRY_SECTION_USD,
+                )
+                try:
+                    section_field = next(
+                        f
+                        for key, f in IntermediateResearch.model_fields.items()
+                        if (f.alias or key) == section
+                    )
+                    section_model = create_model(  # type: ignore[call-overload]
+                        "ResearchSectionRepair",
+                        __config__=IntermediateResearch.model_config,
+                        **{section: (section_field.rebuild_annotation(), ...)},
+                    )
+                    memo_section = (
+                        "G_insight_H_event" if section in {"G_insight", "H_event"} else section
+                    )
+                    allowed = sources.allowed(memo_refs.get(memo_section, set()))
+                    for ref in tuple(allowed):
+                        try:
+                            EvidenceReference(
+                                object_path="$", path="$.url", url=sources.by_number[ref].url
+                            )
+                        except (ValidationError, ValueError, TypeError):
+                            allowed.remove(ref)
+                    retry_prompt = json.dumps(
+                        {
+                            "brief": self._search_brief(brief),
+                            "annotated_memos": {memo_section: memos[memo_section]}
+                            if memo_section in memos
+                            else {},
+                            "usable_sources": [s for s in catalog if s["number"] in allowed],
+                            "schema": section_model.model_json_schema(),
+                            "errors": [e for e in errors if e["loc"] and e["loc"][0] == section],
+                            "verified_tiktok": data["C_tiktok"] if section == "C_tiktok" else [],
+                        },
+                        ensure_ascii=False,
+                    )
+                    response = self._gemini.generate_text(
+                        retry_prompt,
+                        ctx.request_id,
+                        system=_prompt("repair_section"),
+                        json_mode=True,
+                        max_cost_usd=_FINAL_RETRY_SECTION_USD,
+                    )
+                    responses.append(response)
+                    if not 0 <= response.cost_usd <= _FINAL_RETRY_SECTION_USD:
+                        raise ValueError("section generation exceeded budget")
+                    patch = section_model.model_validate_json(
+                        response.text, strict=True
+                    ).model_dump()
+                    replacement = IntermediateResearch.model_validate(
+                        intermediate.model_dump(by_alias=True) | patch, strict=True
+                    )
+                    materialized, dropped, _ = _materialize(
+                        replacement, sources, memo_refs | {memo_section: allowed}
+                    )
+                    candidate = materialized[section]
+                    if section == "C_tiktok":
+                        # Only select captured posts; Gemini cannot supply new URLs or metrics.
+                        candidate = patch[section]
+                        if not candidate or any(item not in data[section] for item in candidate):
+                            raise ValueError("unverified TikTok replacement")
+                    elif section in {"brand", "research_date"}:
+                        candidate = data[section]
+                    elif section == "E_community":
+                        tags = {item["name"]: item["tiktok_tags"] for item in data[section]}
+                        for item in candidate:
+                            item["tiktok_tags"] = tags.get(item["name"], [])
+                    trial = data | {section: candidate}
+                    if section in _missing_sections(trial):
+                        raise ValueError("section still missing verified evidence")
+                    data[section] = candidate
+                    discarded[section] += dropped[section]
+                    intermediate = replacement
+                    log.info(
+                        "proposal_research_section_retry_done",
+                        section=section,
+                        research_cost_usd=response.cost_usd,
+                    )
+                except Exception as exc:
+                    log.warning(
+                        "proposal_research_section_retry_failed",
+                        section=section,
+                        errors=research_validation_errors(exc),
+                    )
+                    raise ResearchError(
+                        f"調査結果の最終確認に失敗しました（不足・要確認: {label}）"
+                    ) from None
+
     def _fill_tiktok(
         self,
         data: dict[str, Any],
@@ -699,6 +888,8 @@ class ProposalResearchSkill(BaseSkill[ResearchBrief, ProposalResearchOutput]):
         brief: ResearchBrief,
         ctx: SkillContext,
     ) -> int:
+        started = self._clock()
+        log = ctx.bind_logger(self.name)
         candidates: dict[str, list[str]] = {}
         kept_names = {community["name"] for community in data["E_community"]}
         for community in intermediate.e_community:
@@ -725,24 +916,57 @@ class ProposalResearchSkill(BaseSkill[ResearchBrief, ProposalResearchOutput]):
         if brief.unreleased:
             terms = [term for term in terms if not _contains_name(term, brief.product_name)]
         terms = terms[:_TIKTOK_TERMS]
+        attempts = [0] * len(terms)
+        log.info(
+            "proposal_research_tiktok_start", term_count=len(terms), parallelism=_TIKTOK_PARALLEL
+        )
 
         # 検索 1 回ごとに media のタスクを起動するため、順次だと 7 回で 16 分かかった
         # （10-09 本番）。検索語どうしは並べ、1 語の中は hashtag → keyword の順を保つ。
         # 一時的な失敗のみ 1 回再試行・深度上限はお土産資料と同じ。
-        def search_term(term: str) -> tuple[int, dict[str, Any] | None]:
+        def search_term(term_index: int, term: str) -> tuple[int, dict[str, Any] | None]:
             count = 0
             for search_type in ("hashtag", "keyword"):
 
                 def search(search_type: str = search_type) -> TikTokSearchResult:
                     nonlocal count
                     count += 1
-                    return self._tiktok_searcher(
-                        term,
+                    attempts[term_index] = count
+                    call_start = self._clock()
+                    log.info(
+                        "proposal_research_tiktok_search_start",
+                        term_index=term_index,
                         search_type=search_type,
-                        max_videos=configured_search_depth(),
-                        request_id=ctx.request_id,
-                        timeout_s=_configured_search_timeout_seconds(),
+                        attempt=count,
                     )
+                    try:
+                        result = self._tiktok_searcher(
+                            term,
+                            search_type=search_type,
+                            max_videos=configured_search_depth(),
+                            request_id=ctx.request_id,
+                            timeout_s=_configured_search_timeout_seconds(),
+                        )
+                    except Exception as exc:
+                        log.warning(
+                            "proposal_research_tiktok_search_failed",
+                            term_index=term_index,
+                            search_type=search_type,
+                            attempt=count,
+                            latency_ms=int(max(0, self._clock() - call_start) * 1000),
+                            error_type=type(exc).__name__,
+                        )
+                        raise
+                    log.info(
+                        "proposal_research_tiktok_search_done",
+                        term_index=term_index,
+                        search_type=search_type,
+                        attempt=count,
+                        video_count=len(result.videos),
+                        valid_video_count=sum(_valid_post_url(v.url) for v in result.videos),
+                        latency_ms=int(max(0, self._clock() - call_start) * 1000),
+                    )
+                    return result
 
                 try:
                     result = retry_long_job_once(search)
@@ -762,11 +986,24 @@ class ProposalResearchSkill(BaseSkill[ResearchBrief, ProposalResearchOutput]):
                 }
             return count, None
 
-        with ThreadPoolExecutor(max_workers=_TIKTOK_PARALLEL) as pool:
-            futures = [
-                pool.submit(contextvars.copy_context().run, search_term, term) for term in terms
-            ]
-            outcomes = [future.result() for future in futures]
+        try:
+            with ThreadPoolExecutor(max_workers=_TIKTOK_PARALLEL) as pool:
+                futures = [
+                    pool.submit(contextvars.copy_context().run, search_term, index, term)
+                    for index, term in enumerate(terms)
+                ]
+                outcomes = [future.result() for future in futures]
+        except Exception as exc:
+            log.warning(
+                "proposal_research_tiktok_failed",
+                error_type=type(exc).__name__,
+                search_count=sum(attempts),
+                post_count=0,
+                latency_ms=int(max(0, self._clock() - started) * 1000),
+            )
+            raise ResearchError(
+                "TikTok の代表投稿を取得できませんでした（取得結果の形式を要確認）"
+            ) from None
         searches = sum(count for count, _ in outcomes)
         results: dict[str, dict[str, Any]] = {}
         for term, (_, entry) in zip(terms, outcomes, strict=True):
@@ -774,6 +1011,13 @@ class ProposalResearchSkill(BaseSkill[ResearchBrief, ProposalResearchOutput]):
                 results[term] = entry
                 data["C_tiktok"].append(entry)
         if not results:
+            log.warning(
+                "proposal_research_tiktok_failed",
+                search_count=searches,
+                post_count=0,
+                failed_term_count=len(terms),
+                latency_ms=int(max(0, self._clock() - started) * 1000),
+            )
             raise ResearchError("TikTok の代表投稿を取得できませんでした")
         for community in data["E_community"]:
             matching = [term for term in candidates.get(community["name"], []) if term in results]
@@ -781,6 +1025,14 @@ class ProposalResearchSkill(BaseSkill[ResearchBrief, ProposalResearchOutput]):
                 {"tag": term, "representative_post_url": results[term]["representative_post_url"]}
                 for term in matching
             ]
+        log.info(
+            "proposal_research_tiktok_done",
+            search_count=searches,
+            post_count=len(results),
+            failed_term_count=len(terms) - len(results),
+            community_tag_count=sum(len(c["tiktok_tags"]) for c in data["E_community"]),
+            latency_ms=int(max(0, self._clock() - started) * 1000),
+        )
         return searches
 
 
@@ -792,6 +1044,8 @@ def _valid_post_url(url: str) -> bool:
             and parsed.hostname in {"www.tiktok.com", "tiktok.com"}
             and parsed.username is None
             and parsed.port in {None, 443}
+            and "..." not in url
+            and "…" not in url
             and not any(char.isspace() for char in url)
             and bool(_POST_PATH.fullmatch(parsed.path))
         )

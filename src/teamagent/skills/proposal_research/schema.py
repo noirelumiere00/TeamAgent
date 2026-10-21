@@ -6,7 +6,7 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from teamagent.skills.proposal_builder.schema import InsightEvidence, ProductMeta
+from teamagent.skills.proposal_builder.schema import InsightEvidence, ProductMeta, ResearchIssue
 from teamagent.skills.proposal_research.brief import ResearchBrief
 
 
@@ -112,6 +112,7 @@ class ResearchSummary(StrictModel):
     elapsed_seconds: float = Field(ge=0)
     gemini_cost_usd: float = Field(ge=0)
     tiktok_search_count: int = Field(ge=0)
+    review_required: list[ResearchIssue] = Field(default_factory=list)
 
 
 class ProposalResearchOutput(StrictModel):
