@@ -407,6 +407,30 @@ def test_dockerfile_uses_exact_arm64_children_and_chainguard_final() -> None:
         assert f"ARG {secret}" not in dockerfile
 
 
+@pytest.mark.parametrize(
+    ("package", "version", "directory"),
+    [
+        ("follow-redirects", "1.16.1", "/opt/teamagent/plugins/slack/node_modules/follow-redirects"),
+    ],
+)
+def test_vulnerability_overrides_are_verified_before_pruning(
+    package: str, version: str, directory: str
+) -> None:
+    dockerfile = DOCKERFILE.read_text()
+    patch = dockerfile.split("patch_dir=/tmp/openclaw-vulnerability-patches;", 1)[1]
+    patch = patch.split("chmod -R a-w /opt/teamagent", 1)[0]
+    pack = f'npm pack {package}@{version} --ignore-scripts --pack-destination "$patch_dir";'
+    tarball = f"{package.lstrip('@').replace('/', '-')}-{version}.tgz"
+    extract = f'tar -xzf "$patch_dir/{tarball}" --strip-components=1 -C {directory};'
+    expected = f'"{directory}":"{version}"'
+    assert patch.index(pack) < patch.index(extract) < patch.index(expected)
+    for command in ("rm -rf", "mkdir -p"):
+        paths = patch.split(f"    {command} \\\n", 1)[1].split(";", 1)[0].split()
+        assert directory in paths
+    assert "if(got!==v)throw new Error" in patch
+    assert dockerfile.index(pack) < dockerfile.index("RUN node /tmp/prune-runtime.mjs")
+
+
 def test_config_loads_only_reviewed_plugins_and_not_browser() -> None:
     config = _load_reviewed_json5(CONFIG)
     assert config["plugins"]["allow"] == [

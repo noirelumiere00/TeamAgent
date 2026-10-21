@@ -70,7 +70,7 @@ RUN set -eux; \
     rm -rf /root/.cache/ms-playwright /home/node/.cache/ms-playwright /ms-playwright; \
     chmod -R a-w /opt/teamagent
 
-# The pinned upstream release ships five transitively vulnerable packages that
+# The pinned upstream release ships vulnerable packages that
 # the release gate rejects (it requires zero Critical/High findings). Upstream
 # has no patched tag for 2026.7.1, so exact-version registry tarballs are unpacked
 # over only the affected directories here. Running npm pack from /tmp avoids the
@@ -78,7 +78,8 @@ RUN set -eux; \
 # closure. The prune pass immediately below must run after these tarballs are
 # unpacked so their development metadata and payload are removed before the
 # runtime inventory check. The assertions below fail the build if a tarball
-# contains anything other than the reviewed version.
+# contains anything other than the reviewed version. npm pack verifies each
+# registry tarball against its dist.integrity before extraction.
 #   axios           1.16.0 -> 1.20.0  GHSA-gcfj-64vw-6mp9 (inherited proxy, 1.18.0),
 #                                     CVE-2026-101898, CVE-2026-101901, CVE-2026-101903,
 #                                     CVE-2026-101905, CVE-2026-101906, CVE-2026-101907,
@@ -111,12 +112,17 @@ RUN set -eux; \
 #     MCP サーバの選んだ認可サーバへ資格情報を送りうる）。1.31.0 が最小の修正版。依存は同じ（@hono/node-server の
 #     範囲が広がっただけ）。1.30/1.31 の変更は SSE keep-alive と OAuth の issuer 束縛で、Aico の mcp への接続
 #     （ベアラートークン・OAuth 不使用）には影響しない。
+#   @modelcontextprotocol/sdk 1.31.0 -> 1.32.0  CVE-2026-111767（GHSA-22jm-h49p-29qw）・CVE-2026-111768（GHSA-46jr-4wx8-v453）(oc28)
+#     1.32.0 が最小の修正版。依存・engines は 1.31.0 と同一（registry で確認）。
+#   follow-redirects 1.16.0 -> 1.16.1  CVE-2026-111755 / CVE-2026-111756 (oc28)
+#     Slack's axios 1.20.0 accepts ^1.16.0; dependencies and Node >=4.0 are unchanged.
 RUN set -eux; \
     chmod -R u+w /opt/teamagent; \
     patch_dir=/tmp/openclaw-vulnerability-patches; \
     mkdir -p "$patch_dir"; \
     cd "$patch_dir"; \
     npm pack axios@1.20.0 --ignore-scripts --pack-destination "$patch_dir"; \
+    npm pack follow-redirects@1.16.1 --ignore-scripts --pack-destination "$patch_dir"; \
     npm pack brace-expansion@5.0.11 --ignore-scripts --pack-destination "$patch_dir"; \
     npm pack fast-uri@3.1.7 --ignore-scripts --pack-destination "$patch_dir"; \
     npm pack ip-address@10.3.1 --ignore-scripts --pack-destination "$patch_dir"; \
@@ -125,9 +131,10 @@ RUN set -eux; \
     npm pack https-proxy-agent@5.0.1 --ignore-scripts --pack-destination "$patch_dir"; \
     npm pack agent-base@6.0.2 --ignore-scripts --pack-destination "$patch_dir"; \
     npm pack proxy-addr@2.0.8 --ignore-scripts --pack-destination "$patch_dir"; \
-    npm pack @modelcontextprotocol/sdk@1.31.0 --ignore-scripts --pack-destination "$patch_dir"; \
+    npm pack @modelcontextprotocol/sdk@1.32.0 --ignore-scripts --pack-destination "$patch_dir"; \
     rm -rf \
       /opt/teamagent/plugins/slack/node_modules/axios \
+      /opt/teamagent/plugins/slack/node_modules/follow-redirects \
       /opt/teamagent/plugins/slack/node_modules/https-proxy-agent \
       /opt/teamagent/plugins/slack/node_modules/agent-base \
       /app/node_modules/brace-expansion \
@@ -140,6 +147,7 @@ RUN set -eux; \
       /app/node_modules/@modelcontextprotocol/sdk; \
     mkdir -p \
       /opt/teamagent/plugins/slack/node_modules/axios \
+      /opt/teamagent/plugins/slack/node_modules/follow-redirects \
       /opt/teamagent/plugins/slack/node_modules/https-proxy-agent \
       /opt/teamagent/plugins/slack/node_modules/agent-base \
       /app/node_modules/brace-expansion \
@@ -151,6 +159,7 @@ RUN set -eux; \
       /opt/teamagent/plugins/slack/node_modules/proxy-addr \
       /app/node_modules/@modelcontextprotocol/sdk; \
     tar -xzf "$patch_dir/axios-1.20.0.tgz" --strip-components=1 -C /opt/teamagent/plugins/slack/node_modules/axios; \
+    tar -xzf "$patch_dir/follow-redirects-1.16.1.tgz" --strip-components=1 -C /opt/teamagent/plugins/slack/node_modules/follow-redirects; \
     tar -xzf "$patch_dir/https-proxy-agent-5.0.1.tgz" --strip-components=1 -C /opt/teamagent/plugins/slack/node_modules/https-proxy-agent; \
     tar -xzf "$patch_dir/agent-base-6.0.2.tgz" --strip-components=1 -C /opt/teamagent/plugins/slack/node_modules/agent-base; \
     tar -xzf "$patch_dir/brace-expansion-5.0.11.tgz" --strip-components=1 -C /app/node_modules/brace-expansion; \
@@ -160,10 +169,10 @@ RUN set -eux; \
     tar -xzf "$patch_dir/tar-7.5.21.tgz" --strip-components=1 -C /app/node_modules/tar; \
     tar -xzf "$patch_dir/proxy-addr-2.0.8.tgz" --strip-components=1 -C /app/node_modules/proxy-addr; \
     tar -xzf "$patch_dir/proxy-addr-2.0.8.tgz" --strip-components=1 -C /opt/teamagent/plugins/slack/node_modules/proxy-addr; \
-    tar -xzf "$patch_dir/modelcontextprotocol-sdk-1.31.0.tgz" --strip-components=1 -C /app/node_modules/@modelcontextprotocol/sdk; \
+    tar -xzf "$patch_dir/modelcontextprotocol-sdk-1.32.0.tgz" --strip-components=1 -C /app/node_modules/@modelcontextprotocol/sdk; \
     cd /tmp; \
     rm -rf "$patch_dir"; \
-    node -e 'const fs=require("fs");const want={"/app/node_modules/brace-expansion":"5.0.11","/app/node_modules/fast-uri":"3.1.7","/app/node_modules/ip-address":"10.3.1","/app/node_modules/undici":"8.10.2","/app/node_modules/tar":"7.5.21","/app/node_modules/proxy-addr":"2.0.8","/opt/teamagent/plugins/slack/node_modules/proxy-addr":"2.0.8","/app/node_modules/@modelcontextprotocol/sdk":"1.31.0","/opt/teamagent/plugins/slack/node_modules/agent-base":"6.0.2","/opt/teamagent/plugins/slack/node_modules/axios":"1.20.0","/opt/teamagent/plugins/slack/node_modules/https-proxy-agent":"5.0.1"};for(const [dir,v] of Object.entries(want)){const got=JSON.parse(fs.readFileSync(dir+"/package.json")).version;if(got!==v)throw new Error(`vulnerability patch mismatch: ${dir} is ${got}, expected ${v}`)}'; \
+    node -e 'const fs=require("fs");const want={"/app/node_modules/brace-expansion":"5.0.11","/app/node_modules/fast-uri":"3.1.7","/app/node_modules/ip-address":"10.3.1","/app/node_modules/undici":"8.10.2","/app/node_modules/tar":"7.5.21","/app/node_modules/proxy-addr":"2.0.8","/opt/teamagent/plugins/slack/node_modules/proxy-addr":"2.0.8","/app/node_modules/@modelcontextprotocol/sdk":"1.32.0","/opt/teamagent/plugins/slack/node_modules/agent-base":"6.0.2","/opt/teamagent/plugins/slack/node_modules/axios":"1.20.0","/opt/teamagent/plugins/slack/node_modules/follow-redirects":"1.16.1","/opt/teamagent/plugins/slack/node_modules/https-proxy-agent":"5.0.1"};for(const [dir,v] of Object.entries(want)){const got=JSON.parse(fs.readFileSync(dir+"/package.json")).version;if(got!==v)throw new Error(`vulnerability patch mismatch: ${dir} is ${got}, expected ${v}`)}'; \
     chmod -R a-w /opt/teamagent
 
 # The upstream release contains its complete development workspace. Resolve the
