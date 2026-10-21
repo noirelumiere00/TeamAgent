@@ -100,7 +100,7 @@ media = [
     "curl-cffi==0.15.0",
     "playwright==1.60.0",
     "python-pptx==1.0.2",
-    "pillow==12.3.0",
+    "pillow==13.0.0",
     "weasyprint>=69.0",
 ]
 
@@ -117,7 +117,7 @@ media-runtime = [
     "curl-cffi==0.15.0",
     "playwright==1.60.0",
     "python-pptx==1.0.2",
-    "pillow==12.3.0",
+    "pillow==13.0.0",
     "weasyprint>=69.0",
 ]
 
