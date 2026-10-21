@@ -42,7 +42,8 @@ UV_DIGEST = "9941e2d8e06ff884d328905091eac0a6bc1e40e5ce12e6dd0de4ef4ee26baac4"
 # 2026-10-08: Alpine 上流への追随（zlib 1.3.2-r0→1.3.2-r1）。apk 段の実ビルドで lock 差分 -1 +1（241→241 行）。
 # 2026-10-19: Alpine 上流への追随（libexpat 2.8.5-r0→2.9.0-r0）。apk 段の実ビルドで lock 差分 -1 +1（241→241 行）。
 # 2026-10-19: Alpine 上流への追随（libx11 1.8.13-r0→1.8.14-r0・libxi 1.8.3-r0→1.8.4-r0・libxrender 0.9.12-r0→0.9.13-r0・libxtst 1.2.5-r0→1.2.6-r0）。apk 段の実ビルドで lock 差分 -4 +4（241→241 行）。
-APK_LOCK_SHA256 = "7a917a661038aa7c4b01735e58d5ede39fdc8b93f7698f18a30d235cb94c9718"
+# 2026-10-21: ca-certificates 20260909-r0→20261020-r0。人作成 lock は 20 行目のみ差分（241 行不変）、実物一致は段 3 の cmp で検証。
+APK_LOCK_SHA256 = "ef94d8a3647535224341cf325bc9fc130ee28686189db2b1930d2c8bd4238e5a"
 CHROMIUM_PATH = "/usr/lib/chromium/chromium"
 
 
