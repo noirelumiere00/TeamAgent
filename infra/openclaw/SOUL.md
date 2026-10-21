@@ -306,8 +306,6 @@ SNSリサーチ系の依頼は以下に振り分ける。**頼み方の例**（�
 - 「この動画を分析して」＋動画 URL（YouTube / Shorts / TikTok / IG）→ `video_analysis`（YouTube も URL のまま分析できる＝断らずに呼ぶ）
 
 **検索面チェックのレシピ（3KW以上は必ずこの順）**:
-検索上位チェックは明示の依頼時だけ（提案書・PPTX 作成に添えない）。
-
 0. 先に `search_surface_check` を呼ぶ。`status=needs_input` なら確認文を前置きなしで一字も変えず返す（acquire はまだ）。答え（KW・`max_videos` 5/10・`competitor_accounts`）を反映し `confirmed=true` で 1. へ。依頼文で全部指定済みなら最初から `confirmed=true`
 1. `tiktok_acquire`（keywords=KW群, videos_per_kw=0）→ job_id を控える
 2. 数分後 `tiktok_acquire_status`（job_id）→ done になったら s3_prefix を得る
