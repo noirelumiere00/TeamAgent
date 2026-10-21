@@ -410,7 +410,11 @@ def test_dockerfile_uses_exact_arm64_children_and_chainguard_final() -> None:
 @pytest.mark.parametrize(
     ("package", "version", "directory"),
     [
-        ("follow-redirects", "1.16.1", "/opt/teamagent/plugins/slack/node_modules/follow-redirects"),
+        (
+            "follow-redirects",
+            "1.16.1",
+            "/opt/teamagent/plugins/slack/node_modules/follow-redirects",
+        ),
     ],
 )
 def test_vulnerability_overrides_are_verified_before_pruning(
