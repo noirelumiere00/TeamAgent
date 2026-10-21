@@ -146,7 +146,12 @@ def test_many_keywords_without_acquire_job_guides_to_acquire() -> None:
         apify=_FakeApify(), bedrock=_FakeBedrock(), publisher=_publisher
     )  # type: ignore[arg-type]
     out = skill.run(SearchSurfaceCheckInput(keywords=["セブン", "ファミマ", "ローソン"]), _ctx())
-    assert "tiktok_acquire" in out.slack_summary
+    assert out.slack_summary == "検索上位チェックには、先に検索結果の取得が必要です。"
+    assert "tiktok_acquire(keywords=" in out.model_instructions
+    assert "videos_per_kw=0" in out.model_instructions
+    assert "acquire_job_id" in out.model_instructions
+    assert "利用者に提示しない" in out.model_instructions
+    assert "model_instructions" in SearchSurfaceCheckSkill.mcp_relay_fields
     assert out.surfaces == []
 
 

@@ -187,6 +187,8 @@ class SearchSurfaceCheckSkill(BaseSkill[SearchSurfaceCheckInput, SearchSurfaceCh
 
     name: ClassVar[str] = "search_surface_check"
     description: ClassVar[str] = (
+        "検索上位チェックを明示的に依頼されたときだけ使う。"
+        "提案書・フルのPPTX作成の前処理や並行処理として呼ばない。資料作成は omiyage_report_submit。"
         "検索KW群のTikTok/Instagramの検索面（誰のどんな投稿が上位に出るか）を取得し、"
         "面の勢力図（ニュース/グルメ/一般/公式/インフルエンサーの割合）とクライアント動画の"
         "在圏判定つきの媒体比較レポート(HTML署名URL)を作る。"
@@ -204,6 +206,7 @@ class SearchSurfaceCheckSkill(BaseSkill[SearchSurfaceCheckInput, SearchSurfaceCh
     mcp_relay_fields: ClassVar[tuple[str, ...] | None] = (
         "status",
         "slack_summary",
+        "model_instructions",
         "report_url",
         "warnings",
         "total_cost_usd",
@@ -542,7 +545,9 @@ class SearchSurfaceCheckSkill(BaseSkill[SearchSurfaceCheckInput, SearchSurfaceCh
         ):
             return SearchSurfaceCheckOutput(
                 keywords=input.keywords,
-                slack_summary=(
+                slack_summary="検索上位チェックには、先に検索結果の取得が必要です。",
+                model_instructions=(
+                    "モデル専用（利用者に提示しない）: "
                     f"{len(input.keywords)}KWのTikTok面チェックは、先に "
                     f"tiktok_acquire(keywords={input.keywords}, videos_per_kw=0) を実行し、"
                     "完了後に acquire_job_id を渡してください"

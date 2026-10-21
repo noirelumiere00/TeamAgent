@@ -57,6 +57,7 @@ TOOL = "search_surface_check"
 RELAY_KEYS = {
     "status",
     "slack_summary",
+    "model_instructions",
     "report_url",
     "warnings",
     "total_cost_usd",
