@@ -295,3 +295,35 @@ async def test_not_found_only_keeps_the_separate_video_metrics_post(
     result = await dispatch("video_metrics", ANSWER)
     assert "direct_delivery" not in result
     assert len(posts) == 1
+
+
+async def test_compact_fallback_card_links_survive_with_drive_first_off(monkeypatch):
+    enable(monkeypatch)
+    monkeypatch.setenv("SEARCH_DRIVE_FIRST", "0")
+    slack = _FakeSlack()
+    monkeypatch.setattr(detached_jobs, "_slack_client", lambda timeout_seconds: slack)
+    link = "<https://drive.google.com/file/d/ORIGINAL/view|資料を見る>"
+    answer = f"*匿名案件*（2025年9月）\n• 配信面を組み合わせた。\n• {link}"
+    search = _Search("list_fast", answer)
+    monkeypatch.setattr(
+        search,
+        "run",
+        lambda *a: SearchOutput(
+            answer=answer,
+            direct_answer=answer,
+            direct_answer_kind="list_fast",
+            answer_format="list",
+            total_cost_usd=0,
+            found=True,
+        ),
+    )
+    result = await server.dispatch_tool(
+        _spec(search, "search"),
+        "search",
+        {"query": "事例はある？"},
+        identity_resolver=_resolver_for(ME),
+        caller_claim_verifier=_Verifier(_claim(channel=DM)),
+    )
+    assert json.loads(result[0].text)["delivered"] is True
+    assert link in slack.posts[0]["text"]
+    assert slack.posts[0]["blocks"][0]["text"]["text"] == slack.posts[0]["text"]

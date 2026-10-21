@@ -42,7 +42,7 @@ from teamagent.skills._shared.next_step import (
 )
 from teamagent.skills._shared.source_url import hit_doc_url
 from teamagent.skills.base import BaseSkill, SkillContext, register
-from teamagent.skills.search import compact, timeline_status
+from teamagent.skills.search import compact, drive_first, timeline_status
 from teamagent.skills.search.aggregation import extract_aggregation_filter
 from teamagent.skills.search.alias_expansion import retry_inputs, scope_footer
 from teamagent.skills.search.answer_mode import (
@@ -113,6 +113,7 @@ from teamagent.skills.search.result_guard import (
     prefix_header,
 )
 from teamagent.skills.search.schema import (
+    DocumentReference,
     RelatedFileOut,
     SearchDirectAnswerKind,
     SearchHitOut,
@@ -254,6 +255,7 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
         slack: Any = None,
         slack_store: Any = None,
         slack_reader_factory: Any = None,
+        google_token_store: Any = None,
     ) -> None:
         """Adapter は外から注入する（テストでモック差し替え可能にするため）。
 
@@ -288,6 +290,7 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
         self._composite = composite_enabled()
         self._slack_store = slack_store
         self._slack_reader_factory = slack_reader_factory
+        self._google_token_store = google_token_store
         self._use_new_schema = use_new_schema
         if use_contextual:
             # Contextual Retrieval テーブルを優先（明示指定がなければ）
@@ -584,6 +587,8 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
         compact_mode = ctx.metadata.get(compact.CTX_KEY) is True and not compact.explicit_list(
             input.query
         )
+        compact_answer = ""
+        compact_fallback_cards = ""
         log = ctx.bind_logger(self.name)
         log.info(
             "search_skill_start",
@@ -629,7 +634,10 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
         if case_probe.get("case"):
             from teamagent.skills.search.fanout import _case_hits
 
-            hits = [*hits, *_case_hits(case_probe["case"])]
+            hits = [
+                *hits,
+                *_case_hits(case_probe["case"], drive_mode=drive_first.enabled(ctx.metadata)),
+            ]
         timings["retrieve_ms"] = (time.perf_counter() - _t) * 1000
 
         # 2-a. 「該当なし」の判定（retrieval の実数値とメタだけ・LLM に任せない）。
@@ -650,7 +658,7 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
         # Slack / 管理シートの本文にある資料名は、全ヒット分をまとめて 1 回だけ
         # Drive URL に解決する。answer と構造化 hits の両方で同じ結果を使い回す。
         _t = time.perf_counter()
-        file_urls = self._resolve_file_urls(hits, ctx)
+        file_urls = {} if drive_first.enabled(ctx.metadata) else self._resolve_file_urls(hits, ctx)
         timings["resolve_urls_ms"] = (time.perf_counter() - _t) * 1000
 
         # 取引先の分類を補ってから対象を絞り、要約・警告・📊で同じ根拠を使う。
@@ -724,6 +732,11 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
             slack_items = tuple(i for i in slack_items if target_matches(i.text, case_target))
             hits = summary_hits
             found = bool((found and summary_hits) or slack_items)
+        if drive_first.enabled(ctx.metadata):
+            groups, slack_items, file_urls = drive_first.annotate(
+                self, [hits, summary_hits], slack_items, ctx
+            )
+            hits, summary_hits = groups
         if compact_mode and slack_items:
             found = True
         case_miss = bool(case_target and not found)
@@ -820,6 +833,60 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
             timings["converse_ms"] = (time.perf_counter() - _t) * 1000
             if not answer.strip():
                 direct_kind = None
+            if compact_mode and found:
+                compact_answer = compact.build(
+                    answer,
+                    summary_hits,
+                    slack_items,
+                    lambda h: self._hit_url(h, file_urls=file_urls),
+                    query=input.query,
+                    asked_industry=asked_industry,
+                    notice=guard_header,
+                )
+                if compact.is_empty(compact_answer, notice=guard_header):
+                    compact_mode = False
+                    compact_fallback_cards = compact.fallback_cards(
+                        input.query,
+                        summary_hits,
+                        slack_items,
+                        lambda h: self._hit_url(h, file_urls=file_urls),
+                        target=case_target,
+                    )
+                    log.info(
+                        "search_compact_fallback",
+                        mode="cards" if compact_fallback_cards else "normal",
+                    )
+                    if compact_fallback_cards:
+                        case_listing = True
+                        answer = compact_fallback_cards
+                    else:
+                        _t = time.perf_counter()
+                        try:
+                            answer, fallback_cost = self._summarize(
+                                input.query,
+                                summary_hits,
+                                ctx.request_id,
+                                slack_items=slack_items,
+                                asked_industry=asked_industry,
+                                canonical_campaign_totals=(
+                                    campaign_totals_block(summary_hits)
+                                    if ctx.metadata.get("_search_direct_answer") is True
+                                    else ""
+                                ),
+                            )
+                            cost_usd += fallback_cost
+                            answer = compact.normal_answer(answer)
+                        except Exception as exc:
+                            log.warning("search_compact_fallback_failed", error=type(exc).__name__)
+                            answer = ""
+                            direct_kind = None
+                        timings["converse_ms"] += (time.perf_counter() - _t) * 1000
+                        if not answer:
+                            direct_kind = None
+                            answer = "資料は見つかりました。取得した根拠を示します。"
+                            answer += self._source_links_block(
+                                summary_hits, file_urls=file_urls, slack_items=slack_items
+                            )
             # 資料リンク・「シートのみ」と、動画ごとの数字・リンクをコードで足す。
             if not compact_mode:
                 answer = self._append_campaign_footer(
@@ -939,6 +1006,9 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
                 url = resolved_file_ref[1]
             if not url:
                 url = self._doc_url({"source_uri": meta.get("source_uri")})
+            ref = meta.get(drive_first.REFERENCE_KEY)
+            if ref is not None:
+                url = ref.url
             # 便A-3: 日付は tool が根拠を持つ値だけを返す。
             #   updated_at = documents.modified_at（adapter が JST 文字列化済み）
             #   title_date = 資料名（title / 実ファイル名 / file_name）に埋まった日付
@@ -949,6 +1019,7 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
             search_hits.append(
                 SearchHitOut(
                     chunk_id=h.chunk_id,
+                    reference=ref,
                     content=h.content,
                     score=h.score,
                     source=self._build_source(h),
@@ -985,15 +1056,7 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
 
         if compact_mode and input.include_answer:
             if found:
-                answer = compact.build(
-                    answer,
-                    summary_hits,
-                    slack_items,
-                    lambda h: self._hit_url(h, file_urls=file_urls),
-                    query=input.query,
-                    asked_industry=asked_industry,
-                    notice=guard_header,
-                )
+                answer = compact_answer
             elif slack_lookup is not None and slack_lookup.hidden_count:
                 answer = "Slackの非公開の場所に一致がありますが、この会話では内容を表示できません。"
             else:
@@ -1002,6 +1065,9 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
                     scope += "・Slack" if slack_lookup.status == "ok" else "（Slackは検索未完了）"
                 answer = build_scoped_not_found_answer(case_target, scope=scope, complete=complete)
 
+        displayed_refs: list[DocumentReference] | None = (
+            [] if drive_first.enabled(ctx.metadata) else None
+        )
         if case_listing and input.include_answer:
             from teamagent.skills.search.case_list import render, slack_cases
 
@@ -1009,9 +1075,13 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
                 [*summary_hits, *slack_cases(slack_items)],
                 case_target,
                 lambda h: self._hit_url(h, file_urls=file_urls),
+                displayed_refs=displayed_refs,
+                cards=bool(compact_fallback_cards),
             )
             if listed:
                 answer = listed
+                if compact_fallback_cards and self._direct_answer_allowed(ctx, "list_fast"):
+                    direct_kind = "list_fast"
             elif slack_lookup is not None and slack_lookup.hidden_count:
                 answer = "Slackの非公開の場所に一致がありますが、この会話では内容を表示できません。"
             elif found:
@@ -1023,8 +1093,16 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
                     complete=complete,
                 )
             suggested_next = None
+        if found and input.include_answer:
+            answer = answer.replace(compact.EMPTY_ANSWER, "").strip()
+            if compact.is_empty(answer):
+                answer = "資料は見つかりました。取得した根拠を示します。"
+                answer += self._source_links_block(
+                    summary_hits, file_urls=file_urls, slack_items=slack_items
+                )
         output = SearchOutput(
             answer=answer,
+            displayed_refs=displayed_refs,
             answer_format="list" if case_listing else "compact" if compact_mode else None,
             direct_answer=answer if direct_kind is not None else None,
             direct_answer_kind=direct_kind,
@@ -2930,6 +3008,9 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
         """
 
         meta = hit.metadata or {}
+        ref = meta.get(drive_first.REFERENCE_KEY)
+        if isinstance(ref, DocumentReference):
+            return ref.url
         direct = cls._doc_url({"drive_url": meta.get("drive_url")})
         if direct:
             return direct
@@ -2954,7 +3035,12 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
             meta = h.metadata or {}
             if not self._name_resolution_target(meta):
                 continue
-            for name in self._candidate_file_names(meta, h.content or ""):
+            names = (
+                drive_first.candidate_names(meta, h.content or "")
+                if drive_first.enabled(ctx.metadata)
+                else self._candidate_file_names(meta, h.content or "")
+            )
+            for name in names:
                 if name not in titles:
                     titles.append(name)
         if not titles:
@@ -2970,8 +3056,22 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
                 ),
                 user_role=ctx.metadata.get("user_role"),
             ) as conn:
+                if drive_first.enabled(ctx.metadata):
+                    resolved: dict[str, str] = {}
+                    for start in range(0, len(titles), 20):
+                        resolved.update(
+                            self._pgvector.resolve_file_urls_by_titles(
+                                conn,
+                                titles[start : start + 20],
+                                request_id=ctx.request_id,
+                                strict=True,
+                            )
+                        )
+                    return resolved
                 return self._pgvector.resolve_file_urls_by_titles(
-                    conn, titles, request_id=ctx.request_id
+                    conn,
+                    titles,
+                    request_id=ctx.request_id,
                 )
         except Exception as exc:  # 解決失敗で検索回答そのものを壊さない
             logger.warning(
@@ -2995,6 +3095,22 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
         場合、行 URL ではなく実ファイルの URL を出すために使う（ユーザー判定: 行 URL は不合格）。
         """
         resolved = file_urls or {}
+        refs = [h.metadata.get(drive_first.REFERENCE_KEY) for h in hits]
+        refs.extend(item.hit.reference for item in slack_items)
+        if any(ref is not None for ref in refs):
+            reference_lines: list[str] = []
+            seen_refs: set[str] = set()
+            for ref in refs:
+                if ref is None or not ref.url or ref.url in seen_refs:
+                    continue
+                if any(c in ref.url for c in ") (\t\n\r"):
+                    continue
+                seen_refs.add(ref.url)
+                title = re.sub(r"[\[\]()<>@\n\r]+", " ", ref.title).strip() or "記録"
+                reference_lines.append(f"- {drive_first.label(ref)}: [{title}]({ref.url})")
+                if len(reference_lines) == 6:
+                    break
+            return "\n\n📎 *出典*\n" + "\n".join(reference_lines) if reference_lines else ""
         seen: set[str] = set()
         lines: list[str] = []
         sources = [

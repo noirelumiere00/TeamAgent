@@ -10,6 +10,7 @@ from urllib.parse import urlsplit
 from teamagent.adapters.pgvector_client import SearchHit
 from teamagent.prompts.loader import load_prompt
 from teamagent.skills._shared.grounding import NumberGrounder
+from teamagent.skills.search import drive_first
 from teamagent.skills.search.campaign_files import (
     VIDEO_METRICS_HEADING,
     _footer_campaigns,
@@ -19,6 +20,7 @@ from teamagent.skills.search.comparison import compact_comparison, is_comparison
 from teamagent.skills.search.composite import SlackItem
 
 CTX_KEY = "_search_compact_answer"
+EMPTY_ANSWER = "取得した資料では、質問への回答を確認できませんでした。"
 _CITATION = re.compile(r"\[S:([\w-]+)\]")
 _EXPLICIT_LIST = re.compile(
     r"一覧|リスト(?:アップ)?|列挙|(?:資料|事例|案件)を全部|全部(?:の資料)?を?(?:出|見せ|並べ)"
@@ -37,6 +39,44 @@ _DATES = re.compile(
 )
 # title, resolved URL, retrieved content. Keys are assigned by code, never model URLs.
 Sources = dict[str, tuple[str, str, str]]
+
+
+def is_empty(answer: str, *, notice: str = "") -> bool:
+    return not _CITATION.sub("", answer.removeprefix(notice)).replace(EMPTY_ANSWER, "").strip()
+
+
+def normal_answer(answer: str) -> str:
+    # 通常回答の再生成がcompact用の文を繰り返しても、除去した主張を復活させない。
+    return (
+        "\n".join(line for line in answer.splitlines() if not _CITATION.search(line))
+        .replace(EMPTY_ANSWER, "")
+        .strip()
+    )
+
+
+def fallback_cards(
+    query: str,
+    hits: Sequence[SearchHit],
+    slack_items: Sequence[SlackItem],
+    url_of: Callable[[SearchHit], str | None],
+    *,
+    target: str | None = None,
+) -> str:
+    from teamagent.skills.search.answer_mode import classify_answer_mode
+    from teamagent.skills.search.case_list import render
+
+    if (
+        not re.search(r"事例|案件|資料|提案書|実績|レポート|スライド|ファイル", query)
+        or classify_answer_mode(query) == "insight"
+        or is_comparison_query(query)
+    ):
+        return ""
+    return render(
+        [*hits, *(drive_first.slack_hit(item, i) for i, item in enumerate(slack_items))],
+        target,
+        url_of,
+        cards=True,
+    )
 
 
 def explicit_list(query: str) -> bool:
@@ -59,13 +99,21 @@ def source_map(
     sources: Sources = {}
     for hit in hits:
         meta = hit.metadata or {}
+        ref = meta.get(drive_first.REFERENCE_KEY)
         sources[str(hit.chunk_id)] = (
-            str(meta.get("title") or meta.get("file_name") or "資料"),
+            f"{drive_first.label(ref)}: {ref.title}"
+            if ref
+            else str(meta.get("title") or meta.get("file_name") or "資料"),
             url_of(hit) or "",
             hit.content + "\n" + str(meta.get("updated_at") or ""),
         )
     for i, item in enumerate(slack_items):
-        sources[f"slack{i}"] = (item.hit.channel or "Slack", item.hit.permalink, item.text)
+        ref = item.hit.reference
+        sources[f"slack{i}"] = (
+            f"{drive_first.label(ref)}: {ref.title}" if ref else item.hit.channel or "Slack",
+            ref.url or "" if ref else item.hit.permalink,
+            item.text,
+        )
     return sources
 
 
@@ -147,6 +195,8 @@ def render(
         if len({sources[key][1] or key for key in candidate_keys}) > 3:
             continue
         text = _CITATION.sub("", raw).strip()
+        if EMPTY_ANSWER in text:
+            continue
         if re.match(
             r"^(?:[-*#・•]|[📊📁🏆🗂💬📎🕸]|金庫の資料|事例・施策実績|資料リンク|"
             r"関係図|探した範囲|動画ごとの数字|施策の反応合計|施策の数字はシート)",
@@ -174,7 +224,7 @@ def render(
             continue
         lines.append(text)
         used = candidate_keys
-    body = "\n".join([*base, *lines]) or "取得した資料では、質問への回答を確認できませんでした。"
+    body = "\n".join([*base, *lines])
     heading, _, payload = metrics.partition("\n")
     blocks: list[str] = []
     if heading == VIDEO_METRICS_HEADING:

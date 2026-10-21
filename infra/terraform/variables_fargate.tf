@@ -676,6 +676,18 @@ variable "search_direct_answer_allowed_emails" {
   default     = ""
 }
 
+variable "search_drive_first" {
+  description = "検索の Drive 正本優先（SEARCH_DRIVE_FIRST・MCP/OC 共通）。既定 OFF。本人確認済み DM の許可対象者だけに有効。"
+  type        = string
+  default     = "0"
+}
+
+variable "search_drive_first_allowed_emails" {
+  description = "Drive 正本優先の独立した本人メール許可リスト。空は全員拒否。初回は小俣さんだけを指定し、TD で変更したら正本 tfvars にも反映する。"
+  type        = string
+  default     = ""
+}
+
 # ============================================================
 # 2026-09-29: F0 連携切れの見える化（PR-0b 連携の生存確認）。既定はすべて「今と同じ」。
 # ============================================================

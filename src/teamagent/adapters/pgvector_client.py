@@ -12,6 +12,7 @@ Usage:
 from __future__ import annotations
 
 import os
+import re
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -1624,12 +1625,45 @@ class PgVectorClient:
         )
         return hits
 
+    def list_authorized_document_references(
+        self,
+        conn: psycopg.Connection[dict[str, Any]],
+        *,
+        document_ids: list[str] | None = None,
+        drive_file_ids: list[str] | None = None,
+        source_uris: list[str] | None = None,
+        request_id: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """出典候補を本人の RLS 接続で引き直す。各行と元候補の照合は呼び出し側で行う。"""
+        if not (document_ids or drive_file_ids or source_uris):
+            return []
+        sql = """
+            SELECT d.id::text AS id, d.id::text AS document_id,
+                   d.title, d.source_uri, d.source_type::text AS source_type,
+                   d.external_id, d.metadata
+            FROM documents d
+            WHERE d.metadata->>'suppressed' IS DISTINCT FROM 'true'
+              AND (d.id::text = ANY(%s)
+                   OR (d.source_type = 'gdrive' AND d.external_id = ANY(%s))
+                   OR d.source_uri = ANY(%s))
+        """
+        with conn.cursor() as cur:
+            cur.execute(sql, [document_ids or [], drive_file_ids or [], source_uris or []])
+            rows = [dict(row) for row in cur.fetchall()]
+        logger.info(
+            "pgvector_authorized_document_references",
+            request_id=request_id,
+            resolved=len(rows),
+        )
+        return rows
+
     def resolve_file_urls_by_titles(
         self,
         conn: psycopg.Connection[dict[str, Any]],
         titles: list[str],
         *,
         request_id: str | None = None,
+        strict: bool = False,
     ) -> dict[str, str]:
         """資料名 → 実ファイル(Drive)の URL を引き当てる（read-only）。
 
@@ -1640,13 +1674,16 @@ class PgVectorClient:
 
         引き当ては「完全一致」優先・見つからなければ拡張子を除いた前方一致。
         取り違えを避けるため部分一致の緩い検索はしない（見つからなければ空）。
+        strict=True は本人の RLS 接続上で file ID が一意なときだけ採用し、
+        完全一致が曖昧なら再解決しない。救済は同じ stem の拡張子違いのみ。既定は従来互換。
         """
         clean = [t.strip() for t in titles if isinstance(t, str) and t.strip()]
         if not clean:
             return {}
         clean = clean[:20]
-        sql = """
-            SELECT d.title, d.source_uri
+        columns = "d.title, d.source_uri, d.external_id" if strict else "d.title, d.source_uri"
+        sql = f"""
+            SELECT {columns}
             FROM documents d
             WHERE d.source_type = 'gdrive'
               AND d.source_uri IS NOT NULL
@@ -1654,23 +1691,38 @@ class PgVectorClient:
               AND d.title = ANY(%s)
         """  # nosec B608
         resolved: dict[str, str] = {}
+        exact_file_ids: dict[str, set[str]] = {}
         with conn.cursor() as cur:
             cur.execute(sql, [clean])
             for row in cur.fetchall():
                 title = str(row.get("title") or "")
                 uri = str(row.get("source_uri") or "")
-                if title and uri.startswith(("http://", "https://")):
+                if strict and title:
+                    exact_file_ids.setdefault(title, set()).add(str(row.get("external_id") or ""))
+                elif title and uri.startswith(("http://", "https://")):
                     resolved.setdefault(title, uri)
-        missing = [t for t in clean if t not in resolved]
+        if strict:
+            for title, file_ids in exact_file_ids.items():
+                if len(file_ids) == 1:
+                    file_id = next(iter(file_ids))
+                    if re.fullmatch(r"[A-Za-z0-9_-]+", file_id):
+                        resolved[title] = f"https://drive.google.com/file/d/{file_id}/view"
+        missing = [t for t in clean if t not in (exact_file_ids if strict else resolved)]
         if missing:
-            # 拡張子違い/前後の空白ゆれを救う（前方一致・1件に確定するものだけ採用）
-            like_sql = """
-                SELECT d.title, d.source_uri
+            # strict は版名を推測せず、既定は従来の前方一致を保つ。
+            columns = "DISTINCT d.external_id, d.title" if strict else "d.title, d.source_uri"
+            title_match = (
+                "regexp_replace(btrim(d.title), '\\.[^.]+$', '') = %s"
+                if strict
+                else "d.title ILIKE %s"
+            )
+            like_sql = f"""
+                SELECT {columns}
                 FROM documents d
                 WHERE d.source_type = 'gdrive'
                   AND d.source_uri IS NOT NULL
                   AND d.metadata->>'suppressed' IS DISTINCT FROM 'true'
-                  AND d.title ILIKE %s
+                  AND {title_match}
                 LIMIT 2
             """  # nosec B608
             with conn.cursor() as cur:
@@ -1678,9 +1730,19 @@ class PgVectorClient:
                     stem = title.rsplit(".", 1)[0].strip()
                     if len(stem) < 8:
                         continue
-                    cur.execute(like_sql, [f"{stem}%"])
+                    cur.execute(like_sql, [stem if strict else f"{stem}%"])
                     rows = cur.fetchall()
                     if len(rows) == 1:
+                        if strict:
+                            candidate_stem = (
+                                str(rows[0].get("title") or "").strip().rsplit(".", 1)[0]
+                            )
+                            if candidate_stem != stem:
+                                continue
+                            file_id = str(rows[0].get("external_id") or "")
+                            if re.fullmatch(r"[A-Za-z0-9_-]+", file_id):
+                                resolved[title] = f"https://drive.google.com/file/d/{file_id}/view"
+                            continue
                         uri = str(rows[0].get("source_uri") or "")
                         if uri.startswith(("http://", "https://")):
                             resolved[title] = uri

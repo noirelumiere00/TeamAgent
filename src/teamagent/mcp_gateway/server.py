@@ -51,6 +51,7 @@ from teamagent.mcp_gateway import (
     direct_search_answer,
     direct_summary,
     direct_video_metrics,
+    document_followup,
     surface_video_followup,
 )
 from teamagent.mcp_gateway.caller_claim import (
@@ -1441,7 +1442,17 @@ async def dispatch_tool(
             output = detached_job.outcome()
         else:
             # 同期 skill.run（DB I/O 等でブロックする）を thread に逃がしイベントループを塞がない。
-            output = await asyncio.to_thread(skill.run, skill_input, ctx)
+            output = None
+            if name in {SEARCH_TOOL_NAME, "knowledge_deliver"}:
+                output = await asyncio.to_thread(
+                    document_followup.restore,
+                    skill,
+                    str(getattr(skill_input, "query", "")),
+                    ctx,
+                    verified_caller,
+                )
+            if output is None:
+                output = await asyncio.to_thread(skill.run, skill_input, ctx)
         _elapsed_ms = int((time.perf_counter() - _started) * 1000)
     except detached_jobs.DetachInterruptedError:
         # 順番待ちのまま終了処理に入った（skill.run は走っていない＝usage も quota も無し）。
@@ -1505,11 +1516,23 @@ async def dispatch_tool(
     # 出典 ID（上位 5 件）と回答の文字数（search 系だけ・本文/URL は残さない・例外を出さない）。
     # source_uri は model_dump から外れる内部項目なので、dump 前の出力オブジェクトから取る。
     usage_metadata = source_usage_metadata(name, output)
+    followup_available = None
+    if name == SEARCH_TOOL_NAME:
+        followup_available = await asyncio.to_thread(
+            document_followup.remember,
+            skill,
+            output,
+            ctx,
+            verified_caller,
+            query=str(getattr(skill_input, "query", "")),
+        )
     try:
         data = output.model_dump() if hasattr(output, "model_dump") else {"result": str(output)}
     finally:
         skill.cleanup_output(output)
     if isinstance(data, dict):
+        if followup_available is not None:
+            data["document_followup_available"] = followup_available
         _schedule_async_job_notice(name, data, raw, ctx)
     # ── ミドルウェア(0): usage 計測（既定ON・best-effort DB 記録）─────────────────
     # 本番主経路（Aico→MCP）の tool 使用量を構造化ログと usage_events の両方へ
@@ -1584,6 +1607,8 @@ async def dispatch_tool(
             and direct_answer.strip()
             and direct_kind in search_direct_kinds
         ):
+            from teamagent.skills.search.drive_first import enabled as drive_first_enabled
+
             candidate = {"answer_kind": direct_kind, "answer": direct_answer}
             if data.get("answer_format") is not None:
                 candidate["answer_format"] = data["answer_format"]
@@ -1595,9 +1620,21 @@ async def dispatch_tool(
                 direct_kind,
                 search_direct_destination,
                 request_id=ctx.request_id,
+                allow_case_links=(
+                    direct_kind == "list_fast"
+                    and (
+                        drive_first_enabled(ctx.metadata)
+                        or (
+                            ctx.metadata.get("_search_compact_answer") is True
+                            and data.get("answer_format") == "list"
+                        )
+                    )
+                ),
             )
             if posted is not None and posted.get("delivered") is True:
                 posted["direct_delivery"] = candidate
+                if followup_available is not None:
+                    posted["document_followup_available"] = followup_available
                 return [TextContent(type="text", text=json.dumps(posted, ensure_ascii=False))]
             if posted is not None:
                 data["delivery"] = posted["delivery"]
