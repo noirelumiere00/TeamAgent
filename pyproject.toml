@@ -98,7 +98,7 @@ media = [
     # Python/Node の Playwright は Docker/JS lock と同じ厳密版に固定する。
     "yt-dlp==2026.8.19",
     "curl-cffi==0.15.0",
-    "playwright==1.60.0",
+    "playwright==1.64.0",
     "python-pptx==1.0.2",
     "pillow==13.0.0",
     "weasyprint>=69.0",
@@ -115,7 +115,7 @@ media-runtime = [
     "pydantic>=2.9.0",
     "yt-dlp==2026.8.19",
     "curl-cffi==0.15.0",
-    "playwright==1.60.0",
+    "playwright==1.64.0",
     "python-pptx==1.0.2",
     "pillow==13.0.0",
     "weasyprint>=69.0",
