@@ -230,6 +230,18 @@ reason and leaves startup/live reception available. This wait stays in the
 background so gateway startup can finish. Limits are 100 DM conversations, 200
 history messages per DM (two pages), 20 replayed questions per DM, and 200
 replayed questions overall. Questions run oldest first within each DM.
+The 100-DM budget counts only eligible, allowlisted DM conversations, not raw
+listing rows. Listing uses GET query parameters, 100 rows per page, and a
+separate 20-page safety limit. It stops when all explicitly allowed users have
+been found or there is no next cursor. A repeated cursor alone does not stop
+the scan; the page limit bounds retries and reports `list_page_limit_incomplete`.
+Non-DMs, missing/invalid peer IDs, known bots (including Slackbot and this bot),
+deleted peers, externally shared DMs and non-allowlisted users are skipped
+without reading history. Repeated eligible DM rows are read only once.
+One `dm catchup listing pages=N skipped={...}` line aggregates fixed reason
+codes and counts, without conversation/user IDs, bodies or email addresses.
+Bot/deletion/external classification uses fields present in the listing; no
+extra `users:read` scope or user-profile API is introduced.
 An incomplete history page budget skips that DM: without the complete reply
 history, replay could duplicate an existing answer. An exhausted replay or
 conversation budget records an unresolved reason rather than silently claiming

@@ -140,6 +140,8 @@ const OUTBOUND_TOOL_RE = new RegExp(
     `|では?[ \\t　]*|[をにのがはへと][ \\t　]*)?[、,]?[ \\t　]*`,
   "giu",
 );
+const OUTBOUND_INTERNAL_TOOL_RE = new RegExp(
+  OUTBOUND_TOOL_RE.source.replace(OUTBOUND_BARE_TOOL_SOURCE, OUTBOUND_TOOL_SOURCE), "giu");
 
 // oauth_connect の google_start_link/slack_start_link は base64.urlsafe_b64encode の
 // state を path に直接付ける（末尾 = の padding を含む）。署名・期限の検証は connect-web。
@@ -164,12 +166,12 @@ const UNVERIFIED_CONNECT_TEXT = "連携は Aico の DM に『連携』とだけ�
 const CONNECT_LINK_MODIFIED_DIAGNOSTIC_CODE = "CONNECT-Z03";
 
 // 純関数: 本文と変更件数だけ返す。payload の blocks/value/ファイル情報には触れない。
-export function scrubOutboundReplyText(text, replacementConnectUrls = new Set()) {
+export function scrubOutboundReplyText(text, replacementConnectUrls = new Set(), toolNamesAreInternal = false) {
   const counts = { signedUrls: 0, toolNames: 0, urlSeparators: 0 };
   const parts = [];
   let end = 0;
   function scrubTools(plain) {
-    return plain.replace(OUTBOUND_TOOL_RE, () => {
+    return plain.replace(toolNamesAreInternal ? OUTBOUND_INTERNAL_TOOL_RE : OUTBOUND_TOOL_RE, () => {
       counts.toolNames += 1;
       return "";
     });
@@ -181,7 +183,7 @@ export function scrubOutboundReplyText(text, replacementConnectUrls = new Set())
   function scrubLinkText(value) {
     // href が通常 URL でも、表示ラベルや Markdown タイトルへ署名 URL を書くことがある。
     if (!OUTBOUND_SIGNED_URL_RE.test(value) && !/connect\.newstv\.co\.jp/iu.test(value)) return scrubTools(value);
-    const nested = scrubOutboundReplyText(value, replacementConnectUrls);
+    const nested = scrubOutboundReplyText(value, replacementConnectUrls, toolNamesAreInternal);
     counts.signedUrls += nested.counts.signedUrls;
     counts.toolNames += nested.counts.toolNames;
     counts.urlSeparators += nested.counts.urlSeparators;
@@ -2172,14 +2174,19 @@ function buildButtonReply(binding, actionId, data, message) {
 // Slack は HTTP 200 + `{"ok": false, "error": "…"}` で失敗を返すので、必ず ok を見る。
 async function callSlackApiOnce({ fetchFn, botToken, method, body, timeoutMs }) {
   let response;
+  const listRequest = method === "conversations.list";
+  const url = new URL(`${SLACK_API_BASE}/${method}`);
+  if (listRequest) for (const [name, value] of Object.entries(body ?? {})) {
+    if (value !== "") url.searchParams.set(name, String(value));
+  }
   try {
-    response = await fetchFn(`${SLACK_API_BASE}/${method}`, {
-      method: "POST",
+    response = await fetchFn(url.toString(), {
+      method: listRequest ? "GET" : "POST",
       headers: {
         Authorization: `Bearer ${botToken}`,
-        "Content-Type": "application/json; charset=utf-8",
+        ...(listRequest ? {} : {"Content-Type": "application/json; charset=utf-8"}),
       },
-      body: JSON.stringify(body),
+      ...(listRequest ? {} : {body: JSON.stringify(body)}),
       signal: AbortSignal.timeout(timeoutMs),
     });
   } catch (error) {
@@ -2533,6 +2540,8 @@ function actionRunChannelMatches(actionEvent, runChannelId) {
 export const DM_CATCHUP_LIMITS = Object.freeze({
   windowMs: 30 * 60 * 1000,
   maxDms: 100,
+  listPageSize: 100,
+  maxListPages: 20,
   maxHistory: 200,
   maxPerDm: 20,
   maxReplay: 200,
@@ -2704,7 +2713,10 @@ export function createDmCatchup({
   const slack = (method, body = {}) => callSlackApi({fetchFn, botToken, method, body,
     timeoutMs: SLACK_API_TIMEOUT_MS, sleepFn: ms => new Promise(resolve => setTimeout(resolve, ms))});
   async function scan() {
-    let replayed = 0, scanned = 0;
+    let replayed = 0, scanned = 0, listPages = 0;
+    const skipped = new Map(), listedDms = new Set();
+    const remainingUsers = allowFrom.includes("*") ? null : new Set(allowFrom);
+    const skip = reason => skipped.set(reason, (skipped.get(reason) ?? 0) + 1);
     try {
       await ready();
       const auth = await slack("auth.test");
@@ -2721,16 +2733,28 @@ export function createDmCatchup({
       const cutoff = now(), oldest = `${Math.floor((cutoff - DM_CATCHUP_LIMITS.windowMs) / 1000)}.${String((cutoff - DM_CATCHUP_LIMITS.windowMs) % 1000).padStart(3, "0")}000`;
       recoveryCutoff = cutoff;
       let cursor = "";
-      const listCursors = new Set();
       do {
-        const list = await slack("conversations.list", {types: "im", limit: DM_CATCHUP_LIMITS.maxDms, cursor});
+        const list = await slack("conversations.list", {types: "im", limit: DM_CATCHUP_LIMITS.listPageSize, cursor});
+        listPages++;
         if (!Array.isArray(list.channels)) throw new Error("invalid conversation list");
         for (const channel of list.channels) {
-          if (!SLACK_DM_CHANNEL_RE.test(channel?.id ?? "") || !SLACK_USER_RE.test(channel.user ?? "")) {
-            await incomplete("invalid_dm_identity"); continue;
+          if (remainingUsers?.size === 0) break;
+          if (!SLACK_DM_CHANNEL_RE.test(channel?.id ?? "") || channel.is_im === false) {
+            skip("non_dm"); continue;
           }
-          if (!allowed(channel.user)) continue;
+          if (channel.is_user_deleted === true) { skip("deleted_user"); continue; }
+          if (channel.is_ext_shared === true || channel.is_pending_ext_shared === true) {
+            skip("external_dm"); continue;
+          }
+          if (channel.user === "USLACKBOT" || channel.user === authenticatedBot ||
+              channel.is_bot === true || channel.bot_id) { skip("bot_dm"); continue; }
+          if (typeof channel.user !== "string" || !channel.user) { skip("missing_user"); continue; }
+          if (!SLACK_USER_RE.test(channel.user)) { skip("invalid_user"); continue; }
+          if (!allowed(channel.user)) { skip("not_allowlisted"); continue; }
+          if (listedDms.has(channel.id)) { skip("duplicate_dm"); continue; }
           if (scanned >= DM_CATCHUP_LIMITS.maxDms) { await incomplete("dm_limit_incomplete"); return {replayed, scanned}; }
+          listedDms.add(channel.id);
+          remainingUsers?.delete(channel.user);
           scanned++;
           const priorDone = [...rows].filter(([id, row]) => row.channel === channel.id &&
             row.state === "done" && !confirmed.has(id));
@@ -2808,16 +2832,23 @@ export function createDmCatchup({
             }
           }
         }
-        cursor = list.response_metadata?.next_cursor ?? "";
-        if (cursor && (scanned >= DM_CATCHUP_LIMITS.maxDms || listCursors.has(cursor))) {
-          await incomplete("dm_limit_incomplete"); break;
+        if (remainingUsers?.size === 0) break;
+        const nextCursor = list.response_metadata?.next_cursor ?? "";
+        if (typeof nextCursor !== "string") throw new Error("invalid list cursor");
+        if (nextCursor && nextCursor === cursor) skip("repeated_cursor");
+        cursor = nextCursor;
+        if (cursor && listPages >= DM_CATCHUP_LIMITS.maxListPages) {
+          await incomplete("list_page_limit_incomplete"); break;
         }
-        listCursors.add(cursor);
       } while (cursor);
     } catch (error) {
       await incomplete(/missing_scope/u.test(error?.code ?? "") ? "missing_scope" : "startup_unavailable");
     } finally {
       recoveryCutoff = undefined;
+      const summary = `${PLUGIN_ID}: dm catchup listing pages=${listPages} skipped=${JSON.stringify(
+        Object.fromEntries([...skipped].sort(([left], [right]) => left.localeCompare(right))))}`;
+      if (typeof logger?.info === "function") logger.info(summary);
+      else console.warn(summary);
     }
     return {replayed, scanned};
   }
@@ -3063,6 +3094,8 @@ export function createCallerIdentityPlugin({
     }
     if (searchTool) entry.searchCompleted = true;
     if (["oauth_connect", "teamagent__oauth_connect"].includes(event?.toolName)) entry.needsInput = true;
+    const collected = searchTool ? (entry.searchEvidence ??= {urls: new Set(), numbers: new Set(),
+      metricEvidence: {play: new Set(), save: new Set()}, text: ""}) : entry;
     function collect(value, depth = 0, kind = null) {
       if (depth > 12) return;
       if (typeof value === "string") {
@@ -3070,10 +3103,13 @@ export function createCallerIdentityPlugin({
           const parsed = JSON.parse(value);
           if (typeof parsed !== "string") { collect(parsed, depth + 1, kind); return; }
         } catch {}
+        if (searchTool && collected.text.length < ASSISTANT_MESSAGE_SCAN_LIMIT) {
+          collected.text += "\n" + value.slice(0, ASSISTANT_MESSAGE_SCAN_LIMIT - collected.text.length);
+        }
         if (kind) {
           for (const number of metricNumbers(value)) {
-            if (entry.metricEvidence[kind].size >= 4096) break;
-            entry.metricEvidence[kind].add(number);
+            if (collected.metricEvidence[kind].size >= 4096) break;
+            collected.metricEvidence[kind].add(number);
           }
         } else {
           const count = "\\d[\\d,]*(?:\\.\\d+)?\\s*[万億]?\\s*(?:倍|%)?";
@@ -3084,22 +3120,22 @@ export function createCallerIdentityPlugin({
           for (const match of clean.matchAll(pattern)) {
             const sourceKind = metricKind(match[1] ?? match[4]);
             for (const number of metricNumbers(match[2] ?? match[3])) {
-              if (entry.metricEvidence[sourceKind].size >= 4096) break;
-              entry.metricEvidence[sourceKind].add(number);
+              if (collected.metricEvidence[sourceKind].size >= 4096) break;
+              collected.metricEvidence[sourceKind].add(number);
             }
           }
         }
         for (const number of metricNumbers(value)) {
-          if (entry.numbers.size >= 4096) break;
-          entry.numbers.add(number);
+          if (collected.numbers.size >= 4096) break;
+          collected.numbers.add(number);
         }
         for (const m of value.slice(0, ASSISTANT_MESSAGE_SCAN_LIMIT).matchAll(/https?:\/\/[^\s<>"`|\\）」』、。！？]+/giu)) {
-          if (entry.urls.size >= 128) break;
-          entry.urls.add(m[0].replace(CONNECT_URL_TRAILING_RE, ""));
+          if (collected.urls.size >= 128) break;
+          collected.urls.add(m[0].replace(CONNECT_URL_TRAILING_RE, ""));
         }
       } else if (typeof value === "number" && Number.isFinite(value)) {
-        if (entry.numbers.size < 4096) entry.numbers.add(String(value));
-        if (kind && entry.metricEvidence[kind].size < 4096) entry.metricEvidence[kind].add(String(value));
+        if (collected.numbers.size < 4096) collected.numbers.add(String(value));
+        if (kind && collected.metricEvidence[kind].size < 4096) collected.metricEvidence[kind].add(String(value));
       } else if (Array.isArray(value)) {
         for (const item of value) collect(item, depth + 1, kind);
       } else if (value && typeof value === "object" && !value.isError) {
@@ -3114,6 +3150,12 @@ export function createCallerIdentityPlugin({
       }
     }
     collect(event.result);
+    if (searchTool) {
+      for (const key of ["urls", "numbers"]) for (const value of collected[key]) entry[key].add(value);
+      for (const kind of ["play", "save"]) {
+        for (const value of collected.metricEvidence[kind]) entry.metricEvidence[kind].add(value);
+      }
+    }
     if (searchTool && (searchDirectEnabled || searchResultData(event.result)?.answer_format === "list")) {
       const data = searchResultData(event.result);
       // Only the trusted MCP envelope defines the final format; retrieved contents cannot opt in.
@@ -3131,10 +3173,40 @@ export function createCallerIdentityPlugin({
     evidenceByRun.delete(runId);
     evidenceByRun.set(runId, entry);
     const session = evidenceSessionKey(runId);
-    if (session && entry.urls.size) {
+    if (session && (entry.urls.size || searchTool)) {
+      const previous = evidenceBySession.get(session);
       evidenceBySession.delete(session);
-      evidenceBySession.set(session, {urls: new Set(entry.urls), updatedAtMs: now()});
+      evidenceBySession.set(session, {urls: new Set(entry.urls), updatedAtMs: now(),
+        searchEvidence: searchTool ? {urls: new Set(collected.urls), numbers: new Set(collected.numbers),
+          metricEvidence: {play: new Set(collected.metricEvidence.play), save: new Set(collected.metricEvidence.save)},
+          text: collected.text, updatedAtMs: now()} : previous?.searchEvidence});
     }
+  }
+
+  function conversationSearchEvidence(runId) {
+    const current = evidenceByRun.get(runId)?.searchEvidence;
+    if (current) return current;
+    const previous = evidenceBySession.get(evidenceSessionKey(runId))?.searchEvidence;
+    return previous && now() - previous.updatedAtMs <= INBOUND_CONTEXT_TTL_MS ? previous : undefined;
+  }
+
+  function searchClaimSentences(text) {
+    return text.split(/[。！？!?\n]/u).map(sentence => sentence.normalize("NFKC")
+      .replace(/[\s*#_`,、:：]/gu, "").replace(/^[-•・]+/u, "")).filter(Boolean);
+  }
+
+  function hasUnsupportedSearchClaims(runId, text) {
+    const evidence = conversationSearchEvidence(runId);
+    const body = text.replace(/^\s*\d+[.)、]\s+/gmu, "");
+    if (hasUngroundedNumbers(body, evidence?.numbers, evidence?.metricEvidence)) return true;
+    const source = new Set(searchClaimSentences(evidence?.text ?? ""));
+    const comparison = /勝ち(?:です|だ|$)|勝った|勝利|上回|下回|が[上下](?:です|だ|でした|だった|$)|同率|(?:より|方が|ほうが).{0,24}(?:高|低|多|少|良)|優位|効(?:いた|いて|く)|効果が(?:あ|高|低)/gu;
+    // shortcut: 比較の言い換えは推測せず再検索する。意味照合が必要ならsearch側の比較事実を構造化する。
+    return searchClaimSentences(body).some(sentence =>
+      [...sentence.matchAll(comparison)].some(claim =>
+        !/^(?:ではない|ではありません|とは言え|とはいえ|とは判断でき|とは断定でき|とは限ら|かどうか|かは不明)/u
+          .test(sentence.slice(claim.index + claim[0].length))) &&
+      !source.has(sentence));
   }
 
   function collectSearchSourceUrls(value, urls, depth = 0) {
@@ -3187,43 +3259,45 @@ export function createCallerIdentityPlugin({
     return metricNumberTokens(text).map(number => String(number.value) + number.suffix);
   }
 
-  // shortcut: 同 run の数値集合で照合し、投稿者との対応も保証する要件が出たら行キーで照合する。
+  // shortcut: 取得済みの数値集合で照合し、投稿者との対応も保証する要件が出たら行キーで照合する。
+  function hasUngroundedNumbers(value, numbers, metricEvidence, label = value) {
+    const sources = [...(numbers ?? [])].map(value => ({value: Number.parseFloat(value),
+      suffix: value.endsWith("倍") ? "倍" : value.endsWith("%") ? "%" : ""}));
+    const tokens = metricNumberTokens(value);
+    const kind = metricKind(label);
+    const relevant = kind ? [...(metricEvidence?.[kind] ?? [])] : [];
+    return tokens.some(number => {
+      const matches = candidate => Math.round(candidate / number.quantum) === Math.round(number.value / number.quantum);
+      if (!number.suffix) return !sources.some(source => !source.suffix && matches(source.value));
+      const operands = tokens.filter(token => !token.suffix);
+      if ((number.suffix !== "倍" || operands.length !== 2) && relevant.some(source =>
+        source.endsWith(number.suffix) && matches(Number.parseFloat(source)))) return false;
+      if (number.suffix !== "倍") return true;
+      const counts = relevant.filter(source => !/(?:倍|%)$/u.test(source)).map(Number)
+        .filter(candidate => candidate > 0 && (operands.length !== 2 || operands.some(operand =>
+          Math.round(candidate / operand.quantum) === Math.round(operand.value / operand.quantum))))
+        .sort((a, b) => a - b);
+      return !counts.some(denominator => {
+        const target = denominator * number.value;
+        let low = 0;
+        let high = counts.length;
+        while (low < high) {
+          const mid = (low + high) >>> 1;
+          if (counts[mid] < target) low = mid + 1;
+          else high = mid;
+        }
+        return [counts[low - 1], counts[low]].some(numerator =>
+          numerator !== undefined && numerator !== denominator && matches(numerator / denominator));
+      });
+    });
+  }
+
   function stripUngroundedVideoMetrics(text, numbers, metricEvidence) {
     const lines = text.split("\n");
     const video = /動画|投稿者|アカウント|クリエイター|投稿ごと|投稿別|上位の投稿|@[\w.]/u;
     const metric = /再生|保存/u;
     const notice = "動画ごとの数値は 📊 を参照してください。";
-    const sources = [...(numbers ?? [])].map(value => ({value: Number.parseFloat(value),
-      suffix: value.endsWith("倍") ? "倍" : value.endsWith("%") ? "%" : ""}));
-    const ungrounded = (value, label = value) => {
-      const tokens = metricNumberTokens(value);
-      const kind = metricKind(label);
-      const relevant = kind ? [...(metricEvidence?.[kind] ?? [])] : [];
-      return tokens.some(number => {
-        const matches = candidate => Math.round(candidate / number.quantum) === Math.round(number.value / number.quantum);
-        if (!number.suffix) return !sources.some(source => !source.suffix && matches(source.value));
-        const operands = tokens.filter(token => !token.suffix);
-        if ((number.suffix !== "倍" || operands.length !== 2) && relevant.some(source =>
-          source.endsWith(number.suffix) && matches(Number.parseFloat(source)))) return false;
-        if (number.suffix !== "倍") return true;
-        const counts = relevant.filter(source => !/(?:倍|%)$/u.test(source)).map(Number)
-          .filter(candidate => candidate > 0 && (operands.length !== 2 || operands.some(operand =>
-            Math.round(candidate / operand.quantum) === Math.round(operand.value / operand.quantum))))
-          .sort((a, b) => a - b);
-        return !counts.some(denominator => {
-          const target = denominator * number.value;
-          let low = 0;
-          let high = counts.length;
-          while (low < high) {
-            const mid = (low + high) >>> 1;
-            if (counts[mid] < target) low = mid + 1;
-            else high = mid;
-          }
-          return [counts[low - 1], counts[low]].some(numerator =>
-            numerator !== undefined && numerator !== denominator && matches(numerator / denominator));
-        });
-      });
-    };
+    const ungrounded = (value, label = value) => hasUngroundedNumbers(value, numbers, metricEvidence, label);
     function rowMetricText(row) {
       const normalized = row.normalize("NFKC");
       const count = "\\d[\\d,]*(?:\\.\\d+)?\\s*[万億]?\\s*(?:倍|%)?";
@@ -6116,14 +6190,20 @@ export function createCallerIdentityPlugin({
     const runId = authoritativeRunId(event, ctx, logger, "before_agent_finalize");
     if (!runId) return undefined;
     const ingress = connectIngressByRun.get(runId);
-    const searched = evidenceByRun.get(runId)?.searchCompleted === true;
-    const unrelatedToolSatisfies = !["comparison", "list", "document_followup"].includes(ingress?.searchRequired) &&
-      ((toolCallsByRun.get(runId)?.count ?? 0) > 0 || evidenceByRun.has(runId));
+    const direct = searchDirectByRun.get(runId);
+    if (direct?.delivered || direct?.replaced) return;
+    if (direct?.pending) return direct.task;
+    const claimsOnly = ["comparison", "list", "document_followup"].includes(ingress?.searchRequired);
+    const unrelatedToolSatisfies = !claimsOnly && (toolCallsByRun.get(runId)?.count ?? 0) > 0;
     if (!ingress?.searchRequired || ingress.connectRequest ||
-        searched || unrelatedToolSatisfies ||
+        evidenceByRun.has(runId) || unrelatedToolSatisfies ||
         typeof event?.lastAssistantMessage !== "string" || !event.lastAssistantMessage.trim() ||
         searchRevisionsByRun.has(runId) ||
         connectRevisionsByRun.has(runId) || videoRevisionsByRun.has(runId)) return undefined;
+    const previous = claimsOnly && conversationSearchEvidence(runId);
+    if (previous && !hasUnsupportedSearchClaims(runId, event.lastAssistantMessage) &&
+        (metricNumbers(event.lastAssistantMessage).length || searchClaimSentences(event.lastAssistantMessage)
+          .every(sentence => searchClaimSentences(previous.text).includes(sentence)))) return;
     if (searchDirectEnabled && searchDirectAllowlist.size && mcpBearer && slackBotToken) {
       const existing = searchDirectByRun.get(runId);
       if (existing) return existing.task;
@@ -6137,6 +6217,8 @@ export function createCallerIdentityPlugin({
   }
 
   function reviseSearchZeroTool(runId, ingress, logger, event) {
+    if (["comparison", "list"].includes(ingress.searchRequired) &&
+        !hasUnsupportedSearchClaims(runId, event?.lastAssistantMessage ?? "")) return;
     if (ingress.searchRequired === "source" &&
         !/(?:添付|(?:URL|リンク|ファイル|資料).{0,24}(?:貼|送|共有|提供|指定|アップロード))|抽出でき|添付が[無な]/iu.test(event?.lastAssistantMessage ?? "")) return;
 
@@ -6322,7 +6404,7 @@ export function createCallerIdentityPlugin({
     if (entry.delivered || entry.replaced) return {cancel: true, reason: "search answer already delivered"};
     if (entry.failed) {
       entry.replaced = true;
-      return {payload: {...payload, text: revisedReplyFallback({searchRequired: true})}};
+      return {payload: {...payload, text: revisedReplyFallback({...entry, searchRequired: true}, runId)}};
     }
   }
 
@@ -6330,11 +6412,18 @@ export function createCallerIdentityPlugin({
   function trackRevisedReply(event, ctx, result) {
     const runId = authoritativeRunId(event, ctx, null, "before_agent_finalize");
     if (!runId) return result;
+    const direct = searchDirectByRun.get(runId);
+    if (direct?.failed && !direct.originalReply && visibleReplyText(event?.lastAssistantMessage)) {
+      direct.originalReply = event.lastAssistantMessage;
+    }
     if (result?.action === "revise") {
       const entry = revisedRepliesByRun.get(runId) ?? {payloadSeen: false, delivered: false};
       entry.pending = true;
       entry.draftDigest = createHash("sha256").update(event.lastAssistantMessage ?? "").digest("hex");
       entry.searchRequired ||= result.retry?.idempotencyKey === "search-zero-tool";
+      if (entry.searchRequired && !entry.originalReply && visibleReplyText(event?.lastAssistantMessage)) {
+        entry.originalReply = event.lastAssistantMessage;
+      }
       entry.updatedAtMs = now();
       revisedRepliesByRun.delete(runId);
       revisedRepliesByRun.set(runId, entry);
@@ -6350,9 +6439,15 @@ export function createCallerIdentityPlugin({
       .replace(/^\s*(?:NO_REPLY|HEARTBEAT_OK)\s*$/u, "").trim();
   }
 
-  function revisedReplyFallback(entry) {
+  function revisedReplyFallback(entry, runId) {
+    if (entry.searchRequired && visibleReplyText(entry.originalReply)) {
+      const normalized = finalizeOutgoingText({payload: {text: entry.originalReply}}, undefined, runId)
+        ?.payload?.text ?? entry.originalReply;
+      const original = scrubOutboundReplyText(normalized, connectUrlsByRun.get(runId)?.urls, true).text;
+      if (visibleReplyText(original)) return original;
+    }
     return entry.searchRequired
-      ? "数字や説明は search で元資料を確認してからお伝えします。今回は確認を完了できませんでした。"
+      ? "元資料を確認してからお伝えします。今回は確認を完了できませんでした。"
       : "回答の作り直しを完了できませんでした。結果を確認できていないため、断定を控えます。";
   }
 
@@ -6372,7 +6467,7 @@ export function createCallerIdentityPlugin({
         (entry.searchRequired && !evidenceByRun.get(runId)?.searchCompleted))) {
       entry.payloadSeen = true;
       entry.replaced = true;
-      return {payload: {...payload, text: revisedReplyFallback(entry)}};
+      return {payload: {...payload, text: revisedReplyFallback(entry, runId)}};
     }
     if (hasContent) entry.payloadSeen = true;
     return result;
@@ -6410,7 +6505,7 @@ export function createCallerIdentityPlugin({
       const threadTs = SLACK_DM_CHANNEL_RE.test(channel) ? ingress.threadTs
         : (ingress.threadTs ?? canonicalSlackTimestamp(ingress.messageId));
       entry.posting = true;
-      await postButtonMessage({channel, threadTs}, {text: revisedReplyFallback(entry)});
+      await postButtonMessage({channel, threadTs}, {text: revisedReplyFallback(entry, runId)});
       entry.delivered = true;
       emitPluginLog(logger, "warn", "revised reply fallback outcome=delivered reason=empty_revised_pass");
     })().catch(error => {
@@ -7416,6 +7511,8 @@ export function createCallerIdentityPlugin({
             ? connectUrlsByRun.get(runId)?.urls : undefined;
           const authoritative = runId && runId === canonicalInvocationId(ctx?.runId);
           const evidence = authoritative ? evidenceByRun.get(runId) : undefined;
+          const grounding = authoritative && !evidence && ["comparison", "list"].includes(connectIngressByRun.get(runId)?.searchRequired)
+            ? conversationSearchEvidence(runId) : evidence;
           const session = authoritative ? evidenceSessionKey(runId) : null;
           const urls = evidence?.urls?.size ? evidence.urls : evidenceBySession.get(session)?.urls;
           const finalTextOnly = (event.kind === undefined || event.kind === "final") &&
@@ -7443,7 +7540,8 @@ export function createCallerIdentityPlugin({
           if (cleanAnswer !== canonical) emitPluginLog(api.logger, "info", "search advice removed layer=oc");
           const restored = restoreEvidenceUrls(cleanAnswer, urls);
           if (restored !== payload.text) emitPluginLog(api.logger, "info", "outbound URL restored diagnostic=CONNECT-Z04");
-          const trimmed = authoritative ? groundEvidenceReply(restored, evidence) : restored;
+          const trimmed = authoritative ? groundEvidenceReply(restored,
+            {...grounding, needsInput: evidence?.needsInput ?? grounding?.needsInput}) : restored;
           if (payload.text.trim() && !trimmed.trim()) {
             return finishRevisedReply(event, ctx, { ...result, cancel: true });
           }

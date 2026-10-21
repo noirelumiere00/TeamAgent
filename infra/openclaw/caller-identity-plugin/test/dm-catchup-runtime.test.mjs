@@ -282,7 +282,8 @@ test('startup authenticates, waits for Socket ready, then fixes the history cuto
       assert.deepEqual(requests, ['auth.test']);
       return await h.wait();
     }, fetchFn: async (url, opts) => {
-      const method = url.split('/').at(-1), body = JSON.parse(opts.body);
+      const target = new URL(url), method = target.pathname.split('/').at(-1);
+      const body = opts.body ? JSON.parse(opts.body) : Object.fromEntries(target.searchParams);
       requests.push(method);
       if (method === 'auth.test') return response({ok: true, team_id: TEAM, user_id: 'U87654321'});
       if (method === 'conversations.list') return response({ok: true, channels: [{id: CHANNEL, user: USER}]});

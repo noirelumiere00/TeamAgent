@@ -31,7 +31,7 @@ function requestParams(url, options = {}) {
   return {method: parsed.pathname.split('/').at(-1), params};
 }
 
-async function setup(t, {statePath, history = [], channels, historyError,
+async function setup(t, {statePath, history = [], channels, listResponse, historyError,
   hasMore = false, historyWait, dispatch, authTeam = TEAM, allowFrom, now = () => NOW} = {}) {
   assert.equal(typeof plugin.createDmCatchup, 'function', 'createDmCatchup export is required');
   if (!statePath) {
@@ -47,9 +47,10 @@ async function setup(t, {statePath, history = [], channels, historyError,
     calls.push(call);
     if (call.method === 'auth.test') return response({ok: true, team_id: authTeam,
       user_id: BOT, bot_id: 'B12345678', app_id: 'A12345678'});
-    if (call.method === 'conversations.list') return response({ok: true,
-      channels: channels ?? [{id: CHANNEL, user: USER, is_im: true}],
-      response_metadata: {next_cursor: ''}});
+    if (call.method === 'conversations.list') return response(listResponse
+      ? await listResponse(call.params, options) : {ok: true,
+        channels: channels ?? [{id: CHANNEL, user: USER, is_im: true}],
+        response_metadata: {next_cursor: ''}});
     if (call.method === 'conversations.history') {
       historyStarted();
       await historyWait;
@@ -69,6 +70,139 @@ async function setup(t, {statePath, history = [], channels, historyError,
   });
   return {api, statePath, calls, dispatched, logs, historyReached};
 }
+
+const otherDm = index => ({id: `D${String(index).padStart(8, '0')}`,
+  user: `U${String(index).padStart(8, '0')}`, is_im: true});
+
+test('list filters and pagination cursor use the documented GET query', async t => {
+  const requests = [];
+  const p = await setup(t, {allowFrom: [USER], listResponse: (params, options) => {
+    requests.push({params, options});
+    return params.cursor ? {ok: true, channels: [{id: CHANNEL, user: USER}]}
+      : {ok: true, channels: [], response_metadata: {next_cursor: 'opaque+/='}};
+  }});
+  assert.equal((await p.api.start()).scanned, 1);
+  for (const {params, options} of requests) {
+    assert.equal(options.method, 'GET');
+    assert.equal(options.body, undefined);
+    assert.equal(params.types, 'im');
+    assert.equal(params.limit, '100');
+  }
+  assert.deepEqual(p.calls.filter(call => call.method === 'conversations.list')
+    .map(call => call.params.cursor ?? ''), ['', 'opaque+/=']);
+});
+
+test('allowlisted DM after 100 unrelated rows is reached through normal cursors', async t => {
+  const p = await setup(t, {allowFrom: [USER], listResponse: params => params.cursor
+    ? {ok: true, channels: [{id: CHANNEL, user: USER, is_im: true}]}
+    : {ok: true, channels: Array.from({length: 100}, (_, i) => otherDm(i)),
+      response_metadata: {next_cursor: 'second-page'}}});
+  const result = await p.api.start();
+  t.diagnostic(`normal cursors: scanned=${result.scanned}`);
+  assert.equal(result.scanned, 1);
+  assert.deepEqual(p.calls.filter(call => call.method === 'conversations.history')
+    .map(call => call.params.channel), [CHANNEL]);
+});
+
+test('[regression] allowlisted DM at row 101 survives a repeated list cursor', async t => {
+  let page = 0;
+  const p = await setup(t, {allowFrom: [USER], listResponse: () => {
+    page++;
+    return page <= 2 ? {ok: true,
+      channels: Array.from({length: 50}, (_, i) => otherDm((page - 1) * 50 + i)),
+      response_metadata: {next_cursor: 'repeated-cursor'}}
+      : {ok: true, channels: [{id: CHANNEL, user: USER, is_im: true}]};
+  }});
+  const result = await p.api.start();
+  t.diagnostic(`row 101 with repeated cursor: scanned=${result.scanned}, list_calls=${page}`);
+  assert.equal(result.scanned, 1);
+  assert.deepEqual(p.calls.filter(call => call.method === 'conversations.history')
+    .map(call => call.params.channel), [CHANNEL]);
+});
+
+test('listing stops as soon as every explicitly allowed DM is found', async t => {
+  const p = await setup(t, {allowFrom: [USER], listResponse: () => ({ok: true,
+    channels: [{id: CHANNEL, user: USER, is_im: true}],
+    response_metadata: {next_cursor: 'irrelevant-next-page'}})});
+  assert.equal((await p.api.start()).scanned, 1);
+  assert.equal(p.calls.filter(call => call.method === 'conversations.list').length, 1);
+  assert.ok(!JSON.stringify(p.logs).includes('dm_limit_incomplete'));
+});
+
+test('ineligible conversation reasons are one anonymous aggregate, never individual warnings', async t => {
+  const p = await setup(t, {allowFrom: ['*'], channels: [
+    {id: 'C00000001', is_im: false}, {id: 'D00000001', user: 'USLACKBOT'},
+    {id: 'D00000002', user: BOT}, {id: 'D00000003', user: 'U00000003', is_bot: true},
+    {id: 'D00000004', user: 'U00000004', is_user_deleted: true},
+    {id: 'D00000005', user: 'U00000005', is_ext_shared: true},
+    {id: 'D00000006'}, {id: 'D00000007', user: 'not-an-id'},
+    {id: CHANNEL, user: USER, is_im: true},
+  ]});
+  const result = await p.api.start();
+  assert.equal(result.scanned, 1);
+  assert.deepEqual(p.calls.filter(call => call.method === 'conversations.history')
+    .map(call => call.params.channel), [CHANNEL]);
+  assert.equal(p.logs.filter(entry => entry.level === 'warn').length, 0);
+  const aggregates = p.logs.filter(entry => entry.args.join(' ').includes('dm catchup listing '));
+  assert.equal(aggregates.length, 1);
+  const summary = aggregates[0].args.join(' ');
+  for (const reason of ['non_dm', 'bot_dm', 'deleted_user', 'external_dm', 'missing_user', 'invalid_user']) {
+    assert.ok(summary.includes(reason), reason);
+  }
+  assert.doesNotMatch(summary, /USLACKBOT|U000000|D000000|C000000|not-an-id/u);
+});
+
+test('the listing aggregate is emitted once across the logger and stderr', async t => {
+  const p = await setup(t, {allowFrom: [USER], channels: [{id: 'C00000001', is_im: false}]});
+  const stderr = [], originalWarn = console.warn;
+  console.warn = (...args) => stderr.push(args.join(' '));
+  try { await p.api.start(); } finally { console.warn = originalWarn; }
+  const lines = [...p.logs.map(entry => entry.args.join(' ')), ...stderr];
+  assert.equal(lines.filter(line => line.includes('dm catchup listing ')).length, 1);
+});
+
+test('duplicate list rows cannot consume another allowed DM slot or repeat history reads', async t => {
+  const other = otherDm(99);
+  let page = 0;
+  const p = await setup(t, {allowFrom: [USER, other.user], listResponse: () => ({ok: true,
+    channels: ++page < 3 ? [{id: CHANNEL, user: USER, is_im: true}] : [other],
+    response_metadata: {next_cursor: page < 3 ? `page-${page}` : ''}})});
+  assert.equal((await p.api.start()).scanned, 2);
+  assert.deepEqual(p.calls.filter(call => call.method === 'conversations.history')
+    .map(call => call.params.channel), [CHANNEL, other.id]);
+});
+
+test('the DM budget counts 100 eligible conversations without counting bot or deleted rows', async t => {
+  const entries = [{id: 'D90000001', user: 'USLACKBOT'},
+    {id: 'D90000002', user: BOT}, {id: 'D90000003', user: 'U90000003', is_bot: true},
+    {id: 'D90000004', user: 'U90000004', is_user_deleted: true},
+    ...Array.from({length: 101}, (_, i) => otherDm(i + 1000))];
+  const p = await setup(t, {allowFrom: ['*'], listResponse: params => {
+    const start = Number(params.cursor ?? 0), end = start + 100;
+    return {ok: true, channels: entries.slice(start, end),
+      response_metadata: {next_cursor: end < entries.length ? String(end) : ''}};
+  }});
+  assert.equal((await p.api.start()).scanned, 100);
+  assert.deepEqual(p.calls.filter(call => call.method === 'conversations.history')
+    .map(call => call.params.channel), entries.slice(4, 104).map(item => item.id));
+  const journal = JSON.parse(await readFile(p.statePath, 'utf8'));
+  assert.ok(journal.unresolved.some(item => item.reason === 'dm_limit_incomplete'));
+});
+
+for (const fixedCursor of [false, true]) test(`list-page safety budget bounds ${fixedCursor ? 'repeated' : 'unique'} cursors separately`, async t => {
+  let pages = 0;
+  const p = await setup(t, {allowFrom: [USER], listResponse: () => {
+    if (++pages > 30) throw new Error('test fixture refuses unbounded listing');
+    return {ok: true, channels: [otherDm(pages)],
+      response_metadata: {next_cursor: fixedCursor ? 'same-cursor' : `page-${pages}`}};
+  }});
+  assert.equal((await p.api.start()).scanned, 0);
+  assert.equal(pages, 20);
+  assert.equal(plugin.DM_CATCHUP_LIMITS.maxListPages, 20);
+  assert.equal(p.calls.filter(call => call.method === 'conversations.history').length, 0);
+  const journal = JSON.parse(await readFile(p.statePath, 'utf8'));
+  assert.ok(journal.unresolved.some(item => item.reason === 'list_page_limit_incomplete'));
+});
 
 test('[required-1] downtime DM is recovered exactly once', async t => {
   const question = message();

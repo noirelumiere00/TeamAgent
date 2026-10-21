@@ -39,12 +39,12 @@ for (const content of ['比較して何が効いた？', '動画ごとの結果�
   });
 }
 
-test('comparison still requires search after an unrelated tool succeeds', () => {
+test('unsupported comparison still requires search after an unrelated tool succeeds', () => {
   const {receive, call, hooks} = setup();
   const ctx = receive('比較して何が効いた？');
   assert.ok(call(ctx, 'chitchat', 'call-chat', {})?.params);
   const out = hooks.get('before_agent_finalize')({runId: ctx.runId,
-    lastAssistantMessage: 'これから動画を分析します。'}, ctx);
+    lastAssistantMessage: '施策Aは平均171,325再生で、施策Bより高いです。'}, ctx);
   assert.equal(out?.action, 'revise');
   assert.match(out.retry.instruction, /search/);
 });
@@ -125,12 +125,12 @@ test('supplied-video watching cannot finish without actually invoking analysis',
 for (const content of ['伊藤ハムのハンバーグとステーキの施策を見比べて',
   '伊藤ハムの施策を比べて',
   'この2本の動画の施策資料を見比べて https://docs.google.com/document/d/campaign-a/edit https://docs.google.com/document/d/campaign-b/edit']) {
-  test(`campaign comparisons require search when actual videos were not supplied: ${content}`, () => {
+  test(`unsupported campaign comparisons require search when actual videos were not supplied: ${content}`, () => {
     const {receive, call, hooks} = setup();
     const ctx = receive(content);
     assert.equal(call(ctx, 'video_analysis', 'heavy-analysis', {query: '比較'})?.block, true);
     assert.equal(hooks.get('before_agent_finalize')({runId: ctx.runId,
-      lastAssistantMessage: 'これから分析します。'}, ctx)?.action, 'revise');
+      lastAssistantMessage: '施策Aは平均171,325再生で、施策Bより高いです。'}, ctx)?.action, 'revise');
   });
 }
 
