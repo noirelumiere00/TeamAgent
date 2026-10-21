@@ -58,6 +58,28 @@ def test_haiku_uses_fixed_rubric_caching_and_rejects_unstructured_output() -> No
         judge.judge(extract(ReadOnlySlack()).exchanges[0])
 
 
+def test_haiku_json_fence_is_accepted_but_extra_keys_or_prose_are_not() -> None:
+    # 10-21 初回測定: 実 Haiku は ```json の囲みを付けて返し、187 件すべてが欠測になった。
+    import pytest
+
+    from teamagent.dm_quality import HAIKU_MODEL, HaikuJudge
+
+    def reply(text):
+        return lambda **_: SimpleNamespace(
+            text=text, stop_reason="end_turn", usage=SimpleNamespace(cost_usd=0.001)
+        )
+
+    judge = HaikuJudge(SimpleNamespace(model_id=HAIKU_MODEL, converse=reply("")))
+    exchange = extract(ReadOnlySlack()).exchanges[0]
+    for text in ('```json\n{"verdict": "partial"}\n```', '```\n{"verdict":"bad"}\n```'):
+        judge.client.converse = reply(text)
+        assert judge.judge(exchange).verdict in {"partial", "bad"}
+    for text in ('```json\n{"verdict": "good", "why": "x"}\n```', "結果: ```json\n{}\n```"):
+        judge.client.converse = reply(text)
+        with pytest.raises(ValueError):
+            judge.judge(exchange)
+
+
 def test_checkpoint_replay_is_private_and_avoids_second_judgement(tmp_path: Path) -> None:
     from teamagent.dm_quality import Judgement, measure, write_report
 
