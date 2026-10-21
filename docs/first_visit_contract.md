@@ -64,9 +64,7 @@ verify_manifest(root, *, kit_path, kit_python=None) -> list[str]
 
 ## 固定するキット
 
-単位④で③の入口へ更新し、対象は `VERSION = 2026.10.14.1`、git HEAD `7c390997233b39dc83b7095f289d01e484df720d`、tree `123668d3ab6d63bb98d0108459457dd01eef6803`。manifestには版とgitの指紋を記録する。別版や未固定の変更を暗黙に受け入れない。キット側のソースを変更せず、設定された`kit_path`の入力ゲートを使う。
-
-media用の固定取得物は `tools/first_visit/kit.lock.json` と同ディレクトリのsource archive。取り込む33ファイルをlockの `paths` に列挙し、上流全体の `git_tree` と取得物の `archive_git_tree` を分けて固定する。生成に不要な運用文書・他スキル・テスト・fixture生成器は収録しない。GitのないmediaではPPTX-onlyのkit CLIを使い、現行のGit検証はclean checkoutを持つ手元・CIで維持する。実行時の入力manifest検証接続は⑤で行う。生成・機械前検の成功は描画QA・配達の完了を意味しない。
+単位①の対象は `VERSION = 2026.10.14.1`、git HEAD `5544938b7f1695a7f13a646ea4b7fd8cadf37629`。manifestには版とgitの指紋を記録する。別版や未固定の変更を暗黙に受け入れない。キット側のソースを変更せず、設定された`kit_path`の入力ゲートを使う。
 
 ## 単位②で追加する保存
 
