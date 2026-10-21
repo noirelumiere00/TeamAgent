@@ -41,6 +41,11 @@ from typing import Any
 
 import structlog
 
+from teamagent.adapters.file_record_lookup import (
+    SavedFileRecord,
+    select_saved_file_records,
+    slack_source_uri,
+)
 from teamagent.adapters.google_auth import (
     build_oauth_credentials,
     force_oauth_enabled,
@@ -261,6 +266,81 @@ class GSheetsClient:
             headers=headers,
             rows=rows,
             row_count=len(rows),
+        )
+
+    def lookup_saved_file_records(
+        self,
+        sheet_id: str,
+        request_id: str,
+        *,
+        slack_sources: list[str] | None = None,
+        record_keys: list[tuple[str, str]] | None = None,
+    ) -> list[SavedFileRecord]:
+        """ファイル記録だけを読む。保存先の閲覧権限は呼び出し側が本人の Drive で確認する。"""
+        if not (slack_sources or record_keys):
+            return []
+        table = self.get_tab_rows(
+            sheet_id, "ファイル記録", request_id, value_render_option="FORMULA"
+        )
+        records = select_saved_file_records(
+            table.headers,
+            table.rows,
+            slack_sources=slack_sources or (),
+            record_keys=record_keys or (),
+        )
+        if (
+            records
+            and all(
+                slack_source_uri(source) in {record.slack_source_uri for record in records}
+                for source in slack_sources or ()
+            )
+            and all(
+                key in {(record.record_number, record.branch_number) for record in records}
+                for key in record_keys or ()
+            )
+        ):
+            return records
+        # RichText は同じ grid response のキーとリンクを使い、行移動との読み合わせを避ける。
+        response = (
+            self._ensure_service()
+            .spreadsheets()
+            .get(
+                spreadsheetId=sheet_id,
+                ranges=["'ファイル記録'"],
+                includeGridData=True,
+                fields=(
+                    "sheets(data(startRow,startColumn,"
+                    "rowData(values(formattedValue,userEnteredValue,hyperlink))))"
+                ),
+            )
+            .execute()
+        )
+        rows: list[list[str]] = []
+        for sheet in response.get("sheets", []):
+            for grid in sheet.get("data", []):
+                for offset, data in enumerate(grid.get("rowData", [])):
+                    row_index = int(grid.get("startRow", 0)) + offset
+                    while len(rows) <= row_index:
+                        rows.append([])
+                    for column, cell in enumerate(data.get("values", [])):
+                        col_index = int(grid.get("startColumn", 0)) + column
+                        while len(rows[row_index]) <= col_index:
+                            rows[row_index].append("")
+                        value = str(
+                            cell.get("userEnteredValue", {}).get("formulaValue")
+                            or cell.get("formattedValue")
+                            or ""
+                        )
+                        if cell.get("hyperlink"):
+                            label = str(cell.get("formattedValue") or "").replace('"', '""')
+                            url = str(cell["hyperlink"]).replace('"', '""')
+                            value = f'=HYPERLINK("{url}","{label}")'
+                        rows[row_index][col_index] = value
+        return select_saved_file_records(
+            rows[0] if rows else (),
+            rows[1:],
+            slack_sources=slack_sources or (),
+            record_keys=record_keys or (),
         )
 
     def update_single_cell(

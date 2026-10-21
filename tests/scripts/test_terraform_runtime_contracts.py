@@ -251,6 +251,21 @@ def test_search_direct_answer_rollout_is_ordered_and_denied_by_default() -> None
             assert _rendered_default(block, variables, env_name) == default
 
 
+def test_search_drive_first_is_independent_and_denied_by_default() -> None:
+    variables = (TF_ROOT / "variables_fargate.tf").read_text(encoding="utf-8")
+    for task in ("mcp", "openclaw"):
+        block = _block(TF_ROOT / "fargate.tf", "aws_ecs_task_definition", task)
+        for env_name, variable, default in (
+            ("SEARCH_DRIVE_FIRST", "search_drive_first", "0"),
+            ("SEARCH_DRIVE_FIRST_ALLOWED_EMAILS", "search_drive_first_allowed_emails", ""),
+        ):
+            assert f'{{ name = "{env_name}", value = var.{variable} }}' in block
+            assert _rendered_default(block, variables, env_name) == default
+    template = (PROJECT_ROOT / ".env.production.template").read_text(encoding="utf-8")
+    assert re.search(r"(?m)^SEARCH_DRIVE_FIRST=0$", template)
+    assert re.search(r"(?m)^SEARCH_DRIVE_FIRST_ALLOWED_EMAILS=$", template)
+
+
 def test_retired_allowlist_variables_are_not_read_by_terraform() -> None:
     terraform = "\n".join(path.read_text(encoding="utf-8") for path in sorted(TF_ROOT.glob("*.tf")))
     for name in RETIRED_ALLOWLIST_VARIABLES:

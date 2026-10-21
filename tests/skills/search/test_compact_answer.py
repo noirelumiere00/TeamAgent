@@ -51,7 +51,8 @@ def test_compact_does_not_invent_source_for_uncited_sentence(monkeypatch):
     monkeypatch.setattr(fanout, "build_summary_client", lambda: skill._bedrock)
     out = run(skill, query="状況は？", meta={**META, "_search_compact_answer": True})
     assert "根拠のない主張" not in out.answer
-    assert "https://" not in out.answer
+    assert "[S:999]" not in out.answer
+    assert out.answer_format is None
 
 
 @pytest.mark.parametrize(

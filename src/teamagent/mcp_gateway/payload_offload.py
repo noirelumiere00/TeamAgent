@@ -55,11 +55,11 @@ OFFLOAD_TOOLS: frozenset[str] = frozenset(
 # 混ざる「依頼者本人にしか見えない」データ（本人の Slack・Drive 等の資料本文）。
 # 署名 URL は RLS/本人限定配信をバイパスする経路なので、全文 JSON から落としてから退避する。
 # 切り詰め版（依頼者本人の会話へ返す側）には残す。
-PER_USER_KEYS: frozenset[str] = frozenset({"slack_hits", "hits", "related"})
+PER_USER_KEYS: frozenset[str] = frozenset({"slack_hits", "hits", "related", "displayed_refs"})
 # 本人の Slack・資料を材料にした要約（複合検索の answer）も、本人限定の中身を
 # 含みうる。PER_USER_KEYS に中身がある（＝要約器に本人の Slack を渡した）回は、これらのキーも
 # 退避先から落とす。会話へ返す切り詰め版には残す（本人の会話なので見せてよい）。
-PER_USER_DERIVED_KEYS: frozenset[str] = frozenset({"answer"})
+PER_USER_DERIVED_KEYS: frozenset[str] = frozenset({"answer", "direct_delivery"})
 
 # ペイロード全体（JSON 文字列長）がこれを超えたら退避＋切り詰めを発動。
 _DEFAULT_MAX_CHARS = 10_000

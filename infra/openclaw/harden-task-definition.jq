@@ -169,6 +169,7 @@ def assert_current_contract:
   assert_unique_names(($container.environment // []); "environment") |
   if (($container.environment // [] | map(.name) |
        . - ["SEARCH_DIRECT_ANSWER", "SEARCH_DIRECT_ANSWER_ALLOWED_EMAILS", "SEARCH_DIRECT_ANSWER_KINDS",
+            "SEARCH_DRIVE_FIRST", "SEARCH_DRIVE_FIRST_ALLOWED_EMAILS",
             "DM_CATCHUP_ENABLED", "DM_CATCHUP_ALLOWED_USERS"] | sort) ==
       ["AWS_REGION", "SLACK_DM_ALLOWLIST", "SLACK_TEAM_ID", "TMPDIR"])
      then . else fail("environment must contain exact runtime and Slack inputs") end |
@@ -186,7 +187,8 @@ def assert_current_contract:
          ) or
          (
            (.name == "SEARCH_DIRECT_ANSWER" or .name == "SEARCH_DIRECT_ANSWER_ALLOWED_EMAILS" or
-            .name == "SEARCH_DIRECT_ANSWER_KINDS" or .name == "DM_CATCHUP_ENABLED" or
+            .name == "SEARCH_DIRECT_ANSWER_KINDS" or .name == "SEARCH_DRIVE_FIRST" or
+            .name == "SEARCH_DRIVE_FIRST_ALLOWED_EMAILS" or .name == "DM_CATCHUP_ENABLED" or
             .name == "DM_CATCHUP_ALLOWED_USERS") and
            (.value | type == "string")
          )

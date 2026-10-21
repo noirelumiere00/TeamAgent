@@ -532,12 +532,40 @@ class GeminiClient:
         *,
         system: str | None = None,
         json_mode: bool = False,
+        max_cost_usd: float | None = None,
     ) -> GeminiResponse:
         """テキストのみの生成 (複数動画分析の横断まとめ等)。動画 part は含めない。"""
         from google.genai import types
 
+        limits: dict[str, Any] = {}
+        if max_cost_usd is not None:
+            price = _PRICE_TABLE.get(self.model_id)
+            if price is None or not 0 < max_cost_usd <= 0.1:
+                raise ValueError("unsupported bounded generation budget or model")
+            client = self._ensure_client()
+            counted = client.models.count_tokens(
+                model=self.model_id,
+                contents=[types.Content(role="user", parts=[types.Part(text=prompt)])],
+                config=types.CountTokensConfig(
+                    system_instruction=system,
+                    http_options=types.HttpOptions(
+                        timeout=90_000, retry_options=types.HttpRetryOptions(attempts=1)
+                    ),
+                ),
+            )
+            tokens = counted.total_tokens
+            if not isinstance(tokens, int) or tokens < 0:
+                raise ValueError("input token count unavailable")
+            # Counted input + thought/output cap bound the single billable attempt.
+            remaining = max_cost_usd - (tokens + 1024) * price[0] / 1_000_000
+            output_limit = min(8192, int(remaining * 1_000_000 / price[1]))
+            if output_limit < 256:
+                raise ValueError("section generation budget exhausted")
+            limits = dict(
+                max_output_tokens=output_limit, max_attempts=1, rate_limit_attempts=1, timeout_s=90
+            )
         return self._generate_video(
-            [types.Part(text=prompt)], request_id, system=system, json_mode=json_mode
+            [types.Part(text=prompt)], request_id, system=system, json_mode=json_mode, **limits
         )
 
     def generate_with_google_search(
@@ -686,6 +714,7 @@ class GeminiClient:
         max_attempts: int | None = None,
         rate_limit_attempts: int | None = None,
         log_event: str = "gemini_analyze_video",
+        max_output_tokens: int | None = None,
     ) -> GeminiResponse:
         """動画/テキスト/画像 part を generate_content に投げ GeminiResponse に整形する共通処理。
 
@@ -704,6 +733,12 @@ class GeminiClient:
             config_kwargs["http_options"] = types.HttpOptions(timeout=int(timeout_s * 1000))
         if json_mode:
             config_kwargs["response_mime_type"] = "application/json"
+        if max_output_tokens is not None:
+            config_kwargs["max_output_tokens"] = max_output_tokens
+            config_kwargs["http_options"] = types.HttpOptions(
+                timeout=int((timeout_s or 90) * 1000),
+                retry_options=types.HttpRetryOptions(attempts=1),
+            )
         if thinking_level:
             config_kwargs["thinking_config"] = types.ThinkingConfig(
                 thinking_level=types.ThinkingLevel(thinking_level.upper())

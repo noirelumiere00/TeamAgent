@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import re
 import socket
 import time
 from dataclasses import dataclass
@@ -301,6 +302,25 @@ class GDriveClient:
     # -------------------------------------------------------
     # API 呼び出し
     # -------------------------------------------------------
+    def get_file_metadata(self, file_id: str, request_id: str) -> dict[str, Any]:
+        """本人 client から保存先の存在・閲覧可否を確認する。本文取得や認証の切替はしない。"""
+        if not re.fullmatch(r"[A-Za-z0-9_-]+", file_id):
+            raise ValueError("invalid Drive file ID")
+        response = (
+            self._ensure_service()
+            .files()
+            .get(
+                fileId=file_id,
+                supportsAllDrives=True,
+                fields="id,name,mimeType,webViewLink,trashed,driveId,parents",
+            )
+            .execute()
+        )
+        if response.get("id") != file_id:
+            raise ValueError("Drive metadata did not match requested file")
+        logger.info("gdrive_get_file_metadata", request_id=request_id)
+        return dict(response)
+
     def list_files(
         self,
         folder_id: str | None,

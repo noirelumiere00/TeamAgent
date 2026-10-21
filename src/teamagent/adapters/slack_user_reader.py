@@ -85,6 +85,7 @@ class SlackSearchMatch:
     # 応答に files が無い一致は空タプル（推測で埋めない）。
     file_names: tuple[str, ...] = ()
     thread_ts: str = ""
+    file_ids: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -125,6 +126,21 @@ def _file_names_from_raw(m: dict[str, Any]) -> tuple[str, ...]:
     return tuple(names)
 
 
+def _file_ids_from_raw(m: dict[str, Any]) -> tuple[str, ...]:
+    """Slack 応答のファイル ID だけを保持する（本文取得・共有範囲変更はしない）。"""
+    raw = m.get("files")
+    if not isinstance(raw, list):
+        return ()
+    ids: list[str] = []
+    for item in raw:
+        file_id = item.get("id") if isinstance(item, dict) else None
+        if isinstance(file_id, str) and re.fullmatch(r"F[A-Z0-9]+", file_id) and file_id not in ids:
+            ids.append(file_id)
+        if len(ids) >= 5:
+            break
+    return tuple(ids)
+
+
 def _search_match_from_raw(m: dict[str, Any]) -> SlackSearchMatch:
     """search.messages の 1 マッチを SlackSearchMatch へ写す（マッピングの単一真実源）。"""
     ch: dict[str, Any] = m.get("channel") or {}
@@ -143,6 +159,7 @@ def _search_match_from_raw(m: dict[str, Any]) -> SlackSearchMatch:
         channel_is_group=_opt_bool(ch.get("is_group")),
         channel_is_channel=_opt_bool(ch.get("is_channel")),
         file_names=_file_names_from_raw(m),
+        file_ids=_file_ids_from_raw(m),
         thread_ts=str(
             m.get("thread_ts")
             or (parse_qs(urlsplit(str(m.get("permalink") or "")).query).get("thread_ts") or [""])[0]

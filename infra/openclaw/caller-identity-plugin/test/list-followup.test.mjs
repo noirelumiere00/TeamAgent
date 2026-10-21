@@ -4,8 +4,9 @@ import {createCallerIdentityPlugin} from '../dist/index.js';
 
 const sheet = 'https://docs.google.com/spreadsheets/d/campaign-actual/edit';
 const rows = `📋 伊藤ハム ショート動画実績\n- 動画A：再生507,700、保存127 <${sheet}|施策シート>`;
-function setup({direct = true, shared = false,
-  previousSearch = '前の回答：再生数999,999、保存数888'} = {}) {
+function setup({direct = true, shared = false, driveFirst = false, documentReceipt = true,
+  allowedEmail = 'pilot@example.test', profileEmail = 'pilot@example.test', profileTeam = 'T07MU5P2PBR',
+  answer = rows, previousSearch = '前の回答：再生数999,999、保存数888'} = {}) {
   const hooks = new Map(), calls = [], posts = [], tasks = [];
   const conversation = shared ? 'channel:C12345678' : 'user:U12345678';
   const ctx = {runId: 'previous-run', sessionKey: shared
@@ -16,16 +17,21 @@ function setup({direct = true, shared = false,
     TEAMAGENT_MCP_BEARER: 'test-bearer', SLACK_BOT_TOKEN: 'test-token',
     SEARCH_DIRECT_ANSWER: direct ? '1' : '0', SEARCH_DIRECT_ANSWER_ALLOWED_EMAILS: '*',
     SEARCH_DIRECT_ANSWER_KINDS: 'list_fast',
+    SEARCH_DRIVE_FIRST: driveFirst ? '1' : '0',
+    SEARCH_DRIVE_FIRST_ALLOWED_EMAILS: allowedEmail,
   }, sleepFn: async () => {}, onBackgroundTask: task => tasks.push(task), fetchFn: async (url, options) => {
     const body = JSON.parse(options.body);
     let result;
-    if (url.endsWith('/conversations.open')) result = {ok: true, channel: {id: 'D12345678'}};
+    if (url.endsWith('/users.info')) result = {ok: true, user: {id: ctx.senderId,
+      team_id: profileTeam, profile: {email: profileEmail}}};
+    else if (url.endsWith('/conversations.open')) result = {ok: true, channel: {id: 'D12345678'}};
     else if (url.endsWith('/chat.postMessage')) {
       posts.push(body); result = {ok: true};
     } else if (body.method === 'tools/call') {
       calls.push(body.params);
       result = {jsonrpc: '2.0', id: body.id, result: {content: [{type: 'text', text: JSON.stringify({
-        answer: rows, found: true, direct_delivery: {answer_kind: 'list_fast', answer: rows},
+        answer, found: true, direct_delivery: {answer_kind: 'list_fast', answer,
+          ...(driveFirst ? {answer_format: 'list'} : {})},
         video_metrics_evidence: {text: '再生数507,700、保存数127', urls: [sheet]},
       })}]}};
     } else result = {jsonrpc: '2.0', id: body.id, result: {}};
@@ -42,7 +48,9 @@ function setup({direct = true, shared = false,
     toolName: `teamagent__${tool}`, toolCallId: id, runId: ctx.runId, params},
   {...ctx, toolName: `teamagent__${tool}`, toolCallId: id});
   receive('伊藤ハムのハンバーグの施策は今どうなっている？', '1792041600.123456');
-  hooks.get('after_tool_call')({toolName: 'teamagent__search', result: {text: previousSearch}}, ctx);
+  hooks.get('after_tool_call')({toolName: 'teamagent__search', result: driveFirst
+    ? {content: [{type: 'text', text: JSON.stringify({document_followup_available: documentReceipt})}]}
+    : {text: previousSearch}}, ctx);
   hooks.get('agent_end')({runId: ctx.runId}, ctx);
   ctx.runId = 'list-run';
   const followup = async (query = '一覧で出して', history = []) => {
@@ -281,3 +289,60 @@ test('comparison answer can preserve an explicit inability to identify a winner'
   assert.equal(p.finalize(original), undefined);
   assert.equal(p.send(original)?.payload?.text ?? original, original);
 });
+test('document followup sends only the trusted followup text instead of choosing another document', async () => {
+  const p = setup({direct: false, driveFirst: true});
+  await p.followup('その資料も出して');
+  assert.equal(p.finalize()?.action, 'revise');
+  const out = p.call('search', 'document-followup', {query: '別案件の資料'});
+  assert.equal(out.params.query, 'その資料も出して');
+});
+
+test('document followup guard stays off with the new policy disabled', async () => {
+  const p = setup({direct: false});
+  await p.followup('その資料も出して');
+  assert.equal(p.finalize(), undefined);
+  const out = p.call('search', 'document-followup-off', {query: 'その資料も出して'});
+  assert.equal(out.params.query, 'その資料も出して');
+});
+
+test('document followup recovers for its allowed requester without a process-local receipt', async () => {
+  const p = setup({direct: false, driveFirst: true, documentReceipt: false});
+  await p.followup('その資料も出して');
+  assert.equal(p.finalize()?.action, 'revise');
+  const out = p.call('search', 'document-followup-after-restart', {query: '別の資料'});
+  assert.equal(out.params.query, 'その資料も出して');
+});
+
+test('document followup direct search does not append earlier user history', async () => {
+  const p = setup({driveFirst: true});
+  await p.followup('その資料も出して');
+  await p.finalize();
+  assert.equal(p.calls[0].arguments.query, 'その資料も出して');
+});
+
+for (const denied of [
+  {allowedEmail: ''}, {profileEmail: 'outside@example.test'}, {profileTeam: 'T99999999'},
+]) {
+  test(`document followup does not change behavior for an unverified pilot: ${JSON.stringify(denied)}`, async () => {
+    const p = setup({direct: false, driveFirst: true, documentReceipt: false, ...denied});
+    await p.followup('その資料も出して');
+    assert.equal(p.finalize(), undefined);
+    assert.equal(p.calls.length, 0);
+  });
+}
+
+for (const [url, label, note] of [
+  ['https://drive.google.com/file/d/ORIGINAL/view', '資料を見る', '資料の説明です。'],
+  ['https://example.slack.com/archives/C12345678/p1792041600123456', '会話の記録',
+    'Slackにだけある資料（本文未読）'],
+]) {
+  test(`direct case format keeps Slack named links and single-star titles: ${label}`, async () => {
+    const answer = `*対象案件*（2025年9月）\n• ${note}\n• <${url}|${label}>`;
+    const p = setup({driveFirst: true, documentReceipt: false, answer});
+    await p.followup('その資料も出して');
+    await p.finalize();
+    assert.equal(p.posts.length, 1);
+    assert.equal(p.posts[0].text, answer);
+    assert.doesNotMatch(p.posts[0].text, /&lt;|\*\*対象案件\*\*/u);
+  });
+}

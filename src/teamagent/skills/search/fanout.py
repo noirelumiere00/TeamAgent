@@ -21,7 +21,7 @@ from teamagent.adapters.pgvector_client import SearchHit
 from teamagent.adapters.retry import RetryPolicy
 from teamagent.mcp_gateway.allowlist import email_allowed
 from teamagent.skills.base import SkillContext
-from teamagent.skills.search import compact, timeline_status
+from teamagent.skills.search import compact, drive_first, timeline_status
 from teamagent.skills.search.answer_mode import classify_answer_mode, is_case_list
 from teamagent.skills.search.answer_sections import (
     ANSWER_MAX_CHARS,
@@ -76,7 +76,13 @@ from teamagent.skills.search.result_guard import (
     build_result_header,
     prefix_header,
 )
-from teamagent.skills.search.schema import RelatedFileOut, SearchHitOut, SearchInput, SearchOutput
+from teamagent.skills.search.schema import (
+    DocumentReference,
+    RelatedFileOut,
+    SearchHitOut,
+    SearchInput,
+    SearchOutput,
+)
 
 logger = structlog.get_logger(__name__)
 
@@ -220,7 +226,7 @@ def _source_lane(result: SourceResult[Any]) -> LaneStatus:
     return LaneStatus.found(len(result.items), partial=result.incomplete)
 
 
-def _case_rows(result: SourceResult[Any]) -> list[dict[str, Any]]:
+def _case_rows(result: SourceResult[Any], *, drive_mode: bool = False) -> list[dict[str, Any]]:
     return [
         {
             "title": r.title,
@@ -233,12 +239,20 @@ def _case_rows(result: SourceResult[Any]) -> list[dict[str, Any]]:
             "case_external_use": r.external_use,
             "case_industry": r.industry,
             "updated_at": r.updated_at,
+            **(
+                {
+                    "document_id": r.document_id,
+                    "source_type": "other" if r.source == "deck" else "gsheets",
+                }
+                if drive_mode
+                else {}
+            ),
         }
         for r in result.items
     ]
 
 
-def _case_hits(result: SourceResult[Any]) -> list[SearchHit]:
+def _case_hits(result: SourceResult[Any], *, drive_mode: bool = False) -> list[SearchHit]:
     """構造化検索の事例も、取得済みの効果・URLを本文の根拠へ渡す。"""
     return [
         SearchHit(
@@ -250,13 +264,15 @@ def _case_hits(result: SourceResult[Any]) -> list[SearchHit]:
             score=1.0,
             metadata={**row, "case_corpus": "true", "client_name": row["case_client"]},
         )
-        for index, row in enumerate(_case_rows(result), 1)
+        for index, row in enumerate(_case_rows(result, drive_mode=drive_mode), 1)
     ]
 
 
 def run_fanout(skill: Any, input: SearchInput, ctx: SkillContext) -> SearchOutput:
     """並行取得→従来の found 判定→専用要約→コードの節と探した範囲。"""
     started = time.perf_counter()
+    drive_mode = drive_first.enabled(ctx.metadata)
+    expanded_early: ExpansionResult | None = None
     compact_enabled = ctx.metadata.get(compact.CTX_KEY) is True
     compact_mode = compact_enabled and not compact.explicit_list(input.query)
     log = ctx.bind_logger(skill.name)
@@ -332,7 +348,7 @@ def run_fanout(skill: Any, input: SearchInput, ctx: SkillContext) -> SearchOutpu
         hits, found = [], False
     vault_ms = int((time.perf_counter() - vault_started) * 1000)
     # 時間切れの別名再検索が接続を持つ間は、補助接続を足さない（最大 3 本）。
-    file_urls = {} if extra.get("incomplete") else skill._resolve_file_urls(hits, ctx)
+    file_urls = {} if extra.get("incomplete") or drive_mode else skill._resolve_file_urls(hits, ctx)
     summary_hits = hits
     from teamagent.ingest.industry_taxonomy import normalize_industry
     from teamagent.skills.search.knowledge_query import extract_query_industry
@@ -387,11 +403,57 @@ def run_fanout(skill: Any, input: SearchInput, ctx: SkillContext) -> SearchOutpu
         hits = summary_hits
     if compact_mode and slack.items:
         found = True
+    case_hits = _case_hits(cases, drive_mode=drive_mode)
+    if drive_mode:
+        expanded_early = _collect(
+            expand_future,
+            started,
+            EXPAND_DEADLINE_S,
+            ExpansionResult((), None, (), "timeout", 0, 0.0, "timeout"),
+        )
+        groups, items, file_urls = drive_first.annotate(
+            skill,
+            [
+                hits,
+                summary_hits,
+                extra.get("named", []),
+                karte.items,
+                case_hits,
+                extra.get("candidates", hits),
+                expanded_early.hits,
+            ],
+            slack.items,
+            ctx,
+        )
+        (
+            hits,
+            summary_hits,
+            extra["named"],
+            karte_items,
+            case_hits,
+            extra["candidates"],
+            expanded_hits,
+        ) = groups
+        karte = replace(karte, items=tuple(karte_items))
+        slack = replace(slack, items=items)
+        expanded_early = replace(expanded_early, hits=tuple(expanded_hits))
     case_miss = bool(case_target and not found)
     statuses = (
         timeline_status.resolve_statuses([*summary_hits, *extra.get("named", []), *karte.items])
         if timeline_status.enabled()
         else None
+    )
+    guard_header = (
+        build_result_header(
+            query=input.query,
+            hits=summary_hits,
+            weak_threshold=skill._weak_result_threshold,
+            query_client=client,
+            asked_industry=input.filter_industry,
+            use_entities=skill._client_guard_entities,
+        )
+        if found and skill._result_guard
+        else ""
     )
     head, summary_cost = (
         (
@@ -474,11 +536,52 @@ def run_fanout(skill: Any, input: SearchInput, ctx: SkillContext) -> SearchOutpu
         summary_ms = int((time.perf_counter() - summary_started) * 1000)
         if summary_state != "ok" or not head.strip():
             direct_kind = None
+    compact_answer = ""
+    compact_fallback_cards = ""
+    if compact_mode and found and input.include_answer:
+        compact_answer = compact.build(
+            head,
+            summary_hits,
+            slack.items,
+            lambda h: skill._hit_url(h, file_urls=file_urls),
+            query=input.query,
+            asked_industry=asked_industry,
+            karte_hits=karte.items,
+            notice=guard_header,
+        )
+        if compact.is_empty(compact_answer, notice=guard_header):
+            compact_mode = False
+            compact_fallback_cards = compact.fallback_cards(
+                input.query,
+                summary_hits,
+                slack.items,
+                lambda h: skill._hit_url(h, file_urls=file_urls),
+                target=case_target,
+            )
+            log.info(
+                "search_compact_fallback", mode="cards" if compact_fallback_cards else "normal"
+            )
+            head = ""
+            if compact_fallback_cards:
+                list_fast = True
+            elif summary_hits or slack.items:
+                summary_started = time.perf_counter()
+                head, cost, summary_state = _collect(
+                    _submit(summarize, "summary_fallback"),
+                    summary_started,
+                    SUMMARY_DEADLINE_S,
+                    ("", 0.0, "timeout"),
+                )
+                summary_cost += cost
+                summary_ms += int((time.perf_counter() - summary_started) * 1000)
+                head = compact.normal_answer(head)
+                if summary_state != "ok" or not head:
+                    direct_kind = None
     if found and input.include_answer and not compact_mode:
         head = skill._append_campaign_footer(head, summary_hits, asked_industry=asked_industry)
     # 広げる処理は 10s 以内。回収の追加待ちは該当ありで 1s、該当なしで 0s に抑える。
     collection_deadline = time.perf_counter() + (1.0 if found else 0.0)
-    expanded = _collect(
+    expanded = expanded_early or _collect(
         expand_future,
         started,
         min(EXPAND_DEADLINE_S, collection_deadline - started),
@@ -531,12 +634,21 @@ def run_fanout(skill: Any, input: SearchInput, ctx: SkillContext) -> SearchOutpu
         else:
             cases = near
     named = extra.get("named", [])
+    near_hits = _case_hits(near, drive_mode=drive_mode)
+    if drive_mode and near_hits:
+        groups, _, near_urls = drive_first.annotate(skill, [near_hits], (), ctx)
+        near_hits = groups[0]
+        file_urls.update(near_urls)
+        if cases is near:
+            case_hits = near_hits
     sections = build_sections(
         vault_hits=candidates if found else (),
         expand_hits=expanded.hits if show_expanded else (),
         karte_hits=karte.items,
-        case_rows=_case_rows(cases) if cases.stage != 4 else (),
-        near_case_rows=_case_rows(near),
+        case_rows=([h.metadata for h in case_hits] if drive_mode else _case_rows(cases))
+        if cases.stage != 4
+        else (),
+        near_case_rows=[h.metadata for h in near_hits] if drive_mode else _case_rows(near),
         slack_hits=[i.hit for i in slack.items[:SLACK_TOP_N]],
         min_score=skill._weak_result_threshold,
         karte_client=client or "",
@@ -591,16 +703,7 @@ def run_fanout(skill: Any, input: SearchInput, ctx: SkillContext) -> SearchOutpu
             if hits
             else LaneStatus.failed("search_failed")
         )
-    guard_header = ""
     if found and skill._result_guard:
-        guard_header = build_result_header(
-            query=input.query,
-            hits=summary_hits,
-            weak_threshold=skill._weak_result_threshold,
-            query_client=client,
-            asked_industry=input.filter_industry,
-            use_entities=skill._client_guard_entities,
-        )
         head = prefix_header(guard_header, head)
         if WEAK_RESULT_NOTICE in guard_header:
             direct_kind = None
@@ -669,16 +772,7 @@ def run_fanout(skill: Any, input: SearchInput, ctx: SkillContext) -> SearchOutpu
     )
     if compact_mode and input.include_answer:
         if found:
-            answer = compact.build(
-                head,
-                summary_hits,
-                slack.items,
-                lambda h: skill._hit_url(h, file_urls=file_urls),
-                query=input.query,
-                asked_industry=asked_industry,
-                karte_hits=karte.items,
-                notice=guard_header,
-            )
+            answer = compact_answer
         elif not visible_found:
             if slack.hidden_count:
                 answer = "Slackの非公開の場所に一致がありますが、この会話では内容を表示できません。"
@@ -686,14 +780,25 @@ def run_fanout(skill: Any, input: SearchInput, ctx: SkillContext) -> SearchOutpu
                 scope = "社内資料・施策実績"
                 scope += "・Slack" if slack.status == "ok" else "（Slackは検索未完了）"
                 answer = build_scoped_not_found_answer(case_target, scope=scope, complete=complete)
-    case_listing = is_case_list(input.query) and input.include_answer
+    case_listing = (
+        is_case_list(input.query) or bool(compact_fallback_cards)
+    ) and input.include_answer
+    displayed_refs: list[DocumentReference] | None = [] if drive_mode else None
     if case_listing:
         from teamagent.skills.search.case_list import render, slack_cases
 
         listed = render(
-            [*_case_hits(cases), *summary_hits, *named, *expanded.hits, *slack_cases(slack.items)],
+            [
+                *(case_hits if drive_mode else _case_hits(cases)),
+                *summary_hits,
+                *named,
+                *expanded.hits,
+                *slack_cases(slack.items),
+            ],
             case_target,
             lambda h: skill._hit_url(h, file_urls=file_urls),
+            displayed_refs=displayed_refs,
+            cards=bool(compact_fallback_cards),
         )
         if listed:
             answer, found, visible_found = listed, True, True
@@ -795,6 +900,8 @@ def run_fanout(skill: Any, input: SearchInput, ctx: SkillContext) -> SearchOutpu
         hit_count=len(hits),
         deferred=False,
     )
+    if found and input.include_answer:
+        answer = answer.replace(compact.EMPTY_ANSWER, "").strip()
     return SearchOutput(
         answer=answer,
         answer_format="compact"
@@ -805,6 +912,7 @@ def run_fanout(skill: Any, input: SearchInput, ctx: SkillContext) -> SearchOutpu
         direct_answer=answer if direct_kind is not None else None,
         direct_answer_kind=direct_kind,
         hits=_output_hits(skill, hits, file_urls),
+        displayed_refs=displayed_refs,
         found=found,
         total_cost_usd=summary_cost + expanded.cost_usd + vault_cost,
         slack_hits=[i.hit for i in slack.items[:SLACK_TOP_N]],
@@ -842,6 +950,9 @@ def _output_hits(
             url = resolved_file_ref[1]
         if not url:
             url = skill._doc_url({"source_uri": meta.get("source_uri")})
+        ref = meta.get(drive_first.REFERENCE_KEY)
+        if ref is not None:
+            url = ref.url
         # 便A-3: 日付は tool が根拠を持つ値だけを返す。
         #   updated_at = documents.modified_at（adapter が JST 文字列化済み）
         #   title_date = 資料名（title / 実ファイル名 / file_name）に埋まった日付
@@ -852,6 +963,7 @@ def _output_hits(
         search_hits.append(
             SearchHitOut(
                 chunk_id=h.chunk_id,
+                reference=ref,
                 content=h.content[:200],
                 score=h.score,
                 source=skill._build_source(h),

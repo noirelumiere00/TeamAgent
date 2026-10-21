@@ -111,6 +111,28 @@ class RelatedFileOut(BaseModel):
     )
 
 
+ReferenceKind = Literal[
+    "drive", "slack_conversation", "slack_attachment", "vault", "sheet", "unknown"
+]
+
+
+class DocumentReference(BaseModel):
+    """実際に表示した原本と来歴。再提示時には必ず本人の権限で再確認する。"""
+
+    document_id: str | None = None
+    drive_file_id: str | None = None
+    slack_file_id: str | None = None
+    slack_file_ids: list[str] = Field(default_factory=list)
+    file_record_number: str | None = None
+    file_record_branch: str | None = None
+    unread: bool = False
+    title: str = ""
+    url: str | None = None
+    source_uri: str | None = None
+    source_type: str | None = None
+    kind: ReferenceKind = "unknown"
+
+
 class SearchHitOut(BaseModel):
     """検索結果の1ヒット。
 
@@ -122,6 +144,7 @@ class SearchHitOut(BaseModel):
     """
 
     chunk_id: int
+    reference: DocumentReference | None = None
     content: str
     score: float = Field(ge=0.0, le=1.0, description="cosine 類似度（1.0 に近いほど類似）")
     source: str | None = Field(
@@ -283,6 +306,13 @@ class SearchHitOut(BaseModel):
             return None
         return cleaned
 
+    @model_serializer(mode="wrap")
+    def _omit_reference(self, handler: SerializerFunctionWrapHandler) -> dict[str, Any]:
+        data: dict[str, Any] = handler(self)
+        if self.reference is None:
+            data.pop("reference", None)
+        return data
+
 
 class SlackHitOut(BaseModel):
     """複合検索（USE_COMPOSITE_SEARCH）で並行して探した本人の Slack の 1 投稿（短い抜粋だけ）。
@@ -295,6 +325,15 @@ class SlackHitOut(BaseModel):
     excerpt: str = Field(default="", description="本文の抜粋（160 字まで・通知記法は無害化済み）")
     permalink: str = Field(default="", description="投稿へのリンク")
     file_names: list[str] = Field(default_factory=list, description="添付ファイル名（あれば）")
+    file_ids: list[str] = Field(default_factory=list, exclude=True)
+    reference: DocumentReference | None = None
+
+    @model_serializer(mode="wrap")
+    def _omit_reference(self, handler: SerializerFunctionWrapHandler) -> dict[str, Any]:
+        data: dict[str, Any] = handler(self)
+        if self.reference is None:
+            data.pop("reference", None)
+        return data
 
 
 # 値が None のときはツール結果から落とすキー（複合検索 OFF のとき出力を 1 バイトも変えないため）。
@@ -304,6 +343,7 @@ _OMIT_WHEN_NONE: tuple[str, ...] = (
     "suggested_next",
     "sources",
     "answer_format",
+    "displayed_refs",
 )
 
 
@@ -314,6 +354,7 @@ class SearchOutput(BaseModel):
     """検索 Skill の出力。"""
 
     answer: str = Field(description="Claude による要約（引用付き）")
+    displayed_refs: list[DocumentReference] | None = None
     answer_format: Literal["compact", "list"] | None = None
     direct_answer: str | None = Field(default=None, exclude=True)
     direct_answer_kind: SearchDirectAnswerKind | None = Field(default=None, exclude=True)

@@ -89,6 +89,8 @@ HUMAN_FACING_PROMPTS = (
 # 含まないもの（enum・ID・真偽値だけの JSON）は、地の文の書きぶりを模倣されても
 # 人に届く文章が無いので対象外にする。注入防止の安全指示かどうかは基準にしない。
 EXEMPT_PROMPTS = {
+    # 調査の必須区分だけを JSON で作り直す内部プロンプト（出力は区分 JSON のみ・人に直接は届かない）。
+    "proposal_research/v1/repair_section.md": "内部 JSON（区分の再生成）",
     # 全 DM 品質の判定（Haiku に区分 JSON だけを返させる内部プロンプト）。人には見えない。
     "dm_quality/v1/system.md": "内部 JSON（判定区分だけ）",
     # 時系列フラグ ON 時だけ本体へ足す規律。装飾の禁止節は v2d/v3 から継承する。

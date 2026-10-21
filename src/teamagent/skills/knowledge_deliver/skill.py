@@ -51,6 +51,7 @@ from teamagent.skills.search.client_match import (
     normalize_client,
     normalize_filter_client,
 )
+from teamagent.skills.search.drive_first import enabled as drive_first_enabled
 from teamagent.skills.search.knowledge_query import extract_query_industry
 from teamagent.skills.search.not_found import _haystack, _term_in_hit, query_subject_terms
 from teamagent.skills.search.result_guard import (
@@ -84,6 +85,7 @@ _CLIENT_GUARD_ENV = "KNOWLEDGE_DELIVER_CLIENT_GUARD"
 # search の回答末尾の「📎 資料リンク」ブロック（SearchSkill._source_links_block）の 1 行。
 _LINKS_HEAD = "📎 *資料リンク*"
 _LINK_LINE_RE = re.compile(r"^- \[[^\]]*\]\((?P<url>[^)\s]+)\)")
+_CANONICAL_LINK_LINE_RE = re.compile(r"^- (?:[^\[\]\n]+: )?\[[^\]]*\]\((?P<url>[^)\s]+)\)")
 
 
 def _client_guard_enabled() -> bool:
@@ -151,20 +153,20 @@ def _resolve_asked_client(
     return None, "none"
 
 
-def _drop_link_lines(answer: str, urls: set[str]) -> str:
+def _drop_link_lines(answer: str, urls: set[str], *, canonical: bool = False) -> str:
     """回答末尾の「📎 資料リンク」から ``urls`` の行を落とす（見出しだけ残ったら見出しも）。"""
     if not answer or not urls:
         return answer
     lines = answer.split("\n")
-    kept = [
-        line for line in lines if not ((m := _LINK_LINE_RE.match(line)) and m.group("url") in urls)
-    ]
+    pattern = _CANONICAL_LINK_LINE_RE if canonical else _LINK_LINE_RE
+    kept = [line for line in lines if not ((m := pattern.match(line)) and m.group("url") in urls)]
     if len(kept) == len(lines):
         return answer
     out: list[str] = []
     for i, line in enumerate(kept):
         nxt = kept[i + 1] if i + 1 < len(kept) else ""
-        if line.strip() == _LINKS_HEAD and not _LINK_LINE_RE.match(nxt):
+        heads = {_LINKS_HEAD, "📎 *出典*"} if canonical else {_LINKS_HEAD}
+        if line.strip() in heads and not pattern.match(nxt):
             continue
         out.append(line)
     return "\n".join(out).rstrip()
@@ -338,7 +340,9 @@ class KnowledgeDeliverSkill(BaseSkill[KnowledgeDeliverInput, KnowledgeDeliverOut
                 _drop_punt_lines(sentence) for sentence in re.split(r"(?<=[。！？])", answer)
             ).strip()
         if asked_client or subject_terms:
-            answer = _drop_link_lines(answer, other_client_urls - kept_urls)
+            answer = _drop_link_lines(
+                answer, other_client_urls - kept_urls, canonical=drive_first_enabled(ctx.metadata)
+            )
         # ガードが無ければ添付していた（＝ガードが 0 件の原因）なら、従来の理由文ではなく
         # 「名指しの取引先の資料は無い」とそのまま言う。
         guard_emptied = not candidates and (not_found_block or client_excluded > 0)

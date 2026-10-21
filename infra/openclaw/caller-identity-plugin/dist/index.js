@@ -2941,6 +2941,10 @@ export function createCallerIdentityPlugin({
   const buttonDirect =
     mcpBearer !== null && slackBotToken !== null && typeof fetchFn === "function";
   const searchDirectKnownKinds = new Set(["not_found", "comparison", "list_fast", "video_metrics"]);
+  const documentFollowupEnabled = ["1", "true", "yes"].includes(String(env.SEARCH_DRIVE_FIRST ?? "").trim().toLowerCase());
+  const documentFollowupAllowedEmails = new Set(String(env.SEARCH_DRIVE_FIRST_ALLOWED_EMAILS ?? "")
+    .split(",").map(value => value.trim().toLowerCase()).filter(Boolean));
+  const documentFollowupPattern = /^(?:その|さっきの|直前の)(?:事例の)?(?:資料|ファイル)(?:の(?:URL|リンク))?(?:も|を|も一緒に)?(?:出して|見せて|送って|教えて|共有して|ください|下さい)(?:ください|下さい)?[。！!？?\s]*$/iu;
   const searchDirectKinds = new Set(String(env.SEARCH_DIRECT_ANSWER_KINDS ?? "")
     .split(",").map(value => value.trim()).filter(Boolean));
   if ([...searchDirectKinds].some(kind => !searchDirectKnownKinds.has(kind))) searchDirectKinds.clear();
@@ -5766,6 +5770,14 @@ export function createCallerIdentityPlugin({
       );
     }
 
+    if (trusted.searchRequired === "document_followup" && tool === "knowledge_deliver") {
+      return {block: true, blockReason:
+        "直前に表示した資料のURLは teamagent__search で確認してください。query は依頼者の発話そのものを使い、別の資料を探し直さないでください。"};
+    }
+    if (tool === "search" && trusted.searchRequired === "document_followup") {
+      const saved = searchQueryByPending.get(trusted.pendingKey);
+      if (saved?.query) params = {...params, query: saved.query.slice(0, 1000)};
+    }
     if (tool === "search" && trusted.searchRequired === "list") {
       const saved = searchQueryByPending.get(trusted.pendingKey);
       if (saved?.context) params = {...params,
@@ -6181,7 +6193,7 @@ export function createCallerIdentityPlugin({
     const direct = searchDirectByRun.get(runId);
     if (direct?.delivered || direct?.replaced) return;
     if (direct?.pending) return direct.task;
-    const claimsOnly = ["comparison", "list"].includes(ingress?.searchRequired);
+    const claimsOnly = ["comparison", "list", "document_followup"].includes(ingress?.searchRequired);
     const unrelatedToolSatisfies = !claimsOnly && (toolCallsByRun.get(runId)?.count ?? 0) > 0;
     if (!ingress?.searchRequired || ingress.connectRequest ||
         evidenceByRun.has(runId) || unrelatedToolSatisfies ||
@@ -6212,6 +6224,11 @@ export function createCallerIdentityPlugin({
 
     searchRevisionsByRun.set(runId, {updatedAtMs: now()});
     emitPluginLog(logger, "warn", `search zero-tool revise reason=${ingress.searchRequired} outcome=revised`);
+    if (ingress.searchRequired === "document_followup") return {action: "revise",
+      reason: "直前の資料の閲覧権限を確認する必要があります。", retry: {
+        instruction: "teamagent__search を今のパスで必ず呼び出してください。query は依頼者の発話そのものを渡してください。直前に表示した資料のURLを返し、別資料を選び直さないでください。",
+        idempotencyKey: "document-followup", maxAttempts: 1,
+      }};
     return {action: "revise", reason: "社内資料の検索が必要です。", retry: {
       instruction: "この指示は明示的にツール実行を要求します。This retry explicitly requires a new tool call, even if the previous pass was final. " +
         "利用可能な teamagent__search（search）を今のパスで必ず呼び出してください。" +
@@ -6232,6 +6249,26 @@ export function createCallerIdentityPlugin({
       const data = JSON.parse(first.text);
       return isPlainObject(data) ? data : null;
     } catch { return null; }
+  }
+
+  async function restoreDocumentFollowup(event, ctx) {
+    if (!documentFollowupEnabled || !documentFollowupAllowedEmails.size || !slackBotToken) return;
+    const runId = canonicalInvocationId(ctx?.runId);
+    if (!runId || (event?.runId && event.runId !== runId)) return;
+    const ingress = connectIngressByRun.get(runId);
+    const query = ingress && searchQueryByPending.get(ingress.pendingKey)?.query;
+    if (!ingress || !documentFollowupPattern.test(query?.trim() ?? "") ||
+        (!SLACK_DM_CHANNEL_RE.test(ingress.channelId) && ingress.channelId !== `DM:${ingress.senderId}`)) return;
+    try {
+      const profile = await callSlackApi({fetchFn, botToken: slackBotToken, method: "users.info",
+        body: {user: ingress.senderId}, timeoutMs: SLACK_API_TIMEOUT_MS, sleepFn});
+      const email = profile.user?.profile?.email;
+      if (profile.user?.id === ingress.senderId && profile.user?.team_id === ingress.teamId &&
+          typeof email === "string" && (documentFollowupAllowedEmails.has("*") ||
+            documentFollowupAllowedEmails.has(email.trim().toLowerCase()))) {
+        ingress.searchRequired = "document_followup";
+      }
+    } catch {}
   }
 
   function deliveredPdfBatch(data) {
@@ -6296,7 +6333,8 @@ export function createCallerIdentityPlugin({
     if (!SLACK_DM_CHANNEL_RE.test(channel)) return reviseSearchZeroTool(runId, ingress, logger, event);
     rememberSearchConversation(event, ctx);
     const saved = searchQueryByPending.get(ingress.pendingKey);
-    const query = [saved?.query, saved?.context].filter(Boolean).join("\n").slice(0, 1000);
+    const query = (ingress.searchRequired === "document_followup" ? saved?.query ?? "" :
+      [saved?.query, saved?.context].filter(Boolean).join("\n")).slice(0, 1000);
     let result;
     try {
       if (!query) throw new ConnectPathError("missing_search_query");
@@ -7437,6 +7475,7 @@ export function createCallerIdentityPlugin({
           restore = undefined;
         }
         rememberSearchConversation(event, ctx);
+        await restoreDocumentFollowup(event, ctx);
         const memo = await injectPersonalMemory(event, ctx, api.logger);
         if (restore === undefined) return memo;
         return memo === undefined ? restore : { ...memo, ...restore };
