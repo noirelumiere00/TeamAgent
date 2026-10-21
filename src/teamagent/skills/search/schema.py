@@ -363,8 +363,9 @@ class SearchOutput(BaseModel):
     found: bool = Field(
         default=True,
         description=(
-            "金庫に問いへ該当する資料があったか。False のとき answer は"
-            "「金庫に該当する資料は見つかりませんでした（近いもの: …）」で、hits は参考の近いもの"
+            "データベースに問いへ該当する資料があったか。False のとき answer は"
+            "「データベースに該当する資料は見つかりませんでした（近いもの: …）」で、"
+            "hits は参考の近いもの"
         ),
     )
     slack_hits: list[SlackHitOut] | None = Field(

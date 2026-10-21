@@ -30,9 +30,9 @@ for (const answer of ['施策は実施済みです。\n\n出典: [施策実績](
     p.remember({answer_format: 'compact', answer, found: true,
       hits: [{url: 'https://example.test/unused'}], slack_hits: [{permalink: 'https://example.test/slack-unused'}]});
     p.hooks.get('agent_end')({runId: p.ctx.runId}, p.ctx);
-    const out = p.send('長い書き直しです。\n📁 金庫の資料\nhttps://fabricated.test/source');
+    const out = p.send('長い書き直しです。\n📁 データベースの資料\nhttps://fabricated.test/source');
     assert.match(out, /施策は実施済み|該当事例を確認/u);
-    assert.doesNotMatch(out, /金庫|unused|fabricated|📎/u);
+    assert.doesNotMatch(out, /データベース|unused|fabricated|📎/u);
     assert.ok(out.length <= 2500);
   });
 }

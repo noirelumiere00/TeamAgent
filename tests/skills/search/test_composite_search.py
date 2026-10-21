@@ -80,7 +80,7 @@ def _env(monkeypatch: pytest.MonkeyPatch) -> None:
 # ── フェイク ───────────────────────────────────────────────────────────────
 
 
-def _converse(text: str = "要約（金庫: 提案書A）") -> ConverseResponse:
+def _converse(text: str = "要約（データベース: 提案書A）") -> ConverseResponse:
     return ConverseResponse(
         text=text,
         usage=TokenUsage(
@@ -275,11 +275,11 @@ def test_dm_returns_top5_short_excerpts_and_cites_both_sources() -> None:
     q = client.search_messages.call_args.kwargs["query"]
     assert q == "日本ガイシ ケイパ提案"
     msg = _user_message(b)
-    assert "# 参考資料（金庫の資料）" in msg
+    assert "# 参考資料（データベースの資料）" in msg
     assert "# Slack の投稿（依頼者本人の Slack 検索・5 件）" in msg
-    assert "（金庫: 資料名）" in msg and "（Slack: #チャンネル名 投稿日）" in msg
-    assert "金庫の資料には無く、Slack の投稿にあります" in msg
-    assert out.answer.startswith("要約（金庫: 提案書A）")
+    assert "（データベース: 資料名）" in msg and "（Slack: #チャンネル名 投稿日）" in msg
+    assert "データベースの資料には無く、Slack の投稿にあります" in msg
+    assert out.answer.startswith("要約（データベース: 提案書A）")
 
 
 def test_channel_request_uses_public_matches_only() -> None:
@@ -469,7 +469,7 @@ def test_vault_empty_slack_only_says_so() -> None:
     client = _slack_client([_public(1, "東芝 半導体の提案の相談がありました")])
     b = _bedrock()
     b.converse.return_value = _converse(
-        "金庫の資料には無く、Slack の投稿にあります。（Slack: #sales-1）"
+        "データベースの資料には無く、Slack の投稿にあります。（Slack: #sales-1）"
     )
     skill, _ = _skill(b, _pg([]), client=client)
     out = skill.run(
@@ -480,7 +480,7 @@ def test_vault_empty_slack_only_says_so() -> None:
     assert out.answer.startswith(f"{NOT_FOUND_HEAD}。")
     assert "Slack の投稿にあります" in out.answer
     msg = _user_message(b)
-    assert "（金庫に該当する資料はありません）" in msg
+    assert "（データベースに該当する資料はありません）" in msg
     assert "東芝 半導体の提案の相談" in msg
     assert out.total_cost_usd == pytest.approx(0.003)
 
@@ -491,7 +491,7 @@ def test_both_empty_no_llm_call() -> None:
     out = skill.run(SearchInput(query="x"), SkillContext(metadata=dict(MCP, channel_id="D1")))
     assert out.found is False and out.slack_status == "ok" and out.slack_hits == []
     assert out.answer.split("\n\n探した範囲:", 1)[0] == f"{NOT_FOUND_HEAD}。"
-    assert out.answer.endswith("探した範囲: 金庫を『x』で検索・Slack も確認")
+    assert out.answer.endswith("探した範囲: データベースを『x』で検索・Slack も確認")
     b.converse.assert_not_called()
 
 
