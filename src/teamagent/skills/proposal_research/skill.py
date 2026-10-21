@@ -800,7 +800,7 @@ class ProposalResearchSkill(BaseSkill[ResearchBrief, ProposalResearchOutput]):
                         for key, f in IntermediateResearch.model_fields.items()
                         if (f.alias or key) == section
                     )
-                    section_model = create_model(
+                    section_model = create_model(  # type: ignore[call-overload]
                         "ResearchSectionRepair",
                         __config__=IntermediateResearch.model_config,
                         **{section: (section_field.rebuild_annotation(), ...)},
