@@ -1063,7 +1063,7 @@ def test_slow_industry_case_lookup_keeps_vault(monkeypatch: pytest.MonkeyPatch) 
     original_search = pg.search_similar_new_schema.side_effect
 
     def search(**kw: Any) -> Any:
-        # 言い換えで出た業種が結果をまとめる時点で揃うよう、社内資料（金庫）の検索は言い換えの後にする。
+        # 言い換えで出た業種が結果をまとめる時点で揃うよう、データベースの検索は言い換えの後にする。
         assert expanded.wait(10)
         return original_search(**kw)
 
