@@ -162,7 +162,8 @@ async def test_auth_and_expensive_confirmation_keep_original_error(
 
 @pytest.mark.parametrize("direct_status", ["posted", "failed"])
 async def test_surface_acquire_instructions_reach_model_without_posting_or_policy_note(
-    monkeypatch: pytest.MonkeyPatch, direct_status: str,
+    monkeypatch: pytest.MonkeyPatch,
+    direct_status: str,
 ) -> None:
     from teamagent.mcp_gateway import direct_summary
     from teamagent.skills.search_surface_check.skill import SearchSurfaceCheckSkill
@@ -181,11 +182,16 @@ async def test_surface_acquire_instructions_reach_model_without_posting_or_polic
     cls = SearchSurfaceCheckSkill
     specs = {cls.name: ToolSpec(cls.name, cls.description, cls)}
     result = await server.dispatch_tool(
-        specs, cls.name, {"keywords": ["ハンバーグ", "冷凍ハンバーグ", "夜ご飯"]},
+        specs,
+        cls.name,
+        {"keywords": ["ハンバーグ", "冷凍ハンバーグ", "夜ご飯"]},
     )
     out = json.loads(result[0].text)
     assert posted == []
     assert scheduled == []
     assert out["slack_summary"] == "検索上位チェックには、先に検索結果の取得が必要です。"
-    assert "tiktok_acquire(keywords=['ハンバーグ', '冷凍ハンバーグ', '夜ご飯'], videos_per_kw=0)" in out["model_instructions"]
+    assert (
+        "tiktok_acquire(keywords=['ハンバーグ', '冷凍ハンバーグ', '夜ご飯'], videos_per_kw=0)"
+        in out["model_instructions"]
+    )
     assert "acquire_job_id" in out["model_instructions"]
