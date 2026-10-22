@@ -55,6 +55,82 @@ def normal_answer(answer: str) -> str:
     )
 
 
+def append_used_drive_links(
+    answer: str, hits: Sequence[SearchHit], displayed_refs: list[DocumentReference]
+) -> str:
+    """通常回答で明記した社名・商品名・資料名の正本だけを表示・保存する。"""
+    from teamagent.skills.search.case_list import case_link
+
+    body = unicodedata.normalize("NFKC", answer).casefold()
+    # URL 内のファイル名は、回答本文で使った資料名とはみなさない。
+    body = re.sub(r"https?://[^\s<>)]*", "", body)
+    links: list[str] = []
+    seen = {ref.drive_file_id for ref in displayed_refs}
+    for hit in hits:
+        meta = hit.metadata or {}
+        ref = drive_first.canonical_reference(meta, hit.content)
+        if ref.kind != "drive" or not ref.drive_file_id or ref.drive_file_id in seen:
+            continue
+        names = [
+            ref.title,
+            *(
+                str(meta.get(key) or "")
+                for key in (
+                    "title",
+                    "file_name",
+                    "drive_title",
+                    "client_name",
+                    "cls_project",
+                    "case_client",
+                    "case_product",
+                    "advertiser",
+                    "brand",
+                    "product",
+                    "campaign",
+                )
+            ),
+        ]
+        used = False
+        for name in names:
+            name = re.sub(
+                r"\.(?:pdf|pptx?|docx?|xlsx?)$", "", unicodedata.normalize("NFKC", name).casefold()
+            ).strip()
+            if len(name) < 2 or name in {
+                "資料",
+                "記録",
+                "提案資料",
+                "提案書",
+                "レポート",
+                "報告書",
+                "事例",
+                "施策",
+                "動画",
+                "ショート動画",
+                "tiktok",
+                "sns",
+                "不明",
+                "未分類",
+            }:
+                continue
+            pattern = (
+                (r"(?<![a-z0-9])" if re.match(r"[a-z0-9]", name) else "")
+                + re.escape(name)
+                + (r"(?![a-z0-9])" if re.search(r"[a-z0-9]$", name) else "")
+            )
+            if re.search(pattern, body):
+                used = True
+                break
+        link = case_link(ref.url, "資料を見る")
+        if not used or link is None or "/spreadsheets/" in (ref.url or ""):
+            continue
+        seen.add(ref.drive_file_id)
+        displayed_refs.append(ref)
+        links.append(link)
+        if len(links) == 3:
+            break
+    return "\n\n".join(part for part in (answer, " / ".join(links)) if part)
+
+
 def fallback_cards(
     query: str,
     hits: Sequence[SearchHit],
@@ -170,7 +246,11 @@ def render(
     fact_keys: Sequence[str] = (),
     notice: str = "",
     used_keys: list[str] | None = None,
+    rejection_reasons: list[str] | None = None,
 ) -> str:
+    rejected = rejection_reasons if rejection_reasons is not None else []
+    if not answer.strip():
+        rejected.append("empty_summary")
     sources = {key: source for key, source in sources.items() if _safe_url(source[1])}
     prefix: list[str] = []
     for line in notice.splitlines():
@@ -191,23 +271,32 @@ def render(
     base = [*prefix, *derived]
     for raw in answer.splitlines():
         keys = list(dict.fromkeys(_CITATION.findall(raw)))
-        if not keys or any(key not in sources for key in keys):
+        if not keys:
+            if raw.strip():
+                rejected.append("missing_citations")
+            continue
+        if any(key not in sources for key in keys):
+            rejected.append("unknown_citation")
             continue
         candidate_keys = list(dict.fromkeys([*used, *keys]))
         if len({sources[key][1] or key for key in candidate_keys}) > 3:
+            rejected.append("source_limit")
             continue
         text = _CITATION.sub("", raw).strip()
         if EMPTY_ANSWER in text:
+            rejected.append("empty_answer_marker")
             continue
         if re.match(
             r"^(?:[-*#・•]|[📊📁🏆🗂💬📎🕸]|金庫の資料|事例・施策実績|資料リンク|"
             r"関係図|探した範囲|動画ごとの数字|施策の反応合計|施策の数字はシート)",
             text,
         ):
+            rejected.append("heading_or_list")
             continue
         # Quantitative metric prose comes only from the code-generated facts/rows.
         metric_text = _DATES.sub("", unicodedata.normalize("NFKC", text))
         if _METRIC_PROSE.search(metric_text) and _QUANTITIES.search(metric_text):
+            rejected.append("metric_prose")
             continue
         if (
             not text
@@ -216,13 +305,16 @@ def render(
             or _sentence_count("\n".join([*base, *lines, text])) > 6
             or len("\n".join([*base, *lines, text])) > 550
         ):
+            rejected.append("body_format_or_limit")
             continue
         if not NumberGrounder.from_inputs(
             "\n".join(sources[k][2] for k in keys), always_allowed=frozenset()
         ).ok(text):
+            rejected.append("ungrounded_number")
             continue
         footer = _source_line(candidate_keys, sources)
         if len("\n".join([*base, *lines, text, footer])) + 1 > 2500:
+            rejected.append("answer_limit")
             continue
         lines.append(text)
         used = candidate_keys
@@ -268,6 +360,7 @@ def build(
     karte_hits: Sequence[SearchHit] = (),
     notice: str = "",
     displayed_refs: list[DocumentReference] | None = None,
+    rejection_reasons: list[str] | None = None,
 ) -> str:
     facts, fact_ids = compact_comparison(query, hits)
     show_metrics = wants_metrics(query)
@@ -282,6 +375,7 @@ def build(
         metrics=video_stats_footer(hits, "", asked_industry=asked_industry) if show_metrics else "",
         metric_keys=[str(hit.chunk_id) for hit, _ in campaigns],
         used_keys=used_keys,
+        rejection_reasons=rejection_reasons,
     )
     if displayed_refs is None:
         return rendered
