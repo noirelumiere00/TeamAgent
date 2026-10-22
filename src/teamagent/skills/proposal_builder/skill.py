@@ -1132,6 +1132,7 @@ class ProposalBuilderSkill(BaseSkill[ProposalBuilderInput, ProposalBuilderOutput
             posting_start_date=input.posting_start_date,
             product_sector=meta.sector,
             proposal_date=input.proposal_date,
+            business_unit=input.business_unit,
             auxiliary_placeholders={
                 "PB-ACCOUNTS": accounts_text,
                 "PB-CASES": cases_text,

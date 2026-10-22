@@ -24,6 +24,7 @@ from teamagent.media.operations import (
 from teamagent.media.proposal_cleanup import (
     finalize_proposal_content,
     prepare_proposal_content,
+    proposal_bu2_slide_ids,
     proposal_emme_slide_ids,
     proposal_template_samples,
 )
@@ -269,11 +270,14 @@ def _proposal(root: Path, manifest: dict[str, Any]) -> dict[str, Any]:
         )
         product_sector = raw.get("product_sector", "")
         agency_route = raw.get("agency_route", True)
+        business_unit = raw.get("business_unit", "BU2")
         proposal_date = (
             date.fromisoformat(raw["proposal_date"]) if raw.get("proposal_date") else None
         )
         if not isinstance(product_sector, str) or type(agency_route) is not bool:
             raise ValueError("invalid proposal context")
+        if business_unit not in ("BU1", "BU2"):
+            raise ValueError("invalid business_unit; expected BU1 or BU2")
     except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
         raise MediaOperationError("MEDIA_COMPOSER_INVALID", "composer JSON is invalid") from exc
     valid_ids = set(range(1, 104)) - set(range(48, 56))
@@ -290,6 +294,7 @@ def _proposal(root: Path, manifest: dict[str, Any]) -> dict[str, Any]:
     presentation = Presentation(str(template))
     samples = proposal_template_samples(presentation)
     emme_slide_ids = proposal_emme_slide_ids(presentation)
+    bu2_slide_ids = proposal_bu2_slide_ids(presentation)
     template_ids: set[int] = set()
     template_auxiliary: set[str] = set()
     template_date_offsets: set[int] = set()
@@ -374,6 +379,8 @@ def _proposal(root: Path, manifest: dict[str, Any]) -> dict[str, Any]:
         presentation,
         samples,
         emme_slide_ids=emme_slide_ids,
+        bu2_slide_ids=bu2_slide_ids,
+        business_unit=business_unit,
         product_sector=product_sector,
         proposal_date=proposal_date,
         posting_start_date=posting_start_date,

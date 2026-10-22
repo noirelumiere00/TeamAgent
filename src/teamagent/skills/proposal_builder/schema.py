@@ -351,6 +351,9 @@ class ProposalBuilderInput(_StrictModel):
     proposal_date: date = Field(
         default_factory=proposal_today, description="提案書の作成日。未指定時は日本時間の受付日。"
     )
+    business_unit: Literal["BU1", "BU2"] = Field(
+        default="BU2", description="業務区分。BU2は施策メニュー型、BU1は従来のPR戦略型。"
+    )
     client_name: str = Field(
         default="クライアント",
         min_length=1,

@@ -59,6 +59,9 @@ class ProposalDeckInput(BaseModel):
     proposal_date: date = Field(
         default_factory=proposal_today, description="提案書の作成日（日本時間）。日付検査の基準。"
     )
+    business_unit: Literal["BU1", "BU2"] = Field(
+        default="BU2", description="業務区分。BU2は施策メニュー型、BU1は従来のPR戦略型。"
+    )
     auxiliary_placeholders: dict[str, str] = Field(
         default_factory=dict,
         description=("統合FMTの補助枠。キーは PB-[A-Z0-9_-]+、値は非空、値の合計は最大20000文字。"),
