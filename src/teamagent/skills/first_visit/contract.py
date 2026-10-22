@@ -22,8 +22,8 @@ from teamagent.skills.omiyage_report.schema import OmiyageReportSubmitInput
 
 CONTRACT_VERSION = 1
 KIT_VERSION = "2026.10.14.1"
-KIT_COMMIT = "7c390997233b39dc83b7095f289d01e484df720d"
-KIT_TREE = "123668d3ab6d63bb98d0108459457dd01eef6803"
+KIT_COMMIT = "25eccd8219f01cad18dbb4f5a863b5f41d8f52fb"
+KIT_TREE = "e12d92cc1fe03a3c3e0b7a75acdaa66b8d128ad6"
 KIT_GATE_SHA256 = "4e84c1aae75f4a97f7f67d4626252db11183309285b3ee4d4bfa847d4c83409f"
 _STATS = {
     "plays": "playCount",
