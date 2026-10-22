@@ -141,7 +141,6 @@ def test_core_model_torch_and_app_html_are_content_addressed() -> None:
 
 def test_core_ca_bundle_uses_the_official_fixed_apk_without_changing_python() -> None:
     builder = _stage("builder", "final")
-    final = _stage("final")
     assert f"ARG CA_CERTIFICATES_BUNDLE_APK_SHA256={CA_BUNDLE_APK_SHA256}" in TEXT
     assert "ARG CA_CERTIFICATES_BUNDLE_VERSION=20260909-r3" in TEXT
     assert "COPY infra/docker/vendor/ca-certificates-bundle-20260909-r3.apk " in builder
@@ -149,12 +148,6 @@ def test_core_ca_bundle_uses_the_official_fixed_apk_without_changing_python() ->
     assert "COPY infra/docker/replace_core_ca_bundle.py " in builder
     assert '--apk-sha256 "$CA_CERTIFICATES_BUNDLE_APK_SHA256"' in builder
     assert '--version "$CA_CERTIFICATES_BUNDLE_VERSION"' in builder
-    assert (
-        'io.teamagent.contract.ca-certificates-bundle-apk-sha256="$CA_CERTIFICATES_BUNDLE_APK_SHA256"'
-    ) in final
-    assert (
-        'io.teamagent.contract.ca-certificates-bundle-version="$CA_CERTIFICATES_BUNDLE_VERSION"'
-    ) in final
 
 
 def test_core_runtime_is_uid_10001_read_only_ready_and_python_health_checked() -> None:

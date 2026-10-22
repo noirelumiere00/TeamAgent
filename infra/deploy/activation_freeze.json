@@ -373,14 +373,10 @@
     "generation_release_chain_note": "S3 codebuild-buildspecs/ 配下の全 prefix を無条件スキャンして得た release chain の実体。adopt purity（4 forget + 4 import）と generation freeze integrity は別概念で、後者はこの inventory 全体を対象とする（2026-08-24 ユーザー裁定⑦）。"
   },
   "unlock": {
-    "active": true,
-    "scope_paths": [
-      "infra/codebuild/source_provenance.py",
-      "infra/codebuild/teamagent_runtime_contract.json",
-      "infra/codebuild/teamagent_core_media_release_contract.json"
-    ],
-    "reason": "【2026-10-22 core の CA bundle 差し替え】CVE-2026-111943 の修正版である Wolfi 公式 ca-certificates-bundle 20260909-r3 を SHA-256 固定の APK から取り込み、Python 3.14.8 と builder/runtime の固定 digest を維持する。runtime 契約へ APK SHA と bundle 版の 2 entry を追加し、source_provenance.py の release-ready 必須集合と release 契約の source_runtime_contract.sha256 を追随する。scope はこの 3 path の変更集合ちょうど。source-publisher / attestor / promoter / image-builder と source_provenance.py を埋め込む approval-publisher の計 5 世代をオフライン再導出し、公開は別便で行う。例外は追加しない。",
-    "gate": "human gate 2026-10-22（小俣さん「証明書だけ差し替え」: chainguard python:latest が 3.15 に移り 3.14 系の修正版土台が無いため、ca-certificates-bundle のみ Wolfi 公式 r3 に差し替え。3.15 移行は別途）",
+    "active": false,
+    "scope_paths": [],
+    "reason": null,
+    "gate": null,
     "folded_2026_08_28": {
       "decision": "裁定③（relock せず相乗り）を打ち切り、本 PR で unlock を畳む。Human Gate ⑤ を 2026-08-28 にユーザーが通した。",
       "why_now": "①本 PR は frozen surface を 1 path も変更していない（assert-frozen-surface --base origin/dev --head HEAD が「frozen surface 無変更（監視対象 21 path）」を返す実測）。∴ この unlock は本 PR には不要。②active のままだと test_unlock_is_inactive_and_empty_by_default が落ち、CI が 1 failed / 7,474 passed で恒常的に赤になる（3.11 / 3.13 / 3.14 すべてで実測）。本物の失敗と見分けがつかなくなる。③裁定③の rationale「いま relock すると同じ宣言を立て直す往復が発生する」は成立しない。retention_ruling_2026_08_27.landmine_partial_scope のとおり、相乗り PR は scope_paths を自分の変更集合へ絞り込まねばならず、**どのみち書き直しが必須**だから。",
@@ -507,6 +503,16 @@
       "reason": "【media の apk ロック追随】 【2026-10-21 apk ロック追随】mcp 便 r67 の空撃ちで、Alpine v3.24 / edge の ca-certificates 20260909-r0 が上流にもベース同梱にも無く、上流は 20261020-r0 へ入れ替わっていることを確認した。Dockerfile の明示 pin を 20261020-r0 へ追随させ、人が作成した lock の 1 行を差し替える（241→241 行）。社内網では手元の Docker 実ビルドができないため、実インベントリとの一致は段 3 の AWS image-builder が cmp で照合する。lock の sha256 が動くため契約の artifact.apk-lock.sha256 と release 契約の sha が動き、世代 4 本を再導出する。scope は core_media 契約 1 path。",
       "gate": "human gate 2026-10-21（小俣さん「マージまで全て任せる」・Alpine 上流で ca-certificates 20260909-r0 → 20261020-r0 入替）",
       "note": "10/21 の media APK ロック追随の宣言。dev 取り込み済みで、本 PR の source_provenance.py と runtime/release 契約の変更集合へ scope を切り替えるため退避。"
+    },
+    "previous_scope_20261022_core_ca_bundle": {
+      "scope_paths": [
+        "infra/codebuild/source_provenance.py",
+        "infra/codebuild/teamagent_runtime_contract.json",
+        "infra/codebuild/teamagent_core_media_release_contract.json"
+      ],
+      "reason": "【2026-10-22 core の CA bundle 差し替え】CVE-2026-111943 の修正版である Wolfi 公式 ca-certificates-bundle 20260909-r3 を SHA-256 固定の APK から取り込み、Python 3.14.8 と builder/runtime の固定 digest を維持する。runtime 契約へ APK SHA と bundle 版の 2 entry を追加し、source_provenance.py の release-ready 必須集合と release 契約の source_runtime_contract.sha256 を追随する。scope はこの 3 path の変更集合ちょうど。source-publisher / attestor / promoter / image-builder と source_provenance.py を埋め込む approval-publisher の計 5 世代をオフライン再導出し、公開は別便で行う。例外は追加しない。",
+      "gate": "human gate 2026-10-22（小俣さん「証明書だけ差し替え」: chainguard python:latest が 3.15 に移り 3.14 系の修正版土台が無いため、ca-certificates-bundle のみ Wolfi 公式 r3 に差し替え。3.15 移行は別途）",
+      "note": "CA の source_provenance 必須 entry 追加と runtime/release 契約変更を取り下げ、既存契約を維持した証明書差し替えに絞る。frozen surface の変更がなくなったため unlock を畳み、承認文言と旧 scope を履歴として保存する。"
     }
   },
   "production_deployment_freeze": {

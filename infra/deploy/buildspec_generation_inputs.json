@@ -6,7 +6,7 @@
     "infra/codebuild/mcp-source-publisher-buildspec.yml": "9cdb0123e96a8f79a0886d40c29efb4fa30dac15",
     "infra/codebuild/image-attestor-buildspec.yml": "d9b2573bd11f57914941be000b996d2afbc2ea32",
     "infra/codebuild/image-promoter-buildspec.yml": "adaf16dd1ebd090007f1ba9e16dc667f28a7406b",
-    "infra/codebuild/source_provenance.py": "af7dc75e7b54500eac108756034cabffb24ee929",
+    "infra/codebuild/source_provenance.py": "61884d2f820c8484f1bbd76f6a12ce8887a801ad",
     "infra/codebuild/release_evidence.py": "ffc56acd62c1ae122283835601822a59776e92c5",
     "infra/codebuild/teamagent_bundle_provenance.py": "fb379e6999566de8f6588c20f141c71ff414dda8",
     "infra/codebuild/teamagent_schema_versions.py": "1e100f61fa15c4ae6eb4bcc4f054de849149d8cb",
@@ -15,8 +15,8 @@
     "infra/codebuild/openclaw_provenance.py": "22ef083687245abf56c4fbfe8f51569aca0d1775",
     "infra/codebuild/tiktok_source_provenance.py": "77e61e9eb2606b295ae5adfe47ea8bde1c1960eb",
     "infra/codebuild/verify_actual_image.sh": "74795d433d3bb9c42e4922b799ccb2f9f7059063",
-    "infra/codebuild/teamagent_runtime_contract.json": "f9c9bf8d1effbd7c7bfa0adbf40ac842ad13a70d",
-    "infra/codebuild/teamagent_core_media_release_contract.json": "3f11ae5a5c3f3ee08af8aa6da9c7c9b9fd62bf09",
+    "infra/codebuild/teamagent_runtime_contract.json": "f57aa1dd80bfd49ef9dd5166a69e56dbded7c4c8",
+    "infra/codebuild/teamagent_core_media_release_contract.json": "1f1fed794d4003c6544b723228e008e7cfd5af4a",
     "infra/codebuild/tiktok_release_contract.json": "6e65b8e2ff695a89782c8b83647450ce9a4720ad",
     "infra/codebuild/openclaw_bundle_contract.json": "6e466a9f83ef7895b58ad1d6ae6a8bfdd298de58",
     "infra/terraform/codebuild.tf": "eb3589566c44ad089817e1820d7e898784aee785",
@@ -39,9 +39,9 @@
     "evaluated_at": "2026-08-21T07:15:42Z"
   },
   "expected_generation_sha256": {
-    "teamagent-dev-mcp-source-publisher": "9a37e28a585939fef4a1d87a33e07f76283c21cfbabf9e03d95becf803b6b085",
-    "teamagent-dev-image-attestor": "aa5f1c4f99be581a7428fee6a41256118f80e076f1d5b48177f851da1006d9ca",
-    "teamagent-dev-image-promoter": "ba1419fc6a34639d5d65b08fdbc51530b3f2101db02cd31bf6f06996b7605d9a",
-    "teamagent-dev-approval-publisher": "7271cd1a1768c12df6ded4f4524abd9e78e5125e331aee7b9f48f13b7cdb3493"
+    "teamagent-dev-mcp-source-publisher": "c0c62f4a9e8608bbd5dd742488d754680a3274beed557df33dfe743b36810957",
+    "teamagent-dev-image-attestor": "36e2718f284e89bb40e095780e51af38c852298b065bb66f129de856dbd9ba7e",
+    "teamagent-dev-image-promoter": "37cc27cc8f8500c198babd84c2491454254317e497e4882bad722c3590b7280f",
+    "teamagent-dev-approval-publisher": "33e2a64353969f75e941a9524fcd76919c2dfcc7d192aabb67ecc09c9921ddf4"
   }
 }

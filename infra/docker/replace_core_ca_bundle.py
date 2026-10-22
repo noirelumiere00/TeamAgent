@@ -26,7 +26,7 @@ def load_package(apk: Path, lock_path: Path, apk_sha256: str, version: str) -> d
     lock = json.loads(lock_path.read_bytes())
     raw = apk.read_bytes()
     if hashlib.sha256(raw).hexdigest() != apk_sha256 or apk_sha256 != lock["archive_sha256"]:
-        raise ValueError("APK SHA-256 differs from the runtime contract/lock")
+        raise ValueError("APK SHA-256 differs from the build argument/lock")
     index = lock["apkindex"]
     if (index["P"], index["V"], index["A"], int(index["S"])) != (
         NAME,

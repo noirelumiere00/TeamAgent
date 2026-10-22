@@ -373,11 +373,6 @@ def require_release_ready(contract: dict[str, Any], *, label: str = "runtime con
         raise ProvenanceError(f"{label} release is blocked: {release['blocked_reason']}")
     entries_by_key = {entry["key"]: entry for entry in contract["receipt"]["entries"]}
     required = {
-        "artifact.ca-certificates-bundle.arm64-apk.sha256": (
-            "ca-certificates-bundle",
-            "artifact_sha256",
-            "CA_CERTIFICATES_BUNDLE_APK_SHA256",
-        ),
         "artifact.torch.arm64-wheel.sha256": (
             "torch",
             "artifact_sha256",
@@ -407,11 +402,6 @@ def require_release_ready(contract: dict[str, Any], *, label: str = "runtime con
             "uv",
             "binary_sha256",
             "UV_BINARY_SHA256",
-        ),
-        "component.ca-certificates-bundle.version": (
-            "ca-certificates-bundle",
-            "package_version",
-            "CA_CERTIFICATES_BUNDLE_VERSION",
         ),
         "component.python.version": (
             "python",

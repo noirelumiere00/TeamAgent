@@ -42,7 +42,8 @@ Core:
 
 2026-10-22の証明書差し替えはCVE-2026-111943への対応である。`python:latest`は3.15へ
 移行し、3.14系で修正版bundleを持つ土台が無いため、上記の固定digestを維持する。
-runtime契約はAPK SHAとbundle版を束縛し、release契約は更新したruntime契約SHAを参照する。
+APK SHAとbundle版はDockerfileのbuilder検査と固定lockで束縛し、署名対象のbuild contextに含める。
+runtime/release契約のreceiptは既存のままとし、source_provenanceとapproval-publisherの世代も維持する。
 TrivyとECR Inspectorの実スキャン結果は通常便で確認する。
 
 Productionのconnect-webは `CONNECT_APP_HTML_S3_URI` による `source=s3` が正であり、baked
