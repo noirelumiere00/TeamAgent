@@ -280,7 +280,10 @@ def run_fanout(skill: Any, input: SearchInput, ctx: SkillContext) -> SearchOutpu
     drive_case_listing = drive_mode and is_case_list(input.query)
     expanded_early: ExpansionResult | None = None
     compact_enabled = ctx.metadata.get(compact.CTX_KEY) is True
-    compact_mode = compact_enabled and not compact.explicit_list(input.query)
+    compact_mode = (drive_mode and not drive_case_listing) or (
+        compact_enabled and not compact.explicit_list(input.query)
+    )
+    displayed_refs: list[DocumentReference] | None = [] if drive_mode else None
     log = ctx.bind_logger(skill.name)
     log.info(
         "search_skill_start",
@@ -443,6 +446,8 @@ def run_fanout(skill: Any, input: SearchInput, ctx: SkillContext) -> SearchOutpu
         karte = replace(karte, items=tuple(karte_items))
         slack = replace(slack, items=items)
         expanded_early = replace(expanded_early, hits=tuple(expanded_hits))
+        if not drive_case_listing and found and not summary_hits:
+            summary_hits = extra["named"]
     case_miss = bool(case_target and not found)
     statuses = (
         timeline_status.resolve_statuses([*summary_hits, *extra.get("named", []), *karte.items])
@@ -482,7 +487,8 @@ def run_fanout(skill: Any, input: SearchInput, ctx: SkillContext) -> SearchOutpu
     if not skill._direct_answer_allowed(ctx, direct_kind):
         direct_kind = None
     list_fast = (
-        found
+        not compact_mode
+        and found
         and input.include_answer
         and (
             compact.explicit_list(input.query)
@@ -544,6 +550,7 @@ def run_fanout(skill: Any, input: SearchInput, ctx: SkillContext) -> SearchOutpu
             direct_kind = None
     compact_answer = ""
     compact_fallback_cards = ""
+    drive_fallback = False
     if compact_mode and found and input.include_answer:
         compact_answer = compact.build(
             head,
@@ -554,16 +561,19 @@ def run_fanout(skill: Any, input: SearchInput, ctx: SkillContext) -> SearchOutpu
             asked_industry=asked_industry,
             karte_hits=karte.items,
             notice=guard_header,
+            displayed_refs=displayed_refs,
         )
         if compact.is_empty(compact_answer, notice=guard_header):
             compact_mode = False
-            compact_fallback_cards = compact.fallback_cards(
-                input.query,
-                summary_hits,
-                slack.items,
-                lambda h: skill._hit_url(h, file_urls=file_urls),
-                target=case_target,
-            )
+            drive_fallback = drive_mode
+            if not drive_fallback:
+                compact_fallback_cards = compact.fallback_cards(
+                    input.query,
+                    summary_hits,
+                    slack.items,
+                    lambda h: skill._hit_url(h, file_urls=file_urls),
+                    target=case_target,
+                )
             log.info(
                 "search_compact_fallback", mode="cards" if compact_fallback_cards else "normal"
             )
@@ -583,7 +593,9 @@ def run_fanout(skill: Any, input: SearchInput, ctx: SkillContext) -> SearchOutpu
                 head = compact.normal_answer(head)
                 if summary_state != "ok" or not head:
                     direct_kind = None
-    if found and input.include_answer and not compact_mode:
+                    if drive_fallback:
+                        head = "資料は見つかりましたが、回答の作成を完了できませんでした。"
+    if found and input.include_answer and not compact_mode and not drive_fallback:
         head = skill._append_campaign_footer(head, summary_hits, asked_industry=asked_industry)
     # 広げる処理は 10s 以内。回収の追加待ちは該当ありで 1s、該当なしで 0s に抑える。
     collection_deadline = time.perf_counter() + (1.0 if found else 0.0)
@@ -724,7 +736,7 @@ def run_fanout(skill: Any, input: SearchInput, ctx: SkillContext) -> SearchOutpu
         skill._source_links_block(
             summary_hits[:3], file_urls=file_urls, slack_items=slack.items[:3]
         )
-        if found and not list_fast and not compact_mode
+        if found and not list_fast and not compact_mode and not drive_fallback
         else ""
     )
     # 広げた候補は元の問いの根拠ではないため、不在判定の必須レーンに含めない。
@@ -761,7 +773,7 @@ def run_fanout(skill: Any, input: SearchInput, ctx: SkillContext) -> SearchOutpu
     answer = (
         (
             head
-            if case_miss or negative_short
+            if case_miss or negative_short or drive_fallback
             else compose_answer(
                 head=head,
                 sections=sections,
@@ -789,7 +801,6 @@ def run_fanout(skill: Any, input: SearchInput, ctx: SkillContext) -> SearchOutpu
     case_listing = (
         is_case_list(input.query) or bool(compact_fallback_cards)
     ) and input.include_answer
-    displayed_refs: list[DocumentReference] | None = [] if drive_mode else None
     if case_listing:
         from teamagent.skills.search.case_list import EMPTY_DRIVE_CASES, render, slack_cases
 

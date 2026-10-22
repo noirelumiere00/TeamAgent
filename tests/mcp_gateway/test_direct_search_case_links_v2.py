@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 
@@ -22,14 +23,16 @@ def slack(monkeypatch: pytest.MonkeyPatch) -> _FakeSlack:
     return client
 
 
-def _deliver(answer: str, *, enabled: bool = True, kind: str = "list_fast") -> object:
-    return direct_search_answer.deliver(
+def _deliver(answer: str, *, enabled: bool = True, kind: str = "list_fast") -> dict[str, Any]:
+    result = direct_search_answer.deliver(
         answer,
         kind,
         detached_jobs.Destination("D0ORIGIN", None),
         request_id="req",
         allow_case_links=enabled,
     )
+    assert result is not None
+    return result
 
 
 def test_fixed_original_and_conversation_links_survive_exactly_once(slack: _FakeSlack) -> None:
@@ -82,10 +85,8 @@ def test_unapproved_named_link_does_not_enable_rich_delivery(slack: _FakeSlack, 
     assert f"<{url}|資料を見る>" not in slack.posts[0]["text"]
 
 
-@pytest.mark.parametrize(("enabled", "kind"), [(False, "list_fast"), (True, "comparison")])
-def test_off_and_other_answer_kinds_use_original_escape_path(
-    slack: _FakeSlack, enabled: bool, kind: str
-) -> None:
+@pytest.mark.parametrize(("enabled", "kind"), [(False, "list_fast"), (False, "comparison")])
+def test_off_uses_original_escape_path(slack: _FakeSlack, enabled: bool, kind: str) -> None:
     answer = f"*匿名案件*\n• <{DRIVE}|資料を見る>"
     _deliver(answer, enabled=enabled, kind=kind)
     assert slack.posts[0]["blocks"] is None
@@ -97,7 +98,7 @@ def test_block_rejection_retries_with_a_clickable_plain_url(
 ) -> None:
     original = slack.post_message
 
-    async def reject_blocks(**kwargs):
+    async def reject_blocks(**kwargs: Any) -> Any:
         result = await original(**kwargs)
         return SimpleNamespace(ok=False) if kwargs.get("blocks") else result
 
@@ -108,3 +109,11 @@ def test_block_rejection_retries_with_a_clickable_plain_url(
     assert f"<{DRIVE}>" in slack.posts[1]["text"]
     assert "資料を見る" in slack.posts[1]["text"]
     assert "|資料を見る>" not in slack.posts[1]["text"]
+
+
+@pytest.mark.parametrize("kind", ["comparison", "list_fast"])
+def test_enabled_non_card_answer_keeps_document_link(slack: _FakeSlack, kind: str) -> None:
+    answer = f"資料では同じ進め方です。\n\n<{DRIVE}|資料を見る>"
+    assert _deliver(answer, kind=kind)["delivered"] is True
+    assert slack.posts[0]["text"] == answer
+    assert slack.posts[0]["blocks"][0]["text"]["verbatim"] is True

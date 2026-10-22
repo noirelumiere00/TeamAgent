@@ -18,6 +18,7 @@ from teamagent.skills.search.campaign_files import (
 )
 from teamagent.skills.search.comparison import compact_comparison, is_comparison_query
 from teamagent.skills.search.composite import SlackItem
+from teamagent.skills.search.schema import DocumentReference
 
 CTX_KEY = "_search_compact_answer"
 EMPTY_ANSWER = "取得した資料では、質問への回答を確認できませんでした。"
@@ -168,6 +169,7 @@ def render(
     facts: str = "",
     fact_keys: Sequence[str] = (),
     notice: str = "",
+    used_keys: list[str] | None = None,
 ) -> str:
     sources = {key: source for key, source in sources.items() if _safe_url(source[1])}
     prefix: list[str] = []
@@ -250,6 +252,8 @@ def render(
                 blocks.append("\n".join([label, *rows]))
                 used = candidate_keys
     shown_metrics = heading + "\n" + "\n\n".join(blocks) if blocks else ""
+    if used_keys is not None:
+        used_keys.extend(used)
     return "\n\n".join(part for part in (body, shown_metrics, _source_line(used, sources)) if part)
 
 
@@ -263,11 +267,13 @@ def build(
     asked_industry: str | None = None,
     karte_hits: Sequence[SearchHit] = (),
     notice: str = "",
+    displayed_refs: list[DocumentReference] | None = None,
 ) -> str:
     facts, fact_ids = compact_comparison(query, hits)
     show_metrics = wants_metrics(query)
     campaigns = _footer_campaigns(hits, asked_industry) if show_metrics else []
-    return render(
+    used_keys: list[str] = []
+    rendered = render(
         answer,
         source_map([*hits, *karte_hits], slack_items, url_of),
         facts=facts,
@@ -275,4 +281,31 @@ def build(
         notice=notice,
         metrics=video_stats_footer(hits, "", asked_industry=asked_industry) if show_metrics else "",
         metric_keys=[str(hit.chunk_id) for hit, _ in campaigns],
+        used_keys=used_keys,
     )
+    if displayed_refs is None:
+        return rendered
+    from teamagent.skills.search.case_list import case_link
+
+    references: dict[str, DocumentReference | None] = {
+        str(hit.chunk_id): drive_first.canonical_reference(hit.metadata or {}, hit.content)
+        for hit in [*hits, *karte_hits]
+    }
+    references.update({f"slack{i}": item.hit.reference for i, item in enumerate(slack_items)})
+    links = []
+    seen = set()
+    for key in used_keys:
+        ref = references.get(key)
+        if ref is None or ref.kind != "drive" or ref.drive_file_id in seen:
+            continue
+        link = case_link(ref.url, "資料を見る")
+        if link is None or "/spreadsheets/" in (ref.url or ""):
+            continue
+        seen.add(ref.drive_file_id)
+        displayed_refs.append(ref)
+        links.append(link)
+        if len(links) == 3:
+            break
+    # 引用を残した本文と同じ正本だけを表示・保存し、検索候補の一覧は添えない。
+    body = rendered.rsplit("\n\n出典: ", 1)[0]
+    return "\n\n".join(part for part in (body, " / ".join(links)) if part)

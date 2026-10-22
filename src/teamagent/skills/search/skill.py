@@ -578,7 +578,8 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
 
     def run(self, input: SearchInput, ctx: SkillContext) -> SearchOutput:
         """検索 Skill のメインフロー。"""
-        drive_case_listing = drive_first.enabled(ctx.metadata) and is_case_list(input.query)
+        drive_mode = drive_first.enabled(ctx.metadata)
+        drive_case_listing = drive_mode and is_case_list(input.query)
         if drive_case_listing:
             from teamagent.skills.search.case_list import CANDIDATE_LIMIT
 
@@ -592,11 +593,13 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
         case_listing = drive_case_listing or (
             ctx.metadata.get(compact.CTX_KEY) is True and is_case_list(input.query)
         )
-        compact_mode = ctx.metadata.get(compact.CTX_KEY) is True and not compact.explicit_list(
-            input.query
+        compact_mode = (drive_mode and not drive_case_listing) or (
+            ctx.metadata.get(compact.CTX_KEY) is True and not compact.explicit_list(input.query)
         )
+        displayed_refs: list[DocumentReference] | None = [] if drive_mode else None
         compact_answer = ""
         compact_fallback_cards = ""
+        drive_fallback = False
         log = ctx.bind_logger(self.name)
         log.info(
             "search_skill_start",
@@ -852,16 +855,19 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
                     query=input.query,
                     asked_industry=asked_industry,
                     notice=guard_header,
+                    displayed_refs=displayed_refs,
                 )
                 if compact.is_empty(compact_answer, notice=guard_header):
                     compact_mode = False
-                    compact_fallback_cards = compact.fallback_cards(
-                        input.query,
-                        summary_hits,
-                        slack_items,
-                        lambda h: self._hit_url(h, file_urls=file_urls),
-                        target=case_target,
-                    )
+                    drive_fallback = drive_mode
+                    if not drive_fallback:
+                        compact_fallback_cards = compact.fallback_cards(
+                            input.query,
+                            summary_hits,
+                            slack_items,
+                            lambda h: self._hit_url(h, file_urls=file_urls),
+                            target=case_target,
+                        )
                     log.info(
                         "search_compact_fallback",
                         mode="cards" if compact_fallback_cards else "normal",
@@ -893,12 +899,14 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
                         timings["converse_ms"] += (time.perf_counter() - _t) * 1000
                         if not answer:
                             direct_kind = None
-                            answer = "資料は見つかりました。取得した根拠を示します。"
-                            answer += self._source_links_block(
-                                summary_hits, file_urls=file_urls, slack_items=slack_items
-                            )
+                            answer = "資料は見つかりましたが、回答の作成を完了できませんでした。"
+                            if not drive_fallback:
+                                answer = "資料は見つかりました。取得した根拠を示します。"
+                                answer += self._source_links_block(
+                                    summary_hits, file_urls=file_urls, slack_items=slack_items
+                                )
             # 資料リンク・「シートのみ」と、動画ごとの数字・リンクをコードで足す。
-            if not compact_mode:
+            if not compact_mode and not drive_fallback:
                 answer = self._append_campaign_footer(
                     answer, summary_hits, asked_industry=asked_industry
                 )
@@ -914,6 +922,7 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
             and not deferred
             and not case_miss
             and not compact_mode
+            and not drive_fallback
             and (_source_links_enabled() or direct_kind is not None)
         ):
             answer += self._source_links_block(
@@ -940,7 +949,7 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
         #        「実ファイルをお送りしますか？」を末尾に 1 個だけ足す（受け皿は
         #        knowledge_deliver。その tool が OFF の環境では出来ない約束をしない）。
         #        該当なしのときは近いものの実ファイルを勧めない。
-        if found and not compact_mode:
+        if found and not compact_mode and not drive_fallback:
             answer = self._append_next_step(answer, query=input.query, file_urls=file_urls)
 
         # 3-quater. 結果に添える次の一手（既存ツールを 1 つだけ・モデルに 2 本目を選ばせる）。
@@ -1075,9 +1084,6 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
                     scope += "・Slack" if slack_lookup.status == "ok" else "（Slackは検索未完了）"
                 answer = build_scoped_not_found_answer(case_target, scope=scope, complete=complete)
 
-        displayed_refs: list[DocumentReference] | None = (
-            [] if drive_first.enabled(ctx.metadata) else None
-        )
         if case_listing and input.include_answer:
             from teamagent.skills.search.case_list import EMPTY_DRIVE_CASES, render, slack_cases
 

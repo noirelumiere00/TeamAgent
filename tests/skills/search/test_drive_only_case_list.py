@@ -152,11 +152,14 @@ def test_sales_feedback_question_keeps_feedback(
 ) -> None:
     monkeypatch.setenv("USE_SEARCH_FANOUT", str(int(fanout_enabled)))
     skill, _ = make([_case(90, source_type="slack", source_uri=POST, is_sales_fb=True)])
-    skill._summarize = MagicMock(return_value=("食品会社の営業フィードバック: 温度感B。", 0.0))
+    skill._summarize = MagicMock(
+        return_value=("食品会社の営業フィードバック: 温度感B。[S:90]", 0.0)
+    )
     monkeypatch.setattr(fanout, "build_summary_client", MagicMock)
     out = _run(skill, query="食品メーカーの営業の温度感を教えて")
     assert "温度感B" in out.answer
-    assert out.answer_format is None
+    assert out.answer_format == "compact"
+    assert out.displayed_refs == [] and POST not in out.answer
     skill._summarize.assert_called_once()
 
 
