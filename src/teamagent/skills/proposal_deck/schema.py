@@ -242,7 +242,7 @@ class ProposalDeckInput(BU2Content):
         )
         leaking_keys.extend(
             key
-            for key, value in self.model_dump(include=BU2_INPUT_FIELDS).items()
+            for key, value in self.model_dump(include=set(BU2_INPUT_FIELDS)).items()
             if contains_forbidden_term(str(value), self.forbidden_output_terms)
         )
         if leaking_keys:

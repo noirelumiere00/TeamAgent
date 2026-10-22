@@ -591,7 +591,7 @@ class ProposalDeckSkill(BaseSkill[ProposalDeckInput, ProposalDeckOutput]):
                 # 不正な model-supplied path/key で repair を浪費させない。
                 if isinstance(data, dict):
                     data["evidence_images"] = input.evidence_images
-                    data.update(input.model_dump(include=BU2_INPUT_FIELDS))
+                    data.update(input.model_dump(include=set(BU2_INPUT_FIELDS)))
                     # {48}〜{55} は {47} に統合済みの非対象 ID。モデルが律儀に skipped へ
                     # 列挙すると contract で弾かれ repair を 1 回浪費するので、検証前に落とす
                     # （2026-09-16 実走で発生。placeholders 側の 48〜55 も同様に無視する）。
@@ -667,7 +667,7 @@ class ProposalDeckSkill(BaseSkill[ProposalDeckInput, ProposalDeckOutput]):
         if isinstance(data, dict):
             data = {
                 **data,
-                **input.model_dump(include=BU2_INPUT_FIELDS),
+                **input.model_dump(include=set(BU2_INPUT_FIELDS)),
                 "product_sector": input.product_sector,
                 "proposal_date": input.proposal_date,
                 "business_unit": input.business_unit,
