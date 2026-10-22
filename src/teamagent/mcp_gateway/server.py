@@ -626,6 +626,17 @@ async def _resolve_metadata(
     # knowledge_deliver が「聞かれたチャンネル/スレッドに添付」するのに使う。無ければ DM 配信。
     channel_id = verified_caller.channel_id if verified_caller else raw.get("channel_id")
     thread_ts = verified_caller.thread_ts if verified_caller else raw.get("thread_ts")
+    request_metadata = {}
+    request_text = raw.get("request_text")
+    if (
+        tool in {"proposal_builder", "proposal_builder_submit"}
+        and verified_caller is not None
+        and verified_caller.channel_id.startswith("D")
+        and isinstance(request_text, str)
+        and 0 < len(request_text) <= 4000
+    ):
+        # OC が本文を注入してから署名した引数だけを照合元にする。
+        request_metadata["request_text"] = request_text
 
     if company_shared_groups is not None:
         # 会社共有モードも「Slack event署名 + exact team + member resolver成功」が必須。
@@ -661,7 +672,7 @@ async def _resolve_metadata(
             source="company_shared+signed_claim+resolver",
             domain=_domain_of(resolved["user_email"]),
         )
-        return {**meta, "channel_id": channel_id, "thread_ts": thread_ts}, None
+        return {**meta, "channel_id": channel_id, "thread_ts": thread_ts, **request_metadata}, None
 
     if identity_resolver is not None:
         # 外殻が email/groups/role を申告してきたら破棄して警告（攻撃 or バグの早期検知）。
@@ -705,6 +716,7 @@ async def _resolve_metadata(
             "verified_slack_team_id": verified_caller.slack_team_id,
             "channel_id": channel_id,
             "thread_ts": thread_ts,
+            **request_metadata,
         }, None
 
     # LEGACY モード（resolver 未注入＝テスト/PoC 専用）。本番エントリポイントは resolver 必須。
@@ -723,6 +735,7 @@ async def _resolve_metadata(
         "identity_verified": False,
         "channel_id": channel_id,
         "thread_ts": thread_ts,
+        **request_metadata,
     }
     return meta, None
 

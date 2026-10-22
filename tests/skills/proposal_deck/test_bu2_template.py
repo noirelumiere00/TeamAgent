@@ -10,6 +10,7 @@ from pptx.util import Inches
 from teamagent.adapters.proposal_assets import ProposalAssetProvisionError, _validate_template
 from teamagent.media import proposal_template
 from teamagent.media.operations import MediaOperationError
+from teamagent.media.proposal_bu2 import BU2Content
 from teamagent.media.render_child import _proposal
 from teamagent.skills.proposal_deck.contract import ComposerOutput
 from teamagent.skills.proposal_deck.renderer import UnfilledPlaceholderError, render_deck
@@ -183,6 +184,67 @@ def test_structured_values_and_source_notes_match_in_both_renderers(
         assert "入力条件・補足（自動生成）" in notes
         assert ("要確認" in notes) is partial_terms
         assert "要確認" not in text
+    assert contents[0] == contents[1]
+
+
+@pytest.mark.parametrize(
+    "request_text",
+    [
+        "",
+        "本数３本、再生１２万回、単価８円/回、期間６週間、管理費１５%、接触７回、理解率８０%",
+    ],
+    ids=["missing-request", "unmatched-values"],
+)
+def test_ungrounded_bu2_values_are_blank_with_review_notes_in_both_renderers(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, request_text: str
+) -> None:
+    path = tmp_path / "template.pptx"
+    _extension(path)
+    _pin_template(monkeypatch, path, 86)
+    supplied = bu2_payload()
+    supplied["plans"][0]["assumption"] = "料金は900000円、単価2.5円で計算"
+    grounded = BU2Content.model_validate(supplied).grounded_in_request(request_text)
+    payload = json.loads(_full_composer_json())
+    payload.update(
+        **grounded.model_dump(mode="json"),
+        template_profile="proposal-builder-v1",
+        posting_start_date="2026-12-20",
+        proposal_date="2026-10-22",
+        product_sector="美容",
+        auxiliary_placeholders={key: "設定値" for key in proposal_template.BASE_AUXILIARY_KEYS},
+    )
+    render_deck(ComposerOutput.model_validate(payload), path, tmp_path / "local.pptx")
+    (tmp_path / "composer.json").write_text(json.dumps(payload), encoding="utf-8")
+    _proposal(
+        tmp_path,
+        {
+            "kind": "proposal_pptx",
+            "template": "template.pptx",
+            "composer": "composer.json",
+            "evidence": [],
+            "output": "worker.pptx",
+            "fail_if_missing": True,
+        },
+    )
+    contents = []
+    for backend in ("local", "worker"):
+        added = list(Presentation(tmp_path / f"{backend}.pptx").slides)[-3:]
+        text = "\n".join(shape.text for slide in added[:2] for shape in slide.shapes)
+        notes = "\n".join(slide.notes_slide.notes_text_frame.text for slide in added[:2])
+        contents.append((text.replace("\v", "\n"), notes))
+        assert all(not shape.text.strip() for shape in added[1].shapes)
+        assert all(
+            not shape.text.strip() or shape.text.startswith("※ネット表記")
+            for shape in added[0].shapes
+        )
+        for slide in added[:2]:
+            review = slide.notes_slide.notes_text_frame.text
+            assert "要確認一覧（自動生成）" in review
+            assert "依頼に記載が無いため未記入" in review
+        assert "要確認" not in text
+        for value in ("100,001", "250,003", "900000", "2.5円", "4週間", "4回接触", "60%", "10%"):
+            assert value not in text
+            assert value not in notes
     assert contents[0] == contents[1]
 
 

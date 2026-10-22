@@ -254,6 +254,7 @@ def prepare_proposal_content(
             for key in sorted(aux_keys & aux_values.keys())
             if "要確認" in aux_values[key]
         )
+        reviews.extend(reason for reason in sources if "要確認" in reason)
         if reviews:
             append_review_note(slide, "\n".join(reviews))
         for shape in list(slide.shapes):

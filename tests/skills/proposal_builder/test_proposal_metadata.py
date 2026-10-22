@@ -78,8 +78,61 @@ def test_builder_transfers_bu2_inputs_through_json_boundary(
     builder = ProposalBuilderSkill(search=object(), deck=deck, account_db_path="unused.xlsx")
     request = _input(_research(sector="食品"), **bu2_payload())
     request = type(request).model_validate_json(request.model_dump_json())
-    builder.run(request, SkillContext())
+    builder.run(
+        request,
+        SkillContext(
+            metadata={"request_text": "2本、100001回、2.5円/回、4週間、4回接触、60%、10%"}
+        ),
+    )
     assert deck.inputs[0].plans == request.plans
     assert deck.inputs[0].simulation == request.simulation
     assert deck.inputs[0].hearing_items == request.hearing_items
     assert deck.inputs[0].estimate_terms == request.estimate_terms
+
+
+@pytest.mark.parametrize("background", [False, True])
+@pytest.mark.parametrize("request_text", [None, "100001回、理解率60%"])
+def test_builder_filters_sync_and_background_inputs(
+    monkeypatch: pytest.MonkeyPatch, background: bool, request_text: str | None
+) -> None:
+    from teamagent.adapters.proposal_job_store import ProposalJobStore
+    from teamagent.skills.proposal_builder.schema import ProposalBuilderSubmitInput
+    from teamagent.skills.proposal_builder.skill import ProposalBuilderSubmitSkill
+    from tests.skills.proposal_builder.test_async_jobs import _ctx
+    from tests.skills.proposal_deck.test_bu2_content import bu2_payload
+
+    _configure_builder_test(monkeypatch, media_configured=False)
+    monkeypatch.setenv("PROPOSAL_BUILDER_ALLOWED_EMAILS", "*")
+    deck = _CapturingDeck()
+    builder = ProposalBuilderSkill(search=object(), deck=deck, account_db_path="unused.xlsx")
+    request = _input(_research(), **bu2_payload())
+    ctx = _ctx()
+    if request_text is not None:
+        ctx.metadata["request_text"] = request_text
+    if background:
+        pending = []
+        submit = ProposalBuilderSubmitSkill(
+            builder_factory=lambda: builder,
+            store=ProposalJobStore(table_name="", memory={}),
+            thread_launcher=lambda target, _name: pending.append(target),
+            input_validator=lambda _: None,
+            heartbeat_seconds=0,
+        )
+        accepted = submit.run(ProposalBuilderSubmitInput.model_validate(request.model_dump()), ctx)
+        assert accepted.status == "queued"
+        # 後続の会話や呼出しで metadata が変わっても job の原文は変わらない。
+        ctx.metadata["request_text"] = "2本、2.5円、4回、10%"
+        pending.pop()()
+    else:
+        builder.run(request, ctx)
+    result = deck.inputs[0]
+    assert result.plans[0].count is None
+    assert result.plans[0].unit_price_yen is None
+    assert result.plans[0].period == ""
+    assert result.estimate_terms.management_fee_rate is None
+    assert result.simulation is not None
+    assert result.simulation.contacts is None
+    assert result.simulation.views == (100001 if request_text else None)
+    assert result.simulation.understanding_rate == (
+        request.simulation.understanding_rate if request_text else None
+    )

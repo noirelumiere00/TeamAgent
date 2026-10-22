@@ -31,6 +31,7 @@ from teamagent.adapters.tiktok_scraper import (
     search_tiktok,
 )
 from teamagent.mcp_gateway.allowlist import email_allowed
+from teamagent.media.proposal_bu2 import BU2_REQUEST_VALUES_ONLY
 from teamagent.skills._shared.deck_review import UNAVAILABLE_WARNING, warning_lines
 from teamagent.skills._shared.long_jobs import enabled as long_jobs_enabled
 from teamagent.skills._shared.long_jobs import latest_job, open_dm_once_more, origin
@@ -676,7 +677,9 @@ class ProposalBuilderSkill(BaseSkill[ProposalBuilderInput, ProposalBuilderOutput
     name: ClassVar[str] = "proposal_builder"
     description: ClassVar[str] = (
         "Gemini v3 JSONと投稿開始日Dから、社内RAGの実績・保護アカウント候補を選び、"
-        "出典検証済みの提案書PPTXを生成して依頼元Slackスレッドへ添付する"
+        "出典検証済みの提案書PPTXを生成して依頼元Slackスレッドへ添付する。"
+        "BU2の段階見積（本数・再生数・単価・期間・見積条件）と試算の仮定は、"
+        + BU2_REQUEST_VALUES_ONLY
     )
     input_schema: ClassVar[type[BaseModel]] = ProposalBuilderInput
     output_schema: ClassVar[type[BaseModel]] = ProposalBuilderOutput
@@ -884,6 +887,7 @@ class ProposalBuilderSkill(BaseSkill[ProposalBuilderInput, ProposalBuilderOutput
     def _execute(self, input: ProposalBuilderInput, ctx: SkillContext) -> ProposalBuilderOutput:
         """Shared proposal execution path used by sync and submitted jobs."""
 
+        input = input.grounded_in_request(ctx.metadata.get("request_text", ""))
         enrichment_lease: list[_TikTokEnrichment] = []
         log = ctx.bind_logger(self.name)
         try:
@@ -1573,6 +1577,8 @@ class ProposalBuilderSubmitSkill(
         "生成はMCP内のバックグラウンドthreadで継続するため、返された秒数後に"
         "proposal_builder_statusで同じjob_idを照会する。queued/running中は再submitしない。"
         "利用者へは調査・作成の状況と返されたmessageを伝え、ツール名や内部語は出さない。"
+        "BU2の段階見積（本数・再生数・単価・期間・見積条件）と試算の仮定は、"
+        + BU2_REQUEST_VALUES_ONLY
     )
     input_schema: ClassVar[type[BaseModel]] = ProposalBuilderSubmitInput
     output_schema: ClassVar[type[BaseModel]] = ProposalBuilderSubmitOutput

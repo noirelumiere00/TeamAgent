@@ -165,6 +165,7 @@ class ProposalDeckSkill(BaseSkill[ProposalDeckInput, ProposalDeckOutput]):
         self._temporary_output_lock = threading.Lock()
 
     def run(self, input: ProposalDeckInput, ctx: SkillContext) -> ProposalDeckOutput:
+        input = input.grounded_in_request(ctx.metadata.get("request_text", ""))
         log = ctx.bind_logger(self.name)
         log.info(
             "proposal_deck_start",
