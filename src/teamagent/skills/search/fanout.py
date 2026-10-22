@@ -186,7 +186,12 @@ def collect_named_sources(
     industry: str | None = None,
 ) -> None:
     """金庫の接続で名指し資料・カルテ・事例を読む。SAVEPOINT で本体を守る。"""
+    from teamagent.skills.search.case_list import CANDIDATE_LIMIT
+
     connect = bounded_connection(reuse_connection(conn), time.perf_counter() + 3.0)
+    case_limit = 5 if probe.get("case_query") else 3
+    if probe.get("case_query") and drive_first.enabled(ctx.metadata):
+        case_limit = CANDIDATE_LIMIT
     probe["karte"] = karte_lookup(
         skill._pgvector, connect, query_client=client, request_id=ctx.request_id
     )
@@ -200,7 +205,7 @@ def collect_named_sources(
         product=case_query_target(str(probe["case_query"]))
         if probe.get("case_query") and not industry and not client
         else None,
-        limit=5 if probe.get("case_query") else 3,
+        limit=case_limit,
     )
     started = time.perf_counter()
     status: LaneState = "skipped"
@@ -272,6 +277,7 @@ def run_fanout(skill: Any, input: SearchInput, ctx: SkillContext) -> SearchOutpu
     """並行取得→従来の found 判定→専用要約→コードの節と探した範囲。"""
     started = time.perf_counter()
     drive_mode = drive_first.enabled(ctx.metadata)
+    drive_case_listing = drive_mode and is_case_list(input.query)
     expanded_early: ExpansionResult | None = None
     compact_enabled = ctx.metadata.get(compact.CTX_KEY) is True
     compact_mode = compact_enabled and not compact.explicit_list(input.query)
@@ -785,7 +791,7 @@ def run_fanout(skill: Any, input: SearchInput, ctx: SkillContext) -> SearchOutpu
     ) and input.include_answer
     displayed_refs: list[DocumentReference] | None = [] if drive_mode else None
     if case_listing:
-        from teamagent.skills.search.case_list import render, slack_cases
+        from teamagent.skills.search.case_list import EMPTY_DRIVE_CASES, render, slack_cases
 
         listed = render(
             [
@@ -793,17 +799,20 @@ def run_fanout(skill: Any, input: SearchInput, ctx: SkillContext) -> SearchOutpu
                 *summary_hits,
                 *named,
                 *expanded.hits,
-                *slack_cases(slack.items),
+                *slack_cases(slack.items, drive_only=drive_case_listing),
             ],
             case_target,
             lambda h: skill._hit_url(h, file_urls=file_urls),
             displayed_refs=displayed_refs,
             cards=bool(compact_fallback_cards),
+            drive_only=drive_case_listing,
         )
         if listed:
             answer, found, visible_found = listed, True, True
             if skill._direct_answer_allowed(ctx, "list_fast"):
                 direct_kind = "list_fast"
+        elif drive_case_listing:
+            answer, found, visible_found = EMPTY_DRIVE_CASES, False, False
         elif slack.hidden_count:
             answer = "Slackの非公開の場所に一致がありますが、この会話では内容を表示できません。"
         elif visible_found:

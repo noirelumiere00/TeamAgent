@@ -578,12 +578,20 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
 
     def run(self, input: SearchInput, ctx: SkillContext) -> SearchOutput:
         """検索 Skill のメインフロー。"""
+        drive_case_listing = drive_first.enabled(ctx.metadata) and is_case_list(input.query)
+        if drive_case_listing:
+            from teamagent.skills.search.case_list import CANDIDATE_LIMIT
+
+            # Drive 正本で絞る前に候補を5件へ切らない。関連度・RLSの検査は通常どおり通す。
+            input = input.model_copy(update={"top_k": max(input.top_k, CANDIDATE_LIMIT)})
         if os.environ.get("USE_SEARCH_FANOUT", "") == "1":
             from teamagent.skills.search.fanout import fanout_active, run_fanout
 
             if fanout_active(ctx):
                 return run_fanout(self, input, ctx)
-        case_listing = ctx.metadata.get(compact.CTX_KEY) is True and is_case_list(input.query)
+        case_listing = drive_case_listing or (
+            ctx.metadata.get(compact.CTX_KEY) is True and is_case_list(input.query)
+        )
         compact_mode = ctx.metadata.get(compact.CTX_KEY) is True and not compact.explicit_list(
             input.query
         )
@@ -757,7 +765,9 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
         )
         if not self._direct_answer_allowed(ctx, direct_kind):
             direct_kind = None
-        if input.include_answer and case_miss:
+        if input.include_answer and drive_case_listing:
+            answer, cost_usd = "", 0.0
+        elif input.include_answer and case_miss:
             answer, cost_usd = (
                 build_case_not_found_answer(
                     case_target or "", unavailable=status_note(slack_lookup) if slack_lookup else ""
@@ -1069,19 +1079,26 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
             [] if drive_first.enabled(ctx.metadata) else None
         )
         if case_listing and input.include_answer:
-            from teamagent.skills.search.case_list import render, slack_cases
+            from teamagent.skills.search.case_list import EMPTY_DRIVE_CASES, render, slack_cases
 
             listed = render(
-                [*summary_hits, *slack_cases(slack_items)],
+                [*summary_hits, *slack_cases(slack_items, drive_only=drive_case_listing)],
                 case_target,
                 lambda h: self._hit_url(h, file_urls=file_urls),
                 displayed_refs=displayed_refs,
                 cards=bool(compact_fallback_cards),
+                drive_only=drive_case_listing,
             )
             if listed:
                 answer = listed
-                if compact_fallback_cards and self._direct_answer_allowed(ctx, "list_fast"):
+                if drive_case_listing:
+                    found = True
+                if (drive_case_listing or compact_fallback_cards) and self._direct_answer_allowed(
+                    ctx, "list_fast"
+                ):
                     direct_kind = "list_fast"
+            elif drive_case_listing:
+                answer, found = EMPTY_DRIVE_CASES, False
             elif slack_lookup is not None and slack_lookup.hidden_count:
                 answer = "Slackの非公開の場所に一致がありますが、この会話では内容を表示できません。"
             elif found:
