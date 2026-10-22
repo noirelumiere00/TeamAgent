@@ -71,7 +71,7 @@ from teamagent.skills.search.client_match import (
     hit_is_about_client,
     normalize_filter_client,
 )
-from teamagent.skills.search.comparison import comparison_table
+from teamagent.skills.search.comparison import comparison_table, is_comparison_query
 from teamagent.skills.search.composite import (
     MCP_SURFACE_CTX_KEY,
     SlackItem,
@@ -580,16 +580,16 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
         """検索 Skill のメインフロー。"""
         drive_mode = drive_first.enabled(ctx.metadata)
         drive_case_listing = drive_mode and is_case_list(input.query)
-        if drive_case_listing:
-            from teamagent.skills.search.case_list import CANDIDATE_LIMIT
-
-            # Drive 正本で絞る前に候補を5件へ切らない。関連度・RLSの検査は通常どおり通す。
-            input = input.model_copy(update={"top_k": max(input.top_k, CANDIDATE_LIMIT)})
         if os.environ.get("USE_SEARCH_FANOUT", "") == "1":
             from teamagent.skills.search.fanout import fanout_active, run_fanout
 
             if fanout_active(ctx):
                 return run_fanout(self, input, ctx)
+        if drive_case_listing:
+            from teamagent.skills.search.case_list import CANDIDATE_LIMIT
+
+            # Drive 正本で絞る前に候補を5件へ切らない。関連度・RLSの検査は通常どおり通す。
+            input = input.model_copy(update={"top_k": max(input.top_k, CANDIDATE_LIMIT)})
         case_listing = drive_case_listing or (
             ctx.metadata.get(compact.CTX_KEY) is True and is_case_list(input.query)
         )
@@ -678,9 +678,13 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
         )
         if self._campaign_files and any(is_campaign_hit(h) for h in hits):
             self._attach_campaign_files(hits, ctx)
-        case_target = case_query_target(input.query, asked_industry)
+        case_target = (
+            None
+            if drive_mode and is_comparison_query(input.query)
+            else case_query_target(input.query, asked_industry)
+        )
         summary_hits = case_target_hits(hits, case_target)
-        if self._campaign_files and any(is_campaign_hit(h) for h in hits):
+        if drive_case_listing or (self._campaign_files and any(is_campaign_hit(h) for h in hits)):
             summary_hits = scope_by_industry(summary_hits, asked_industry)
         if not summary_hits:
             found = False
@@ -847,6 +851,7 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
             if not answer.strip():
                 direct_kind = None
             if compact_mode and found:
+                compact_rejections: list[str] = []
                 compact_answer = compact.build(
                     answer,
                     summary_hits,
@@ -856,6 +861,7 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
                     asked_industry=asked_industry,
                     notice=guard_header,
                     displayed_refs=displayed_refs,
+                    rejection_reasons=compact_rejections,
                 )
                 if compact.is_empty(compact_answer, notice=guard_header):
                     compact_mode = False
@@ -871,6 +877,7 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
                     log.info(
                         "search_compact_fallback",
                         mode="cards" if compact_fallback_cards else "normal",
+                        reason=",".join(sorted(set(compact_rejections))) or "no_retained_evidence",
                     )
                     if compact_fallback_cards:
                         case_listing = True
@@ -892,6 +899,18 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
                             )
                             cost_usd += fallback_cost
                             answer = compact.normal_answer(answer)
+                            if drive_fallback and displayed_refs is not None:
+                                answer = compact.append_used_drive_links(
+                                    answer,
+                                    [
+                                        *summary_hits,
+                                        *(
+                                            drive_first.slack_hit(i, n)
+                                            for n, i in enumerate(slack_items)
+                                        ),
+                                    ],
+                                    displayed_refs,
+                                )
                         except Exception as exc:
                             log.warning("search_compact_fallback_failed", error=type(exc).__name__)
                             answer = ""
@@ -1129,10 +1148,12 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
             answer_format="list" if case_listing else "compact" if compact_mode else None,
             direct_answer=answer if direct_kind is not None else None,
             direct_answer_kind=direct_kind,
-            hits=search_hits,
+            hits=[] if drive_case_listing and input.include_answer else search_hits,
             total_cost_usd=cost_usd,
             found=found,
-            slack_hits=([item.hit for item in slack_items] if slack_lookup is not None else None),
+            slack_hits=[]
+            if drive_case_listing and input.include_answer
+            else ([item.hit for item in slack_items] if slack_lookup is not None else None),
             slack_status=slack_lookup.status if slack_lookup is not None else None,
             suggested_next=suggested_next,
             query_client=self._asked_client(probe),

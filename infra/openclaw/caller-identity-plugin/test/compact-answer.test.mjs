@@ -234,3 +234,25 @@ for (const direct of [false, true]) {
     });
   }
 }
+
+for (const direct of [false, true]) {
+  for (const hasDrive of [false, true]) {
+    test(`Drive case cards suppress Slack additions: direct=${direct}, hasDrive=${hasDrive}`, () => {
+      const p = setup('食品メーカーのショート動画の事例出して', undefined, direct);
+      const url = 'https://drive.google.com/file/d/USED/view';
+      const answer = hasDrive ? `*食品会社A*（2026年9月）\n• 紹介動画を配信。\n• <${url}|資料を見る>`
+        : 'Drive に資料のある事例は見つかりませんでした。';
+      p.remember({answer, answer_format: 'list', found: hasDrive, hits: [], slack_hits: [],
+        displayed_refs: hasDrive ? [{kind: 'drive', drive_file_id: 'USED', url}] : []});
+      assert.equal(p.send(`${answer}\nSlack からの事例共有: 別会社の商品`), answer);
+    });
+  }
+  test(`Drive normal fallback preserves used link: direct=${direct}`, () => {
+    const p = setup('TikTokの保存率を上げるコツは？', undefined, direct);
+    const url = 'https://drive.google.com/file/d/USED/view';
+    const answer = `食品会社Aでは商品紹介を工夫しています。\n\n<${url}|資料を見る>`;
+    p.remember({answer, found: true, answer_format: null,
+      displayed_refs: [{kind: 'drive', drive_file_id: 'USED', url}]});
+    assert.equal(p.send('保存を促すポイントを説明します。'), answer);
+  });
+}

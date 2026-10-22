@@ -37,6 +37,7 @@ from teamagent.skills.search.answer_sections import (
 from teamagent.skills.search.campaign_files import (
     campaign_totals_block,
     is_campaign_hit,
+    scope_by_industry,
 )
 from teamagent.skills.search.client_match import hit_entities
 from teamagent.skills.search.comparison import is_comparison_query
@@ -278,6 +279,10 @@ def run_fanout(skill: Any, input: SearchInput, ctx: SkillContext) -> SearchOutpu
     started = time.perf_counter()
     drive_mode = drive_first.enabled(ctx.metadata)
     drive_case_listing = drive_mode and is_case_list(input.query)
+    if drive_case_listing:
+        from teamagent.skills.search.case_list import CANDIDATE_LIMIT
+
+        input = input.model_copy(update={"top_k": max(input.top_k, CANDIDATE_LIMIT)})
     expanded_early: ExpansionResult | None = None
     compact_enabled = ctx.metadata.get(compact.CTX_KEY) is True
     compact_mode = (drive_mode and not drive_case_listing) or (
@@ -371,9 +376,15 @@ def run_fanout(skill: Any, input: SearchInput, ctx: SkillContext) -> SearchOutpu
         and any(is_campaign_hit(h) for h in hits)
     ):
         skill._attach_campaign_files(hits, ctx)
-    case_target = case_query_target(input.query, asked_industry)
+    case_target = (
+        None
+        if drive_mode and is_comparison_query(input.query)
+        else case_query_target(input.query, asked_industry)
+    )
     scope_target = case_target or (
-        asked_industry if input.filter_industry or any(is_campaign_hit(h) for h in hits) else None
+        asked_industry
+        if drive_case_listing or input.filter_industry or any(is_campaign_hit(h) for h in hits)
+        else None
     )
     summary_hits = case_target_hits(hits, scope_target)
     if not summary_hits:
@@ -552,6 +563,7 @@ def run_fanout(skill: Any, input: SearchInput, ctx: SkillContext) -> SearchOutpu
     compact_fallback_cards = ""
     drive_fallback = False
     if compact_mode and found and input.include_answer:
+        compact_rejections: list[str] = []
         compact_answer = compact.build(
             head,
             summary_hits,
@@ -562,6 +574,7 @@ def run_fanout(skill: Any, input: SearchInput, ctx: SkillContext) -> SearchOutpu
             karte_hits=karte.items,
             notice=guard_header,
             displayed_refs=displayed_refs,
+            rejection_reasons=compact_rejections,
         )
         if compact.is_empty(compact_answer, notice=guard_header):
             compact_mode = False
@@ -575,7 +588,9 @@ def run_fanout(skill: Any, input: SearchInput, ctx: SkillContext) -> SearchOutpu
                     target=case_target,
                 )
             log.info(
-                "search_compact_fallback", mode="cards" if compact_fallback_cards else "normal"
+                "search_compact_fallback",
+                mode="cards" if compact_fallback_cards else "normal",
+                reason=",".join(sorted(set(compact_rejections))) or "no_retained_evidence",
             )
             head = ""
             if compact_fallback_cards:
@@ -595,6 +610,16 @@ def run_fanout(skill: Any, input: SearchInput, ctx: SkillContext) -> SearchOutpu
                     direct_kind = None
                     if drive_fallback:
                         head = "資料は見つかりましたが、回答の作成を完了できませんでした。"
+                elif drive_fallback and displayed_refs is not None:
+                    head = compact.append_used_drive_links(
+                        head,
+                        [
+                            *summary_hits,
+                            *karte.items,
+                            *(drive_first.slack_hit(i, n) for n, i in enumerate(slack.items)),
+                        ],
+                        displayed_refs,
+                    )
     if found and input.include_answer and not compact_mode and not drive_fallback:
         head = skill._append_campaign_footer(head, summary_hits, asked_industry=asked_industry)
     # 広げる処理は 10s 以内。回収の追加待ちは該当ありで 1s、該当なしで 0s に抑える。
@@ -804,14 +829,17 @@ def run_fanout(skill: Any, input: SearchInput, ctx: SkillContext) -> SearchOutpu
     if case_listing:
         from teamagent.skills.search.case_list import EMPTY_DRIVE_CASES, render, slack_cases
 
+        listing_hits = [
+            *(case_hits if drive_mode else _case_hits(cases)),
+            *summary_hits,
+            *named,
+            *expanded.hits,
+            *slack_cases(slack.items, drive_only=drive_case_listing),
+        ]
+        if drive_case_listing:
+            listing_hits = scope_by_industry(listing_hits, asked_industry)
         listed = render(
-            [
-                *(case_hits if drive_mode else _case_hits(cases)),
-                *summary_hits,
-                *named,
-                *expanded.hits,
-                *slack_cases(slack.items, drive_only=drive_case_listing),
-            ],
+            listing_hits,
             case_target,
             lambda h: skill._hit_url(h, file_urls=file_urls),
             displayed_refs=displayed_refs,
@@ -931,11 +959,15 @@ def run_fanout(skill: Any, input: SearchInput, ctx: SkillContext) -> SearchOutpu
         else None,
         direct_answer=answer if direct_kind is not None else None,
         direct_answer_kind=direct_kind,
-        hits=_output_hits(skill, hits, file_urls),
+        hits=[]
+        if drive_case_listing and input.include_answer
+        else _output_hits(skill, hits, file_urls),
         displayed_refs=displayed_refs,
         found=found,
         total_cost_usd=summary_cost + expanded.cost_usd + vault_cost,
-        slack_hits=[i.hit for i in slack.items[:SLACK_TOP_N]],
+        slack_hits=[]
+        if drive_case_listing and input.include_answer
+        else [i.hit for i in slack.items[:SLACK_TOP_N]],
         slack_status=slack.status,
         query_client=client,
         sources=[
