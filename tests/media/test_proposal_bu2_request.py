@@ -92,12 +92,12 @@ def test_removed_plan_assumption_is_listed_for_review_even_when_amount_matches()
     grounded = BU2Content.model_validate(payload).grounded_in_request(REQUEST_TEXT)
     presentation = Presentation()
     slide = presentation.slides.add_slide(presentation.slide_layouts[6])
-    key = "PB-BU2-PLAN-TRIAL-AMOUNT"
-    slide.shapes.add_textbox(0, 0, 100, 100).text = "{{" + key + "}}"
+    slot = "PB-BU2-PLAN-TRIAL-AMOUNT"
+    slide.shapes.add_textbox(0, 0, 100, 100).text = "{{" + slot + "}}"
     _, values = prepare_proposal_content(
         presentation, {}, bu2_auxiliary_values(grounded), bu2_source_notes(grounded)
     )
-    assert values[key] == "250,003 円"
+    assert values[slot] == "250,003 円"
     notes = slide.notes_slide.notes_text_frame.text
     assert "要確認一覧" in notes
     assert "依頼に記載が無いため未記入" in notes
