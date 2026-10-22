@@ -1130,11 +1130,13 @@ class ProposalBuilderSkill(BaseSkill[ProposalBuilderInput, ProposalBuilderOutput
             research_material=research_material,
             evidence_images=tiktok_enrichment.evidence_images,
             posting_start_date=input.posting_start_date,
+            product_sector=meta.sector,
+            proposal_date=input.proposal_date,
             auxiliary_placeholders={
                 "PB-ACCOUNTS": accounts_text,
                 "PB-CASES": cases_text,
                 "PB-CLIENT-NAME": safe_client_name,
-                "PB-DATETIME": input.posting_start_date.strftime("%Y年%m月%d日"),
+                "PB-DATETIME": input.proposal_date.strftime("%Y年%m月%d日"),
                 "PB-EXPERIENCE": experience_text,
                 "PB-MONTH": input.posting_start_date.strftime("%Y年%m月"),
                 "PB-PRODUCT-NAME": product_name,
@@ -1171,7 +1173,6 @@ class ProposalBuilderSkill(BaseSkill[ProposalBuilderInput, ProposalBuilderOutput
                 issues.append(f"composer_skipped_placeholders:{joined}")
             if not research.f_competitor:
                 issues.append("competitor_research_missing")
-
             status: Literal["ready", "draft"] = "ready" if not issues else "draft"
             warnings = [
                 "アカウントの直近投稿・死活はDB選定後に未検証",
@@ -1195,8 +1196,11 @@ class ProposalBuilderSkill(BaseSkill[ProposalBuilderInput, ProposalBuilderOutput
                 log.warning("proposal_builder_review_format_failed", error_type=type(exc).__name__)
             warnings.extend(deck_lines)
             warnings.extend(deck_output.length_warnings)
+            warnings.extend(deck_output.quality_warnings)
             if deck_output.length_warnings:
                 deck_warning += "\n" + "\n".join(deck_output.length_warnings)
+            if deck_output.quality_warnings:
+                deck_warning += "\n" + "\n".join(deck_output.quality_warnings)
             ready_message = (
                 "提案書を生成しました。出典の無い数値は『要確認』に置き換えています。"
                 if deck_output.review_slides

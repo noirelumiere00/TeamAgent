@@ -21,7 +21,12 @@ from teamagent.media.operations import (
     _replace_placeholders,
     _set_text_keeping_format,
 )
-from teamagent.media.proposal_cleanup import prepare_proposal_content
+from teamagent.media.proposal_cleanup import (
+    finalize_proposal_content,
+    prepare_proposal_content,
+    proposal_emme_slide_ids,
+    proposal_template_samples,
+)
 
 _AUXILIARY = re.compile(r"\{\{(PB-[A-Z0-9_-]{1,60})\}\}")
 _DATE = re.compile(r"\{\{PB-DATE:([+-]?\d{1,3}):(%Y/%m/%d|%m/%d|%Y年%m月%d日)\}\}")
@@ -262,6 +267,13 @@ def _proposal(root: Path, manifest: dict[str, Any]) -> dict[str, Any]:
         posting_start_date = (
             date.fromisoformat(raw_start_date) if isinstance(raw_start_date, str) else None
         )
+        product_sector = raw.get("product_sector", "")
+        agency_route = raw.get("agency_route", False)
+        proposal_date = (
+            date.fromisoformat(raw["proposal_date"]) if raw.get("proposal_date") else None
+        )
+        if not isinstance(product_sector, str) or type(agency_route) is not bool:
+            raise ValueError("invalid proposal context")
     except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
         raise MediaOperationError("MEDIA_COMPOSER_INVALID", "composer JSON is invalid") from exc
     valid_ids = set(range(1, 104)) - set(range(48, 56))
@@ -276,6 +288,8 @@ def _proposal(root: Path, manifest: dict[str, Any]) -> dict[str, Any]:
     from pptx.util import Emu
 
     presentation = Presentation(str(template))
+    samples = proposal_template_samples(presentation)
+    emme_slide_ids = proposal_emme_slide_ids(presentation)
     template_ids: set[int] = set()
     template_auxiliary: set[str] = set()
     template_date_offsets: set[int] = set()
@@ -322,18 +336,6 @@ def _proposal(root: Path, manifest: dict[str, Any]) -> dict[str, Any]:
     for text_frame in _iter_text_frames(presentation):
         _replace_placeholders(text_frame, placeholders)
         _replace_proposal_special_tokens(text_frame, auxiliary, posting_start_date)
-    remaining: list[int] = []
-    remaining_special: list[str] = []
-    remaining_legacy: list[str] = []
-    for text_frame in _iter_text_frames(presentation):
-        combined = "".join(paragraph.text for paragraph in text_frame.paragraphs)
-        remaining.extend(int(match.group(1)) for match in _PLACEHOLDER.finditer(combined))
-        remaining_special.extend(match.group(0) for match in _PB_TOKEN.finditer(combined))
-        if profile == _PROPOSAL_BUILDER_PROFILE:
-            remaining_legacy.extend(_legacy_artifacts(combined, allow_template_tokens=False))
-    if (remaining or remaining_special or remaining_legacy) and spec["fail_if_missing"] is True:
-        raise MediaOperationError("MEDIA_PPTX_UNFILLED", "unfilled placeholders remain")
-
     slots = _iter_proposal_image_slots(presentation)
     injected = 0
     ordered: list[tuple[int, int, Path]] = []
@@ -368,6 +370,27 @@ def _proposal(root: Path, manifest: dict[str, Any]) -> dict[str, Any]:
             picture.left = Emu(int(shape.left) + (int(shape.width) - picture.width) // 2)
             picture.top = Emu(int(shape.top) + (int(shape.height) - picture.height) // 2)
         injected += 1
+    finalize_proposal_content(
+        presentation,
+        samples,
+        emme_slide_ids=emme_slide_ids,
+        product_sector=product_sector,
+        proposal_date=proposal_date,
+        posting_start_date=posting_start_date,
+        agency_route=agency_route,
+    )
+    remaining: list[int] = []
+    remaining_special: list[str] = []
+    remaining_legacy: list[str] = []
+    for text_frame in _iter_text_frames(presentation):
+        combined = "".join(paragraph.text for paragraph in text_frame.paragraphs)
+        remaining.extend(int(match.group(1)) for match in _PLACEHOLDER.finditer(combined))
+        remaining_special.extend(match.group(0) for match in _PB_TOKEN.finditer(combined))
+        if profile == _PROPOSAL_BUILDER_PROFILE:
+            remaining_legacy.extend(_legacy_artifacts(combined, allow_template_tokens=False))
+    if (remaining or remaining_special or remaining_legacy) and spec["fail_if_missing"] is True:
+        raise MediaOperationError("MEDIA_PPTX_UNFILLED", "unfilled placeholders remain")
+
     presentation.save(str(destination))
     qa = _deck_qa(destination, expected_slides=len(presentation.slides))
     return {

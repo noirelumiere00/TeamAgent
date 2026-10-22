@@ -12,6 +12,7 @@ from typing import Literal
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
+from teamagent.media.proposal_dates import proposal_today
 from teamagent.skills.proposal_deck.confidentiality import contains_forbidden_term
 from teamagent.skills.proposal_deck.contract import (
     PROPOSAL_BUILDER_REQUIRED_AUXILIARY,
@@ -51,6 +52,12 @@ class ProposalDeckInput(BaseModel):
     posting_start_date: date | None = Field(
         default=None,
         description="投稿開始日 D（ISO date）。スケジュール/ガント生成を行わない場合は未指定。",
+    )
+    product_sector: str = Field(
+        default="", max_length=200, description="既存調査の業種。媒体ページの適合判定に使う。"
+    )
+    proposal_date: date = Field(
+        default_factory=proposal_today, description="提案書の作成日（日本時間）。日付検査の基準。"
     )
     auxiliary_placeholders: dict[str, str] = Field(
         default_factory=dict,
@@ -269,6 +276,9 @@ class ProposalDeckOutput(BaseModel):
     skipped_ids: list[int] = Field(default_factory=list, description="要確認の placeholder ID")
     length_warnings: list[str] = Field(
         default_factory=list, description="文字数の局所修復・要確認置換を行った枠の一覧"
+    )
+    quality_warnings: list[str] = Field(
+        default_factory=list, description="FMT見本・日付・本文500字超過の頁番号付き警告"
     )
     review_slides: list[int] | None = Field(
         default=None, description="『要確認』が残る枚目（表示順・1始まり）。None は未検査"

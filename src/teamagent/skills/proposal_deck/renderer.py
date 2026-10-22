@@ -424,6 +424,9 @@ def render_pptx(
     auxiliary_placeholders: dict[str, str] | None = None,
     posting_start_date: date | None = None,
     template_profile: str = "base",
+    product_sector: str = "",
+    proposal_date: date | None = None,
+    agency_route: bool = False,
 ) -> Path:
     """テンプレ pptx を読み、placeholder を全置換して out_path に保存。
 
@@ -432,9 +435,16 @@ def render_pptx(
     """
     from pptx import Presentation
 
-    from teamagent.media.proposal_cleanup import prepare_proposal_content
+    from teamagent.media.proposal_cleanup import (
+        finalize_proposal_content,
+        prepare_proposal_content,
+        proposal_emme_slide_ids,
+        proposal_template_samples,
+    )
 
     prs = Presentation(str(template_path))
+    samples = proposal_template_samples(prs)
+    emme_slide_ids = proposal_emme_slide_ids(prs)
     inventory = inspect_template(prs)
     required_template_ids: set[int] = set()
     if template_profile == PROPOSAL_BUILDER_TEMPLATE_PROFILE:
@@ -490,6 +500,19 @@ def render_pptx(
     _replace_schedule_dates(prs, posting_start_date)
     _replace_template_version(prs, template_profile)
 
+    if evidence_images:
+        _inject_evidence_images(prs, evidence_images)
+
+    finalize_proposal_content(
+        prs,
+        samples,
+        emme_slide_ids=emme_slide_ids,
+        product_sector=product_sector,
+        proposal_date=proposal_date,
+        posting_start_date=posting_start_date,
+        agency_route=agency_route,
+    )
+
     audit = audit_presentation(
         prs,
         expected_filled_ids=set(placeholders),
@@ -506,9 +529,6 @@ def render_pptx(
             f"legacy: {audit.legacy_artifacts[:5]} "
             f"(samples: {audit.extra_braces[:5]})"
         )
-
-    if evidence_images:
-        _inject_evidence_images(prs, evidence_images)
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
     prs.save(str(out_path))
@@ -588,6 +608,9 @@ def render_deck(
         auxiliary_placeholders=composer_out.auxiliary_placeholders,
         posting_start_date=composer_out.posting_start_date,
         template_profile=composer_out.template_profile,
+        product_sector=composer_out.product_sector,
+        proposal_date=composer_out.proposal_date,
+        agency_route=composer_out.agency_route,
     )
 
 
