@@ -61,11 +61,44 @@ def proposal_emme_slide_ids(presentation: Any) -> set[int]:
     }
 
 
+def proposal_bu2_slide_ids(presentation: Any) -> set[int]:
+    """元FMTの見出し・枠でBU2の除外頁を決め、生成本文や表示順番号に依存しない。"""
+    slides = list(presentation.slides)
+    texts = [_shape_texts(slide.shapes) for slide in slides]
+    headings = [{_normalize(text).replace("５", "5") for text in page} for page in texts]
+    excluded = {
+        slide.slide_id
+        for slide, page in zip(slides, headings, strict=True)
+        if page
+        & {
+            "｜ショート動画を成果につなげる5つのポイント",
+            "｜5つのポイントが連動して、売上エンジンになる",
+        }
+    }
+    starts = [i for i, page in enumerate(headings) if "02|PRワードの開発" in page]
+    ends = [i for i, page in enumerate(headings) if "03|コミュニケーション戦略" in page]
+    if len(starts) != 1 or len(ends) != 1 or starts[0] >= ends[0]:
+        return excluded
+    start, end = starts[0], ends[0]
+    ids = {
+        i: {int(match.group(1)) for text in texts[i] for match in _NUMERIC.finditer(text)}
+        for i in range(start, end)
+    }
+    summaries = [i for i, page_ids in ids.items() if {43, 44, 45} <= page_ids]
+    proposals = [i for i, page_ids in ids.items() if {46, 47, 56} <= page_ids]
+    # shortcut: 統合FMT v1の章末2頁を保持する。別構成は削除せず、新FMT時に契約を更新する。
+    if summaries == [end - 2] and proposals == [end - 1]:
+        excluded.update(slide.slide_id for slide in slides[start : end - 2])
+    return excluded
+
+
 def finalize_proposal_content(
     presentation: Any,
     samples: dict[int, set[str]],
     *,
     emme_slide_ids: set[int],
+    bu2_slide_ids: set[int],
+    business_unit: str = "BU2",
     product_sector: str = "",
     proposal_date: date | None = None,
     posting_start_date: date | None = None,
@@ -75,16 +108,18 @@ def finalize_proposal_content(
     from teamagent.media.operations import _set_text_keeping_format
     from teamagent.media.proposal_dates import proposal_today, schedule_warnings
 
+    excluded = set(bu2_slide_ids) if business_unit == "BU2" else set()
     emme = [slide for slide in presentation.slides if slide.slide_id in emme_slide_ids]
     if product_sector.strip() and not _BEAUTY_SECTOR.search(product_sector):
-        # 入力83枚の契約検査後に除外する。残るslide_id・装飾・座標は維持する。
-        excluded = {slide.slide_id for slide in emme}
-        for slide_id in list(presentation.slides._sldIdLst):
-            if int(slide_id.id) in excluded:
-                presentation.part.drop_rel(slide_id.rId)
-                presentation.slides._sldIdLst.remove(slide_id)
+        excluded.update(emme_slide_ids)
     elif emme and not product_sector.strip():
         append_review_note(emme[0], "警告: 媒体選択 要確認（業種未指定のためEMMEを保持）")
+
+    # 入力83枚の契約検査後に除外する。残るslide_id・装飾・座標は維持する。
+    for slide_id in list(presentation.slides._sldIdLst):
+        if int(slide_id.id) in excluded:
+            presentation.part.drop_rel(slide_id.rId)
+            presentation.slides._sldIdLst.remove(slide_id)
 
     for slide in presentation.slides:
         for frame in _text_frames(slide.shapes):

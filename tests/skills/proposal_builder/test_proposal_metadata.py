@@ -4,6 +4,7 @@ from datetime import date
 from pathlib import Path
 
 import pytest
+from pydantic import ValidationError
 
 from teamagent.skills.base import SkillContext
 from teamagent.skills.proposal_builder.schema import ProposalBuilderStatusInput
@@ -18,7 +19,10 @@ from tests.skills.proposal_builder.test_tiktok_enrichment import (
 )
 
 
-def test_builder_passes_existing_sector_and_creation_date(monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize("business_unit", [None, "BU1", "BU2"])
+def test_builder_passes_existing_sector_and_creation_date(
+    monkeypatch: pytest.MonkeyPatch, business_unit: str | None
+) -> None:
     _configure_builder_test(monkeypatch, media_configured=False)
     deck = _CapturingDeck()
     builder = ProposalBuilderSkill(
@@ -26,11 +30,20 @@ def test_builder_passes_existing_sector_and_creation_date(monkeypatch: pytest.Mo
         deck=deck,  # type: ignore[arg-type]
         account_db_path="unused.xlsx",
     )
-    builder.run(_input(_research(sector="食品"), proposal_date="2026-10-22"), SkillContext())
+    metadata = {"business_unit": business_unit} if business_unit else {}
+    request = _input(_research(sector="食品"), proposal_date="2026-10-22", **metadata)
+    request = type(request).model_validate_json(request.model_dump_json())
+    builder.run(request, SkillContext())
     assert deck.inputs[0].product_sector == "食品"
     assert deck.inputs[0].proposal_date == date(2026, 10, 22)
+    assert deck.inputs[0].business_unit == (business_unit or "BU2")
     assert deck.inputs[0].auxiliary_placeholders["PB-DATETIME"] == "2026年10月22日"
     assert deck.inputs[0].auxiliary_placeholders["PB-MONTH"] == "2026年09月"
+
+
+def test_builder_rejects_unknown_business_unit() -> None:
+    with pytest.raises(ValidationError, match="business_unit"):
+        _input(_research(), business_unit="BU3")
 
 
 def test_quality_warning_reaches_completion_without_blocking_ready_proposal(

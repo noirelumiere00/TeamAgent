@@ -667,6 +667,7 @@ class ProposalDeckSkill(BaseSkill[ProposalDeckInput, ProposalDeckOutput]):
                 **data,
                 "product_sector": input.product_sector,
                 "proposal_date": input.proposal_date,
+                "business_unit": input.business_unit,
                 "agency_route": True,
             }
         composer_out = ComposerOutput.model_validate(data)
