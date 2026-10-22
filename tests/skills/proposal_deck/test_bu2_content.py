@@ -77,6 +77,14 @@ def test_missing_data_is_review_text_not_invented_financial_terms() -> None:
     assert values["PB-BU2-ESTIMATE-NOTES"].count("要確認") == 2
 
 
+@pytest.mark.parametrize("field", ["views", "contacts", "understanding_rate", "assumption"])
+def test_simulation_has_no_standard_assumptions(field: str) -> None:
+    payload = bu2_payload()
+    del payload["simulation"][field]
+    with pytest.raises(ValidationError):
+        BU2Content.model_validate(payload)
+
+
 @pytest.mark.parametrize(
     "patch",
     [

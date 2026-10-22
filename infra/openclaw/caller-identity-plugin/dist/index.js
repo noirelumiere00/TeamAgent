@@ -1299,6 +1299,15 @@ function canonicalInvocationId(value) {
   return normalized && INVOCATION_ID_RE.test(normalized) ? normalized : null;
 }
 
+function proposalRequestText(content) {
+  if (typeof content !== "string") return undefined;
+  const characters = [...content];
+  if (characters.length <= 4000) return content;
+  // 切り詰めた数値を別の小さな数値の根拠にしない。
+  return characters.slice(0, 4000).join("")
+    .replace(/[0-9０-９][0-9０-９.,，．\s万億千百十兆円回本日週ヶケかカ月年％%/／+\-−]*$/u, "");
+}
+
 // ── 拒否の観測性と利用者向け診断行（2026-09-03 実測） ─────────────────────────
 // 実測（OpenClaw の EFS 上のセッション記録 166 ファイル・tool call 363 件を読み取り専用の
 // Fargate プローブで集計）:
@@ -3689,6 +3698,7 @@ export function createCallerIdentityPlugin({
         }
         if (ingress.searchRequired) existing.searchRequired = ingress.searchRequired;
         if (ingress.videoAnalysisQuerySlots?.length) existing.videoAnalysisQuerySlots = ingress.videoAnalysisQuerySlots;
+        if (existing.requestText === undefined) existing.requestText = ingress.requestText;
         // 再通知でも抑止用台帳を確実に持つ（agent_end 後に ingressByRun 側が消えた後、
         // 同じ受信の再通知が来る順序でも判定が失われないように）。
         rememberConnectIngress(runId, existing);
@@ -3789,7 +3799,7 @@ export function createCallerIdentityPlugin({
     const pendingKey = JSON.stringify([sessionKey, messageId]);
     // event.content は上流が BodyForCommands ?? RawBody ?? Body から作る利用者の生本文
     // （message-hook-mappers:23 / Slack は commandBody ?? rawBody = 封筒無しの本文）。
-    // ingress には判定結果だけを載せる（G7）。評価用の正規化発言は別台帳へ保存する。
+    // 見積照合用の DM 本文だけは run 束縛と同じ寿命で最大4,000字を保持し、ログへ出さない。
     const connectRequestRule =
       typeof event?.content === "string" ? classifyConnectRequest(event.content) : null;
     const connectRequest = connectRequestRule !== null;
@@ -3825,6 +3835,8 @@ export function createCallerIdentityPlugin({
       teamId,
       channelId,
       threadTs,
+      requestText: SLACK_DM_CHANNEL_RE.test(channelId) || channelId === `DM:${senderId}`
+        ? proposalRequestText(event?.content) : undefined,
       searchInsightRequested: /傾向|パターン|共通点|勝ち筋|示唆|戦略|打ち手|攻め方|刺さ|改善|アイデア|ヒント|学び|教訓|コツ|提案して|案を|考えて|なぜ|何が効いた|効いたのは|どう(?:攻め|動|提案|進め|すれば|したら)/u.test(event?.content ?? ""),
       messageId,
       actionFingerprint: null,
@@ -3869,6 +3881,7 @@ export function createCallerIdentityPlugin({
       ingress.videoRequestIntent = existing.videoRequestIntent === true;
     }
     if (existing?.searchRequired && !ingress.searchRequired) ingress.searchRequired = existing.searchRequired;
+    if (ingress.requestText === undefined) ingress.requestText = existing?.requestText;
     if (existing?.videoAnalysisQuerySlots?.length && !ingress.videoAnalysisQuerySlots.length) {
       ingress.videoAnalysisQuerySlots = existing.videoAnalysisQuerySlots;
     }
@@ -5908,6 +5921,8 @@ export function createCallerIdentityPlugin({
       slack_team_id: trusted.teamId,
       channel_id: trusted.channelId,
       ...(trusted.threadTs === null ? {} : {thread_ts: trusted.threadTs}),
+      ...((tool === "proposal_builder" || tool === "proposal_builder_submit") &&
+        typeof trusted.requestText === "string" ? {request_text: trusted.requestText} : {}),
     };
     const adjustedParams = {
       ...params,
