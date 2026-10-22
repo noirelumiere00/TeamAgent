@@ -17,24 +17,15 @@ from typing import Final, Literal
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
+from teamagent.media.proposal_bu2 import BU2Content
 from teamagent.media.proposal_dates import proposal_today
+from teamagent.media.proposal_template import BASE_AUXILIARY_KEYS
 
 _MISSING_IDS: Final[frozenset[int]] = frozenset({48, 49, 50, 51, 52, 53, 54, 55})
 VALID_IDS: Final[frozenset[int]] = frozenset(range(1, 104)) - _MISSING_IDS
 _AUXILIARY_KEY: Final[re.Pattern[str]] = re.compile(r"^PB-[A-Z0-9_-]{1,60}$")
 PROPOSAL_BUILDER_TEMPLATE_PROFILE: Final[str] = "proposal-builder-v1"
-PROPOSAL_BUILDER_REQUIRED_AUXILIARY: Final[frozenset[str]] = frozenset(
-    {
-        "PB-ACCOUNTS",
-        "PB-CASES",
-        "PB-CLIENT-NAME",
-        "PB-DATETIME",
-        "PB-EXPERIENCE",
-        "PB-KEY-MESSAGE",
-        "PB-MONTH",
-        "PB-PRODUCT-NAME",
-    }
-)
+PROPOSAL_BUILDER_REQUIRED_AUXILIARY: Final[frozenset[str]] = BASE_AUXILIARY_KEYS
 
 LENGTH_RULES: Final[dict[int, tuple[int, int]]] = {
     # 「程度」表記の下限は運用緩和（日本語はモデルが字数を下振れしやすい）.
@@ -155,7 +146,7 @@ class PlaceholderLengthError(ValueError):
         )
 
 
-class ComposerOutput(BaseModel):
+class ComposerOutput(BU2Content):
     """Composer 出力（FMT v2 / 95 placeholder 完全網羅契約）。renderer の入力。
 
     `placeholders` には埋めた ID のみ、未検出は `skipped_placeholders` に積む。

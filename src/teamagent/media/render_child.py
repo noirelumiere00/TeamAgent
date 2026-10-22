@@ -21,12 +21,19 @@ from teamagent.media.operations import (
     _replace_placeholders,
     _set_text_keeping_format,
 )
+from teamagent.media.proposal_bu2 import bu2_auxiliary_values, bu2_source_notes
 from teamagent.media.proposal_cleanup import (
     finalize_proposal_content,
     prepare_proposal_content,
+    proposal_bu1_slide_ids,
     proposal_bu2_slide_ids,
     proposal_emme_slide_ids,
     proposal_template_samples,
+)
+from teamagent.media.proposal_template import (
+    BASE_AUXILIARY_KEYS,
+    BU2_AUXILIARY_KEYS,
+    template_auxiliary_keys,
 )
 
 _AUXILIARY = re.compile(r"\{\{(PB-[A-Z0-9_-]{1,60})\}\}")
@@ -36,20 +43,8 @@ _PB_TOKEN = re.compile(r"\{\{PB-[^{}]+\}\}")
 _LEGACY_INSTRUCTION = re.compile(r"自動入力|貼り付けてください|はめ込|転記|差し替え")
 _BRACE_CHARACTER = re.compile(r"[{}｛｝]")
 _PROPOSAL_BUILDER_PROFILE = "proposal-builder-v1"
-_PROPOSAL_BUILDER_REQUIRED_AUXILIARY = frozenset(
-    {
-        "PB-ACCOUNTS",
-        "PB-CASES",
-        "PB-CLIENT-NAME",
-        "PB-DATETIME",
-        "PB-EXPERIENCE",
-        "PB-KEY-MESSAGE",
-        "PB-MONTH",
-        "PB-PRODUCT-NAME",
-    }
-)
+_PROPOSAL_BUILDER_REQUIRED_AUXILIARY = BASE_AUXILIARY_KEYS
 _PROPOSAL_BUILDER_REQUIRED_DATE_OFFSETS = frozenset(range(-56, 22, 7))
-_PROPOSAL_BUILDER_EXPECTED_SLIDE_COUNT = 83
 # 撮影の前に隠す要素（ブラウザ用の編集ヒント）。position:fixed なので、隠さないと全スライドの
 # 左上に焼き込まれる。video_algorithm.slides.NOEXPORT_CSS と同じ値（media 便は skills を
 # 持たないので、ここに同じ文字列を置く）。
@@ -263,6 +258,8 @@ def _proposal(root: Path, manifest: dict[str, Any]) -> dict[str, Any]:
         auxiliary = {
             str(key): str(value) for key, value in raw.get("auxiliary_placeholders", {}).items()
         }
+        auxiliary.update(bu2_auxiliary_values(raw))
+        source_notes = bu2_source_notes(raw)
         profile = str(raw.get("template_profile", "base"))
         raw_start_date = raw.get("posting_start_date")
         posting_start_date = (
@@ -295,6 +292,7 @@ def _proposal(root: Path, manifest: dict[str, Any]) -> dict[str, Any]:
     samples = proposal_template_samples(presentation)
     emme_slide_ids = proposal_emme_slide_ids(presentation)
     bu2_slide_ids = proposal_bu2_slide_ids(presentation)
+    bu1_slide_ids = proposal_bu1_slide_ids(presentation)
     template_ids: set[int] = set()
     template_auxiliary: set[str] = set()
     template_date_offsets: set[int] = set()
@@ -308,9 +306,15 @@ def _proposal(root: Path, manifest: dict[str, Any]) -> dict[str, Any]:
         template_versions.update(match.group(1) for match in _TEMPLATE_VERSION.finditer(combined))
         template_legacy_artifacts.extend(_legacy_artifacts(combined, allow_template_tokens=True))
     if profile == _PROPOSAL_BUILDER_PROFILE:
+        try:
+            required_auxiliary = template_auxiliary_keys(template, len(presentation.slides))
+        except ValueError as exc:
+            raise MediaOperationError("MEDIA_PPTX_TEMPLATE_PROFILE_INVALID", str(exc)) from exc
         invalid_numeric_inventory = template_ids != valid_ids
-        invalid_values = set(auxiliary) != _PROPOSAL_BUILDER_REQUIRED_AUXILIARY
-        invalid_tokens = template_auxiliary != _PROPOSAL_BUILDER_REQUIRED_AUXILIARY
+        invalid_values = not _PROPOSAL_BUILDER_REQUIRED_AUXILIARY <= auxiliary.keys() or bool(
+            auxiliary.keys() - (_PROPOSAL_BUILDER_REQUIRED_AUXILIARY | BU2_AUXILIARY_KEYS)
+        )
+        invalid_tokens = template_auxiliary != required_auxiliary
         if (
             invalid_numeric_inventory
             or invalid_values
@@ -323,7 +327,6 @@ def _proposal(root: Path, manifest: dict[str, Any]) -> dict[str, Any]:
             )
         if (
             posting_start_date is None
-            or len(presentation.slides) != _PROPOSAL_BUILDER_EXPECTED_SLIDE_COUNT
             or template_versions != {_PROPOSAL_BUILDER_PROFILE}
             or not _PROPOSAL_BUILDER_REQUIRED_DATE_OFFSETS.issubset(template_date_offsets)
         ):
@@ -337,7 +340,9 @@ def _proposal(root: Path, manifest: dict[str, Any]) -> dict[str, Any]:
             "composer template profile is invalid",
         )
 
-    placeholders, auxiliary = prepare_proposal_content(presentation, placeholders, auxiliary)
+    placeholders, auxiliary = prepare_proposal_content(
+        presentation, placeholders, auxiliary, source_notes
+    )
     for text_frame in _iter_text_frames(presentation):
         _replace_placeholders(text_frame, placeholders)
         _replace_proposal_special_tokens(text_frame, auxiliary, posting_start_date)
@@ -380,6 +385,7 @@ def _proposal(root: Path, manifest: dict[str, Any]) -> dict[str, Any]:
         samples,
         emme_slide_ids=emme_slide_ids,
         bu2_slide_ids=bu2_slide_ids,
+        bu1_slide_ids=bu1_slide_ids,
         business_unit=business_unit,
         product_sector=product_sector,
         proposal_date=proposal_date,

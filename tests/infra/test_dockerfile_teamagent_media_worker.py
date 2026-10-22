@@ -265,6 +265,8 @@ def test_media_image_copies_only_worker_media_code_and_no_core_secrets_stack() -
         "deck_qa.py",
         "operations.py",
         "proposal_cleanup.py",
+        "proposal_bu2.py",
+        "proposal_template.py",
         "proposal_dates.py",
         "render_child.py",
         "security.py",
@@ -417,6 +419,8 @@ def test_media_dockerignore_is_deny_by_default() -> None:
         "!src/teamagent/media/tool_worker.py",
         "!src/teamagent/media/tool_contracts.py",
         "!src/teamagent/media/proposal_dates.py",
+        "!src/teamagent/media/proposal_bu2.py",
+        "!src/teamagent/media/proposal_template.py",
         "!tools/tiktok_scraper/package-lock.json",
         "!infra/docker/media-apk.lock",
     ):

@@ -14,6 +14,7 @@ from urllib.parse import urlsplit
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from teamagent.media.proposal_bu2 import BU2Content
 from teamagent.media.proposal_dates import proposal_today
 from teamagent.skills.proposal_research.brief import ResearchBrief
 
@@ -322,7 +323,7 @@ class SanitizationResult(_StrictModel):
         return bool(self.issues)
 
 
-class ProposalBuilderInput(_StrictModel):
+class ProposalBuilderInput(_StrictModel, BU2Content):
     """Slack/MCPから一度で提案書を生成する統合入力。"""
 
     # MCP JSONのISO日付文字列をdateへ変換するため、この外部入力境界だけstrict=False。

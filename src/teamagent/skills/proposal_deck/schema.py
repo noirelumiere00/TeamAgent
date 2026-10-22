@@ -12,6 +12,7 @@ from typing import Literal
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
+from teamagent.media.proposal_bu2 import BU2_INPUT_FIELDS, BU2Content
 from teamagent.media.proposal_dates import proposal_today
 from teamagent.skills.proposal_deck.confidentiality import contains_forbidden_term
 from teamagent.skills.proposal_deck.contract import (
@@ -25,7 +26,7 @@ _AUXILIARY_PLACEHOLDER_KEY = re.compile(r"PB-[A-Z0-9_-]+")
 _MAX_AUXILIARY_PLACEHOLDER_CHARS = 20_000
 
 
-class ProposalDeckInput(BaseModel):
+class ProposalDeckInput(BU2Content):
     """proposal_deck Skill の入力。"""
 
     product_name: str = Field(
@@ -238,6 +239,11 @@ class ProposalDeckInput(BaseModel):
             key
             for key, text in self.auxiliary_placeholders.items()
             if contains_forbidden_term(text, self.forbidden_output_terms)
+        )
+        leaking_keys.extend(
+            key
+            for key, value in self.model_dump(include=set(BU2_INPUT_FIELDS)).items()
+            if contains_forbidden_term(str(value), self.forbidden_output_terms)
         )
         if leaking_keys:
             raise ValueError(

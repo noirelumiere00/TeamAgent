@@ -110,7 +110,7 @@ RESEARCH_NOT_READY_MESSAGE = "調査からの自動作成は準備中です。Ge
 ALLOWED_EMAILS_ENV = "PROPOSAL_BUILDER_ALLOWED_EMAILS"
 # 拒否の文（Aico がそのまま利用者へ伝える。内部語を載せない）。
 NOT_READY_MESSAGE = (
-    "83枚の提案書の自動生成は準備中のため、まだお使いいただけません。"
+    "統合FMTの提案書の自動生成は準備中のため、まだお使いいただけません。"
     "使えるようになったらお知らせします。"
 )
 
@@ -1133,6 +1133,10 @@ class ProposalBuilderSkill(BaseSkill[ProposalBuilderInput, ProposalBuilderOutput
             product_sector=meta.sector,
             proposal_date=input.proposal_date,
             business_unit=input.business_unit,
+            plans=input.plans,
+            simulation=input.simulation,
+            estimate_terms=input.estimate_terms,
+            hearing_items=input.hearing_items,
             auxiliary_placeholders={
                 "PB-ACCOUNTS": accounts_text,
                 "PB-CASES": cases_text,
@@ -1562,7 +1566,7 @@ class ProposalBuilderSubmitSkill(
 
     name: ClassVar[str] = "proposal_builder_submit"
     description: ClassVar[str] = (
-        "83枚の提案書を作成する。商材名・公式URL・与件・投稿開始日があれば、"
+        "統合FMTの提案書を作成する。商材名・公式URL・与件・投稿開始日があれば、"
         "PROPOSAL_RESEARCH_AUTOが有効なときはresearch_briefで調査から作成でき、JSONは不要。"
         "従来のGemini v3 JSONと投稿開始日Dからの作成にも対応し、どちらか一方を指定する。"
         "重い処理を待たずにjob_idを返す。"
