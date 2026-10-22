@@ -230,6 +230,12 @@ locals {
       content_type                  = "text/yaml"
       object_lock_retain_until_date = "2099-12-31T00:00:00Z"
     }
+    # 2026-10-22 オフライン導出（未公開）。OC の ca-certificates-bundle を 20260909-r3 へ更新。
+    # Node 26.12.1 の実測 SHA に契約を追随させ、現行世代本文の OC 契約 base64 だけを置換。
+    "36e2718f284e89bb40e095780e51af38c852298b065bb66f129de856dbd9ba7e" = {
+      content_type                  = "text/yaml"
+      object_lock_retain_until_date = "2099-12-31T00:00:00Z"
+    }
   }
 
   image_promoter_buildspec_generations = {
@@ -521,8 +527,8 @@ import {
 }
 
 import {
-  to = aws_s3_object.image_attestor_buildspec_generation["43fd4c84f195e554e1c8439e0881d21de7bafe04732b1072d4c7f81f586b2014"]
-  id = "teamagent-dev-image-release-evidence/codebuild-buildspecs/teamagent-dev-image-attestor/43fd4c84f195e554e1c8439e0881d21de7bafe04732b1072d4c7f81f586b2014.yml"
+  to = aws_s3_object.image_attestor_buildspec_generation["36e2718f284e89bb40e095780e51af38c852298b065bb66f129de856dbd9ba7e"]
+  id = "teamagent-dev-image-release-evidence/codebuild-buildspecs/teamagent-dev-image-attestor/36e2718f284e89bb40e095780e51af38c852298b065bb66f129de856dbd9ba7e.yml"
 }
 
 import {
