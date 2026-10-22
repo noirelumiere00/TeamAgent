@@ -667,7 +667,7 @@ class ProposalDeckSkill(BaseSkill[ProposalDeckInput, ProposalDeckOutput]):
                 **data,
                 "product_sector": input.product_sector,
                 "proposal_date": input.proposal_date,
-                "agency_route": False,
+                "agency_route": True,
             }
         composer_out = ComposerOutput.model_validate(data)
         forced_skips = set(input.forced_skipped_ids)

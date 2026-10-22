@@ -175,7 +175,7 @@ class ComposerOutput(BaseModel):
     product_sector: str = Field(default="", max_length=200)
     proposal_date: date = Field(default_factory=proposal_today)
     # 代理店経由を示す既存入力はないため通常経路では常にFalseに上書きする。
-    agency_route: bool = False
+    agency_route: bool = True
     # 既定値は従来テンプレとの後方互換。統合経路だけが厳格なtemplate inventory検証を有効化する。
     template_profile: str = Field(default="base", max_length=80)
 

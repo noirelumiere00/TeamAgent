@@ -426,7 +426,7 @@ def render_pptx(
     template_profile: str = "base",
     product_sector: str = "",
     proposal_date: date | None = None,
-    agency_route: bool = False,
+    agency_route: bool = True,
 ) -> Path:
     """テンプレ pptx を読み、placeholder を全置換して out_path に保存。
 

@@ -23,7 +23,7 @@ def test_request_metadata_overrides_composer_and_survives_worker_json() -> None:
     payload = json.loads(composer.model_dump_json())
     assert payload["product_sector"] == "食品"
     assert payload["proposal_date"] == "2026-10-22"
-    assert payload["agency_route"] is False
+    assert payload["agency_route"] is True
     assert ComposerOutput.model_validate_json(composer.model_dump_json()).proposal_date == (
         date(2026, 10, 22)
     )

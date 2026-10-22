@@ -268,7 +268,7 @@ def _proposal(root: Path, manifest: dict[str, Any]) -> dict[str, Any]:
             date.fromisoformat(raw_start_date) if isinstance(raw_start_date, str) else None
         )
         product_sector = raw.get("product_sector", "")
-        agency_route = raw.get("agency_route", False)
+        agency_route = raw.get("agency_route", True)
         proposal_date = (
             date.fromisoformat(raw["proposal_date"]) if raw.get("proposal_date") else None
         )

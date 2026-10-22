@@ -69,7 +69,7 @@ def finalize_proposal_content(
     product_sector: str = "",
     proposal_date: date | None = None,
     posting_start_date: date | None = None,
-    agency_route: bool = False,
+    agency_route: bool = True,
 ) -> None:
     """出荷前に本文を清掃し、業種選択・日付・見本・文字数をノートへ記録する。"""
     from teamagent.media.operations import _set_text_keeping_format
