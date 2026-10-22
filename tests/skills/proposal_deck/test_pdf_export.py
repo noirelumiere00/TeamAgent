@@ -117,6 +117,34 @@ def test_build_proposal_html_escapes_html() -> None:
     assert "&lt;script&gt;" in html
 
 
+def test_build_proposal_html_moves_review_values_to_final_list() -> None:
+    co = ComposerOutput.model_construct(
+        placeholders={
+            1: "本文サンプル",
+            56: "要確認（データ未検出）",
+            64: "要確認（文字数調整: <情報不足>）",
+        },
+        citations_per_placeholder={64: ["本文に残さない出典.pdf"]},
+        skipped_placeholders=[SkippedPlaceholder(id=2, reason="要確認（根拠資料なし）")],
+    )
+
+    rendered = build_proposal_html(co, product_name="商品", version_id="v-review")
+
+    body, _, reviews = rendered.partition("<hr>")
+    assert "本文サンプル" in body
+    assert "要確認" not in body
+    assert "本文に残さない出典.pdf" not in body
+    assert "埋め 1 /" in body
+    assert "<h1>要確認一覧</h1>" in reviews
+    for pid, reason in (
+        (2, "要確認（根拠資料なし）"),
+        (56, "要確認（データ未検出）"),
+        (64, "要確認（文字数調整: &lt;情報不足&gt;）"),
+    ):
+        assert f"{{{pid}}}" in reviews
+        assert reason in reviews
+
+
 # -----------------------------------------------------------
 # version_id は常に付く
 # -----------------------------------------------------------

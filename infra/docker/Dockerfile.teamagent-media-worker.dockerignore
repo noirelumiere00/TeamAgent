@@ -9,6 +9,7 @@
 !src/teamagent/media/deadline.py
 !src/teamagent/media/deck_qa.py
 !src/teamagent/media/operations.py
+!src/teamagent/media/proposal_cleanup.py
 !src/teamagent/media/render_child.py
 !src/teamagent/media/security.py
 !src/teamagent/media/tool_contracts.py

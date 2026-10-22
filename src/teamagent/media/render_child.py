@@ -21,6 +21,7 @@ from teamagent.media.operations import (
     _replace_placeholders,
     _set_text_keeping_format,
 )
+from teamagent.media.proposal_cleanup import prepare_proposal_content
 
 _AUXILIARY = re.compile(r"\{\{(PB-[A-Z0-9_-]{1,60})\}\}")
 _DATE = re.compile(r"\{\{PB-DATE:([+-]?\d{1,3}):(%Y/%m/%d|%m/%d|%Y年%m月%d日)\}\}")
@@ -248,7 +249,11 @@ def _proposal(root: Path, manifest: dict[str, Any]) -> dict[str, Any]:
     try:
         raw = json.loads(composer.read_text(encoding="utf-8"))
         placeholders = {int(key): str(value) for key, value in raw["placeholders"].items()}
-        skipped = {int(item["id"]) for item in raw.get("skipped_placeholders", [])}
+        skipped_reasons = {
+            int(item["id"]): str(item.get("reason", "要確認（データ未検出）"))
+            for item in raw.get("skipped_placeholders", [])
+        }
+        skipped = set(skipped_reasons)
         auxiliary = {
             str(key): str(value) for key, value in raw.get("auxiliary_placeholders", {}).items()
         }
@@ -263,7 +268,9 @@ def _proposal(root: Path, manifest: dict[str, Any]) -> dict[str, Any]:
     if set(placeholders) - valid_ids or skipped - valid_ids:
         raise MediaOperationError("MEDIA_COMPOSER_IDS_INVALID", "composer IDs are invalid")
     for placeholder_id in valid_ids:
-        placeholders.setdefault(placeholder_id, "要確認（データ未検出）")
+        placeholders.setdefault(
+            placeholder_id, skipped_reasons.get(placeholder_id, "要確認（データ未検出）")
+        )
 
     from pptx import Presentation
     from pptx.util import Emu
@@ -311,6 +318,7 @@ def _proposal(root: Path, manifest: dict[str, Any]) -> dict[str, Any]:
             "composer template profile is invalid",
         )
 
+    placeholders, auxiliary = prepare_proposal_content(presentation, placeholders, auxiliary)
     for text_frame in _iter_text_frames(presentation):
         _replace_placeholders(text_frame, placeholders)
         _replace_proposal_special_tokens(text_frame, auxiliary, posting_start_date)

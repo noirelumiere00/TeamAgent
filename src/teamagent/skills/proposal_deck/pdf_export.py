@@ -39,9 +39,13 @@ def build_proposal_html(
 ) -> str:
     """ComposerOutput を読みやすい HTML 文字列にする（純関数）。"""
     rows: list[str] = []
+    review_reasons = {item.id: item.reason for item in composer_out.skipped_placeholders}
     for pid in sorted(VALID_IDS):
         text = composer_out.placeholders.get(pid)
         if text is None:
+            continue
+        if "要確認" in text:
+            review_reasons[pid] = text
             continue
         cites = composer_out.citations_per_placeholder.get(pid) or []
         cite_html = ""
@@ -52,19 +56,18 @@ def build_proposal_html(
             f'<div class="item"><span class="pid">{{{pid}}}</span> '
             f"{html.escape(text)}{cite_html}</div>"
         )
-    skipped_rows = "".join(
-        f'<div class="item skipped"><span class="pid">{{{s.id}}}</span> '
-        f"{html.escape(s.reason)}</div>"
-        for s in sorted(composer_out.skipped_placeholders, key=lambda s: s.id)
+    review_rows = "".join(
+        f'<div class="item skipped"><span class="pid">{{{pid}}}</span> {html.escape(reason)}</div>'
+        for pid, reason in sorted(review_reasons.items())
     )
-    skipped_block = f"<hr><h1>要確認（データ未検出）</h1>{skipped_rows}" if skipped_rows else ""
+    review_block = f"<hr><h1>要確認一覧</h1>{review_rows}" if review_rows else ""
     return (
         "<!DOCTYPE html><html><head><meta charset='utf-8'>"
         f"<style>{_CSS}</style></head><body>"
         f"<h1>{html.escape(product_name)} 提案書</h1>"
         f'<div class="meta">version: {html.escape(version_id)}'
-        f"（埋め {len(composer_out.placeholders)} / {len(VALID_IDS)} 項目）</div>"
-        f"{''.join(rows)}{skipped_block}"
+        f"（埋め {len(rows)} / {len(VALID_IDS)} 項目）</div>"
+        f"{''.join(rows)}{review_block}"
         "</body></html>"
     )
 

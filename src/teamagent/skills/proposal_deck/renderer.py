@@ -432,6 +432,8 @@ def render_pptx(
     """
     from pptx import Presentation
 
+    from teamagent.media.proposal_cleanup import prepare_proposal_content
+
     prs = Presentation(str(template_path))
     inventory = inspect_template(prs)
     required_template_ids: set[int] = set()
@@ -478,6 +480,9 @@ def render_pptx(
                 "integrated template D-56 through D+21 schedule markers are incomplete"
             )
 
+    placeholders, auxiliary_placeholders = prepare_proposal_content(
+        prs, placeholders, auxiliary_placeholders or {}
+    )
     filled: set[int] = set()
     for tf in _iter_text_frames(prs):
         filled |= _replace_in_text_frame(tf, placeholders)
@@ -548,13 +553,13 @@ def audit_presentation(
 
 
 def materialize_placeholders(out: ComposerOutput) -> dict[int, str]:
-    """skipped も『要確認（データ未検出）』で実体化し、全 VALID_IDS をカバーする。
+    """skipped の理由を保持して全 VALID_IDS をカバーする。
 
-    renderer 段階では unfilled を残さないため、未検出 placeholder にも必ず文字列を割り当てる。
+    描画直前に不足枠の本文を空にし、理由をノートへ移す。
     """
     materialized = dict(out.placeholders)
     for skip in out.skipped_placeholders:
-        materialized.setdefault(skip.id, "要確認（データ未検出）")
+        materialized.setdefault(skip.id, skip.reason)
     for pid in VALID_IDS:
         materialized.setdefault(pid, "要確認（データ未検出）")
     return materialized

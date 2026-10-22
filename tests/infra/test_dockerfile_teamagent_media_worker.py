@@ -263,6 +263,7 @@ def test_media_image_copies_only_worker_media_code_and_no_core_secrets_stack() -
         "deadline.py",
         "deck_qa.py",
         "operations.py",
+        "proposal_cleanup.py",
         "render_child.py",
         "security.py",
         "tool_contracts.py",

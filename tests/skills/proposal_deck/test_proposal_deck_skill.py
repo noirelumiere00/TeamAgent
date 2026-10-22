@@ -470,5 +470,12 @@ def test_rendered_deck_returns_length_adjustment_list(tmp_path: Path) -> None:
         for shape in slide.shapes
         if shape.has_text_frame
     )
-    assert texts.count("要確認（文字数調整）") == 2
+    assert "要確認" not in texts
+    notes = "\n".join(
+        slide.notes_slide.notes_text_frame.text
+        for slide in Presentation(out.pptx_path).slides
+        if slide.has_notes_slide
+    )
+    assert notes.count("要確認（文字数調整）") == 2
+    assert out.review_slides == [3]
     assert "あ" * 21 not in texts and "い" * 23 not in texts
