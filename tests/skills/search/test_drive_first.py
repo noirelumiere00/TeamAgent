@@ -73,11 +73,12 @@ def test_live_slack_case_uses_drive_instead_of_post(setup_search):
 def test_unresolved_slack_attachment_is_explicitly_unread(setup_search):
     skill, pg = setup_search
     pg.resolve_file_urls_by_titles.return_value = {}
-    out = skill.run(SearchInput(query="食品の事例出して"), SkillContext(metadata=META))
+    # 事例一覧では除外するが、通常の資料探しでは従来どおり未読の出典を示す。
+    out = skill.run(SearchInput(query="食品の資料を探して"), SkillContext(metadata=META))
     assert "Slack にだけある資料（本文未読）" in out.answer
     assert "本文未読" in out.answer
     assert "[資料]" not in out.answer
-    assert out.displayed_refs[0].unread
+    assert out.slack_hits[0].reference.unread
 
 
 def test_off_and_outside_allowlist_are_byte_identical(setup_search, monkeypatch):

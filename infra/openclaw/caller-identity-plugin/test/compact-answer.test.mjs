@@ -2,13 +2,13 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {createCallerIdentityPlugin} from '../dist/index.js';
 
-function setup(content = '施策は今どうなっている？', threadId = undefined) {
+function setup(content = '施策は今どうなっている？', threadId = undefined, direct = true) {
   const hooks = new Map();
   const ctx = {threadId, runId: 'short-run', sessionKey: 'agent:teamagent:slack:direct:u12345678',
     senderId: 'U12345678', channelId: 'U12345678'};
   createCallerIdentityPlugin({env: {
     TEAMAGENT_CALLER_CLAIM_SECRET: 'x'.repeat(48), SLACK_TEAM_ID: 'T07MU5P2PBR',
-    SEARCH_DIRECT_ANSWER: '1', SEARCH_DIRECT_ANSWER_ALLOWED_EMAILS: '*',
+    SEARCH_DIRECT_ANSWER: direct ? '1' : '0', SEARCH_DIRECT_ANSWER_ALLOWED_EMAILS: '*',
     SEARCH_DIRECT_ANSWER_KINDS: 'not_found',
   }}).register({registerInteractiveHandler() {}, logger: {info() {}, warn() {}},
     on: (name, fn) => hooks.set(name, fn)});
@@ -162,6 +162,23 @@ test('case list stays five backend lines without OC recommendations', () => {
   const out = p.send('事例は1件です。\n\n💡 推奨アクション\n営業に紹介します。\n\n共感が効くパターンです。');
   assert.equal(out, answer);
 });
+
+for (const direct of [false, true]) {
+  for (const count of [0, 1, 5]) {
+    test(`Drive case list excludes model feedback and extra source links: direct=${direct}, count=${count}`, () => {
+      const p = setup('食品メーカーのショート動画の事例出して', undefined, direct);
+      const answer = count ? Array.from({length: count}, (_, i) =>
+        `*食品会社${i}*（2026年9月）\n• ショート動画を配信。\n• 結果を確認。\n• <https://drive.google.com/file/d/FILE${i}/view|資料を見る>`
+      ).join('\n\n') : 'Drive に資料のある事例は見つかりませんでした。';
+      const slack = 'https://vector-workspcae.slack.com/archives/CFOOD/p1234567890123456';
+      p.remember({answer_format: 'list', answer, found: count > 0,
+        hits: [{url: 'https://example.test/app'}], slack_hits: [{permalink: slack}]});
+      const out = p.send(`${answer}\n\n営業フィードバック\n温度感B <${slack}|詳細>\n\nAico Vault https://example.test/app`);
+      assert.equal(out, answer);
+      assert.doesNotMatch(out, /slack\.com|営業フィードバック|Vault/u);
+    });
+  }
+}
 
 test('fact reply removes advice added by OC', () => {
   const p = setup('撮影日はいつ？');
