@@ -64,7 +64,11 @@ verify_manifest(root, *, kit_path, kit_python=None) -> list[str]
 
 ## 固定するキット
 
-単位①の対象は `VERSION = 2026.10.14.1`、git HEAD `5544938b7f1695a7f13a646ea4b7fd8cadf37629`。manifestには版とgitの指紋を記録する。別版や未固定の変更を暗黙に受け入れない。キット側のソースを変更せず、設定された`kit_path`の入力ゲートを使う。
+単位④で③の入口へ更新し、対象は `VERSION = 2026.10.14.1`、git HEAD `25eccd8219f01cad18dbb4f5a863b5f41d8f52fb`、tree `e12d92cc1fe03a3c3e0b7a75acdaa66b8d128ad6`。manifestには版とgitの指紋を記録する。別版や未固定の変更を暗黙に受け入れない。キット側のソースを変更せず、設定された`kit_path`の入力ゲートを使う。
+
+media用の固定取得物は `tools/first_visit/kit.lock.json` と同ディレクトリのsource archive。取り込む33ファイルをlockの `paths` に列挙し、上流全体の `git_tree` と取得物の `archive_git_tree` を分けて固定する。生成に不要な運用文書・他スキル・テスト・fixture生成器は収録しない。GitのないmediaではPPTX-onlyのkit CLIを使い、現行のGit検証はclean checkoutを持つ手元・CIで維持する。実行時の入力manifest検証接続は⑤で行う。生成・機械前検の成功は描画QA・配達の完了を意味しない。
+
+この版は PptxGenJS 3.12.0 を維持し、npm override で image-size 2.0.3 を固定する。CI は取得物内の npm lock を直接読み、入れ子も含めた image-size の既知の脆弱版をオフラインで拒否する。実イメージの Trivy C/H ゼロのゲートも維持する。
 
 ## 単位②で追加する保存
 
