@@ -208,12 +208,25 @@ def test_unrelated_changes_still_pass(base: str, head: str, reason: str) -> None
 
 
 def test_unlock_matches_the_committed_declaration() -> None:
-    """frozen surface 無変更のため unlock を畳み、承認と過去の宣言を保持する。"""
+    """c-ares の上流入替へ追随し、scope と退避した宣言を完全一致で封印する。"""
     unlock = _freeze_doc()["unlock"]
-    assert unlock["active"] is False
-    assert unlock["scope_paths"] == []
-    assert unlock["reason"] is None
-    assert unlock["gate"] is None
+    assert unlock["active"] is True
+    assert unlock["scope_paths"] == ["infra/codebuild/teamagent_core_media_release_contract.json"]
+    assert (
+        unlock["reason"]
+        == "【media の apk ロック追随】 【2026-10-22 apk ロック追随】mcp 便 r68 の空撃ちで、Alpine 上流の c-ares 1.34.8-r0 → 1.34.9-r0 入替を検出した。c-ares は Dockerfile に明示 pin が無く lock だけのため、人が作成した lock の 19 行目だけを差し替える（241→241 行）。社内網では手元の Docker 実ビルドができないため、実インベントリとの一致は段 3 の AWS image-builder が cmp で照合する。lock の sha256 が動くため Dockerfile の lock SHA 既定値と契約の artifact.apk-lock.sha256 を追随させ、release 契約を埋め込む世代 4 本を再導出する。scope は core_media 契約 1 path。"
+    )
+    assert (
+        unlock["gate"]
+        == "human gate 2026-10-22（小俣さん 10-21「マージまで全て任せる」・Alpine 上流で c-ares 1.34.8-r0 → 1.34.9-r0 入替。r68 の空撃ちで検出）"
+    )
+    assert unlock["previous_scope_20261022_core_ca"] == {
+        "active": False,
+        "scope_paths": [],
+        "reason": None,
+        "gate": None,
+        "note": "#670 取り込み時点の unlock は inactive・scope 空。core の CA bundle 宣言は previous_scope_20261022_core_ca_bundle に退避済みで、その履歴も保持する。",
+    }
     previous = unlock["previous_scope_20261022_core_ca_bundle"]
     assert previous["scope_paths"] == [
         "infra/codebuild/source_provenance.py",
