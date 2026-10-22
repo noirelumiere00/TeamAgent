@@ -17,6 +17,8 @@ from typing import Final
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
+from teamagent.media.proposal_dates import proposal_today
+
 _MISSING_IDS: Final[frozenset[int]] = frozenset({48, 49, 50, 51, 52, 53, 54, 55})
 VALID_IDS: Final[frozenset[int]] = frozenset(range(1, 104)) - _MISSING_IDS
 _AUXILIARY_KEY: Final[re.Pattern[str]] = re.compile(r"^PB-[A-Z0-9_-]{1,60}$")
@@ -170,6 +172,10 @@ class ComposerOutput(BaseModel):
     auxiliary_placeholders: dict[str, str] = Field(default_factory=dict)
     # 投稿開始日 D。統合FMT内の `{{PB-DATE:<offset>:<format>}}` を決定論的に解決する。
     posting_start_date: date | None = None
+    product_sector: str = Field(default="", max_length=200)
+    proposal_date: date = Field(default_factory=proposal_today)
+    # 代理店経由を示す既存入力はないため通常経路では常にFalseに上書きする。
+    agency_route: bool = True
     # 既定値は従来テンプレとの後方互換。統合経路だけが厳格なtemplate inventory検証を有効化する。
     template_profile: str = Field(default="base", max_length=80)
 

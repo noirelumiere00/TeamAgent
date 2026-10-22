@@ -477,5 +477,7 @@ def test_rendered_deck_returns_length_adjustment_list(tmp_path: Path) -> None:
         if slide.has_notes_slide
     )
     assert notes.count("要確認（文字数調整）") == 2
-    assert out.review_slides == [3]
+    assert out.review_slides == [1, 2, 3]
+    assert all("本文500字超過" in warning for warning in out.quality_warnings)
+    assert len(out.quality_warnings) == 2
     assert "あ" * 21 not in texts and "い" * 23 not in texts

@@ -14,6 +14,7 @@ from urllib.parse import urlsplit
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from teamagent.media.proposal_dates import proposal_today
 from teamagent.skills.proposal_research.brief import ResearchBrief
 
 
@@ -347,6 +348,9 @@ class ProposalBuilderInput(_StrictModel):
         ),
     )
     posting_start_date: date = Field(description="投稿開始日D（YYYY-MM-DD）")
+    proposal_date: date = Field(
+        default_factory=proposal_today, description="提案書の作成日。未指定時は日本時間の受付日。"
+    )
     client_name: str = Field(
         default="クライアント",
         min_length=1,

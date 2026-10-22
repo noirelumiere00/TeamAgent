@@ -28,7 +28,7 @@ from pydantic import BaseModel, ValidationError
 
 from teamagent.adapters.bedrock_client import BedrockClient, _estimate_cost
 from teamagent.prompts.loader import load_prompt
-from teamagent.skills._shared.deck_review import review_slides
+from teamagent.skills._shared.deck_review import quality_warnings, review_slides
 from teamagent.skills.base import BaseSkill, SkillContext, register
 from teamagent.skills.proposal_deck.confidentiality import contains_forbidden_term
 from teamagent.skills.proposal_deck.contract import (
@@ -200,9 +200,12 @@ class ProposalDeckSkill(BaseSkill[ProposalDeckInput, ProposalDeckOutput]):
             )
 
             try:
-                review = review_slides(Path(rendered).read_bytes(), template.read_bytes())
+                rendered_bytes = Path(rendered).read_bytes()
+                review = review_slides(rendered_bytes, template.read_bytes())
+                quality = quality_warnings(rendered_bytes)
             except Exception as exc:
                 review = None
+                quality = []
                 log.warning("proposal_deck_review_scan_failed", error_type=type(exc).__name__)
 
             pptx_url = self._publish_if_enabled(
@@ -238,6 +241,7 @@ class ProposalDeckSkill(BaseSkill[ProposalDeckInput, ProposalDeckOutput]):
                 coverage_ratio=composer_out.coverage_ratio,
                 skipped_ids=skipped_ids,
                 length_warnings=length_warnings,
+                quality_warnings=quality,
                 review_slides=review,
                 total_cost_usd=cost_usd,
             )
@@ -658,6 +662,13 @@ class ProposalDeckSkill(BaseSkill[ProposalDeckInput, ProposalDeckOutput]):
     def _finalize_composer(data: Any, input: ProposalDeckInput) -> ComposerOutput:
         """モデル出力を契約検証し、決定論的入力を後付けして根拠検証まで通す。"""
 
+        if isinstance(data, dict):
+            data = {
+                **data,
+                "product_sector": input.product_sector,
+                "proposal_date": input.proposal_date,
+                "agency_route": True,
+            }
         composer_out = ComposerOutput.model_validate(data)
         forced_skips = set(input.forced_skipped_ids)
         placeholders = {

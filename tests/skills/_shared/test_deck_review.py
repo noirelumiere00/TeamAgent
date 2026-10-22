@@ -5,6 +5,7 @@ from io import BytesIO
 from pptx import Presentation
 from pptx.util import Inches
 
+from teamagent.skills._shared import deck_review
 from teamagent.skills._shared.deck_review import count_review, review_slides, warning_lines
 
 
@@ -69,3 +70,44 @@ def test_tables_and_group_shapes_are_counted() -> None:
     stream = BytesIO()
     prs.save(stream)
     assert count_review(stream.getvalue()) == {1: 2}
+
+
+def test_removed_slide_keeps_template_review_baseline_aligned() -> None:
+    template = _deck([[], ["要確認"], []])
+    prs = Presentation(BytesIO(template))
+    removed = prs.slides._sldIdLst[0]
+    prs.part.drop_rel(removed.rId)
+    prs.slides._sldIdLst.remove(removed)
+    prs.slides[1].shapes.add_textbox(0, 0, Inches(4), Inches(1)).text = "要確認"
+    stream = BytesIO()
+    prs.save(stream)
+    assert review_slides(stream.getvalue(), template) == [2]
+
+
+def test_quality_warnings_use_only_generated_notes_and_display_order() -> None:
+    header = "要確認一覧（自動生成）"
+    sample = "警告: FMT見本未上書き: 商品の見本文面"
+    date = "警告: 日付: フェーズ1とフェーズ2が同じ月"
+    body = "警告: 本文500字超過: 501字"
+    media = "警告: 媒体選択 要確認（業種未指定のためEMMEを保持）"
+    prs = Presentation(BytesIO(_deck([[header + "\n" + sample], [], []])))
+    prs.slides[0].notes_slide.notes_text_frame.text = date
+    frame = prs.slides[1].notes_slide.notes_text_frame
+    frame.text = date + "\n" + header
+    paragraph = frame.add_paragraph()
+    paragraph.add_run().text = "要確認 警"
+    paragraph.add_run().text = "告: FMT見本未上書き: 商品の見本文面"
+    frame.add_paragraph().text = "要確認 " + sample
+    prs.slides[2].notes_slide.notes_text_frame.text = (
+        header + "\n要確認 " + date + "\n要確認 " + body + "\n" + media
+    )
+    ids = prs.slides._sldIdLst
+    ids.insert(0, ids[-1])
+    stream = BytesIO()
+    prs.save(stream)
+    assert deck_review.quality_warnings(stream.getvalue()) == [
+        "1枚目: " + date,
+        "1枚目: " + body,
+        "1枚目: " + media,
+        "3枚目: " + sample,
+    ]

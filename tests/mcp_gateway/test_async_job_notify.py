@@ -538,6 +538,34 @@ def test_large_metadata_does_not_hide_the_result_link() -> None:
     assert len(text) < 500 and "https://example.test/result" in text
 
 
+def test_proposal_completion_keeps_every_page_warning_once_after_long_message() -> None:
+    warnings = [
+        f"{page}枚目: 警告: {kind}: 要確認"
+        for page in range(1, 84)
+        for kind in ("FMT見本未上書き", "日付", "本文500字超過", "媒体選択")
+    ]
+    warnings.extend(
+        [
+            "文字数調整 {87}: 要確認の既定文に置換",
+            "PowerPoint の左の一覧で 7枚目に『要確認』が残っています",
+        ]
+    )
+    completion = server._format_proposal_completion(
+        SimpleNamespace(
+            status="done",
+            result_message="調査結果" * 1000 + "\n" + "\n".join(warnings * 2),
+            warnings=warnings * 2,
+            proposal_status="draft",
+            filled_count=95,
+            skipped_count=0,
+            pptx_url="https://example.test/proposal.pptx",
+        )
+    )
+    for warning in warnings:
+        assert completion.splitlines().count(warning) == 1
+    assert "https://example.test/proposal.pptx" in completion
+
+
 @pytest.mark.asyncio
 async def test_dispatch_uses_signed_destination_and_discards_spoofed_context(
     notices: list[dict[str, Any]],

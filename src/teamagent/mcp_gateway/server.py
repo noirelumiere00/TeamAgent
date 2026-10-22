@@ -378,16 +378,23 @@ def _format_proposal_completion(output: Any) -> str:
         from teamagent.skills._shared.long_jobs import failure_reason
 
         return "❌ 提案書生成に失敗しました。" + failure_reason(output.error_code)
+    from teamagent.skills._shared.deck_review import QUALITY_WARNING_PREFIXES, UNAVAILABLE_WARNING
+
     result_message = output.result_message or output.message
-    length_warnings = [
-        line for line in getattr(output, "warnings", []) if line.startswith("文字数調整 {")
-    ]
+    deck_warnings = list(
+        dict.fromkeys(
+            line
+            for line in getattr(output, "warnings", [])
+            if line.startswith(("文字数調整 {", "PowerPoint の左の一覧で ", UNAVAILABLE_WARNING))
+            or any(prefix in line for prefix in QUALITY_WARNING_PREFIXES)
+        )
+    )
     if result_message:
         result_message = "\n".join(
-            line for line in result_message.splitlines() if line not in length_warnings
+            line for line in result_message.splitlines() if line not in deck_warnings
         )
         lines.append(result_message[:1000])
-    lines.extend(length_warnings)
+    lines.extend(deck_warnings)
     if output.proposal_status:
         lines.append(f"結果: {output.proposal_status}")
     if output.filled_count is not None and output.skipped_count is not None:
