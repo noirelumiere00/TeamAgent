@@ -9,6 +9,18 @@
     "subject": "core",
     "entries": [
       {
+        "key": "artifact.ca-certificates-bundle.arm64-apk.sha256",
+        "component": "ca-certificates-bundle",
+        "evidence": "artifact_sha256",
+        "value_kind": "sha256",
+        "value": "4f57ebd7dc21d78ecce228f397d0a4ee46b5cfc777ac5f292821d41a97bfd896",
+        "build_arg": "CA_CERTIFICATES_BUNDLE_APK_SHA256",
+        "oci_label": "io.teamagent.contract.ca-certificates-bundle-apk-sha256",
+        "dockerfile_uses": [
+          "--apk-sha256 \"$CA_CERTIFICATES_BUNDLE_APK_SHA256\""
+        ]
+      },
+      {
         "key": "artifact.torch.arm64-wheel.sha256",
         "component": "torch",
         "evidence": "artifact_sha256",
@@ -78,6 +90,18 @@
         "oci_label": "io.teamagent.contract.uv-binary-sha256",
         "dockerfile_uses": [
           "printf '%s  %s\\n' \"$UV_BINARY_SHA256\" /usr/bin/uv | sha256sum -c -"
+        ]
+      },
+      {
+        "key": "component.ca-certificates-bundle.version",
+        "component": "ca-certificates-bundle",
+        "evidence": "package_version",
+        "value_kind": "package_version",
+        "value": "20260909-r3",
+        "build_arg": "CA_CERTIFICATES_BUNDLE_VERSION",
+        "oci_label": "io.teamagent.contract.ca-certificates-bundle-version",
+        "dockerfile_uses": [
+          "--version \"$CA_CERTIFICATES_BUNDLE_VERSION\""
         ]
       },
       {

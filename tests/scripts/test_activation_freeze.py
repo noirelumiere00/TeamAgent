@@ -208,7 +208,7 @@ def test_unrelated_changes_still_pass(base: str, head: str, reason: str) -> None
 
 
 def test_unlock_matches_the_committed_declaration() -> None:
-    """unlock は「無し」か「本 PR が宣言した 1 path ちょうど」のどちらかに固定する。
+    """unlock は「無し」か「本 PR が宣言した変更集合ちょうど」のどちらかに固定する。
 
     旧テスト（test_unlock_is_inactive_and_empty_by_default）は inactive を無条件に
     要求しており、frozen surface を正当に触る PR が unlock を宣言すると構造的に
@@ -236,18 +236,37 @@ def test_unlock_matches_the_committed_declaration() -> None:
 
     2026-10-22 human gate で scope を OpenClaw 契約 1 path へ切り替える。ca bundle r3 の
     runtime バンプに追随し、直前の media 宣言は ``previous_scope_20261022_core_media`` に退避する。
+
+    #668 後の OpenClaw 宣言を ``previous_scope_20261022_openclaw`` へ退避し、
+    core の CA bundle だけを差し替える 3 path へ切り替える。過去の宣言も保持する。
     """
     unlock = _freeze_doc()["unlock"]
     if unlock["active"]:
-        assert unlock["scope_paths"] == ["infra/codebuild/openclaw_bundle_contract.json"]
+        assert unlock["scope_paths"] == [
+            "infra/codebuild/source_provenance.py",
+            "infra/codebuild/teamagent_runtime_contract.json",
+            "infra/codebuild/teamagent_core_media_release_contract.json",
+        ]
         assert (
             unlock["reason"]
-            == "【2026-10-22 OpenClaw の ca-certificates-bundle 更新】oc28 の provenance builder が HIGH CVE-2026-111943（ca-certificates-bundle 20260909-r2）で停止したため、Chainguard node の arm64 runtime を 4e3acbdf…（nodejs-26 26.12.1-r2・glibc 2.44-r9・ca-certificates-bundle 20260909-r3）へ上げる。Claude が取得した base-evidence.json の /usr/bin/node 実測 SHA に契約を 5a7e0d20… → 6410d7ee… と追随させ、image-attestor 世代を再導出する。scope は OpenClaw 契約 1 path。OC の ECR 例外は既に空で追加・撤去は不要。mcp の Python 3.15 移行は別判断とし、runtime/core_media 契約は変更しない。世代の公開と OC provenance builder の inline buildspec 契約 SHA ピンの更新は別途必要。"
+            == "【2026-10-22 core の CA bundle 差し替え】CVE-2026-111943 の修正版である Wolfi 公式 ca-certificates-bundle 20260909-r3 を SHA-256 固定の APK から取り込み、Python 3.14.8 と builder/runtime の固定 digest を維持する。runtime 契約へ APK SHA と bundle 版の 2 entry を追加し、source_provenance.py の release-ready 必須集合と release 契約の source_runtime_contract.sha256 を追随する。scope はこの 3 path の変更集合ちょうど。source-publisher / attestor / promoter / image-builder と source_provenance.py を埋め込む approval-publisher の計 5 世代をオフライン再導出し、公開は別便で行う。例外は追加しない。"
         )
         assert (
             unlock["gate"]
-            == "human gate 2026-10-22（小俣さん: oc28 の停止報告を受け mcp 側は「期限つき例外＋3.15移行」を選択。OC の node 土台更新は 10-21「マージまで全て任せる」の委任範囲で Claude が判断。#597 と同じ範囲で契約・凍結/世代まで更新）"
+            == "human gate 2026-10-22（小俣さん「証明書だけ差し替え」: chainguard python:latest が 3.15 に移り 3.14 系の修正版土台が無いため、ca-certificates-bundle のみ Wolfi 公式 r3 に差し替え。3.15 移行は別途）"
         )
+        assert unlock["previous_scope_20261022_core_media_apk"] == {
+            "scope_paths": ["infra/codebuild/teamagent_core_media_release_contract.json"],
+            "reason": "【media の apk ロック追随】 【2026-10-21 apk ロック追随】mcp 便 r67 の空撃ちで、Alpine v3.24 / edge の ca-certificates 20260909-r0 が上流にもベース同梱にも無く、上流は 20261020-r0 へ入れ替わっていることを確認した。Dockerfile の明示 pin を 20261020-r0 へ追随させ、人が作成した lock の 1 行を差し替える（241→241 行）。社内網では手元の Docker 実ビルドができないため、実インベントリとの一致は段 3 の AWS image-builder が cmp で照合する。lock の sha256 が動くため契約の artifact.apk-lock.sha256 と release 契約の sha が動き、世代 4 本を再導出する。scope は core_media 契約 1 path。",
+            "gate": "human gate 2026-10-21（小俣さん「マージまで全て任せる」・Alpine 上流で ca-certificates 20260909-r0 → 20261020-r0 入替）",
+            "note": "10/21 の media APK ロック追随の宣言。dev 取り込み済みで、本 PR の source_provenance.py と runtime/release 契約の変更集合へ scope を切り替えるため退避。",
+        }
+        assert unlock["previous_scope_20261022_openclaw"] == {
+            "scope_paths": ["infra/codebuild/openclaw_bundle_contract.json"],
+            "reason": "【2026-10-22 OpenClaw の ca-certificates-bundle 更新】oc28 の provenance builder が HIGH CVE-2026-111943（ca-certificates-bundle 20260909-r2）で停止したため、Chainguard node の arm64 runtime を 4e3acbdf…（nodejs-26 26.12.1-r2・glibc 2.44-r9・ca-certificates-bundle 20260909-r3）へ上げる。Claude が取得した base-evidence.json の /usr/bin/node 実測 SHA に契約を 5a7e0d20… → 6410d7ee… と追随させ、image-attestor 世代を再導出する。scope は OpenClaw 契約 1 path。OC の ECR 例外は既に空で追加・撤去は不要。mcp の Python 3.15 移行は別判断とし、runtime/core_media 契約は変更しない。世代の公開と OC provenance builder の inline buildspec 契約 SHA ピンの更新は別途必要。",
+            "gate": "human gate 2026-10-22（小俣さん: oc28 の停止報告を受け mcp 側は「期限つき例外＋3.15移行」を選択。OC の node 土台更新は 10-21「マージまで全て任せる」の委任範囲で Claude が判断。#597 と同じ範囲で契約・凍結/世代まで更新）",
+            "note": "#668 の OpenClaw 契約の宣言。dev 取り込み済みで、本 PR の source_provenance.py と runtime/release 契約の変更集合へ scope を切り替えるため退避。",
+        }
         previous = unlock["previous_scope_20261022_core_media"]
         assert previous["scope_paths"] == [
             "infra/codebuild/teamagent_core_media_release_contract.json"

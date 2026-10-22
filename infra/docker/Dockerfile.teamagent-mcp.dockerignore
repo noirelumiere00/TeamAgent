@@ -14,6 +14,11 @@
 !infra/
 !infra/codebuild/
 !infra/codebuild/teamagent_runtime_contract.json
+!infra/docker/
+!infra/docker/replace_core_ca_bundle.py
+!infra/docker/core-ca-bundle.lock.json
+!infra/docker/vendor/
+!infra/docker/vendor/ca-certificates-bundle-20260909-r3.apk
 !infra/migrations/
 !infra/migrations/**
 !data/

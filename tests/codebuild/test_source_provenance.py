@@ -5,6 +5,7 @@ import hashlib
 import importlib.util
 import json
 import os
+import re
 import subprocess
 import sys
 import zipfile
@@ -199,12 +200,14 @@ def test_active_core_contract_is_schema_aligned_and_released() -> None:
     assert "approval_record" not in contract
     assert contract["receipt"]["subject"] == "core"
     assert {entry["key"] for entry in contract["receipt"]["entries"]} == {
+        "artifact.ca-certificates-bundle.arm64-apk.sha256",
         "artifact.torch.arm64-wheel.sha256",
         "base.builder.arm64.digest",
         "base.runtime.arm64.digest",
         "base.uv.arm64.digest",
         "binary.python.sha256",
         "binary.uv.sha256",
+        "component.ca-certificates-bundle.version",
         "component.python.version",
         "component.torch.version",
         "component.uv.version",
@@ -305,24 +308,26 @@ def test_runtime_contract_ready_cli_accepts_the_checked_in_contract() -> None:
     )
 
 
-def test_release_ready_rejects_missing_or_rebound_builder_digest() -> None:
+@pytest.mark.parametrize(
+    "key",
+    [
+        "base.builder.arm64.digest",
+        "artifact.ca-certificates-bundle.arm64-apk.sha256",
+        "component.ca-certificates-bundle.version",
+    ],
+)
+def test_release_ready_rejects_missing_or_rebound_evidence(key: str) -> None:
     contract = _ready_contract()
     contract["receipt"]["entries"] = [
-        entry
-        for entry in contract["receipt"]["entries"]
-        if entry["key"] != "base.builder.arm64.digest"
+        entry for entry in contract["receipt"]["entries"] if entry["key"] != key
     ]
-    with pytest.raises(provenance.ProvenanceError, match=r"base\.builder\.arm64\.digest"):
+    with pytest.raises(provenance.ProvenanceError, match=re.escape(key)):
         provenance.validate_runtime_contract(contract)
 
     contract = _ready_contract()
-    builder_entry = next(
-        entry
-        for entry in contract["receipt"]["entries"]
-        if entry["key"] == "base.builder.arm64.digest"
-    )
-    builder_entry["build_arg"] = "MUTABLE_BUILDER_TAG"
-    builder_entry["dockerfile_uses"] = ["cgr.dev/chainguard/python@${MUTABLE_BUILDER_TAG}"]
+    entry = next(entry for entry in contract["receipt"]["entries"] if entry["key"] == key)
+    entry["build_arg"] = "REBOUND_EVIDENCE"
+    entry["dockerfile_uses"] = ['test -n "$REBOUND_EVIDENCE"']
     with pytest.raises(provenance.ProvenanceError, match="bindings are invalid"):
         provenance.validate_runtime_contract(contract)
 
@@ -778,8 +783,8 @@ def test_remote_oci_receipt_rejects_noncanonical_base64(
     ) -> dict[str, str]:
         labels = original_expected_labels(contract, contract_sha256)
         encoded = labels[provenance.RUNTIME_RECEIPT_LABEL]
-        assert encoded.endswith("Q==")
-        labels[provenance.RUNTIME_RECEIPT_LABEL] = encoded[:-3] + "R=="
+        assert encoded.endswith("0=")
+        labels[provenance.RUNTIME_RECEIPT_LABEL] = encoded[:-2] + "1="
         return labels
 
     monkeypatch.setattr(

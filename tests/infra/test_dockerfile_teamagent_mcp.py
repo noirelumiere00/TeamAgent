@@ -19,6 +19,7 @@ UV_DIGEST = "9941e2d8e06ff884d328905091eac0a6bc1e40e5ce12e6dd0de4ef4ee26baac4"
 PYTHON_BINARY_SHA256 = "775bf454e5816503fe56f81c9b9e0d3f03790694bdce576cbbefd60971fc88ca"
 UV_BINARY_SHA256 = "f32f61ced7feb20342032cdac4d0825cebbda61911554f5de5231ec72821812e"
 TORCH_WHEEL_SHA256 = "ca021f9eb2f8345c83fa03e3a04587308afb8df71bd472670b3ece00df58621c"
+CA_BUNDLE_APK_SHA256 = "4f57ebd7dc21d78ecce228f397d0a4ee46b5cfc777ac5f292821d41a97bfd896"
 E5_MODEL_REVISION = "3d7cfbdacd47fdda877c5cd8a79fbcc4f2a574f3"
 BAKED_APP_HTML_SHA256 = "716ac25a96516efd6443277c903102d514f3f86729f8706baea41ee48f0ecdeb"
 APP_HTML_SHA256 = "fd62e56e51d3cee25c3d3a87085048fae08ce3babc82480411c61df36e467e28"
@@ -138,6 +139,24 @@ def test_core_model_torch_and_app_html_are_content_addressed() -> None:
     assert 'org.opencontainers.image.revision="$GIT_COMMIT"' in TEXT
 
 
+def test_core_ca_bundle_uses_the_official_fixed_apk_without_changing_python() -> None:
+    builder = _stage("builder", "final")
+    final = _stage("final")
+    assert f"ARG CA_CERTIFICATES_BUNDLE_APK_SHA256={CA_BUNDLE_APK_SHA256}" in TEXT
+    assert "ARG CA_CERTIFICATES_BUNDLE_VERSION=20260909-r3" in TEXT
+    assert "COPY infra/docker/vendor/ca-certificates-bundle-20260909-r3.apk " in builder
+    assert "COPY infra/docker/core-ca-bundle.lock.json " in builder
+    assert "COPY infra/docker/replace_core_ca_bundle.py " in builder
+    assert '--apk-sha256 "$CA_CERTIFICATES_BUNDLE_APK_SHA256"' in builder
+    assert '--version "$CA_CERTIFICATES_BUNDLE_VERSION"' in builder
+    assert (
+        'io.teamagent.contract.ca-certificates-bundle-apk-sha256="$CA_CERTIFICATES_BUNDLE_APK_SHA256"'
+    ) in final
+    assert (
+        'io.teamagent.contract.ca-certificates-bundle-version="$CA_CERTIFICATES_BUNDLE_VERSION"'
+    ) in final
+
+
 def test_core_runtime_is_uid_10001_read_only_ready_and_python_health_checked() -> None:
     final = _stage("final")
     assert "USER 10001:10001" in final
@@ -181,6 +200,9 @@ def test_core_dockerignore_is_deny_by_default_and_excludes_sensitive_state() -> 
         "!scripts/ingest_sources.py",
         "!scripts/run_morning_digest_fargate.py",
         "!infra/codebuild/teamagent_runtime_contract.json",
+        "!infra/docker/replace_core_ca_bundle.py",
+        "!infra/docker/core-ca-bundle.lock.json",
+        "!infra/docker/vendor/ca-certificates-bundle-20260909-r3.apk",
     ):
         assert allowed in text
     assert "!scripts/**" not in text

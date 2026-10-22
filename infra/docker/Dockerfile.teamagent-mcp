@@ -15,6 +15,8 @@ ARG E5_MODEL_REVISION=3d7cfbdacd47fdda877c5cd8a79fbcc4f2a574f3
 ARG TORCH_VERSION=2.13.0+cpu
 ARG TORCH_ARM64_WHEEL_URL=https://download-r2.pytorch.org/whl/cpu/torch-2.13.0%2Bcpu-cp314-cp314-manylinux_2_28_aarch64.whl
 ARG TORCH_ARM64_WHEEL_SHA256=ca021f9eb2f8345c83fa03e3a04587308afb8df71bd472670b3ece00df58621c
+ARG CA_CERTIFICATES_BUNDLE_VERSION=20260909-r3
+ARG CA_CERTIFICATES_BUNDLE_APK_SHA256=4f57ebd7dc21d78ecce228f397d0a4ee46b5cfc777ac5f292821d41a97bfd896
 ARG BAKED_APP_HTML_SHA256=716ac25a96516efd6443277c903102d514f3f86729f8706baea41ee48f0ecdeb
 ARG APP_HTML_SOURCE=s3
 ARG APP_HTML_SHA256=fd62e56e51d3cee25c3d3a87085048fae08ce3babc82480411c61df36e467e28
@@ -23,6 +25,8 @@ ARG APP_HTML_MANIFEST_SHA256=1a2834b62a12c60c31ee874820a3a5cfccafb7960193047a17a
 ARG APP_HTML_BUILD_INPUTS_SHA256=28ea06cf04cf5d0774ea3e9635cb7dfcfcc2985e49160521cee412431cf38bba
 
 FROM ghcr.io/astral-sh/uv:latest@${UV_ARM64_DIGEST} AS uv
+
+FROM cgr.dev/chainguard/python:latest@${PYTHON_RUNTIME_ARM64_DIGEST} AS runtime-base
 
 FROM cgr.dev/chainguard/python:latest-dev@${PYTHON_BUILDER_ARM64_DIGEST} AS builder
 USER 0
@@ -39,6 +43,8 @@ ARG E5_MODEL_REVISION
 ARG TORCH_VERSION
 ARG TORCH_ARM64_WHEEL_URL
 ARG TORCH_ARM64_WHEEL_SHA256
+ARG CA_CERTIFICATES_BUNDLE_VERSION
+ARG CA_CERTIFICATES_BUNDLE_APK_SHA256
 ARG BAKED_APP_HTML_SHA256
 ARG APP_HTML_SOURCE
 ARG APP_HTML_SHA256
@@ -73,6 +79,19 @@ parsed_receipt = json.loads(receipt); \
 assert parsed_receipt['subject'] == 'core'; \
 assert parsed_receipt['values'] == expected_values; \
 assert all(os.environ[entry['build_arg']] == entry['value'] for entry in entries)"
+
+# Keep Python 3.14; prepare only the CA payload and inventory from the exact runtime base.
+COPY --from=runtime-base / /tmp/core-ca/root/
+COPY infra/docker/vendor/ca-certificates-bundle-20260909-r3.apk /tmp/core-ca/bundle.apk
+COPY infra/docker/core-ca-bundle.lock.json /tmp/core-ca/lock.json
+COPY infra/docker/replace_core_ca_bundle.py /tmp/core-ca/replace_core_ca_bundle.py
+RUN set -eu; \
+    printf '%s  %s\n' 0533366dfd74a1df3c01286ed6bbdff9c6977b03b62a360c755a131168c3d3a1 /tmp/core-ca/lock.json | sha256sum -c -; \
+    python /tmp/core-ca/replace_core_ca_bundle.py prepare \
+      --root /tmp/core-ca/root --base-db /tmp/core-ca/base-installed \
+      --apk /tmp/core-ca/bundle.apk --lock /tmp/core-ca/lock.json \
+      --apk-sha256 "$CA_CERTIFICATES_BUNDLE_APK_SHA256" \
+      --version "$CA_CERTIFICATES_BUNDLE_VERSION"
 
 ENV UV_COMPILE_BYTECODE=1 \
     UV_LINK_MODE=copy \
@@ -192,7 +211,8 @@ RUN set -eu; \
     awk -F: '$1 != "teamagent" && $3 != 10001' /etc/group > /runtime-etc/group; \
     printf '%s\n' 'teamagent:x:10001:' >> /runtime-etc/group
 
-FROM cgr.dev/chainguard/python:latest@${PYTHON_RUNTIME_ARM64_DIGEST} AS final
+FROM runtime-base AS final
+USER 0
 WORKDIR /app
 
 ARG GIT_COMMIT
@@ -218,9 +238,20 @@ ARG PYTHON_BINARY_SHA256
 ARG E5_MODEL_REVISION
 ARG TORCH_VERSION
 ARG TORCH_ARM64_WHEEL_SHA256
+ARG CA_CERTIFICATES_BUNDLE_VERSION
+ARG CA_CERTIFICATES_BUNDLE_APK_SHA256
 ARG RUNTIME_CONTRACT_SHA256
 ARG RUNTIME_RECEIPT_B64
 ARG RUNTIME_RECEIPT_SHA256
+
+COPY --from=builder /tmp/core-ca/root/etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
+COPY --from=builder /tmp/core-ca/root/var/lib/db/sbom/ca-certificates-bundle-20260909-r3.spdx.json /var/lib/db/sbom/ca-certificates-bundle-20260909-r3.spdx.json
+COPY --from=builder /tmp/core-ca/root/usr/lib/apk/db/installed /usr/lib/apk/db/installed
+# Verify the final scanner inventory and payload; remove the stale base SBOM.
+RUN --mount=type=bind,from=builder,source=/tmp/core-ca,target=/tmp/core-ca \
+    ["/usr/bin/python3.14", "-B", "/tmp/core-ca/replace_core_ca_bundle.py", "finalize", \
+     "--root", "/", "--base-db", "/tmp/core-ca/base-installed", \
+     "--apk", "/tmp/core-ca/bundle.apk", "--lock", "/tmp/core-ca/lock.json"]
 
 COPY --from=builder /runtime-etc/passwd /etc/passwd
 COPY --from=builder /runtime-etc/group /etc/group
@@ -275,6 +306,8 @@ LABEL org.opencontainers.image.revision="$GIT_COMMIT" \
       io.teamagent.contract.e5-model-revision="$E5_MODEL_REVISION" \
       io.teamagent.contract.torch-version="$TORCH_VERSION" \
       io.teamagent.contract.torch-arm64-wheel-sha256="$TORCH_ARM64_WHEEL_SHA256" \
+      io.teamagent.contract.ca-certificates-bundle-version="$CA_CERTIFICATES_BUNDLE_VERSION" \
+      io.teamagent.contract.ca-certificates-bundle-apk-sha256="$CA_CERTIFICATES_BUNDLE_APK_SHA256" \
       io.teamagent.contract.baked-app-html-sha256="$BAKED_APP_HTML_SHA256" \
       io.teamagent.contract.baked-app-html-version-id="$BAKED_APP_HTML_VERSION_ID" \
       io.teamagent.contract.app-html-source="$APP_HTML_SOURCE" \
