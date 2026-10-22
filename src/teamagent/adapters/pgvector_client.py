@@ -1121,6 +1121,7 @@ class PgVectorClient:
         limit: int = 3,
         stage: int = 1,
         request_id: str | None = None,
+        soft_industry: bool = False,
     ) -> list[dict[str, Any]]:
         """事例集から 1 段ぶんの候補を返す（段の選択は呼び出し側が行う）。
 
@@ -1137,9 +1138,10 @@ class PgVectorClient:
         予定にブランド名で書かれた社外 MTG（「【社外】<ブランド>様」）でも当たるようにする。
         **母集団（case_corpus='true'）は広げない**（照合キーが 1 本増えるだけ）。
 
-        段3/4 は ``industry`` が None なら **呼ばれても空を返す**（業種を推測しない）。
+        段3/4 は ``industry`` が None なら空を返す。Drive用の soft_industry 時は
+        段4を業種で絞らず最大30件取り、呼び出し側で選別する。
         """
-        limit = max(1, min(5, int(limit)))
+        limit = max(1, min(30 if soft_industry else 5, int(limit)))
         base = f"""
             SELECT
 {self._CASE_COLUMNS}
@@ -1182,13 +1184,16 @@ class PgVectorClient:
             )
             params["product_like"] = f"%{self._escape_like(product.strip())}%"
         elif stage == 4:
-            if not industry:
+            if soft_industry:
+                where = ""
+            elif not industry:
                 return []
-            where = (
-                " AND COALESCE(d.metadata->>'case_industry', d.metadata->>'cls_industry')"
-                " = %(industry)s"
-            )
-            params["industry"] = industry
+            else:
+                where = (
+                    " AND COALESCE(d.metadata->>'case_industry', d.metadata->>'cls_industry')"
+                    " = %(industry)s"
+                )
+                params["industry"] = industry
         else:
             return []
 
@@ -1760,12 +1765,13 @@ class PgVectorClient:
         client_name: str,
         *,
         limit: int = 8,
+        drive_only: bool = False,
     ) -> list[SearchHit]:
         """名指し資料を種類を問わず新しい順に引く（RLS 済み接続・読み取りだけ）。"""
         if not client_name.strip():
             return []
         pattern = f"%{self._escape_like(client_name.strip())}%"
-        sql = """
+        sql = f"""
             SELECT -(abs(hashtext(d.id::text)::bigint) + 1) AS chunk_id,
                    d.id AS document_id, d.title, d.source_uri, d.source_type::text AS source_type,
                    d.metadata,
@@ -1775,9 +1781,10 @@ class PgVectorClient:
               AND (d.title ILIKE %s ESCAPE '\\'
                    OR d.metadata->>'cls_project' ILIKE %s ESCAPE '\\'
                    OR d.metadata->>'client_name' ILIKE %s ESCAPE '\\')
+              {"AND d.source_type IN ('gdrive', 'other')" if drive_only else ""}
             ORDER BY d.modified_at DESC NULLS LAST, d.id DESC
             LIMIT %s
-        """  # nosec B608
+        """  # nosec B608 - source条件は固定文字列のみ
         with conn.cursor() as cur:
             cur.execute(sql, [pattern, pattern, pattern, min(8, max(1, limit))])
             rows = cur.fetchall()

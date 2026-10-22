@@ -47,6 +47,21 @@ def _client() -> PgVectorClient:
     return PgVectorClient("postgresql://user:pw@localhost/db")
 
 
+def test_drive_soft_industry_reads_thirty_without_an_industry_predicate() -> None:
+    conn = _Conn()
+    _client().list_case_studies(conn, industry="食品", stage=4, limit=30, soft_industry=True)  # type: ignore[arg-type]
+    assert conn.params == [{"limit": 30}]
+    assert "d.metadata->>'case_corpus' = 'true'" in conn.sql[0]
+    assert "= %(industry)s" not in conn.sql[0]
+
+
+def test_named_comparison_filters_drive_before_limiting_candidates() -> None:
+    conn = _Conn()
+    _client().find_documents_for_advertiser(conn, "架空会社甲", drive_only=True)  # type: ignore[arg-type]
+    assert "d.source_type IN ('gdrive', 'other')" in conn.sql[0]
+    assert conn.params[0] == ["%架空会社甲%"] * 3 + [8]
+
+
 def test_population_is_pinned_to_case_corpus_in_every_stage() -> None:
     """変異: WHERE から ``case_corpus = 'true'`` を外すと全社資料が返って赤。"""
     client = _client()

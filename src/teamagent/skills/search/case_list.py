@@ -99,7 +99,7 @@ def render(
         else "\n"
     )
     seen: set[tuple[str, str]] = set()
-    for hit in case_target_hits(hits, target):
+    for hit in case_target_hits(hits, target, soft_industry=drive_only):
         meta = hit.metadata or {}
         entry = entry_from_hit(hit, url=url_of(hit))
         url = _safe_url(entry.url)
