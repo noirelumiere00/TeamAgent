@@ -20,6 +20,10 @@ from teamagent.skills.search.composite import SlackItem
 from teamagent.skills.search.not_found import case_target_hits
 from teamagent.skills.search.schema import DocumentReference
 
+# shortcut: 候補の既定幅は30件、Drive事例の取りこぼしが続く場合はページングへ拡張する。
+CANDIDATE_LIMIT = 30
+EMPTY_DRIVE_CASES = "Drive に資料のある事例は見つかりませんでした。"
+
 
 def case_link(url: str | None, label: str) -> str | None:
     """定型カードの2種類のリンクだけを、正確な原本・会話ホストへ許す。"""
@@ -86,6 +90,7 @@ def render(
     *,
     displayed_refs: list[DocumentReference] | None = None,
     cards: bool = False,
+    drive_only: bool = False,
 ) -> str:
     lines: list[str] = []
     separator = (
@@ -95,12 +100,22 @@ def render(
     )
     seen: set[tuple[str, str]] = set()
     for hit in case_target_hits(hits, target):
+        meta = hit.metadata or {}
         entry = entry_from_hit(hit, url=url_of(hit))
         url = _safe_url(entry.url)
         link_label = "資料"
         ref = (hit.metadata or {}).get(drive_first.REFERENCE_KEY)
-        if cards and ref is None:
+        if (cards or drive_only) and ref is None:
             ref = drive_first.canonical_reference(hit.metadata or {}, hit.content)
+        if drive_only and (
+            ref is None
+            or ref.kind != "drive"
+            or not case_link(ref.url, "資料を見る")
+            or entry.kind in {"karte", "research", "deal"}
+            or str(meta.get("is_sales_fb") or "").lower() in {"true", "1", "yes"}
+            or re.search(r"営業フィードバック|営業FB", str(meta.get("channel_name") or ""))
+        ):
+            continue
         if ref is not None:
             url = _safe_url(ref.url)
             link_label = drive_first.label(ref)
@@ -120,7 +135,6 @@ def render(
         if (not url and ref is None) or key in seen or entry.kind in {"karte", "research"}:
             continue
         seen.add(key)
-        meta = hit.metadata or {}
         if ref is not None:
             details = _details(str(meta.get("case_effect") or hit.content))
             mark = (
@@ -169,7 +183,7 @@ def render(
     return separator.join(lines)
 
 
-def slack_cases(items: Sequence[SlackItem]) -> list[SearchHit]:
+def slack_cases(items: Sequence[SlackItem], *, drive_only: bool = False) -> list[SearchHit]:
     return [
         SearchHit(
             chunk_id=-10000 - i,
@@ -185,4 +199,5 @@ def slack_cases(items: Sequence[SlackItem]) -> list[SearchHit]:
             },
         )
         for i, item in enumerate(items)
+        if not drive_only or not re.search(r"営業フィードバック|営業FB", item.hit.channel)
     ]

@@ -718,7 +718,7 @@ def case_lookup_by_industry(
                         conn,
                         product=product,
                         industry=None,
-                        limit=5,
+                        limit=max(5, limit),
                         stage=5,
                         request_id=request_id,
                     )
