@@ -358,3 +358,31 @@ test('s1 nested or empty candidates never authorize direct delivery', async () =
     assert.equal(p.posts.length, 0);
   }
 });
+
+for (const count of [1, 3]) {
+  test(`direct Drive answer keeps ${count} used originals once and excludes unused sources`, async () => {
+    const urls = Array.from({length: count}, (_, i) => `https://drive.google.com/file/d/USED${i}/view`);
+    const answer = '資料では同じ進め方です。\n\n' + urls.map(url => `<${url}|資料を見る>`).join(' / ');
+    const p = setup({searchResult: {found: true, answer_format: 'compact', answer,
+      displayed_refs: urls.map(url => ({kind: 'drive', url})),
+      direct_delivery: {answer_kind: 'comparison', answer_format: 'compact', answer},
+      hits: [{url: 'https://drive.google.com/file/d/UNUSED/view'}],
+      slack_hits: [{permalink: 'https://example.slack.com/archives/C1/p1234567890123456'}]}});
+    await p.finalize();
+    assert.equal(p.posts.length, 1);
+    assert.equal(p.posts[0].text, answer);
+    for (const url of urls) assert.equal(p.posts[0].text.split(url).length - 1, 1);
+    p.end();
+    assert.equal((await p.send('追加の説明'))?.cancel, true);
+  });
+}
+
+test('direct Drive normal fallback does not append unused search sources', async () => {
+  const answer = '食品の施策では配信面と出演者を組み合わせています。';
+  const p = setup({searchResult: {found: true, answer, displayed_refs: [],
+    direct_delivery: {answer_kind: 'comparison', answer},
+    hits: [{url: 'https://drive.google.com/file/d/UNUSED/view'}]}});
+  await p.finalize();
+  assert.equal(p.posts.length, 1);
+  assert.equal(p.posts[0].text, answer);
+});

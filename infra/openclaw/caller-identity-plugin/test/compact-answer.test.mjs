@@ -117,14 +117,16 @@ test('a failed additional tool keeps its recovery reply instead of a stale searc
 });
 
 test('a PDF receipt does not acknowledge the undelivered status answer requested alongside it', () => {
-  const p = setup('施策の状況を教えて。提案PDFも送って');
-  p.remember({answer_format: 'compact', answer: '施策は実施済みです。'});
-  p.remember({delivered_count: 2,
-    delivery: {kind: 'knowledge_deliver', status: 'posted', delivered_count: 2}}, 'teamagent__knowledge_deliver');
-  const text = '施策は実施済みです。';
-  const out = p.hooks.get('reply_payload_sending')({runId: p.ctx.runId, payload: {text}}, p.ctx);
-  assert.notEqual(out?.cancel, true);
-  assert.equal(out?.payload?.text ?? text, text);
+  for (const mode of [{answer_format: 'compact'}, {displayed_refs: []}]) {
+    const p = setup('施策の状況を教えて。提案PDFも送って');
+    p.remember({...mode, answer: '施策は実施済みです。'});
+    p.remember({delivered_count: 2,
+      delivery: {kind: 'knowledge_deliver', status: 'posted', delivered_count: 2}}, 'teamagent__knowledge_deliver');
+    const text = '施策は実施済みです。';
+    const out = p.hooks.get('reply_payload_sending')({runId: p.ctx.runId, payload: {text}}, p.ctx);
+    assert.notEqual(out?.cancel, true);
+    assert.equal(out?.payload?.text ?? text, text);
+  }
 });
 
 test('a completed PDF batch suppresses its own extra receipt after the compact answer was selected', () => {
@@ -204,3 +206,31 @@ test('receipt thread from trusted Slack context is signed for omiyage', () => {
   const claim = JSON.parse(Buffer.from(result.params._user_context.caller_claim.split('.')[0], 'base64url'));
   assert.equal(claim.thread, '1792461784.695389');
 });
+
+for (const direct of [false, true]) {
+  test(`Drive-first compact preserves backend body and used links with direct=${direct}`, () => {
+    const p = setup('提案の進め方は？', undefined, direct);
+    const url = 'https://drive.google.com/file/d/USED/view';
+    const answer = `進行表を先に共有します。\n\n<${url}|資料を見る>`;
+    p.remember({answer_format: 'compact', answer, found: true,
+      displayed_refs: [{kind: 'drive', drive_file_id: 'USED', url}],
+      hits: [{url: 'https://drive.google.com/file/d/UNUSED/view'}],
+      slack_hits: [{permalink: 'https://example.slack.com/archives/C1/p1234567890123456'}]});
+    const out = p.send('進行表を先に共有します。 https://example.slack.com/archives/C1/p1234567890123456');
+    assert.equal(out, answer);
+    assert.equal(out.split(url).length - 1, 1);
+  });
+}
+
+for (const direct of [false, true]) {
+  for (const repeat of [1, 100]) {
+    test(`Drive normal fallback survives without unused inventory: direct=${direct}, repeat=${repeat}`, () => {
+      const p = setup('食品業界の施策の進め方は？', undefined, direct);
+      const answer = '食品の施策では配信面と出演者を組み合わせています。'.repeat(repeat);
+      p.remember({answer, found: true, displayed_refs: [],
+        hits: [{url: 'https://drive.google.com/file/d/UNUSED/view'}],
+        slack_hits: [{permalink: 'https://example.slack.com/archives/C1/p1234567890123456'}]});
+      assert.equal(p.send('未使用資料の一覧です。 https://drive.google.com/file/d/UNUSED/view'), answer);
+    });
+  }
+}

@@ -10,7 +10,7 @@ from teamagent.skills.search.composite import SlackItem, SlackLookup
 from teamagent.skills.search.expand import ExpansionResult
 from teamagent.skills.search.fanout_sources import SourceResult
 from teamagent.skills.search.schema import SearchInput, SlackHitOut
-from tests.skills.search.test_fanout import META, make
+from tests.skills.search.test_fanout import META, _converse, make
 
 DRIVE = "https://drive.google.com/file/d/ALPHA/view"
 POST = "https://example.slack.com/archives/CALPHA/p1234567890123456"
@@ -70,15 +70,21 @@ def test_live_slack_case_uses_drive_instead_of_post(setup_search):
     skill._saved_records_mock.assert_called_once()
 
 
-def test_unresolved_slack_attachment_is_explicitly_unread(setup_search):
+def test_unresolved_slack_attachment_is_explicitly_unread(setup_search, monkeypatch):
     skill, pg = setup_search
     pg.resolve_file_urls_by_titles.return_value = {}
-    # 事例一覧では除外するが、通常の資料探しでは従来どおり未読の出典を示す。
+    # 会話を根拠に答えられるが、未読添付や投稿の URL は資料として添えない。
+    skill._bedrock.converse.return_value = _converse(
+        "Slack にだけある資料（本文未読）です。[S:slack0]"
+    )
+    monkeypatch.setattr(fanout, "build_summary_client", lambda: skill._bedrock)
     out = skill.run(SearchInput(query="食品の資料を探して"), SkillContext(metadata=META))
     assert "Slack にだけある資料（本文未読）" in out.answer
     assert "本文未読" in out.answer
     assert "[資料]" not in out.answer
     assert out.slack_hits[0].reference.unread
+    assert out.displayed_refs == []
+    assert POST not in out.answer
 
 
 def test_off_and_outside_allowlist_are_byte_identical(setup_search, monkeypatch):
@@ -189,9 +195,14 @@ def test_named_karte_expand_and_main_all_use_canonical_function(setup_search, mo
         f"{name}_alpha.pdf": f"https://drive.google.com/file/d/{name.upper()}/view"
         for name in ("main", "named", "karte", "expand")
     }
+    skill._bedrock.converse.return_value = _converse(
+        "主資料を確認しました。[S:1]\nカルテを確認しました。[S:3]"
+    )
+    monkeypatch.setattr(fanout, "build_summary_client", lambda: skill._bedrock)
     out = skill.run(SearchInput(query="食品の資料を探して"), SkillContext(metadata=META))
-    for name in ("MAIN", "NAMED", "KARTE", "EXPAND"):
+    for name in ("MAIN", "KARTE"):
         assert f"/d/{name}/" in out.answer
+    assert "/d/NAMED/" not in out.answer and "/d/EXPAND/" not in out.answer
     assert out.hits[0].reference.kind == "drive"
     requested = [
         name

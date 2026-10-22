@@ -258,3 +258,20 @@ for (const unrelatedTool of [false, true]) {
     assert.equal(p.posts.length, 0);
   });
 }
+
+test('empty revised pass uses the completed Drive answer rather than the original unlinked draft', async () => {
+  const p = setup();
+  const original = '平均171,325再生で施策Aが勝ちです。';
+  assert.equal(p.finalize(original)?.action, 'revise');
+  const url = 'https://drive.google.com/file/d/USED/view';
+  const answer = `資料では同じ進め方です。\n\n<${url}|資料を見る>`;
+  const data = {answer_format: 'compact', answer, found: true,
+    displayed_refs: [{kind: 'drive', drive_file_id: 'USED', url}]};
+  p.hooks.get('after_tool_call')({toolName: 'teamagent__search', runId: p.ctx.runId,
+    result: {content: [{type: 'text', text: JSON.stringify(data)}]}}, p.ctx);
+  await p.end([{role: 'assistant', content: [{type: 'text', text: original}]},
+    {role: 'toolResult', content: [{type: 'text', text: JSON.stringify(data)}]}]);
+  assert.equal(p.posts.length, 1);
+  assert.equal(p.posts[0].text, answer);
+  assert.equal(p.send('重複する返答')?.cancel, true);
+});

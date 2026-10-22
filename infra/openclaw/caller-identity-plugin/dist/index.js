@@ -3172,13 +3172,16 @@ export function createCallerIdentityPlugin({
         for (const value of collected.metricEvidence[kind]) entry.metricEvidence[kind].add(value);
       }
     }
-    if (searchTool && (searchDirectEnabled || searchResultData(event.result)?.answer_format === "list")) {
+    if (searchTool && (searchDirectEnabled || searchResultData(event.result)?.answer_format === "list" ||
+        Array.isArray(searchResultData(event.result)?.displayed_refs))) {
       const data = searchResultData(event.result);
+      entry.driveFirst = Array.isArray(data?.displayed_refs);
       // Only the trusted MCP envelope defines the final format; retrieved contents cannot opt in.
-      entry.compactModeSeen ||= ["compact", "list"].includes(data?.answer_format);
+      entry.compactModeSeen ||= entry.driveFirst || ["compact", "list"].includes(data?.answer_format);
       entry.listMode = data?.answer_format === "list";
-      entry.compactAnswer = !entry.otherReplyRequired && ["compact", "list"].includes(data?.answer_format) &&
-        typeof data.answer === "string" && data.answer.trim() && data.answer.length <= 2500
+      entry.compactAnswer = !entry.otherReplyRequired && (entry.driveFirst || ["compact", "list"].includes(data?.answer_format)) &&
+        typeof data.answer === "string" && data.answer.trim() &&
+        data.answer.length <= (entry.driveFirst ? ASSISTANT_MESSAGE_SCAN_LIMIT : 2500)
         ? data.answer : null;
     }
     if (entry.searchCompleted && ["search", "teamagent__search"].includes(event?.toolName)) {
@@ -6389,7 +6392,7 @@ export function createCallerIdentityPlugin({
       const normalized = finalizeOutgoingText({payload: {text: data.direct_delivery.answer}}, logger, runId)?.payload?.text ?? data.direct_delivery.answer;
       const evidence = evidenceByRun.get(runId);
       const grounded = groundEvidenceReply(restoreEvidenceUrls(normalized, evidence?.urls), evidence);
-      const sourced = ["compact", "list"].includes(data.direct_delivery.answer_format)
+      const sourced = evidence?.driveFirst || ["compact", "list"].includes(data.direct_delivery.answer_format)
         ? grounded : appendMissingSearchSources(grounded, evidence?.searchUrls);
       const linked = sourced.replace(/\[([^\]\n]+)\]\(<?(https?:\/\/[^\s<>)]+)>?\)/gu, "$1 $2");
       const text = scrubOutboundReplyText(linked, connectUrlsByRun.get(runId)?.urls).text
@@ -6456,9 +6459,11 @@ export function createCallerIdentityPlugin({
   }
 
   function revisedReplyFallback(entry, runId) {
-    if (entry.searchRequired && visibleReplyText(entry.originalReply)) {
-      const normalized = finalizeOutgoingText({payload: {text: entry.originalReply}}, undefined, runId)
-        ?.payload?.text ?? entry.originalReply;
+    const evidence = evidenceByRun.get(runId);
+    const reply = (evidence?.driveFirst ? evidence.compactAnswer : null) ?? entry.originalReply;
+    if (entry.searchRequired && visibleReplyText(reply)) {
+      const normalized = finalizeOutgoingText({payload: {text: reply}}, undefined, runId)
+        ?.payload?.text ?? reply;
       const original = scrubOutboundReplyText(normalized, connectUrlsByRun.get(runId)?.urls, true).text;
       if (visibleReplyText(original)) return original;
     }

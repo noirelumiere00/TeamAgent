@@ -41,7 +41,12 @@ def test_found_with_rejected_compact_prose_returns_source_cards(
     monkeypatch.setenv("SEARCH_DRIVE_FIRST", str(int(drive_first_enabled)))
     monkeypatch.setenv("SEARCH_DRIVE_FIRST_ALLOWED_EMAILS", META["user_email"])
     skill, _ = make(_hits())
-    skill._summarize = MagicMock(return_value=(rejected, 0.003))
+    normal = "配信面と出演者を組み合わせた記録があります。"
+    skill._summarize = MagicMock(
+        side_effect=lambda *a, **kw: (
+            (rejected, 0.003) if kw.get("compact_sources") is not None else (normal, 0.004)
+        )
+    )
     out = run(
         skill,
         query="食品メーカーのショート動画の事例はある？",
@@ -53,6 +58,14 @@ def test_found_with_rejected_compact_prose_returns_source_cards(
         },
     )
     assert out.found and out.hits
+    if drive_first_enabled:
+        # 事例一覧以外は、使えなかった候補を資料カードとして復活させない。
+        assert out.answer == normal
+        assert out.answer_format is None
+        assert out.displayed_refs == []
+        assert NO_ANSWER not in out.answer and "https://" not in out.answer
+        assert skill._summarize.call_count == 2
+        return
     assert NO_ANSWER not in out.answer
     assert out.answer.startswith("*匿名案件1*（2025年9月）")
     assert "• 食品のショート動画を提案。\n• 配信面と出演者を組み合わせた。" in out.answer
@@ -123,14 +136,23 @@ def test_reported_question_keeps_the_existing_case_list_path(monkeypatch, fanout
 
 
 @pytest.mark.parametrize("fanout_enabled", [False, True])
-def test_normal_retry_failure_still_returns_retrieved_sources(monkeypatch, fanout_enabled):
+@pytest.mark.parametrize("drive_mode", [False, True])
+def test_normal_retry_failure_still_returns_retrieved_sources(
+    monkeypatch, fanout_enabled, drive_mode
+):
     monkeypatch.setenv("USE_SEARCH_FANOUT", str(int(fanout_enabled)))
+    monkeypatch.setenv("SEARCH_DRIVE_FIRST", str(int(drive_mode)))
+    monkeypatch.setenv("SEARCH_DRIVE_FIRST_ALLOWED_EMAILS", META["user_email"])
     skill, _ = make(_hits())
     skill._summarize = MagicMock(side_effect=[("根拠なし。[S:999]", 0.0), TimeoutError()])
     out = run(skill, query="進捗は？", meta={**META, "_search_compact_answer": True})
     assert out.found and out.answer
     assert NO_ANSWER not in out.answer and "根拠なし" not in out.answer
-    assert "https://drive.google.com/file/d/FILE1/view" in out.answer
+    if drive_mode:
+        assert out.answer == "資料は見つかりましたが、回答の作成を完了できませんでした。"
+        assert out.displayed_refs == []
+    else:
+        assert "https://drive.google.com/file/d/FILE1/view" in out.answer
     assert out.answer_format is None and out.direct_answer is None
 
 

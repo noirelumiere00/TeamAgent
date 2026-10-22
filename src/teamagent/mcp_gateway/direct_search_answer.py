@@ -75,7 +75,7 @@ def deliver(
         render_or_none(
             lambda: _case_rich_message(text), request_id=request_id, kind="search_case_list"
         )
-        if allow_case_links and kind == "list_fast"
+        if allow_case_links
         else None
     )
     if rich is not None:
