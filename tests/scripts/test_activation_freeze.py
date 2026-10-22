@@ -233,18 +233,31 @@ def test_unlock_matches_the_committed_declaration() -> None:
     2026-10-21 human gate で scope を core_media 契約 1 path へ切り替え、ca-certificates
     20260909-r0 → 20261020-r0 の上流入替へ追随する。#650 の release_evidence.py 宣言は
     ``previous_scope_20261021_release_evidence`` に退避し、その内容も完全一致で封印する。
+
+    2026-10-22 human gate で scope を OpenClaw 契約 1 path へ切り替える。ca bundle r3 の
+    runtime バンプに追随し、直前の media 宣言は ``previous_scope_20261022_core_media`` に退避する。
     """
     unlock = _freeze_doc()["unlock"]
     if unlock["active"]:
-        assert unlock["scope_paths"] == [
-            "infra/codebuild/teamagent_core_media_release_contract.json"
-        ]
+        assert unlock["scope_paths"] == ["infra/codebuild/openclaw_bundle_contract.json"]
         assert (
             unlock["reason"]
-            == "【media の apk ロック追随】 【2026-10-21 apk ロック追随】mcp 便 r67 の空撃ちで、Alpine v3.24 / edge の ca-certificates 20260909-r0 が上流にもベース同梱にも無く、上流は 20261020-r0 へ入れ替わっていることを確認した。Dockerfile の明示 pin を 20261020-r0 へ追随させ、人が作成した lock の 1 行を差し替える（241→241 行）。社内網では手元の Docker 実ビルドができないため、実インベントリとの一致は段 3 の AWS image-builder が cmp で照合する。lock の sha256 が動くため契約の artifact.apk-lock.sha256 と release 契約の sha が動き、世代 4 本を再導出する。scope は core_media 契約 1 path。"
+            == "【2026-10-22 OpenClaw の ca-certificates-bundle 更新】oc28 の provenance builder が HIGH CVE-2026-111943（ca-certificates-bundle 20260909-r2）で停止したため、Chainguard node の arm64 runtime を 4e3acbdf…（nodejs-26 26.12.1-r2・glibc 2.44-r9・ca-certificates-bundle 20260909-r3）へ上げる。Claude が取得した base-evidence.json の /usr/bin/node 実測 SHA に契約を 5a7e0d20… → 6410d7ee… と追随させ、image-attestor 世代を再導出する。scope は OpenClaw 契約 1 path。OC の ECR 例外は既に空で追加・撤去は不要。mcp の Python 3.15 移行は別判断とし、runtime/core_media 契約は変更しない。世代の公開と OC provenance builder の inline buildspec 契約 SHA ピンの更新は別途必要。"
         )
         assert (
             unlock["gate"]
+            == "human gate 2026-10-22（小俣さん: oc28 の停止報告を受け mcp 側は「期限つき例外＋3.15移行」を選択。OC の node 土台更新は 10-21「マージまで全て任せる」の委任範囲で Claude が判断。#597 と同じ範囲で契約・凍結/世代まで更新）"
+        )
+        previous = unlock["previous_scope_20261022_core_media"]
+        assert previous["scope_paths"] == [
+            "infra/codebuild/teamagent_core_media_release_contract.json"
+        ]
+        assert (
+            previous["reason"]
+            == "【media の apk ロック追随】 【2026-10-21 apk ロック追随】mcp 便 r67 の空撃ちで、Alpine v3.24 / edge の ca-certificates 20260909-r0 が上流にもベース同梱にも無く、上流は 20261020-r0 へ入れ替わっていることを確認した。Dockerfile の明示 pin を 20261020-r0 へ追随させ、人が作成した lock の 1 行を差し替える（241→241 行）。社内網では手元の Docker 実ビルドができないため、実インベントリとの一致は段 3 の AWS image-builder が cmp で照合する。lock の sha256 が動くため契約の artifact.apk-lock.sha256 と release 契約の sha が動き、世代 4 本を再導出する。scope は core_media 契約 1 path。"
+        )
+        assert (
+            previous["gate"]
             == "human gate 2026-10-21（小俣さん「マージまで全て任せる」・Alpine 上流で ca-certificates 20260909-r0 → 20261020-r0 入替）"
         )
         assert unlock["previous_scope_20261021_release_evidence"] == {

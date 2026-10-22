@@ -100,6 +100,10 @@ contract が独立承認で active になった後だけ、次の固定経路を
 便の ECR 検査で新しい検出が出た場合は、#568 と同じ完全一致・期限つき例外の手順で、その分だけ登録する。
 ベースを上げるときは、/usr/bin/node を実測して契約の node probe と `test_openclaw_runtime_contract.py` の表を同じ PR で更新する（#503→#507）。
 
+2026-10-22: oc28 の HIGH `CVE-2026-111943` に対応し、runtime ベースを node 26.12.1（nodejs-26 26.12.1-r2）・glibc 2.44-r9 の世代へ上げた。
+`ca-certificates-bundle` は 20260909-r2 → 20260909-r3。Claude が取得した arm64 レイヤの実測値で node probe を同期した。
+OpenClaw の ECR 例外はすでに空で、追加・撤去はない。Docker 実ビルドと実イメージの Trivy 検査は便で確認する。
+
 build role は candidate/release repository、publisher evidence、deployment
 resource を変更できません。publisher/launcher も ECS、EventBridge、
 task definition、service を変更できません。

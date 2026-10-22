@@ -219,6 +219,10 @@ NODE_BINARY_SHA256_BY_RUNTIME_DIGEST = {
     "sha256:f99475923192f82504a29552820f26e4bb96dbf2bfdce4569e5962cd75ac055a": (
         "5a7e0d208999f408af3c0c2e91f58bc2a0c57cfb9dfb4bf5a689979eeb970aa8"
     ),
+    # 2026-10-22 Claude 実測: nodejs-26 26.12.1-r2・glibc 2.44-r9・ca-certificates-bundle 20260909-r3。
+    "sha256:4e3acbdfc5647f9c40ee16ad0f3937309847489948d85dbb0a4f4a766fd4360d": (
+        "6410d7ee22c666fb81dc671fefeac4370918a554156700a97f6c5af65ffd4501"
+    ),
 }
 
 
