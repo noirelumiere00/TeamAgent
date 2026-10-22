@@ -19,6 +19,7 @@ from datetime import date, timedelta
 from pathlib import Path
 from typing import Any
 
+from teamagent.media.proposal_template import BU2_AUXILIARY_KEYS, template_auxiliary_keys
 from teamagent.skills.proposal_deck.contract import (
     PROPOSAL_BUILDER_REQUIRED_AUXILIARY,
     PROPOSAL_BUILDER_TEMPLATE_PROFILE,
@@ -37,7 +38,6 @@ PB_TOKEN_PATTERN = re.compile(r"\{\{PB-[^{}]+\}\}")
 LEGACY_INSTRUCTION_PATTERN = re.compile(r"自動入力|貼り付けてください|はめ込|転記|差し替え")
 BRACE_CHARACTER_PATTERN = re.compile(r"[{}｛｝]")
 _PROPOSAL_BUILDER_REQUIRED_DATE_OFFSETS = frozenset(range(-56, 22, 7))
-_PROPOSAL_BUILDER_EXPECTED_SLIDE_COUNT = 83
 
 # python-pptx の GROUP shape type 値（MSO_SHAPE_TYPE.GROUP == 6）。
 _GROUP_SHAPE_TYPE = 6
@@ -428,6 +428,7 @@ def render_pptx(
     proposal_date: date | None = None,
     agency_route: bool = True,
     business_unit: str = "BU2",
+    source_notes: dict[str, str] | None = None,
 ) -> Path:
     """テンプレ pptx を読み、placeholder を全置換して out_path に保存。
 
@@ -439,6 +440,7 @@ def render_pptx(
     from teamagent.media.proposal_cleanup import (
         finalize_proposal_content,
         prepare_proposal_content,
+        proposal_bu1_slide_ids,
         proposal_bu2_slide_ids,
         proposal_emme_slide_ids,
         proposal_template_samples,
@@ -450,19 +452,22 @@ def render_pptx(
     samples = proposal_template_samples(prs)
     emme_slide_ids = proposal_emme_slide_ids(prs)
     bu2_slide_ids = proposal_bu2_slide_ids(prs)
+    bu1_slide_ids = proposal_bu1_slide_ids(prs)
     inventory = inspect_template(prs)
     required_template_ids: set[int] = set()
     if template_profile == PROPOSAL_BUILDER_TEMPLATE_PROFILE:
         required_template_ids = set(VALID_IDS)
+        try:
+            required_auxiliary = template_auxiliary_keys(template_path, inventory.slide_count)
+        except ValueError as exc:
+            raise UnfilledPlaceholderError(str(exc)) from exc
         missing_auxiliary_values = PROPOSAL_BUILDER_REQUIRED_AUXILIARY - set(
             auxiliary_placeholders or {}
         )
-        invalid_auxiliary_values = (
-            set(auxiliary_placeholders or {}) != PROPOSAL_BUILDER_REQUIRED_AUXILIARY
+        invalid_auxiliary_values = set(auxiliary_placeholders or {}) - (
+            PROPOSAL_BUILDER_REQUIRED_AUXILIARY | BU2_AUXILIARY_KEYS
         )
-        invalid_auxiliary_tokens = (
-            set(inventory.auxiliary_keys) != PROPOSAL_BUILDER_REQUIRED_AUXILIARY
-        )
+        invalid_auxiliary_tokens = set(inventory.auxiliary_keys) != required_auxiliary
         if missing_auxiliary_values or invalid_auxiliary_values:
             raise UnfilledPlaceholderError(
                 "proposal-builder auxiliary values must exactly match the integrated "
@@ -482,8 +487,6 @@ def render_pptx(
             raise UnfilledPlaceholderError(
                 "integrated template numeric inventory must exactly match the 95-ID contract"
             )
-        if inventory.slide_count != _PROPOSAL_BUILDER_EXPECTED_SLIDE_COUNT:
-            raise UnfilledPlaceholderError("integrated template must contain exactly 83 slides")
         if inventory.template_versions != {PROPOSAL_BUILDER_TEMPLATE_PROFILE}:
             raise UnfilledPlaceholderError(
                 "integrated template version marker is missing or ambiguous"
@@ -496,7 +499,7 @@ def render_pptx(
             )
 
     placeholders, auxiliary_placeholders = prepare_proposal_content(
-        prs, placeholders, auxiliary_placeholders or {}
+        prs, placeholders, auxiliary_placeholders or {}, source_notes
     )
     filled: set[int] = set()
     for tf in _iter_text_frames(prs):
@@ -513,6 +516,7 @@ def render_pptx(
         samples,
         emme_slide_ids=emme_slide_ids,
         bu2_slide_ids=bu2_slide_ids,
+        bu1_slide_ids=bu1_slide_ids,
         business_unit=business_unit,
         product_sector=product_sector,
         proposal_date=proposal_date,
@@ -605,6 +609,8 @@ def render_deck(
     enable_images=True のとき composer_out.evidence_images を空枠へ画像注入する
     （既定 False＝従来どおりテキストのみ・後方互換）。
     """
+    from teamagent.media.proposal_bu2 import bu2_auxiliary_values, bu2_source_notes
+
     placeholders = materialize_placeholders(composer_out)
     return render_pptx(
         template_path,
@@ -612,13 +618,17 @@ def render_deck(
         out_path,
         fail_if_missing=fail_if_missing,
         evidence_images=composer_out.evidence_images if enable_images else None,
-        auxiliary_placeholders=composer_out.auxiliary_placeholders,
+        auxiliary_placeholders={
+            **composer_out.auxiliary_placeholders,
+            **bu2_auxiliary_values(composer_out),
+        },
         posting_start_date=composer_out.posting_start_date,
         template_profile=composer_out.template_profile,
         product_sector=composer_out.product_sector,
         proposal_date=composer_out.proposal_date,
         agency_route=composer_out.agency_route,
         business_unit=composer_out.business_unit,
+        source_notes=bu2_source_notes(composer_out),
     )
 
 

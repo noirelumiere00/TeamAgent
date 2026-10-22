@@ -7,6 +7,8 @@ from collections.abc import Iterator
 from datetime import date
 from typing import Any
 
+from teamagent.media.proposal_template import BU2_AUXILIARY_KEYS
+
 REVIEW_NOTES_HEADER = "要確認一覧（自動生成）"
 _NUMERIC = re.compile(r"[｛{]\s*(\d+)\s*[:：]?[^｝}]*[｝}]")
 _AUXILIARY = re.compile(r"\{\{(PB-[A-Z0-9_-]{1,60})\}\}")
@@ -92,12 +94,26 @@ def proposal_bu2_slide_ids(presentation: Any) -> set[int]:
     return excluded
 
 
+def proposal_bu1_slide_ids(presentation: Any) -> set[int]:
+    """Identify the three BU2-only pages from their original auxiliary fields."""
+    return {
+        slide.slide_id
+        for slide in presentation.slides
+        if any(
+            match.group(1) in BU2_AUXILIARY_KEYS
+            for text in _shape_texts(slide.shapes)
+            for match in _AUXILIARY.finditer(text)
+        )
+    }
+
+
 def finalize_proposal_content(
     presentation: Any,
     samples: dict[int, set[str]],
     *,
     emme_slide_ids: set[int],
     bu2_slide_ids: set[int],
+    bu1_slide_ids: set[int] | None = None,
     business_unit: str = "BU2",
     product_sector: str = "",
     proposal_date: date | None = None,
@@ -108,14 +124,14 @@ def finalize_proposal_content(
     from teamagent.media.operations import _set_text_keeping_format
     from teamagent.media.proposal_dates import proposal_today, schedule_warnings
 
-    excluded = set(bu2_slide_ids) if business_unit == "BU2" else set()
+    excluded = set(bu2_slide_ids) if business_unit == "BU2" else set(bu1_slide_ids or ())
     emme = [slide for slide in presentation.slides if slide.slide_id in emme_slide_ids]
     if product_sector.strip() and not _BEAUTY_SECTOR.search(product_sector):
         excluded.update(emme_slide_ids)
     elif emme and not product_sector.strip():
         append_review_note(emme[0], "警告: 媒体選択 要確認（業種未指定のためEMMEを保持）")
 
-    # 入力83枚の契約検査後に除外する。残るslide_id・装飾・座標は維持する。
+    # 入力FMTの契約検査後に除外する。残るslide_id・装飾・座標は維持する。
     for slide_id in list(presentation.slides._sldIdLst):
         if int(slide_id.id) in excluded:
             presentation.part.drop_rel(slide_id.rId)
@@ -194,10 +210,19 @@ def prepare_proposal_content(
     presentation: Any,
     placeholders: dict[int, str],
     auxiliary: dict[str, str],
+    source_notes: dict[str, str] | None = None,
 ) -> tuple[dict[int, str], dict[str, str]]:
-    """装飾を触らず、不足の理由は各ページのノートに保存して本文を空にする。"""
+    """不足理由をノートへ保存して本文を空欄化し、未使用ヒアリング枠を除去する。"""
     values = {key: value.translate(_SAFE_SYMBOLS) for key, value in placeholders.items()}
     aux_values = {key: value.translate(_SAFE_SYMBOLS) for key, value in auxiliary.items()}
+    unused_hearing = {
+        key
+        for key, value in aux_values.items()
+        if key in BU2_AUXILIARY_KEYS
+        and key.startswith("PB-BU2-HEARING-")
+        and value == ""
+        and key in (source_notes or {})
+    }
     for slide in presentation.slides:
         # 統合FMTの roundRect に範囲外の角丸値があり、表示系によって形が崩れる。
         for guide in slide._element.xpath(_ROUND_RECT_ADJ):
@@ -207,6 +232,18 @@ def prepare_proposal_content(
         combined = "\n".join(_shape_texts(slide.shapes))
         numeric_ids = {int(match.group(1)) for match in _NUMERIC.finditer(combined)}
         aux_keys = {match.group(1) for match in _AUXILIARY.finditer(combined)}
+        sources = [
+            reason for key, reason in sorted((source_notes or {}).items()) if key in aux_keys
+        ]
+        if sources:
+            frame = slide.notes_slide.notes_text_frame
+            existing = frame.text.rstrip()
+            frame.text = (existing + "\n\n" if existing else "") + (
+                "入力条件・補足（自動生成）\n" + "\n".join(sources)
+            )
+        for key in aux_keys & BU2_AUXILIARY_KEYS:
+            if key not in unused_hearing and not aux_values.get(key, "").strip():
+                aux_values[key] = "要確認（データ未検出）"
         reviews = [
             f"枠 {key}: {values[key]}"
             for key in sorted(numeric_ids & values.keys())
@@ -218,11 +255,20 @@ def prepare_proposal_content(
             if "要確認" in aux_values[key]
         )
         if reviews:
-            frame = slide.notes_slide.notes_text_frame
-            existing = frame.text.rstrip()
-            frame.text = (existing + "\n\n" if existing else "") + (
-                REVIEW_NOTES_HEADER + "\n" + "\n".join(reviews)
-            )
+            append_review_note(slide, "\n".join(reviews))
+        for shape in list(slide.shapes):
+            if not getattr(shape, "has_text_frame", False):
+                continue
+            match = _AUXILIARY.fullmatch(shape.text.strip())
+            if match:
+                key = match.group(1)
+                if (
+                    key in BU2_AUXILIARY_KEYS
+                    and key.startswith("PB-BU2-HEARING-")
+                    and (key in unused_hearing or "要確認" in aux_values.get(key, ""))
+                ):
+                    element = shape._element
+                    element.getparent().remove(element)
         if {46, 47, 56} & numeric_ids:
             # shortcut: 統合FMTの洗濯機見本だけを対象、新FMTでは画像slot契約に移す。
             for shape in list(slide.shapes):
@@ -238,7 +284,16 @@ def prepare_proposal_content(
                     element.getparent().remove(element)
     return (
         {key: "" if "要確認" in value else value for key, value in values.items()},
-        {key: "" if "要確認" in value else value for key, value in aux_values.items()},
+        {
+            key: (
+                "\n".join(line for line in value.splitlines() if "要確認" not in line)
+                if key == "PB-BU2-ESTIMATE-NOTES"
+                else ""
+                if "要確認" in value
+                else value
+            )
+            for key, value in aux_values.items()
+        },
     )
 
 

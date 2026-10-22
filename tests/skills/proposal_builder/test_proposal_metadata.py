@@ -66,3 +66,20 @@ def test_quality_warning_reaches_completion_without_blocking_ready_proposal(
     assert warning in state.result_message and warning in state.warnings
     assert "proposal_quality_warnings" not in state.verification_issues
     target.discard()
+
+
+def test_builder_transfers_bu2_inputs_through_json_boundary(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from tests.skills.proposal_deck.test_bu2_content import bu2_payload
+
+    _configure_builder_test(monkeypatch, media_configured=False)
+    deck = _CapturingDeck()
+    builder = ProposalBuilderSkill(search=object(), deck=deck, account_db_path="unused.xlsx")
+    request = _input(_research(sector="食品"), **bu2_payload())
+    request = type(request).model_validate_json(request.model_dump_json())
+    builder.run(request, SkillContext())
+    assert deck.inputs[0].plans == request.plans
+    assert deck.inputs[0].simulation == request.simulation
+    assert deck.inputs[0].hearing_items == request.hearing_items
+    assert deck.inputs[0].estimate_terms == request.estimate_terms

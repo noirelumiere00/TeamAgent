@@ -26,6 +26,8 @@ from xml.etree import ElementTree
 from defusedxml import DefusedXmlException
 from defusedxml.ElementTree import fromstring as defused_fromstring
 
+from teamagent.media.proposal_template import template_auxiliary_keys
+
 _ASSET_DIRECTORY = Path("/tmp/teamagent/proposal-builder")  # nosec B108
 _TEMPLATE_PATH = _ASSET_DIRECTORY / "integrated_fmt.pptx"
 _ACCOUNT_DB_PATH = _ASSET_DIRECTORY / "account_db.json"
@@ -42,19 +44,6 @@ _AUXILIARY_PLACEHOLDER = re.compile(r"\{\{(PB-[A-Z0-9_-]{1,60})\}\}")
 _LEGACY_INSTRUCTION = re.compile(r"自動入力|貼り付けてください|はめ込|転記|差し替え")
 _BRACE_CHARACTER = re.compile(r"[{}｛｝]")
 _VALID_NUMERIC_IDS = frozenset(range(1, 104)) - frozenset(range(48, 56))
-_REQUIRED_AUXILIARY = frozenset(
-    {
-        "PB-ACCOUNTS",
-        "PB-CASES",
-        "PB-CLIENT-NAME",
-        "PB-DATETIME",
-        "PB-EXPERIENCE",
-        "PB-KEY-MESSAGE",
-        "PB-MONTH",
-        "PB-PRODUCT-NAME",
-    }
-)
-_EXPECTED_SLIDE_COUNT = 83
 _REQUIRED_DATE_OFFSETS = frozenset(range(-56, 22, 7))
 _PRESENTATION_NS = "http://schemas.openxmlformats.org/presentationml/2006/main"
 _OFFICE_REL_NS = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
@@ -389,8 +378,10 @@ def _validate_template(path: Path) -> None:
             )
             if not slide_names:
                 raise ProposalAssetProvisionError("template contains no slides")
-            if len(slide_names) != _EXPECTED_SLIDE_COUNT:
-                raise ProposalAssetProvisionError("integrated template slide count is invalid")
+            try:
+                required_auxiliary = template_auxiliary_keys(path, len(slide_names))
+            except ValueError as exc:
+                raise ProposalAssetProvisionError(str(exc)) from exc
             text_bodies: list[str] = []
             total_slide_xml_bytes = 0
             for name in slide_names:
@@ -424,7 +415,7 @@ def _validate_template(path: Path) -> None:
     auxiliary_keys = frozenset(
         match.group(1) for text in text_bodies for match in _AUXILIARY_PLACEHOLDER.finditer(text)
     )
-    if auxiliary_keys != _REQUIRED_AUXILIARY:
+    if auxiliary_keys != required_auxiliary:
         raise ProposalAssetProvisionError("integrated template auxiliary inventory is invalid")
     template_versions = frozenset(
         match.group(1)

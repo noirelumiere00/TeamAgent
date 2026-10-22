@@ -10,6 +10,8 @@
 !src/teamagent/media/deck_qa.py
 !src/teamagent/media/operations.py
 !src/teamagent/media/proposal_cleanup.py
+!src/teamagent/media/proposal_bu2.py
+!src/teamagent/media/proposal_template.py
 !src/teamagent/media/proposal_dates.py
 !src/teamagent/media/render_child.py
 !src/teamagent/media/security.py

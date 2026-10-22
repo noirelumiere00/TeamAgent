@@ -1,5 +1,6 @@
 """BU2の頁選択は元FMTで確定し、残す頁の装飾・座標と入力検査を保つ。"""
 
+import hashlib
 import json
 from datetime import date
 from pathlib import Path
@@ -10,6 +11,7 @@ from pptx import Presentation
 from pptx.util import Inches
 
 from teamagent.media.operations import MediaOperationError
+from teamagent.media.proposal_template import KNOWN_TEMPLATE_SLIDES
 from teamagent.media.render_child import _proposal
 from teamagent.skills.proposal_deck.contract import (
     PROPOSAL_BUILDER_REQUIRED_AUXILIARY,
@@ -88,14 +90,21 @@ def _render(root: Path, backend: str, **context: Any) -> Path:
     return output
 
 
+def _pin_template(monkeypatch: pytest.MonkeyPatch, path: Path, slide_count: int = 83) -> None:
+    monkeypatch.setitem(
+        KNOWN_TEMPLATE_SLIDES, hashlib.sha256(path.read_bytes()).hexdigest(), slide_count
+    )
+
+
 @pytest.mark.parametrize("backend", ["local", "worker"])
 @pytest.mark.parametrize("unit", [None, "BU2", "BU1"])
 @pytest.mark.parametrize("sector", ["食品", "美容"])
 def test_bu2_selection_preserves_remaining_geometry(
-    tmp_path: Path, backend: str, unit: str | None, sector: str
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, backend: str, unit: str | None, sector: str
 ) -> None:
     template = tmp_path / "template.pptx"
     _template(template)
+    _pin_template(monkeypatch, template)
     before = template.read_bytes()
     source = Presentation(template)
     excluded = ({12, 13} | set(range(34, 46))) if unit != "BU1" else set()
@@ -121,18 +130,23 @@ def test_bu2_selection_preserves_remaining_geometry(
 
 @pytest.mark.parametrize("backend", ["local", "worker"])
 @pytest.mark.parametrize("missing_page", [34, 46, 47, 48])
-def test_incomplete_pr_chapter_is_retained(tmp_path: Path, backend: str, missing_page: int) -> None:
+def test_incomplete_pr_chapter_is_retained(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, backend: str, missing_page: int
+) -> None:
     template = tmp_path / "template.pptx"
     _template(template)
     prs = Presentation(template)
     prs.slides[missing_page - 1].shapes[0].text = "別構成の資料"
     prs.save(template)
+    _pin_template(monkeypatch, template)
     output = _render(tmp_path, backend)
     assert len(Presentation(output).slides) == 81
 
 
 @pytest.mark.parametrize("backend", ["local", "worker"])
-def test_input_inventory_is_checked_before_bu2_removal(tmp_path: Path, backend: str) -> None:
+def test_input_inventory_is_checked_before_bu2_removal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, backend: str
+) -> None:
     template = tmp_path / "template.pptx"
     _template(template)
     prs = Presentation(template)
@@ -140,6 +154,7 @@ def test_input_inventory_is_checked_before_bu2_removal(tmp_path: Path, backend: 
     prs.part.drop_rel(item.rId)
     prs.slides._sldIdLst.remove(item)
     prs.save(template)
+    _pin_template(monkeypatch, template)
     with pytest.raises((UnfilledPlaceholderError, MediaOperationError)):
         _render(tmp_path, backend)
     assert not (tmp_path / "output.pptx").exists()
