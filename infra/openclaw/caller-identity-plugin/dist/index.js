@@ -142,6 +142,13 @@ const OUTBOUND_TOOL_RE = new RegExp(
 );
 const OUTBOUND_INTERNAL_TOOL_RE = new RegExp(
   OUTBOUND_TOOL_RE.source.replace(OUTBOUND_BARE_TOOL_SOURCE, OUTBOUND_TOOL_SOURCE), "giu");
+// 名前だけ消すと引数や実行手順が残るため、モデル向け指示は段落ごと落とす。
+const OUTBOUND_MODEL_DIRECTIVE_RE = new RegExp(
+  `(?<![a-z0-9_])(?:(?:${OUTBOUND_TOOL_SOURCE}|[a-z][a-z0-9]*_[a-z0-9_]+)` +
+    "`?\\s*[（(]|(?:acquire_job_id|job_id|videos_per_kw|max_posts_per_kw|" +
+    "max_videos|competitor_accounts|model_instructions)(?![a-z0-9_]))",
+  "iu",
+);
 
 // oauth_connect の google_start_link/slack_start_link は base64.urlsafe_b64encode の
 // state を path に直接付ける（末尾 = の padding を含む）。署名・期限の検証は connect-web。
@@ -168,6 +175,15 @@ const CONNECT_LINK_MODIFIED_DIAGNOSTIC_CODE = "CONNECT-Z03";
 // 純関数: 本文と変更件数だけ返す。payload の blocks/value/ファイル情報には触れない。
 export function scrubOutboundReplyText(text, replacementConnectUrls = new Set(), toolNamesAreInternal = false) {
   const counts = { signedUrls: 0, toolNames: 0, urlSeparators: 0 };
+  const paragraphs = text.split(/\r?\n[\t 　]*\r?\n/u);
+  const kept = paragraphs.filter(paragraph => {
+    // URL の path/query は本文の内部語判定から保護する。
+    const plain = paragraph.replace(/https?:\/\/[^\s<>|]+/giu, "");
+    if (!OUTBOUND_MODEL_DIRECTIVE_RE.test(plain)) return true;
+    counts.toolNames += 1;
+    return false;
+  });
+  if (kept.length !== paragraphs.length) text = kept.join("\n\n").trim();
   const parts = [];
   let end = 0;
   function scrubTools(plain) {
@@ -7558,6 +7574,9 @@ export function createCallerIdentityPlugin({
                 (unverifiedConnectUrls ? ` unverified_connect_urls=${unverifiedConnectUrls}` +
                   ` diagnostic=${CONNECT_LINK_MODIFIED_DIAGNOSTIC_CODE}` : ""),
             );
+            if (finalTextOnly && !scrubbed.text.trim()) {
+              return finishRevisedReply(event, ctx, { ...result, cancel: true });
+            }
             result = { ...result, payload: { ...payload, text: scrubbed.text } };
           }
         }

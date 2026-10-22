@@ -158,3 +158,40 @@ async def test_auth_and_expensive_confirmation_keep_original_error(
     repeated = json.loads(await call("x_voice_search", args))["error"]
     monkeypatch.setenv("USE_INPUT_POLICY_V1", "0")
     assert json.loads(await call("x_voice_search", args))["error"] == enabled == repeated
+
+
+@pytest.mark.parametrize("direct_status", ["posted", "failed"])
+async def test_surface_acquire_instructions_reach_model_without_posting_or_policy_note(
+    monkeypatch: pytest.MonkeyPatch,
+    direct_status: str,
+) -> None:
+    from teamagent.mcp_gateway import direct_summary
+    from teamagent.skills.search_surface_check.skill import SearchSurfaceCheckSkill
+
+    monkeypatch.setenv("SEARCH_SURFACE_ALLOWED_EMAILS", "a@example.com")
+    posted: list[dict[str, Any]] = []
+    scheduled: list[Any] = []
+    monkeypatch.setattr(direct_summary, "decide", lambda *a, **kw: (object(), "ok"))
+
+    def deliver(data: dict[str, Any], *args: Any, **kwargs: Any) -> str:
+        posted.append(data)
+        return direct_status
+
+    monkeypatch.setattr(direct_summary, "deliver", deliver)
+    monkeypatch.setattr(surface_video_followup, "maybe_schedule", lambda **kw: scheduled.append(kw))
+    cls = SearchSurfaceCheckSkill
+    specs = {cls.name: ToolSpec(cls.name, cls.description, cls)}
+    result = await server.dispatch_tool(
+        specs,
+        cls.name,
+        {"keywords": ["ハンバーグ", "冷凍ハンバーグ", "夜ご飯"]},
+    )
+    out = json.loads(result[0].text)
+    assert posted == []
+    assert scheduled == []
+    assert out["slack_summary"] == "検索上位チェックには、先に検索結果の取得が必要です。"
+    assert (
+        "tiktok_acquire(keywords=['ハンバーグ', '冷凍ハンバーグ', '夜ご飯'], videos_per_kw=0)"
+        in out["model_instructions"]
+    )
+    assert "acquire_job_id" in out["model_instructions"]

@@ -228,6 +228,10 @@ class SearchSurfaceCheckOutput(BaseModel):
     )
     report_url: str | None = Field(default=None, description="媒体比較HTML署名URL（7日）")
     slack_summary: str = ""
+    model_instructions: str = Field(
+        default="",
+        description="モデル専用の次の手順。利用者に提示・転記せず、この欄を直接投稿しない",
+    )
     total_cost_usd: float = 0.0
     warnings: list[str] = Field(default_factory=list)
     measured_epoch: int = Field(

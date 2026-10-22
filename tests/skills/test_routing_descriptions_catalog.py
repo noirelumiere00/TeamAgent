@@ -533,3 +533,14 @@ def test_user_eval_campaign_routing_examples_are_frozen() -> None:
     assert rows["iter1-campaign-results"]["expect"] == "search"
     assert "何が効いたか" in rows["iter1-campaign-results"]["utterance"]
     assert rows["iter1-new-market-videos"]["expect"] == "video_algorithm"
+
+
+def test_proposal_only_request_does_not_start_surface_research() -> None:
+    soul = _SOUL_PATH.read_text(encoding="utf-8")
+    assert "検索上位チェックを明示的に依頼されたときだけ" in SearchSurfaceCheckSkill.description
+    assert (
+        "提案書・フルのPPTX作成の前処理や並行処理として呼ばない"
+        in SearchSurfaceCheckSkill.description
+    )
+    assert "明示がなければ単発・並行でも呼ばない" in soul
+    assert "model_instructions はモデル専用（本文に転記しない" in soul
