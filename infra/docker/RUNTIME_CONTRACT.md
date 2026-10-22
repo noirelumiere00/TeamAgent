@@ -20,11 +20,17 @@ media workerは1 process / 1 strict jobで終了する。
 Core:
 
 - Chainguard Python builder child:
-  `sha256:2eac0b3ef42685b2d45d57633364aaa87ec54bf29960dcf7ecd0eed20e14d124`
+  `sha256:2c8414a1ab05655dc3a88e88f4cac4fde9db3342daab7772f1b45f2b937b2fd5`
 - Chainguard Python runtime child:
-  `sha256:b7fda4f2d99284fe078f751034a0c858676f3456c4d75f1e935527c1951b5ba9`
-- Python `3.14.6`; `/usr/bin/python3.14` SHA-256
-  `0d036a463b218cff354adfb9c09a969a9a659698fa376bd3b55fe5bc002e7af8`
+  `sha256:f9552d99b5fcf870d9cd1d285e0086ae90aa2f0758aeff8d1f80dc9346fb52c5`
+- Python `3.14.8`; `/usr/bin/python3.14` SHA-256
+  `775bf454e5816503fe56f81c9b9e0d3f03790694bdce576cbbefd60971fc88ca`
+- Wolfi `ca-certificates-bundle` `20260909-r3` は
+  [`core-ca-bundle.lock.json`](./core-ca-bundle.lock.json) の取得元・SHA-256で固定した
+  公式APKをvendorし、Python 3.14の土台から証明書bundleだけを差し替える。
+  [`replace_core_ca_bundle.py`](./replace_core_ca_bundle.py) がAPKのSHA、証明書とSBOMの実byte、
+  runtimeのAPK installed dbの対象recordとfile checksumを検証し、他packageのrecordが
+  byte単位で不変であることをbuild中に強制する。SSL環境変数とcertifiの設定は据え置く。
 - uv child `sha256:9941e2d8e06ff884d328905091eac0a6bc1e40e5ce12e6dd0de4ef4ee26baac4`,
   uv `0.11.29`, binary SHA-256
   `f32f61ced7feb20342032cdac4d0825cebbda61911554f5de5231ec72821812e`
@@ -33,6 +39,12 @@ Core:
   `ca021f9eb2f8345c83fa03e3a04587308afb8df71bd472670b3ece00df58621c`
 - baked fallback `app.html` SHA-256
   `716ac25a96516efd6443277c903102d514f3f86729f8706baea41ee48f0ecdeb`
+
+2026-10-22の証明書差し替えはCVE-2026-111943への対応である。`python:latest`は3.15へ
+移行し、3.14系で修正版bundleを持つ土台が無いため、上記の固定digestを維持する。
+APK SHAとbundle版はDockerfileのbuilder検査と固定lockで束縛し、署名対象のbuild contextに含める。
+runtime/release契約のreceiptは既存のままとし、source_provenanceとapproval-publisherの世代も維持する。
+TrivyとECR Inspectorの実スキャン結果は通常便で確認する。
 
 Productionのconnect-webは `CONNECT_APP_HTML_S3_URI` による `source=s3` が正であり、baked
 fallbackとQA済みproduction artifactを同一digestとして扱わない。最終core OCI contractは次を

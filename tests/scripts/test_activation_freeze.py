@@ -208,91 +208,78 @@ def test_unrelated_changes_still_pass(base: str, head: str, reason: str) -> None
 
 
 def test_unlock_matches_the_committed_declaration() -> None:
-    """unlock は「無し」か「本 PR が宣言した 1 path ちょうど」のどちらかに固定する。
-
-    旧テスト（test_unlock_is_inactive_and_empty_by_default）は inactive を無条件に
-    要求しており、frozen surface を正当に触る PR が unlock を宣言すると構造的に
-    赤くなる設計矛盾があった。2026-08-31 の human gate（rename 枝）と同型で、
-    2026-09-01 human gate（便γ・ユーザー明示承認・パッチ適用もユーザーの手）により
-    宣言照合形へ更新。緩めたのではない: active の間は宣言内容そのものを封印し、
-    scope の拡大・gate の欠落・別内容への差し替えを検出する。畳めば else 分岐が
-    元の封印と同一になる。
-
-    2026-10-01 human gate で scope を OpenClaw 契約 1 path へ移した（#503 の runtime ベース
-    世代上げに node probe を追随させる PR）。直前の core_media 契約の宣言は
-    ``previous_scope_20261001`` に退避し、その中身もここで封印する。
-
-    2026-09-11 human gate で scope を 1 path へ絞り直した（前回の 2 path 宣言は
-    PR #386 で消化済み）。media base 同梱の util-linux 系 3 パッケージを
-    2.42.1-r0 → 2.42.3-r1 へ pin すると media-apk.lock の 3 行が動き、同 lock の
-    sha256 を焼いている release 契約の ``artifact.apk-lock.sha256`` が**必ず同時に**
-    変わる。相乗り規約 ``retention_ruling_2026_08_27.landmine_partial_scope`` の
-    とおり、scope はこの PR の変更集合ちょうどへ絞り込んである。**この 1 path
-    以外への拡大は、この assert が引き続き検出する。**
-
-    2026-10-21 human gate で scope を core_media 契約 1 path へ切り替え、ca-certificates
-    20260909-r0 → 20261020-r0 の上流入替へ追随する。#650 の release_evidence.py 宣言は
-    ``previous_scope_20261021_release_evidence`` に退避し、その内容も完全一致で封印する。
-
-    2026-10-22 human gate で scope を OpenClaw 契約 1 path へ切り替える。ca bundle r3 の
-    runtime バンプに追随し、直前の media 宣言は ``previous_scope_20261022_core_media`` に退避する。
-    """
+    """frozen surface 無変更のため unlock を畳み、承認と過去の宣言を保持する。"""
     unlock = _freeze_doc()["unlock"]
-    if unlock["active"]:
-        assert unlock["scope_paths"] == ["infra/codebuild/openclaw_bundle_contract.json"]
-        assert (
-            unlock["reason"]
-            == "【2026-10-22 OpenClaw の ca-certificates-bundle 更新】oc28 の provenance builder が HIGH CVE-2026-111943（ca-certificates-bundle 20260909-r2）で停止したため、Chainguard node の arm64 runtime を 4e3acbdf…（nodejs-26 26.12.1-r2・glibc 2.44-r9・ca-certificates-bundle 20260909-r3）へ上げる。Claude が取得した base-evidence.json の /usr/bin/node 実測 SHA に契約を 5a7e0d20… → 6410d7ee… と追随させ、image-attestor 世代を再導出する。scope は OpenClaw 契約 1 path。OC の ECR 例外は既に空で追加・撤去は不要。mcp の Python 3.15 移行は別判断とし、runtime/core_media 契約は変更しない。世代の公開と OC provenance builder の inline buildspec 契約 SHA ピンの更新は別途必要。"
-        )
-        assert (
-            unlock["gate"]
-            == "human gate 2026-10-22（小俣さん: oc28 の停止報告を受け mcp 側は「期限つき例外＋3.15移行」を選択。OC の node 土台更新は 10-21「マージまで全て任せる」の委任範囲で Claude が判断。#597 と同じ範囲で契約・凍結/世代まで更新）"
-        )
-        previous = unlock["previous_scope_20261022_core_media"]
-        assert previous["scope_paths"] == [
-            "infra/codebuild/teamagent_core_media_release_contract.json"
-        ]
-        assert (
-            previous["reason"]
-            == "【media の apk ロック追随】 【2026-10-21 apk ロック追随】mcp 便 r67 の空撃ちで、Alpine v3.24 / edge の ca-certificates 20260909-r0 が上流にもベース同梱にも無く、上流は 20261020-r0 へ入れ替わっていることを確認した。Dockerfile の明示 pin を 20261020-r0 へ追随させ、人が作成した lock の 1 行を差し替える（241→241 行）。社内網では手元の Docker 実ビルドができないため、実インベントリとの一致は段 3 の AWS image-builder が cmp で照合する。lock の sha256 が動くため契約の artifact.apk-lock.sha256 と release 契約の sha が動き、世代 4 本を再導出する。scope は core_media 契約 1 path。"
-        )
-        assert (
-            previous["gate"]
-            == "human gate 2026-10-21（小俣さん「マージまで全て任せる」・Alpine 上流で ca-certificates 20260909-r0 → 20261020-r0 入替）"
-        )
-        assert unlock["previous_scope_20261021_release_evidence"] == {
-            "scope_paths": ["infra/codebuild/release_evidence.py"],
-            "reason": "【2026-10-19 初回リリース免除の延長】INITIAL_RELEASE_EXEMPTION_SUNSET_UTC を 2026-11-15T00:00:00Z から 2026-12-15T00:00:00Z、campaign expiry を 2026-11-22T00:00:00Z から 2026-12-22T00:00:00Z へ延長し、12/5 稼働判定後の通常便を確保する。drill の NO-GO 解消は別 PR。release_evidence.py は generation input のため source-publisher / attestor / promoter の base64 と image-builder の SHA を含む世代 4 本の再導出・再公開が必要。世代台帳 3 ファイルの更新は live S3 本文からの導出待ち。runtime / core_media / openclaw 契約は変更しない。",
-            "gate": "human gate 2026-10-19（小俣さん承認: 初回リリース免除の期限を 12/15 へ延長）",
-            "note": "dev 取り込み済みで本 PR では触らないため scope から外す（過剰 unlock の禁止）。human gate 2026-10-21（小俣さん「マージまで全て任せる」: ca-certificates の上流入替に追随するため凍結 scope を release_evidence.py から core_media 契約へ切り替え）",
-        }
-        previous = unlock["previous_scope_20261019_core_media_apk"]
-        assert previous["scope_paths"] == [
-            "infra/codebuild/teamagent_core_media_release_contract.json",
-        ]
-        assert "libexpat 2.8.5-r0→2.9.0-r0" in previous["reason"]
-        assert "libx11 1.8.13-r0" in previous["reason"]
-        assert "1.8.14-r0" in previous["reason"]
-        assert "libxi 1.8.3-r0" in previous["reason"]
-        assert "1.8.4-r0" in previous["reason"]
-        assert "libxrender 0.9.12-r0" in previous["reason"]
-        assert "0.9.13-r0" in previous["reason"]
-        assert "libxtst 1.2.5-r0" in previous["reason"]
-        assert "1.2.6-r0" in previous["reason"]
-        assert "human gate 2026-10-19" in previous["gate"]
-        assert "r64 段3" in previous["gate"]
-        prev_oc = unlock["previous_scope_20261019_openclaw_bundle_contract"]
-        assert prev_oc["scope_paths"] == ["infra/codebuild/openclaw_bundle_contract.json"]
-        assert "glibc 2.44-r8" in prev_oc["reason"]
-        assert "#568 の例外 16 件を外す" in prev_oc["reason"]
-        assert "12929629… → 5a7e0d20…" in prev_oc["reason"]
-        assert unlock["previous_scope_20261012_core_python_base"]["scope_paths"] == [
-            "infra/codebuild/teamagent_runtime_contract.json",
-            "infra/codebuild/teamagent_core_media_release_contract.json",
-        ]
-    else:
-        assert unlock["scope_paths"] == []
-        assert unlock["reason"] is None
+    assert unlock["active"] is False
+    assert unlock["scope_paths"] == []
+    assert unlock["reason"] is None
+    assert unlock["gate"] is None
+    previous = unlock["previous_scope_20261022_core_ca_bundle"]
+    assert previous["scope_paths"] == [
+        "infra/codebuild/source_provenance.py",
+        "infra/codebuild/teamagent_runtime_contract.json",
+        "infra/codebuild/teamagent_core_media_release_contract.json",
+    ]
+    assert (
+        previous["reason"]
+        == "【2026-10-22 core の CA bundle 差し替え】CVE-2026-111943 の修正版である Wolfi 公式 ca-certificates-bundle 20260909-r3 を SHA-256 固定の APK から取り込み、Python 3.14.8 と builder/runtime の固定 digest を維持する。runtime 契約へ APK SHA と bundle 版の 2 entry を追加し、source_provenance.py の release-ready 必須集合と release 契約の source_runtime_contract.sha256 を追随する。scope はこの 3 path の変更集合ちょうど。source-publisher / attestor / promoter / image-builder と source_provenance.py を埋め込む approval-publisher の計 5 世代をオフライン再導出し、公開は別便で行う。例外は追加しない。"
+    )
+    assert (
+        previous["gate"]
+        == "human gate 2026-10-22（小俣さん「証明書だけ差し替え」: chainguard python:latest が 3.15 に移り 3.14 系の修正版土台が無いため、ca-certificates-bundle のみ Wolfi 公式 r3 に差し替え。3.15 移行は別途）"
+    )
+    assert unlock["previous_scope_20261022_core_media_apk"] == {
+        "scope_paths": ["infra/codebuild/teamagent_core_media_release_contract.json"],
+        "reason": "【media の apk ロック追随】 【2026-10-21 apk ロック追随】mcp 便 r67 の空撃ちで、Alpine v3.24 / edge の ca-certificates 20260909-r0 が上流にもベース同梱にも無く、上流は 20261020-r0 へ入れ替わっていることを確認した。Dockerfile の明示 pin を 20261020-r0 へ追随させ、人が作成した lock の 1 行を差し替える（241→241 行）。社内網では手元の Docker 実ビルドができないため、実インベントリとの一致は段 3 の AWS image-builder が cmp で照合する。lock の sha256 が動くため契約の artifact.apk-lock.sha256 と release 契約の sha が動き、世代 4 本を再導出する。scope は core_media 契約 1 path。",
+        "gate": "human gate 2026-10-21（小俣さん「マージまで全て任せる」・Alpine 上流で ca-certificates 20260909-r0 → 20261020-r0 入替）",
+        "note": "10/21 の media APK ロック追随の宣言。dev 取り込み済みで、本 PR の source_provenance.py と runtime/release 契約の変更集合へ scope を切り替えるため退避。",
+    }
+    assert unlock["previous_scope_20261022_openclaw"] == {
+        "scope_paths": ["infra/codebuild/openclaw_bundle_contract.json"],
+        "reason": "【2026-10-22 OpenClaw の ca-certificates-bundle 更新】oc28 の provenance builder が HIGH CVE-2026-111943（ca-certificates-bundle 20260909-r2）で停止したため、Chainguard node の arm64 runtime を 4e3acbdf…（nodejs-26 26.12.1-r2・glibc 2.44-r9・ca-certificates-bundle 20260909-r3）へ上げる。Claude が取得した base-evidence.json の /usr/bin/node 実測 SHA に契約を 5a7e0d20… → 6410d7ee… と追随させ、image-attestor 世代を再導出する。scope は OpenClaw 契約 1 path。OC の ECR 例外は既に空で追加・撤去は不要。mcp の Python 3.15 移行は別判断とし、runtime/core_media 契約は変更しない。世代の公開と OC provenance builder の inline buildspec 契約 SHA ピンの更新は別途必要。",
+        "gate": "human gate 2026-10-22（小俣さん: oc28 の停止報告を受け mcp 側は「期限つき例外＋3.15移行」を選択。OC の node 土台更新は 10-21「マージまで全て任せる」の委任範囲で Claude が判断。#597 と同じ範囲で契約・凍結/世代まで更新）",
+        "note": "#668 の OpenClaw 契約の宣言。dev 取り込み済みで、本 PR の source_provenance.py と runtime/release 契約の変更集合へ scope を切り替えるため退避。",
+    }
+    previous = unlock["previous_scope_20261022_core_media"]
+    assert previous["scope_paths"] == ["infra/codebuild/teamagent_core_media_release_contract.json"]
+    assert (
+        previous["reason"]
+        == "【media の apk ロック追随】 【2026-10-21 apk ロック追随】mcp 便 r67 の空撃ちで、Alpine v3.24 / edge の ca-certificates 20260909-r0 が上流にもベース同梱にも無く、上流は 20261020-r0 へ入れ替わっていることを確認した。Dockerfile の明示 pin を 20261020-r0 へ追随させ、人が作成した lock の 1 行を差し替える（241→241 行）。社内網では手元の Docker 実ビルドができないため、実インベントリとの一致は段 3 の AWS image-builder が cmp で照合する。lock の sha256 が動くため契約の artifact.apk-lock.sha256 と release 契約の sha が動き、世代 4 本を再導出する。scope は core_media 契約 1 path。"
+    )
+    assert (
+        previous["gate"]
+        == "human gate 2026-10-21（小俣さん「マージまで全て任せる」・Alpine 上流で ca-certificates 20260909-r0 → 20261020-r0 入替）"
+    )
+    assert unlock["previous_scope_20261021_release_evidence"] == {
+        "scope_paths": ["infra/codebuild/release_evidence.py"],
+        "reason": "【2026-10-19 初回リリース免除の延長】INITIAL_RELEASE_EXEMPTION_SUNSET_UTC を 2026-11-15T00:00:00Z から 2026-12-15T00:00:00Z、campaign expiry を 2026-11-22T00:00:00Z から 2026-12-22T00:00:00Z へ延長し、12/5 稼働判定後の通常便を確保する。drill の NO-GO 解消は別 PR。release_evidence.py は generation input のため source-publisher / attestor / promoter の base64 と image-builder の SHA を含む世代 4 本の再導出・再公開が必要。世代台帳 3 ファイルの更新は live S3 本文からの導出待ち。runtime / core_media / openclaw 契約は変更しない。",
+        "gate": "human gate 2026-10-19（小俣さん承認: 初回リリース免除の期限を 12/15 へ延長）",
+        "note": "dev 取り込み済みで本 PR では触らないため scope から外す（過剰 unlock の禁止）。human gate 2026-10-21（小俣さん「マージまで全て任せる」: ca-certificates の上流入替に追随するため凍結 scope を release_evidence.py から core_media 契約へ切り替え）",
+    }
+    previous = unlock["previous_scope_20261019_core_media_apk"]
+    assert previous["scope_paths"] == [
+        "infra/codebuild/teamagent_core_media_release_contract.json",
+    ]
+    assert "libexpat 2.8.5-r0→2.9.0-r0" in previous["reason"]
+    assert "libx11 1.8.13-r0" in previous["reason"]
+    assert "1.8.14-r0" in previous["reason"]
+    assert "libxi 1.8.3-r0" in previous["reason"]
+    assert "1.8.4-r0" in previous["reason"]
+    assert "libxrender 0.9.12-r0" in previous["reason"]
+    assert "0.9.13-r0" in previous["reason"]
+    assert "libxtst 1.2.5-r0" in previous["reason"]
+    assert "1.2.6-r0" in previous["reason"]
+    assert "human gate 2026-10-19" in previous["gate"]
+    assert "r64 段3" in previous["gate"]
+    prev_oc = unlock["previous_scope_20261019_openclaw_bundle_contract"]
+    assert prev_oc["scope_paths"] == ["infra/codebuild/openclaw_bundle_contract.json"]
+    assert "glibc 2.44-r8" in prev_oc["reason"]
+    assert "#568 の例外 16 件を外す" in prev_oc["reason"]
+    assert "12929629… → 5a7e0d20…" in prev_oc["reason"]
+    assert unlock["previous_scope_20261012_core_python_base"]["scope_paths"] == [
+        "infra/codebuild/teamagent_runtime_contract.json",
+        "infra/codebuild/teamagent_core_media_release_contract.json",
+    ]
 
 
 def test_unlock_requires_scope_reason_and_gate(tmp_path: Path) -> None:

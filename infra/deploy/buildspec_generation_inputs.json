@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "description": "PR2-A0.3 activation manifest の generation input 束縛。buildspec 世代の content-addressed key へ影響する入力を Generation Baseline 時点の git blob へ固定する。1 つでも変化したら STALE MANIFEST（adopt へ進まず manifest を再生成する）。検証: infra/deploy/verify_generation_inputs.py",
-  "generation_baseline": "19d024daafb37b7532edbedf5465ab39aa25d38e",
+  "generation_baseline": "d0411909934446f38382680c3fe77c0f8932bd5f",
   "inputs": {
     "infra/codebuild/mcp-source-publisher-buildspec.yml": "9cdb0123e96a8f79a0886d40c29efb4fa30dac15",
     "infra/codebuild/image-attestor-buildspec.yml": "d9b2573bd11f57914941be000b996d2afbc2ea32",

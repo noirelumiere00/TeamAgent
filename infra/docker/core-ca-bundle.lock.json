@@ -1,0 +1,23 @@
+{
+  "schema_version": 1,
+  "url": "https://packages.wolfi.dev/os/aarch64/ca-certificates-bundle-20260909-r3.apk",
+  "archive": "ca-certificates-bundle-20260909-r3.apk",
+  "archive_sha256": "4f57ebd7dc21d78ecce228f397d0a4ee46b5cfc777ac5f292821d41a97bfd896",
+  "base_version": "20260909-r2",
+  "apkindex": {
+    "C": "Q12NXUp1YSrgDFsj3YmYoLOz7Pngg=",
+    "P": "ca-certificates-bundle",
+    "V": "20260909-r3",
+    "A": "aarch64",
+    "S": "119164",
+    "I": "229626",
+    "T": "",
+    "U": "",
+    "L": "MPL-2.0 AND MIT",
+    "o": "ca-certificates",
+    "m": "wolfi",
+    "t": "1792505521",
+    "c": "34903eac7b8592ab9906e3aba6b3aa1ad96023df",
+    "D": "merged-usrsbin wolfi-baselayout"
+  }
+}
