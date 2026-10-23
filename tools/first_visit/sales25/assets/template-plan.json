@@ -1,0 +1,273 @@
+{
+  "edition": "sales25",
+  "template_only": true,
+  "slides": [
+    {
+      "role": "cover"
+    },
+    {
+      "role": "overall_summary"
+    },
+    {
+      "role": "search_order",
+      "group": "{{self}}",
+      "query": "{{q_self}}",
+      "post_ids": [
+        "tpl-self-search-01",
+        "tpl-self-search-02",
+        "tpl-self-search-03",
+        "tpl-self-search-04",
+        "tpl-self-search-05",
+        "tpl-self-search-06",
+        "tpl-self-search-07",
+        "tpl-self-search-08",
+        "tpl-self-search-09",
+        "tpl-self-search-10"
+      ]
+    },
+    {
+      "role": "top_views",
+      "group": "{{self}}",
+      "query": "{{q_self}}",
+      "post_ids": [
+        "tpl-self-top_views-01",
+        "tpl-self-top_views-02",
+        "tpl-self-top_views-03",
+        "tpl-self-top_views-04",
+        "tpl-self-top_views-05"
+      ],
+      "expected_image_count": 5
+    },
+    {
+      "role": "top_eng",
+      "group": "{{self}}",
+      "query": "{{q_self}}",
+      "post_ids": [
+        "tpl-self-top_eng-01",
+        "tpl-self-top_eng-02",
+        "tpl-self-top_eng-03",
+        "tpl-self-top_eng-04",
+        "tpl-self-top_eng-05"
+      ],
+      "expected_image_count": 5
+    },
+    {
+      "role": "top_saves",
+      "group": "{{self}}",
+      "query": "{{q_self}}",
+      "post_ids": [
+        "tpl-self-top_saves-01",
+        "tpl-self-top_saves-02",
+        "tpl-self-top_saves-03",
+        "tpl-self-top_saves-04",
+        "tpl-self-top_saves-05"
+      ],
+      "expected_image_count": 5
+    },
+    {
+      "role": "search_order",
+      "group": "{{a}}",
+      "query": "{{q_a}}",
+      "post_ids": [
+        "tpl-a-search-01",
+        "tpl-a-search-02",
+        "tpl-a-search-03",
+        "tpl-a-search-04",
+        "tpl-a-search-05",
+        "tpl-a-search-06",
+        "tpl-a-search-07",
+        "tpl-a-search-08",
+        "tpl-a-search-09",
+        "tpl-a-search-10"
+      ]
+    },
+    {
+      "role": "top_views",
+      "group": "{{a}}",
+      "query": "{{q_a}}",
+      "post_ids": [
+        "tpl-a-top_views-01",
+        "tpl-a-top_views-02",
+        "tpl-a-top_views-03",
+        "tpl-a-top_views-04",
+        "tpl-a-top_views-05"
+      ],
+      "expected_image_count": 5
+    },
+    {
+      "role": "top_eng",
+      "group": "{{a}}",
+      "query": "{{q_a}}",
+      "post_ids": [
+        "tpl-a-top_eng-01",
+        "tpl-a-top_eng-02",
+        "tpl-a-top_eng-03",
+        "tpl-a-top_eng-04",
+        "tpl-a-top_eng-05"
+      ],
+      "expected_image_count": 5
+    },
+    {
+      "role": "top_saves",
+      "group": "{{a}}",
+      "query": "{{q_a}}",
+      "post_ids": [
+        "tpl-a-top_saves-01",
+        "tpl-a-top_saves-02",
+        "tpl-a-top_saves-03",
+        "tpl-a-top_saves-04",
+        "tpl-a-top_saves-05"
+      ],
+      "expected_image_count": 5
+    },
+    {
+      "role": "search_order",
+      "group": "{{b}}",
+      "query": "{{q_b}}",
+      "post_ids": [
+        "tpl-b-search-01",
+        "tpl-b-search-02",
+        "tpl-b-search-03",
+        "tpl-b-search-04",
+        "tpl-b-search-05",
+        "tpl-b-search-06",
+        "tpl-b-search-07",
+        "tpl-b-search-08",
+        "tpl-b-search-09",
+        "tpl-b-search-10"
+      ]
+    },
+    {
+      "role": "top_views",
+      "group": "{{b}}",
+      "query": "{{q_b}}",
+      "post_ids": [
+        "tpl-b-top_views-01",
+        "tpl-b-top_views-02",
+        "tpl-b-top_views-03",
+        "tpl-b-top_views-04",
+        "tpl-b-top_views-05"
+      ],
+      "expected_image_count": 5
+    },
+    {
+      "role": "top_eng",
+      "group": "{{b}}",
+      "query": "{{q_b}}",
+      "post_ids": [
+        "tpl-b-top_eng-01",
+        "tpl-b-top_eng-02",
+        "tpl-b-top_eng-03",
+        "tpl-b-top_eng-04",
+        "tpl-b-top_eng-05"
+      ],
+      "expected_image_count": 5
+    },
+    {
+      "role": "top_saves",
+      "group": "{{b}}",
+      "query": "{{q_b}}",
+      "post_ids": [
+        "tpl-b-top_saves-01",
+        "tpl-b-top_saves-02",
+        "tpl-b-top_saves-03",
+        "tpl-b-top_saves-04",
+        "tpl-b-top_saves-05"
+      ],
+      "expected_image_count": 5
+    },
+    {
+      "role": "search_order",
+      "group": "中立ワード01",
+      "query": "{{q_n1}}",
+      "post_ids": [
+        "tpl-n1-search-01",
+        "tpl-n1-search-02",
+        "tpl-n1-search-03",
+        "tpl-n1-search-04",
+        "tpl-n1-search-05",
+        "tpl-n1-search-06",
+        "tpl-n1-search-07",
+        "tpl-n1-search-08",
+        "tpl-n1-search-09",
+        "tpl-n1-search-10"
+      ]
+    },
+    {
+      "role": "neutral_comparison",
+      "group": "中立ワード01",
+      "query": "{{q_n1}}"
+    },
+    {
+      "role": "search_order",
+      "group": "中立ワード02",
+      "query": "{{q_n2}}",
+      "post_ids": [
+        "tpl-n2-search-01",
+        "tpl-n2-search-02",
+        "tpl-n2-search-03",
+        "tpl-n2-search-04",
+        "tpl-n2-search-05",
+        "tpl-n2-search-06",
+        "tpl-n2-search-07",
+        "tpl-n2-search-08",
+        "tpl-n2-search-09",
+        "tpl-n2-search-10"
+      ]
+    },
+    {
+      "role": "neutral_comparison",
+      "group": "中立ワード02",
+      "query": "{{q_n2}}"
+    },
+    {
+      "role": "search_order",
+      "group": "中立ワード03",
+      "query": "{{q_n3}}",
+      "post_ids": [
+        "tpl-n3-search-01",
+        "tpl-n3-search-02",
+        "tpl-n3-search-03",
+        "tpl-n3-search-04",
+        "tpl-n3-search-05",
+        "tpl-n3-search-06",
+        "tpl-n3-search-07",
+        "tpl-n3-search-08",
+        "tpl-n3-search-09",
+        "tpl-n3-search-10"
+      ]
+    },
+    {
+      "role": "neutral_comparison",
+      "group": "中立ワード03",
+      "query": "{{q_n3}}"
+    },
+    {
+      "role": "pr_analysis",
+      "group": "PR事例",
+      "post_ids": [
+        "tpl-pr-01"
+      ]
+    },
+    {
+      "role": "pr_analysis",
+      "group": "PR事例",
+      "post_ids": [
+        "tpl-pr-02"
+      ]
+    },
+    {
+      "role": "pr_analysis",
+      "group": "PR事例",
+      "post_ids": [
+        "tpl-pr-03"
+      ]
+    },
+    {
+      "role": "approach"
+    },
+    {
+      "role": "methods"
+    }
+  ]
+}

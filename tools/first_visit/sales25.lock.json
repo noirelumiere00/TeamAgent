@@ -1,0 +1,29 @@
+{
+  "schema_version": 1,
+  "adapter_contract_version": 1,
+  "repository": "tiktok-sales-research-kit",
+  "git_commit": "f8c98b4a5555479e28fee71a4195eaf38feeec09",
+  "version": "1.2.4",
+  "format_id": "sales25",
+  "distribution_zip_sha256": "b3ac594df90530f50cb61026b03e5282a1cba0470e8a402486dc3adfc505fb10",
+  "files": {
+    "assets/build-info.json": "1f22254ecfc4425133243e543fc6209dda140d8cd39aeccdb1f9983bec48ef10",
+    "assets/template.pptx": "376571ebba5777a26f0703cbe7ce489a646a80d4d1cd5c67469a868baf9524a7",
+    "assets/fields.json": "b87f4154e576859f94bcd90dc22f90beb94cb3e509e8bbeaa68e47db0d319a6c",
+    "assets/template-plan.json": "72e22c26b165aaa83e119ee057d6d2462179d6b6d73c33e71e6719770d8f4f32",
+    "scripts/fill_template.py": "8d85602234cfa542282e866b8d6d715cd61b157869391c49fcbadde7958c5feb",
+    "scripts/check_fmt.py": "4cd0df65a60564718ce9d13f7058ed78569b3fa3be9aa4b6ea44d0a1c1ec28e5",
+    "scripts/check_top5_analysis.py": "4b7f015dfbb9d20f0c55b81a8a84d295a307d12f0a410966582ace7ba5c3a47d",
+    "scripts/kit_contract.py": "c456976ad4c2652a24e1f3f76c1fe2e43eaaafe22db3fcc2f5aea37ecee2395d",
+    "scripts/metrics.py": "cc753e8fa876ae317f843a0a67e7bb74564e39e6e4bae109852d5c04463c52bb"
+  },
+  "dependency_provenance": {
+    "engine/acquire/package-lock.json": "df533ef6776738d6c87e3a901eb6158b638aeb253ceb5a24c71a36bc71e70223",
+    "engine/analyze/requirements.txt": "bad9d07325df680230f61caf8d1af9f48c7588c14fd709e2074fe8fe8544ce5f"
+  },
+  "offline_runtime": {
+    "pillow": "13.0.0",
+    "python": ">=3.10",
+    "external_commands": false
+  }
+}

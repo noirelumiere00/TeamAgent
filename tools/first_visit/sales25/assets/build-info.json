@@ -1,0 +1,9 @@
+{
+  "version": "1.2.4",
+  "format_id": "sales25",
+  "files": {
+    "assets/template.pptx": "376571ebba5777a26f0703cbe7ce489a646a80d4d1cd5c67469a868baf9524a7",
+    "assets/fields.json": "b87f4154e576859f94bcd90dc22f90beb94cb3e509e8bbeaa68e47db0d319a6c",
+    "assets/template-plan.json": "72e22c26b165aaa83e119ee057d6d2462179d6b6d73c33e71e6719770d8f4f32"
+  }
+}
