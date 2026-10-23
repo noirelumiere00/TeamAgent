@@ -2,12 +2,45 @@
 
 from __future__ import annotations
 
+import re
 import unicodedata
+from collections.abc import Sequence
 
-from teamagent.skills.search.client_match import _LEGAL_SUFFIX_RE, alias_pairs, aliases
+from teamagent.ingest.industry_taxonomy import normalize_industry
+from teamagent.skills.search.client_match import (
+    _LEGAL_SUFFIX_RE,
+    alias_pairs,
+    aliases,
+    normalize_client,
+    normalize_filter_client,
+)
 from teamagent.skills.search.composite import SlackLookup
 from teamagent.skills.search.result_guard import _fold, _mention_at, find_client_mention
 from teamagent.skills.search.schema import SearchInput
+
+
+def resolve_topic_client(
+    query: str, vocabulary: Sequence[str], explicit: str | None = None
+) -> tuple[str, str] | None:
+    """本人RLSの語彙へ、登録別名か一意な短縮名を結ぶ。略称を推測生成しない。"""
+    if not explicit and (direct := find_client_mention(query, vocabulary, strict=True)):
+        return direct, direct
+    topic = re.match(r"^\s*([^の\s？?]{2,80}?)(?:の|って)", query)
+    short = normalize_filter_client(explicit or (topic[1] if topic else "")) or ""
+    if not explicit and normalize_industry(short):
+        short = ""
+    matches: dict[str, tuple[str, str]] = {}
+    for name in vocabulary:
+        known_aliases = sorted(aliases(name))
+        surface = find_client_mention(explicit or query, known_aliases, strict=True) or (
+            short
+            if len(normalize_client(short)) >= 2
+            and normalize_client(short) in normalize_client(name)
+            else None
+        )
+        if surface:
+            matches[normalize_client(name)] = (surface, name)
+    return next(iter(matches.values())) if len(matches) == 1 else None
 
 
 def retry_inputs(input: SearchInput) -> list[SearchInput]:

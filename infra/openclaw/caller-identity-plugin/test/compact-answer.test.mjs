@@ -23,6 +23,28 @@ function setup(content = '施策は今どうなっている？', threadId = unde
   return {ctx, hooks, remember, send};
 }
 
+for (const direct of [false, true]) {
+  for (const tail of ['詳しい資料が見たければどうぞ。', '詳しくはこちら。', '資料はこちらです。']) {
+    for (const hasLink of [false, true]) {
+      test(`topic normal fallback drops only linkless invitations: ${direct}/${tail}/${hasLink}`, () => {
+        const p = setup('{newspaper}の{exhibition}って何？うちも関わってる？', undefined, direct);
+        const body = '展示企画で、当社は動画制作を担当しています。';
+        const link = '<https://example.slack.com/archives/CPUBLIC/p1792727460000000|会話の記録>';
+        const answer = body + tail + (hasLink ? '\n' + link : '');
+        p.remember({answer, found: true, displayed_refs: [], answer_format: null});
+        assert.equal(p.send('長い書き直しです。'), hasLink ? answer : body);
+      });
+    }
+  }
+}
+
+test('linkless invitation guard leaves legacy search responses unchanged', () => {
+  const p = setup('{newspaper}の{exhibition}って何？うちも関わってる？');
+  const answer = '展示企画です。詳しくはこちら。';
+  p.remember({answer, found: true});
+  assert.equal(p.send(answer), answer);
+});
+
 for (const answer of ['施策は実施済みです。\n\n出典: [施策実績](https://example.test/used)',
   'この範囲の資料では、該当事例を確認できませんでした（探した範囲: 社内資料）。']) {
   test('compact backend answer survives model expansion without adding unused sources: ' + answer.slice(0, 10), () => {

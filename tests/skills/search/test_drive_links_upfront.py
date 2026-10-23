@@ -155,7 +155,8 @@ def test_rejected_drive_compact_returns_normal_answer_without_unused_inventory(
     assert out.displayed_refs == []
     assert "UNUSED" not in out.answer and compact.EMPTY_ANSWER not in out.answer
     assert skill._bedrock.converse.call_count == 2
-    assert "[S:1]" not in str(skill._bedrock.converse.call_args.kwargs["messages"])
+    # 通常形式でも、使った出典のリンクを確定できるよう引用IDを渡す。
+    assert "[S:1]" in str(skill._bedrock.converse.call_args.kwargs["messages"])
 
 
 def test_named_only_drive_hit_reaches_normal_summary_after_empty_compact(
