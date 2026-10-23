@@ -251,7 +251,9 @@ class _SqlLikePg:
         exclude_recurring: bool = False,
         embedding_col: str = "embedding",
         filter_source_types: list[str] | None = None,
+        filter_drive_file_ids: list[str] | None = None,
     ) -> list[SearchHit]:
+        assert filter_drive_file_ids is None, "この施策実績フェイクは原資料の再読には使わない"
         call: dict[str, Any] = {
             "limit": limit,
             "filter_industry": filter_industry,

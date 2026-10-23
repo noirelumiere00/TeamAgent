@@ -159,7 +159,7 @@ def test_sales_feedback_question_keeps_feedback(
     out = _run(skill, query="食品メーカーの営業の温度感を教えて")
     assert "温度感B" in out.answer
     assert out.answer_format == "compact"
-    assert out.displayed_refs == [] and POST not in out.answer
+    assert out.displayed_refs == [] and f"<{POST}|会話の記録>" in out.answer
     skill._summarize.assert_called_once()
 
 

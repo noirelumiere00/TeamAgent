@@ -53,7 +53,7 @@ def test_initial_answer_keeps_only_used_canonical_drive_refs(
     assert "[S:2]" in str(prompt["messages"])
 
 
-def test_compact_ref_tracking_deduplicates_and_never_links_slack_or_sheets() -> None:
+def test_compact_ref_tracking_distinguishes_slack_evidence_and_never_links_sheets() -> None:
     hits = [
         _vault_hit(i, title=f"資料{i}", source_uri=uri, source_type=kind)
         for i, uri, kind in [
@@ -74,7 +74,7 @@ def test_compact_ref_tracking_deduplicates_and_never_links_slack_or_sheets() -> 
     )
     assert len(refs) == 1 and refs[0].drive_file_id == "DOC1"
     assert text.count("|資料を見る>") == 1
-    assert "slack.com" not in text and "spreadsheets" not in text
+    assert "|会話の記録>" in text and "spreadsheets" not in text
 
 
 @pytest.mark.parametrize("attachment", [False, True], ids=["conversation", "unread-attachment"])
@@ -108,7 +108,9 @@ def test_cited_non_drive_reference_is_not_a_document_link(
         displayed_refs=refs,
     )
     assert refs == []
-    assert answer == body
+    assert answer == body if drive_shaped_url else answer == body + (
+        "\n\n<https://example.slack.com/archives/C1/p1234567890123456|会話の記録>"
+    )
 
 
 @pytest.mark.parametrize("fanout_enabled", [False, True])

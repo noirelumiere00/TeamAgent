@@ -73,7 +73,7 @@ def test_live_slack_case_uses_drive_instead_of_post(setup_search):
 def test_unresolved_slack_attachment_is_explicitly_unread(setup_search, monkeypatch):
     skill, pg = setup_search
     pg.resolve_file_urls_by_titles.return_value = {}
-    # 会話を根拠に答えられるが、未読添付や投稿の URL は資料として添えない。
+    # 未読添付は資料と区別し、根拠にした投稿だけを「会話の記録」として添える。
     skill._bedrock.converse.return_value = _converse(
         "Slack にだけある資料（本文未読）です。[S:slack0]"
     )
@@ -84,7 +84,7 @@ def test_unresolved_slack_attachment_is_explicitly_unread(setup_search, monkeypa
     assert "[資料]" not in out.answer
     assert out.slack_hits[0].reference.unread
     assert out.displayed_refs == []
-    assert POST not in out.answer
+    assert f"<{POST}|会話の記録>" in out.answer
 
 
 def test_off_and_outside_allowlist_are_byte_identical(setup_search, monkeypatch):

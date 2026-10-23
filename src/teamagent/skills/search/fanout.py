@@ -410,6 +410,11 @@ def run_fanout(skill: Any, input: SearchInput, ctx: SkillContext) -> SearchOutpu
         else None
     )
     summary_hits = case_target_hits(hits, scope_target, soft_industry=drive_mode)
+    if drive_mode:
+        summary_hits = drive_first.scope_hits(input.query, summary_hits, input.filter_doc_type)
+        extra["named"] = drive_first.scope_hits(
+            input.query, extra.get("named", []), input.filter_doc_type
+        )
     if not summary_hits:
         found = False
     client = skill._asked_client(probe)
@@ -558,7 +563,12 @@ def run_fanout(skill: Any, input: SearchInput, ctx: SkillContext) -> SearchOutpu
 
         def summarize() -> tuple[str, float, LaneState]:
             try:
-                if drive_mode and compact_mode and compact_comparison(input.query, summary_hits)[0]:
+                if (
+                    drive_mode
+                    and compact_mode
+                    and classify_answer_mode(input.query) != "insight"
+                    and compact_comparison(input.query, summary_hits)[0]
+                ):
                     return "", 0.0, "ok"
                 answer, cost = skill._summarize(
                     input.query,

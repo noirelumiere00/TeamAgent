@@ -120,6 +120,7 @@ def maybe_post(
             if outcome in {direct_summary.POSTED, direct_summary.UNCERTAIN}:
                 if evidence_enabled:
                     data["video_metrics_evidence"] = metrics_evidence(section[1])
+                    data["video_metrics_posted"] = True
                 data["answer"] = section[0] + POSTED_TEXT + section[2]
                 _strip_hit_numbers(data, section[1])
     logger.info(

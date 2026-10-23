@@ -10,7 +10,7 @@ from urllib.parse import urlsplit
 from teamagent.adapters.pgvector_client import SearchHit
 from teamagent.prompts.loader import load_prompt
 from teamagent.skills._shared.grounding import NumberGrounder
-from teamagent.skills.search import drive_first
+from teamagent.skills.search import drive_first, timeline_status
 from teamagent.skills.search.campaign_files import (
     VIDEO_METRICS_HEADING,
     _footer_campaigns,
@@ -213,7 +213,11 @@ def source_map(
             if ref
             else str(meta.get("title") or meta.get("file_name") or "資料"),
             url_of(hit) or "",
-            hit.content + "\n" + str(meta.get("updated_at") or ""),
+            hit.content
+            + "\n"
+            + str(meta.get("updated_at") or "")
+            + "\n"
+            + timeline_status.evidence_date(hit)[0],
         )
     for i, item in enumerate(slack_items):
         ref = item.hit.reference
@@ -273,6 +277,7 @@ def render(
     sources: Sources,
     *,
     metrics: str = "",
+    metrics_first: bool = False,
     metric_keys: Sequence[str] = (),
     facts: str = "",
     fact_keys: Sequence[str] = (),
@@ -378,7 +383,13 @@ def render(
     shown_metrics = heading + "\n" + "\n\n".join(blocks) if blocks else ""
     if used_keys is not None:
         used_keys.extend(used)
-    return "\n\n".join(part for part in (body, shown_metrics, _source_line(used, sources)) if part)
+    # A separate metrics post ends before the explanation; keep the same order in one post too.
+    content = (
+        "\n\n\n".join(part for part in (shown_metrics, body) if part)
+        if metrics_first
+        else "\n\n".join(part for part in (body, shown_metrics) if part)
+    )
+    return "\n\n".join(part for part in (content, _source_line(used, sources)) if part)
 
 
 def build(
@@ -394,8 +405,34 @@ def build(
     displayed_refs: list[DocumentReference] | None = None,
     rejection_reasons: list[str] | None = None,
 ) -> str:
+    if displayed_refs is not None and re.search(r"今どう|状況|現状|今の状態", query):
+        dates = {str(h.chunk_id): timeline_status.evidence_date(h)[0] for h in [*hits, *karte_hits]}
+        stamped = []
+        for line in answer.splitlines():
+            keys = _CITATION.findall(line)
+            date = max((dates.get(k, "") for k in keys), default="")
+            if date:
+
+                def stamp(match: re.Match[str], date: str = date) -> str:
+                    prefix = (
+                        ""
+                        if re.search(r"\d{4}-\d{2}-\d{2} 時点では", match[2])
+                        else f"{date} 時点では"
+                    )
+                    return match[1] + prefix + match[2]
+
+                line = re.sub(
+                    r"(^|(?<=[。！？]))([^。！？]*?(?:現在|進行中|詰めの段階|完了|終了|実施中|予定|検討中)[^。！？]*)",
+                    stamp,
+                    line,
+                )
+            stamped.append(line)
+        answer = "\n".join(stamped)
     facts, fact_ids = compact_comparison(query, hits)
     show_metrics = wants_metrics(query)
+    metrics = video_stats_footer(hits, "", asked_industry=asked_industry) if show_metrics else ""
+    if metrics and displayed_refs is not None:
+        facts, fact_ids = "", []
     campaigns = _footer_campaigns(hits, asked_industry) if show_metrics else []
     used_keys: list[str] = []
     rendered = render(
@@ -404,7 +441,8 @@ def build(
         facts=facts,
         fact_keys=[str(key) for key in fact_ids],
         notice=notice,
-        metrics=video_stats_footer(hits, "", asked_industry=asked_industry) if show_metrics else "",
+        metrics=metrics,
+        metrics_first=displayed_refs is not None,
         metric_keys=[str(hit.chunk_id) for hit, _ in campaigns],
         used_keys=used_keys,
         rejection_reasons=rejection_reasons,
@@ -422,6 +460,13 @@ def build(
     seen = set()
     for key in used_keys:
         ref = references.get(key)
+        # 公開の会話を根拠にした説明には、資料とは区別して元投稿へのリンクを残す。
+        if ref is not None and ref.kind in {"slack_conversation", "slack_attachment"}:
+            if "slack.com/archives/" in (ref.url or ""):
+                link = case_link(ref.url, "会話の記録")
+                if link and link not in links:
+                    links.append(link)
+            continue
         if ref is None or ref.kind != "drive" or ref.drive_file_id in seen:
             continue
         link = case_link(ref.url, "資料を見る")
