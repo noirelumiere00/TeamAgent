@@ -422,11 +422,13 @@ def test_named_timeout_preserves_vault_and_is_partial() -> None:
 
 
 def test_no_found_does_not_wait_for_expansion(monkeypatch: pytest.MonkeyPatch) -> None:
-    gate, entered = threading.Event(), threading.Event()
+    gate, entered, finished = threading.Event(), threading.Event(), threading.Event()
 
     def expand(*a: Any, **kw: Any) -> ExpansionResult:
         entered.set()
-        gate.wait(1)
+        # 10s は待つ実装に戻ったときに CI を止めないための上限。正常時は finally で即解放。
+        gate.wait(10)
+        finished.set()
         return ExpansionResult((), None, (), "empty", 1, 0.0)
 
     monkeypatch.setattr(fanout, "run_expansion", expand)
@@ -434,14 +436,14 @@ def test_no_found_does_not_wait_for_expansion(monkeypatch: pytest.MonkeyPatch) -
     original_search = pg.search_similar_new_schema.side_effect
 
     def search(**kw: Any) -> Any:
-        assert entered.wait(0.3)
+        assert entered.wait(10)
         return original_search(**kw)
 
     pg.search_similar_new_schema.side_effect = search
     try:
-        started = time.perf_counter()
         out = run(skill, query="宅配系の事例")
-        assert time.perf_counter() - started < 0.3 and not out.found
+        # 経過秒でなく「広げるレーンが終わる前に返った」ことで待たないことを確かめる。
+        assert not finished.is_set() and not out.found
         assert "言い換え ✗" in out.answer
     finally:
         gate.set()
@@ -1034,28 +1036,43 @@ def test_bounded_connection_restores_timeout_and_rolls_back_failure() -> None:
 def test_slow_industry_case_lookup_keeps_vault(monkeypatch: pytest.MonkeyPatch) -> None:
     from teamagent.skills.search.fanout_sources import SourceResult
 
-    gate = threading.Event()
+    gate, entered, finished = threading.Event(), threading.Event(), threading.Event()
+    expanded = threading.Event()
     from teamagent.skills.search.fanout_sources import case_lookup_by_industry
 
     original = case_lookup_by_industry
 
     def lookup(*a: Any, **kw: Any) -> Any:
         if kw.get("industry"):
-            gate.wait(1)
+            entered.set()
+            # 10s は待つ実装に戻ったときに CI を止めないための上限。正常時は finally で即解放。
+            gate.wait(10)
+            finished.set()
             return SourceResult(source="case", status="zero", reason="no_records")
         return original(*a, **kw)
 
+    def expand(*a: Any, **kw: Any) -> ExpansionResult:
+        expanded.set()
+        return ExpansionResult((), "飲料", (), "empty", 1, 0.0)
+
     monkeypatch.setattr(fanout, "case_lookup_by_industry", lookup)
-    monkeypatch.setattr(
-        fanout, "run_expansion", lambda *a, **kw: ExpansionResult((), "飲料", (), "empty", 1, 0.0)
-    )
+    monkeypatch.setattr(fanout, "run_expansion", expand)
     # 該当なしでは回収の追加待ちは 0s。同業種 SQL の遅延も待たない。
-    skill, _ = make([], client=_slack_client([]))
+    # 「X の事例」は対象で絞り同業種 SQL を通らないため、絞らない聞き方にする。
+    skill, pg = make([], client=_slack_client([]))
+    original_search = pg.search_similar_new_schema.side_effect
+
+    def search(**kw: Any) -> Any:
+        # 言い換えで出た業種が結果をまとめる時点で揃うよう、データベースの検索は言い換えの後にする。
+        assert expanded.wait(10)
+        return original_search(**kw)
+
+    pg.search_similar_new_schema.side_effect = search
     try:
-        started = time.perf_counter()
-        out = run(skill, query="お酒の事例")
-        assert time.perf_counter() - started < 0.3 and not out.found
-        assert "お酒の事例は見つかりませんでした" in out.answer
+        out = run(skill, query="お酒のキャンペーン")
+        # 経過秒でなく「同業種 SQL が終わる前に返った」ことで待たないことを確かめる。
+        assert entered.is_set() and not finished.is_set() and not out.found
+        assert out.answer.startswith(NOT_FOUND_HEAD)
         assert "🔎" not in out.answer
     finally:
         gate.set()
