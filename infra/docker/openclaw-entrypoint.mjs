@@ -96,6 +96,8 @@ const DIAGNOSTIC_ENV = [
   // （秘密値ではない）。ここに無いと TD で 0 にしても黙って捨てられ、止められない。
   "TEAMAGENT_FIRST_MESSAGE_RESTORE",
   // MCP の直接投稿と同じ利用者だけ、plugin の二重返信抑止・search 直接実行を有効にする。
+  "TEAMAGENT_INBOUND_ROUTER",
+  "TEAMAGENT_ROUTE_CLASSIFIER",
   "SEARCH_DIRECT_ANSWER",
   "SEARCH_DIRECT_ANSWER_ALLOWED_EMAILS",
   "SEARCH_DIRECT_ANSWER_KINDS",
