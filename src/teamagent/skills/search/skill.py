@@ -584,6 +584,9 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
     def run(self, input: SearchInput, ctx: SkillContext) -> SearchOutput:
         """検索 Skill のメインフロー。"""
         drive_mode = drive_first.enabled(ctx.metadata)
+        if drive_mode and input.filter_doc_type == "事例":
+            # 事例は検索の目的で、提案書・報告書を横断する。SQLと後段の両方で絞らせない。
+            input = input.model_copy(update={"filter_doc_type": None})
         drive_case_listing = drive_mode and is_case_list(input.query)
         drive_comparison = drive_mode and is_comparison_query(input.query)
         if os.environ.get("USE_SEARCH_FANOUT", "") == "1":
