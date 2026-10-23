@@ -1,0 +1,45 @@
+{
+  "status_code": 0,
+  "has_more": false,
+  "cursor": 3,
+  "data": [
+    {
+      "type": 1,
+      "item": {
+        "id": "7400000000000000001",
+        "desc": "anonymous video #Sample",
+        "createTime": 1720000000,
+        "author": {"uniqueId": "anonymous_a", "nickname": "Anonymous A", "followerCount": 0},
+        "authorStats": {"followerCount": 42},
+        "stats": {"playCount": 100, "diggCount": 0, "commentCount": 3, "shareCount": 2, "collectCount": "4"},
+        "video": {"duration": 12, "cover": "https://www.tiktok.com/anonymous-cover.jpg"},
+        "textExtra": [{"hashtagName": "Sample"}],
+        "textLanguage": "ja",
+        "isAd": false
+      }
+    },
+    {
+      "type": 1,
+      "item": {
+        "id": "7400000000000000002",
+        "desc": "anonymous photo",
+        "author": {"uniqueId": "anonymous_b", "nickname": "Anonymous B"},
+        "stats": {"playCount": null, "diggCount": "0", "collectCount": 0},
+        "imagePost": {"images": [
+          {"imageURL": {"urlList": ["https://www.tiktok.com/anonymous-photo-1.jpg"]}},
+          {"imageURL": {"urlList": ["https://www.tiktok.com/anonymous-photo-2.jpg"]}}
+        ]},
+        "textLanguage": "en",
+        "isAd": true
+      }
+    },
+    {
+      "type": 1,
+      "item": {
+        "id": "7400000000000000003",
+        "author": {"uniqueId": "anonymous_c", "followerCount": 0},
+        "stats": {"playCount": 0, "diggCount": 0, "commentCount": 0, "shareCount": 0, "collectCount": 0}
+      }
+    }
+  ]
+}

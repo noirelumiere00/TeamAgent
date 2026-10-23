@@ -328,7 +328,7 @@ ARG YTDLP_SANITIZER_SHA256=4e7464710094be2eb6205fdc1ea207cfe62b99db1b34f9d31691e
 ARG MEDIA_APK_LOCK_SHA256=37d39a19abdcadc32c48680cfa4277400e8e6dbbb9c1d16c23d92e119e6f37c2
 ARG TIKTOK_PACKAGE_JSON_SHA256=c9aafff461749b7591c810d698736fe33461965d238ed2cfd283229612a7fe28
 ARG TIKTOK_PACKAGE_LOCK_SHA256=f0fe7ac3f992960d12dfdaddb14fa06e0b44ed92386c2a7d3fc74cbb98784dc2
-ARG TIKTOK_SCRAPER_SHA256=99c1955010a99be0f2921d8b107f849c3fce216f76eaa2ba342531e98407816e
+ARG TIKTOK_SCRAPER_SHA256=e27f612bbdc799ee6f788fed1fc66d611f5566d264650fbcbe4f02101bfe96d3
 ARG TIKTOK_DNS_PINNED_PROXY_SHA256=ccac597a429069074d2b362d6b15ad75c00c23941be97e9ea87503d36fd50e19
 
 COPY infra/docker/media-apk.lock /tmp/media-apk.lock
@@ -354,6 +354,35 @@ COPY --chown=10001:10001 tools/tiktok_scraper/search.mjs \
   /app/tools/tiktok_scraper/search.mjs
 COPY --chown=10001:10001 tools/tiktok_scraper/dns_pinned_proxy.mjs \
   /app/tools/tiktok_scraper/dns_pinned_proxy.mjs
+# Sales25 kit and selected-post inputs are fixed independently of the legacy kit.
+ARG SALES25_KIT_LOCK_SHA256=03ea4a29ef59b16e325dcd2d07710a9511c55dd08cf4b17f96dfa3eeef2047ca
+ARG SALES25_ANALYSIS_LOCK_SHA256=67741470f8502ae88340154d135985f06ea6aebdc5c40bcb52fea3663c73bb50
+ARG SALES25_FRAME_EXTRACTOR_SHA256=38b7e8f5fd0fb6dc158167dc4718d1fb5ee715cfa055097badd623ba710adac3
+ARG SALES25_MEDIA_SCRAPER_SHA256=4588cb208b7c4f94a427e41b71d1dfbf93af9bdad40cb2614b77b9a560b1b450
+
+COPY --chown=10001:10001 tools/first_visit/sales25.lock.json \
+  /app/tools/first_visit/sales25.lock.json
+COPY --chown=10001:10001 tools/first_visit/sales25/ /app/tools/first_visit/sales25/
+COPY --chown=10001:10001 tools/first_visit/sales25-analysis.lock.json \
+  /app/tools/first_visit/sales25-analysis.lock.json
+COPY --chown=10001:10001 tools/first_visit/sales25-analysis/extract_frames.py \
+  /app/tools/first_visit/sales25-analysis/extract_frames.py
+COPY --chown=10001:10001 tools/tiktok_scraper/sales25_media.mjs \
+  /app/tools/tiktok_scraper/sales25_media.mjs
+RUN set -eu; \
+    test "$SALES25_KIT_LOCK_SHA256" = "03ea4a29ef59b16e325dcd2d07710a9511c55dd08cf4b17f96dfa3eeef2047ca"; \
+    printf '%s  %s\n' "$SALES25_KIT_LOCK_SHA256" /app/tools/first_visit/sales25.lock.json | sha256sum -c -; \
+    test "$SALES25_ANALYSIS_LOCK_SHA256" = "67741470f8502ae88340154d135985f06ea6aebdc5c40bcb52fea3663c73bb50"; \
+    printf '%s  %s\n' "$SALES25_ANALYSIS_LOCK_SHA256" /app/tools/first_visit/sales25-analysis.lock.json | sha256sum -c -; \
+    test "$SALES25_FRAME_EXTRACTOR_SHA256" = "38b7e8f5fd0fb6dc158167dc4718d1fb5ee715cfa055097badd623ba710adac3"; \
+    printf '%s  %s\n' "$SALES25_FRAME_EXTRACTOR_SHA256" /app/tools/first_visit/sales25-analysis/extract_frames.py | sha256sum -c -; \
+    test "$SALES25_MEDIA_SCRAPER_SHA256" = "4588cb208b7c4f94a427e41b71d1dfbf93af9bdad40cb2614b77b9a560b1b450"; \
+    printf '%s  %s\n' "$SALES25_MEDIA_SCRAPER_SHA256" /app/tools/tiktok_scraper/sales25_media.mjs | sha256sum -c -
+LABEL io.teamagent.contract.sales25-kit-lock-sha256="$SALES25_KIT_LOCK_SHA256" \
+      io.teamagent.contract.sales25-analysis-lock-sha256="$SALES25_ANALYSIS_LOCK_SHA256" \
+      io.teamagent.contract.sales25-frame-extractor-sha256="$SALES25_FRAME_EXTRACTOR_SHA256" \
+      io.teamagent.contract.sales25-media-scraper-sha256="$SALES25_MEDIA_SCRAPER_SHA256"
+
 COPY --chown=10001:10001 \
   src/teamagent/media/__init__.py \
   src/teamagent/media/contracts.py \
@@ -365,11 +394,21 @@ COPY --chown=10001:10001 \
   src/teamagent/media/proposal_template.py \
   src/teamagent/media/proposal_dates.py \
   src/teamagent/media/render_child.py \
+  src/teamagent/media/sales25_media.py \
+  src/teamagent/media/sales25_runner.py \
   src/teamagent/media/security.py \
+  src/teamagent/media/tiktok_capture.py \
   src/teamagent/media/tool_contracts.py \
   src/teamagent/media/tool_worker.py \
   src/teamagent/media/url_policy.py \
   /app/src/teamagent/media/
+
+COPY --chown=10001:10001 \
+  src/teamagent/skills/first_visit/__init__.py \
+  src/teamagent/skills/first_visit/sales25.py \
+  src/teamagent/skills/first_visit/sales25_contract.py \
+  src/teamagent/skills/first_visit/sales25_authoring.py \
+  /app/src/teamagent/skills/first_visit/
 
 RUN set -eu; \
     printf '%s  %s\n' "$TIKTOK_SCRAPER_SHA256" /app/tools/tiktok_scraper/search.mjs | sha256sum -c -; \
@@ -384,7 +423,7 @@ RUN set -eu; \
       > /usr/share/teamagent/provenance/uv-arm64.digest; \
     printf '%s\n' "https://github.com/akornatskyy/chromium-headless@04c509a36888b548fa1e88ff30258135ba5a7882" \
       > /usr/share/teamagent/provenance/chromium-base-source.txt; \
-    PYTHONPATH=/app/src /app/.venv/bin/python -c "import importlib.metadata as m, importlib.util as u; assert m.version('playwright') == '$PLAYWRIGHT_VERSION'; assert m.version('yt-dlp') == '$YTDLP_VERSION'; blocked=('boto3','botocore','s3transfer','psycopg','sqlalchemy','slack_sdk','google_auth_oauthlib','mcp','sentence_transformers'); assert all(u.find_spec(name) is None for name in blocked); import teamagent.media.contracts, teamagent.media.operations, teamagent.media.tool_contracts, teamagent.media.tool_worker"; \
+    PYTHONPATH=/app/src /app/.venv/bin/python -c "import importlib.metadata as m, importlib.util as u; assert m.version('playwright') == '$PLAYWRIGHT_VERSION'; assert m.version('yt-dlp') == '$YTDLP_VERSION'; blocked=('boto3','botocore','s3transfer','psycopg','sqlalchemy','slack_sdk','google_auth_oauthlib','mcp','sentence_transformers'); assert all(u.find_spec(name) is None for name in blocked); import teamagent.media.contracts, teamagent.media.operations, teamagent.media.tool_contracts, teamagent.media.tool_worker, teamagent.media.sales25_runner; from teamagent.skills.first_visit.sales25_contract import verify_bundle; verify_bundle()"; \
     test ! -e /app/src/teamagent/media/worker.py; \
     test "$(node -p "require('/app/tools/tiktok_scraper/node_modules/playwright-core/package.json').version")" = "$PLAYWRIGHT_VERSION"; \
     test ! -e /app/src/teamagent/mcp_gateway; \

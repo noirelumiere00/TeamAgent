@@ -462,6 +462,11 @@ def main() -> int:
             metadata = _slides(root, manifest)
         elif kind == "proposal_pptx":
             metadata = _proposal(root, manifest)
+        elif kind == "sales25_pptx":
+            from teamagent.media.sales25_runner import render_sales25
+
+            spec = _exact(manifest, {"kind", "source", "owner_id"}, "sales25 renderer manifest")
+            metadata = render_sales25(root, _path(root, spec["source"]), spec["owner_id"])
         elif kind == "pdf":
             metadata = _pdf(root, manifest)
         else:

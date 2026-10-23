@@ -525,6 +525,59 @@ class GeminiClient:
                 log_event="gemini_analyze_image",
             )
 
+    def analyze_audio_bytes(
+        self, data: bytes, mime_type: str, prompt: str, request_id: str
+    ) -> GeminiResponse:
+        """Send the original audio itself; transcript-only input is not listening evidence."""
+        from google.genai import types
+
+        if mime_type not in {"audio/wav", "audio/mp4", "audio/mpeg"} or not (
+            0 < len(data) <= 20 * 1024 * 1024
+        ):
+            raise ValueError("bounded original audio required")
+        return self._generate_video(
+            [types.Part.from_bytes(data=data, mime_type=mime_type), types.Part(text=prompt)],
+            request_id,
+            system=None,
+            json_mode=True,
+            timeout_s=90,
+            max_attempts=2,
+            rate_limit_attempts=2,
+        )
+
+    def compare_image_bytes(
+        self,
+        first: bytes,
+        second: bytes,
+        prompt: str,
+        request_id: str,
+        *,
+        first_mime: str = "image/jpeg",
+        second_mime: str = "image/jpeg",
+    ) -> GeminiResponse:
+        """Compare the post cover and source image with both images in one request."""
+        from google.genai import types
+
+        if any(
+            mime not in {"image/jpeg", "image/png", "image/webp"}
+            for mime in (first_mime, second_mime)
+        ) or any(not data or len(data) > 8 * 1024 * 1024 for data in (first, second)):
+            raise ValueError("bounded image pair required")
+        return self._generate_video(
+            [
+                types.Part.from_bytes(data=data, mime_type=mime)
+                for data, mime in zip((first, second), (first_mime, second_mime), strict=True)
+            ]
+            + [types.Part(text=prompt)],
+            request_id,
+            system=None,
+            json_mode=True,
+            timeout_s=30,
+            media_resolution="high",
+            max_attempts=2,
+            rate_limit_attempts=2,
+        )
+
     def generate_text(
         self,
         prompt: str,

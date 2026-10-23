@@ -5,7 +5,6 @@ import json
 
 import pytest
 
-from teamagent.adapters import tiktok_task_store as task_store_module
 from teamagent.adapters.tiktok_task_store import TikTokTaskStore
 from teamagent.media.contracts import (
     MediaArtifact,
@@ -83,7 +82,7 @@ def _store(monkeypatch: pytest.MonkeyPatch, client: _FakeMediaClient) -> TikTokT
 def test_submit_fixes_one_absolute_deadline_before_request_creation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(task_store_module.time, "time", lambda: 1_000.9)
+    monkeypatch.setattr("teamagent.adapters.tiktok_task_store.time.time", lambda: 1_000.9)
     client = _FakeMediaClient()
     store = _store(monkeypatch, client)
 
@@ -100,12 +99,13 @@ def test_submit_fixes_one_absolute_deadline_before_request_creation(
     assert client.submitted is not None
     assert client.submitted.created_at_epoch_s == 1_000
     assert client.submitted.deadline_epoch_s == 1_900
+    assert "edition" not in client.submitted.operation.model_dump(mode="json")
 
 
 def test_done_status_reuses_one_deadline_for_read_download_and_presign(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(task_store_module.time, "time", lambda: 2_000.9)
+    monkeypatch.setattr("teamagent.adapters.tiktok_task_store.time.time", lambda: 2_000.9)
     manifest = _ref("manifest.json", b"manifest")
     video = _ref("video-p1", b"video")
     thumb = _ref("thumb-p1", b"thumb")
@@ -131,3 +131,57 @@ def test_done_status_reuses_one_deadline_for_read_download_and_presign(
     assert client.download_deadlines == [2_030]
     assert client.presign_deadlines
     assert set(client.presign_deadlines) == {2_030}
+    assert "acquisition_status" not in status
+    assert "sales25_raw_json_url" not in status
+    assert "acquisition_status_json_url" not in status
+
+
+@pytest.mark.parametrize("count,valid", [(100, True), (101, False)])
+def test_submit_passes_internal_sales25_and_keeps_its_limit(
+    monkeypatch: pytest.MonkeyPatch, count: int, valid: bool
+) -> None:
+    client = _FakeMediaClient()
+    store = _store(monkeypatch, client)
+    assert (
+        store.submit(
+            {
+                "job_id": _JOB_ID,
+                "request_fingerprint": "sales25-request",
+                "keywords": ["synthetic"],
+                "edition": "sales25",
+                "n_per_kw": count,
+                "videos_per_kw": 0,
+                "sort": "display",
+                "artifact_mode": "metadata_only",
+            }
+        )
+        is valid
+    )
+    if valid:
+        assert client.submitted is not None
+        assert client.submitted.operation.model_dump(mode="json")["edition"] == "sales25"
+    else:
+        assert client.submitted is None
+
+
+def test_sales25_status_preserves_partial_counts_and_sidecar_references(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    acquisition = {"accepted": True, "status": "partial", "target": 100, "actual": 63}
+    artifacts = tuple(
+        MediaArtifact(name=name, object=_ref(name, b"{}"))
+        for name in ("posts.json", "sales25-raw.json", "acquisition-status.json")
+    )
+    result = MediaJobResult(
+        job_id=_JOB_ID,
+        status="done",
+        artifacts=artifacts,
+        metadata={"acquisition_status": acquisition},
+    )
+    status = _store(monkeypatch, _FakeMediaClient(result)).get_status(
+        _JOB_ID, audit_principal_hash="a" * 64
+    )
+    assert status is not None
+    assert status["acquisition_status"] == acquisition
+    assert status["sales25_raw_json_url"].endswith("/output/sales25-raw.json")
+    assert status["acquisition_status_json_url"].endswith("/output/acquisition-status.json")

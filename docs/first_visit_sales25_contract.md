@@ -1,6 +1,24 @@
-# sales25 オフライン契約（PR1・PR2）
+# sales25 入力・制作・検索契約（PR1・PR2・PR3）
 
 `first_visit.sales25_contract` と `first_visit.sales25` は、通常ツールから登録・呼び出しされない独立入口。取得済み JSON と案件内画像だけを使う。旧 `first_visit.contract` の API、manifest、旧キット、お土産の生成・配送経路は変更しない。
+
+## 内部100件検索（PR3）
+
+`MediaJobClient.search_tiktok_sales25(query, *, owner_id, request_fingerprint, search_type="keyword", max_videos=100, timeout_s=300)` は `raw / acquisition_status / artifacts / media_job_id` を返す。本人確認済みの呼出側が渡す `owner_id` を、検証済みのworker rawへ結び付ける。`artifacts` の不変参照・SHAはworkerが保存した元のバイト列に対応し、ownerを結び付けた案件rawはその後のsales25 manifestで封印する。
+
+内部要求の `edition="sales25"` は1語・最大100件・`metadata_only`・動画0・`sort="display"` に限定する。公開 `tiktok_acquire` と従来の内部検索は上限30。edition未指定の要求JSONには新しいeditionキーを出さない。親ジョブのrollout、同時実行制御、通常お土産経路への接続はPR6で扱う。
+
+workerは次の3成果物を必須で保存し、欠落やupload失敗はジョブを失敗にする。サムネイルや動画の取得は行わない。
+
+|成果物|内容|
+|---|---|
+|`sales25-raw.json`|JSの縮約前出力。nullableな5指標、missingFields、広告・写真・投稿URL、取得日時、単一セッションの表示順、拒否診断を保持|
+|`acquisition-status.json`|`accepted / status / target / actual / shortfall / stop_reason / diagnostics / raw_ref`。raw_refは同じジョブのraw成果物名|
+|`posts.json`|既存の投稿一覧形式。拒否時は空。分析の根拠には上のrawを使う|
+
+100件未達は `acquisition_status.status="partial"` と実数で返す。正常なrawのstatusは既存の入力契約に合わせて `ok`、正常0件は `observed_zero` + `TIKTOK_TRULY_EMPTY`。CAPTCHA・CDN拒否・異常API応答は、途中の投稿をrawに保持しても `accepted=false / status="failed"` として採用しない。別セッション・hashtagからkeywordへのfallback・失敗後のworker自動再検索で穴埋めしない。取得日時がない失敗には日時を補完しない。
+
+検索見積もりは30件以下120秒、31〜100件240秒をcore・worker・Lambdaで揃える。100件取得の実時間は未実測。DNS-pinned proxyとredirect制御を維持し、正本キットのengineは収録しない。mediaのJS固定SHAはDockerfile・release契約・連動テストを同時更新する。PR3/4/5統合後の世代再導出まで、変更済みrelease契約によるgeneration inputの不一致を解消しない。
 
 ## 固定取得物
 

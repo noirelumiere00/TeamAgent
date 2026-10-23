@@ -18,6 +18,8 @@ from teamagent.media.contracts import (
     MAX_INPUT_BYTES,
     MAX_OUTPUT_BYTES,
     MAX_PROPOSAL_PPTX_BYTES,
+    SALES25_MAX_BUNDLE_BYTES,
+    SALES25_MAX_MANIFEST_BYTES,
     MediaJobRequest,
     S3ObjectRef,
 )
@@ -419,8 +421,22 @@ def _output_slots(
     slots: list[tuple[str, str, int]] = []
     if kind == "acquire":
         slots.append(("media", "media", int(operation["max_bytes"])))
+    elif kind == "sales25_media":
+        slots.extend(
+            (
+                ("media-manifest.json", "media-manifest.json", SALES25_MAX_MANIFEST_BYTES),
+                ("media-bundle.zip", "media-bundle.zip", SALES25_MAX_BUNDLE_BYTES),
+            )
+        )
     elif kind == "tiktok_acquire":
         slots.append(("posts.json", "posts.normalized.json", 16 * 1024 * 1024))
+        if operation.get("edition") == "sales25":
+            slots.extend(
+                (
+                    ("sales25-raw.json", "sales25-raw.json", 16 * 1024 * 1024),
+                    ("acquisition-status.json", "acquisition-status.json", 1024 * 1024),
+                )
+            )
         if operation.get("first_visit_capture"):
             slots.append(("first-visit-capture.json", "first-visit-capture.json", MAX_OUTPUT_BYTES))
         if operation["artifact_mode"] == "full":
@@ -458,6 +474,14 @@ def _output_slots(
         slots.append(("slides.pptx", "slides.pptx", MAX_OUTPUT_BYTES))
     elif kind == "proposal_pptx":
         slots.append(("proposal.pptx", "proposal.pptx", MAX_PROPOSAL_PPTX_BYTES))
+    elif kind == "sales25_pptx":
+        slots.extend(
+            (
+                ("deck.pptx", "deck.pptx", MAX_OUTPUT_BYTES),
+                ("sales25-qa.json", "sales25-qa.json", 1024 * 1024),
+                ("sales25-qa.zip", "sales25-qa.zip", 16 * 1024 * 1024),
+            )
+        )
     elif kind == "pdf":
         slots.append(("document.pdf", "document.pdf", MAX_OUTPUT_BYTES))
     else:

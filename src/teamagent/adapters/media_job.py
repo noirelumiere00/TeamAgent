@@ -35,6 +35,8 @@ from teamagent.media.contracts import (
     ProposalPptxOperation,
     ProxyOperation,
     S3ObjectRef,
+    Sales25MediaOperation,
+    Sales25PptxOperation,
     SlidesOperation,
     ThumbnailOperation,
     TikTokAcquireOperation,
@@ -48,6 +50,7 @@ from teamagent.media.deadline import (
     MediaDeadlineExceededError,
     botocore_config,
 )
+from teamagent.media.tiktok_capture import _sales25_source_ok
 
 logger = structlog.get_logger(__name__)
 
@@ -888,6 +891,7 @@ class MediaJobClient:
         request_fingerprint: str,
         timeout_s: int,
         operation_factory: Callable[[int], MediaOperation],
+        capture_result: Callable[[MediaJobResult], None] | None = None,
     ) -> tuple[Mapping[str, bytes], Mapping[str, Any]]:
         """stage/operation/request途中の例外でも、作成済みinputを残さない。"""
 
@@ -902,6 +906,8 @@ class MediaJobClient:
                 job_id=job_id,
                 deadline_epoch_s=deadline_epoch_s,
             )
+            if capture_result is not None:
+                return self.run_sync(request, timeout_s=timeout_s, capture_result=capture_result)
             return self.run_sync(request, timeout_s=timeout_s)
         finally:
             # run_sync に到達した場合は同メソッドの finally が cleanup する。
@@ -1015,6 +1021,26 @@ class MediaJobClient:
         else:
             mime = "video/mp4"
         return body, mime
+
+    def acquire_sales25_media(
+        self,
+        operation: Sales25MediaOperation,
+        *,
+        request_fingerprint: str,
+        timeout_s: int = _SYNC_TIMEOUT_MAX_S,
+    ) -> Mapping[str, bytes]:
+        """Acquire one selected post without changing the public search path."""
+        deadline_epoch_s = self._absolute_deadline(timeout_s)
+        request = self._request(
+            operation,
+            request_fingerprint,
+            timeout_s,
+            deadline_epoch_s=deadline_epoch_s,
+        )
+        artifacts, _metadata = self.run_sync(request, timeout_s=timeout_s)
+        if set(artifacts) != {"media-manifest.json", "media-bundle.zip"}:
+            raise MediaJobError("MEDIA_SALES25_ARTIFACT_MISSING")
+        return artifacts
 
     def search_tiktok(
         self,
@@ -1151,6 +1177,94 @@ class MediaJobClient:
         if not isinstance(posts, list) or not all(isinstance(item, dict) for item in posts):
             raise MediaJobError("MEDIA_TIKTOK_POSTS_INVALID")
         return posts
+
+    def search_tiktok_sales25(
+        self,
+        query: str,
+        *,
+        owner_id: str,
+        request_fingerprint: str,
+        search_type: Literal["keyword", "hashtag"] = "keyword",
+        max_videos: int = 100,
+        timeout_s: int = 300,
+    ) -> dict[str, Any]:
+        """Return one lossless search and its acceptance evidence for the owning case."""
+
+        if not isinstance(owner_id, str) or not owner_id.strip():
+            raise ValueError("sales25 owner_id is required")
+        operation = TikTokAcquireOperation(
+            kind="tiktok_acquire",
+            edition="sales25",
+            search_type=search_type,
+            keywords=(query,),
+            n_per_kw=max_videos,
+            videos_per_kw=0,
+            sort="display",
+            artifact_mode="metadata_only",
+        )
+        deadline_epoch_s = self._absolute_deadline(timeout_s)
+        request = self._request(
+            operation,
+            f"{request_fingerprint}:sales25:{hashlib.sha256(owner_id.encode()).hexdigest()}",
+            timeout_s,
+            deadline_epoch_s=deadline_epoch_s,
+        )
+        references: list[dict[str, Any]] = []
+
+        def capture_result(result: MediaJobResult) -> None:
+            references.extend(artifact.model_dump(mode="json") for artifact in result.artifacts)
+
+        artifacts, _metadata = self.run_sync(
+            request, timeout_s=timeout_s, capture_result=capture_result
+        )
+        try:
+            raw = json.loads(artifacts["sales25-raw.json"])
+            status = json.loads(artifacts["acquisition-status.json"])
+            if not isinstance(raw, dict) or not isinstance(status, dict):
+                raise ValueError("sales25 artifacts must be objects")
+            videos = raw["videos"]
+            accepted = status["accepted"]
+            if (
+                raw["query"] != operation.keywords[0]
+                or status["query"] != raw["query"]
+                or not isinstance(videos, list)
+                or not all(isinstance(item, dict) for item in videos)
+                or len(videos) > max_videos
+                or type(accepted) is not bool
+                or type(status["target"]) is not int
+                or status["target"] != max_videos
+                or type(status["actual"]) is not int
+                or status["actual"] != len(videos)
+                or type(status["shortfall"]) is not int
+                or status["shortfall"] != max_videos - len(videos)
+                or status["stop_reason"] != raw["stop_reason"]
+                or status["diagnostics"] != raw["diagnostics"]
+                or status["raw_ref"] != "sales25-raw.json"
+                or status["status"]
+                != (
+                    "failed"
+                    if not accepted
+                    else "complete"
+                    if len(videos) == max_videos
+                    else "partial"
+                )
+                or (not accepted and raw.get("status") != "failed")
+            ):
+                raise ValueError("sales25 acquisition evidence disagrees")
+            if accepted and not _sales25_source_ok(
+                raw, query=operation.keywords[0], target=max_videos
+            ):
+                raise ValueError("sales25 acquisition is not acceptable")
+        except (KeyError, TypeError, ValueError) as exc:
+            raise MediaJobError("MEDIA_TIKTOK_SALES25_EVIDENCE_INVALID") from exc
+        # Ownership is trusted core context, never a claim made by the remote page.
+        raw["owner_id"] = owner_id
+        return {
+            "raw": raw,
+            "acquisition_status": status,
+            "artifacts": references,
+            "media_job_id": request.job_id,
+        }
 
     def proxy_video(
         self,
@@ -1358,6 +1472,68 @@ class MediaJobClient:
         if body is None:
             raise MediaJobError("MEDIA_PDF_ARTIFACT_MISSING")
         return body
+
+    def render_sales25_pptx(
+        self,
+        bundle: bytes,
+        *,
+        owner_id: str,
+        request_fingerprint: str,
+        timeout_s: int = 480,
+    ) -> dict[str, Any]:
+        """Render one bounded owner snapshot, retaining immutable result references."""
+        if not isinstance(owner_id, str) or not owner_id.strip() or len(owner_id) > 200:
+            raise ValueError("sales25 owner_id is required")
+        fingerprint = (
+            f"{request_fingerprint}:sales25-pptx:{hashlib.sha256(owner_id.encode()).hexdigest()}"
+        )
+        job_id = self._job_id(fingerprint)
+        references: list[dict[str, Any]] = []
+
+        def operation_factory(deadline_epoch_s: int) -> MediaOperation:
+            source = self.find_staged(
+                job_id=job_id, name="sales25-input.zip", deadline_epoch_s=deadline_epoch_s
+            )
+            if source is None:
+                source = self.stage_bytes(
+                    job_id=job_id,
+                    name="sales25-input.zip",
+                    body=bundle,
+                    content_type="application/zip",
+                    deadline_epoch_s=deadline_epoch_s,
+                )
+            elif (
+                source.sha256 != hashlib.sha256(bundle).hexdigest()
+                or source.size != len(bundle)
+                or source.content_type != "application/zip"
+            ):
+                raise MediaJobError("MEDIA_SALES25_INPUT_CONFLICT")
+            return Sales25PptxOperation(kind="sales25_pptx", source=source, owner_id=owner_id)
+
+        def capture_result(result: MediaJobResult) -> None:
+            references.extend(artifact.model_dump(mode="json") for artifact in result.artifacts)
+
+        artifacts, _metadata = self._run_staged(
+            job_id=job_id,
+            request_fingerprint=fingerprint,
+            timeout_s=timeout_s,
+            operation_factory=operation_factory,
+            capture_result=capture_result,
+        )
+        if set(artifacts) != {"deck.pptx", "sales25-qa.json", "sales25-qa.zip"}:
+            raise MediaJobError("MEDIA_SALES25_ARTIFACT_MISSING")
+        try:
+            qa = json.loads(artifacts["sales25-qa.json"])
+            if (
+                qa["owner_id"] != owner_id
+                or qa["input_sha256"] != hashlib.sha256(bundle).hexdigest()
+                or qa["output_sha256"] != hashlib.sha256(artifacts["deck.pptx"]).hexdigest()
+                or qa["status"] not in {"passed", "incomplete", "invalid"}
+            ):
+                raise ValueError("sales25 QA identity differs")
+        except (KeyError, TypeError, ValueError) as exc:
+            raise MediaJobError("MEDIA_SALES25_QA_INVALID") from exc
+        return {"files": artifacts, "artifacts": references, "media_job_id": job_id}
 
     def render_proposal_pptx(
         self,
