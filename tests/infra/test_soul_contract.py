@@ -31,6 +31,20 @@ def test_soul_exists(soul: str) -> None:
     assert len(soul) > 1000
 
 
+def test_bu2_values_must_come_from_the_user(soul: str) -> None:
+    rule = next(
+        line for line in soul.splitlines() if "proposal_builder_submit" in line and "BU2" in line
+    )
+    for phrase in (
+        "利用者が明示した値だけ",
+        "指定した資料",
+        "無ければ省略",
+        "推測・相場・例の数値を入れない",
+        "試算条件が一つでも未指定なら試算全体を省略",
+    ):
+        assert phrase in rule
+
+
 # ── ⓪ 長さ上限（OpenClaw embedded bootstrap の切断防止）─────────────────────
 #
 # 🔴 単位に注意: OpenClaw の切断は JS の `String.length` ＝ **UTF-16 コードユニット**で
