@@ -52,7 +52,11 @@ from teamagent.skills.search.client_match import (
     normalize_filter_client,
 )
 from teamagent.skills.search.drive_first import enabled as drive_first_enabled
-from teamagent.skills.search.knowledge_query import extract_query_industry
+from teamagent.skills.search.knowledge_query import (
+    document_type,
+    extract_knowledge_filters,
+    extract_query_industry,
+)
 from teamagent.skills.search.not_found import _haystack, _term_in_hit, query_subject_terms
 from teamagent.skills.search.result_guard import (
     aliases,
@@ -221,6 +225,15 @@ class KnowledgeDeliverSkill(BaseSkill[KnowledgeDeliverInput, KnowledgeDeliverOut
     def run(self, input: KnowledgeDeliverInput, ctx: SkillContext) -> KnowledgeDeliverOutput:
         log = ctx.bind_logger(self.name)
         compact = ctx.metadata.get("_search_compact_answer") is True
+        drive_mode = drive_first_enabled(ctx.metadata)
+        wanted_type = (
+            (
+                input.filter_doc_type
+                or (extract_knowledge_filters(input.query) or {}).get("cls_doc_type")
+            )
+            if drive_mode
+            else None
+        )
 
         # 1. 検索＋要約（Phase1 の分類フィルタ・再ランクをそのまま通す）。
         search = self._search or self._build_search()
@@ -274,6 +287,12 @@ class KnowledgeDeliverSkill(BaseSkill[KnowledgeDeliverInput, KnowledgeDeliverOut
         seen_ids: set[str] = set()
         resolved_candidates = 0
         for h in s_out.hits:
+            if (
+                wanted_type
+                and document_type(h.resolved_file_name or h.title or h.file_name or "", h.doc_type)
+                != wanted_type
+            ):
+                continue
             if h.source_type == "gdrive":
                 file_id = extract_drive_file_id(h.source_uri)
             else:
@@ -333,6 +352,13 @@ class KnowledgeDeliverSkill(BaseSkill[KnowledgeDeliverInput, KnowledgeDeliverOut
         # 根拠に使わない（別取引先の）リンクを回答末尾の「📎 資料リンク」から外す。
         # 同じ URL を名指しの取引先のヒットも持っていれば残す。
         answer = s_out.answer
+        if wanted_type and candidates:
+            answer = f"該当する{wanted_type}です。\n" + "\n".join(
+                f"{filename}: https://drive.google.com/file/d/{fid}/view"
+                for fid, filename in candidates
+            )
+        elif wanted_type:
+            answer = f"{wanted_type}のファイル本体は確認できませんでした。"
         if compact:
             from teamagent.skills.search.skill import _drop_punt_lines
 
@@ -460,7 +486,7 @@ class KnowledgeDeliverSkill(BaseSkill[KnowledgeDeliverInput, KnowledgeDeliverOut
                             thread_ts=thread_ts,
                             email=requester_email,
                             dm_channel=dm_channel,
-                            single_post=compact,
+                            single_post=compact or drive_mode,
                         )
                     )
                 except Exception:
@@ -531,7 +557,7 @@ class KnowledgeDeliverSkill(BaseSkill[KnowledgeDeliverInput, KnowledgeDeliverOut
             total_cost_usd=s_out.total_cost_usd,
             delivery=(
                 KnowledgeDeliveryReceipt(delivered_count=len(delivered_ids))
-                if compact
+                if (compact or drive_mode)
                 and delivered_ids
                 and len(delivered_ids) == len(candidates)
                 and where in {"thread", "dm"}

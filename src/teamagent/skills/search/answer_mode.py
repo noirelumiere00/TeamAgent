@@ -85,7 +85,8 @@ def strip_advice(answer: str, query: str) -> str:
     dropping = False
     for paragraph in re.split(r"\n\s*\n", answer):
         if re.search(
-            r"推奨アクション|次の一手|おすすめ(?:の施策|アクション)|効くパターン(?:です|と)|有効なパターン",
+            r"推奨アクション|次の(?:一手|アクション)|おすすめ(?:の施策|アクション)|"
+            r"効くパターン(?:です|と)|有効なパターン",
             paragraph,
         ):
             dropping = True

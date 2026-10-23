@@ -27,10 +27,11 @@ _FOLLOWUP = re.compile(
     re.IGNORECASE,
 )
 _MISSING = "直前に表示した資料の閲覧権限を確認できませんでした。資料名を指定してください。"
+_EXPLANATION = re.compile(r"(?:元の資料|元資料).{0,24}(?:根拠|もと|基).{0,24}説明")
 
 
 def is_followup(query: str) -> bool:
-    return bool(_FOLLOWUP.fullmatch(query.strip()))
+    return bool(_FOLLOWUP.fullmatch(query.strip()) or _EXPLANATION.search(query))
 
 
 def _key(ctx: SkillContext, claim: VerifiedCallerClaim | None) -> str | None:
@@ -183,6 +184,8 @@ def restore(
         saved = DocumentReferenceStore(_search_skill(skill)._pgvector).get(
             ctx.metadata["user_email"], key
         )
+        if not saved and _EXPLANATION.search(query):
+            return None
         refs = (
             reauthorize(skill, [DocumentReference.model_validate(ref) for ref in saved], ctx)
             if saved
@@ -191,6 +194,8 @@ def restore(
     except Exception as exc:
         logger.warning("document_followup_reauthorization_failed", error=type(exc).__name__)
         refs = []
+    if _EXPLANATION.search(query):
+        return _explain(skill, query, refs, ctx)
     lines = []
     for ref in refs:
         title = re.sub(r"[\[\]()<>@\r\n]", " ", ref.title or "資料").strip()
@@ -208,4 +213,69 @@ def restore(
         answer_format="list",
         direct_answer=answer,
         direct_answer_kind="list_fast",
+    )
+
+
+def _explain(
+    skill: Any, query: str, refs: list[DocumentReference], ctx: SkillContext
+) -> SearchOutput:
+    from teamagent.skills.search import compact, drive_first
+    from teamagent.skills.search.fanout_sources import rls_connection
+    from teamagent.skills.search.schema import SearchOutput
+
+    search = _search_skill(skill)
+    ids = list(
+        dict.fromkeys(
+            ref.drive_file_id for ref in refs if ref.kind == "drive" and ref.drive_file_id
+        )
+    )
+    answer = "元の資料本文を確認できませんでした。"
+    displayed: list[DocumentReference] = []
+    cost = 0.0
+    if ids:
+        try:
+            embedding = search._embed(query + "\n" + "\n".join(ref.title for ref in refs))
+            with rls_connection(
+                search._pgvector, ctx.metadata, app_role=search._app_role
+            )() as conn:
+                hits = search._pgvector.search_similar_new_schema(
+                    conn,
+                    embedding,
+                    limit=12,
+                    filter_drive_file_ids=ids,
+                    embedding_col=getattr(search, "_embedding_column", "embedding"),
+                    request_id=ctx.request_id,
+                )
+            # SQL と再認可の両方で同じ Drive 原本に限定し、台帳・自己DMは説明に使わない。
+            hits = [
+                h for h in hits if drive_first.canonical_reference(h.metadata).drive_file_id in ids
+            ]
+            if hits:
+                summary, cost = search._summarize(
+                    query,
+                    hits,
+                    ctx.request_id,
+                    compact_drive_mode=True,
+                    compact_sources=compact.source_map(
+                        hits, (), lambda h: drive_first.canonical_reference(h.metadata).url
+                    ),
+                )
+                rendered = compact.build(
+                    summary,
+                    hits,
+                    (),
+                    lambda h: drive_first.canonical_reference(h.metadata).url,
+                    query=query,
+                    displayed_refs=displayed,
+                )
+                if not compact.is_empty(rendered):
+                    answer = rendered
+        except Exception as exc:
+            logger.warning("document_source_explanation_failed", error=type(exc).__name__)
+    return SearchOutput(
+        answer=answer,
+        total_cost_usd=cost,
+        found=bool(displayed),
+        displayed_refs=displayed,
+        answer_format="compact",
     )

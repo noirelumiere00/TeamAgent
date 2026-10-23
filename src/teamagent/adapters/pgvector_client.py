@@ -441,6 +441,7 @@ class PgVectorClient:
         exclude_recurring: bool = False,
         embedding_col: str = "embedding",
         filter_source_types: list[str] | None = None,
+        filter_drive_file_ids: list[str] | None = None,
     ) -> list[SearchHit]:
         """documents + chunks JOIN で cosine 類似度上位 limit 件を返す。
 
@@ -662,6 +663,9 @@ class PgVectorClient:
                 ")"
             )
 
+        if filter_drive_file_ids is not None:
+            where_parts.append("d.source_type = 'gdrive' AND d.external_id = ANY(%s)")
+            params.append(filter_drive_file_ids)
         where_clause = f"WHERE {' AND '.join(where_parts)}" if where_parts else ""
 
         # chunk_id: hashtext は int4 だが bigint キャストして abs で INT_MIN overflow を防ぐ
@@ -1767,11 +1771,23 @@ class PgVectorClient:
         *,
         limit: int = 8,
         drive_only: bool = False,
+        doc_type: str | None = None,
     ) -> list[SearchHit]:
         """名指し資料を種類を問わず新しい順に引く（RLS 済み接続・読み取りだけ）。"""
         if not client_name.strip():
             return []
         pattern = f"%{self._escape_like(client_name.strip())}%"
+        type_filter = (
+            ""
+            if not doc_type
+            else """
+              AND (CASE WHEN d.title LIKE '%%競合資料%%' THEN '競合資料'
+                        WHEN d.title LIKE '%%レポート%%' OR d.title LIKE '%%報告書%%'
+                          THEN '報告書'
+                        WHEN d.title LIKE '%%提案%%' THEN '提案書'
+                        ELSE d.metadata->>'cls_doc_type' END) = %s
+        """
+        )
         sql = f"""
             SELECT -(abs(hashtext(d.id::text)::bigint) + 1) AS chunk_id,
                    d.id AS document_id, d.title, d.source_uri, d.source_type::text AS source_type,
@@ -1783,16 +1799,26 @@ class PgVectorClient:
                    OR d.metadata->>'cls_project' ILIKE %s ESCAPE '\\'
                    OR d.metadata->>'client_name' ILIKE %s ESCAPE '\\')
               {"AND d.source_type IN ('gdrive', 'other')" if drive_only else ""}
+              {type_filter}
             ORDER BY d.modified_at DESC NULLS LAST, d.id DESC
             LIMIT %s
         """  # nosec B608 - source条件は固定文字列のみ
         with conn.cursor() as cur:
-            cur.execute(sql, [pattern, pattern, pattern, min(8, max(1, limit))])
+            cur.execute(
+                sql,
+                [
+                    pattern,
+                    pattern,
+                    pattern,
+                    *([doc_type] if doc_type else []),
+                    min(8, max(1, limit)),
+                ],
+            )
             rows = cur.fetchall()
         return [
             SearchHit(
                 chunk_id=int(row["chunk_id"]),
-                content="",
+                content=str(row["title"] or "") if doc_type else "",
                 score=1.0,
                 metadata={
                     **(row.get("metadata") or {}),

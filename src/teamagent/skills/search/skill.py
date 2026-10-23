@@ -839,6 +839,7 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
             code_comparison = (
                 drive_mode
                 and compact_mode
+                and classify_answer_mode(input.query) != "insight"
                 and bool(compact_comparison(input.query, summary_hits)[0])
             )
             answer, cost_usd = (
@@ -1978,6 +1979,23 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
                     request_id=ctx.request_id,
                     probe=probe,
                 )
+                if drive_mode:
+                    wanted_type = input.filter_doc_type or (
+                        extract_knowledge_filters(input.query) or {}
+                    ).get("cls_doc_type")
+                    if wanted_type and (asked_client := self._asked_client(probe)):
+                        # 分類漏れ・競合資料の占有でも、名指しの種類を本人RLS下で取り直す。
+                        try:
+                            hits = [
+                                *hits,
+                                *self._pgvector.find_documents_for_advertiser(
+                                    conn, asked_client, drive_only=True, doc_type=wanted_type
+                                ),
+                            ]
+                        except Exception as exc:
+                            logger.warning(
+                                "search_material_lookup_failed", error=type(exc).__name__
+                            )
                 # M1 資料の被り対策。**プール段階（rerank の前）**に噛ませる。
                 # 旧実装は rerank→top_k 後段に置いていたため、最良 doc が 2 chunk に圧縮され
                 # 最終件数が top_k 未満に痩せていた。rerank 前に畳む/cap することで、rerank は
@@ -2016,6 +2034,8 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
                         timings["rerank_ms"] = timings.get("rerank_ms", 0.0) + (
                             (time.perf_counter() - _t_rerank) * 1000
                         )
+                if drive_first.enabled(ctx.metadata):
+                    hits = drive_first.scope_hits(input.query, hits, input.filter_doc_type)
                 if fanout_probe is not None:
                     fanout_probe["candidates"] = list(hits)
                 # Sprint 5: 反ハルシネーション閾値。relevance < 閾値の hit を落とす。

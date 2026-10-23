@@ -27,6 +27,18 @@ _DOC_TYPE_KEYWORDS: tuple[tuple[tuple[str, ...], str], ...] = (
 )
 
 
+def document_type(title: str, classified: str | None = None) -> str | None:
+    """Explicit file names take precedence over ingest's broader classification."""
+    if "競合資料" in title:
+        return "競合資料"
+    for keywords, kind in _DOC_TYPE_KEYWORDS:
+        if any(word in title for word in keywords):
+            return kind
+    if "提案" in title:
+        return "提案書"
+    return classified
+
+
 # 業界キーワード表は teamagent.ingest.industry_taxonomy が唯一の真実源。
 # ここに別の表を持つと、まさに今回直している「語彙が層ごとに分かれる」問題を再生産する。
 # （旧実装はここに 11 語の独自表を持っており、値も "メーカー" のように非正準だった）

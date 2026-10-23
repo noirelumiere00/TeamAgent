@@ -2970,6 +2970,7 @@ export function createCallerIdentityPlugin({
   const documentFollowupAllowedEmails = new Set(String(env.SEARCH_DRIVE_FIRST_ALLOWED_EMAILS ?? "")
     .split(",").map(value => value.trim().toLowerCase()).filter(Boolean));
   const documentFollowupPattern = /^(?:その|さっきの|直前の)(?:事例の)?(?:資料|ファイル)(?:の(?:URL|リンク))?(?:も|を|も一緒に)?(?:出して|見せて|送って|教えて|共有して|ください|下さい)(?:ください|下さい)?[。！!？?\s]*$/iu;
+  const sourceExplanationPattern = /(?:元の資料|元資料).{0,24}(?:根拠|もと|基).{0,24}説明/u;
   const searchDirectKinds = new Set(String(env.SEARCH_DIRECT_ANSWER_KINDS ?? "")
     .split(",").map(value => value.trim()).filter(Boolean));
   if ([...searchDirectKinds].some(kind => !searchDirectKnownKinds.has(kind))) searchDirectKinds.clear();
@@ -3118,6 +3119,10 @@ export function createCallerIdentityPlugin({
       return;
     }
     if (searchTool) entry.searchCompleted = true;
+    const searchData = searchTool ? searchResultData(event.result) : null;
+    if (searchData?.video_metrics_posted === true && typeof searchData.video_metrics_evidence?.text === "string") {
+      entry.postedMetrics = searchData.video_metrics_evidence.text;
+    }
     if (["oauth_connect", "teamagent__oauth_connect"].includes(event?.toolName)) entry.needsInput = true;
     const collected = searchTool ? (entry.searchEvidence ??= {urls: new Set(), numbers: new Set(),
       metricEvidence: {play: new Set(), save: new Set()}, text: ""}) : entry;
@@ -3195,7 +3200,13 @@ export function createCallerIdentityPlugin({
     }
     if (entry.searchCompleted && ["search", "teamagent__search"].includes(event?.toolName)) {
       entry.searchUrls = new Set();
-      collectSearchSourceUrls(event.result, entry.searchUrls);
+      if (Array.isArray(searchData?.displayed_refs)) {
+        for (const ref of searchData.displayed_refs) {
+          if (ref?.kind === "drive" && typeof ref.url === "string" && !ref.url.includes("/spreadsheets/")) {
+            entry.searchUrls.add(ref.url);
+          }
+        }
+      } else collectSearchSourceUrls(event.result, entry.searchUrls);
     }
     entry.updatedAtMs = now();
     evidenceByRun.delete(runId);
@@ -3268,9 +3279,10 @@ export function createCallerIdentityPlugin({
     for (const item of Object.values(value)) collectSearchSourceUrls(item, urls, depth + 1);
   }
 
-  function appendMissingSearchSources(text, urls) {
-    if (!text.trim() || !urls?.size || /https?:\/\//iu.test(text)) return text;
-    return text.trimEnd() + "\n\n📎 出典\n" + [...urls].slice(0, 3).map(url => `- <${url}>`).join("\n");
+  function appendMissingSearchSources(text, urls, displayedOnly = false) {
+    if (!text.trim() || !urls?.size || (!displayedOnly && /https?:\/\//iu.test(text))) return text;
+    const missing = [...urls].filter(url => !text.includes(url)).slice(0, 3);
+    return missing.length ? text.trimEnd() + "\n\n📎 出典\n" + missing.map(url => `- <${url}>`).join("\n") : text;
   }
 
   // NumberGrounder と同じく NFKC・カンマ・万/億を揃える。URL の ID は根拠にしない。
@@ -3458,6 +3470,12 @@ export function createCallerIdentityPlugin({
   }
 
   function groundEvidenceReply(text, evidence) {
+    if (evidence?.postedMetrics) {
+      const posted = new Set(metricNumbers(evidence.postedMetrics));
+      text = text.replace(/[^。！？!?\r\n]+[。！？!?]*/gu, sentence =>
+        /再生|保存|[|｜]/u.test(sentence) && metricNumbers(sentence).some(n => posted.has(n))
+          ? "" : sentence);
+    }
     return stripUngroundedVideoMetrics(
       trimUnsolicitedEnding(text, evidence?.needsInput), evidence?.numbers, evidence?.metricEvidence);
   }
@@ -5810,6 +5828,12 @@ export function createCallerIdentityPlugin({
       const saved = searchQueryByPending.get(trusted.pendingKey);
       if (saved?.query) params = {...params, query: saved.query.slice(0, 1000)};
     }
+    if (tool === "search" && trusted.searchRequired === "source") {
+      const saved = searchQueryByPending.get(trusted.pendingKey);
+      if (sourceExplanationPattern.test(saved?.query ?? "")) {
+        params = {...params, query: saved.query.slice(0, 1000)};
+      }
+    }
     if (tool === "search" && trusted.searchRequired === "list") {
       const saved = searchQueryByPending.get(trusted.pendingKey);
       if (saved?.context) params = {...params,
@@ -6227,14 +6251,14 @@ export function createCallerIdentityPlugin({
     const direct = searchDirectByRun.get(runId);
     if (direct?.delivered || direct?.replaced) return;
     if (direct?.pending) return direct.task;
-    const claimsOnly = ["comparison", "list", "document_followup"].includes(ingress?.searchRequired);
+    const claimsOnly = ["comparison", "list", "document_followup", "source"].includes(ingress?.searchRequired);
     const unrelatedToolSatisfies = !claimsOnly && (toolCallsByRun.get(runId)?.count ?? 0) > 0;
     if (!ingress?.searchRequired || ingress.connectRequest ||
         evidenceByRun.has(runId) || unrelatedToolSatisfies ||
         typeof event?.lastAssistantMessage !== "string" || !event.lastAssistantMessage.trim() ||
         searchRevisionsByRun.has(runId) ||
         connectRevisionsByRun.has(runId) || videoRevisionsByRun.has(runId)) return undefined;
-    const previous = claimsOnly && conversationSearchEvidence(runId);
+    const previous = ["comparison", "list"].includes(ingress?.searchRequired) && conversationSearchEvidence(runId);
     if (previous && !hasUnsupportedSearchClaims(runId, event.lastAssistantMessage) &&
         (metricNumbers(event.lastAssistantMessage).length || searchClaimSentences(event.lastAssistantMessage)
           .every(sentence => searchClaimSentences(previous.text).includes(sentence)))) return;
@@ -6254,8 +6278,8 @@ export function createCallerIdentityPlugin({
     if (["comparison", "list"].includes(ingress.searchRequired) &&
         !hasUnsupportedSearchClaims(runId, event?.lastAssistantMessage ?? "")) return;
     if (ingress.searchRequired === "source" &&
+        !sourceExplanationPattern.test(searchQueryByPending.get(ingress.pendingKey)?.query ?? "") &&
         !/(?:添付|(?:URL|リンク|ファイル|資料).{0,24}(?:貼|送|共有|提供|指定|アップロード))|抽出でき|添付が[無な]/iu.test(event?.lastAssistantMessage ?? "")) return;
-
     searchRevisionsByRun.set(runId, {updatedAtMs: now()});
     emitPluginLog(logger, "warn", `search zero-tool revise reason=${ingress.searchRequired} outcome=revised`);
     if (ingress.searchRequired === "document_followup") return {action: "revise",
@@ -6367,7 +6391,7 @@ export function createCallerIdentityPlugin({
     if (!SLACK_DM_CHANNEL_RE.test(channel)) return reviseSearchZeroTool(runId, ingress, logger, event);
     rememberSearchConversation(event, ctx);
     const saved = searchQueryByPending.get(ingress.pendingKey);
-    const query = (ingress.searchRequired === "document_followup" ? saved?.query ?? "" :
+    const query = (ingress.searchRequired === "document_followup" || sourceExplanationPattern.test(saved?.query ?? "") ? saved?.query ?? "" :
       [saved?.query, saved?.context].filter(Boolean).join("\n")).slice(0, 1000);
     let result;
     try {
@@ -7567,7 +7591,7 @@ export function createCallerIdentityPlugin({
           const canonical = compactText ?? payload.text;
           let droppingAdvice = false;
           const cleanAnswer = noAdvice ? canonical.split(/\n\s*\n/u).filter(paragraph => {
-            if (/推奨アクション|次の一手|おすすめ(?:の施策|アクション)|効くパターン(?:です|と)|有効なパターン/u.test(paragraph)) {
+            if (/推奨アクション|次の(?:一手|アクション)|おすすめ(?:の施策|アクション)|効くパターン(?:です|と)|有効なパターン/u.test(paragraph)) {
               droppingAdvice = true; return false;
             }
             if (droppingAdvice && !/^\s*[#*📎 ]*(?:出典|根拠|資料リンク|事実|結果)/u.test(paragraph) && !paragraph.includes("[S:")) return false;
@@ -7581,9 +7605,12 @@ export function createCallerIdentityPlugin({
           if (payload.text.trim() && !trimmed.trim()) {
             return finishRevisedReply(event, ctx, { ...result, cancel: true });
           }
-          const sourced = authoritative && !evidence?.compactModeSeen
-            ? appendMissingSearchSources(trimmed, evidence?.searchUrls) : trimmed;
-          const scrubbed = scrubOutboundReplyText(sourced, replacements);
+          const sourced = authoritative && (!evidence?.compactModeSeen || evidence?.driveFirst)
+            ? appendMissingSearchSources(trimmed, evidence?.searchUrls, evidence?.driveFirst) : trimmed;
+          const mediaCaption = authoritative && evidence && !finalTextOnly && !sourced.trim() &&
+            (payload.mediaUrl || payload.mediaUrls?.length || payload.attachments?.length || payload.files?.length)
+            ? "資料を添付します。" : sourced;
+          const scrubbed = scrubOutboundReplyText(mediaCaption, replacements);
           if (scrubbed.text !== payload.text) {
             const { signedUrls, toolNames, urlSeparators, unverifiedConnectUrls = 0 } = scrubbed.counts;
             emitPluginLog(

@@ -32,6 +32,38 @@ def enabled(metadata: Mapping[str, Any]) -> bool:
     )
 
 
+def scope_hits(query: str, hits: Sequence[Any], doc_type: str | None = None) -> list[Any]:
+    """Keep the requested material type and explicitly named campaigns in every lane."""
+    from teamagent.skills.search.campaign_files import campaign_key, is_campaign_hit
+    from teamagent.skills.search.knowledge_query import document_type, extract_knowledge_filters
+
+    wanted = doc_type or (extract_knowledge_filters(query) or {}).get("cls_doc_type")
+    selected = list(hits)
+    if wanted:
+        selected = [
+            h
+            for h in selected
+            if document_type(
+                str((h.metadata or {}).get("title") or (h.metadata or {}).get("file_name") or ""),
+                (h.metadata or {}).get("cls_doc_type"),
+            )
+            == wanted
+        ]
+    campaigns = {
+        name
+        for h in hits
+        if is_campaign_hit(h) and (pair := campaign_key(h))
+        if (name := pair[1]) and name.casefold() in query.casefold()
+    }
+    if campaigns:
+        selected = [
+            h
+            for h in selected
+            if not is_campaign_hit(h) or not (pair := campaign_key(h)) or pair[1] in campaigns
+        ]
+    return selected
+
+
 def drive_file_id(value: object) -> str | None:
     text = str(value or "").strip()
     if text.startswith("gdrive://"):
