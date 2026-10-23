@@ -7639,6 +7639,20 @@ export function createCallerIdentityPlugin({
             (payload.mediaUrl || payload.mediaUrls?.length || payload.attachments?.length || payload.files?.length)
             ? "資料を添付します。" : sourced;
           let scrubbed = scrubOutboundReplyText(mediaCaption, replacements);
+          if (finalTextOnly && evidence?.driveFirst) {
+            const materialLink = (whole, slackUrl, slackLabel, mdLabel, mdUrl) => {
+              const url = slackUrl ?? mdUrl, label = slackLabel ?? mdLabel;
+              try {
+                const parsed = new URL(url);
+                if (parsed.hostname.endsWith(".slack.com") && parsed.pathname.startsWith("/archives/") && label !== "会話の記録") return label;
+              } catch {}
+              return whole;
+            };
+            const text = scrubbed.text.replace(/<(https?:\/\/[^\s<>|]+)\|([^>\n]+)>|\[([^\]\n]+)\]\((https?:\/\/[^\s)]+)\)/gu, materialLink)
+              .split(/(?<=[。！？!?\n])/u)
+              .filter(sentence => !/(?:正式社名|商材名|会社名)[^\n。！？!?]*確認(?:して|すると|すれば)|(?:確認|検索)(?:してみて|してください)/u.test(sentence)).join('').trim();
+            scrubbed = {...scrubbed, text};
+          }
           if (finalTextOnly && evidence?.driveFirst &&
               !/https?:\/\/[^\s<>|\[\]()]+/iu.test(scrubbed.text)) {
             const invitation = /詳し[^\n。！？!?]*(?:こちら|どうぞ|ご覧)|(?:資料|詳細|元の会話)[^\n。！？!?]*(?:こちら|見たければ|見たい場合)|こちら(?:を|から|で|です)?(?:どうぞ|ご覧ください|確認してください)?[。！!]?\s*$/u;

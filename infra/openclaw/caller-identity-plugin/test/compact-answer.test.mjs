@@ -278,3 +278,36 @@ for (const direct of [false, true]) {
     assert.equal(p.send('保存を促すポイントを説明します。'), answer);
   });
 }
+
+for (const syntax of ['slack', 'markdown']) {
+  test(`drive-first never labels a Slack thread as a material: ${syntax}`, () => {
+    const p = setup('食品系商品の星空堂って会社に行く。事例ある？');
+    const url = 'https://example.slack.com/archives/CPUBLIC/p1792727460000000';
+    const link = syntax === 'slack' ? `<${url}|0824_提案資料>` : `[0824_提案資料](${url})`;
+    p.remember({answer: `投稿に資料があります。資料: ${link}`, found: true,
+      displayed_refs: [], answer_format: null});
+    const out = p.send(`投稿に資料があります。資料: ${link}`);
+    assert.doesNotMatch(out, /\|0824_提案資料>|\[0824_提案資料\]\(/u);
+    assert.match(out, /0824_提案資料/u);
+  });
+}
+
+for (const tail of ['正式社名を確認してみてください。', '商材名を確認すると見つかるかもしれません。']) {
+  test('Drive fallback never closes by asking the user to verify: ' + tail, () => {
+    const p = setup('星空堂って会社に行く。事例ある？');
+    const body = '星空堂との過去案件は見つかりませんでした。';
+    const link = '<https://drive.google.com/file/d/SAVED/view|資料を見る>';
+    p.remember({answer: `${body}\n${link}\n${tail}`, found: true,
+      displayed_refs: [], answer_format: null});
+    const out = p.send('モデルが書き直しました。');
+    assert.ok(out.includes(body) && out.includes(link));
+    assert.ok(!out.includes(tail));
+  });
+}
+
+test('legacy search leaves material-shaped Slack links alone', () => {
+  const p = setup();
+  const text = '<https://example.slack.com/archives/CPUBLIC/p1792727460000000|0824_提案資料>';
+  p.remember({answer: text, found: true});
+  assert.equal(p.send(text), text);
+});

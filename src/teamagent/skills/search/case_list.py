@@ -91,6 +91,7 @@ def render(
     displayed_refs: list[DocumentReference] | None = None,
     cards: bool = False,
     drive_only: bool = False,
+    max_cases: int = 5,
 ) -> str:
     lines: list[str] = []
     separator = (
@@ -178,7 +179,7 @@ def render(
         lines.append(line)
         if displayed_refs is not None and ref is not None:
             displayed_refs.append(ref)
-        if len(lines) == 5:
+        if len(lines) == max_cases:
             break
     return separator.join(lines)
 
