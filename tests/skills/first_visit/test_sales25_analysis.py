@@ -385,6 +385,7 @@ def test_complete_output_passes_pinned_top10_checker(run: Path, tmp_path: Path) 
     checked = subprocess.run(
         [
             sys.executable,
+            "-B",  # 固定キットの中に __pycache__ を作らない（lock のファイル構成検査が落ちる）
             str(contract.BUNDLE / "scripts/check_top5_analysis.py"),
             "--plan",
             str(run / "deck-plan.json"),
