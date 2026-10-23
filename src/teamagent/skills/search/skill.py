@@ -784,10 +784,13 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
             hits = summary_hits
             found = bool((found and summary_hits) or slack_items)
         if drive_first.enabled(ctx.metadata):
+            category_hits = case_probe.get("category_hits")
             groups, slack_items, file_urls = drive_first.annotate(
-                self, [hits, summary_hits], slack_items, ctx
+                self, [hits, summary_hits, category_hits or []], slack_items, ctx
             )
-            hits, summary_hits = groups
+            hits, summary_hits, annotated_category = groups
+            if category_hits is not None:
+                case_probe["category_hits"] = annotated_category
         if compact_mode and slack_items:
             found = True
         case_miss = bool(case_target and not found)
@@ -1078,6 +1081,7 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
                 asked_industry,
                 displayed_refs,
                 complete=bool(complete),
+                category_hits=case_probe.get("category_hits"),
             )
             found = visible_found = bool(displayed_refs)
             suggested_next = None
@@ -1766,7 +1770,38 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
                         if surface != canonical:
                             probe["query_client_alias"] = surface
             if fanout_probe is not None:
-                from teamagent.skills.search.fanout import collect_named_sources
+                from teamagent.skills.search.case_list import CANDIDATE_LIMIT
+                from teamagent.skills.search.fanout import bounded_connection, collect_named_sources
+                from teamagent.skills.search.fanout_sources import reuse_connection
+
+                if visit:
+                    fanout_probe["category_hits"] = []
+                    if visit.category:
+                        try:
+                            connect = bounded_connection(
+                                reuse_connection(conn), time.perf_counter() + 3.0
+                            )
+                            with connect() as category_conn:
+                                fanout_probe["category_hits"] = (
+                                    self._pgvector.search_topic_by_terms(
+                                        category_conn,
+                                        embedding,
+                                        topic=None,
+                                        terms=[visit.category],
+                                        limit=CANDIDATE_LIMIT,
+                                        embedding_col=self._embedding_column,
+                                        request_id=ctx.request_id,
+                                    )
+                                )
+                        except Exception as exc:
+                            fanout_probe["category_hits"] = None
+                            if probe is not None:
+                                probe["incomplete"] = "true"
+                            logger.warning(
+                                "search_visit_category_failed",
+                                request_id=ctx.request_id,
+                                error=type(exc).__name__,
+                            )
 
                 if is_case_list(input.query) or visit:
                     fanout_probe["case_query"] = input.query

@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import os
 import re
+import unicodedata
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -26,6 +27,12 @@ from psycopg.rows import dict_row
 from teamagent.adapters.pg_pool import ConnectionPool, PoolStats
 
 logger = structlog.get_logger(__name__)
+
+
+def normalize_literal_term(text: str) -> str:
+    """文字検索用の表記統一。意味の言い換えや業種への拡張はしない。"""
+    return re.sub(r"[\s・‐‑‒–—―−-]+", "", unicodedata.normalize("NFKC", text)).lower()
+
 
 # chunks の embedding 列を SQL 識別子として f 文字列に埋める際の許可リスト。
 # 値ではなく **識別子** を埋めるため placeholder にできず、injection 防止は固定許可リスト
@@ -1562,7 +1569,7 @@ class PgVectorClient:
         conn: psycopg.Connection[dict[str, Any]],
         embedding: list[float],
         *,
-        topic: str,
+        topic: str | None,
         terms: list[str],
         limit: int = 5,
         embedding_col: str = "embedding",
@@ -1574,15 +1581,45 @@ class PgVectorClient:
         意味の近さだけでは候補に入らない。代理店名・社名のような固有名は文字で探す。
         RLS は conn 側で設定済み前提（本人が見られる文書だけ）。メタデータは文書の metadata を
         そのまま載せる（channel_name・client_name 等を後段の表示がそのまま使える）。
+        topic=None は商材語の直接検索。表記を統一し、文書ごとに一致した本文を返す。
         """
-        clean = [t.strip() for t in terms if t and t.strip()]
-        if not clean or not topic or embedding_col not in ("embedding", "embedding_ctx"):
+        clean = [normalize_literal_term(t) if topic is None else t.strip() for t in terms]
+        clean = [t for t in clean if t]
+        if (
+            not clean
+            or topic == ""
+            or embedding_col not in (_ALLOWED_EMBEDDING_COLUMNS | {"embedding_ctx"})
+        ):
             return []
         patterns = [f"%{self._escape_like(t)}%" for t in clean]
+        content = "COALESCE(c.contextualized, c.content)"
+        condition = (
+            "d.metadata->>'topic' = %s AND (c.content ILIKE ANY(%s) OR d.title ILIKE ANY(%s))"
+        )
+        distinct, order = "", f"c.{embedding_col} <=> %s::vector"
+        params: list[Any] = [embedding, topic, patterns, patterns, embedding, limit]
+        if topic is None:
+            content = "c.content"
+            # DB側も同じ表記統一を行い、先頭以外の本文チャンクを取りこぼさない。
+            condition = """(
+                d.source_type IN ('gdrive', 'other')
+                OR (d.source_type = 'gsheets' AND (
+                    d.metadata->>'case_corpus' = 'true'
+                    OR d.metadata->>'is_knowledge_share' = 'true')))
+              AND d.metadata->>'suppressed' IS DISTINCT FROM 'true'
+              AND d.metadata->>'is_sales_fb' IS DISTINCT FROM 'true'
+              AND NOT (d.metadata ? 'x_research_tool')
+              AND (
+                regexp_replace(normalize(c.content, NFKC), '[[:space:]・‐‑‒–—―−-]+', '', 'g')
+                    ILIKE ANY(%s)
+                OR regexp_replace(normalize(d.title, NFKC), '[[:space:]・‐‑‒–—―−-]+', '', 'g')
+                    ILIKE ANY(%s))"""
+            distinct, order = "DISTINCT ON (d.id)", f"d.id, {order}"
+            params = [embedding, patterns, patterns, embedding, limit]
         sql = f"""
-            SELECT
+            SELECT {distinct}
                 abs(hashtext(c.id::text)::bigint) AS chunk_id,
-                COALESCE(c.contextualized, c.content) AS content{_timeline_columns()},
+                {content} AS content{_timeline_columns()},
                 1 - (c.{embedding_col} <=> %s::vector) AS score,
                 c.page_num,
                 d.source_uri,
@@ -1592,12 +1629,12 @@ class PgVectorClient:
                 to_char(d.modified_at AT TIME ZONE 'Asia/Tokyo', 'YYYY-MM-DD') AS updated_at
             FROM chunks c
             JOIN documents d ON d.id = c.document_id
-            WHERE d.metadata->>'topic' = %s
-              AND (c.content ILIKE ANY(%s) OR d.title ILIKE ANY(%s))
-            ORDER BY c.{embedding_col} <=> %s::vector
-            LIMIT %s
+            WHERE {condition}
+            ORDER BY {order}
         """  # nosec B608 — embedding_col は上の許可リストで縛っている
-        params: list[Any] = [embedding, topic, patterns, patterns, embedding, limit]
+        if topic is None:
+            sql = f"SELECT * FROM ({sql}) matches ORDER BY score DESC NULLS LAST, chunk_id"
+        sql += " LIMIT %s"
         with conn.cursor() as cur:
             cur.execute(sql, params)
             rows = cur.fetchall()
@@ -1622,7 +1659,7 @@ class PgVectorClient:
                 SearchHit(
                     chunk_id=int(r["chunk_id"]),
                     content=str(r["content"]),
-                    score=max(0.0, min(1.0, float(r["score"]))),
+                    score=max(0.0, min(1.0, float(r["score"] or 0.0))),
                     metadata=meta,
                 )
             )

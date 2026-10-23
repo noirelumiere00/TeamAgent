@@ -498,6 +498,7 @@ def run_fanout(skill: Any, input: SearchInput, ctx: SkillContext) -> SearchOutpu
                 case_hits,
                 extra.get("candidates", hits),
                 expanded_early.hits,
+                extra.get("category_hits") or [],
             ],
             slack.items,
             ctx,
@@ -510,6 +511,7 @@ def run_fanout(skill: Any, input: SearchInput, ctx: SkillContext) -> SearchOutpu
             case_hits,
             extra["candidates"],
             expanded_hits,
+            category_hits,
         ) = groups
         karte = replace(karte, items=tuple(karte_items))
         slack = replace(slack, items=items)
@@ -956,6 +958,7 @@ def run_fanout(skill: Any, input: SearchInput, ctx: SkillContext) -> SearchOutpu
             asked_industry,
             displayed_refs,
             complete=bool(complete),
+            category_hits=category_hits if extra.get("category_hits") is not None else None,
         )
         found = visible_found = bool(displayed_refs)
         direct_kind = "list_fast" if skill._direct_answer_allowed(ctx, "list_fast") else None

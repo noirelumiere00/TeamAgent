@@ -6,9 +6,10 @@ import re
 from collections.abc import Sequence
 from dataclasses import dataclass
 
-from teamagent.adapters.pgvector_client import SearchHit
+from teamagent.adapters.pgvector_client import SearchHit, normalize_literal_term
 from teamagent.ingest.industry_taxonomy import normalize_industry
 from teamagent.skills.search import drive_first
+from teamagent.skills.search.answer_sections import classify_hit
 from teamagent.skills.search.case_list import render
 from teamagent.skills.search.client_match import alias_pairs, normalize_client
 from teamagent.skills.search.not_found import case_target_hits
@@ -27,7 +28,9 @@ def parse(query: str) -> Visit | None:
     match = re.search(r"([^の\s、。？?「」]{2,80}?)(?:って|という)会社に(?:行く|伺う|訪問)", query)
     if match is None:
         return None
-    return Visit(match[1], query[: match.start()].rstrip("の "))
+    category = query[: match.start()].rstrip("の ")
+    category = re.sub(r"(?:系(?:の商品|商品)?|商品)$", "", category).strip()
+    return Visit(match[1], category)
 
 
 def same_company(hit: SearchHit, company: str) -> bool:
@@ -56,8 +59,10 @@ def answer(
     refs: list[DocumentReference],
     *,
     complete: bool,
+    category_hits: Sequence[SearchHit] | None,
 ) -> str:
-    own = [hit for hit in hits if same_company(hit, visit.company)]
+    own = [hit for hit in [*hits, *(category_hits or [])] if same_company(hit, visit.company)]
+    heading = ""
     if own:
         head = f"{visit.company}との過去案件です。"
         selected = own
@@ -67,9 +72,26 @@ def answer(
             if complete
             else f"{visit.company}との過去案件は検索が完了せず確認できませんでした。"
         )
-        # 商材を業種へ結べなければ、無関係な意味検索の候補で埋めない。
-        canonical = normalize_industry(industry)
-        selected = case_target_hits(hits, canonical) if canonical else []
+        category = visit.category or "関連する商材"
+        if category_hits is None:
+            return head + f"\n\n{category} の資料は検索が完了せず確認できませんでした。"
+        term = normalize_literal_term(visit.category)
+        selected = [
+            hit
+            for hit in category_hits
+            if term
+            and classify_hit(hit.metadata or {}) not in {"karte", "research"}
+            and any(
+                term in normalize_literal_term(text)
+                for text in (str((hit.metadata or {}).get("title") or ""), hit.content)
+            )
+        ]
+        if selected:
+            heading = f"{category} に触れた資料\n\n"
+        else:
+            canonical = normalize_industry(industry)
+            selected = case_target_hits(hits, canonical) if canonical else []
+            heading = f"同じ業種（{canonical}）の事例\n\n" if selected else ""
     cards = render(
         selected,
         None,
@@ -79,5 +101,7 @@ def answer(
         max_cases=3,
     )
     if not cards:
-        return head + "\n\n近い事例は見つかりませんでした。"
-    return head + ("\n\n" if own else "\n\n近い事例です。\n\n") + cards
+        if not complete:
+            return head
+        return f"{visit.category or '関連する商材'} の事例は見つかりませんでした。"
+    return head + "\n\n" + heading + cards
