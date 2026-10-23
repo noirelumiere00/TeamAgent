@@ -447,6 +447,12 @@ def _build_async_job_poll(
 
             status_skill = status_skill or OmiyageReportStatusSkill()
             output = status_skill.run(OmiyageReportStatusInput(job_id=job_id), poll_ctx)
+            if getattr(output, "edition", "") == "sales25":
+                return output.status, (
+                    "\n".join([output.result_message, *output.summary_lines, output.next_step])
+                    if output.status == "done"
+                    else output.message
+                )
             if output.status == "failed":
                 from teamagent.skills._shared.long_jobs import failure_reason
 
@@ -1227,6 +1233,12 @@ async def dispatch_tool(
                 verified_caller.slack_user_id,
                 deferred=name in _ASYNC_JOB_TOOLS,
             )
+
+    if name == "omiyage_report_submit" and verified_caller is not None:
+        from teamagent.skills.omiyage_report.sales25 import enabled as sales25_enabled
+
+        if sales25_enabled(metadata):
+            metadata["_sales25_session"] = verified_caller.session_sha256
 
     metadata.pop(direct_search_answer.CTX_KEY, None)
     metadata.pop(direct_search_answer.KINDS_CTX_KEY, None)
