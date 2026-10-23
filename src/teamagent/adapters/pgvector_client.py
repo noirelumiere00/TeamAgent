@@ -1633,7 +1633,7 @@ class PgVectorClient:
             ORDER BY {order}
         """  # nosec B608 — embedding_col は上の許可リストで縛っている
         if topic is None:
-            sql = f"SELECT * FROM ({sql}) matches ORDER BY score DESC NULLS LAST, chunk_id"
+            sql = f"SELECT * FROM ({sql}) matches ORDER BY score DESC NULLS LAST, chunk_id"  # nosec B608 — 上の固定文字列だけで組んだ SQL を包む
         sql += " LIMIT %s"
         with conn.cursor() as cur:
             cur.execute(sql, params)
