@@ -257,6 +257,16 @@ def _case_rows(result: SourceResult[Any], *, drive_mode: bool = False) -> list[d
                 {
                     "document_id": r.document_id,
                     "source_type": "other" if r.source == "deck" else "gsheets",
+                    "drive_file_id": r.drive_file_id,
+                    **(
+                        {
+                            "campaign_aggregate": "true",
+                            "advertiser": r.client,
+                            "campaign": r.product,
+                        }
+                        if r.source == "campaign_db"
+                        else {}
+                    ),
                 }
                 if drive_mode
                 else {}
@@ -380,12 +390,15 @@ def run_fanout(skill: Any, input: SearchInput, ctx: SkillContext) -> SearchOutpu
     asked_industry = normalize_industry(input.filter_industry) or extract_query_industry(
         input.query
     )
+    cases = extra.get("case", SourceResult(source="case", status="skipped", reason="no_industry"))
+    case_hits = _case_hits(cases, drive_mode=drive_mode)
+    campaign_hits = [*hits, *case_hits] if drive_mode else hits
     if (
         not extra.get("incomplete")
         and skill._campaign_files
-        and any(is_campaign_hit(h) for h in hits)
+        and any(is_campaign_hit(h) for h in campaign_hits)
     ):
-        skill._attach_campaign_files(hits, ctx)
+        skill._attach_campaign_files(campaign_hits, ctx)
     case_target = (
         None
         if drive_mode and is_comparison_query(input.query)
@@ -406,7 +419,6 @@ def run_fanout(skill: Any, input: SearchInput, ctx: SkillContext) -> SearchOutpu
         slack_future, started, SLACK_DEADLINE_S, SlackLookup(status="error", reason="timeout")
     )
     karte = extra.get("karte", SourceResult(source="karte", status="skipped", reason="no_client"))
-    cases = extra.get("case", SourceResult(source="case", status="skipped", reason="no_industry"))
     if scope_target:
         slack = replace(
             slack, items=tuple(i for i in slack.items if target_matches(i.text, scope_target))
@@ -418,13 +430,9 @@ def run_fanout(skill: Any, input: SearchInput, ctx: SkillContext) -> SearchOutpu
             karte,
             items=tuple(case_target_hits(karte.items, scope_target, soft_industry=drive_mode)),
         )
-        if drive_mode and normalize_industry(scope_target):
-            kept = {
-                h.chunk_id
-                for h in scope_by_industry(
-                    _case_hits(cases, drive_mode=True), scope_target, soft=True
-                )
-            }
+        if drive_mode:
+            case_hits = case_target_hits(case_hits, scope_target, soft_industry=True)
+            kept = {h.chunk_id for h in case_hits}
             cases = replace(
                 cases, items=tuple(row for i, row in enumerate(cases.items, 1) if -i in kept)
             )
@@ -443,15 +451,15 @@ def run_fanout(skill: Any, input: SearchInput, ctx: SkillContext) -> SearchOutpu
                     )
                 ),
             )
+            case_hits = _case_hits(cases, drive_mode=drive_mode)
     if case_target and cases.items:
         # 対象に一致した構造化事例も、意味検索と同じ回答の根拠にする。
-        summary_hits = [*summary_hits, *_case_hits(cases)]
+        summary_hits = [*summary_hits, *case_hits]
     if case_target:
         found = bool((found and summary_hits) or slack.items or cases.items or extra["named"])
         hits = summary_hits
     if compact_mode and slack.items:
         found = True
-    case_hits = _case_hits(cases, drive_mode=drive_mode)
     if drive_mode:
         expanded_early = _collect(
             expand_future,
@@ -718,11 +726,12 @@ def run_fanout(skill: Any, input: SearchInput, ctx: SkillContext) -> SearchOutpu
     named = extra.get("named", [])
     near_hits = _case_hits(near, drive_mode=drive_mode)
     if drive_mode and near_hits:
+        if skill._campaign_files and any(is_campaign_hit(h) for h in near_hits):
+            skill._attach_campaign_files(near_hits, ctx)
         groups, _, near_urls = drive_first.annotate(skill, [near_hits], (), ctx)
         near_hits = groups[0]
         file_urls.update(near_urls)
-        if cases is near:
-            case_hits = near_hits
+        case_hits = near_hits
     sections = build_sections(
         vault_hits=candidates if found else (),
         expand_hits=expanded.hits if show_expanded else (),
