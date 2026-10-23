@@ -42,7 +42,7 @@ from teamagent.skills._shared.next_step import (
 )
 from teamagent.skills._shared.source_url import hit_doc_url
 from teamagent.skills.base import BaseSkill, SkillContext, register
-from teamagent.skills.search import compact, drive_first, timeline_status
+from teamagent.skills.search import compact, drive_first, timeline_status, visit_cases
 from teamagent.skills.search.aggregation import extract_aggregation_filter
 from teamagent.skills.search.alias_expansion import resolve_topic_client, retry_inputs, scope_footer
 from teamagent.skills.search.answer_mode import (
@@ -584,13 +584,31 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
     def run(self, input: SearchInput, ctx: SkillContext) -> SearchOutput:
         """検索 Skill のメインフロー。"""
         drive_mode = drive_first.enabled(ctx.metadata)
-        drive_case_listing = drive_mode and is_case_list(input.query)
+        visit = visit_cases.parse(input.query) if drive_mode else None
+        category_cost = 0.0
+        if visit:
+            industry = normalize_industry(input.filter_industry) or extract_query_industry(
+                visit.category
+            )
+            if not industry and visit.category:
+                from teamagent.skills.search.expand import build_expansion_planner
+
+                plan = build_expansion_planner().plan(visit.category, ctx.request_id)
+                industry = normalize_industry(plan.industry)
+                category_cost = plan.cost_usd
+            input = input.model_copy(
+                update={"filter_client": visit.company, "filter_industry": industry}
+            )
+        drive_case_listing = drive_mode and (bool(visit) or is_case_list(input.query))
         drive_comparison = drive_mode and is_comparison_query(input.query)
         if os.environ.get("USE_SEARCH_FANOUT", "") == "1":
             from teamagent.skills.search.fanout import fanout_active, run_fanout
 
             if fanout_active(ctx):
-                return run_fanout(self, input, ctx)
+                output = run_fanout(self, input, ctx)
+                return output.model_copy(
+                    update={"total_cost_usd": output.total_cost_usd + category_cost}
+                )
         if drive_case_listing:
             from teamagent.skills.search.case_list import CANDIDATE_LIMIT
 
@@ -649,6 +667,8 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
             probe=probe,
             **({"fanout_probe": case_probe} if case_listing or drive_comparison else {}),
         )
+        if visit:
+            hits = [*hits, *case_probe.get("named", [])]
         if case_probe.get("comparison_clients"):
             hits = [*hits, *case_probe.get("named", [])]
         if case_probe.get("case"):
@@ -682,8 +702,8 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
         timings["resolve_urls_ms"] = (time.perf_counter() - _t) * 1000
 
         # 取引先の分類を補ってから対象を絞り、要約・警告・📊で同じ根拠を使う。
-        asked_industry = normalize_industry(input.filter_industry) or extract_query_industry(
-            input.query
+        asked_industry = normalize_industry(input.filter_industry) or (
+            extract_query_industry(input.query) if not visit else None
         )
         if self._campaign_files and any(is_campaign_hit(h) for h in hits):
             self._attach_campaign_files(hits, ctx)
@@ -693,14 +713,21 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
             else case_query_target(input.query, asked_industry)
         )
         summary_hits = case_target_hits(hits, case_target, soft_industry=drive_mode)
-        if drive_case_listing or (self._campaign_files and any(is_campaign_hit(h) for h in hits)):
+        if not visit and (
+            drive_case_listing or (self._campaign_files and any(is_campaign_hit(h) for h in hits))
+        ):
             summary_hits = scope_by_industry(summary_hits, asked_industry, soft=drive_mode)
         if not summary_hits:
             found = False
 
         # 2-b''. 名指しの取引先があれば、要約に渡すヒットをその取引先の資料に絞る。
         #        1 件も当たらなければ絞らない（該当なしの判定は judge_found の client_mismatch）。
-        if found and self._summary_client_scope and (asked := self._asked_client(probe)):
+        if (
+            not visit
+            and found
+            and self._summary_client_scope
+            and (asked := self._asked_client(probe))
+        ):
             scoped = self._scope_to_client(summary_hits, asked)
             if scoped and len(scoped) < len(summary_hits):
                 log.info(
@@ -1042,6 +1069,19 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
                     )
             if complete:
                 direct_kind = "not_found"
+        if visit and input.include_answer:
+            assert displayed_refs is not None
+            displayed_refs.clear()
+            answer = visit_cases.answer(
+                visit,
+                [*hits, *(drive_first.slack_hit(item, i) for i, item in enumerate(slack_items))],
+                asked_industry,
+                displayed_refs,
+                complete=bool(complete),
+            )
+            found = visible_found = bool(displayed_refs)
+            suggested_next = None
+            direct_kind = "list_fast" if self._direct_answer_allowed(ctx, "list_fast") else None
         logger.info(
             "search_found_decision",
             request_id=ctx.request_id,
@@ -1130,7 +1170,7 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
                     scope += "・Slack" if slack_lookup.status == "ok" else "（Slackは検索未完了）"
                 answer = build_scoped_not_found_answer(case_target, scope=scope, complete=complete)
 
-        if case_listing and input.include_answer:
+        if case_listing and input.include_answer and not visit:
             from teamagent.skills.search.case_list import EMPTY_DRIVE_CASES, render, slack_cases
 
             listed = render(
@@ -1182,7 +1222,7 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
             direct_answer=answer if direct_kind is not None else None,
             direct_answer_kind=direct_kind,
             hits=[] if drive_case_listing and input.include_answer else search_hits,
-            total_cost_usd=cost_usd,
+            total_cost_usd=cost_usd + category_cost,
             found=found,
             slack_hits=[]
             if drive_case_listing and input.include_answer
@@ -1683,6 +1723,7 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
         # （同じ groups/role の別利用者が「本人にしか見えない文書」の名前を共有しない）。
         vocab_key = self._vocab_cache_key(user_groups, user_role, user_email)
         drive_mode = drive_first.enabled(ctx.metadata)
+        visit = visit_cases.parse(input.query) if drive_mode else None
 
         with self._pgvector.connection(
             app_role=self._app_role,
@@ -1713,7 +1754,7 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
                     if matched_client:
                         probe["query_client"] = matched_client
                         probe["asked_source"] = "vocab"
-                if drive_mode:
+                if drive_mode and not visit:
                     resolved = resolve_topic_client(
                         input.query,
                         self._client_vocabulary(conn, ctx.request_id, vocab_key),
@@ -1727,7 +1768,7 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
             if fanout_probe is not None:
                 from teamagent.skills.search.fanout import collect_named_sources
 
-                if is_case_list(input.query):
+                if is_case_list(input.query) or visit:
                     fanout_probe["case_query"] = input.query
                 if comparison_clients:
                     fanout_probe["comparison_clients"] = comparison_clients
@@ -1740,7 +1781,7 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
                     ctx,
                     fanout_probe,
                     industry=normalize_industry(input.filter_industry)
-                    or extract_query_industry(input.query),
+                    or (extract_query_industry(input.query) if not visit else None),
                     comparison_clients=comparison_clients,
                     client_alias=(probe or {}).get("query_client_alias"),
                 )

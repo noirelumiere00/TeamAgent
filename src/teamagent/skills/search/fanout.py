@@ -21,7 +21,7 @@ from teamagent.adapters.pgvector_client import SearchHit
 from teamagent.adapters.retry import RetryPolicy
 from teamagent.mcp_gateway.allowlist import email_allowed
 from teamagent.skills.base import SkillContext
-from teamagent.skills.search import compact, drive_first, timeline_status
+from teamagent.skills.search import compact, drive_first, timeline_status, visit_cases
 from teamagent.skills.search.answer_mode import classify_answer_mode, is_case_list
 from teamagent.skills.search.answer_sections import (
     ANSWER_MAX_CHARS,
@@ -306,7 +306,8 @@ def run_fanout(skill: Any, input: SearchInput, ctx: SkillContext) -> SearchOutpu
     """並行取得→従来の found 判定→専用要約→コードの節と探した範囲。"""
     started = time.perf_counter()
     drive_mode = drive_first.enabled(ctx.metadata)
-    drive_case_listing = drive_mode and is_case_list(input.query)
+    visit = visit_cases.parse(input.query) if drive_mode else None
+    drive_case_listing = drive_mode and (bool(visit) or is_case_list(input.query))
     if drive_case_listing:
         from teamagent.skills.search.case_list import CANDIDATE_LIMIT
 
@@ -397,8 +398,8 @@ def run_fanout(skill: Any, input: SearchInput, ctx: SkillContext) -> SearchOutpu
     from teamagent.ingest.industry_taxonomy import normalize_industry
     from teamagent.skills.search.knowledge_query import extract_query_industry
 
-    asked_industry = normalize_industry(input.filter_industry) or extract_query_industry(
-        input.query
+    asked_industry = normalize_industry(input.filter_industry) or (
+        extract_query_industry(input.query) if not visit else None
     )
     cases = extra.get("case", SourceResult(source="case", status="skipped", reason="no_industry"))
     case_hits = _case_hits(cases, drive_mode=drive_mode)
@@ -416,7 +417,8 @@ def run_fanout(skill: Any, input: SearchInput, ctx: SkillContext) -> SearchOutpu
     )
     scope_target = case_target or (
         asked_industry
-        if drive_case_listing or input.filter_industry or any(is_campaign_hit(h) for h in hits)
+        if not visit
+        and (drive_case_listing or input.filter_industry or any(is_campaign_hit(h) for h in hits))
         else None
     )
     summary_hits = case_target_hits(hits, scope_target, soft_industry=drive_mode)
@@ -432,7 +434,7 @@ def run_fanout(skill: Any, input: SearchInput, ctx: SkillContext) -> SearchOutpu
     if not summary_hits:
         found = False
     client = skill._asked_client(probe)
-    if found and skill._summary_client_scope and client:
+    if not visit and found and skill._summary_client_scope and client:
         summary_hits = skill._scope_to_client(summary_hits, client) or summary_hits
     slack = _collect(
         slack_future, started, SLACK_DEADLINE_S, SlackLookup(status="error", reason="timeout")
@@ -566,7 +568,7 @@ def run_fanout(skill: Any, input: SearchInput, ctx: SkillContext) -> SearchOutpu
         )
         and not is_comparison_query(input.query)
     )
-    if is_case_list(input.query) and found and input.include_answer:
+    if (drive_case_listing or is_case_list(input.query)) and found and input.include_answer:
         list_fast = True
     if list_fast:
         head = LIST_FAST_HEAD
@@ -902,9 +904,9 @@ def run_fanout(skill: Any, input: SearchInput, ctx: SkillContext) -> SearchOutpu
                 scope += "・Slack" if slack.status == "ok" else "（Slackは検索未完了）"
                 answer = build_scoped_not_found_answer(case_target, scope=scope, complete=complete)
     case_listing = (
-        is_case_list(input.query) or bool(compact_fallback_cards)
+        drive_case_listing or is_case_list(input.query) or bool(compact_fallback_cards)
     ) and input.include_answer
-    if case_listing:
+    if case_listing and not visit:
         from teamagent.skills.search.case_list import EMPTY_DRIVE_CASES, render, slack_cases
 
         listing_hits = [
@@ -939,6 +941,24 @@ def run_fanout(skill: Any, input: SearchInput, ctx: SkillContext) -> SearchOutpu
             if lanes["expand"].kind == "failed":
                 scope += "・言い換え ✗（未完了）"
             answer = build_scoped_not_found_answer(case_target, scope=scope, complete=complete)
+    if visit and input.include_answer:
+        assert displayed_refs is not None
+        displayed_refs.clear()
+        answer = visit_cases.answer(
+            visit,
+            [
+                *hits,
+                *case_hits,
+                *named,
+                *expanded.hits,
+                *(drive_first.slack_hit(item, i) for i, item in enumerate(slack.items)),
+            ],
+            asked_industry,
+            displayed_refs,
+            complete=bool(complete),
+        )
+        found = visible_found = bool(displayed_refs)
+        direct_kind = "list_fast" if skill._direct_answer_allowed(ctx, "list_fast") else None
     logger.info(
         "search_found_decision",
         request_id=ctx.request_id,

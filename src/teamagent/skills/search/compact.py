@@ -79,7 +79,7 @@ def append_used_drive_links(
     from teamagent.skills.search.case_list import case_link
 
     used_keys = set(_CITATION.findall(answer))
-    answer = _CITATION.sub("", answer)
+    answer = strip_linkless_invitation(_CITATION.sub("", answer))
     body = unicodedata.normalize("NFKC", answer).casefold()
     # URL 内のファイル名は、回答本文で使った資料名とはみなさない。
     body = re.sub(r"https?://[^\s<>)]*", "", body)
@@ -95,13 +95,7 @@ def append_used_drive_links(
         if used_keys and key not in used_keys:
             continue
         meta = hit.metadata or {}
-        # 根拠が投稿本文なら、添付の保存先が判明していても元の会話へ戻す。
-        reference_meta = (
-            {k: meta.get(k) for k in ("source_type", "source_uri", "title")}
-            if meta.get("source_type") == "slack"
-            else meta
-        )
-        ref = drive_first.canonical_reference(reference_meta, hit.content)
+        ref = drive_first.canonical_reference(meta, hit.content)
         conversation = ref.kind in {"slack_conversation", "slack_attachment"}
         if (ref.kind != "drive" and not conversation) or ref.url in seen:
             continue
@@ -171,7 +165,32 @@ def append_used_drive_links(
 
 
 def strip_linkless_invitation(answer: str) -> str:
-    """リンクの無い誘い文だけを除く。本人限定経路の最終出力で使う。"""
+    """本人限定の最終出力で、資料扱いの会話リンク・確認依頼・リンク無しの誘いを除く。"""
+
+    def material_link(match: re.Match[str]) -> str:
+        url, label = (match[1], match[2]) if match[1] else (match[4], match[3])
+        try:
+            parsed = urlsplit(url)
+        except ValueError:
+            return match[0]
+        if (parsed.hostname or "").endswith(".slack.com") and parsed.path.startswith("/archives/"):
+            return match[0] if label == "会話の記録" else label
+        return match[0]
+
+    answer = re.sub(
+        r"<(https?://[^\s<>|]+)\|([^>\n]+)>|\[([^\]\n]+)\]\((https?://[^\s)]+)\)",
+        material_link,
+        answer,
+    )
+    answer = "".join(
+        sentence
+        for sentence in re.split(r"(?<=[。！？!?\n])", answer)
+        if not re.search(
+            r"(?:正式社名|商材名|会社名)[^\n。！？!?]*確認(?:して|すると|すれば)|"
+            r"(?:確認|検索)(?:してみて|してください)",
+            sentence,
+        )
+    ).strip()
     if any(_safe_url(url) for url in re.findall(r"https?://[^\s<>|\[\]()]+", answer)):
         return answer
     invitation = re.compile(

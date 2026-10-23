@@ -169,7 +169,7 @@ def test_normal_slack_attribution_also_preserves_the_original_post() -> None:
     assert f"<{POST}|会話の記録>" in answer
 
 
-def test_slack_evidence_links_to_the_post_even_when_an_unread_file_was_resolved() -> None:
+def test_slack_evidence_preserves_authorized_saved_attachment_even_when_unread() -> None:
     ref = DocumentReference(
         kind="drive",
         drive_file_id="UNREAD",
@@ -185,8 +185,8 @@ def test_slack_evidence_links_to_the_post_even_when_an_unread_file_was_resolved(
     answer = compact.append_used_drive_links(
         "当社は動画制作を担当しています。[S:slack0]", [], refs, slack_items=(item,)
     )
-    assert f"<{POST}|会話の記録>" in answer
-    assert "UNREAD" not in answer and refs == []
+    assert "<https://drive.google.com/file/d/UNREAD/view|資料を見る>" in answer
+    assert POST not in answer and refs == [ref]
 
 
 @pytest.mark.parametrize("line", ["再生は900万回です。[S:1]", "未確認の主張。[S:unknown]"])
