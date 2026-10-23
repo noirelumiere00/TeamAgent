@@ -479,6 +479,15 @@ def build(
     displayed_refs: list[DocumentReference] | None = None,
     rejection_reasons: list[str] | None = None,
 ) -> str:
+    from teamagent.skills.search.answer_mode import classify_answer_mode
+
+    insight = classify_answer_mode(query) == "insight"
+    sources = source_map([*hits, *karte_hits], slack_items, url_of)
+    if insight and is_empty(
+        render(answer, sources, notice=notice, rejection_reasons=rejection_reasons), notice=notice
+    ):
+        # 数字の節だけでは「何が効いたか」に答えていない。既存の再生成へ回す。
+        return EMPTY_ANSWER
     if displayed_refs is not None and re.search(r"今どう|状況|現状|今の状態", query):
         dates = {str(h.chunk_id): timeline_status.evidence_date(h)[0] for h in [*hits, *karte_hits]}
         stamped = []
@@ -504,6 +513,10 @@ def build(
         answer = "\n".join(stamped)
     facts, fact_ids = compact_comparison(query, hits)
     show_metrics = wants_metrics(query)
+    if displayed_refs is not None and insight:
+        # 効いた要素だけの聞き直しで、既出の数字を再掲しない。
+        facts, fact_ids = "", []
+        show_metrics = bool(_METRICS.search(query))
     metrics = video_stats_footer(hits, "", asked_industry=asked_industry) if show_metrics else ""
     if metrics and displayed_refs is not None:
         facts, fact_ids = "", []
@@ -511,7 +524,7 @@ def build(
     used_keys: list[str] = []
     rendered = render(
         answer,
-        source_map([*hits, *karte_hits], slack_items, url_of),
+        sources,
         facts=facts,
         fact_keys=[str(key) for key in fact_ids],
         notice=notice,

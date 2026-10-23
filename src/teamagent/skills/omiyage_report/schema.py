@@ -11,7 +11,7 @@
 from __future__ import annotations
 
 import re
-from typing import Literal
+from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
@@ -22,7 +22,9 @@ RESEARCH_NOTES_MAX_CHARS = 4000
 # （実測: NUL 混入で ppt/slides/slide4.xml が ExpatError）。TAB / LF / CR は許容。
 _XML_ILLEGAL_CONTROL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f]")
 
-MissingField = Literal["brand", "competitors", "keywords"]
+MissingField = Literal[
+    "brand", "competitors", "keywords", "category", "target_product", "claim_constraints", "queries"
+]
 
 
 class _StrictModel(BaseModel):
@@ -41,6 +43,18 @@ def _clean_names(values: list[str], *, limit: int) -> list[str]:
     if len(cleaned) > limit:
         raise ValueError(f"at most {limit} entries are allowed")
     return cleaned
+
+
+class Sales25Intake(_StrictModel):
+    target_product: str = Field(default="", max_length=500)
+    claim_constraints: str = Field(default="", max_length=1000)
+    queries: list[Annotated[str, Field(min_length=1, max_length=200)]] = Field(
+        default_factory=list,
+        max_length=6,
+        description="実検索語6本（自社・競合A/B・中立3語の順）。省略時は確定名称を使う",
+    )
+    mode: Literal["research", "revision"] = "research"
+    source_job_id: str = Field(default="", pattern=r"^(?:omy_[0-9a-f]{32})?$")
 
 
 class OmiyageReportSubmitInput(_StrictModel):
@@ -83,6 +97,12 @@ class OmiyageReportSubmitInput(_StrictModel):
             "各行に出典URL(https://…)を添える。出典URLの無い行は資料に採用しない（捏造防止）。"
             "無ければ空のまま呼ぶ"
         ),
+    )
+    # OFF の既存要求・capture JSONへ新しいキーを出さない。
+    sales25: Sales25Intake | None = Field(
+        default=None,
+        exclude=True,
+        description="本人限定sales25の対象商品・守る訴求条件。条件なしも明示する",
     )
 
     @field_validator("brand", "official_tiktok_account", "category")
@@ -169,7 +189,7 @@ class OmiyageVideoAnalysisSummary(_StrictModel):
 class OmiyageReportResult(_StrictModel):
     """job 完了時に store へ保存する結果（小さく保つ・生データは持たない）。"""
 
-    status: Literal["ready", "partial"]
+    status: Literal["ready", "partial", "incomplete"]
     message: str
     summary_lines: list[str] = Field(min_length=1, max_length=5)
     next_step: str
@@ -187,7 +207,7 @@ class OmiyageReportStatusOutput(_StrictModel):
     job_id: str
     status: Literal["queued", "running", "done", "failed"]
     retry_after_seconds: int = Field(default=0, ge=0)
-    report_status: Literal["ready", "partial"] | None = None
+    report_status: Literal["ready", "partial", "incomplete"] | None = None
     result_message: str = ""
     summary_lines: list[str] = Field(default_factory=list)
     next_step: str = ""

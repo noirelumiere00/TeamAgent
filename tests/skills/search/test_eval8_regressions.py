@@ -174,6 +174,7 @@ def test_effect_question_still_summarizes_when_comparison_facts_exist(
     skill._summarize.assert_called_once()
     assert "調理実演" in out.answer and "盛り付け" in out.answer
     assert "https://drive.google.com/" in out.answer
+    assert "📊" not in out.answer and "再生平均" not in out.answer
 
 
 def test_completed_status_drops_unsolicited_next_action() -> None:

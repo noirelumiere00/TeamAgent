@@ -142,6 +142,8 @@ const OUTBOUND_TOOL_RE = new RegExp(
 );
 const OUTBOUND_INTERNAL_TOOL_RE = new RegExp(
   OUTBOUND_TOOL_RE.source.replace(OUTBOUND_BARE_TOOL_SOURCE, OUTBOUND_TOOL_SOURCE), "giu");
+const OUTBOUND_INTERNAL_NAME_RE = /\b(?:(?:SOUL|IDENTITY|AGENTS|HEARTBEAT|TOOLS|USER|MEMORY)\.md|openclaw\.config\.json5)\b/iu;
+const OUTBOUND_SETTING_NAME_RE = /\b(?:SEARCH_|TEAMAGENT_|OPENCLAW_|DIRECT_VIDEO_)[A-Z0-9_]+\b/u;
 // 名前だけ消すと引数や実行手順が残るため、モデル向け指示は段落ごと落とす。
 const OUTBOUND_MODEL_DIRECTIVE_RE = new RegExp(
   `(?<![a-z0-9_])(?:(?:${OUTBOUND_TOOL_SOURCE}|[a-z][a-z0-9]*_[a-z0-9_]+)` +
@@ -187,6 +189,11 @@ export function scrubOutboundReplyText(text, replacementConnectUrls = new Set(),
   const parts = [];
   let end = 0;
   function scrubTools(plain) {
+    plain = plain.replace(/[^。！？!?\r\n]+[。！？!?]*/gu, sentence => {
+      if (!OUTBOUND_INTERNAL_NAME_RE.test(sentence) && !OUTBOUND_SETTING_NAME_RE.test(sentence)) return sentence;
+      counts.toolNames += 1;
+      return "";
+    });
     return plain.replace(toolNamesAreInternal ? OUTBOUND_INTERNAL_TOOL_RE : OUTBOUND_TOOL_RE, () => {
       counts.toolNames += 1;
       return "";
@@ -3103,6 +3110,9 @@ export function createCallerIdentityPlugin({
     pruneConnectGuardState(now());
     const entry = evidenceByRun.get(runId) ?? {urls: new Set(), numbers: new Set(),
       metricEvidence: {play: new Set(), save: new Set()}, needsInput: false};
+    const previous = evidenceBySession.get(evidenceSessionKey(runId))?.searchEvidence;
+    if (connectIngressByRun.get(runId)?.searchInsightRequested && previous &&
+        now() - previous.updatedAtMs <= INBOUND_CONTEXT_TTL_MS) entry.postedMetrics ??= previous.postedMetrics;
     const searchTool = ["search", "teamagent__search"].includes(event?.toolName);
     if (!searchTool) {
       entry.compactAnswer = null;
@@ -3122,6 +3132,12 @@ export function createCallerIdentityPlugin({
     const searchData = searchTool ? searchResultData(event.result) : null;
     if (searchData?.video_metrics_posted === true && typeof searchData.video_metrics_evidence?.text === "string") {
       entry.postedMetrics = searchData.video_metrics_evidence.text;
+    }
+    const deliveredAnswer = searchData?.direct_delivery?.answer;
+    if (searchData?.status === "posted" && searchData.delivered === true &&
+        searchData.delivery?.kind === "search_direct_answer" &&
+        typeof deliveredAnswer === "string" && deliveredAnswer.includes("📊")) {
+      entry.postedMetrics = deliveredAnswer.slice(deliveredAnswer.indexOf("📊")).split(/\n{3,}/u)[0];
     }
     if (["oauth_connect", "teamagent__oauth_connect"].includes(event?.toolName)) entry.needsInput = true;
     const collected = searchTool ? (entry.searchEvidence ??= {urls: new Set(), numbers: new Set(),
@@ -3218,7 +3234,7 @@ export function createCallerIdentityPlugin({
       evidenceBySession.set(session, {urls: new Set(entry.urls), updatedAtMs: now(),
         searchEvidence: searchTool ? {urls: new Set(collected.urls), numbers: new Set(collected.numbers),
           metricEvidence: {play: new Set(collected.metricEvidence.play), save: new Set(collected.metricEvidence.save)},
-          text: collected.text, updatedAtMs: now()} : previous?.searchEvidence});
+          text: collected.text, postedMetrics: entry.postedMetrics, updatedAtMs: now()} : previous?.searchEvidence});
     }
   }
 
@@ -3471,9 +3487,11 @@ export function createCallerIdentityPlugin({
 
   function groundEvidenceReply(text, evidence) {
     if (evidence?.postedMetrics) {
-      const posted = new Set(metricNumbers(evidence.postedMetrics));
+      const posted = metricNumberTokens(evidence.postedMetrics);
       text = text.replace(/[^。！？!?\r\n]+[。！？!?]*/gu, sentence =>
-        /再生|保存|[|｜]/u.test(sentence) && metricNumbers(sentence).some(n => posted.has(n))
+        /再生|保存|[|｜]/u.test(sentence) && metricNumberTokens(sentence).some(n =>
+          posted.some(p => p.suffix === n.suffix &&
+            Math.round(p.value / n.quantum) === Math.round(n.value / n.quantum)))
           ? "" : sentence);
     }
     return stripUngroundedVideoMetrics(
@@ -3872,6 +3890,7 @@ export function createCallerIdentityPlugin({
       videoRequestIntent,
       videoAnalysisQuerySlots: explicitVideoQuerySlots(event?.content),
       searchRequired: typeof event?.content === "string" && (
+        /社内で(?:いう|言う|の)|(?:うち|当社|弊社|自社)(?:も|は|が|の)?.{0,12}(?:関わ|関与|担当)/u.test(event.content) ? "internal_topic" :
         explicitlyRequestsFreshVideoAnalysis(event.content) ? null :
         /比較|比べ|何が効|どっちが|どちらが|勝ち|効果/u.test(event.content) ? "comparison" :
         /一覧|リスト(?:アップ)?|列挙|(?:資料|事例|案件)を全部|全部(?:の資料)?を?(?:出|見せ|並べ)/u.test(event.content) ? "list" :
@@ -5820,6 +5839,11 @@ export function createCallerIdentityPlugin({
       );
     }
 
+    if (["internal_term", "internal_topic"].includes(trusted.searchRequired) &&
+        tool === "web_research" && !evidenceByRun.get(eventRunId)?.searchCompleted) {
+      return {block: true, blockReason:
+        "社内の話題は先に teamagent__search を依頼の原文で呼び、社内資料を確認してから答えてください。"};
+    }
     if (trusted.searchRequired === "document_followup" && tool === "knowledge_deliver") {
       return {block: true, blockReason:
         "直前に表示した資料のURLは teamagent__search で確認してください。query は依頼者の発話そのものを使い、別の資料を探し直さないでください。"};
@@ -6251,10 +6275,12 @@ export function createCallerIdentityPlugin({
     const direct = searchDirectByRun.get(runId);
     if (direct?.delivered || direct?.replaced) return;
     if (direct?.pending) return direct.task;
-    const claimsOnly = ["comparison", "list", "document_followup", "source"].includes(ingress?.searchRequired);
+    const claimsOnly = ["comparison", "list", "document_followup", "source", "internal_term", "internal_topic"].includes(ingress?.searchRequired);
     const unrelatedToolSatisfies = !claimsOnly && (toolCallsByRun.get(runId)?.count ?? 0) > 0;
+    const searched = ["internal_term", "internal_topic"].includes(ingress?.searchRequired)
+      ? evidenceByRun.get(runId)?.searchCompleted : evidenceByRun.has(runId);
     if (!ingress?.searchRequired || ingress.connectRequest ||
-        evidenceByRun.has(runId) || unrelatedToolSatisfies ||
+        searched || unrelatedToolSatisfies ||
         typeof event?.lastAssistantMessage !== "string" || !event.lastAssistantMessage.trim() ||
         searchRevisionsByRun.has(runId) ||
         connectRevisionsByRun.has(runId) || videoRevisionsByRun.has(runId)) return undefined;
@@ -6499,6 +6525,8 @@ export function createCallerIdentityPlugin({
 
   function revisedReplyFallback(entry, runId) {
     const evidence = evidenceByRun.get(runId);
+    if (["internal_term", "internal_topic"].includes(connectIngressByRun.get(runId)?.searchRequired) &&
+        !evidence?.searchCompleted) return "社内資料の確認を完了できませんでした。";
     const reply = (evidence?.driveFirst ? evidence.compactAnswer : null) ?? entry.originalReply;
     if (entry.searchRequired && visibleReplyText(reply)) {
       const normalized = finalizeOutgoingText({payload: {text: reply}}, undefined, runId)

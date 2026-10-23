@@ -1,0 +1,134 @@
+{
+  "request": {
+    "brand": "エムキュア",
+    "competitors": [
+      "ラサーナ"
+    ],
+    "keywords": [
+      "ヘアケア"
+    ],
+    "official_tiktok_account": "",
+    "category": "",
+    "research_notes": ""
+  },
+  "accepted": {
+    "status": "queued",
+    "job_id": "omy_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "retry_after_seconds": 30,
+    "missing": [],
+    "suggestions": [],
+    "message": "お土産資料（対象: エムキュア / 競合: ラサーナ / 一般KW: ヘアケア）の作成を受け付けました。目安 約 40 分（TikTok 取得 3 軸＋動画分析 最大 25 本）。完成したPPTXは依頼元のスレッド（DM ならこの DM）へ添付します。",
+    "deduplicated": false
+  },
+  "summary": {
+    "brand": "エムキュア",
+    "competitors": [
+      "ラサーナ"
+    ],
+    "keywords": [
+      "ヘアケア"
+    ],
+    "kind": "omiyage_report",
+    "official_tiktok_account": "",
+    "request_id": "omiyage-async-test",
+    "research_notes_chars": 0,
+    "search_depth": 30
+  },
+  "search_calls": [
+    {
+      "query": "ヘアケア",
+      "search_type": "keyword",
+      "max_videos": 30,
+      "request_id": "omiyage-async-test",
+      "timeout_s": 300
+    },
+    {
+      "query": "エムキュア",
+      "search_type": "keyword",
+      "max_videos": 30,
+      "request_id": "omiyage-async-test",
+      "timeout_s": 300
+    },
+    {
+      "query": "ラサーナ",
+      "search_type": "keyword",
+      "max_videos": 30,
+      "request_id": "omiyage-async-test",
+      "timeout_s": 300
+    }
+  ],
+  "status": {
+    "job_id": "omy_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "status": "done",
+    "retry_after_seconds": 0,
+    "report_status": "ready",
+    "result_message": "お土産資料を生成し、依頼元スレッドへ添付しました。",
+    "summary_lines": [
+      "一般KW「ヘアケア」検索の上位2本中、エムキュア関連は0本（0.0%）、競合の露出は0本でした。",
+      "一般キーワード「ヘアケア」の登場率（caption+hashtag計）は、ブランド名「エムキュア」検索で100.0%（分母2本）、競合最高は競合「ラサーナ」検索の100.0%でした。",
+      "#PR表記ありはブランド名「エムキュア」検索で2本中1本、競合最多は競合「ラサーナ」検索の1本でした。"
+    ],
+    "next_step": "次の一手: 上位投稿の実画面・構成比較まで踏み込んだ詳細版も作成できます。ご希望ならこのスレッドでお知らせください。",
+    "slack_delivered": true,
+    "delivery_target": "thread",
+    "axes": [
+      {
+        "role": "general",
+        "label": "一般KW「ヘアケア」検索",
+        "query": "ヘアケア",
+        "requested": 30,
+        "fetched": 2,
+        "failed": false,
+        "failure_code": ""
+      },
+      {
+        "role": "brand",
+        "label": "ブランド名「エムキュア」検索",
+        "query": "エムキュア",
+        "requested": 30,
+        "fetched": 2,
+        "failed": false,
+        "failure_code": ""
+      },
+      {
+        "role": "competitor",
+        "label": "競合「ラサーナ」検索",
+        "query": "ラサーナ",
+        "requested": 30,
+        "fetched": 2,
+        "failed": false,
+        "failure_code": ""
+      }
+    ],
+    "video_analysis": {
+      "executed": true,
+      "requested": 6,
+      "analyzed": 6,
+      "failed": 0,
+      "skipped": 0,
+      "skip_reason": "",
+      "cost_usd_estimate": 0.09,
+      "cost_cap_usd": 5.0,
+      "model_id": "test-model"
+    },
+    "deck_plan_s3_uri": "s3://fake-bucket/2026-10-23/omiyage-async-test/deck_plan.json",
+    "audit_s3_uri": "s3://fake-bucket/2026-10-23/omiyage-async-test/audit.json",
+    "error_code": null,
+    "message": "お土産資料の生成が完了しました。"
+  },
+  "dm_uploads": [
+    {
+      "channel": "D999",
+      "title": "エムキュア様 TikTok検索データ確認資料",
+      "initial_comment": "一般KW「ヘアケア」検索の上位2本中、エムキュア関連は0本（0.0%）、競合の露出は0本でした。\n一般キーワード「ヘアケア」の登場率（caption+hashtag計）は、ブランド名「エムキュア」検索で100.0%（分母2本）、競合最高は競合「ラサーナ」検索の100.0%でした。\n#PR表記ありはブランド名「エムキュア」検索で2本中1本、競合最多は競合「ラサーナ」検索の1本でした。\n修正はこのスレッドで再依頼ください（数分で再生成してお届けします）。\n次の一手: 上位投稿の実画面・構成比較まで踏み込んだ詳細版も作成できます。ご希望ならこのスレッドでお知らせください。",
+      "thread_ts": "123.456"
+    },
+    {
+      "channel": "D999",
+      "title": "エムキュア様 TikTok検索データ確認資料（編集用（見た目は画像版が正））",
+      "initial_comment": null,
+      "thread_ts": "123.456"
+    }
+  ],
+  "dm_posts": []
+}

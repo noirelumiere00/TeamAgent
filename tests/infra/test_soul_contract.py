@@ -31,6 +31,24 @@ def test_soul_exists(soul: str) -> None:
     assert len(soul) > 1000
 
 
+def test_eval9_internal_search_examples_and_priority_remain(soul: str) -> None:
+    section = soul.split("## ナレッジ検索（過去資料・提案事例）への誘導\n", 1)[1].split("\n## ", 1)[
+        0
+    ]
+    for phrase in (
+        "○○案件の過去資料が見たい",
+        "議事録ある？",
+        "うちも関わってる？",
+        "社内でいう◯◯",
+        "必ず `search` を先に呼ぶ",
+        "query にユーザーの言い回しをそのまま入れる",
+        "source_uri",
+    ):
+        assert phrase in section
+    assert "内部ファイル名（SOUL.md 等）・設定名は利用者に出さない" in soul
+    assert "📊の後は指定施策の効いた要素を2〜3点、数字の再掲なし" in soul
+
+
 def test_bu2_values_must_come_from_the_user(soul: str) -> None:
     rule = next(
         line for line in soul.splitlines() if "proposal_builder_submit" in line and "BU2" in line
