@@ -170,6 +170,36 @@
           ]
         },
         {
+          "key": "artifact.sales25-analysis-lock.sha256",
+          "value": "67741470f8502ae88340154d135985f06ea6aebdc5c40bcb52fea3663c73bb50",
+          "build_arg": "SALES25_ANALYSIS_LOCK_SHA256",
+          "oci_label": "io.teamagent.contract.sales25-analysis-lock-sha256",
+          "dockerfile_uses": [
+            "test \"$SALES25_ANALYSIS_LOCK_SHA256\" = \"67741470f8502ae88340154d135985f06ea6aebdc5c40bcb52fea3663c73bb50\"",
+            "printf '%s  %s\\n' \"$SALES25_ANALYSIS_LOCK_SHA256\" /app/tools/first_visit/sales25-analysis.lock.json | sha256sum -c -"
+          ]
+        },
+        {
+          "key": "artifact.sales25-frame-extractor.sha256",
+          "value": "38b7e8f5fd0fb6dc158167dc4718d1fb5ee715cfa055097badd623ba710adac3",
+          "build_arg": "SALES25_FRAME_EXTRACTOR_SHA256",
+          "oci_label": "io.teamagent.contract.sales25-frame-extractor-sha256",
+          "dockerfile_uses": [
+            "test \"$SALES25_FRAME_EXTRACTOR_SHA256\" = \"38b7e8f5fd0fb6dc158167dc4718d1fb5ee715cfa055097badd623ba710adac3\"",
+            "printf '%s  %s\\n' \"$SALES25_FRAME_EXTRACTOR_SHA256\" /app/tools/first_visit/sales25-analysis/extract_frames.py | sha256sum -c -"
+          ]
+        },
+        {
+          "key": "artifact.sales25-media-scraper.sha256",
+          "value": "4588cb208b7c4f94a427e41b71d1dfbf93af9bdad40cb2614b77b9a560b1b450",
+          "build_arg": "SALES25_MEDIA_SCRAPER_SHA256",
+          "oci_label": "io.teamagent.contract.sales25-media-scraper-sha256",
+          "dockerfile_uses": [
+            "test \"$SALES25_MEDIA_SCRAPER_SHA256\" = \"4588cb208b7c4f94a427e41b71d1dfbf93af9bdad40cb2614b77b9a560b1b450\"",
+            "printf '%s  %s\\n' \"$SALES25_MEDIA_SCRAPER_SHA256\" /app/tools/tiktok_scraper/sales25_media.mjs | sha256sum -c -"
+          ]
+        },
+        {
           "key": "artifact.tiktok-package-json.sha256",
           "value": "c9aafff461749b7591c810d698736fe33461965d238ed2cfd283229612a7fe28",
           "build_arg": "TIKTOK_PACKAGE_JSON_SHA256",
@@ -189,7 +219,7 @@
         },
         {
           "key": "artifact.tiktok-scraper.sha256",
-          "value": "99c1955010a99be0f2921d8b107f849c3fce216f76eaa2ba342531e98407816e",
+          "value": "e27f612bbdc799ee6f788fed1fc66d611f5566d264650fbcbe4f02101bfe96d3",
           "build_arg": "TIKTOK_SCRAPER_SHA256",
           "oci_label": "io.teamagent.contract.tiktok-scraper-sha256",
           "dockerfile_uses": [

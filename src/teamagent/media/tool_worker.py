@@ -31,6 +31,7 @@ from teamagent.media.contracts import (
     MediaJobRequest,
     MediaJobResult,
     S3ObjectRef,
+    Sales25MediaOperation,
     TikTokAcquireOperation,
 )
 from teamagent.media.deadline import DeadlineBudget, MediaDeadlineExceededError
@@ -612,8 +613,38 @@ def run_tool(
                     load_object=load,
                     budget=execution_budget,
                 )
+                if (
+                    isinstance(request.operation, TikTokAcquireOperation)
+                    and request.operation.edition == "sales25"
+                    and {artifact.name for artifact in output.artifacts}
+                    != {"posts.json", "sales25-raw.json", "acquisition-status.json"}
+                ):
+                    raise MediaOperationError(
+                        "MEDIA_TIKTOK_OUTPUT_INVALID", "sales25 capture artifacts are required"
+                    )
                 artifacts: list[MediaArtifact] = []
                 names: set[str] = set()
+                if isinstance(request.operation, Sales25MediaOperation) and (
+                    len(output.artifacts) != 2
+                    or output.metadata
+                    != {
+                        "post_id": request.operation.post_id,
+                        "media_type": request.operation.media_type,
+                        "status": "ready",
+                    }
+                    or {item.name for item in output.artifacts}
+                    != {"media-manifest.json", "media-bundle.zip"}
+                    or any(
+                        item.content_type
+                        != (
+                            "application/json"
+                            if item.name == "media-manifest.json"
+                            else "application/zip"
+                        )
+                        for item in output.artifacts
+                    )
+                ):
+                    raise ToolTransportError("sales25 requires its exact two output artifacts")
                 for produced in output.artifacts:
                     if not isinstance(produced, ProducedArtifact):
                         raise ToolTransportError("operation returned an invalid artifact")

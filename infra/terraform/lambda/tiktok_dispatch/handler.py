@@ -30,6 +30,7 @@ _MAX_JOB_BUDGET_SECONDS = 15 * 60
 _MAX_CLOCK_SKEW_SECONDS = 30
 _TIKTOK_OPERATION_EXECUTION_LIMIT_SECONDS = _MAX_JOB_BUDGET_SECONDS - 30
 _TIKTOK_SEARCH_WORST_CASE_SECONDS = 120
+_TIKTOK_DEEP_SEARCH_WORST_CASE_SECONDS = 240
 _TIKTOK_THUMBNAIL_WORST_CASE_SECONDS = 50
 _TIKTOK_VIDEO_WORST_CASE_SECONDS = 120
 _MAX_ARTIFACT_RETENTION_SECONDS = 30 * 24 * 60 * 60
@@ -57,9 +58,12 @@ _ACQUIRE_HOST_SUFFIXES = (
 )
 _MAX_INPUT_BYTES = 128 * 1024 * 1024
 _MAX_OUTPUT_BYTES = 128 * 1024 * 1024
+_SALES25_MAX_MEDIA_BYTES = 64 * 1024 * 1024
+_SALES25_MAX_MANIFEST_BYTES = 1024 * 1024
 _MAX_PROPOSAL_PPTX_BYTES = 256 * 1024 * 1024
 _OPERATIONS = {
     "acquire",
+    "sales25_media",
     "tiktok_acquire",
     "proxy",
     "frame",
@@ -206,6 +210,54 @@ def _validate_operation(value: Any) -> None:
             maximum=_MAX_OUTPUT_BYTES,
             name="acquire max_bytes",
         )
+    elif kind == "sales25_media":
+        operation = _exact_keys(
+            value,
+            {
+                "kind",
+                "post_id",
+                "url",
+                "media_type",
+                "expected_duration_sec",
+                "expected_photo_count",
+                "expected_sha256",
+                "max_bytes",
+            },
+            "sales25 media operation",
+        )
+        pid = _bounded_string(operation["post_id"], minimum=6, maximum=25, name="post ID")
+        url = _bounded_string(operation["url"], minimum=8, maximum=2048, name="post URL")
+        media_type = operation["media_type"]
+        parsed = urlsplit(url)
+        if (
+            not re.fullmatch(r"\d{6,25}", pid)
+            or media_type not in ("video", "photo")
+            or parsed.scheme != "https"
+            or parsed.netloc not in {"www.tiktok.com", "tiktok.com"}
+            or parsed.query
+            or parsed.fragment
+            or not re.fullmatch(r"/@[A-Za-z0-9_.]+/" + media_type + "/" + pid, parsed.path)
+        ):
+            raise ValueError("sales25 post ID/type/URL mismatch")
+        duration = operation["expected_duration_sec"]
+        photos = operation["expected_photo_count"]
+        if duration is not None and (
+            media_type != "video" or type(duration) not in (int, float) or not 0 < duration <= 180
+        ):
+            raise ValueError("sales25 duration is invalid")
+        if photos is not None:
+            if media_type != "photo":
+                raise ValueError("video cannot declare photos")
+            _bounded_int(photos, minimum=1, maximum=35, name="sales25 photo count")
+        sha = operation["expected_sha256"]
+        if sha is not None and (not isinstance(sha, str) or not _SHA256.fullmatch(sha)):
+            raise ValueError("sales25 expected SHA is invalid")
+        _bounded_int(
+            operation["max_bytes"],
+            minimum=1,
+            maximum=_SALES25_MAX_MEDIA_BYTES,
+            name="sales25 max_bytes",
+        )
     elif kind == "tiktok_acquire":
         operation = _exact_keys(
             value,
@@ -220,11 +272,14 @@ def _validate_operation(value: Any) -> None:
                 "max_video_bytes",
                 "client",
             }
-            | ({"first_visit_capture"} if "first_visit_capture" in value else set()),
+            | ({"first_visit_capture"} if "first_visit_capture" in value else set())
+            | ({"edition"} if "edition" in value else set()),
             "TikTok operation",
         )
         if type(operation.get("first_visit_capture", False)) is not bool:
             raise ValueError("TikTok first visit capture flag is invalid")
+        if "edition" in operation and operation["edition"] != "sales25":
+            raise ValueError("TikTok edition is invalid")
         keywords = operation["keywords"]
         if operation["search_type"] not in {"keyword", "hashtag"}:
             raise ValueError("TikTok search type is invalid")
@@ -237,7 +292,21 @@ def _validate_operation(value: Any) -> None:
             )
         if any(not keyword for keyword in normalized) or len(set(normalized)) != len(normalized):
             raise ValueError("TikTok keywords are invalid")
-        _bounded_int(operation["n_per_kw"], minimum=1, maximum=30, name="TikTok n_per_kw")
+        if operation.get("edition") == "sales25":
+            _bounded_int(operation["n_per_kw"], minimum=1, maximum=100, name="sales25 n_per_kw")
+            if (
+                len(keywords) != 1
+                or operation["artifact_mode"] != "metadata_only"
+                or operation["videos_per_kw"] != 0
+                or operation["sort"] != "display"
+                or operation.get("first_visit_capture", False)
+            ):
+                raise ValueError(
+                    "sales25 requires one keyword, display order, metadata_only, zero videos "
+                    "and no legacy capture"
+                )
+        else:
+            _bounded_int(operation["n_per_kw"], minimum=1, maximum=30, name="TikTok n_per_kw")
         _bounded_int(
             operation["videos_per_kw"],
             minimum=0,
@@ -251,7 +320,12 @@ def _validate_operation(value: Any) -> None:
             raise ValueError("TikTok artifact mode is invalid")
         if artifact_mode == "metadata_only" and operation["videos_per_kw"] != 0:
             raise ValueError("metadata-only TikTok operation cannot download videos")
-        estimated_seconds = len(keywords) * _TIKTOK_SEARCH_WORST_CASE_SECONDS
+        search_seconds = (
+            _TIKTOK_DEEP_SEARCH_WORST_CASE_SECONDS
+            if operation["n_per_kw"] > 30
+            else _TIKTOK_SEARCH_WORST_CASE_SECONDS
+        )
+        estimated_seconds = len(keywords) * search_seconds
         if artifact_mode == "full":
             estimated_seconds += len(keywords) * (
                 operation["n_per_kw"] * _TIKTOK_THUMBNAIL_WORST_CASE_SECONDS
@@ -1033,8 +1107,22 @@ def _operation_output_slots(spec: dict[str, Any], attempt: dict[str, Any]) -> li
     slots: list[tuple[str, str, int]] = []
     if kind == "acquire":
         slots.append(("media", "media", int(operation["max_bytes"])))
+    elif kind == "sales25_media":
+        slots.extend(
+            (
+                ("media-manifest.json", "media-manifest.json", _SALES25_MAX_MANIFEST_BYTES),
+                ("media-bundle.zip", "media-bundle.zip", _MAX_OUTPUT_BYTES),
+            )
+        )
     elif kind == "tiktok_acquire":
         slots.append(("posts.json", "posts.normalized.json", 16 * 1024 * 1024))
+        if operation.get("edition") == "sales25":
+            slots.extend(
+                (
+                    ("sales25-raw.json", "sales25-raw.json", 16 * 1024 * 1024),
+                    ("acquisition-status.json", "acquisition-status.json", 1024 * 1024),
+                )
+            )
         if operation.get("first_visit_capture"):
             slots.append(
                 ("first-visit-capture.json", "first-visit-capture.json", _MAX_OUTPUT_BYTES)
@@ -1090,6 +1178,8 @@ def _required_output_names(spec: dict[str, Any]) -> set[str]:
     kind = spec["operation"]["kind"]
     if kind == "tiktok_acquire":
         names = {"posts.json"}
+        if spec["operation"].get("edition") == "sales25":
+            names.update({"sales25-raw.json", "acquisition-status.json"})
         if spec["operation"]["artifact_mode"] == "full":
             names.update({"config.json", "manifest.json"})
         return names
@@ -1105,6 +1195,8 @@ def _required_output_names(spec: dict[str, Any]) -> set[str]:
 def _allowed_content_types(spec: dict[str, Any], name: str) -> set[str]:
     operation = spec["operation"]
     kind = operation["kind"]
+    if kind == "sales25_media" and name == "media-bundle.zip":
+        return {"application/zip"}
     if kind == "acquire" and name == "media":
         return {
             "video/mp4",
@@ -1949,6 +2041,12 @@ def _validate_completion_result(
         return result, None
     if exit_code != 0 or error_code is not None or not artifacts:
         raise ValueError("media done result disagrees with task exit")
+    if spec["operation"]["kind"] == "sales25_media" and metadata != {
+        "post_id": spec["operation"]["post_id"],
+        "media_type": spec["operation"]["media_type"],
+        "status": "ready",
+    }:
+        raise ValueError("sales25 result metadata differs from its exact contract")
     slots = {slot["name"]: slot for slot in _operation_output_slots(spec, attempt)}
     names: set[str] = set()
     keys: set[str] = set()

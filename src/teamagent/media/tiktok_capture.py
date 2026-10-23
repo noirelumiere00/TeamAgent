@@ -2,8 +2,88 @@
 
 from __future__ import annotations
 
+import re
 from datetime import UTC, datetime
 from typing import Any
+from urllib.parse import urlsplit
+
+
+def _sales25_source_ok(raw: dict[str, Any], *, query: str, target: int) -> bool:
+    """Admit only evidence the offline sales25 input contract can consume."""
+    videos, diagnostics = raw.get("videos"), raw.get("diagnostics")
+    if not isinstance(videos, list) or not isinstance(diagnostics, dict):
+        return False
+    if (
+        raw.get("ok") is not True
+        or raw.get("query") != query
+        or type(raw.get("sessions")) is not int
+        or raw["sessions"] != 1
+        or raw.get("order_basis") != "search_display_order"
+        or raw.get("unfiltered") is not True
+        or raw.get("missingness_preserved") is not True
+        or raw.get("stop_reason") not in ("exhausted", "no_new", "capped")
+        or any(
+            diagnostics.get(key)
+            for key in (
+                "captchaDetected",
+                "cdnDenied",
+                "apiNonZeroStatus",
+                "apiHttpErrors",
+                "apiInvalidResponses",
+                "exception",
+            )
+        )
+        or len(videos) > target
+        or raw.get("status") != ("ok" if videos else "observed_zero")
+        or raw.get("error_code") != (None if videos else "TIKTOK_TRULY_EMPTY")
+    ):
+        return False
+    fetched_at = raw.get("fetched_at")
+    if not isinstance(fetched_at, str):
+        return False
+    try:
+        datetime.fromisoformat(fetched_at)
+    except ValueError:
+        return False
+    for rank, video in enumerate(videos, 1):
+        if not isinstance(video, dict):
+            return False
+        pid, url = video.get("id"), video.get("url")
+        if (
+            not isinstance(pid, str)
+            or not re.fullmatch(r"\d{6,25}", pid)
+            or not isinstance(url, str)
+        ):
+            return False
+        try:
+            parsed = urlsplit(url)
+        except ValueError:
+            return False
+        if (
+            parsed.scheme != "https"
+            or parsed.hostname not in {"www.tiktok.com", "tiktok.com"}
+            or parsed.username
+            or parsed.password
+            or not re.fullmatch(r"/@[^/]+/(video|photo)/" + re.escape(pid), parsed.path)
+            or type(video.get("rank_display")) is not int
+            or video["rank_display"] != rank
+        ):
+            return False
+        missing, stats = video.get("missingFields"), video.get("stats")
+        if (
+            not isinstance(missing, list)
+            or any(not isinstance(key, str) for key in missing)
+            or not isinstance(stats, dict)
+        ):
+            return False
+        for key in ("playCount", "diggCount", "commentCount", "shareCount", "collectCount"):
+            value = stats.get(key)
+            if value is None:
+                if f"stats.{key}" not in missing:
+                    return False
+            elif type(value) is not int or value < 0:
+                return False
+    return True
 
 
 def _normalized_posts(payload: dict[str, Any], query: str) -> list[dict[str, Any]]:

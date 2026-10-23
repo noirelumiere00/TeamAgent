@@ -98,6 +98,7 @@ class TikTokTaskStore:
                 # 動画なしで1ジョブに収まらない要求は skill 側の計画が metadata_only に切り替える。
                 artifact_mode=spec.get("artifact_mode", "full"),
                 max_video_bytes=spec.get("max_video_bytes", 30 * 1024 * 1024),
+                edition=spec.get("edition"),
                 client=TikTokClientConfig(
                     client=raw_client.get("client"),
                     client_short=raw_client.get("client_short"),
@@ -176,6 +177,8 @@ class TikTokTaskStore:
                         deadline_epoch_s=deadline_epoch_s,
                     )
                 )
+            if "acquisition_status" in result.metadata:
+                output["acquisition_status"] = result.metadata["acquisition_status"]
             return output
         except Exception as exc:
             logger.warning("tiktok_status_failed", job_id=job_id, error=type(exc).__name__)
@@ -221,6 +224,9 @@ class TikTokTaskStore:
             "manifest_url": artifact_url("manifest.json"),
             "videos": [],
         }
+        if "sales25-raw.json" in artifacts:
+            output["sales25_raw_json_url"] = artifact_url("sales25-raw.json")
+            output["acquisition_status_json_url"] = artifact_url("acquisition-status.json")
         manifest_ref = artifacts.get("manifest.json")
         if manifest_ref is None:
             return output
