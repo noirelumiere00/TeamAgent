@@ -262,7 +262,7 @@ def test_sections_follow_fixed_order_and_scope_line_is_last() -> None:
     )
     positions = [answer.index("\n" + HEADERS[key]) for key in sec.SECTION_ORDER]
     assert positions == sorted(positions)
-    assert answer.startswith("要約です。\n\n📁 金庫の資料（1件）\n")
+    assert answer.startswith("要約です。\n\n📁 データベースの資料（1件）\n")
     # tail（📎 実ファイルの提案）→ 探した範囲（最後の 1 行）。
     last_lines = answer.split("\n\n")[-2:]
     assert last_lines[0] == DELIVER_SUGGESTION
@@ -291,7 +291,7 @@ def test_scope_line_is_always_added_even_without_head_or_sections() -> None:
     answer = compose_answer(
         head="", sections=Sections(), lanes={"vault": LaneStatus.zero(queries=["宅配 事例"])}
     )
-    assert answer == "探した範囲（まとめて検索）: 金庫 0件（『宅配 事例』）"
+    assert answer == "探した範囲（まとめて検索）: データベース 0件（『宅配 事例』）"
     assert (
         compose_answer(head="", sections=Sections(), lanes={})
         == "探した範囲（まとめて検索）: 記録なし"
@@ -301,7 +301,7 @@ def test_scope_line_is_always_added_even_without_head_or_sections() -> None:
 def test_each_entry_is_one_line_with_date_industry_and_link() -> None:
     answer = render_sections(_all_sections())
     assert (
-        "📁 金庫の資料（1件）\n"
+        "📁 データベースの資料（1件）\n"
         f"- [宅配サービス_TikTok提案書_20260812.pptx]({DRIVE_URL})（2026-08-12・業種: 食品）"
     ) in answer
     assert (
@@ -336,7 +336,7 @@ def test_top_two_per_section_and_min_score_drops_weak_hits() -> None:
         "宅配C_提案書.pptx",
     ]
     answer = render_sections(sections)
-    assert "📁 金庫の資料（2件）" in answer
+    assert "📁 データベースの資料（2件）" in answer
     assert "宅配C_提案書" not in answer  # 3 件目は載せない（上位 2 件）
     assert "弱いヒット" not in answer
     # 言い換えのヒットにも同じしきい値を掛ける。
@@ -588,7 +588,7 @@ def test_special_markup_in_titles_excerpts_and_names_is_neutralized() -> None:
     assert "🔎 近い業種・言い換え（『＜!everyone＞宅配』そのものの資料ではありません）" in answer
     # 問いの語の『』は外して 1 組だけで囲む。
     assert answer.endswith(
-        "探した範囲（まとめて検索）: 金庫 ✓1件（『＜!channel＞ 宅配 事例』『宅配』）・Slack ✓1件"
+        "探した範囲（まとめて検索）: データベース ✓1件（『＜!channel＞ 宅配 事例』『宅配』）・Slack ✓1件"
         "・Slack: 公開チャンネル全体＋参加している非公開・DM"
     )
 
@@ -596,7 +596,7 @@ def test_special_markup_in_titles_excerpts_and_names_is_neutralized() -> None:
 def test_query_echo_masks_pii_like_scope_footer() -> None:
     line = scope_line({"vault": LaneStatus.zero(queries=["taro.yamada@example.com の資料"])})
     assert "taro.yamada@example.com" not in line
-    assert line.startswith("探した範囲（まとめて検索）: 金庫 0件（『")
+    assert line.startswith("探した範囲（まとめて検索）: データベース 0件（『")
 
 
 @pytest.mark.parametrize(
@@ -637,17 +637,17 @@ def test_dates_are_only_shown_when_well_formed() -> None:
 @pytest.mark.parametrize(
     ("name", "status", "text"),
     [
-        ("vault", LaneStatus.found(3, queries=["宅配 事例"]), "金庫 ✓3件（『宅配 事例』）"),
+        ("vault", LaneStatus.found(3, queries=["宅配 事例"]), "データベース ✓3件（『宅配 事例』）"),
         (
             "vault",
             LaneStatus.found(2, queries=["株式会社北都フーズ", "北都フーズ"], partial=True),
-            "金庫 ✓2件（『株式会社北都フーズ』『北都フーズ』・再検索の一部は時間切れ・失敗）",
+            "データベース ✓2件（『株式会社北都フーズ』『北都フーズ』・再検索の一部は時間切れ・失敗）",
         ),
-        ("vault", LaneStatus.zero(queries=["宅配 事例"]), "金庫 0件（『宅配 事例』）"),
+        ("vault", LaneStatus.zero(queries=["宅配 事例"]), "データベース 0件（『宅配 事例』）"),
         (
             "vault",
             LaneStatus.failed("search_failed"),
-            "金庫 ✗ 検索に失敗しました（金庫に無いという意味ではありません）",
+            "データベース ✗ 検索に失敗しました（データベースに無いという意味ではありません）",
         ),
         (
             "expand",
@@ -709,7 +709,7 @@ def test_scope_line_states(name: str, status: LaneStatus, text: str) -> None:
 def test_scope_line_order_is_fixed_and_counts_deals() -> None:
     lanes = dict(reversed(list(LANES_ALL.items())))  # 渡す順に依らない
     assert scope_line(lanes, deal_count=1) == (
-        "探した範囲（まとめて検索）: 金庫 ✓6件（『宅配 事例』・うち案件 1件）"
+        "探した範囲（まとめて検索）: データベース ✓6件（『宅配 事例』・うち案件 1件）"
         "・言い換え ✓1件（『物流 事例』『配送 事例』）"
         "・Slack ✓1件"
         "・カルテ ✓最新1件（『北都フーズ』）"
@@ -719,7 +719,7 @@ def test_scope_line_order_is_fixed_and_counts_deals() -> None:
     )
     # compose_answer は 🤝 の件数から「うち案件」を数える。
     answer = compose_answer(head="要約", sections=_all_sections(), lanes=LANES_ALL)
-    assert "金庫 ✓6件（『宅配 事例』・うち案件 1件）" in answer.rsplit("\n", 1)[-1]
+    assert "データベース ✓6件（『宅配 事例』・うち案件 1件）" in answer.rsplit("\n", 1)[-1]
 
 
 def test_deal_count_counts_the_same_document_once() -> None:
@@ -727,7 +727,7 @@ def test_deal_count_counts_the_same_document_once() -> None:
         vault_hits=[_deal(0.7), _hit(0.6, chunk_id=2, **_deal().metadata)], url_of=_url_of
     )
     answer = compose_answer(head="要約", sections=sections, lanes={"vault": LaneStatus.found(2)})
-    assert answer.endswith("探した範囲（まとめて検索）: 金庫 ✓2件（うち案件 1件）")
+    assert answer.endswith("探した範囲（まとめて検索）: データベース ✓2件（うち案件 1件）")
     assert _section_counts(answer)["deal"] == 1
 
 
@@ -745,7 +745,7 @@ def test_unknown_reason_codes_use_fixed_words_not_the_code() -> None:
     failed = scope_line({"vault": LaneStatus.failed("psycopg.errors.QueryCanceled: secret")})
     assert (
         failed
-        == "探した範囲（まとめて検索）: 金庫 ✗ 探せませんでした（金庫に無いという意味ではありません）"
+        == "探した範囲（まとめて検索）: データベース ✗ 探せませんでした（データベースに無いという意味ではありません）"
     )
     skipped = scope_line({"case": LaneStatus.skipped("<!channel>")})
     assert skipped == "探した範囲（まとめて検索）: 事例 —（条件に合わず使っていません）"
@@ -759,7 +759,7 @@ def test_found_with_zero_count_is_zero() -> None:
 def test_queries_are_capped_and_deduplicated() -> None:
     status = LaneStatus.found(1, queries=["a", "a", "b", "c", "d", "x" * 80])
     text = scope_line({"vault": status})
-    assert text == "探した範囲（まとめて検索）: 金庫 ✓1件（『a』『b』『c』）"
+    assert text == "探した範囲（まとめて検索）: データベース ✓1件（『a』『b』『c』）"
 
 
 # ── Slack の状態（composite.SlackLookup の理由コード）──────────────────────────
@@ -941,7 +941,7 @@ def test_video_metrics_section_does_not_swallow_following_sections() -> None:
     assert cut is not None
     _before, section, after = cut
     assert section == video  # 📊 の節だけを切り出す（📁 以降を DM への直接投稿に巻き込まない）
-    assert after.lstrip("\n").startswith("📁 金庫の資料")
+    assert after.lstrip("\n").startswith("📁 データベースの資料")
     assert after.rstrip().endswith(scope_line(LANES_ALL, deal_count=1))
 
 
@@ -996,7 +996,7 @@ def test_sections_after_video_metrics_use_heading_boundary_without_extra_blank_l
     )
     cut = extract_section(answer)
     assert cut is not None and cut[1] == video
-    assert f"{video}\n\n📁 金庫の資料" in answer
+    assert f"{video}\n\n📁 データベースの資料" in answer
     assert "\n\n\n" not in answer
 
 

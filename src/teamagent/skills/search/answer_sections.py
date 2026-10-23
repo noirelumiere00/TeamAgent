@@ -185,7 +185,7 @@ LANE_ORDER: tuple[LaneName, ...] = ("vault", "expand", "slack", "karte", "case",
 LaneKind = Literal["found", "zero", "failed", "skipped"]
 
 _LANE_LABELS: dict[str, str] = {
-    "vault": "金庫",
+    "vault": "データベース",
     "expand": "言い換え",
     "slack": "Slack",
     "karte": "カルテ",
@@ -195,7 +195,7 @@ _LANE_LABELS: dict[str, str] = {
 #: 探せなかったときに添える「◯◯に無いという意味ではありません」（場所でない探し先には付けない）。
 #: Slack の文言は composite.STATUS_NOTES と同じ（英字の後ろは半角空白）。
 _NOT_ABSENT_NOTES: dict[str, str] = {
-    "vault": "金庫に無いという意味ではありません",
+    "vault": "データベースに無いという意味ではありません",
     "slack": "Slack に無いという意味ではありません",
     "karte": "カルテに無いという意味ではありません",
     "case": "事例集に無いという意味ではありません",
@@ -599,7 +599,7 @@ def build_sections(
 
 def _header(key: SectionKey, count: int, sections: Sections) -> str:
     if key == "vault":
-        return f"📁 金庫の資料（{count}件）"
+        return f"📁 データベースの資料（{count}件）"
     if key == "case":
         return f"🏆 事例・施策実績（{count}件）"
     if key == "deal" and sections.timeline_lines.get(key):

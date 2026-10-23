@@ -295,7 +295,7 @@ def test_not_found_attaches_nothing() -> None:
     out, slack, gdrive = _run(
         hits,
         query="ショート動画の事例",
-        answer="金庫に該当する資料は見つかりませんでした（近いもの: 『A』）。",
+        answer="データベースに該当する資料は見つかりませんでした（近いもの: 『A』）。",
         found=False,
     )
     assert out.delivered_count == 0

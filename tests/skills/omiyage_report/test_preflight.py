@@ -89,7 +89,7 @@ def test_needs_input_message_structure() -> None:
     assert "- 一般検索キーワード（1つ以上）" in message
     assert "対象ブランド（" not in message.split("不足している必須情報：")[1].split("補完候補")[0]
     # 補完候補と回答欄 + 作成指示文
-    assert "補完候補（カルテ・金庫から）：" in message
+    assert "補完候補（カルテ・データベースから）：" in message
     assert "- 競合ブランド候補：ラサーナ" in message
     assert "以下をコピーしてご返信ください。" in message
     assert "競合ブランド：" in message

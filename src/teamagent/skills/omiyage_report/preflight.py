@@ -225,7 +225,7 @@ def build_needs_input_message(
         lines.append("")
 
     if result.suggestions:
-        lines.append("補完候補（カルテ・金庫から）：")
+        lines.append("補完候補（カルテ・データベースから）：")
         for suggestion in result.suggestions:
             label = _REPLY_FIELD_LABELS[suggestion.field]
             lines.append(f"- {label}候補：{'、'.join(suggestion.candidates)}")

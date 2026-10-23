@@ -101,7 +101,7 @@ def test_unconfirmed_terms_are_not_guessed(query: str) -> None:
     skill, b, _ = _search(lambda *_: [])
     out = skill.run(SearchInput(query=query), SkillContext(metadata={}))
     assert not out.found
-    assert out.answer.endswith(f"探した範囲: 金庫を『{query}』で検索")
+    assert out.answer.endswith(f"探した範囲: データベースを『{query}』で検索")
     assert len(skill._embedder.values) == 1
     b.converse.assert_not_called()
 
