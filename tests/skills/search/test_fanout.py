@@ -198,10 +198,12 @@ def test_slack_and_expansion_start_with_vault(monkeypatch: pytest.MonkeyPatch) -
 
 @pytest.mark.parametrize("lane", ["slack", "expand", "summary"])
 def test_slow_lane_keeps_vault(monkeypatch: pytest.MonkeyPatch, lane: str) -> None:
-    gate = threading.Event()
+    gate, finished = threading.Event(), threading.Event()
 
     def slow(*a: Any, **kw: Any) -> Any:
-        gate.wait(1)
+        # 10s は待つ実装に戻ったときに CI を止めないための上限。正常時は finally で即解放。
+        gate.wait(10)
+        finished.set()
         if lane == "expand":
             return ExpansionResult((), None, (), "empty", 1, 0.0)
         if lane == "summary":
@@ -225,9 +227,9 @@ def test_slow_lane_keeps_vault(monkeypatch: pytest.MonkeyPatch, lane: str) -> No
         monkeypatch.setattr(fanout, "lookup_slack" if lane == "slack" else "run_expansion", slow)
     try:
         skill, _ = make()
-        started = time.perf_counter()
         out = run(skill)
-        assert time.perf_counter() - started < 0.5
+        # 経過秒でなく「遅いレーンが終わる前に返った」ことで待たないことを確かめる。
+        assert not finished.is_set()
         assert out.found and "📁" in out.answer
         assert next(r for r in out.sources if r["lane"] == lane)["status"] == "timeout"
     finally:
