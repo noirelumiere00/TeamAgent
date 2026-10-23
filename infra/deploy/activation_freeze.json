@@ -377,8 +377,8 @@
     "scope_paths": [
       "infra/codebuild/teamagent_core_media_release_contract.json"
     ],
-    "reason": "【media の apk ロック追随】 【2026-10-23 apk ロック追随】mcp 便 r70 の空撃ちで、Alpine 上流の ncurses 6.6_p20260822-r0 → 6.6_p20261017-r0 入替を検出した。libncursesw / libpanelw / ncurses-terminfo-base は Dockerfile に明示 pin が無く lock だけのため、人が作成した lock の 112・115・184 行目の 3 行だけを差し替える（241→241 行）。社内網では手元の Docker 実ビルドができないため、実インベントリとの一致は段 3 の AWS image-builder が cmp で照合する。lock の sha256 が動くため Dockerfile の lock SHA 既定値と契約の artifact.apk-lock.sha256 を追随させ、release 契約を埋め込む世代 4 本を再導出する。scope は core_media 契約 1 path。",
-    "gate": "human gate 2026-10-23（小俣さん 10-21「マージまで全て任せる」・Alpine 上流で ncurses 6.6_p20260822-r0 → 6.6_p20261017-r0 入替。r70 の空撃ちで検出）",
+    "reason": "【media の apk ロック追随】 【2026-10-23 apk ロック追随】mcp 便 r71 の段 3 image-builder の apk lock 照合で、Alpine 上流の gdbm-1.26-r0 が media の依存に新規追加されたことを検出した。gdbm は Dockerfile に明示 pin が無く lock だけのため、人が作成した lock の fribidi-1.0.16-r3 の直後・54 行目に 1 行だけ追加する（241→242 行）。社内網では手元の Docker 実ビルドができないため、実インベントリとの一致は段 3 の AWS image-builder が cmp で照合する。lock の sha256 が動くため Dockerfile の lock SHA 既定値と契約の artifact.apk-lock.sha256 を追随させ、release 契約を埋め込む世代 4 本を再導出する。scope は core_media 契約 1 path。",
+    "gate": "human gate 2026-10-23（小俣さん 10-21「マージまで全て任せる」・Alpine 上流で gdbm-1.26-r0 が media の依存に新規追加。r71 の段 3 image-builder の apk lock 照合で検出）",
     "folded_2026_08_28": {
       "decision": "裁定③（relock せず相乗り）を打ち切り、本 PR で unlock を畳む。Human Gate ⑤ を 2026-08-28 にユーザーが通した。",
       "why_now": "①本 PR は frozen surface を 1 path も変更していない（assert-frozen-surface --base origin/dev --head HEAD が「frozen surface 無変更（監視対象 21 path）」を返す実測）。∴ この unlock は本 PR には不要。②active のままだと test_unlock_is_inactive_and_empty_by_default が落ち、CI が 1 failed / 7,474 passed で恒常的に赤になる（3.11 / 3.13 / 3.14 すべてで実測）。本物の失敗と見分けがつかなくなる。③裁定③の rationale「いま relock すると同じ宣言を立て直す往復が発生する」は成立しない。retention_ruling_2026_08_27.landmine_partial_scope のとおり、相乗り PR は scope_paths を自分の変更集合へ絞り込まねばならず、**どのみち書き直しが必須**だから。",
@@ -531,6 +531,15 @@
       "reason": "【media の apk ロック追随】 【2026-10-22 apk ロック追随】mcp 便 r68 の空撃ちで、Alpine 上流の c-ares 1.34.8-r0 → 1.34.9-r0 入替を検出した。c-ares は Dockerfile に明示 pin が無く lock だけのため、人が作成した lock の 19 行目だけを差し替える（241→241 行）。社内網では手元の Docker 実ビルドができないため、実インベントリとの一致は段 3 の AWS image-builder が cmp で照合する。lock の sha256 が動くため Dockerfile の lock SHA 既定値と契約の artifact.apk-lock.sha256 を追随させ、release 契約を埋め込む世代 4 本を再導出する。scope は core_media 契約 1 path。",
       "gate": "human gate 2026-10-22（小俣さん 10-21「マージまで全て任せる」・Alpine 上流で c-ares 1.34.8-r0 → 1.34.9-r0 入替。r68 の空撃ちで検出）",
       "note": "#671 の c-ares APK ロック追随の宣言を退避。10-23 の ncurses 上流入替へ追随するため、core_media 契約 1 path の scope を維持して reason・gate を切り替える。"
+    },
+    "previous_scope_20261023_ncurses": {
+      "active": true,
+      "scope_paths": [
+        "infra/codebuild/teamagent_core_media_release_contract.json"
+      ],
+      "reason": "【media の apk ロック追随】 【2026-10-23 apk ロック追随】mcp 便 r70 の空撃ちで、Alpine 上流の ncurses 6.6_p20260822-r0 → 6.6_p20261017-r0 入替を検出した。libncursesw / libpanelw / ncurses-terminfo-base は Dockerfile に明示 pin が無く lock だけのため、人が作成した lock の 112・115・184 行目の 3 行だけを差し替える（241→241 行）。社内網では手元の Docker 実ビルドができないため、実インベントリとの一致は段 3 の AWS image-builder が cmp で照合する。lock の sha256 が動くため Dockerfile の lock SHA 既定値と契約の artifact.apk-lock.sha256 を追随させ、release 契約を埋め込む世代 4 本を再導出する。scope は core_media 契約 1 path。",
+      "gate": "human gate 2026-10-23（小俣さん 10-21「マージまで全て任せる」・Alpine 上流で ncurses 6.6_p20260822-r0 → 6.6_p20261017-r0 入替。r70 の空撃ちで検出）",
+      "note": "#678 の ncurses APK ロック追随の宣言を退避。10-23 の gdbm-1.26-r0 依存追加へ追随するため、core_media 契約 1 path の scope を維持して reason・gate を切り替える。"
     }
   },
   "production_deployment_freeze": {

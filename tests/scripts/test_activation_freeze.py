@@ -208,18 +208,25 @@ def test_unrelated_changes_still_pass(base: str, head: str, reason: str) -> None
 
 
 def test_unlock_matches_the_committed_declaration() -> None:
-    """ncurses の上流入替へ追随し、scope と退避した宣言を完全一致で封印する。"""
+    """gdbm の依存追加へ追随し、scope と退避した宣言を完全一致で封印する。"""
     unlock = _freeze_doc()["unlock"]
     assert unlock["active"] is True
     assert unlock["scope_paths"] == ["infra/codebuild/teamagent_core_media_release_contract.json"]
     assert (
         unlock["reason"]
-        == "【media の apk ロック追随】 【2026-10-23 apk ロック追随】mcp 便 r70 の空撃ちで、Alpine 上流の ncurses 6.6_p20260822-r0 → 6.6_p20261017-r0 入替を検出した。libncursesw / libpanelw / ncurses-terminfo-base は Dockerfile に明示 pin が無く lock だけのため、人が作成した lock の 112・115・184 行目の 3 行だけを差し替える（241→241 行）。社内網では手元の Docker 実ビルドができないため、実インベントリとの一致は段 3 の AWS image-builder が cmp で照合する。lock の sha256 が動くため Dockerfile の lock SHA 既定値と契約の artifact.apk-lock.sha256 を追随させ、release 契約を埋め込む世代 4 本を再導出する。scope は core_media 契約 1 path。"
+        == "【media の apk ロック追随】 【2026-10-23 apk ロック追随】mcp 便 r71 の段 3 image-builder の apk lock 照合で、Alpine 上流の gdbm-1.26-r0 が media の依存に新規追加されたことを検出した。gdbm は Dockerfile に明示 pin が無く lock だけのため、人が作成した lock の fribidi-1.0.16-r3 の直後・54 行目に 1 行だけ追加する（241→242 行）。社内網では手元の Docker 実ビルドができないため、実インベントリとの一致は段 3 の AWS image-builder が cmp で照合する。lock の sha256 が動くため Dockerfile の lock SHA 既定値と契約の artifact.apk-lock.sha256 を追随させ、release 契約を埋め込む世代 4 本を再導出する。scope は core_media 契約 1 path。"
     )
     assert (
         unlock["gate"]
-        == "human gate 2026-10-23（小俣さん 10-21「マージまで全て任せる」・Alpine 上流で ncurses 6.6_p20260822-r0 → 6.6_p20261017-r0 入替。r70 の空撃ちで検出）"
+        == "human gate 2026-10-23（小俣さん 10-21「マージまで全て任せる」・Alpine 上流で gdbm-1.26-r0 が media の依存に新規追加。r71 の段 3 image-builder の apk lock 照合で検出）"
     )
+    assert unlock["previous_scope_20261023_ncurses"] == {
+        "active": True,
+        "scope_paths": ["infra/codebuild/teamagent_core_media_release_contract.json"],
+        "reason": "【media の apk ロック追随】 【2026-10-23 apk ロック追随】mcp 便 r70 の空撃ちで、Alpine 上流の ncurses 6.6_p20260822-r0 → 6.6_p20261017-r0 入替を検出した。libncursesw / libpanelw / ncurses-terminfo-base は Dockerfile に明示 pin が無く lock だけのため、人が作成した lock の 112・115・184 行目の 3 行だけを差し替える（241→241 行）。社内網では手元の Docker 実ビルドができないため、実インベントリとの一致は段 3 の AWS image-builder が cmp で照合する。lock の sha256 が動くため Dockerfile の lock SHA 既定値と契約の artifact.apk-lock.sha256 を追随させ、release 契約を埋め込む世代 4 本を再導出する。scope は core_media 契約 1 path。",
+        "gate": "human gate 2026-10-23（小俣さん 10-21「マージまで全て任せる」・Alpine 上流で ncurses 6.6_p20260822-r0 → 6.6_p20261017-r0 入替。r70 の空撃ちで検出）",
+        "note": "#678 の ncurses APK ロック追随の宣言を退避。10-23 の gdbm-1.26-r0 依存追加へ追随するため、core_media 契約 1 path の scope を維持して reason・gate を切り替える。",
+    }
     assert unlock["previous_scope_20261023_c_ares"] == {
         "active": True,
         "scope_paths": ["infra/codebuild/teamagent_core_media_release_contract.json"],
