@@ -278,6 +278,29 @@ def annotate(
                 file_record_number=record.record_number,
                 file_record_branch=record.branch_number,
             )
+        # 分割事例も元deckのACLで取得済み。原本IDの補完はDrive対象者の照合時だけ行う。
+        stored_id = str(meta.get("drive_file_id") or "")
+        if (
+            not meta.get("drive_url")
+            and meta.get("source_type") == "other"
+            and meta.get("case_source") == "deck"
+            and "/spreadsheets/" not in str(meta.get("source_uri") or "")
+            and re.fullmatch(r"[A-Za-z0-9_-]+", stored_id)
+        ):
+            meta["drive_url"] = f"https://drive.google.com/file/d/{stored_id}/view"
+        if meta.get("campaign_aggregate") == "true" and not meta.get("drive_url"):
+            # related_files は本人RLS下で広告主・施策を照合済み。台帳URLは正本にしない。
+            related = next(
+                (
+                    row
+                    for row in meta.get("related_files", ())
+                    if drive_file_id(row.get("url"))
+                    and "/spreadsheets/" not in str(row.get("url") or "")
+                ),
+                None,
+            )
+            if related is not None:
+                meta.update(drive_url=related["url"], drive_title=related.get("title"))
         meta[REFERENCE_KEY] = canonical_reference(
             meta, hit.content, file_urls={} if meta.get("source_type") == "slack" else urls
         )

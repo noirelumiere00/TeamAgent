@@ -320,7 +320,7 @@ def scope_by_industry(
             )
             if target_matches(text, wanted) or any(term in text for term in food_terms):
                 mentioned.append(hit)
-            elif soft and not any(target_matches(text, name) for name in INDUSTRY_KEYWORDS):
+            elif soft:
                 unknown.append(hit)
     return matched + mentioned + unknown
 

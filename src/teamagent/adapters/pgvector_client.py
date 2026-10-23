@@ -1057,6 +1057,7 @@ class PgVectorClient:
                 d.metadata->>'case_external_use'    AS case_external_use,
                 d.metadata->>'case_external_use_note' AS case_external_use_note,
                 d.metadata->>'case_source'          AS case_source,
+                d.metadata->>'drive_file_id'        AS drive_file_id,
                 d.metadata->>'case_brand'           AS case_brand,
                 COALESCE(d.metadata->>'case_industry',
                          d.metadata->>'cls_industry') AS case_industry,

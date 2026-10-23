@@ -76,7 +76,13 @@ def test_unknown_industry_is_last_and_known_mismatch_is_excluded(
     ]
     skill, _ = make(hits)
     out = skill.run(SearchInput(query="食品の事例出して"), SkillContext(metadata=META))
-    assert [ref.drive_file_id for ref in out.displayed_refs] == ["FILE5", "FILE3", "FILE4", "FILE1"]
+    assert [ref.drive_file_id for ref in out.displayed_refs] == [
+        "FILE5",
+        "FILE3",
+        "FILE4",
+        "FILE1",
+        "FILE6",
+    ]
 
 
 @pytest.mark.parametrize("fanout_enabled", [False, True])
