@@ -108,8 +108,11 @@ def test_cited_non_drive_reference_is_not_a_document_link(
         displayed_refs=refs,
     )
     assert refs == []
-    assert answer == body if drive_shaped_url else answer == body + (
-        "\n\n<https://example.slack.com/archives/C1/p1234567890123456|会話の記録>"
+    assert (
+        answer == body
+        if drive_shaped_url
+        else answer
+        == body + ("\n\n<https://example.slack.com/archives/C1/p1234567890123456|会話の記録>")
     )
 
 
