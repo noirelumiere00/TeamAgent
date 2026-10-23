@@ -57,6 +57,7 @@ from teamagent.skills.first_visit.recording import (
     capture_enabled,
     upload_capture,
 )
+from teamagent.skills.omiyage_report import sales25
 from teamagent.skills.omiyage_report.compose import (
     build_all_failed_message,
     build_analysis_note,
@@ -555,8 +556,19 @@ class OmiyageReportSubmitSkill(BaseSkill[OmiyageReportSubmitInput, OmiyageReport
         relevance_checker: _RelevanceChecker | None = None,
         dedup_seconds: int | None = None,
         clock: Callable[[], datetime] = _utc_now,
+        sales25_stages: sales25.Stages | None = None,
+        sales25_reader: Callable[[sales25.Artifact], bytes] = sales25.read_artifact,
     ) -> None:
         self._store = store or ProposalJobStore()
+        self._sales25 = sales25.Parent(
+            self._store,
+            stages=sales25_stages,
+            reader=sales25_reader,
+            slack=slack,
+            heartbeat_seconds=(
+                _configured_heartbeat_seconds() if heartbeat_seconds is None else heartbeat_seconds
+            ),
+        )
         self._dedup = OmiyageSubmitDedup(
             self._store,
             window_seconds=(
@@ -640,6 +652,8 @@ class OmiyageReportSubmitSkill(BaseSkill[OmiyageReportSubmitInput, OmiyageReport
         input: OmiyageReportSubmitInput,
         ctx: SkillContext,
     ) -> OmiyageReportSubmitOutput:
+        if sales25.enabled(ctx.metadata):
+            return self._run_sales25(input, ctx)
         log = ctx.bind_logger(self.name)
         from teamagent.skills._shared import input_policy
 
@@ -800,6 +814,114 @@ class OmiyageReportSubmitSkill(BaseSkill[OmiyageReportSubmitInput, OmiyageReport
             message=build_accepted_message(input, estimate)
             + ("\n" + policy_note if policy_note else ""),
         )
+
+    def _run_sales25(
+        self, input: OmiyageReportSubmitInput, ctx: SkillContext
+    ) -> OmiyageReportSubmitOutput:
+        case, needs_input = sales25.preflight(self._store, input, ctx)
+        if needs_input is not None:
+            return needs_input
+        user_id = str(ctx.metadata["verified_slack_user_id"])
+        team_id = str(ctx.metadata["verified_slack_team_id"])
+        owner = team_id + "\x1f" + user_id
+        reused_steps = {}
+        if case["mode"] == "revision":
+            source = self._store.get_job(case.get("source_job_id", ""))
+            source_summary = json.loads(source["request_summary"]) if source else {}
+            if (
+                not source
+                or source["status"] != "done"
+                or source_summary.get("edition") != sales25.EDITION
+                or not sales25.owner_matches(source_summary, ctx)
+                or source_summary.get("channel_id") != ctx.metadata.get("channel_id")
+                or source_summary.get("thread_ts") != ctx.metadata.get("thread_ts")
+                or any(
+                    source_summary["case"].get(k) != case.get(k)
+                    for k in (
+                        "brand",
+                        "competitors",
+                        "keywords",
+                        "category",
+                        "queries",
+                        "target_product",
+                        "claim_constraints",
+                    )
+                )
+            ):
+                return OmiyageReportSubmitOutput(
+                    status="needs_input",
+                    message="修正元の本人のrunと同じ調査条件を確認してください。新規調査は別の依頼として受け付けます。",
+                )
+            source_result = sales25.ParentResult.model_validate_json(source["result_json"])
+            reused_steps = {
+                k: v.model_dump()
+                for k, v in source_result.checkpoints.items()
+                if k.startswith("search_") or k in {"relevance", "media", "analysis"}
+            }
+        job_id = new_omiyage_job_id()
+        log = ctx.bind_logger(self.name)
+        dedup = self._dedup.claim(sales25.fingerprint(case, owner), job_id, log)
+        if dedup.duplicate_of:
+            return OmiyageReportSubmitOutput(
+                status="queued",
+                job_id=dedup.duplicate_of,
+                deduplicated=True,
+                retry_after_seconds=self._retry_after_seconds,
+                message="同じsales25の依頼を受け付け済みです。既存の進捗を確認します。目安は1〜3時間（仮）です。",
+            )
+        admission = self._admission
+        if not admission.try_acquire(eta_minutes=180, waiter_key=owner):
+            self._dedup.release(dedup.lock_id, job_id, log)
+            return OmiyageReportSubmitOutput(
+                status="busy",
+                retry_after_seconds=self._retry_after_seconds,
+                message="資料の作成枠が埋まっています。少し待ってからもう一度お試しください。",
+            )
+        handed_off = False
+        try:
+            self._store.create_job(
+                job_id,
+                {
+                    "kind": OMIYAGE_JOB_KIND,
+                    "edition": sales25.EDITION,
+                    "case": case,
+                    "owner": owner,
+                    "user_id": user_id,
+                    "team_id": team_id,
+                    "channel_id": ctx.metadata.get("channel_id", ""),
+                    "thread_ts": ctx.metadata.get("thread_ts"),
+                    "request_id": ctx.request_id,
+                    "reused_steps": reused_steps,
+                },
+            )
+            try:
+                self._thread_launcher(
+                    lambda: self._run_sales25_parent(admission, job_id), f"sales25-{job_id}"
+                )
+            except Exception:
+                self._store.mark_failed(job_id, _JOB_START_FAILED, expected_statuses=("queued",))
+                return OmiyageReportSubmitOutput(
+                    status="failed", job_id=job_id, message="sales25の開始を確認できませんでした。"
+                )
+            handed_off = True
+        finally:
+            if not handed_off:
+                admission.release()
+                self._dedup.release(dedup.lock_id, job_id, log)
+        return OmiyageReportSubmitOutput(
+            status="queued",
+            job_id=job_id,
+            retry_after_seconds=self._retry_after_seconds,
+            message="25頁のお土産資料（sales25）を受け付けました。目安は1〜3時間（仮）です。大きな工程の切り替わりと長い停滞時にお知らせします。",
+        )
+
+    def _run_sales25_parent(self, admission: JobAdmission, job_id: str) -> None:
+        try:
+            row = self._store.get_job(job_id)
+            if row is not None:
+                self._sales25.execute(job_id, row)
+        finally:
+            admission.release()
 
     def _claim_dedup(
         self,
@@ -1512,6 +1634,8 @@ class OmiyageReportStatusSkill(BaseSkill[OmiyageReportStatusInput, OmiyageReport
         stale_after_seconds: int | None = None,
         retry_after_seconds: int | None = None,
         clock: Callable[[], datetime] = _utc_now,
+        sales25_parent: sales25.Parent | None = None,
+        thread_launcher: _ThreadLauncher = _launch_daemon_thread,
     ) -> None:
         self._store = store or ProposalJobStore()
         self._stale_after_seconds = (
@@ -1525,6 +1649,8 @@ class OmiyageReportStatusSkill(BaseSkill[OmiyageReportStatusInput, OmiyageReport
             else max(0, retry_after_seconds)
         )
         self._clock = clock
+        self._sales25 = sales25_parent or sales25.Parent(self._store)
+        self._thread_launcher = thread_launcher
 
     def run(
         self,
@@ -1557,6 +1683,42 @@ class OmiyageReportStatusSkill(BaseSkill[OmiyageReportStatusInput, OmiyageReport
                 error_code="JOB_KIND_MISMATCH",
                 message="そのjob_idはお土産資料のjobではありません。",
             )
+
+        summary = json.loads(row["request_summary"])
+        if summary.get("edition") == sales25.EDITION:
+            if not sales25.owner_matches(summary, ctx):
+                return self._sales25.status(input.job_id, row, ctx)
+            if (
+                row.get("status") in {"queued", "running"}
+                and self._active_failure_code(row) == "JOB_STATE_INVALID"
+            ):
+                self._store.mark_failed(
+                    input.job_id,
+                    "JOB_STATE_INVALID",
+                    expected_statuses=(row["status"],),
+                    **self._timestamp_cas_args(row),
+                )
+                row = self._store.get_job(input.job_id) or row
+            if (
+                row.get("status") in {"queued", "running"}
+                and self._active_failure_code(row) == "MCP_RESTARTED"
+            ):
+                admission = _ADMISSION
+                if admission.try_acquire(eta_minutes=180, waiter_key=summary["owner"]):
+                    resume_row = row
+
+                    def resume() -> None:
+                        try:
+                            self._sales25.execute(input.job_id, resume_row)
+                        finally:
+                            admission.release()
+
+                    try:
+                        self._thread_launcher(resume, f"sales25-resume-{input.job_id}")
+                    except Exception:
+                        admission.release()
+                row = self._store.get_job(input.job_id) or row
+            return self._sales25.status(input.job_id, row, ctx)
 
         raw_status = row.get("status")
         if raw_status in ("queued", "running"):
