@@ -273,6 +273,7 @@ def test_media_image_copies_only_worker_media_code_and_no_core_secrets_stack() -
         "render_child.py",
         "security.py",
         "tool_contracts.py",
+        "tiktok_capture.py",
         "tool_worker.py",
         "url_policy.py",
     ):
@@ -403,7 +404,7 @@ def test_media_sources_and_js_lock_are_content_addressed() -> None:
     expected = {
         PACKAGE: "c9aafff461749b7591c810d698736fe33461965d238ed2cfd283229612a7fe28",
         PACKAGE_LOCK: "f0fe7ac3f992960d12dfdaddb14fa06e0b44ed92386c2a7d3fc74cbb98784dc2",
-        SCRAPER: "99c1955010a99be0f2921d8b107f849c3fce216f76eaa2ba342531e98407816e",
+        SCRAPER: "e27f612bbdc799ee6f788fed1fc66d611f5566d264650fbcbe4f02101bfe96d3",
         DNS_PINNED_PROXY: ("ccac597a429069074d2b362d6b15ad75c00c23941be97e9ea87503d36fd50e19"),
     }
     for path, digest in expected.items():
@@ -420,6 +421,7 @@ def test_media_dockerignore_is_deny_by_default() -> None:
         "!uv.lock",
         "!src/teamagent/media/tool_worker.py",
         "!src/teamagent/media/tool_contracts.py",
+        "!src/teamagent/media/tiktok_capture.py",
         "!src/teamagent/media/proposal_dates.py",
         "!src/teamagent/media/proposal_bu2.py",
         "!src/teamagent/media/proposal_template.py",

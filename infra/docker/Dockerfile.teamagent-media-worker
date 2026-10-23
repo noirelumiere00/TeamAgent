@@ -328,7 +328,7 @@ ARG YTDLP_SANITIZER_SHA256=4e7464710094be2eb6205fdc1ea207cfe62b99db1b34f9d31691e
 ARG MEDIA_APK_LOCK_SHA256=37d39a19abdcadc32c48680cfa4277400e8e6dbbb9c1d16c23d92e119e6f37c2
 ARG TIKTOK_PACKAGE_JSON_SHA256=c9aafff461749b7591c810d698736fe33461965d238ed2cfd283229612a7fe28
 ARG TIKTOK_PACKAGE_LOCK_SHA256=f0fe7ac3f992960d12dfdaddb14fa06e0b44ed92386c2a7d3fc74cbb98784dc2
-ARG TIKTOK_SCRAPER_SHA256=99c1955010a99be0f2921d8b107f849c3fce216f76eaa2ba342531e98407816e
+ARG TIKTOK_SCRAPER_SHA256=e27f612bbdc799ee6f788fed1fc66d611f5566d264650fbcbe4f02101bfe96d3
 ARG TIKTOK_DNS_PINNED_PROXY_SHA256=ccac597a429069074d2b362d6b15ad75c00c23941be97e9ea87503d36fd50e19
 
 COPY infra/docker/media-apk.lock /tmp/media-apk.lock
@@ -366,6 +366,7 @@ COPY --chown=10001:10001 \
   src/teamagent/media/proposal_dates.py \
   src/teamagent/media/render_child.py \
   src/teamagent/media/security.py \
+  src/teamagent/media/tiktok_capture.py \
   src/teamagent/media/tool_contracts.py \
   src/teamagent/media/tool_worker.py \
   src/teamagent/media/url_policy.py \

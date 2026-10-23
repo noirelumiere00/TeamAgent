@@ -46,16 +46,9 @@ _TIKTOK_SEARCH_WORST_CASE_SECONDS = 120
 # Fargate起動＋回転proxyのレイテンシ余裕を持たせた上限を使う。
 _TIKTOK_DEEP_SEARCH_WORST_CASE_SECONDS = 240
 _TIKTOK_DEEP_SEARCH_THRESHOLD_N_PER_KW = 30
-_TIKTOK_MAX_N_PER_KW = 120
-# dispatcher Lambda（infra/terraform/lambda/tiktok_dispatch/handler.py の
-# ``_bounded_int(operation["n_per_kw"], minimum=1, maximum=30)``）が受理する n_per_kw
-# の上限＝core 側が本番へ実際に流してよい単一情報源。契約モデルの le=120 は worker 側
-# の深掘り実装を残しているが、dispatcher を通らない値をここから送ると全軸
-# TIKTOK_MEDIA_JOB_FAILED（TikTok n_per_kw is invalid）になる（2026-09-02 お土産資料
-# 本番事故）。送信側はこの値で clamp／fail-fast し、
-# tests/media/test_tiktok_n_per_kw_contract.py が handler.py の maximum と一致する
-# ことを強制する。上げるときは dispatcher と同じ PR で両方を動かす。
+# Keep the ordinary transport limit aligned with dispatcher validation.
 TIKTOK_N_PER_KW_MAX = 30
+TIKTOK_SALES25_N_PER_KW_MAX = 100
 _TIKTOK_THUMBNAIL_WORST_CASE_SECONDS = 50
 _TIKTOK_VIDEO_WORST_CASE_SECONDS = 120
 
@@ -178,19 +171,22 @@ class TikTokAcquireOperation(_StrictModel):
         Annotated[str, StringConstraints(min_length=1, max_length=100)],
         ...,
     ] = Field(min_length=1, max_length=10)
-    n_per_kw: int = Field(default=10, ge=1, le=_TIKTOK_MAX_N_PER_KW)
+    n_per_kw: int = Field(default=10, ge=1, le=TIKTOK_SALES25_N_PER_KW_MAX)
     videos_per_kw: int = Field(default=2, ge=0, le=10)
     sort: Literal["display", "save_rate", "recent"] = "display"
     artifact_mode: Literal["metadata_only", "full"] = "full"
     max_video_bytes: int = Field(default=30 * 1024 * 1024, ge=1, le=MAX_OUTPUT_BYTES)
     client: TikTokClientConfig = Field(default_factory=TikTokClientConfig)
     first_visit_capture: bool = False
+    edition: Literal["sales25"] | None = None
 
     @model_serializer(mode="wrap")
     def _capture_only_when_enabled(self, handler: SerializerFunctionWrapHandler) -> dict[str, Any]:
         value: dict[str, Any] = handler(self)
         if not self.first_visit_capture:
             value.pop("first_visit_capture", None)
+        if self.edition is None:
+            value.pop("edition", None)
         return value
 
     @field_validator("keywords")
@@ -203,6 +199,20 @@ class TikTokAcquireOperation(_StrictModel):
 
     @model_validator(mode="after")
     def _fits_immutable_job_deadline(self) -> TikTokAcquireOperation:
+        if self.edition == "sales25":
+            if (
+                len(self.keywords) != 1
+                or self.artifact_mode != "metadata_only"
+                or self.videos_per_kw != 0
+                or self.sort != "display"
+                or self.first_visit_capture
+            ):
+                raise ValueError(
+                    "sales25 requires one keyword, display order, metadata_only, zero videos "
+                    "and no legacy capture"
+                )
+        elif self.n_per_kw > TIKTOK_N_PER_KW_MAX:
+            raise ValueError(f"ordinary TikTok n_per_kw must be at most {TIKTOK_N_PER_KW_MAX}")
         if self.artifact_mode == "metadata_only" and self.videos_per_kw != 0:
             raise ValueError("metadata-only TikTok operation cannot download videos")
         estimated_seconds = estimate_tiktok_operation_seconds(
@@ -553,6 +563,7 @@ __all__ = [
     "MAX_PRESIGNED_URL_SECONDS",
     "MAX_PROPOSAL_PPTX_BYTES",
     "TIKTOK_N_PER_KW_MAX",
+    "TIKTOK_SALES25_N_PER_KW_MAX",
     "AcquireOperation",
     "FrameOperation",
     "MediaArtifact",

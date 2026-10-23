@@ -16,6 +16,7 @@ import threading
 import urllib.request
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
@@ -41,6 +42,7 @@ from teamagent.media.security import (
     validate_acquire_url,
     validate_public_https_url,
 )
+from teamagent.media.tiktok_capture import _sales25_source_ok
 
 logger = logging.getLogger(__name__)
 
@@ -731,6 +733,8 @@ def _tiktok_acquire(
     )
     if not Path(node).exists() or not Path(scraper).exists():
         raise MediaOperationError("MEDIA_TIKTOK_RUNTIME_MISSING", "TikTok runtime is missing")
+    if operation.edition == "sales25":
+        return _tiktok_sales25(operation, workdir, budget, node=node, scraper=scraper)
 
     posts: list[dict[str, Any]] = []
     shortfalls: list[dict[str, Any]] = []
@@ -1043,6 +1047,136 @@ def _tiktok_acquire(
             "search_types": actual_search_types,
             "shortfalls": shortfalls,
             "warnings": warnings,
+            "s3_prefix": "",
+        },
+    )
+
+
+def _tiktok_sales25(
+    operation: TikTokAcquireOperation,
+    workdir: Path,
+    budget: DeadlineBudget,
+    *,
+    node: str,
+    scraper: str,
+) -> OperationOutput:
+    keyword = operation.keywords[0]
+    captured: list[dict[str, Any]] = []
+    error: MediaOperationError | None = None
+    try:
+        _node_json(
+            [
+                node,
+                scraper,
+                "--query",
+                keyword,
+                "--type",
+                operation.search_type,
+                "--max",
+                str(operation.n_per_kw),
+                "--edition",
+                "sales25",
+                "--sessions",
+                "1",
+            ],
+            workdir=workdir,
+            budget=budget,
+            timeout_s=tiktok_search_timeout_seconds(operation.n_per_kw),
+            capture=captured.append,
+        )
+    except MediaOperationError as exc:
+        if exc.code == "MEDIA_JOB_DEADLINE_EXCEEDED":
+            raise
+        error = exc
+    attempted_at = datetime.now(UTC).isoformat()
+    raw = (
+        captured[0]
+        if captured
+        else {
+            "query": keyword,
+            "fetched_at": None,
+            "fetched_on": None,
+            "attempted_at": attempted_at,
+            "sessions": 1,
+            "order_basis": "search_display_order",
+            "unfiltered": True,
+            "missingness_preserved": False,
+            "stop_reason": "exception",
+            "status": "failed",
+            "error_code": error.code if error else "MEDIA_TIKTOK_OUTPUT_INVALID",
+            "diagnostics": error.diagnostics if error else {},
+            "videos": [],
+        }
+    )
+    raw_videos = raw.get("videos")
+    videos = raw_videos if isinstance(raw_videos, list) else []
+    diagnostics = raw.get("diagnostics")
+    diagnostics = diagnostics if isinstance(diagnostics, dict) else {}
+    actual = len(videos)
+    accepted = error is None and _sales25_source_ok(raw, query=keyword, target=operation.n_per_kw)
+    status = {
+        "query": keyword,
+        "accepted": accepted,
+        "status": ("complete" if actual == operation.n_per_kw else "partial")
+        if accepted
+        else "failed",
+        "target": operation.n_per_kw,
+        "actual": actual,
+        "shortfall": max(0, operation.n_per_kw - actual),
+        "stop_reason": raw.get("stop_reason", "unknown"),
+        "diagnostics": diagnostics,
+        "raw_ref": "sales25-raw.json",
+    }
+    # Retain the source before legacy normalization loses nulls and photo/ad metadata.
+    artifacts: list[ProducedArtifact] = []
+    for name, payload in (("sales25-raw.json", raw), ("acquisition-status.json", status)):
+        path = workdir / name
+        path.write_text(
+            json.dumps(payload, ensure_ascii=False, separators=(",", ":"), allow_nan=False),
+            encoding="utf-8",
+        )
+        artifacts.append(ProducedArtifact(name, path, "application/json", relative_key=name))
+    posts = (
+        [
+            _post_row(video, keyword, rank, f"p01{rank:03d}", operation.search_type)
+            for rank, video in enumerate(videos, 1)
+        ]
+        if accepted
+        else []
+    )
+    shortfalls = (
+        []
+        if accepted and actual == operation.n_per_kw
+        else [
+            {
+                "kw": keyword,
+                "requested": operation.n_per_kw,
+                "actual": actual,
+                "reason": raw.get("error_code") or "MEDIA_TIKTOK_RESULT_SHORTFALL",
+                "stop_reason": status["stop_reason"],
+            }
+        ]
+    )
+    posts_path = workdir / "posts.normalized.json"
+    posts_path.write_text(
+        json.dumps(
+            {"posts": posts, "shortfalls": shortfalls}, ensure_ascii=False, separators=(",", ":")
+        ),
+        encoding="utf-8",
+    )
+    return OperationOutput(
+        (
+            ProducedArtifact(
+                "posts.json", posts_path, "application/json", relative_key="posts.normalized.json"
+            ),
+            *artifacts,
+        ),
+        {
+            "counts": {"kw": 1, "posts": len(posts), "videos": 0, "per_kw": {keyword: len(posts)}},
+            "search_types": {keyword: operation.search_type},
+            "shortfalls": shortfalls,
+            "warnings": [] if accepted else [f"{keyword}:MEDIA_TIKTOK_FAILED"],
+            "acquisition_status": status,
             "s3_prefix": "",
         },
     )

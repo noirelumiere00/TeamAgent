@@ -1202,8 +1202,18 @@ def run_job(
                 output = (
                     retry_long_job_once(execute)
                     if isinstance(request.operation, TikTokAcquireOperation)
+                    and request.operation.edition != "sales25"
                     else execute()
                 )
+                if (
+                    isinstance(request.operation, TikTokAcquireOperation)
+                    and request.operation.edition == "sales25"
+                    and {artifact.name for artifact in output.artifacts}
+                    != {"posts.json", "sales25-raw.json", "acquisition-status.json"}
+                ):
+                    raise MediaOperationError(
+                        "MEDIA_TIKTOK_OUTPUT_INVALID", "sales25 capture artifacts are required"
+                    )
                 artifacts_list: list[MediaArtifact] = []
                 for artifact in output.artifacts:
                     execution_budget.checkpoint()

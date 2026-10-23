@@ -17,6 +17,7 @@
 // ブラウザのログは stderr に出す (stdout は JSON のみ = Python が parse しやすい)。
 
 import puppeteer from "puppeteer-core";
+import { pathToFileURL } from "node:url";
 import {
   isPublicIp,
   startDnsPinnedProxy,
@@ -61,13 +62,24 @@ function parseArgs(argv) {
     else if (k === "--max-bytes") a.maxBytes = parseInt(argv[++i], 10) || a.maxBytes;
     else if (k === "--out") a.out = argv[++i];
     else if (k === "--sessions") a.sessions = Math.max(1, parseInt(argv[++i], 10) || 1);
+    else if (k === "--edition") a.edition = argv[++i];
     else if (k === "--headful") a.headful = true;
     else if (k === "--network-guard-self-test") a.networkGuardSelfTest = true;
+  }
+  if (argv.includes("--edition")) {
+    const rawNumber = (flag, fallback) => argv.includes(flag) ? Number(argv[argv.lastIndexOf(flag) + 1]) : fallback;
+    a.max = rawNumber("--max", a.max);
+    a.sessions = rawNumber("--sessions", a.sessions);
+    if (a.edition !== "sales25" || a.mode !== "search" ||
+        !["keyword", "hashtag"].includes(a.type) || !Number.isInteger(a.max) ||
+        a.max < 1 || a.max > 100 || a.sessions !== 1) {
+      throw new Error("sales25 requires search, --max 1..100 and --sessions 1");
+    }
   }
   return a;
 }
 
-const args = parseArgs(process.argv);
+let args;
 const log = (...m) => console.error("[tiktok]", ...m); // stderr
 
 // ---- Chrome 実行パス自動検出 (Mac/Linux 両対応) ----
@@ -215,13 +227,13 @@ async function detectBotWall(page) {
 }
 
 // API レスポンス item → 動画オブジェクト (search/general 形式: {type:1, item:{...}})
-function parseSearchItem(item) {
+function parseSearchItem(item, edition) {
   if (!item || item.type !== 1 || !item.item) return null;
-  return normalizeVideo(item.item);
+  return normalizeVideo(item.item, edition);
 }
 
 // challenge / SSR 形式: 動画オブジェクト直
-function normalizeVideo(v) {
+function normalizeVideo(v, edition) {
   if (!v || !v.id) return null;
   const stats = v.stats || {};
   const author = v.author || {};
@@ -233,7 +245,7 @@ function normalizeVideo(v) {
   const m = (v.desc || "").match(/#[\w　-鿿]+/g);
   if (m) for (const t of m) { const c = t.replace("#", ""); if (!hashtags.includes(c)) hashtags.push(c); }
 
-  return {
+  const normalized = {
     id: String(v.id),
     url: `https://www.tiktok.com/@${author.uniqueId || "_"}/video/${v.id}`,
     desc: v.desc || "",
@@ -263,9 +275,33 @@ function normalizeVideo(v) {
       ? { title: v.music.title || "", authorName: v.music.authorName || "", original: !!v.music.original }
       : null,
   };
+  if (edition === "sales25") {
+    const count = (value) => {
+      if (typeof value === "string" && /^\d+$/.test(value)) value = Number(value);
+      return Number.isSafeInteger(value) && value >= 0 ? value : null;
+    };
+    const followers = [author.followerCount, authorStats.followerCount].map(count);
+    normalized.author.followerCount = followers.find((n) => n > 0) ?? followers.find((n) => n !== null) ?? null;
+    normalized.stats = Object.fromEntries(Object.keys(normalized.stats).map((key) => [key, count(stats[key])]));
+    normalized.isAd = typeof v.isAd === "boolean" ? v.isAd : [0, 1].includes(v.isAd) ? v.isAd === 1 : null;
+    normalized.createTime = count(v.createTime);
+    normalized.duration = count(v.video?.duration);
+    normalized.mediaType = v.imagePost ? "photo" : "video";
+    normalized.imageCount = v.imagePost ? (Array.isArray(v.imagePost.images) ? v.imagePost.images.length : null) : 0;
+    normalized.images = v.imagePost?.images ?? [];
+    normalized.url = `https://www.tiktok.com/@${author.uniqueId || "_"}/${normalized.mediaType}/${v.id}`;
+    normalized.textLanguage = typeof v.textLanguage === "string" && v.textLanguage ? v.textLanguage : null;
+    normalized.missingFields = [
+      ...Object.keys(normalized.stats).filter((key) => normalized.stats[key] === null).map((key) => `stats.${key}`),
+      ...(normalized.author.followerCount === null ? ["author.followerCount"] : []),
+      ...["isAd", "createTime", "duration", "imageCount", "textLanguage"].filter((key) => normalized[key] === null),
+    ];
+  }
+  return normalized;
 }
 
-async function searchOnce(browser, query, type, maxVideos) {
+async function searchOnce(browser, query, type, maxVideos, { edition, delay = humanDelay } = {}) {
+  const sales25 = edition === "sales25";
   const isTag = type === "hashtag";
   const context = await browser.createBrowserContext();
   const page = await context.newPage();
@@ -275,6 +311,28 @@ async function searchOnce(browser, query, type, maxVideos) {
   let captchaDetected = false;
   let gridFound = false;
   let ssrCount = 0;
+  let cdnDenied = false;
+  let stopReason = "capped";
+  let apiInvalidResponses = 0;
+  let searchStarted = false;
+  const apiNonZeroStatus = [];
+  const apiHttpErrors = [];
+  let responses = Promise.resolve();
+  const refused = () => captchaDetected || cdnDenied || apiInvalidResponses > 0 || apiNonZeroStatus.length > 0 || apiHttpErrors.length > 0;
+  const makeDiag = () => ({
+    pagesFetched, captchaDetected, gridFound, ssrCount, videosFound: allVideos.length,
+    ...(sales25 ? { cdnDenied, apiNonZeroStatus, apiHttpErrors, apiInvalidResponses, stop_reason: stopReason } : {}),
+  });
+  const checkWalls = async () => {
+    captchaDetected = (await detectBotWall(page)) || captchaDetected;
+    if (sales25) {
+      cdnDenied = (await page.evaluate(() => {
+        const title = document.title || "";
+        const body = (document.body?.innerText || "").slice(0, 2000);
+        return /Access Denied|^\s*(403 Forbidden|Forbidden)\s*$/i.test(title) || /You don't have permission to access/i.test(body);
+      })) || cdnDenied;
+    }
+  };
 
   const MAX_PAGES = 18;
   const MAX_SCROLL = 20;
@@ -296,42 +354,82 @@ async function searchOnce(browser, query, type, maxVideos) {
     await installPageNetworkGuard(page, { blockHeavy: true });
 
     // ネットワーク傍受: 検索 API / challenge API
-    page.on("response", async (resp) => {
+    const captureResponse = async (resp) => {
       const url = resp.url();
       const isSearch = url.includes("/api/search/general/");
       const isChallenge = isTag && url.includes("/api/challenge/item_list/");
       if (!isSearch && !isChallenge) return;
+      if (sales25 && !isCanonicalTikTokUrl(url)) return;
       try {
+        if (sales25 && (resp.status() < 200 || resp.status() >= 300)) {
+          apiHttpErrors.push(resp.status());
+          cdnDenied ||= resp.status() === 403;
+        }
         const text = await resp.text();
-        if (!text || text.includes("<html") || text.includes("<!DOCTYPE")) return;
+        if (!text || (sales25 ? /<html|<!DOCTYPE/i.test(text) : text.includes("<html") || text.includes("<!DOCTYPE"))) {
+          if (sales25) {
+            apiInvalidResponses++;
+            captchaDetected ||= /captcha|security-check/i.test(text);
+            cdnDenied ||= /Access Denied|You don't have permission to access/i.test(text);
+          }
+          return;
+        }
         const json = JSON.parse(text);
         const items = json?.data || json?.itemList || json?.item_list || [];
+        if (sales25) {
+          const status = json?.status_code ?? json?.statusCode;
+          if (status !== 0) {
+            if (typeof status === "number") apiNonZeroStatus.push(status);
+            else apiInvalidResponses++;
+            return;
+          }
+          const hasMore = json.has_more ?? json.hasMore;
+          if (!Array.isArray(items) || ![false, true, 0, 1].includes(hasMore) ||
+              ![json.data, json.itemList, json.item_list].some(Array.isArray)) {
+            apiInvalidResponses++;
+            return;
+          }
+        }
         let added = 0;
         for (const it of items) {
-          const v = isSearch ? parseSearchItem(it) : normalizeVideo(it);
+          const v = isSearch ? parseSearchItem(it, edition) : normalizeVideo(it, edition);
           if (v && !allVideos.find((e) => e.id === v.id)) { allVideos.push(v); added++; }
         }
         pagesFetched++;
-        latestHasMore = json.has_more === true || json.has_more === 1 || json.hasMore === true;
+        latestHasMore = json.has_more === true || json.has_more === 1 || json.hasMore === true || (sales25 && json.hasMore === 1);
         log(`API page ${pagesFetched}: +${added} (total ${allVideos.length}) has_more=${latestHasMore}`);
-      } catch { /* 非JSONは無視 */ }
-    });
+      } catch { if (sales25) apiInvalidResponses++; }
+    };
+    const responseHandler = (resp) => {
+      if (sales25 && !searchStarted) return;
+      // Read in response-event order: slow bodies must not reorder display ranks.
+      if (sales25) responses = responses.then(() => captureResponse(resp));
+      else void captureResponse(resp);
+    };
+    page.on("response", responseHandler);
 
     // 初回 Cookie/トークン取得 (ウォームアップ): トップで滞在＋軽いスクロール/マウスで ttwid/msToken を成熟させてから検索へ
-    await page.goto("https://www.tiktok.com/", { waitUntil: "domcontentloaded", timeout: 30000 });
-    await humanDelay(2500, 4000);
+    const warmupResponse = await page.goto("https://www.tiktok.com/", { waitUntil: "domcontentloaded", timeout: 30000 });
+    if (sales25 && warmupResponse?.status() === 403) cdnDenied = true;
+    await delay(2500, 4000);
     try {
       await page.evaluate(() => window.scrollTo(0, 600));
       await page.mouse.move(400 + Math.random() * 300, 300 + Math.random() * 200);
     } catch (e) { /* warmup は best-effort */ }
-    await humanDelay(1500, 2500);
+    await delay(1500, 2500);
+    if (sales25) {
+      await checkWalls();
+      if (refused()) return { videos: [], diag: makeDiag() };
+    }
 
     // 検索/タグページへ
     const navUrl = isTag
       ? `https://www.tiktok.com/tag/${encodeURIComponent(query)}`
       : `https://www.tiktok.com/search?q=${encodeURIComponent(query)}`;
     log(`navigate: ${navUrl}`);
-    await page.goto(navUrl, { waitUntil: "domcontentloaded", timeout: 30000 });
+    searchStarted = true;
+    const searchResponse = await page.goto(navUrl, { waitUntil: "domcontentloaded", timeout: 30000 });
+    if (sales25 && searchResponse?.status() === 403) cdnDenied = true;
 
     const waitSel = isTag
       ? '[data-e2e="challenge-item"], [class*="DivItemContainerV2"]'
@@ -341,12 +439,13 @@ async function searchOnce(browser, query, type, maxVideos) {
       gridFound = true;
     } catch { log("grid selector timeout, continue with SSR/scroll"); }
     // captcha/verify を能動検出 (0件の原因を推測でなく実検知で切り分け)
-    captchaDetected = await detectBotWall(page);
+    await responses;
+    await checkWalls();
     if (captchaDetected) log("CAPTCHA/verify page detected (bot wall)");
-    await humanDelay(3000, 4500);
+    await delay(3000, 4500);
 
     // SSR フォールバック (傍受で 0 件のとき埋め込み JSON から)
-    if (allVideos.length === 0) {
+    if (allVideos.length === 0 && (!sales25 || !refused())) {
       try {
         const ssr = await page.evaluate((tag) => {
           const el = document.getElementById("__UNIVERSAL_DATA_FOR_REHYDRATION__");
@@ -363,7 +462,7 @@ async function searchOnce(browser, query, type, maxVideos) {
         }, isTag);
         if (Array.isArray(ssr)) {
           for (const it of ssr) {
-            const v = isTag ? normalizeVideo(it) : parseSearchItem(it);
+            const v = isTag ? normalizeVideo(it, edition) : parseSearchItem(it, edition);
             if (v && !allVideos.find((e) => e.id === v.id)) { allVideos.push(v); ssrCount++; }
           }
           log(`SSR extraction: ${allVideos.length} videos (ssr+${ssrCount})`);
@@ -375,12 +474,17 @@ async function searchOnce(browser, query, type, maxVideos) {
     let noNew = 0;
     let hasMoreFalseRetries = 0;
     for (let s = 0; s < MAX_SCROLL; s++) {
+      if (sales25) {
+        await responses;
+        await checkWalls();
+        if (refused()) break;
+      }
       if (allVideos.length >= maxVideos) { log(`reached target ${allVideos.length}/${maxVideos}`); break; }
       if (pagesFetched >= MAX_PAGES) break;
       if (!latestHasMore && pagesFetched > 0) {
-        if (hasMoreFalseRetries >= 3) break;
+        if (hasMoreFalseRetries >= 3) { stopReason = "exhausted"; break; }
         hasMoreFalseRetries++;
-        await humanDelay(3000, 5000);
+        await delay(3000, 5000);
       }
       const prev = allVideos.length;
       await page.evaluate((idx) => {
@@ -392,17 +496,82 @@ async function searchOnce(browser, query, type, maxVideos) {
         }
         window.scrollTo(0, Math.max(document.body.scrollHeight, (idx + 1) * 3000));
       }, s);
-      await humanDelay(3000, 4500);
+      await delay(3000, 4500);
+      if (sales25) await responses;
       if (allVideos.length > prev) { noNew = 0; hasMoreFalseRetries = 0; }
-      else { noNew++; if (noNew >= 5) { log("no new data x5, stop"); break; } if (noNew >= 2) await humanDelay(2000, 3000); }
+      else { noNew++; if (noNew >= 5) { stopReason = "no_new"; log("no new data x5, stop"); break; } if (noNew >= 2) await delay(2000, 3000); }
     }
 
-    const diag = { pagesFetched, captchaDetected, gridFound, ssrCount, videosFound: allVideos.length };
-    return { videos: allVideos.slice(0, maxVideos), diag };
+    if (sales25) {
+      await checkWalls();
+      page.off("response", responseHandler);
+      await responses;
+    }
+    return { videos: allVideos.slice(0, maxVideos), diag: makeDiag() };
+  } catch (error) {
+    if (!sales25) throw error;
+    await responses;
+    stopReason = "exception";
+    return { videos: allVideos.slice(0, maxVideos), diag: { ...makeDiag(), exception: String(error.message || error) } };
   } finally {
     await page.close();
     await context.close();
   }
+}
+
+function sales25Result(result, target, now = new Date()) {
+  const diagnostics = result.diag || {};
+  let errorCode = null;
+  let stopReason = diagnostics.stop_reason || "exception";
+  if (diagnostics.cdnDenied) {
+    errorCode = "TIKTOK_CDN_DENIED";
+    stopReason = "cdn_denied";
+  } else if (diagnostics.captchaDetected) {
+    errorCode = "TIKTOK_BOT_WALL";
+    stopReason = "captcha";
+  } else if (diagnostics.apiInvalidResponses || diagnostics.apiNonZeroStatus?.length || diagnostics.apiHttpErrors?.length) {
+    errorCode = "TIKTOK_API_ERROR";
+    stopReason = "api_error";
+  } else if (diagnostics.exception || result.errorCode === "TIKTOK_EXCEPTION") {
+    errorCode = "TIKTOK_EXCEPTION";
+    stopReason = "exception";
+  } else if (!diagnostics.pagesFetched) {
+    errorCode = "TIKTOK_BOT_WALL";
+    stopReason = "no_api_response";
+  } else if (!result.videos.length && stopReason !== "exhausted") {
+    errorCode = "TIKTOK_API_ERROR";
+    stopReason = "incomplete_empty";
+  }
+  const accepted = errorCode === null;
+  const videos = result.videos.map((video, index) => ({ ...video, rank_display: index + 1 }));
+  if (accepted && !videos.length) errorCode = "TIKTOK_TRULY_EMPTY";
+  return {
+    ...result,
+    ok: accepted,
+    count: videos.length,
+    videos,
+    error: accepted ? null : (diagnostics.exception || errorCode),
+    errorCode,
+    edition: "sales25",
+    fetched_at: now.toISOString(),
+    fetched_on: new Date(now.getTime() + 9 * 60 * 60 * 1000).toISOString().slice(0, 10),
+    sessions: 1,
+    order_basis: "search_display_order",
+    unfiltered: true,
+    missingness_preserved: true,
+    stop_reason: stopReason,
+    status: accepted ? (videos.length ? "ok" : "observed_zero") : "failed",
+    error_code: errorCode,
+    diagnostics,
+    acquisition_status: {
+      accepted,
+      status: accepted ? (videos.length < target ? "partial" : "complete") : "failed",
+      target,
+      actual: videos.length,
+      shortfall: Math.max(0, target - videos.length),
+      stop_reason: stopReason,
+    },
+  };
 }
 
 // 1 本の動画 URL からコメントを取得する (コメント API /api/comment/list/ を傍受)。
@@ -777,6 +946,12 @@ async function mainDownload() {
 
 // ---- main ----
 async function main() {
+  try {
+    args = parseArgs(process.argv);
+  } catch (error) {
+    writeOutAndExit(JSON.stringify({ ok: false, error: error.message, errorCode: "TIKTOK_INVALID_ARGUMENT" }), 2);
+    return;
+  }
   if (args.networkGuardSelfTest) {
     runNetworkGuardSelfTest();
     return;
@@ -795,7 +970,7 @@ async function main() {
   }
   let browser;
   let pinnedProxy;
-  const result = { ok: false, query: args.query, type: args.type, count: 0, videos: [], error: null, errorCode: null, diag: null };
+  let result = { ok: false, query: args.query, type: args.type, count: 0, videos: [], error: null, errorCode: null, diag: null };
   try {
     const chrome = findChrome();
     log(`launch chrome: ${chrome} (headless=${!args.headful}) sessions=${args.sessions}`);
@@ -811,11 +986,11 @@ async function main() {
 
     if (args.sessions <= 1) {
       // 単一セッション (既定・低レイテンシ)
-      const r = await searchOnce(browser, args.query, args.type, args.max);
+      const r = await searchOnce(browser, args.query, args.type, args.max, { edition: args.edition });
       videos = r.videos;
       diag = { ...r.diag, sessionsRun: 1 };
       // タグ空振り → keyword 検索フォールバック (検索 API は安定)
-      if (videos.length === 0 && args.type === "hashtag") {
+      if (videos.length === 0 && args.type === "hashtag" && args.edition !== "sales25") {
         log("hashtag 空振り → keyword 検索にフォールバック");
         const r2 = await searchOnce(browser, args.query, "keyword", args.max);
         videos = r2.videos;
@@ -870,9 +1045,12 @@ async function main() {
     if (browser) await browser.close().catch(() => {});
     if (pinnedProxy) await pinnedProxy.close().catch(() => {});
   }
+  if (args.edition === "sales25") result = sales25Result(result, args.max);
   const out = JSON.stringify(result);
   if (args.out) fs.writeFileSync(args.out, out);
   writeOutAndExit(out, result.ok ? 0 : 2);
 }
 
-main();
+export { parseArgs, normalizeVideo, parseSearchItem, searchOnce, sales25Result };
+
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) main();

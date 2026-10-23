@@ -17,6 +17,7 @@ from teamagent.media import tool_contracts
 from teamagent.media.contracts import (
     AcquireOperation,
     FrameOperation,
+    MediaOperation,
     PdfOperation,
     ProposalEvidence,
     ProposalPptxOperation,
@@ -648,6 +649,7 @@ def test_dispatcher_presigns_immutable_input_with_checksum_response(
     assert result["batchItemFailures"] == []
     get_call = next(kwargs for name, kwargs in s3.calls if name == "generate_presigned_url")
     assert get_call["operation"] == "get_object"
+    assert isinstance(request.operation, ProxyOperation)
     assert get_call["Params"] == {
         "Bucket": "teamagent-media",
         "Key": request.operation.source.key,
@@ -1350,7 +1352,7 @@ def test_every_output_slot_has_an_approved_content_type(
     """
 
     module = _load_handler(monkeypatch, ddb=_Dynamo(), ecs=_Ecs())
-    operations = [
+    operations: list[MediaOperation] = [
         AcquireOperation(kind="acquire", url="https://www.youtube.com/watch?v=BaW_jenozKc"),
         TikTokAcquireOperation(
             kind="tiktok_acquire",
@@ -1569,3 +1571,142 @@ def test_first_visit_capture_on_reaches_dispatcher_launch_with_bounded_output_ca
     assert sidecar["key"].endswith("/output/first-visit-capture.json")
     assert sidecar["max_bytes"] == 128 * 1024 * 1024
     assert control["inputs"] == []
+
+
+def _sales25_operation() -> TikTokAcquireOperation:
+    return TikTokAcquireOperation(
+        kind="tiktok_acquire",
+        edition="sales25",
+        keywords=("synthetic",),
+        n_per_kw=100,
+        videos_per_kw=0,
+        artifact_mode="metadata_only",
+    )
+
+
+def test_sales25_hundred_has_three_required_bounded_json_slots(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = _load_handler(monkeypatch, ddb=_Dynamo(), ecs=_Ecs())
+    request = make_job_request(
+        operation=_sales25_operation(),
+        output_bucket="teamagent-media",
+        request_fingerprint="sales25-output-slots",
+        now_epoch_s=1_000,
+        timeout_s=300,
+    )
+    spec = json.loads(request.to_json_bytes())
+    module._validate_operation(spec["operation"])
+    attempt = {"attempt_version": 1, "attempt_id": _ATTEMPT_ID}
+    slots = module._operation_output_slots(spec, attempt)
+    expected = {"posts.json", "sales25-raw.json", "acquisition-status.json"}
+    assert {slot["name"] for slot in slots} == expected
+    assert module._required_output_names(spec) == expected
+    assert [(slot["name"], slot["key"], slot["max_bytes"]) for slot in slots] == list(
+        tool_contracts._output_slots(request, _ATTEMPT_ID, 1)
+    )
+    for name in expected:
+        assert module._allowed_content_types(spec, name) == {"application/json"}
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"n_per_kw": 101},
+        {"n_per_kw": 0},
+        {"n_per_kw": True},
+        {"keywords": ["one", "two"]},
+        {"videos_per_kw": 1},
+        {"videos_per_kw": False},
+        {"artifact_mode": "full"},
+        {"sort": "recent"},
+        {"first_visit_capture": True},
+        {"edition": None},
+        {"edition": "unknown"},
+        {"edition": 1},
+        {"sessions": 2},
+        {"owner_id": "untrusted"},
+    ],
+)
+def test_sales25_rejects_invalid_envelope_in_core_and_dispatcher(
+    monkeypatch: pytest.MonkeyPatch, changes: dict[str, Any]
+) -> None:
+    module = _load_handler(monkeypatch, ddb=_Dynamo(), ecs=_Ecs())
+    payload = {**_sales25_operation().model_dump(mode="json"), **changes}
+    with pytest.raises(ValueError):
+        module._validate_operation(payload)
+    with pytest.raises(ValueError):
+        TikTokAcquireOperation.model_validate_json(json.dumps(payload))
+
+
+def test_sales25_dispatcher_accounts_for_deep_search_seconds(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = _load_handler(monkeypatch, ddb=_Dynamo(), ecs=_Ecs())
+    monkeypatch.setattr(module, "_TIKTOK_OPERATION_EXECUTION_LIMIT_SECONDS", 239)
+    with pytest.raises(ValueError, match="immutable job deadline"):
+        module._validate_operation(_sales25_operation().model_dump(mode="json"))
+    monkeypatch.setattr(module, "_TIKTOK_OPERATION_EXECUTION_LIMIT_SECONDS", 240)
+    module._validate_operation(_sales25_operation().model_dump(mode="json"))
+
+
+@pytest.mark.parametrize("count", [30, 31])
+def test_ordinary_dispatcher_limit_stays_thirty(
+    monkeypatch: pytest.MonkeyPatch, count: int
+) -> None:
+    module = _load_handler(monkeypatch, ddb=_Dynamo(), ecs=_Ecs())
+    payload = _sales25_operation().model_dump(mode="json")
+    del payload["edition"]
+    payload["n_per_kw"] = count
+    if count == 30:
+        module._validate_operation(payload)
+    else:
+        with pytest.raises(ValueError, match="TikTok n_per_kw"):
+            module._validate_operation(payload)
+
+
+@pytest.mark.parametrize("flag", [None, "", "0", "false"])
+def test_capture_off_keeps_identical_ordinary_payload_and_slots(
+    monkeypatch: pytest.MonkeyPatch, flag: str | None
+) -> None:
+    from teamagent.skills.first_visit.recording import capture_enabled
+
+    module = _load_handler(monkeypatch, ddb=_Dynamo(), ecs=_Ecs())
+    baseline = TikTokAcquireOperation(
+        kind="tiktok_acquire",
+        keywords=("synthetic",),
+        videos_per_kw=0,
+        artifact_mode="metadata_only",
+    )
+    if flag is None:
+        monkeypatch.delenv("FIRST_VISIT_CAPTURE", raising=False)
+    else:
+        monkeypatch.setenv("FIRST_VISIT_CAPTURE", flag)
+    operation = TikTokAcquireOperation(
+        kind="tiktok_acquire",
+        keywords=("synthetic",),
+        videos_per_kw=0,
+        artifact_mode="metadata_only",
+        first_visit_capture=capture_enabled(),
+    )
+    requests = [
+        make_job_request(
+            operation=value,
+            output_bucket="teamagent-media",
+            request_fingerprint="off-unchanged",
+            now_epoch_s=1_000,
+            timeout_s=300,
+        )
+        for value in (baseline, operation)
+    ]
+    assert requests[0].to_json_bytes() == requests[1].to_json_bytes()
+    spec = json.loads(requests[1].to_json_bytes())
+    module._validate_operation(spec["operation"])
+    assert "edition" not in spec["operation"]
+    assert "first_visit_capture" not in spec["operation"]
+    assert [
+        slot["name"]
+        for slot in module._operation_output_slots(
+            spec, {"attempt_version": 1, "attempt_id": _ATTEMPT_ID}
+        )
+    ] == ["posts.json"]

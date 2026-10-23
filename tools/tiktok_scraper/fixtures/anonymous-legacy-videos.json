@@ -1,0 +1,79 @@
+[
+  {
+    "id": "7400000000000000001",
+    "url": "https://www.tiktok.com/@anonymous_a/video/7400000000000000001",
+    "desc": "anonymous video #Sample",
+    "createTime": 1720000000,
+    "duration": 12,
+    "coverUrl": "https://www.tiktok.com/anonymous-cover.jpg",
+    "playAddr": "",
+    "downloadAddr": "",
+    "bitrateUrls": [],
+    "author": {
+      "uniqueId": "anonymous_a",
+      "nickname": "Anonymous A",
+      "followerCount": 42
+    },
+    "stats": {
+      "playCount": 100,
+      "diggCount": 0,
+      "commentCount": 3,
+      "shareCount": 2,
+      "collectCount": 4
+    },
+    "hashtags": [
+      "Sample"
+    ],
+    "music": null
+  },
+  {
+    "id": "7400000000000000002",
+    "url": "https://www.tiktok.com/@anonymous_b/video/7400000000000000002",
+    "desc": "anonymous photo",
+    "createTime": 0,
+    "duration": 0,
+    "coverUrl": "",
+    "playAddr": "",
+    "downloadAddr": "",
+    "bitrateUrls": [],
+    "author": {
+      "uniqueId": "anonymous_b",
+      "nickname": "Anonymous B",
+      "followerCount": 0
+    },
+    "stats": {
+      "playCount": 0,
+      "diggCount": "0",
+      "commentCount": 0,
+      "shareCount": 0,
+      "collectCount": 0
+    },
+    "hashtags": [],
+    "music": null
+  },
+  {
+    "id": "7400000000000000003",
+    "url": "https://www.tiktok.com/@anonymous_c/video/7400000000000000003",
+    "desc": "",
+    "createTime": 0,
+    "duration": 0,
+    "coverUrl": "",
+    "playAddr": "",
+    "downloadAddr": "",
+    "bitrateUrls": [],
+    "author": {
+      "uniqueId": "anonymous_c",
+      "nickname": "",
+      "followerCount": 0
+    },
+    "stats": {
+      "playCount": 0,
+      "diggCount": 0,
+      "commentCount": 0,
+      "shareCount": 0,
+      "collectCount": 0
+    },
+    "hashtags": [],
+    "music": null
+  }
+]

@@ -30,6 +30,7 @@ _MAX_JOB_BUDGET_SECONDS = 15 * 60
 _MAX_CLOCK_SKEW_SECONDS = 30
 _TIKTOK_OPERATION_EXECUTION_LIMIT_SECONDS = _MAX_JOB_BUDGET_SECONDS - 30
 _TIKTOK_SEARCH_WORST_CASE_SECONDS = 120
+_TIKTOK_DEEP_SEARCH_WORST_CASE_SECONDS = 240
 _TIKTOK_THUMBNAIL_WORST_CASE_SECONDS = 50
 _TIKTOK_VIDEO_WORST_CASE_SECONDS = 120
 _MAX_ARTIFACT_RETENTION_SECONDS = 30 * 24 * 60 * 60
@@ -220,11 +221,14 @@ def _validate_operation(value: Any) -> None:
                 "max_video_bytes",
                 "client",
             }
-            | ({"first_visit_capture"} if "first_visit_capture" in value else set()),
+            | ({"first_visit_capture"} if "first_visit_capture" in value else set())
+            | ({"edition"} if "edition" in value else set()),
             "TikTok operation",
         )
         if type(operation.get("first_visit_capture", False)) is not bool:
             raise ValueError("TikTok first visit capture flag is invalid")
+        if "edition" in operation and operation["edition"] != "sales25":
+            raise ValueError("TikTok edition is invalid")
         keywords = operation["keywords"]
         if operation["search_type"] not in {"keyword", "hashtag"}:
             raise ValueError("TikTok search type is invalid")
@@ -237,7 +241,21 @@ def _validate_operation(value: Any) -> None:
             )
         if any(not keyword for keyword in normalized) or len(set(normalized)) != len(normalized):
             raise ValueError("TikTok keywords are invalid")
-        _bounded_int(operation["n_per_kw"], minimum=1, maximum=30, name="TikTok n_per_kw")
+        if operation.get("edition") == "sales25":
+            _bounded_int(operation["n_per_kw"], minimum=1, maximum=100, name="sales25 n_per_kw")
+            if (
+                len(keywords) != 1
+                or operation["artifact_mode"] != "metadata_only"
+                or operation["videos_per_kw"] != 0
+                or operation["sort"] != "display"
+                or operation.get("first_visit_capture", False)
+            ):
+                raise ValueError(
+                    "sales25 requires one keyword, display order, metadata_only, zero videos "
+                    "and no legacy capture"
+                )
+        else:
+            _bounded_int(operation["n_per_kw"], minimum=1, maximum=30, name="TikTok n_per_kw")
         _bounded_int(
             operation["videos_per_kw"],
             minimum=0,
@@ -251,7 +269,12 @@ def _validate_operation(value: Any) -> None:
             raise ValueError("TikTok artifact mode is invalid")
         if artifact_mode == "metadata_only" and operation["videos_per_kw"] != 0:
             raise ValueError("metadata-only TikTok operation cannot download videos")
-        estimated_seconds = len(keywords) * _TIKTOK_SEARCH_WORST_CASE_SECONDS
+        search_seconds = (
+            _TIKTOK_DEEP_SEARCH_WORST_CASE_SECONDS
+            if operation["n_per_kw"] > 30
+            else _TIKTOK_SEARCH_WORST_CASE_SECONDS
+        )
+        estimated_seconds = len(keywords) * search_seconds
         if artifact_mode == "full":
             estimated_seconds += len(keywords) * (
                 operation["n_per_kw"] * _TIKTOK_THUMBNAIL_WORST_CASE_SECONDS
@@ -1035,6 +1058,13 @@ def _operation_output_slots(spec: dict[str, Any], attempt: dict[str, Any]) -> li
         slots.append(("media", "media", int(operation["max_bytes"])))
     elif kind == "tiktok_acquire":
         slots.append(("posts.json", "posts.normalized.json", 16 * 1024 * 1024))
+        if operation.get("edition") == "sales25":
+            slots.extend(
+                (
+                    ("sales25-raw.json", "sales25-raw.json", 16 * 1024 * 1024),
+                    ("acquisition-status.json", "acquisition-status.json", 1024 * 1024),
+                )
+            )
         if operation.get("first_visit_capture"):
             slots.append(
                 ("first-visit-capture.json", "first-visit-capture.json", _MAX_OUTPUT_BYTES)
@@ -1090,6 +1120,8 @@ def _required_output_names(spec: dict[str, Any]) -> set[str]:
     kind = spec["operation"]["kind"]
     if kind == "tiktok_acquire":
         names = {"posts.json"}
+        if spec["operation"].get("edition") == "sales25":
+            names.update({"sales25-raw.json", "acquisition-status.json"})
         if spec["operation"]["artifact_mode"] == "full":
             names.update({"config.json", "manifest.json"})
         return names

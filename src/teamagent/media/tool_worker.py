@@ -612,6 +612,15 @@ def run_tool(
                     load_object=load,
                     budget=execution_budget,
                 )
+                if (
+                    isinstance(request.operation, TikTokAcquireOperation)
+                    and request.operation.edition == "sales25"
+                    and {artifact.name for artifact in output.artifacts}
+                    != {"posts.json", "sales25-raw.json", "acquisition-status.json"}
+                ):
+                    raise MediaOperationError(
+                        "MEDIA_TIKTOK_OUTPUT_INVALID", "sales25 capture artifacts are required"
+                    )
                 artifacts: list[MediaArtifact] = []
                 names: set[str] = set()
                 for produced in output.artifacts:

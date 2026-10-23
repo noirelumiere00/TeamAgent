@@ -15,6 +15,7 @@
 !src/teamagent/media/proposal_dates.py
 !src/teamagent/media/render_child.py
 !src/teamagent/media/security.py
+!src/teamagent/media/tiktok_capture.py
 !src/teamagent/media/tool_contracts.py
 !src/teamagent/media/tool_worker.py
 !src/teamagent/media/url_policy.py
