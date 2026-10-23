@@ -269,6 +269,12 @@ def validate_inputs(root: Path, *, owner_id: str, bundle: Path = BUNDLE) -> None
                     raise ValueError("displayed TOP5 ranking mismatch")
     data = read_json(local_path(root, "deck-input.json"))
     reviews = read_json(local_path(root, "top5-analysis.json"))
+    # PR4 adds a full-media gate; the pinned kit checker does not inspect this status.
+    if "status" in reviews and (
+        reviews["status"] != "complete"
+        or any(review.get("status") != "complete" for review in reviews["posts"].values())
+    ):
+        raise ValueError("sales25 full-media analysis incomplete")
     for pid, review in reviews["posts"].items():
         if review.get("url") != urls.get(pid):
             raise ValueError("review/raw post URL mismatch")

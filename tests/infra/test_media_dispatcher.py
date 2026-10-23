@@ -17,11 +17,13 @@ from teamagent.media import tool_contracts
 from teamagent.media.contracts import (
     AcquireOperation,
     FrameOperation,
+    MediaOperation,
     PdfOperation,
     ProposalEvidence,
     ProposalPptxOperation,
     ProxyOperation,
     S3ObjectRef,
+    Sales25MediaOperation,
     SlidesOperation,
     ThumbnailOperation,
     TikTokAcquireOperation,
@@ -35,6 +37,180 @@ _ATTEMPT_ID = "01234567-89ab-4cde-8fab-0123456789ab"
 _CAPABILITY_SECRET = "a" * 64
 _CAPABILITY_SHA256 = hashlib.sha256(_CAPABILITY_SECRET.encode()).hexdigest()
 _CONTROL_SHA256 = "d" * 64
+
+
+def test_sales25_media_exact_transport_contract(monkeypatch: pytest.MonkeyPatch) -> None:
+    module = _load_handler(monkeypatch, ddb=_Dynamo(), ecs=_Ecs())
+    request = make_job_request(
+        operation=Sales25MediaOperation(
+            kind="sales25_media",
+            post_id="9000000010",
+            url="https://www.tiktok.com/@synthetic/video/9000000010",
+            media_type="video",
+            expected_duration_sec=12.0,
+        ),
+        output_bucket="teamagent-media",
+        request_fingerprint="sales25-transport",
+        now_epoch_s=1_000,
+        timeout_s=900,
+    )
+    spec = json.loads(request.to_json_bytes())
+    module._validate_operation(spec["operation"])
+    attempt = {"attempt_version": 1, "attempt_id": _ATTEMPT_ID}
+    slots = module._operation_output_slots(spec, attempt)
+    assert [(s["name"], s["key"], s["max_bytes"]) for s in slots] == list(
+        tool_contracts._output_slots(request, _ATTEMPT_ID, 1)
+    )
+    assert [(s["name"], s["max_bytes"]) for s in slots] == [
+        ("media-manifest.json", 1024 * 1024),
+        ("media-bundle.zip", 128 * 1024 * 1024),
+    ]
+    assert module._required_output_names(spec) == {"media-manifest.json", "media-bundle.zip"}
+    assert module._allowed_content_types(spec, "media-manifest.json") == {"application/json"}
+    assert module._allowed_content_types(spec, "media-bundle.zip") == {"application/zip"}
+    assert tool_contracts._input_refs(request) == ()
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"post_id": "9000000011"},
+        {"url": "https://example.invalid/video/9000000010"},
+        {"url": "https://www.tiktok.com/@synthetic/video/9000000010?x=1"},
+        {"url": "https://www.tiktok.com:443/@synthetic/video/9000000010"},
+        {"media_type": "photo"},
+        {"media_type": []},
+        {"expected_photo_count": 1},
+        {"expected_duration_sec": 181.0},
+        {"expected_duration_sec": True},
+        {"expected_duration_sec": float("nan")},
+        {"expected_duration_sec": float("inf")},
+        {"max_bytes": 64 * 1024 * 1024 + 1},
+        {"expected_sha256": "bad"},
+        {"extra": "forbidden"},
+    ],
+)
+def test_sales25_media_core_and_lambda_reject_same_invalid_request(
+    monkeypatch: pytest.MonkeyPatch, change: dict[str, Any]
+) -> None:
+    module = _load_handler(monkeypatch, ddb=_Dynamo(), ecs=_Ecs())
+    operation = Sales25MediaOperation(
+        kind="sales25_media",
+        post_id="9000000010",
+        url="https://www.tiktok.com/@synthetic/video/9000000010",
+        media_type="video",
+    ).model_dump(mode="json")
+    operation.update(change)
+    with pytest.raises(ValueError):
+        Sales25MediaOperation.model_validate(operation)
+    with pytest.raises(ValueError):
+        module._validate_operation(operation)
+
+
+def test_sales25_photo_count_and_strict_missing_keys(monkeypatch: pytest.MonkeyPatch) -> None:
+    module = _load_handler(monkeypatch, ddb=_Dynamo(), ecs=_Ecs())
+    operation = Sales25MediaOperation(
+        kind="sales25_media",
+        post_id="9000000010",
+        url="https://www.tiktok.com/@synthetic/photo/9000000010",
+        media_type="photo",
+        expected_photo_count=35,
+    ).model_dump(mode="json")
+    module._validate_operation(operation)
+    operation["expected_photo_count"] = 36
+    with pytest.raises(ValueError):
+        module._validate_operation(operation)
+    with pytest.raises(ValueError):
+        Sales25MediaOperation.model_validate(operation)
+    operation.pop("expected_sha256")
+    with pytest.raises(ValueError, match="keys"):
+        module._validate_operation(operation)
+
+
+@pytest.mark.parametrize("tamper", [False, True])
+def test_sales25_completion_has_exact_artifacts_and_metadata(
+    monkeypatch: pytest.MonkeyPatch, tamper: bool
+) -> None:
+    module = _load_handler(monkeypatch, ddb=_Dynamo(), ecs=_Ecs())
+    request = make_job_request(
+        operation=Sales25MediaOperation(
+            kind="sales25_media",
+            post_id="9000000010",
+            url="https://www.tiktok.com/@synthetic/video/9000000010",
+            media_type="video",
+        ),
+        output_bucket="teamagent-media",
+        request_fingerprint="sales25-completion",
+        now_epoch_s=1_000,
+        timeout_s=900,
+    )
+    spec = json.loads(request.to_json_bytes())
+    attempt = {
+        "attempt_version": 1,
+        "attempt_id": _ATTEMPT_ID,
+        "capability_sha256": _CAPABILITY_SHA256,
+    }
+    s3 = _S3()
+    artifacts = [
+        {
+            "name": slot["name"],
+            "object": s3.add_output(
+                key=slot["key"],
+                version_id=f"version-{index}",
+                body=b"synthetic",
+                content_type=content_type,
+                metadata=module._fixed_object_metadata(spec, attempt),
+            ),
+        }
+        for index, (slot, content_type) in enumerate(
+            zip(
+                module._operation_output_slots(spec, attempt),
+                ["application/json", "application/zip"],
+                strict=True,
+            )
+        )
+    ]
+    metadata = {"post_id": "9000000010", "media_type": "video", "status": "ready"}
+    if tamper:
+        metadata["unexpected"] = "forbidden"
+    completion = {
+        "schema_version": "1",
+        "job_id": request.job_id,
+        "payload_sha256": request.payload_sha256,
+        "attempt_id": _ATTEMPT_ID,
+        "attempt_version": 1,
+        "capability_secret": _CAPABILITY_SECRET,
+        "_completion_version_id": "completion-version",
+        "result": {
+            "schema_version": "1",
+            "job_id": request.job_id,
+            "status": "done",
+            "artifacts": artifacts,
+            "metadata": metadata,
+            "error_code": None,
+        },
+    }
+    if tamper:
+        with pytest.raises(ValueError, match="metadata differs"):
+            module._validate_completion_result(
+                completion,
+                s3=s3,
+                bucket=request.output_bucket,
+                spec=spec,
+                attempt=attempt,
+                exit_code=0,
+            )
+    else:
+        result, manifest = module._validate_completion_result(
+            completion,
+            s3=s3,
+            bucket=request.output_bucket,
+            spec=spec,
+            attempt=attempt,
+            exit_code=0,
+        )
+        assert result["status"] == "done"
+        assert manifest == module._artifact_manifest_sha256(artifacts)
 
 
 class _ConditionalFailureError(RuntimeError):
@@ -648,6 +824,7 @@ def test_dispatcher_presigns_immutable_input_with_checksum_response(
     assert result["batchItemFailures"] == []
     get_call = next(kwargs for name, kwargs in s3.calls if name == "generate_presigned_url")
     assert get_call["operation"] == "get_object"
+    assert isinstance(request.operation, ProxyOperation)
     assert get_call["Params"] == {
         "Bucket": "teamagent-media",
         "Key": request.operation.source.key,
@@ -1350,7 +1527,7 @@ def test_every_output_slot_has_an_approved_content_type(
     """
 
     module = _load_handler(monkeypatch, ddb=_Dynamo(), ecs=_Ecs())
-    operations = [
+    operations: list[MediaOperation] = [
         AcquireOperation(kind="acquire", url="https://www.youtube.com/watch?v=BaW_jenozKc"),
         TikTokAcquireOperation(
             kind="tiktok_acquire",

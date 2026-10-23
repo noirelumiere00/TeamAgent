@@ -8,6 +8,8 @@ import re
 import subprocess
 from pathlib import Path
 
+import pytest
+
 ROOT = Path(__file__).resolve().parents[2]
 DOCKERFILE = ROOT / "infra/docker/Dockerfile.teamagent-media-worker"
 DOCKERIGNORE = ROOT / "infra/docker/Dockerfile.teamagent-media-worker.dockerignore"
@@ -412,6 +414,57 @@ def test_media_sources_and_js_lock_are_content_addressed() -> None:
     assert "npm ci --omit=dev --ignore-scripts --no-audit --no-fund" in TEXT
 
 
+@pytest.mark.parametrize(
+    ("key", "argument", "relative"),
+    [
+        (
+            "artifact.sales25-analysis-lock.sha256",
+            "SALES25_ANALYSIS_LOCK_SHA256",
+            "tools/first_visit/sales25-analysis.lock.json",
+        ),
+        (
+            "artifact.sales25-frame-extractor.sha256",
+            "SALES25_FRAME_EXTRACTOR_SHA256",
+            "tools/first_visit/sales25-analysis/extract_frames.py",
+        ),
+        (
+            "artifact.sales25-media-scraper.sha256",
+            "SALES25_MEDIA_SCRAPER_SHA256",
+            "tools/tiktok_scraper/sales25_media.mjs",
+        ),
+    ],
+)
+def test_sales25_media_inputs_are_pinned_and_cannot_be_overridden(
+    key: str, argument: str, relative: str
+) -> None:
+    contract = json.loads(
+        (ROOT / "infra/codebuild/teamagent_core_media_release_contract.json").read_text()
+    )
+    media = next(subject for subject in contract["subjects"] if subject["name"] == "media")
+    assertion = next(item for item in media["source_assertions"] if item["key"] == key)
+    digest = _sha256(ROOT / relative)
+    assert assertion["value"] == digest
+    assert assertion["build_arg"] == argument
+    assert f"ARG {argument}={digest}" in TEXT
+    guard = f'test "${argument}" = "{digest}"'
+    checksum = f"printf '%s  %s\\n' \"${argument}\" /app/{relative} | sha256sum -c -"
+    assert guard in assertion["dockerfile_uses"]
+    assert checksum in assertion["dockerfile_uses"]
+    assert all(use in TEXT for use in assertion["dockerfile_uses"])
+    assert f"COPY --chown=10001:10001 {relative} \\\n  /app/{relative}" in TEXT
+    assert f"!{relative}\n" in DOCKERIGNORE.read_text()
+    assert f'{assertion["oci_label"]}="${argument}"' in TEXT
+    for value, succeeds in ((digest, True), ("0" * 64, False)):
+        result = subprocess.run(
+            ["/bin/sh", "-c", guard],
+            env={argument: value},
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        assert (result.returncode == 0) is succeeds, result.stderr
+
+
 def test_media_dockerignore_is_deny_by_default() -> None:
     text = DOCKERIGNORE.read_text(encoding="utf-8")
     assert text.startswith("**\n")
@@ -423,6 +476,7 @@ def test_media_dockerignore_is_deny_by_default() -> None:
         "!src/teamagent/media/proposal_dates.py",
         "!src/teamagent/media/proposal_bu2.py",
         "!src/teamagent/media/proposal_template.py",
+        "!src/teamagent/media/sales25_media.py",
         "!tools/tiktok_scraper/package-lock.json",
         "!infra/docker/media-apk.lock",
     ):

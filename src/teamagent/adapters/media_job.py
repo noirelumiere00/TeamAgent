@@ -35,6 +35,7 @@ from teamagent.media.contracts import (
     ProposalPptxOperation,
     ProxyOperation,
     S3ObjectRef,
+    Sales25MediaOperation,
     SlidesOperation,
     ThumbnailOperation,
     TikTokAcquireOperation,
@@ -1015,6 +1016,26 @@ class MediaJobClient:
         else:
             mime = "video/mp4"
         return body, mime
+
+    def acquire_sales25_media(
+        self,
+        operation: Sales25MediaOperation,
+        *,
+        request_fingerprint: str,
+        timeout_s: int = _SYNC_TIMEOUT_MAX_S,
+    ) -> Mapping[str, bytes]:
+        """Acquire one selected post without changing the public search path."""
+        deadline_epoch_s = self._absolute_deadline(timeout_s)
+        request = self._request(
+            operation,
+            request_fingerprint,
+            timeout_s,
+            deadline_epoch_s=deadline_epoch_s,
+        )
+        artifacts, _metadata = self.run_sync(request, timeout_s=timeout_s)
+        if set(artifacts) != {"media-manifest.json", "media-bundle.zip"}:
+            raise MediaJobError("MEDIA_SALES25_ARTIFACT_MISSING")
+        return artifacts
 
     def search_tiktok(
         self,

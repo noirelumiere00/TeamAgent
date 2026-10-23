@@ -28,6 +28,7 @@ from teamagent.media.contracts import (
     ProposalPptxOperation,
     ProxyOperation,
     S3ObjectRef,
+    Sales25MediaOperation,
     SlidesOperation,
     ThumbnailOperation,
     TikTokAcquireOperation,
@@ -280,6 +281,8 @@ def _acquire_ytdlp(
     operation: AcquireOperation,
     workdir: Path,
     budget: DeadlineBudget,
+    *,
+    include_identity: bool = False,
 ) -> OperationOutput:
     _remaining(budget)
     try:
@@ -354,9 +357,17 @@ def _acquire_ytdlp(
         ".mov": "video/quicktime",
         ".mkv": "video/x-matroska",
     }.get(suffix, "application/octet-stream")
+    metadata: dict[str, Any] = {"extractor": extractor, "size": size}
+    if include_identity:
+        metadata.update(
+            post_id=info.get("id"),
+            url=info.get("webpage_url"),
+            duration_sec=info.get("duration"),
+            thumbnail=info.get("thumbnail"),
+        )
     return OperationOutput(
         artifacts=(ProducedArtifact("media", destination, mime),),
-        metadata={"extractor": extractor, "size": size},
+        metadata=metadata,
     )
 
 
@@ -1518,6 +1529,10 @@ def execute_operation(
     _remaining(budget)
     if isinstance(operation, AcquireOperation):
         output = _acquire(operation, workdir, budget)
+    elif isinstance(operation, Sales25MediaOperation):
+        from teamagent.media.sales25_media import acquire_sales25_media
+
+        output = acquire_sales25_media(operation, workdir, budget)
     elif isinstance(operation, TikTokAcquireOperation):
         output = _tiktok_acquire(operation, workdir, budget)
     elif isinstance(operation, ProxyOperation):

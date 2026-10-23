@@ -31,6 +31,12 @@ from teamagent.media.url_policy import acquire_host_allowed
 MAX_JOB_BODY_BYTES = 128 * 1024
 MAX_INPUT_BYTES = 128 * 1024 * 1024
 MAX_OUTPUT_BYTES = 128 * 1024 * 1024
+SALES25_MAX_MEDIA_BYTES = 64 * 1024 * 1024
+SALES25_MAX_BUNDLE_BYTES = MAX_OUTPUT_BYTES
+SALES25_MAX_MANIFEST_BYTES = 1024 * 1024
+SALES25_MAX_DURATION_SECONDS = 180
+SALES25_MAX_PHOTOS = 35
+SALES25_MAX_FRAMES = 180
 # proposal-builder の統合FMTは元FMTだけで約143MB。一般media操作の境界を広げず、
 # proposal_pptx の template / output だけを明示的に拡張する。
 MAX_PROPOSAL_PPTX_BYTES = 256 * 1024 * 1024
@@ -146,6 +152,40 @@ class AcquireOperation(_StrictModel):
         if parsed.fragment:
             raise ValueError("acquire URL fragments are not allowed")
         return value
+
+
+class Sales25MediaOperation(_StrictModel):
+    """One selected post, separate from keyword search and its output budget."""
+
+    kind: Literal["sales25_media"]
+    post_id: Annotated[str, StringConstraints(pattern=r"^\d{6,25}$")]
+    url: str = Field(min_length=8, max_length=2048)
+    media_type: Literal["video", "photo"]
+    expected_duration_sec: float | None = Field(
+        default=None, gt=0, le=SALES25_MAX_DURATION_SECONDS, allow_inf_nan=False
+    )
+    expected_photo_count: int | None = Field(default=None, ge=1, le=SALES25_MAX_PHOTOS)
+    expected_sha256: Sha256 | None = None
+    max_bytes: int = Field(default=SALES25_MAX_MEDIA_BYTES, ge=1, le=SALES25_MAX_MEDIA_BYTES)
+
+    @model_validator(mode="after")
+    def _post_identity(self) -> Sales25MediaOperation:
+        parsed = urlsplit(self.url)
+        if (
+            parsed.scheme != "https"
+            or parsed.netloc not in {"www.tiktok.com", "tiktok.com"}
+            or parsed.query
+            or parsed.fragment
+            or not re.fullmatch(
+                r"/@[A-Za-z0-9_.]+/" + self.media_type + "/" + self.post_id, parsed.path
+            )
+        ):
+            raise ValueError("sales25 post ID/type/URL mismatch")
+        if self.media_type == "video" and self.expected_photo_count is not None:
+            raise ValueError("video cannot declare photos")
+        if self.media_type == "photo" and self.expected_duration_sec is not None:
+            raise ValueError("photo cannot declare video duration")
+        return self
 
 
 class TikTokClientConfig(_StrictModel):
@@ -303,6 +343,7 @@ class PdfOperation(_StrictModel):
 
 MediaOperation = Annotated[
     AcquireOperation
+    | Sales25MediaOperation
     | TikTokAcquireOperation
     | ProxyOperation
     | FrameOperation
@@ -552,6 +593,12 @@ __all__ = [
     "MAX_OUTPUT_BYTES",
     "MAX_PRESIGNED_URL_SECONDS",
     "MAX_PROPOSAL_PPTX_BYTES",
+    "SALES25_MAX_BUNDLE_BYTES",
+    "SALES25_MAX_DURATION_SECONDS",
+    "SALES25_MAX_FRAMES",
+    "SALES25_MAX_MANIFEST_BYTES",
+    "SALES25_MAX_MEDIA_BYTES",
+    "SALES25_MAX_PHOTOS",
     "TIKTOK_N_PER_KW_MAX",
     "AcquireOperation",
     "FrameOperation",
@@ -564,6 +611,7 @@ __all__ = [
     "ProposalPptxOperation",
     "ProxyOperation",
     "S3ObjectRef",
+    "Sales25MediaOperation",
     "SlidesOperation",
     "ThumbnailOperation",
     "TikTokAcquireOperation",

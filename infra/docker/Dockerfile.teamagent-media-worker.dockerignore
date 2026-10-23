@@ -14,6 +14,7 @@
 !src/teamagent/media/proposal_template.py
 !src/teamagent/media/proposal_dates.py
 !src/teamagent/media/render_child.py
+!src/teamagent/media/sales25_media.py
 !src/teamagent/media/security.py
 !src/teamagent/media/tool_contracts.py
 !src/teamagent/media/tool_worker.py
@@ -22,10 +23,14 @@
 !tools/first_visit/
 !tools/first_visit/kit.lock.json
 !tools/first_visit/tiktok-skills-kit-25eccd8.tar.gz
+!tools/first_visit/sales25-analysis.lock.json
+!tools/first_visit/sales25-analysis/
+!tools/first_visit/sales25-analysis/extract_frames.py
 !tools/tiktok_scraper/
 !tools/tiktok_scraper/package.json
 !tools/tiktok_scraper/package-lock.json
 !tools/tiktok_scraper/search.mjs
+!tools/tiktok_scraper/sales25_media.mjs
 !tools/tiktok_scraper/dns_pinned_proxy.mjs
 !infra/
 !infra/docker/

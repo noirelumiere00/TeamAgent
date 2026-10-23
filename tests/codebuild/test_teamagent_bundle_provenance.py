@@ -613,6 +613,31 @@ def test_pair_rejects_source_assertion_default_drift(tmp_path: Path) -> None:
         )
 
 
+@pytest.mark.parametrize(
+    "key",
+    [
+        "artifact.sales25-analysis-lock.sha256",
+        "artifact.sales25-frame-extractor.sha256",
+        "artifact.sales25-media-scraper.sha256",
+    ],
+)
+def test_pair_rejects_removed_sales25_pin_override_guard(tmp_path: Path, key: str) -> None:
+    runtime_path, contract_path = _copy_pair(tmp_path)
+    assertion = next(
+        item
+        for item in _subject(_read_json(contract_path), "media")["source_assertions"]
+        if item["key"] == key
+    )
+    guard = f'test "${assertion["build_arg"]}" = "{assertion["value"]}"'
+    dockerfile = tmp_path / MEDIA_DOCKERFILE
+    body = dockerfile.read_text(encoding="utf-8")
+    assert body.count(guard) == 1
+    dockerfile.write_text(body.replace(guard, "true", 1), encoding="utf-8")
+
+    with pytest.raises(PROVENANCE.ProvenanceError, match="does not implement"):
+        PROVENANCE.validate_contract_pair(runtime_path, contract_path, tmp_path)
+
+
 def test_pair_rejects_missing_core_receipt_arg(tmp_path: Path) -> None:
     runtime_path, contract_path = _copy_pair(tmp_path)
     dockerfile = tmp_path / CORE_DOCKERFILE
@@ -803,7 +828,7 @@ def _verify_core(
     contract_path: Path = CONTRACT_PATH,
     runtime_contract_path: Path = RUNTIME_CONTRACT_PATH,
 ) -> dict[str, str]:
-    return PROVENANCE.verify_oci_config(
+    result: dict[str, str] = PROVENANCE.verify_oci_config(
         config,
         subject_name="core",
         commit=COMMIT,
@@ -814,6 +839,7 @@ def _verify_core(
         expected_build_context_sha256=BUILD_CONTEXT_SHA256,
         expected_release_approval_sha256=RELEASE_APPROVAL_SHA256,
     )
+    return result
 
 
 def _core_labels(
