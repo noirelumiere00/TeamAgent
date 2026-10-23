@@ -259,6 +259,78 @@ def test_paths_and_symlinks(authored: Path) -> None:
         contract.seal_inputs(authored, owner_id=OWNER)
 
 
+@pytest.mark.parametrize("qid", ["q0", "q3"])
+def test_search_order_keeps_ineligible_posts(authored: Path, qid: str) -> None:
+    decisions = contract.read_json(authored / f"selection/decisions_{qid}.json")
+    for index, decision in enumerate(decisions, 1):
+        decision["eligible"] = index != 8 and index <= 10
+    query = next(
+        q for q in contract.read_json(authored / "case.json")["queries"] if q["query_id"] == qid
+    )
+    source = contract._source(
+        query, contract.read_json(authored / f"raw/{qid}.json"), decisions, OWNER
+    )
+    (authored / f"selection/decisions_{qid}.json").write_bytes(contract.json_bytes(decisions))
+    (authored / f"selection/source_{qid}.json").write_bytes(contract.json_bytes(source))
+    if qid == "q0":
+        change(
+            authored,
+            "deck-plan.json",
+            lambda d: d["analysis_selection"]["queries"][0].update(
+                rankings=contract._rankings(source["posts"])
+            ),
+        )
+    contract.validate_inputs(authored, owner_id=OWNER)
+    page = 2 if qid == "q0" else 14
+    change(authored, "deck-plan.json", lambda d: d["slides"][page]["post_ids"].pop(7))
+    with pytest.raises(ValueError, match="search-order post IDs"):
+        contract.validate_inputs(authored, owner_id=OWNER)
+
+
+@pytest.mark.parametrize("tag", ["PR", "pr", "Pr", "product", 1])
+def test_pr_hashtag_case(authored: Path, tag: str | int) -> None:
+    for relative, key in (("raw/q0.json", "videos"), ("selection/source_q0.json", "posts")):
+        change(authored, relative, lambda d, key=key: d[key][0].update(isAd=False, hashtags=[tag]))
+    if tag in ("product", 1):
+        with pytest.raises(ValueError, match="PR post/evidence mismatch"):
+            contract.validate_inputs(authored, owner_id=OWNER)
+    else:
+        contract.validate_inputs(authored, owner_id=OWNER)
+
+
+@pytest.mark.parametrize("image_key", ["p04_image_01", "p21_image_01"])
+def test_reviewed_display_derivative_preserves_photo_count(authored: Path, image_key: str) -> None:
+    image = "images/display.png"
+    shutil.copyfile(authored / "images/portrait.png", authored / image)
+    change(authored, "deck-input.json", lambda d: d["images"][image_key].update(path=image))
+    with pytest.raises(ValueError, match="image"):
+        contract.validate_inputs(authored, owner_id=OWNER)
+    change(
+        authored,
+        "top5-analysis.json",
+        lambda d: d["posts"]["9000000001"]["visual"].update(opened_display_files=[image]),
+    )
+    review = contract.read_json(authored / "top5-analysis.json")["posts"]["9000000001"]
+    assert review["photo_count"] == len(review["visual"]["opened_files"]) == 3
+    contract.seal_inputs(authored, owner_id=OWNER)
+    result = sales25.generate(authored, authored.parent / "out", owner_id=OWNER)
+    assert result["status"] == "passed"
+    (authored / image).unlink()
+    with pytest.raises(ValueError, match="missing review evidence"):
+        contract.validate_inputs(authored, owner_id=OWNER)
+
+
+@pytest.mark.parametrize("paths", [None, "images/portrait.png", [1]])
+def test_display_files_require_path_list(authored: Path, paths: Any) -> None:
+    change(
+        authored,
+        "top5-analysis.json",
+        lambda d: d["posts"]["9000000001"]["visual"].update(opened_display_files=paths),
+    )
+    with pytest.raises(ValueError, match="opened_display_files"):
+        contract.validate_inputs(authored, owner_id=OWNER)
+
+
 def test_25_pages_checker_results_links_notes_and_native_table(
     built: tuple[Path, Path, dict[str, Any]],
 ) -> None:
