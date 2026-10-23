@@ -44,7 +44,7 @@ from teamagent.skills._shared.source_url import hit_doc_url
 from teamagent.skills.base import BaseSkill, SkillContext, register
 from teamagent.skills.search import compact, drive_first, timeline_status
 from teamagent.skills.search.aggregation import extract_aggregation_filter
-from teamagent.skills.search.alias_expansion import retry_inputs, scope_footer
+from teamagent.skills.search.alias_expansion import resolve_topic_client, retry_inputs, scope_footer
 from teamagent.skills.search.answer_mode import (
     MODE_INSTRUCTIONS,
     classify_answer_mode,
@@ -633,7 +633,8 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
         probe: dict[str, str] | None = (
             {}
             if (
-                self._result_guard
+                drive_mode
+                or self._result_guard
                 or self._not_found_answer
                 or ctx.metadata.get("_search_direct_answer") is True
             )
@@ -912,6 +913,7 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
                                 ctx.request_id,
                                 slack_items=slack_items,
                                 asked_industry=asked_industry,
+                                compact_drive_mode=drive_mode,
                                 canonical_campaign_totals=(
                                     campaign_totals_block(summary_hits)
                                     if ctx.metadata.get("_search_direct_answer") is True
@@ -919,18 +921,22 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
                                 ),
                             )
                             cost_usd += fallback_cost
-                            answer = compact.normal_answer(answer)
+                            answer = compact.normal_answer(
+                                answer,
+                                sources=compact.source_map(
+                                    summary_hits,
+                                    slack_items,
+                                    lambda h: self._hit_url(h, file_urls=file_urls),
+                                )
+                                if drive_fallback
+                                else None,
+                            )
                             if drive_fallback and displayed_refs is not None:
                                 answer = compact.append_used_drive_links(
                                     answer,
-                                    [
-                                        *summary_hits,
-                                        *(
-                                            drive_first.slack_hit(i, n)
-                                            for n, i in enumerate(slack_items)
-                                        ),
-                                    ],
+                                    summary_hits,
                                     displayed_refs,
+                                    slack_items=slack_items,
                                 )
                         except Exception as exc:
                             log.warning("search_compact_fallback_failed", error=type(exc).__name__)
@@ -1167,6 +1173,8 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
                 answer = compact.append_comparison_drive_links(
                     answer, summary_hits, case_probe["comparison_clients"], displayed_refs
                 )
+        if drive_mode:
+            answer = compact.strip_linkless_invitation(answer)
         output = SearchOutput(
             answer=answer,
             displayed_refs=displayed_refs,
@@ -1705,6 +1713,17 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
                     if matched_client:
                         probe["query_client"] = matched_client
                         probe["asked_source"] = "vocab"
+                if drive_mode:
+                    resolved = resolve_topic_client(
+                        input.query,
+                        self._client_vocabulary(conn, ctx.request_id, vocab_key),
+                        input.filter_client,
+                    )
+                    if resolved:
+                        surface, canonical = resolved
+                        probe["query_client"] = canonical
+                        if surface != canonical:
+                            probe["query_client_alias"] = surface
             if fanout_probe is not None:
                 from teamagent.skills.search.fanout import collect_named_sources
 
@@ -1723,6 +1742,7 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
                     industry=normalize_industry(input.filter_industry)
                     or extract_query_industry(input.query),
                     comparison_clients=comparison_clients,
+                    client_alias=(probe or {}).get("query_client_alias"),
                 )
             if drive_mode:
                 # boost・各リコール床にも、業種のSQL条件を持ち込ませない。
@@ -2896,8 +2916,9 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
             sections.append(load_prompt("search", "campaign", "files"))
         if slack_items:
             sections.append(slack_prompt_block(slack_items))
-            sections.append(load_prompt("search", "composite", "slack"))
-        if bedrock is not None:
+            if not compact_drive_mode:
+                sections.append(load_prompt("search", "composite", "slack"))
+        if bedrock is not None and not compact_drive_mode:
             system += "\n" + load_prompt("search/fanout", "v1", "sources")
         if karte_hits:
             sections.append(
@@ -2915,6 +2936,15 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
             sections.insert(0, timeline_status.prompt_block(statuses))
         if compact_sources is not None:
             sections.append(compact.source_prompt(compact_sources))
+        elif compact_drive_mode:
+            sections.append(
+                compact.source_prompt(
+                    compact.source_map(
+                        [*hits, *karte_hits], slack_items, lambda h: self._hit_url(h)
+                    )
+                )
+            )
+            system += "\n" + load_prompt("search", "compact", "normal")
         user_message = "以下の社内資料から質問に答えてください。\n\n" + "\n\n".join(sections)
 
         resp = (bedrock if bedrock is not None else self._bedrock).converse(

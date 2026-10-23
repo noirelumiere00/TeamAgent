@@ -54,6 +54,7 @@ HUMAN_FACING_PROMPTS = (
     "search/v3/system.md",
     "search/compact/system.md",
     "search/compact/drive.md",
+    "search/compact/normal.md",
     # 複合検索（USE_COMPOSITE_SEARCH）で search の user message に足す節（出典の書き分け）。
     "search/composite/slack.md",
     # 施策実績のヒットがあるとき search の user message に足す節（資料リンク・業種の扱い）。
@@ -169,6 +170,7 @@ _NO_BAN_SECTION = (
     "search/campaign/files.md",
     # compact の system prompt（禁止節あり）の末尾に Drive 対象者だけ足す追記節。
     "search/compact/drive.md",
+    "search/compact/normal.md",
 )
 MUST_HAVE_BAN_SECTION = tuple(p for p in HUMAN_FACING_PROMPTS if p not in _NO_BAN_SECTION)
 

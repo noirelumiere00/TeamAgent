@@ -46,8 +46,21 @@ def is_empty(answer: str, *, notice: str = "") -> bool:
     return not _CITATION.sub("", answer.removeprefix(notice)).replace(EMPTY_ANSWER, "").strip()
 
 
-def normal_answer(answer: str) -> str:
+def normal_answer(answer: str, *, sources: Sources | None = None) -> str:
     # 通常回答の再生成がcompact用の文を繰り返しても、除去した主張を復活させない。
+    if sources is not None:
+        lines = []
+        for line in answer.splitlines():
+            keys = _CITATION.findall(line)
+            if keys and (
+                any(key not in sources for key in keys)
+                or not NumberGrounder.from_inputs(
+                    "\n".join(sources[key][2] for key in keys), always_allowed=frozenset()
+                ).ok(_CITATION.sub("", line))
+            ):
+                continue
+            lines.append(line)
+        return "\n".join(lines).replace(EMPTY_ANSWER, "").strip()
     return (
         "\n".join(line for line in answer.splitlines() if not _CITATION.search(line))
         .replace(EMPTY_ANSWER, "")
@@ -56,23 +69,45 @@ def normal_answer(answer: str) -> str:
 
 
 def append_used_drive_links(
-    answer: str, hits: Sequence[SearchHit], displayed_refs: list[DocumentReference]
+    answer: str,
+    hits: Sequence[SearchHit],
+    displayed_refs: list[DocumentReference],
+    *,
+    slack_items: Sequence[SlackItem] = (),
 ) -> str:
-    """通常回答で明記した社名・商品名・資料名の正本だけを表示・保存する。"""
+    """通常回答の引用・明記した資料名から、会話と正本を最大3件残す。"""
     from teamagent.skills.search.case_list import case_link
 
+    used_keys = set(_CITATION.findall(answer))
+    answer = _CITATION.sub("", answer)
     body = unicodedata.normalize("NFKC", answer).casefold()
     # URL 内のファイル名は、回答本文で使った資料名とはみなさない。
     body = re.sub(r"https?://[^\s<>)]*", "", body)
     links: list[str] = []
-    seen = {ref.drive_file_id for ref in displayed_refs}
-    for hit in hits:
+    seen = {ref.url for ref in displayed_refs}
+    candidates = [(str(h.chunk_id), h) for h in hits]
+    candidates.extend(
+        (f"slack{i}", drive_first.slack_hit(item, i)) for i, item in enumerate(slack_items)
+    )
+    channels = {f"slack{i}": item.hit.channel or "" for i, item in enumerate(slack_items)}
+    shown = 0
+    for key, hit in candidates:
+        if used_keys and key not in used_keys:
+            continue
         meta = hit.metadata or {}
-        ref = drive_first.canonical_reference(meta, hit.content)
-        if ref.kind != "drive" or not ref.drive_file_id or ref.drive_file_id in seen:
+        # 根拠が投稿本文なら、添付の保存先が判明していても元の会話へ戻す。
+        reference_meta = (
+            {k: meta.get(k) for k in ("source_type", "source_uri", "title")}
+            if meta.get("source_type") == "slack"
+            else meta
+        )
+        ref = drive_first.canonical_reference(reference_meta, hit.content)
+        conversation = ref.kind in {"slack_conversation", "slack_attachment"}
+        if (ref.kind != "drive" and not conversation) or ref.url in seen:
             continue
         names = [
             ref.title,
+            channels.get(key, ""),
             *(
                 str(meta.get(key) or "")
                 for key in (
@@ -87,10 +122,11 @@ def append_used_drive_links(
                     "brand",
                     "product",
                     "campaign",
+                    "channel_name",
                 )
             ),
         ]
-        used = False
+        used = key in used_keys
         for name in names:
             name = re.sub(
                 r"\.(?:pdf|pptx?|docx?|xlsx?)$", "", unicodedata.normalize("NFKC", name).casefold()
@@ -120,15 +156,34 @@ def append_used_drive_links(
             if re.search(pattern, body):
                 used = True
                 break
-        link = case_link(ref.url, "資料を見る")
+        link = case_link(ref.url, "会話の記録" if conversation else "資料を見る")
         if not used or link is None or "/spreadsheets/" in (ref.url or ""):
             continue
-        seen.add(ref.drive_file_id)
-        displayed_refs.append(ref)
-        links.append(link)
-        if len(links) == 3:
+        seen.add(ref.url)
+        if not conversation:
+            displayed_refs.append(ref)
+        if ref.url and ref.url not in answer:
+            links.append(link)
+        shown += 1
+        if shown == 3:
             break
     return "\n\n".join(part for part in (answer, " / ".join(links)) if part)
+
+
+def strip_linkless_invitation(answer: str) -> str:
+    """リンクの無い誘い文だけを除く。本人限定経路の最終出力で使う。"""
+    if any(_safe_url(url) for url in re.findall(r"https?://[^\s<>|\[\]()]+", answer)):
+        return answer
+    invitation = re.compile(
+        r"詳し[^\n。！？!?]*(?:こちら|どうぞ|ご覧)|"
+        r"(?:資料|詳細|元の会話)[^\n。！？!?]*(?:こちら|見たければ|見たい場合)|"
+        r"こちら(?:を|から|で|です)?(?:どうぞ|ご覧ください|確認してください)?[。！!]?\s*$"
+    )
+    return "".join(
+        sentence
+        for sentence in re.split(r"(?<=[。！？!?\n])", answer)
+        if not invitation.search(sentence)
+    ).strip()
 
 
 def append_comparison_drive_links(

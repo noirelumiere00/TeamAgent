@@ -66,6 +66,7 @@ def _search(on_search: Any) -> tuple[Any, MagicMock, MagicMock]:
         ("めかぶとトップバリュの資料を探して", "イオントップバリュ", "めかぶ"),
         ("ファミマのおにぎりの資料を探して", "ファミリーマート", "おにぎり"),
         ("ホンダの提案資料を探して", "本田技研工業", "提案"),
+        ("日経新聞の大徳寺展の資料を探して", "日本経済新聞社", "大徳寺展"),
     ],
 )
 def test_user_requests_rescued_by_alias(query: str, alias: str, product: str) -> None:

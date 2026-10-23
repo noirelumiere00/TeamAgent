@@ -39,7 +39,7 @@ from teamagent.skills.search.campaign_files import (
     is_campaign_hit,
     scope_by_industry,
 )
-from teamagent.skills.search.client_match import hit_entities
+from teamagent.skills.search.client_match import aliases, hit_entities
 from teamagent.skills.search.comparison import compact_comparison, is_comparison_query
 from teamagent.skills.search.composite import (
     MCP_SURFACE_CTX_KEY,
@@ -186,6 +186,7 @@ def collect_named_sources(
     *,
     industry: str | None = None,
     comparison_clients: list[str] | None = None,
+    client_alias: str | None = None,
 ) -> None:
     """金庫の接続で名指し資料・カルテ・事例を読む。SAVEPOINT で本体を守る。"""
     from teamagent.skills.search.case_list import CANDIDATE_LIMIT
@@ -214,7 +215,14 @@ def collect_named_sources(
     status: LaneState = "skipped"
     named: list[SearchHit] = []
     if client or comparison_clients:
-        for name in comparison_clients or ([client] if client else []):
+        names = comparison_clients or ([client] if client else [])
+        if drive_first.enabled(ctx.metadata) and client and not comparison_clients:
+            names = list(
+                dict.fromkeys(
+                    [client, *([client_alias] if client_alias else []), *sorted(aliases(client))]
+                )
+            )[:3]
+        for name in names:
             try:
                 with connect() as named_conn:
                     named.extend(
@@ -226,6 +234,8 @@ def collect_named_sources(
                 status = "timeout" if is_timeout_error(exc) else "error"
         if status == "skipped":
             status = "ok" if named else "empty"
+    if drive_first.enabled(ctx.metadata):
+        named = list({hit.chunk_id: hit for hit in named}.values())
     probe["named"] = named
     probe["named_lane"] = LaneResult(
         "named", status, len(named), int((time.perf_counter() - started) * 1000)
@@ -415,6 +425,10 @@ def run_fanout(skill: Any, input: SearchInput, ctx: SkillContext) -> SearchOutpu
         extra["named"] = drive_first.scope_hits(
             input.query, extra.get("named", []), input.filter_doc_type
         )
+        seen = {hit.chunk_id for hit in summary_hits}
+        summary_hits = [*summary_hits, *(h for h in extra["named"] if h.chunk_id not in seen)]
+        if extra["named"]:
+            found = True
     if not summary_hits:
         found = False
     client = skill._asked_client(probe)
@@ -659,7 +673,16 @@ def run_fanout(skill: Any, input: SearchInput, ctx: SkillContext) -> SearchOutpu
                 )
                 summary_cost += cost
                 summary_ms += int((time.perf_counter() - summary_started) * 1000)
-                head = compact.normal_answer(head)
+                head = compact.normal_answer(
+                    head,
+                    sources=compact.source_map(
+                        [*summary_hits, *karte.items],
+                        slack.items,
+                        lambda h: skill._hit_url(h, file_urls=file_urls),
+                    )
+                    if drive_fallback
+                    else None,
+                )
                 if summary_state != "ok" or not head:
                     direct_kind = None
                     if drive_fallback:
@@ -667,12 +690,9 @@ def run_fanout(skill: Any, input: SearchInput, ctx: SkillContext) -> SearchOutpu
                 elif drive_fallback and displayed_refs is not None:
                     head = compact.append_used_drive_links(
                         head,
-                        [
-                            *summary_hits,
-                            *karte.items,
-                            *(drive_first.slack_hit(i, n) for n, i in enumerate(slack.items)),
-                        ],
+                        [*summary_hits, *karte.items],
                         displayed_refs,
+                        slack_items=slack.items,
                     )
     if found and input.include_answer and not compact_mode and not drive_fallback:
         head = skill._append_campaign_footer(head, summary_hits, asked_industry=asked_industry)
@@ -1012,6 +1032,8 @@ def run_fanout(skill: Any, input: SearchInput, ctx: SkillContext) -> SearchOutpu
             answer = compact.append_comparison_drive_links(
                 answer, summary_hits, extra["comparison_clients"], displayed_refs
             )
+    if drive_mode:
+        answer = compact.strip_linkless_invitation(answer)
     return SearchOutput(
         answer=answer,
         answer_format="compact"

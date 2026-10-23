@@ -7610,7 +7610,13 @@ export function createCallerIdentityPlugin({
           const mediaCaption = authoritative && evidence && !finalTextOnly && !sourced.trim() &&
             (payload.mediaUrl || payload.mediaUrls?.length || payload.attachments?.length || payload.files?.length)
             ? "資料を添付します。" : sourced;
-          const scrubbed = scrubOutboundReplyText(mediaCaption, replacements);
+          let scrubbed = scrubOutboundReplyText(mediaCaption, replacements);
+          if (finalTextOnly && evidence?.driveFirst &&
+              !/https?:\/\/[^\s<>|\[\]()]+/iu.test(scrubbed.text)) {
+            const invitation = /詳し[^\n。！？!?]*(?:こちら|どうぞ|ご覧)|(?:資料|詳細|元の会話)[^\n。！？!?]*(?:こちら|見たければ|見たい場合)|こちら(?:を|から|で|です)?(?:どうぞ|ご覧ください|確認してください)?[。！!]?\s*$/u;
+            scrubbed = {...scrubbed, text: scrubbed.text.split(/(?<=[。！？!?\n])/u)
+              .filter(sentence => !invitation.test(sentence)).join('').trim()};
+          }
           if (scrubbed.text !== payload.text) {
             const { signedUrls, toolNames, urlSeparators, unverifiedConnectUrls = 0 } = scrubbed.counts;
             emitPluginLog(
