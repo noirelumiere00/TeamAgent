@@ -253,8 +253,7 @@ def validate_inputs(root: Path, *, owner_id: str, bundle: Path = BUNDLE) -> None
         )
         if any(s.get("query") != query["query"] or s.get("group") != query["group"] for s in block):
             raise ValueError("plan query/group mismatch")
-        eligible = [p for p in sources[qid]["posts"] if p["eligible"]]
-        if block[0]["post_ids"] != [p["id"] for p in eligible[:10]]:
+        if block[0]["post_ids"] != [p["id"] for p in sources[qid]["posts"][:10]]:
             raise ValueError("search-order post IDs mismatch")
         if index < 3:
             item, rankings = selected[index], _rankings(sources[qid]["posts"])
@@ -275,8 +274,14 @@ def validate_inputs(root: Path, *, owner_id: str, bundle: Path = BUNDLE) -> None
         source = local_path(root, review["source"]["path"])
         if hashlib.sha256(source.read_bytes()).hexdigest() != review["source"]["sha256"]:
             raise ValueError("review media SHA-256 mismatch")
+        display_files = review["visual"].get("opened_display_files", [])
+        if not isinstance(display_files, list) or any(
+            not isinstance(p, str) for p in display_files
+        ):
+            raise ValueError("opened_display_files must be a list of paths")
         paths = [
             *review["visual"]["opened_files"],
+            *display_files,
             *(e["file"] for e in review["evidence"].values()),
         ]
         if "file" in review["audio"]:
@@ -297,9 +302,9 @@ def validate_inputs(root: Path, *, owner_id: str, bundle: Path = BUNDLE) -> None
             continue
         for index, pid in enumerate(slide["post_ids"], 1):
             image = data["images"][f"p{page:02d}_image_{index:02d}"]
-            if (
-                image.get("url") != urls[pid]
-                or image["path"] not in reviews["posts"][pid]["visual"]["opened_files"]
+            if image.get("url") != urls[pid] or image["path"] not in (
+                reviews["posts"][pid]["visual"]["opened_files"]
+                + reviews["posts"][pid]["visual"].get("opened_display_files", [])
             ):
                 raise ValueError("TOP5 image/link order differs from reviewed post IDs")
     _validate_pr(root, plan, data, reviews, sources, bundle)
@@ -317,11 +322,19 @@ def _validate_pr(
         if (
             plan["slides"][page - 1]["post_ids"] != [pid]
             or not example.get("pr_basis")
-            or not (post.get("isAd") is True or "PR" in post.get("hashtags", []))
+            or not (
+                post.get("isAd") is True
+                or any(
+                    isinstance(tag, str) and tag.casefold() == "pr"
+                    for tag in post.get("hashtags", [])
+                )
+            )
             or pid not in reviews["posts"]
         ):
             raise ValueError("PR post/evidence mismatch")
-        opened = reviews["posts"][pid]["visual"]["opened_files"]
+        visual = reviews["posts"][pid]["visual"]
+        # Display derivatives must not inflate the checker's original photo count.
+        opened = visual["opened_files"] + visual.get("opened_display_files", [])
         paths = []
         for index in range(1, 4):
             image = data["images"][f"p{page}_image_{index:02d}"]
