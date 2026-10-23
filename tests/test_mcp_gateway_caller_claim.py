@@ -1212,3 +1212,63 @@ def test_production_claim_contract_requires_separate_secret_and_team(
     monkeypatch.setenv("TEAMAGENT_MCP_BEARER", TEST_CALLER_CLAIM_SECRET)
     with pytest.raises(CallerClaimError, match="must differ"):
         CallerClaimVerifier.from_env()
+
+
+async def test_router_pre_model_search_claim_is_accepted_once_by_python_mcp() -> None:
+    script = r"""
+import {pathToFileURL} from 'node:url';
+const {createCallerIdentityPlugin} = await import(pathToFileURL(process.argv[1]));
+console.info = () => {}; console.warn = () => {};
+const hooks = new Map(), calls = [];
+const response = data => ({ok: true, text: async () => JSON.stringify(data)});
+createCallerIdentityPlugin({env: {
+  TEAMAGENT_CALLER_CLAIM_SECRET: process.env.TEST_CLAIM_SECRET,
+  SLACK_TEAM_ID: process.env.TEST_TEAM_ID,
+  SLACK_BOT_TOKEN: 'fixture-token', TEAMAGENT_MCP_BEARER: 'fixture-bearer',
+  TEAMAGENT_INBOUND_ROUTER: 'enforce', SEARCH_DIRECT_ANSWER_ALLOWED_EMAILS: 'owner@example.test',
+}, now: () => Number(process.env.TEST_NOW) * 1000, fetchFn: async (url, options) => {
+  const body = JSON.parse(options.body);
+  if (url.endsWith('/users.info')) return response({ok: true, user: {
+    id: process.env.TEST_USER_ID, team_id: process.env.TEST_TEAM_ID, profile: {email: 'owner@example.test'}}});
+  if (body.method === 'tools/call') {
+    calls.push(body.params);
+    return response({jsonrpc: '2.0', id: body.id, result: {content: [{type: 'text',
+      text: JSON.stringify({answer: '探した資料の範囲では確認できませんでした。', found: false})}]}});
+  }
+  return response({jsonrpc: '2.0', id: body.id, result: {}});
+}}).register({on: (name, handler) => hooks.set(name, handler), registerInteractiveHandler() {},
+  logger: {info() {}, warn() {}}});
+const ctx = {runId: 'pre-model-claim', sessionKey: 'agent:fixture:slack:direct:test',
+  senderId: process.env.TEST_USER_ID, channelId: 'D0123456789'};
+hooks.get('message_received')({content: '社内でいう未知の略語とは？', runId: ctx.runId,
+  senderId: ctx.senderId, messageId: '1784424000.000001',
+  metadata: {guildId: process.env.TEST_TEAM_ID, to: ctx.channelId}},
+  {...ctx, channelId: 'slack', conversationId: ctx.channelId, messageId: '1784424000.000001'});
+await hooks.get('before_prompt_build')({messages: []}, ctx);
+process.stdout.write(JSON.stringify(calls));
+"""
+    completed = subprocess.run(
+        ["node", "--input-type=module", "-e", script, str(CALLER_PLUGIN)],
+        env={
+            **os.environ,
+            "TEST_CLAIM_SECRET": TEST_CALLER_CLAIM_SECRET,
+            "TEST_TEAM_ID": TEST_SLACK_TEAM_ID,
+            "TEST_USER_ID": TEST_SLACK_USER_ID,
+            "TEST_NOW": str(TEST_NOW),
+        },
+        capture_output=True,
+        text=True,
+        check=True,
+        timeout=10,
+    )
+    calls = json.loads(completed.stdout)
+    assert len(calls) == 1
+    assert calls[0]["name"] == "search"
+    arguments = calls[0]["arguments"]
+    verifier = make_verifier()
+    claim = await verifier.verify(tool="search", arguments=arguments)
+    assert claim.slack_user_id == TEST_SLACK_USER_ID
+    assert claim.channel_id == "D0123456789"
+    assert claim.expires_at - claim.issued_at == 60
+    with pytest.raises(CallerClaimError, match="replay"):
+        await verifier.verify(tool="search", arguments=arguments)
