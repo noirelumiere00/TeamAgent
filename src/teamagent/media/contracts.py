@@ -346,6 +346,25 @@ class ProposalPptxOperation(_StrictModel):
     fail_if_missing: bool = True
 
 
+class Sales25PptxOperation(_StrictModel):
+    """One owner-bound authoring snapshot, rendered only with the pinned kit."""
+
+    kind: Literal["sales25_pptx"]
+    source: S3ObjectRef
+    owner_id: str = Field(min_length=1, max_length=200)
+
+    @model_validator(mode="after")
+    def _zip_source(self) -> Sales25PptxOperation:
+        if not self.owner_id.strip():
+            raise ValueError("sales25 owner_id must be nonblank")
+        if (
+            self.source.content_type != "application/zip"
+            or not 0 < self.source.size <= MAX_INPUT_BYTES
+        ):
+            raise ValueError("sales25 source must be a bounded ZIP")
+        return self
+
+
 class PdfOperation(_StrictModel):
     kind: Literal["pdf"]
     html: S3ObjectRef
@@ -360,6 +379,7 @@ MediaOperation = Annotated[
     | ThumbnailOperation
     | SlidesOperation
     | ProposalPptxOperation
+    | Sales25PptxOperation
     | PdfOperation,
     Field(discriminator="kind"),
 ]
@@ -623,6 +643,7 @@ __all__ = [
     "ProxyOperation",
     "S3ObjectRef",
     "Sales25MediaOperation",
+    "Sales25PptxOperation",
     "SlidesOperation",
     "ThumbnailOperation",
     "TikTokAcquireOperation",

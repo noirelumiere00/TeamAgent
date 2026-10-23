@@ -616,6 +616,7 @@ def test_pair_rejects_source_assertion_default_drift(tmp_path: Path) -> None:
 @pytest.mark.parametrize(
     "key",
     [
+        "artifact.sales25-kit-lock.sha256",
         "artifact.sales25-analysis-lock.sha256",
         "artifact.sales25-frame-extractor.sha256",
         "artifact.sales25-media-scraper.sha256",

@@ -48,6 +48,14 @@ def _clean_names(values: list[str], *, limit: int) -> list[str]:
 class Sales25Intake(_StrictModel):
     target_product: str = Field(default="", max_length=500)
     claim_constraints: str = Field(default="", max_length=1000)
+    brand_synonyms: dict[
+        Annotated[str, Field(min_length=1, max_length=200)],
+        Annotated[list[Annotated[str, Field(min_length=1, max_length=100)]], Field(max_length=12)],
+    ] = Field(
+        default_factory=dict,
+        max_length=3,
+        description="ブランド別に広く数える同義語。例: コープデリ→コープ/COOP/生協",
+    )
     queries: list[Annotated[str, Field(min_length=1, max_length=200)]] = Field(
         default_factory=list,
         max_length=6,

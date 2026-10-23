@@ -474,6 +474,14 @@ def _output_slots(
         slots.append(("slides.pptx", "slides.pptx", MAX_OUTPUT_BYTES))
     elif kind == "proposal_pptx":
         slots.append(("proposal.pptx", "proposal.pptx", MAX_PROPOSAL_PPTX_BYTES))
+    elif kind == "sales25_pptx":
+        slots.extend(
+            (
+                ("deck.pptx", "deck.pptx", MAX_OUTPUT_BYTES),
+                ("sales25-qa.json", "sales25-qa.json", 1024 * 1024),
+                ("sales25-qa.zip", "sales25-qa.zip", 16 * 1024 * 1024),
+            )
+        )
     elif kind == "pdf":
         slots.append(("document.pdf", "document.pdf", MAX_OUTPUT_BYTES))
     else:

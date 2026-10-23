@@ -64,6 +64,7 @@ _MAX_PROPOSAL_PPTX_BYTES = 256 * 1024 * 1024
 _OPERATIONS = {
     "acquire",
     "sales25_media",
+    "sales25_pptx",
     "tiktok_acquire",
     "proxy",
     "frame",
@@ -439,6 +440,16 @@ def _validate_operation(value: Any) -> None:
             _validate_s3_ref(entry["source"])
         if type(operation["fail_if_missing"]) is not bool:
             raise ValueError("proposal fail_if_missing is invalid")
+    elif kind == "sales25_pptx":
+        operation = _exact_keys(value, {"kind", "source", "owner_id"}, "sales25 PPTX operation")
+        _validate_s3_ref(operation["source"])
+        owner = _bounded_string(operation["owner_id"], minimum=1, maximum=200, name="sales25 owner")
+        if (
+            not owner.strip()
+            or operation["source"]["content_type"] != "application/zip"
+            or operation["source"]["size"] < 1
+        ):
+            raise ValueError("sales25 owner or ZIP source is invalid")
     elif kind == "pdf":
         operation = _exact_keys(value, {"kind", "html"}, "PDF operation")
         _validate_s3_ref(operation["html"])
@@ -1162,6 +1173,14 @@ def _operation_output_slots(spec: dict[str, Any], attempt: dict[str, Any]) -> li
         slots.append(("slides.pptx", "slides.pptx", _MAX_OUTPUT_BYTES))
     elif kind == "proposal_pptx":
         slots.append(("proposal.pptx", "proposal.pptx", _MAX_PROPOSAL_PPTX_BYTES))
+    elif kind == "sales25_pptx":
+        slots.extend(
+            (
+                ("deck.pptx", "deck.pptx", _MAX_OUTPUT_BYTES),
+                ("sales25-qa.json", "sales25-qa.json", 1024 * 1024),
+                ("sales25-qa.zip", "sales25-qa.zip", 16 * 1024 * 1024),
+            )
+        )
     elif kind == "pdf":
         slots.append(("document.pdf", "document.pdf", _MAX_OUTPUT_BYTES))
     else:
@@ -1195,7 +1214,9 @@ def _required_output_names(spec: dict[str, Any]) -> set[str]:
 def _allowed_content_types(spec: dict[str, Any], name: str) -> set[str]:
     operation = spec["operation"]
     kind = operation["kind"]
-    if kind == "sales25_media" and name == "media-bundle.zip":
+    if (kind == "sales25_media" and name == "media-bundle.zip") or (
+        kind == "sales25_pptx" and name == "sales25-qa.zip"
+    ):
         return {"application/zip"}
     if kind == "acquire" and name == "media":
         return {

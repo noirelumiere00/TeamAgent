@@ -36,6 +36,7 @@ from teamagent.media.contracts import (
     ProxyOperation,
     S3ObjectRef,
     Sales25MediaOperation,
+    Sales25PptxOperation,
     SlidesOperation,
     ThumbnailOperation,
     TikTokAcquireOperation,
@@ -890,6 +891,7 @@ class MediaJobClient:
         request_fingerprint: str,
         timeout_s: int,
         operation_factory: Callable[[int], MediaOperation],
+        capture_result: Callable[[MediaJobResult], None] | None = None,
     ) -> tuple[Mapping[str, bytes], Mapping[str, Any]]:
         """stage/operation/request途中の例外でも、作成済みinputを残さない。"""
 
@@ -904,6 +906,8 @@ class MediaJobClient:
                 job_id=job_id,
                 deadline_epoch_s=deadline_epoch_s,
             )
+            if capture_result is not None:
+                return self.run_sync(request, timeout_s=timeout_s, capture_result=capture_result)
             return self.run_sync(request, timeout_s=timeout_s)
         finally:
             # run_sync に到達した場合は同メソッドの finally が cleanup する。
@@ -1468,6 +1472,68 @@ class MediaJobClient:
         if body is None:
             raise MediaJobError("MEDIA_PDF_ARTIFACT_MISSING")
         return body
+
+    def render_sales25_pptx(
+        self,
+        bundle: bytes,
+        *,
+        owner_id: str,
+        request_fingerprint: str,
+        timeout_s: int = 480,
+    ) -> dict[str, Any]:
+        """Render one bounded owner snapshot, retaining immutable result references."""
+        if not isinstance(owner_id, str) or not owner_id.strip() or len(owner_id) > 200:
+            raise ValueError("sales25 owner_id is required")
+        fingerprint = (
+            f"{request_fingerprint}:sales25-pptx:{hashlib.sha256(owner_id.encode()).hexdigest()}"
+        )
+        job_id = self._job_id(fingerprint)
+        references: list[dict[str, Any]] = []
+
+        def operation_factory(deadline_epoch_s: int) -> MediaOperation:
+            source = self.find_staged(
+                job_id=job_id, name="sales25-input.zip", deadline_epoch_s=deadline_epoch_s
+            )
+            if source is None:
+                source = self.stage_bytes(
+                    job_id=job_id,
+                    name="sales25-input.zip",
+                    body=bundle,
+                    content_type="application/zip",
+                    deadline_epoch_s=deadline_epoch_s,
+                )
+            elif (
+                source.sha256 != hashlib.sha256(bundle).hexdigest()
+                or source.size != len(bundle)
+                or source.content_type != "application/zip"
+            ):
+                raise MediaJobError("MEDIA_SALES25_INPUT_CONFLICT")
+            return Sales25PptxOperation(kind="sales25_pptx", source=source, owner_id=owner_id)
+
+        def capture_result(result: MediaJobResult) -> None:
+            references.extend(artifact.model_dump(mode="json") for artifact in result.artifacts)
+
+        artifacts, _metadata = self._run_staged(
+            job_id=job_id,
+            request_fingerprint=fingerprint,
+            timeout_s=timeout_s,
+            operation_factory=operation_factory,
+            capture_result=capture_result,
+        )
+        if set(artifacts) != {"deck.pptx", "sales25-qa.json", "sales25-qa.zip"}:
+            raise MediaJobError("MEDIA_SALES25_ARTIFACT_MISSING")
+        try:
+            qa = json.loads(artifacts["sales25-qa.json"])
+            if (
+                qa["owner_id"] != owner_id
+                or qa["input_sha256"] != hashlib.sha256(bundle).hexdigest()
+                or qa["output_sha256"] != hashlib.sha256(artifacts["deck.pptx"]).hexdigest()
+                or qa["status"] not in {"passed", "incomplete", "invalid"}
+            ):
+                raise ValueError("sales25 QA identity differs")
+        except (KeyError, TypeError, ValueError) as exc:
+            raise MediaJobError("MEDIA_SALES25_QA_INVALID") from exc
+        return {"files": artifacts, "artifacts": references, "media_job_id": job_id}
 
     def render_proposal_pptx(
         self,

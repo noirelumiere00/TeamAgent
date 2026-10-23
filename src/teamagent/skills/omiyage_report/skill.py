@@ -845,6 +845,7 @@ class OmiyageReportSubmitSkill(BaseSkill[OmiyageReportSubmitInput, OmiyageReport
                         "queries",
                         "target_product",
                         "claim_constraints",
+                        "brand_synonyms",
                     )
                 )
             ):

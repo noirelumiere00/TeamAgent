@@ -138,8 +138,17 @@ def generate(
         bundle=bundle,
         python=python or Path(sys.executable),
     )
-    if filled["returncode"] != 0 or filled["result"].get("status") != "filled":
+    if (filled["returncode"], filled["result"].get("status")) not in {
+        (0, "filled"),
+        (1, "partial"),
+    } or filled["result"].get("unresolved_tokens"):
         raise ValueError("sales25 filler failed; see filler-qa")
-    return check_deck(
+    result = check_deck(
         root, pptx, output_dir / "qa", owner_id=owner_id, bundle=bundle, python=python
     )
+    if filled["result"].get("status") == "partial":
+        result["fill_limitations"] = filled["result"].get("limitations", [])
+        if result["status"] == "passed":
+            result["status"] = "incomplete"
+        (output_dir / "qa/result.json").write_bytes(contract.json_bytes(result))
+    return result

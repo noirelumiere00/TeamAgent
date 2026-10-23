@@ -5,7 +5,10 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import shutil
 import subprocess
+import sys
+import sysconfig
 from pathlib import Path
 
 import pytest
@@ -419,6 +422,11 @@ def test_media_sources_and_js_lock_are_content_addressed() -> None:
     ("key", "argument", "relative"),
     [
         (
+            "artifact.sales25-kit-lock.sha256",
+            "SALES25_KIT_LOCK_SHA256",
+            "tools/first_visit/sales25.lock.json",
+        ),
+        (
             "artifact.sales25-analysis-lock.sha256",
             "SALES25_ANALYSIS_LOCK_SHA256",
             "tools/first_visit/sales25-analysis.lock.json",
@@ -518,3 +526,72 @@ def test_every_media_module_render_child_imports_is_copied_into_the_image() -> N
         assert f"!src/teamagent/media/{module}.py\n" in ignore, (
             f".dockerignore の許可に {module}.py が無い"
         )
+
+
+def test_sales25_fixed_kit_and_offline_runner_are_in_media_image() -> None:
+    from teamagent.skills.first_visit.sales25_contract import verify_bundle
+
+    lock = verify_bundle()
+    ignore = DOCKERIGNORE.read_text()
+    assert (
+        "COPY --chown=10001:10001 tools/first_visit/sales25/ /app/tools/first_visit/sales25/"
+        in TEXT
+    )
+    for relative in lock["files"]:
+        assert f"!tools/first_visit/sales25/{relative}\n" in ignore
+    for relative in (
+        "src/teamagent/media/sales25_runner.py",
+        "src/teamagent/skills/first_visit/sales25.py",
+        "src/teamagent/skills/first_visit/sales25_contract.py",
+        "src/teamagent/skills/first_visit/sales25_authoring.py",
+    ):
+        assert relative in TEXT
+        assert f"!{relative}\n" in ignore
+    assert (
+        "from teamagent.skills.first_visit.sales25_contract import verify_bundle; verify_bundle()"
+        in TEXT
+    )
+
+
+def test_sales25_media_copy_imports_without_core_packages(tmp_path: Path) -> None:
+    app = tmp_path / "app"
+    # Mirror only Python COPY inputs; -S avoids the developer venv's editable core package.
+    copied = re.findall(r"^  (src/teamagent/[^ ]+\.py) \\\n", TEXT, re.MULTILINE)
+    assert "src/teamagent/skills/first_visit/__init__.py" in copied
+    assert "src/teamagent/media/worker.py" not in copied
+    for relative in copied:
+        target = app / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(ROOT / relative, target)
+    shutil.copytree(ROOT / "tools/first_visit/sales25", app / "tools/first_visit/sales25")
+    shutil.copyfile(
+        ROOT / "tools/first_visit/sales25.lock.json", app / "tools/first_visit/sales25.lock.json"
+    )
+    program = """
+import importlib.abc
+import sys
+from pathlib import Path
+app = Path(sys.argv[1])
+sys.path[:0] = [str(app / 'src'), sys.argv[2]]
+class NoCore(importlib.abc.MetaPathFinder):
+    def find_spec(self, fullname, path=None, target=None):
+        blocked = ('teamagent.adapters', 'teamagent.mcp_gateway', 'boto3', 'botocore', 'slack_sdk')
+        if fullname.startswith(blocked):
+            raise ImportError('core dependency in roleless media: ' + fullname)
+sys.meta_path.insert(0, NoCore())
+from teamagent.media import sales25_runner, render_child, tool_worker
+from teamagent.skills.first_visit import sales25_authoring, sales25_contract
+for module in (sales25_runner, render_child, tool_worker, sales25_authoring, sales25_contract):
+    assert Path(module.__file__).is_relative_to(app), module.__file__
+assert sales25_contract.BUNDLE == app / 'tools/first_visit/sales25'
+sales25_contract.verify_bundle()
+"""
+    result = subprocess.run(
+        [sys.executable, "-I", "-S", "-c", program, str(app), sysconfig.get_path("purelib")],
+        cwd=app,
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=15,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr

@@ -278,6 +278,9 @@ def test_same_id_identity_conflict_is_rejected(run: Path) -> None:
     plan = contract.read_json(run / "deck-plan.json")
     for ranking in plan["analysis_selection"]["queries"][1]["rankings"].values():
         ranking[0] = pid
+    for slide in plan["slides"]:
+        if old in slide.get("post_ids", []):
+            slide["post_ids"] = [pid if value == old else value for value in slide["post_ids"]]
     (run / "deck-plan.json").write_bytes(contract.json_bytes(plan))
     with pytest.raises(ValueError, match="same-ID"):
         analysis.selected_posts(run, OWNER)
@@ -471,6 +474,9 @@ def test_same_id_across_queries_normalizes_photo_count_and_preserves_rankings(
     plan = contract.read_json(run / "deck-plan.json")
     for ranking in plan["analysis_selection"]["queries"][1]["rankings"].values():
         ranking[0] = pid
+    for slide in plan["slides"]:
+        if old in slide.get("post_ids", []):
+            slide["post_ids"] = [pid if value == old else value for value in slide["post_ids"]]
     plan["pr_examples"][1]["post_id"] = pid
     (run / "deck-plan.json").write_bytes(contract.json_bytes(plan))
     if image_count != 3:

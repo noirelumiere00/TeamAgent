@@ -190,6 +190,17 @@
           ]
         },
         {
+          "key": "artifact.sales25-kit-lock.sha256",
+          "value": "03ea4a29ef59b16e325dcd2d07710a9511c55dd08cf4b17f96dfa3eeef2047ca",
+          "build_arg": "SALES25_KIT_LOCK_SHA256",
+          "oci_label": "io.teamagent.contract.sales25-kit-lock-sha256",
+          "dockerfile_uses": [
+            "test \"$SALES25_KIT_LOCK_SHA256\" = \"03ea4a29ef59b16e325dcd2d07710a9511c55dd08cf4b17f96dfa3eeef2047ca\"",
+            "printf '%s  %s\\n' \"$SALES25_KIT_LOCK_SHA256\" /app/tools/first_visit/sales25.lock.json | sha256sum -c -",
+            "from teamagent.skills.first_visit.sales25_contract import verify_bundle; verify_bundle()"
+          ]
+        },
+        {
           "key": "artifact.sales25-media-scraper.sha256",
           "value": "4588cb208b7c4f94a427e41b71d1dfbf93af9bdad40cb2614b77b9a560b1b450",
           "build_arg": "SALES25_MEDIA_SCRAPER_SHA256",

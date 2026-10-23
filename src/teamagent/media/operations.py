@@ -30,6 +30,7 @@ from teamagent.media.contracts import (
     ProxyOperation,
     S3ObjectRef,
     Sales25MediaOperation,
+    Sales25PptxOperation,
     SlidesOperation,
     ThumbnailOperation,
     TikTokAcquireOperation,
@@ -1621,6 +1622,31 @@ def _proposal_pptx(
     )
 
 
+def _sales25_pptx(
+    operation: Sales25PptxOperation,
+    workdir: Path,
+    load: ObjectLoader,
+    budget: DeadlineBudget,
+) -> OperationOutput:
+    source = load(operation.source, workdir / "sales25-input.zip")
+    metadata = _renderer_json(
+        {"kind": "sales25_pptx", "source": source.name, "owner_id": operation.owner_id},
+        workdir=workdir,
+        budget=budget,
+    )
+    names = {
+        "deck.pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+        "sales25-qa.json": "application/json",
+        "sales25-qa.zip": "application/zip",
+    }
+    if any(not (workdir / name).is_file() for name in names):
+        raise MediaOperationError("MEDIA_SALES25_ARTIFACT_MISSING", "sales25 artifacts missing")
+    return OperationOutput(
+        tuple(ProducedArtifact(name, workdir / name, mime) for name, mime in names.items()),
+        metadata,
+    )
+
+
 def _pdf(
     operation: PdfOperation,
     workdir: Path,
@@ -1679,6 +1705,8 @@ def execute_operation(
         output = _slides(operation, workdir, load_object, budget)
     elif isinstance(operation, ProposalPptxOperation):
         output = _proposal_pptx(operation, workdir, load_object, budget)
+    elif isinstance(operation, Sales25PptxOperation):
+        output = _sales25_pptx(operation, workdir, load_object, budget)
     elif isinstance(operation, PdfOperation):
         output = _pdf(operation, workdir, load_object, budget)
     else:

@@ -1,0 +1,439 @@
+"""Production sales25 stages; only immutable references cross parent checkpoints."""
+
+from __future__ import annotations
+
+import hashlib
+import io
+import json
+import os
+import tempfile
+import time
+import uuid
+import zipfile
+from collections.abc import Callable
+from dataclasses import asdict
+from datetime import datetime
+from functools import partial
+from pathlib import Path
+from typing import Any, cast
+
+from teamagent.adapters.gemini_client import GeminiClient, GeminiResponse
+from teamagent.adapters.media_job import MediaJobClient, MediaJobError
+from teamagent.adapters.proposal_job_store import ProposalJobStore
+from teamagent.media.contracts import MAX_INPUT_BYTES, S3ObjectRef
+from teamagent.skills.first_visit import sales25_analysis as analysis
+from teamagent.skills.first_visit import sales25_authoring as authoring
+from teamagent.skills.first_visit import sales25_contract as contract
+from teamagent.skills.omiyage_report.sales25 import Artifact, MachineChecks, Stages, StepResult
+
+_SEARCH_SLOT_NAMES = ("dedup_sales25_search_slot_0", "dedup_sales25_search_slot_1")
+# shortcut: one 128 MiB snapshot reserves 16 MiB for metadata; split transfers for larger cases.
+_SNAPSHOT_METADATA_RESERVE = 16 * 1024 * 1024
+
+
+def _limit(name: str, default: int, minimum: int, maximum: int) -> int:
+    value = int(os.environ.get(name, str(default)))
+    if not minimum <= value <= maximum:
+        raise ValueError(f"{name} is outside its allowed range")
+    return value
+
+
+def pack_run(root: Path, owner_id: str) -> bytes:
+    """Bounded, deterministic transfer snapshot; the worker seals authored inputs separately."""
+    paths = sorted(p for p in root.rglob("*") if p.is_file())
+    if sum(p.stat().st_size for p in paths) > MAX_INPUT_BYTES:
+        raise ValueError("sales25 run exceeds transfer size limit")
+    manifest: dict[str, Any] = {"schema_version": 1, "owner_id": owner_id, "files": {}}
+    output = io.BytesIO()
+    with zipfile.ZipFile(output, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        for path in paths:
+            relative = path.relative_to(root).as_posix()
+            if relative == "wire-manifest.json":
+                raise ValueError("reserved transfer manifest")
+            data = contract.local_path(root, relative).read_bytes()
+            manifest["files"][relative] = {
+                "sha256": hashlib.sha256(data).hexdigest(),
+                "size": len(data),
+            }
+            archive.writestr(zipfile.ZipInfo(relative), data)
+        archive.writestr(zipfile.ZipInfo("wire-manifest.json"), contract.json_bytes(manifest))
+    if output.tell() > MAX_INPUT_BYTES:
+        raise ValueError("sales25 run exceeds transfer size limit")
+    return output.getvalue()
+
+
+class _Model:
+    """Cache model evidence in the same case folder, including across interrupted stages."""
+
+    def __init__(self, wire: Wire, case: dict[str, Any], step: str) -> None:
+        self.wire, self.case, self.step = wire, case, step
+        self.calls = 0
+        self.cost_usd = 0.0
+        self.maximum = _limit("OMIYAGE_SALES25_MODEL_CALLS_PER_STAGE", 2000, 1, 20000)
+        self.client: GeminiClient | None = None
+
+    def __getattr__(self, method: str) -> Callable[..., GeminiResponse]:
+        if method not in {
+            "generate_text",
+            "analyze_image_bytes",
+            "compare_image_bytes",
+            "analyze_audio_bytes",
+            "analyze_video_bytes",
+        }:
+            raise AttributeError(method)
+
+        def invoke(*args: Any, **kwargs: Any) -> GeminiResponse:
+            self.wire._remaining(self.case)
+            if self.calls >= self.maximum:
+                raise TimeoutError("sales25 model call limit")
+            self.calls += 1
+            identity = contract.json_bytes(
+                {
+                    "method": method,
+                    "args": [
+                        hashlib.sha256(a).hexdigest() if isinstance(a, bytes) else a for a in args
+                    ],
+                    "kwargs": kwargs,
+                    "model": os.getenv("GEMINI_MODEL_ID", ""),
+                }
+            )
+            name = "model-" + hashlib.sha256(identity).hexdigest() + ".json"
+            cached = self.wire._find_json(self.case, name)
+            if cached is None:
+                if self.client is None:
+                    self.client = self.wire.model_factory()
+                response = cast(GeminiResponse, getattr(self.client, method)(*args, **kwargs))
+                self.wire._save_json(self.case, name, asdict(response))
+            else:
+                response = GeminiResponse(**cached)
+            self.cost_usd += response.cost_usd
+            return response
+
+        return invoke
+
+
+class Wire:
+    def __init__(
+        self,
+        client: MediaJobClient | None = None,
+        model_factory: Callable[[], GeminiClient] = GeminiClient.from_env,
+        *,
+        store: ProposalJobStore | None = None,
+    ) -> None:
+        self.client = client or MediaJobClient()
+        self.model_factory = model_factory
+        self.store = store or ProposalJobStore()
+
+    @staticmethod
+    def _case_id(case: dict[str, Any]) -> str:
+        identity = contract.json_bytes([case["owner_id"], case["job_id"]])
+        return "mj_" + hashlib.sha256(identity).hexdigest()[:24]
+
+    @staticmethod
+    def _remaining(case: dict[str, Any]) -> int:
+        duration = _limit("OMIYAGE_SALES25_PARENT_SECONDS", 10800, 300, 86400)
+        remaining = int(
+            datetime.fromisoformat(case["started_at"]).timestamp() + duration - time.time()
+        )
+        if remaining <= 0:
+            raise TimeoutError("sales25 parent deadline")
+        return remaining
+
+    def _deadline(self, case: dict[str, Any]) -> int:
+        return int(time.time()) + min(900, self._remaining(case))
+
+    def _download(self, case: dict[str, Any], reference: dict[str, Any]) -> bytes:
+        if reference["owner_id"] != case["owner_id"]:
+            raise ValueError("sales25 evidence owner mismatch")
+        ref = S3ObjectRef.model_validate(reference["object"])
+        data = self.client.download(ref, deadline_epoch_s=self._deadline(case))
+        if len(data) != ref.size or hashlib.sha256(data).hexdigest() != ref.sha256:
+            raise ValueError("sales25 evidence hash/size mismatch")
+        return data
+
+    def _save(
+        self, case: dict[str, Any], name: str, data: bytes, content_type: str
+    ) -> dict[str, Any]:
+        ref = self.client.stage_bytes(
+            job_id=self._case_id(case),
+            name=name,
+            body=data,
+            content_type=content_type,
+            deadline_epoch_s=self._deadline(case),
+        )
+        return {"owner_id": case["owner_id"], "object": ref.model_dump(mode="json")}
+
+    def _save_json(self, case: dict[str, Any], name: str, data: Any) -> dict[str, Any]:
+        return self._save(
+            case,
+            name,
+            contract.json_bytes({"owner_id": case["owner_id"], "data": data}),
+            "application/json",
+        )
+
+    def _json(self, case: dict[str, Any], reference: dict[str, Any]) -> Any:
+        payload = json.loads(self._download(case, reference))
+        if payload["owner_id"] != case["owner_id"]:
+            raise ValueError("sales25 payload owner mismatch")
+        return payload["data"]
+
+    def _find_json(self, case: dict[str, Any], name: str) -> Any:
+        ref = self.client.find_staged(
+            job_id=self._case_id(case), name=name, deadline_epoch_s=self._deadline(case)
+        )
+        return (
+            self._json(case, {"owner_id": case["owner_id"], "object": ref.model_dump(mode="json")})
+            if ref
+            else None
+        )
+
+    def run(
+        self, stage: str, case: dict[str, Any], previous: dict[str, StepResult], step_key: str
+    ) -> StepResult:
+        name = step_key.split(":")[-1].replace("_", "-") + "-result.json"
+        cached = self._find_json(case, name)
+        if cached is not None:
+            return StepResult.model_validate(cached)
+        result = cast(StepResult, getattr(self, stage)(case, previous, step_key))
+        self._save_json(case, name, result.model_dump())
+        return result
+
+    def _claim_search_slot(self, case: dict[str, Any]) -> tuple[str, str, int]:
+        while True:
+            timeout = min(
+                self._remaining(case), _limit("OMIYAGE_SALES25_SEARCH_SECONDS", 300, 270, 900)
+            )
+            now = int(time.time())
+            target = f"{now + timeout + 60}:{uuid.uuid4().hex}"
+            for name in _SEARCH_SLOT_NAMES:
+                current = self.store.get_dedup_lock(name)
+                previous = current["target_job_id"] if current else None
+                if previous and int(previous.split(":", 1)[0]) > now:
+                    continue
+                if self.store.put_dedup_lock(name, target, expected_target=previous):
+                    return name, target, timeout
+            time.sleep(min(1, self._remaining(case)))
+
+    def search(
+        self, case: dict[str, Any], previous: dict[str, StepResult], step_key: str
+    ) -> StepResult:
+        slot, lease, timeout = self._claim_search_slot(case)
+        try:
+            result = self.client.search_tiktok_sales25(
+                case["query"],
+                owner_id=case["owner_id"],
+                request_fingerprint=step_key,
+                max_videos=100,
+                timeout_s=timeout,
+            )
+        except MediaJobError as exc:
+            # A caller timeout does not stop the child; keep its slot until deadline + 60s.
+            if "TIMEOUT" in str(exc) or "DEADLINE_EXCEEDED" in str(exc):
+                return StepResult(status="timeout", reason="timeout")
+            raise
+        self.store.put_dedup_lock(slot, "", expected_target=lease)
+        ref = self._save_json(case, step_key.split(":")[-1].replace("_", "-") + ".json", result)
+        raw, acquisition = result["raw"], result["acquisition_status"]
+        if not acquisition["accepted"]:
+            error = str(raw.get("error_code", ""))
+            timeout = "TIMEOUT" in error or "DEADLINE_EXCEEDED" in error
+            refused = raw.get("stop_reason") in {
+                "refused",
+                "captcha",
+                "cdn_denied",
+                "api_error",
+                "no_api_response",
+            }
+            return StepResult(
+                status="timeout" if timeout else "refused" if refused else "incomplete",
+                reason="timeout" if timeout else "refused" if refused else None,
+                refs=[ref],
+                child_job_ids=[result["media_job_id"]],
+            )
+        actual = acquisition["actual"]
+        return StepResult(
+            status="zero" if actual == 0 else "partial" if actual < 100 else "complete",
+            reason="shortfall" if actual < 100 else None,
+            actual=actual,
+            fetched_at=raw["fetched_at"],
+            refs=[ref],
+            child_job_ids=[result["media_job_id"]],
+        )
+
+    def relevance(
+        self, case: dict[str, Any], previous: dict[str, StepResult], step_key: str
+    ) -> StepResult:
+        groups = [case["brand"], *case["competitors"], *case["keywords"]]
+        authored_case = {
+            **case,
+            "queries": [
+                {
+                    "query_id": f"q{i}",
+                    "query": query,
+                    "group": groups[i],
+                    "role": "self" if i == 0 else "competitor" if i < 3 else "market_keyword",
+                    "aliases": case["brand_synonyms"].get(groups[i], [groups[i]]),
+                }
+                for i, query in enumerate(case["queries"])
+            ],
+        }
+        raw = {
+            f"q{i}": self._json(case, previous[f"search_{i + 1}"].refs[0])["raw"] for i in range(6)
+        }
+        model = _Model(self, case, step_key)
+        inputs = authoring.prepare_inputs(
+            authored_case, raw, owner_id=case["owner_id"], model=cast(GeminiClient, model)
+        )
+        inputs["relevance-usage.json"] = {"calls": model.calls, "cost_usd": model.cost_usd}
+        ref = self._save_json(case, "relevance.json", inputs)
+        with tempfile.TemporaryDirectory(prefix="sales25-selection-") as work:
+            root = Path(work).resolve() / "run"
+            contract.write_inputs(root, inputs)
+            total = len(analysis.selected_posts(root, case["owner_id"]))
+        return StepResult(status="complete", refs=[ref], total=total)
+
+    def media(
+        self, case: dict[str, Any], previous: dict[str, StepResult], step_key: str
+    ) -> StepResult:
+        inputs = self._json(case, previous["relevance"].refs[0])
+        collected = {}
+        snapshot_bytes = sum(len(contract.json_bytes(value)) for value in inputs.values())
+        with tempfile.TemporaryDirectory(prefix="sales25-selection-") as work:
+            root = Path(work).resolve() / "run"
+            contract.write_inputs(root, inputs)
+            for post in analysis.selected_posts(root, case["owner_id"]):
+                name = "media-" + post["id"]
+                record = self._find_json(case, name + ".json")
+                if record is None:
+                    operation = analysis.media_operation(post)
+                    artifacts = self.client.acquire_sales25_media(
+                        operation,
+                        request_fingerprint=step_key + ":" + post["id"],
+                        timeout_s=min(900, self._remaining(case)),
+                    )
+                    manifest, _files = analysis.validate_media(operation, artifacts)
+                    record = {
+                        filename: self._save(
+                            case,
+                            name + "-" + filename,
+                            body,
+                            "application/zip" if filename.endswith("zip") else "application/json",
+                        )
+                        for filename, body in artifacts.items()
+                    }
+                    self._save_json(case, name + ".json", record)
+                else:
+                    manifest = json.loads(self._download(case, record["media-manifest.json"]))
+                snapshot_bytes += sum(asset["bytes"] for asset in manifest["assets"])
+                snapshot_bytes += len(contract.json_bytes(manifest))
+                if snapshot_bytes > MAX_INPUT_BYTES - _SNAPSHOT_METADATA_RESERVE:
+                    ref = self._save_json(
+                        case,
+                        "media-size-limit.json",
+                        {
+                            "status": "incomplete",
+                            "reason": "snapshot_size_limit",
+                            "bytes": snapshot_bytes,
+                            "limit_bytes": MAX_INPUT_BYTES,
+                            "metadata_reserve_bytes": _SNAPSHOT_METADATA_RESERVE,
+                        },
+                    )
+                    return StepResult(status="incomplete", reason="media_missing", refs=[ref])
+                collected[post["id"]] = record
+        ref = self._save_json(case, "media.json", collected)
+        return StepResult(
+            status="complete", refs=[ref], actual=len(collected), total=len(collected)
+        )
+
+    def analysis(
+        self, case: dict[str, Any], previous: dict[str, StepResult], step_key: str
+    ) -> StepResult:
+        inputs = self._json(case, previous["relevance"].refs[0])
+        media = self._json(case, previous["media"].refs[0])
+        model = _Model(self, case, step_key)
+        with tempfile.TemporaryDirectory(prefix="sales25-analysis-") as work:
+            root = Path(work).resolve() / "run"
+            contract.write_inputs(root, inputs)
+
+            def acquire(operation: Any) -> dict[str, bytes]:
+                return {
+                    name: self._download(case, ref)
+                    for name, ref in media[operation.post_id].items()
+                }
+
+            result = analysis.analyze_selection(
+                root, owner_id=case["owner_id"], acquire=acquire, model=cast(GeminiClient, model)
+            )
+            (root / "analysis-usage.json").write_bytes(
+                contract.json_bytes({"calls": model.calls, "cost_usd": model.cost_usd})
+            )
+            ref = self._save(
+                case, "analysis.zip", pack_run(root, case["owner_id"]), "application/zip"
+            )
+        if any(p["cover"]["status"] != "matched" for p in result["posts"].values()):
+            return StepResult(status="incomplete", reason="media_mismatch", refs=[ref])
+        partial_audio = any(p["audio"]["status"] == "unmeasured" for p in result["posts"].values())
+        return StepResult(
+            status="partial" if partial_audio else "complete",
+            reason="audio_unverified" if partial_audio else None,
+            refs=[ref],
+            actual=len(result["posts"]),
+            total=len(result["posts"]),
+        )
+
+    def fill(
+        self, case: dict[str, Any], previous: dict[str, StepResult], step_key: str
+    ) -> StepResult:
+        result = self.client.render_sales25_pptx(
+            self._download(case, previous["analysis"].refs[0]),
+            owner_id=case["owner_id"],
+            request_fingerprint=step_key,
+            timeout_s=min(480, self._remaining(case)),
+        )
+        qa = json.loads(result["files"]["sales25-qa.json"])
+        artifacts = {a["name"]: a["object"] for a in result["artifacts"]}
+        pptx = Artifact(**artifacts["deck.pptx"], owner_id=case["owner_id"])
+        refs = [
+            {"owner_id": case["owner_id"], "object": artifacts[name]}
+            for name in ("sales25-qa.json", "sales25-qa.zip")
+        ]
+        return StepResult(
+            status="complete",
+            reason="shortfall"
+            if qa["status"] == "incomplete" or qa.get("fill_limitations")
+            else None,
+            artifact=pptx,
+            refs=refs,
+            child_job_ids=[result["media_job_id"]],
+        )
+
+    def machine_check(
+        self, case: dict[str, Any], previous: dict[str, StepResult], step_key: str
+    ) -> StepResult:
+        payload = json.loads(self._download(case, previous["fill"].refs[0]))
+        checks = MachineChecks.model_validate(payload["checks"])
+        artifact = previous["fill"].artifact
+        if (
+            artifact is None
+            or payload["output_sha256"] != artifact.sha256
+            or not checks.accepts(artifact.sha256)
+        ):
+            return StepResult(status="incomplete", reason="fmt_invalid", checks=checks)
+        return StepResult(status="complete", checks=checks)
+
+
+def production_stages(wire: Wire | None = None, *, store: ProposalJobStore | None = None) -> Stages:
+    adapter = wire or Wire(store=store)
+    return Stages(
+        **{
+            name: partial(adapter.run, name)
+            for name in (
+                "search",
+                "relevance",
+                "media",
+                "analysis",
+                "fill",
+                "machine_check",
+            )
+        }
+    )
