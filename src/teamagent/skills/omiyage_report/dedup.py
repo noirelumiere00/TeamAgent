@@ -181,6 +181,9 @@ class OmiyageSubmitDedup:
             return ""
         status = row.get("status")
         if status in ("queued", "running"):
+            # sales25 の心拍切れは status が同じ親runを再開する。二重の調査を作らない。
+            if json.loads(row["request_summary"]).get("edition") == "sales25":
+                return str(status)
             updated_at = _parse_timestamp(row.get("updated_at"))
             if updated_at is None or (now - updated_at).total_seconds() > self._stale_seconds:
                 return ""  # 心拍切れ（再起動で止まったジョブ）は待たせない

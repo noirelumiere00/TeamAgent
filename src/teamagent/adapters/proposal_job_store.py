@@ -277,7 +277,7 @@ class ProposalJobStore:
             row["error_summary"] = error_summary
         if stage is not None:
             row["stage"] = stage
-        for name in ("research_delivery_status", "research_delivery_error"):
+        for name in ("research_delivery_status", "research_delivery_error", "checkpoint_json"):
             value = string_value(name)
             if value is not None:
                 row[name] = value
@@ -323,7 +323,7 @@ class ProposalJobStore:
             next_status="running",
         )
 
-    def heartbeat(self, job_id: str) -> bool:
+    def heartbeat(self, job_id: str, *, expected_checkpoint: str | None = None) -> bool:
         """Refresh a running row without changing its state."""
 
         now_text = _isoformat(self._clock())
@@ -331,6 +331,11 @@ class ProposalJobStore:
             with self._memory_lock:
                 row = self._memory.get(job_id)
                 if row is None or row.get("status") != "running":
+                    return False
+                if (
+                    expected_checkpoint is not None
+                    and row.get("checkpoint_json") != expected_checkpoint
+                ):
                     return False
                 row["updated_at"] = now_text
                 return True
@@ -340,14 +345,25 @@ class ProposalJobStore:
                 TableName=self._table_name,
                 Key={"job_id": {"S": job_id}},
                 UpdateExpression="SET #updated_at = :updated_at",
-                ConditionExpression="#status = :running",
+                ConditionExpression="#status = :running"
+                + (" AND #checkpoint = :checkpoint" if expected_checkpoint is not None else ""),
                 ExpressionAttributeNames={
                     "#status": "status",
                     "#updated_at": "updated_at",
+                    **(
+                        {"#checkpoint": "checkpoint_json"}
+                        if expected_checkpoint is not None
+                        else {}
+                    ),
                 },
                 ExpressionAttributeValues={
                     ":running": {"S": "running"},
                     ":updated_at": {"S": now_text},
+                    **(
+                        {":checkpoint": {"S": expected_checkpoint}}
+                        if expected_checkpoint is not None
+                        else {}
+                    ),
                 },
             )
             return True
@@ -392,7 +408,65 @@ class ProposalJobStore:
                 return False
             raise
 
-    def mark_done(self, job_id: str, result_json: str) -> bool:
+    def save_checkpoint(
+        self,
+        job_id: str,
+        checkpoint_json: str,
+        *,
+        expected_checkpoint: str | None,
+        expected_updated_at: str | None = None,
+    ) -> bool:
+        """Claim/resume a parent or advance its checkpoint, fencing an older worker."""
+        if len(checkpoint_json.encode()) > 64 * 1024:
+            raise ValueError("parent checkpoint exceeds the DynamoDB row boundary")
+        now_text = _isoformat(self._clock())
+        if not self.uses_dynamodb:
+            with self._memory_lock:
+                row = self._memory.get(job_id)
+                if row is None or row.get("status") not in {"queued", "running"}:
+                    return False
+                if row.get("checkpoint_json") != expected_checkpoint:
+                    return False
+                if expected_updated_at is not None and row.get("updated_at") != expected_updated_at:
+                    return False
+                row.update(status="running", checkpoint_json=checkpoint_json, updated_at=now_text)
+                return True
+        names = {"#status": "status", "#checkpoint": "checkpoint_json", "#updated_at": "updated_at"}
+        values = {
+            ":queued": {"S": "queued"},
+            ":running": {"S": "running"},
+            ":checkpoint": {"S": checkpoint_json},
+            ":updated_at": {"S": now_text},
+        }
+        condition = "(#status = :queued OR #status = :running)"
+        if expected_checkpoint is None:
+            condition += " AND attribute_not_exists(#checkpoint)"
+        else:
+            condition += " AND #checkpoint = :previous"
+            values[":previous"] = {"S": expected_checkpoint}
+        if expected_updated_at is not None:
+            condition += " AND #updated_at = :previous_time"
+            values[":previous_time"] = {"S": expected_updated_at}
+        try:
+            self._client().update_item(
+                TableName=self._table_name,
+                Key={"job_id": {"S": job_id}},
+                UpdateExpression=(
+                    "SET #status = :running, #checkpoint = :checkpoint, #updated_at = :updated_at"
+                ),
+                ConditionExpression=condition,
+                ExpressionAttributeNames=names,
+                ExpressionAttributeValues=values,
+            )
+            return True
+        except Exception as exc:
+            if _is_conditional_failure(exc):
+                return False
+            raise
+
+    def mark_done(
+        self, job_id: str, result_json: str, *, expected_checkpoint: str | None = None
+    ) -> bool:
         if len(result_json.encode("utf-8")) > _MAX_RESULT_BYTES:
             raise ValueError("proposal job result exceeds the DynamoDB row boundary")
         return self._transition(
@@ -400,6 +474,7 @@ class ProposalJobStore:
             expected_statuses=("running",),
             next_status="done",
             result_json=result_json,
+            expected_checkpoint=expected_checkpoint,
         )
 
     def mark_delivered(self, job_id: str) -> bool:
@@ -413,8 +488,15 @@ class ProposalJobStore:
             return False
         result["slack_delivered"] = True
         summary = json.loads(row.get("request_summary") or "{}")
+        if summary.get("edition") == "sales25":
+            result["delivery_status"] = "delivered"
         research_auto = isinstance(summary, dict) and summary.get("research_auto") is True
-        target = "dm" if research_auto and result.get("delivery_target") == "dm" else "thread"
+        target = (
+            "dm"
+            if (research_auto or summary.get("edition") == "sales25")
+            and result.get("delivery_target") == "dm"
+            else "thread"
+        )
         result["delivery_target"] = target
         suffix = " DMへ添付しました。" if target == "dm" else " この会話へ添付しました。"
         # 添付の報告は 1 行目（状態の文）に続ける。末尾に足すと、調査の行や要確認の警告の
@@ -444,10 +526,14 @@ class ProposalJobStore:
         # 書くと次の状態照会で RESULT_INVALID になる（10-09 の検証で発覚）。
         # 調査からの自動作成だけに限る。
         summary = json.loads(row.get("request_summary") or "{}")
-        if not (isinstance(summary, dict) and summary.get("research_auto") is True):
+        is_sales25 = isinstance(summary, dict) and summary.get("edition") == "sales25"
+        if not (is_sales25 or (isinstance(summary, dict) and summary.get("research_auto") is True)):
             return False
         warning = "提案書の添付結果を確認できません" if uncertain else "Slackファイル添付に失敗"
-        result["warnings"] = list(dict.fromkeys([*result.get("warnings", []), warning]))
+        if is_sales25:
+            result["delivery_status"] = "uncertain" if uncertain else "failed"
+        else:
+            result["warnings"] = list(dict.fromkeys([*result.get("warnings", []), warning]))
         result["message"] = str(result.get("message") or "") + (
             " 提案書の添付結果を確認できませんでした。DMをご確認ください。"
             if uncertain
@@ -494,6 +580,7 @@ class ProposalJobStore:
         expected_updated_at_missing: bool = False,
         expected_updated_at_invalid: bool = False,
         result_json: str | None = None,
+        expected_checkpoint: str | None = None,
         error_code: str | None = None,
         error_summary: str | None = None,
     ) -> bool:
@@ -511,6 +598,11 @@ class ProposalJobStore:
             with self._memory_lock:
                 row = self._memory.get(job_id)
                 if row is None or row.get("status") not in expected_statuses:
+                    return False
+                if (
+                    expected_checkpoint is not None
+                    and row.get("checkpoint_json") != expected_checkpoint
+                ):
                     return False
                 if expected_updated_at is not None and row.get("updated_at") != expected_updated_at:
                     return False
@@ -543,6 +635,9 @@ class ProposalJobStore:
             status_conditions.append(f"#status = {placeholder}")
             values[placeholder] = {"S": status}
         conditions = ["(" + " OR ".join(status_conditions) + ")"]
+        if expected_checkpoint is not None:
+            conditions.append("#checkpoint = :checkpoint")
+            values[":checkpoint"] = {"S": expected_checkpoint}
         if expected_updated_at is not None:
             conditions.append("#updated_at = :expected_updated_at")
             values[":expected_updated_at"] = {"S": expected_updated_at}
@@ -590,6 +685,11 @@ class ProposalJobStore:
                     "#result_json": "result_json",
                     "#error_code": "error_code",
                     "#error_summary": "error_summary",
+                    **(
+                        {"#checkpoint": "checkpoint_json"}
+                        if expected_checkpoint is not None
+                        else {}
+                    ),
                 },
                 ExpressionAttributeValues=values,
             )

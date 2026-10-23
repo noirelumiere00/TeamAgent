@@ -14,7 +14,7 @@ import structlog
 
 from teamagent.adapters.proposal_job_store import ProposalJobStore
 from teamagent.mcp_gateway import detached_jobs
-from teamagent.skills._shared.long_jobs import _OWNER_KEY, Origin, enabled
+from teamagent.skills._shared.long_jobs import _OWNER_KEY, ORIGIN_KEY, Origin, enabled
 from teamagent.skills._shared.slack_blocks import RichMessage
 from teamagent.skills.base import SkillContext
 
@@ -111,6 +111,7 @@ def publish_notice(
                 logger.warning("long_job_notice_uncertain", request_id=request_id, job_id=job_id)
                 # 添付の自動再送はしない。DMへ振り替えた場合は依頼元へ結果の不確実性を知らせる。
                 if not origin.redirected:
+                    record_primary_failure(uncertain=True)
                     return False
                 record_primary_failure(uncertain=True)
                 message = "提案書の添付結果を確認できませんでした。DMをご確認ください。"
@@ -248,6 +249,7 @@ def _run_completion_notice(
     deadline = started + _MAX_WATCH_SECONDS
     _wait_until_next_poll(deadline, _INITIAL_DELAY_SECONDS)
     last_status = "unknown"
+    message = ""
     while _monotonic() < deadline and not origin.cancelled:
         if outbox_key:
             try:
@@ -269,6 +271,17 @@ def _run_completion_notice(
             last_status = "unknown"
             logger.warning("long_job_poll_failed", request_id=request_id, error=type(exc).__name__)
         else:
+            if status == "running" and message.startswith("sales25:"):
+                phase = message.split("。", 1)[0]
+                if "検索" in phase:
+                    phase = "sales25: 検索"
+                publish_notice(
+                    message,
+                    origin=origin,
+                    request_id=request_id,
+                    job_id=job_id,
+                    kind="progress_" + phase,
+                )
             if status in {"done", "failed"}:
                 publish_notice(
                     message,
@@ -281,7 +294,12 @@ def _run_completion_notice(
                     return True
         if last_status not in {"done", "failed"} and _monotonic() - started >= _TIMEOUT_SECONDS:
             message = (
-                "作業はまだ完了していません。通常より時間がかかっています。完了・失敗はこの会話にお届けします。"
+                "sales25の作業はまだ完了していません。目安は1〜3時間（仮）です。引き続き確認し、結果をこの会話にお届けします。"
+                if message.startswith("sales25:") and last_status in {"queued", "running"}
+                else (
+                    "作業はまだ完了していません。通常より時間がかかっています。"
+                    "完了・失敗はこの会話にお届けします。"
+                )
                 if last_status in {"queued", "running"}
                 else (
                     "作業の状態を確認できません。確認を続け、"
@@ -423,6 +441,7 @@ def recover_pending_notices() -> int:
                 "_long_job_principal_hash": entry["principal"],
                 _CREATED_AT_KEY: entry.get("created_at", entry["updated_at"]),
                 ASYNC_JOB_POLL_METADATA_KEY: True,
+                ORIGIN_KEY: target,
             },
         )
         job_ids = entry["job_id"].split("|")
