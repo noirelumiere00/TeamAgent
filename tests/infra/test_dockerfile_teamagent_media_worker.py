@@ -45,7 +45,8 @@ UV_DIGEST = "9941e2d8e06ff884d328905091eac0a6bc1e40e5ce12e6dd0de4ef4ee26baac4"
 # 2026-10-21: ca-certificates 20260909-r0→20261020-r0。人作成 lock は 20 行目のみ差分（241 行不変）、実物一致は段 3 の cmp で検証。
 # 2026-10-22: c-ares 1.34.8-r0→1.34.9-r0。人作成 lock は 19 行目のみ差分（241 行不変）、実物一致は段 3 の cmp で検証。
 # 2026-10-23: ncurses 6.6_p20260822-r0→6.6_p20261017-r0。人作成 lock は 112・115・184 行目のみ差分（241 行不変）、実物一致は段 3 の cmp で検証。
-APK_LOCK_SHA256 = "608c7d70f0a7191e991f6be89957beb9c3e5bd254e3dd2a6e17035d09f71a7e4"
+# 2026-10-23: gdbm-1.26-r0 を 54 行目へ追加（241→242 行）。人作成 lock と実物の一致は段 3 の cmp で検証。
+APK_LOCK_SHA256 = "37d39a19abdcadc32c48680cfa4277400e8e6dbbb9c1d16c23d92e119e6f37c2"
 CHROMIUM_PATH = "/usr/lib/chromium/chromium"
 
 
@@ -115,8 +116,8 @@ def test_media_chromium_path_matches_the_measured_binary_everywhere() -> None:
 
 def test_apk_inventory_is_exact_and_hash_pinned() -> None:
     assert (
-        len(APK_LOCK.read_text(encoding="utf-8").splitlines()) == 241
-    )  # 2026-08-17 edge 依存グラフ変更で expat/gdbm が再び依存から脱落（実ビルド diff で確定）
+        len(APK_LOCK.read_text(encoding="utf-8").splitlines()) == 242
+    )  # 2026-10-23: gdbm-1.26-r0 の依存追加に追随。実物一致は段 3 の cmp で検証。
     assert _sha256(APK_LOCK) == APK_LOCK_SHA256
     assert f"ARG MEDIA_APK_LOCK_SHA256={APK_LOCK_SHA256}" in TEXT
     assert "cmp /tmp/media-apk.lock /tmp/actual-apk.lock" in TEXT
