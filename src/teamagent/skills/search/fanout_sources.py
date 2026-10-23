@@ -651,6 +651,7 @@ def case_lookup_by_industry(
     request_id: str | None = None,
     product: str | None = None,
     limit: int = CASE_LIMIT,
+    soft_industry: bool = False,
 ) -> SourceResult[CaseRow]:
     """事例集から事例を引く（例外は投げない）。
 
@@ -689,7 +690,12 @@ def case_lookup_by_industry(
             if client is not None:
                 with conn.transaction():
                     found = pgvector.list_case_studies(
-                        conn, client_name=client, limit=limit, stage=1, request_id=request_id
+                        conn,
+                        client_name=client,
+                        limit=limit,
+                        stage=1,
+                        request_id=request_id,
+                        soft_industry=soft_industry,
                     )
                 searched.append(client)
                 if found:
@@ -702,6 +708,7 @@ def case_lookup_by_industry(
                             limit=limit,
                             stage=2,
                             request_id=request_id,
+                            soft_industry=soft_industry,
                         )
                     same = [
                         r
@@ -721,6 +728,7 @@ def case_lookup_by_industry(
                         limit=max(5, limit),
                         stage=5,
                         request_id=request_id,
+                        soft_industry=soft_industry,
                     )
                 searched.append(product)
                 if found:
@@ -728,7 +736,12 @@ def case_lookup_by_industry(
             if not rows and want_industry and canonical is not None:
                 with conn.transaction():
                     found = pgvector.list_case_studies(
-                        conn, industry=canonical, limit=limit, stage=4, request_id=request_id
+                        conn,
+                        industry=canonical,
+                        limit=limit,
+                        stage=4,
+                        request_id=request_id,
+                        soft_industry=soft_industry,
                     )
                 searched.append(canonical)
                 if found:

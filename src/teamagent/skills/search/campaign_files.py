@@ -32,7 +32,7 @@ from typing import Any
 
 from teamagent.adapters.pgvector_client import SearchHit
 from teamagent.client_identity import client_identity_key
-from teamagent.ingest.industry_taxonomy import normalize_industry
+from teamagent.ingest.industry_taxonomy import INDUSTRY_KEYWORDS, normalize_industry
 from teamagent.skills._shared.source_url import hit_doc_url
 from teamagent.skills.search.client_match import normalize_filter_client
 from teamagent.skills.search.not_found import target_matches
@@ -282,13 +282,21 @@ def hit_industry(hit: SearchHit) -> str | None:
     return _industry_of(getattr(hit, "metadata", None) or {})
 
 
-def scope_by_industry(hits: Sequence[SearchHit], asked_industry: str | None) -> list[SearchHit]:
-    """確認できる業種一致を先にし、未分類でも対象業種を明記した資料は残す。"""
+def scope_by_industry(
+    hits: Sequence[SearchHit], asked_industry: str | None, *, soft: bool = False
+) -> list[SearchHit]:
+    """既知の別業種を除く。Drive用のsoft選別では近接語を拾い、判断不能は末尾へ残す。"""
     wanted = normalize_industry(asked_industry)
     if not wanted:
         return list(hits)
     matched: list[SearchHit] = []
     mentioned: list[SearchHit] = []
+    unknown: list[SearchHit] = []
+    food_terms = (
+        (*INDUSTRY_KEYWORDS["飲食"], *INDUSTRY_KEYWORDS["飲料"], "調味料", "菓子", "ラーメン")
+        if soft and wanted == "食品"
+        else ()
+    )
     for hit in hits:
         industry = hit_industry(hit)
         if industry == wanted:
@@ -298,14 +306,23 @@ def scope_by_industry(hits: Sequence[SearchHit], asked_industry: str | None) -> 
             text = (
                 "\n".join(
                     str(meta.get(key) or "")
-                    for key in ("title", "campaign", "case_product", "cls_project", "advertiser")
+                    for key in (
+                        "title",
+                        "campaign",
+                        "case_product",
+                        "cls_project",
+                        "advertiser",
+                        *(("client_name", "case_client", "brand", "product") if soft else ()),
+                    )
                 )
                 + "\n"
                 + hit.content
             )
-            if target_matches(text, wanted):
+            if target_matches(text, wanted) or any(term in text for term in food_terms):
                 mentioned.append(hit)
-    return matched + mentioned
+            elif soft and not any(target_matches(text, name) for name in INDUSTRY_KEYWORDS):
+                unknown.append(hit)
+    return matched + mentioned + unknown
 
 
 def campaign_header(hit: SearchHit) -> str:

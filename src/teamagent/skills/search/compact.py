@@ -131,6 +131,37 @@ def append_used_drive_links(
     return "\n\n".join(part for part in (answer, " / ".join(links)) if part)
 
 
+def append_comparison_drive_links(
+    answer: str,
+    hits: Sequence[SearchHit],
+    clients: Sequence[str],
+    displayed_refs: list[DocumentReference],
+) -> str:
+    """比較対象ごとに確認済み正本を1件表示し、表示した参照だけを保存する。"""
+    from teamagent.skills.search.case_list import case_link
+    from teamagent.skills.search.client_match import hit_is_about_client
+
+    links: list[str] = []
+    for client in clients:
+        for hit in hits:
+            if not hit_is_about_client(hit, client):
+                continue
+            ref = drive_first.canonical_reference(hit.metadata or {}, hit.content)
+            link = case_link(ref.url, "資料を見る") if ref.kind == "drive" else None
+            if not link or "/spreadsheets/" in (ref.url or ""):
+                continue
+            label = re.sub(r"[<>&|\r\n]", " ", client).strip()
+            labeled = f"{label}: {link}"
+            if link in answer and ": " + link not in answer:
+                answer = answer.replace(link, labeled, 1)
+            else:
+                links.append(labeled)
+            if not any(r.drive_file_id == ref.drive_file_id for r in displayed_refs):
+                displayed_refs.append(ref)
+            break
+    return "\n\n".join(part for part in (answer, " / ".join(links)) if part)
+
+
 def fallback_cards(
     query: str,
     hits: Sequence[SearchHit],
@@ -194,8 +225,9 @@ def source_map(
     return sources
 
 
-def prompt() -> str:
-    return load_prompt("search", "compact", "system")
+def prompt(*, drive_mode: bool = False) -> str:
+    system = load_prompt("search", "compact", "system")
+    return system + "\n" + load_prompt("search", "compact", "drive") if drive_mode else system
 
 
 def source_prompt(sources: Sources) -> str:

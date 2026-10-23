@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Sequence
 from decimal import Decimal
 
 from teamagent.adapters.pgvector_client import SearchHit
 from teamagent.skills.search.campaign_files import campaign_key, is_campaign_hit
+from teamagent.skills.search.client_match import names_overlap
+from teamagent.skills.search.result_guard import find_client_mention
 
 _COMPARISON = re.compile(r"比較|比べ|何が効|どれが効|どっちが|どちらが|勝ち|効果")
 _NUMBER = r"([0-9]+(?:,[0-9]{3})*(?:\.[0-9]+)?)(?=\s|、|。|$)"
@@ -22,6 +25,19 @@ _METRICS = (
 def is_comparison_query(query: str) -> bool:
     """一覧語と併記されても、比較・効果を問う依頼は要約を省かない。"""
     return bool(_COMPARISON.search(query))
+
+
+def named_comparison_clients(query: str, vocabulary: Sequence[str]) -> list[str]:
+    """既存の語境界検査で名指しを拾い、長い法人名・別名の重複を除く。"""
+    if not is_comparison_query(query):
+        return []
+    clients: list[str] = []
+    for name in sorted(vocabulary, key=len, reverse=True):
+        if find_client_mention(query, [name], strict=True) and not any(
+            names_overlap(name, previous) for previous in clients
+        ):
+            clients.append(name)
+    return clients if len(clients) >= 2 else []
 
 
 def _comparison_rows(

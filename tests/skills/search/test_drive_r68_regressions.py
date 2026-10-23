@@ -54,8 +54,8 @@ def test_industry_applies_to_all_card_candidates(
         SearchInput(query=query, filter_industry="食品" if explicit_filter else None),
         SkillContext(metadata=META),
     )
-    assert [ref.drive_file_id for ref in out.displayed_refs] == ["FILE1", "FILE3"]
-    assert "食品会社2" not in out.answer and "分類なし" not in out.answer
+    assert [ref.drive_file_id for ref in out.displayed_refs] == ["FILE1", "FILE3", "FILE4"]
+    assert "食品会社2" not in out.answer
 
 
 @pytest.mark.parametrize("fanout_enabled", [False, True])

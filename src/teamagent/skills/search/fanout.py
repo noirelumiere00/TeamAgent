@@ -40,7 +40,7 @@ from teamagent.skills.search.campaign_files import (
     scope_by_industry,
 )
 from teamagent.skills.search.client_match import hit_entities
-from teamagent.skills.search.comparison import is_comparison_query
+from teamagent.skills.search.comparison import compact_comparison, is_comparison_query
 from teamagent.skills.search.composite import (
     MCP_SURFACE_CTX_KEY,
     SLACK_TOP_N,
@@ -185,6 +185,7 @@ def collect_named_sources(
     probe: dict[str, Any],
     *,
     industry: str | None = None,
+    comparison_clients: list[str] | None = None,
 ) -> None:
     """金庫の接続で名指し資料・カルテ・事例を読む。SAVEPOINT で本体を守る。"""
     from teamagent.skills.search.case_list import CANDIDATE_LIMIT
@@ -207,17 +208,24 @@ def collect_named_sources(
         if probe.get("case_query") and not industry and not client
         else None,
         limit=case_limit,
+        soft_industry=drive_first.enabled(ctx.metadata),
     )
     started = time.perf_counter()
     status: LaneState = "skipped"
     named: list[SearchHit] = []
-    if client:
-        try:
-            with connect() as named_conn:
-                named = skill._pgvector.find_documents_for_advertiser(named_conn, client, limit=8)
+    if client or comparison_clients:
+        for name in comparison_clients or ([client] if client else []):
+            try:
+                with connect() as named_conn:
+                    named.extend(
+                        skill._pgvector.find_documents_for_advertiser(
+                            named_conn, name, limit=8, drive_only=bool(comparison_clients)
+                        )
+                    )
+            except Exception as exc:
+                status = "timeout" if is_timeout_error(exc) else "error"
+        if status == "skipped":
             status = "ok" if named else "empty"
-        except Exception as exc:
-            status = "timeout" if is_timeout_error(exc) else "error"
     probe["named"] = named
     probe["named_lane"] = LaneResult(
         "named", status, len(named), int((time.perf_counter() - started) * 1000)
@@ -351,6 +359,8 @@ def run_fanout(skill: Any, input: SearchInput, ctx: SkillContext) -> SearchOutpu
         hits = skill._retrieve(
             embedding, input, ctx, timings=timings, probe=probe, fanout_probe=extra
         )
+        if extra.get("comparison_clients"):
+            hits = [*hits, *extra.get("named", [])]
         decision = skill._judge_found(input.query, hits, probe)
         if skill._alias_expansion and not decision.found:
             hits, _, incomplete = skill._retry_aliases(input, ctx, hits, probe)
@@ -386,7 +396,7 @@ def run_fanout(skill: Any, input: SearchInput, ctx: SkillContext) -> SearchOutpu
         if drive_case_listing or input.filter_industry or any(is_campaign_hit(h) for h in hits)
         else None
     )
-    summary_hits = case_target_hits(hits, scope_target)
+    summary_hits = case_target_hits(hits, scope_target, soft_industry=drive_mode)
     if not summary_hits:
         found = False
     client = skill._asked_client(probe)
@@ -401,20 +411,38 @@ def run_fanout(skill: Any, input: SearchInput, ctx: SkillContext) -> SearchOutpu
         slack = replace(
             slack, items=tuple(i for i in slack.items if target_matches(i.text, scope_target))
         )
-        extra["named"] = case_target_hits(extra.get("named", []), scope_target)
-        karte = replace(karte, items=tuple(case_target_hits(karte.items, scope_target)))
-        cases = replace(
-            cases,
-            items=tuple(
-                r
-                for r in cases.items
-                if (
-                    normalize_industry(r.industry) == normalize_industry(scope_target)
-                    if normalize_industry(scope_target) and r.industry
-                    else target_matches(f"{r.title} {r.client} {r.brand} {r.product}", scope_target)
-                )
-            ),
+        extra["named"] = case_target_hits(
+            extra.get("named", []), scope_target, soft_industry=drive_mode
         )
+        karte = replace(
+            karte,
+            items=tuple(case_target_hits(karte.items, scope_target, soft_industry=drive_mode)),
+        )
+        if drive_mode and normalize_industry(scope_target):
+            kept = {
+                h.chunk_id
+                for h in scope_by_industry(
+                    _case_hits(cases, drive_mode=True), scope_target, soft=True
+                )
+            }
+            cases = replace(
+                cases, items=tuple(row for i, row in enumerate(cases.items, 1) if -i in kept)
+            )
+        else:
+            cases = replace(
+                cases,
+                items=tuple(
+                    r
+                    for r in cases.items
+                    if (
+                        normalize_industry(r.industry) == normalize_industry(scope_target)
+                        if normalize_industry(scope_target) and r.industry
+                        else target_matches(
+                            f"{r.title} {r.client} {r.brand} {r.product}", scope_target
+                        )
+                    )
+                ),
+            )
     if case_target and cases.items:
         # 対象に一致した構造化事例も、意味検索と同じ回答の根拠にする。
         summary_hits = [*summary_hits, *_case_hits(cases)]
@@ -522,6 +550,8 @@ def run_fanout(skill: Any, input: SearchInput, ctx: SkillContext) -> SearchOutpu
 
         def summarize() -> tuple[str, float, LaneState]:
             try:
+                if drive_mode and compact_mode and compact_comparison(input.query, summary_hits)[0]:
+                    return "", 0.0, "ok"
                 answer, cost = skill._summarize(
                     input.query,
                     summary_hits,
@@ -530,6 +560,7 @@ def run_fanout(skill: Any, input: SearchInput, ctx: SkillContext) -> SearchOutpu
                     bedrock=build_summary_client(),
                     karte_hits=karte.items,
                     asked_industry=asked_industry,
+                    compact_drive_mode=drive_mode,
                     **({"timeline_statuses": statuses} if statuses is not None else {}),
                     **(
                         {"canonical_campaign_totals": campaign_totals_block(summary_hits)}
@@ -557,7 +588,12 @@ def run_fanout(skill: Any, input: SearchInput, ctx: SkillContext) -> SearchOutpu
             summary_future, summary_started, SUMMARY_DEADLINE_S, ("", 0.0, "timeout")
         )
         summary_ms = int((time.perf_counter() - summary_started) * 1000)
-        if summary_state != "ok" or not head.strip():
+        if summary_state != "ok" or (
+            not head.strip()
+            and not (
+                drive_mode and compact_mode and compact_comparison(input.query, summary_hits)[0]
+            )
+        ):
             direct_kind = None
     compact_answer = ""
     compact_fallback_cards = ""
@@ -634,8 +670,11 @@ def run_fanout(skill: Any, input: SearchInput, ctx: SkillContext) -> SearchOutpu
     if extra.get("retried"):
         candidates = hits
     if scope_target:
-        candidates = case_target_hits(candidates, scope_target)
-        expanded = replace(expanded, hits=tuple(case_target_hits(expanded.hits, scope_target)))
+        candidates = case_target_hits(candidates, scope_target, soft_industry=drive_mode)
+        expanded = replace(
+            expanded,
+            hits=tuple(case_target_hits(expanded.hits, scope_target, soft_industry=drive_mode)),
+        )
     show_expanded = (
         not found
         or not classify_hits(hits).has_case_or_campaign
@@ -837,7 +876,7 @@ def run_fanout(skill: Any, input: SearchInput, ctx: SkillContext) -> SearchOutpu
             *slack_cases(slack.items, drive_only=drive_case_listing),
         ]
         if drive_case_listing:
-            listing_hits = scope_by_industry(listing_hits, asked_industry)
+            listing_hits = scope_by_industry(listing_hits, asked_industry, soft=True)
         listed = render(
             listing_hits,
             case_target,
@@ -950,6 +989,10 @@ def run_fanout(skill: Any, input: SearchInput, ctx: SkillContext) -> SearchOutpu
     )
     if found and input.include_answer:
         answer = answer.replace(compact.EMPTY_ANSWER, "").strip()
+        if displayed_refs is not None and extra.get("comparison_clients"):
+            answer = compact.append_comparison_drive_links(
+                answer, summary_hits, extra["comparison_clients"], displayed_refs
+            )
     return SearchOutput(
         answer=answer,
         answer_format="compact"
