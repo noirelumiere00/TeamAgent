@@ -6466,6 +6466,93 @@ def test_config_migration_manifest_is_accepted_and_bound_to_exact_live(tmp_path:
         assert "liveはmigrationのexact one-time source allowlistと一致しません" in rejected.stderr
 
 
+def test_sales25_candidate_requires_snapshot_before_preflight(tmp_path: Path) -> None:
+    entry = json.loads(MIGRATIONS_FILE.read_text())["migrations"][
+        "2026-10-tiktok-dispatch-sales25-v1"
+    ]
+    assert entry["kind"] == "config"
+    assert entry["enabled"] is False and entry["reviewed_plan"] is None
+    assert entry["to"]["allowed_resource_changes"] == ["aws_lambda_function.tiktok_dispatch[0]"]
+    assert entry["to"]["allowed_env_changes"] == {}
+    assert entry["required_preflight_profiles"] == []
+    assert entry["to"]["images"] == entry["from"]["images"]
+    assert entry["to"]["rule_states"] == entry["from"]["rule_states"]
+    unmeasured = copy.deepcopy(entry)
+    for values in unmeasured["from"].values():
+        values.update(dict.fromkeys(values, ""))
+    unmeasured["to"]["images"] = copy.deepcopy(unmeasured["from"]["images"])
+    unmeasured["to"]["rule_states"] = copy.deepcopy(unmeasured["from"]["rule_states"])
+    rejected, _ = _run_migration_to_file(tmp_path, unmeasured, "preflight")
+    assert rejected.returncode != 0
+
+    entry["from"] = _config_migration_entry()["from"]
+    entry["expires_at"] = "2099-01-01T00:00:00Z"
+    entry["to"]["images"] = copy.deepcopy(entry["from"]["images"])
+    entry["to"]["rule_states"] = copy.deepcopy(entry["from"]["rule_states"])
+    accepted, _ = _run_migration_to_file(tmp_path, entry, "candidate")
+    assert accepted.returncode == 0, accepted.stderr
+    live = _config_live_snapshot(entry)
+    assert _run_validate_migration_source(tmp_path, live, entry).returncode == 0
+    live["dispatchers"]["tiktok"]["code_sha256"] = "Q" * 43 + "="
+    assert _run_validate_migration_source(tmp_path, live, entry).returncode != 0
+
+
+@pytest.mark.parametrize(
+    "scenario",
+    ["code_only", "lambda_static_env", "lambda_role", "lambda_source_reference", "lambda_filename_reference"],
+)
+def test_config_strict_dispatcher_body_accepts_only_archive_code_update(
+    tmp_path: Path, scenario: str
+) -> None:
+    plan = _safe_plan()
+    _stabilize_no_image_plan(plan, hmac_active=False)
+    change = _find(plan, "aws_lambda_function.tiktok_dispatch[0]")["change"]
+    change["actions"] = ["update"]
+    change["after"]["source_code_hash"] = "Q" * 43 + "="
+    if scenario != "code_only":
+        _mutate_plan(plan, scenario)
+    snapshot = {
+        "dispatchers": {
+            component: {"critical": _normalize_lambda_tf(_lambda_tf(component))}
+            for component in DISPATCHERS
+        },
+        "taskdefs": {component: {"arn": _task_arn(component)} for component in DISPATCHERS},
+    }
+    core = {
+        f"{prefix}_dispatch_static_environment": {
+            key: value for key, value in _dispatcher_environment(component).items()
+            if key != "TASKDEF_ARN"
+        }
+        for component, prefix in (("tiktok", "tiktok"), ("x_buzz", "x"))
+    }
+    paths = []
+    for name, value in (("plan", plan), ("snapshot", snapshot), ("core", core)):
+        path = tmp_path / f"{name}.json"
+        path.write_text(json.dumps(value))
+        paths.append(str(path))
+    # Exercise the actual shared dispatcher block reached after config validation.
+    strict_body = _guard_function("validate_plan").split(
+        "  # Dispatcherはtask definition revisionだけ", 1
+    )[1].split("  # SQS event source mapping", 1)[0]
+    strict_body = "\n".join(strict_body.splitlines()[2:])
+    script = "\n".join([
+        'set -euo pipefail',
+        f'GUARD_JQ_DIR={str(GUARD.parent)!r}',
+        'die() { echo "$*" >&2; return 1; }',
+        'plan_has_address() { return 0; }',
+        'plan_json="$1"; snapshot="$2"; core="$3"',
+        'validate_dispatchers() {',
+        strict_body,
+        '}',
+        'validate_dispatchers',
+    ])
+    result = subprocess.run(["bash", "-c", script, "validator", *paths],
+                            capture_output=True, text=True, timeout=120)
+    assert (result.returncode == 0) == (scenario == "code_only"), result.stderr
+    if scenario != "code_only":
+        assert "所定taskdef参照以外のdispatcher設定を変更します" in result.stderr
+
+
 CONFIG_MANIFEST_REJECTIONS = {
     "to_image_digest": lambda e: e["to"]["images"].update(mcp=f"{REPOSITORY}@sha256:{'d' * 64}"),
     "from_image_digest": lambda e: e["from"]["images"].update(
