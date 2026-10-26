@@ -369,3 +369,13 @@ for (const [id, query, body, tail] of [
     assert.equal(p.send('モデルが追加した説明です。'), body + '\n' + link);
   });
 }
+
+for (const tail of ['詳しい内容をご覧になりたい場合は、お知らせください。', '何か他に知りたいことはありますか？']) {
+  test(`eval12 final guard with MCP drive receipt and no OC drive env: ${tail}`, () => {
+    const p = setup('社内でいうビデオリリースって何？');
+    p.remember({answer: '配信サービスです。' + tail, found: true, displayed_refs: []});
+    const out = p.send('モデルの下書き。');
+    assert.match(out, /配信サービスです/u);
+    assert.doesNotMatch(out, /お知らせ|ありますか/u);
+  });
+}

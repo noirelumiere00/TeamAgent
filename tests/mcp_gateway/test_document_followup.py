@@ -327,3 +327,11 @@ async def test_slack_only_attachment_is_rechecked_as_the_requester(
     skill._slack_store.get.assert_called_once_with(ME)
     skill._slack_reader_factory.assert_called_once_with("requester-token")
     assert skill.calls == ["対象分野の事例出して"]
+
+
+async def test_eval12_empty_refs_survive_real_mcp_serialization() -> None:
+    skill = _Search()
+    skill.refs = []
+    result = await dispatch(skill, "社内でいうビデオリリースって何？")
+    assert result["displayed_refs"] == []
+    assert result["document_followup_available"] is False
