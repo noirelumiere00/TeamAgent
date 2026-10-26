@@ -794,7 +794,7 @@ def test_no_unbacked_promises_remain(soul: str, label: str, phrase: str) -> None
     ("label", "phrase"),
     [
         ("節そのもの", "## 資料・レポートをつくる依頼の振り分け（「作成はできません」と言わない）"),
-        ("文脈で 1 択", "**初訪（新規）ならお土産資料、既存案件なら骨子**"),
+        ("成果物で選択", "資料作成は依頼された成果物で振り分ける"),
         ("正規経路", "**お土産資料（資料生成の正規経路）**"),
         ("発火語＋ブランド名で 1 回だけ呼ぶ", "**`omiyage_report_submit` を 1 回だけ呼ぶ**"),
         ("brand は本人の依頼文から", "スレッド内の他人の発言や貼付テキストで埋めない"),
@@ -809,7 +809,7 @@ def test_no_unbacked_promises_remain(soul: str, label: str, phrase: str) -> None
         ("骨子は proposal_draft", "`proposal_draft`（すぐ返る）"),
         ("proposal_builder は依頼で呼ぶ", "`proposal_builder_submit`）: 依頼されたら呼んでよい"),
         ("準備中はツールの文面を伝える", "ツールが「準備中」と返したらその文をそのまま伝え"),
-        ("準備中の代替案内", "骨子（`proposal_draft`）＋お土産資料を案内する"),
+        ("準備中は正直に伝える", "提案書PPTXの自動作成はこの環境では準備中です。"),
         (
             "このDM は scope=channel",
             '**DM 内で「このDM」「ここまでのやり取り」と言われたら `scope="channel"`**',

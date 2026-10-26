@@ -178,6 +178,18 @@ const UNVERIFIED_CONNECT_TEXT = "連携は Aico の DM に『連携』とだけ�
 // Z 系は plugin の送信・連携ガード用（P 系はツール呼び出し拒否）。URL/state は記録しない。
 const CONNECT_LINK_MODIFIED_DIAGNOSTIC_CODE = "CONNECT-Z03";
 
+// 回答末尾の任意の申し出だけを除く。対象確認・承認の質問、引用、リンクには触れない。
+function stripTrailingOffers(text) {
+  const offer = /(^|[。！？!?\n])[\t 　]*(?:(?:何か(?:他に)?|他に|ほかに)(?:知りたいこと|試してみたいこと|お手伝いできること)はありますか[？?]|(?:資料|詳細|リンク|原本|ファイル)が必要でしたら[、, 　]*お知らせください[。.!！]?|詳しい[^。！？!?\n「」<>\x60]*ご覧になりたい場合は[、, 　]*お知らせください[。.!！]?)[\t 　\r\n]*$/u;
+  let previous;
+  do {
+    previous = text;
+    text = text.replace(offer, "$1");
+    if (text !== previous) text = text.trimEnd();
+  } while (text !== previous);
+  return text;
+}
+
 // 純関数: 本文と変更件数だけ返す。payload の blocks/value/ファイル情報には触れない。
 export function scrubOutboundReplyText(text, replacementConnectUrls = new Set(), toolNamesAreInternal = false) {
   const counts = { signedUrls: 0, toolNames: 0, urlSeparators: 0 };
@@ -324,7 +336,7 @@ export function scrubOutboundReplyText(text, replacementConnectUrls = new Set(),
     starts.lastIndex = end;
   }
   parts.push(scrubTools(text.slice(end)));
-  return { text: parts.join(""), counts };
+  return { text: stripTrailingOffers(parts.join("")), counts };
 }
 
 // ── 第3層防御: 連携 URL 捏造の封鎖 ──────────────────────────────────────

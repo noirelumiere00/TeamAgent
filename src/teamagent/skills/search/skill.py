@@ -1241,6 +1241,15 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
                     authorize_drive=lambda ref: self._authorized_drive_reference(ref, ctx),
                 )
             answer = compact.strip_linkless_invitation(answer)
+        if found and input.include_answer and timeline_status.enabled():
+            status = timeline_status.status_answer(
+                input.query,
+                summary_hits,
+                lambda h: self._hit_url(h, file_urls=file_urls),
+                displayed_refs,
+            )
+            if status:
+                answer = status + ("\n\n" + answer if answer else "")
         output = SearchOutput(
             answer=answer,
             displayed_refs=displayed_refs,

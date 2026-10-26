@@ -99,7 +99,7 @@ _RESEARCH_JOB_KEY = "_proposal_research_job"
 _RESEARCH_STORE_KEY = "_proposal_research_store"
 _DM_CHANNEL_KEY = "_proposal_delivery_dm"
 RESEARCH_AUTO_ENV = "PROPOSAL_RESEARCH_AUTO"
-RESEARCH_NOT_READY_MESSAGE = "調査からの自動作成は準備中です。Gemini v3 の JSON を渡してください"
+RESEARCH_NOT_READY_MESSAGE = "調査からの提案書PPTXの自動作成は準備中です。"
 
 # 83 枚提案書の段階公開（2026-10-07）。submit の入口で「誰が使えるか」を env で決める。
 # - 空・未設定: 全員拒否（今の本番と同じ＝使えない）
@@ -110,10 +110,7 @@ RESEARCH_NOT_READY_MESSAGE = "調査からの自動作成は準備中です。Ge
 # 個人指定でも ``*`` でも拒否する。
 ALLOWED_EMAILS_ENV = "PROPOSAL_BUILDER_ALLOWED_EMAILS"
 # 拒否の文（Aico がそのまま利用者へ伝える。内部語を載せない）。
-NOT_READY_MESSAGE = (
-    "統合FMTの提案書の自動生成は準備中のため、まだお使いいただけません。"
-    "使えるようになったらお知らせします。"
-)
+NOT_READY_MESSAGE = "統合FMTの提案書の自動生成は準備中のため、まだお使いいただけません。"
 
 
 def _allowed_emails_from_env() -> frozenset[str]:

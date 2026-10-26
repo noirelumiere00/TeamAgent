@@ -1069,6 +1069,15 @@ def run_fanout(skill: Any, input: SearchInput, ctx: SkillContext) -> SearchOutpu
                 authorize_drive=lambda ref: skill._authorized_drive_reference(ref, ctx),
             )
         answer = compact.strip_linkless_invitation(answer)
+    if found and input.include_answer and timeline_status.enabled():
+        status = timeline_status.status_answer(
+            input.query,
+            [*summary_hits, *karte.items],
+            lambda h: skill._hit_url(h, file_urls=file_urls),
+            displayed_refs,
+        )
+        if status:
+            answer = status + ("\n\n" + answer if answer else "")
     return SearchOutput(
         answer=answer,
         answer_format="compact"
