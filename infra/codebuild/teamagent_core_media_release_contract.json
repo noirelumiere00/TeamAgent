@@ -212,7 +212,7 @@
         },
         {
           "key": "artifact.tiktok-package-json.sha256",
-          "value": "c9aafff461749b7591c810d698736fe33461965d238ed2cfd283229612a7fe28",
+          "value": "6b7328c05e81a9508371cd5bbf24735d3d21a6d6e43d3e8ba66c47459acebf48",
           "build_arg": "TIKTOK_PACKAGE_JSON_SHA256",
           "oci_label": "io.teamagent.contract.tiktok-package-json-sha256",
           "dockerfile_uses": [
@@ -221,7 +221,7 @@
         },
         {
           "key": "artifact.tiktok-package-lock.sha256",
-          "value": "f0fe7ac3f992960d12dfdaddb14fa06e0b44ed92386c2a7d3fc74cbb98784dc2",
+          "value": "66eb17e9aa0b4293c022887a17934b171da1268a049b5f35273089daff165a28",
           "build_arg": "TIKTOK_PACKAGE_LOCK_SHA256",
           "oci_label": "io.teamagent.contract.tiktok-package-lock-sha256",
           "dockerfile_uses": [

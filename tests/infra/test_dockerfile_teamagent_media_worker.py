@@ -219,7 +219,7 @@ def test_python_and_js_playwright_are_same_exact_version_and_hashed() -> None:
     assert 'grep -F -c "$playwright_integrity" /deps/package-lock.json' in TEXT
     package = json.loads(PACKAGE.read_text(encoding="utf-8"))
     assert package["dependencies"]["playwright-core"] == "1.60.0"
-    assert package["dependencies"]["puppeteer-core"] == "25.3.0"
+    assert package["dependencies"]["puppeteer-core"] == "25.16.0"
     assert "playwright/driver/node" in TEXT
     assert "ln -s /usr/bin/node" in TEXT
 
@@ -407,8 +407,8 @@ try {
 
 def test_media_sources_and_js_lock_are_content_addressed() -> None:
     expected = {
-        PACKAGE: "c9aafff461749b7591c810d698736fe33461965d238ed2cfd283229612a7fe28",
-        PACKAGE_LOCK: "f0fe7ac3f992960d12dfdaddb14fa06e0b44ed92386c2a7d3fc74cbb98784dc2",
+        PACKAGE: "6b7328c05e81a9508371cd5bbf24735d3d21a6d6e43d3e8ba66c47459acebf48",
+        PACKAGE_LOCK: "66eb17e9aa0b4293c022887a17934b171da1268a049b5f35273089daff165a28",
         SCRAPER: "e27f612bbdc799ee6f788fed1fc66d611f5566d264650fbcbe4f02101bfe96d3",
         DNS_PINNED_PROXY: ("ccac597a429069074d2b362d6b15ad75c00c23941be97e9ea87503d36fd50e19"),
     }
@@ -416,6 +416,29 @@ def test_media_sources_and_js_lock_are_content_addressed() -> None:
         assert _sha256(path) == digest
         assert digest in TEXT
     assert "npm ci --omit=dev --ignore-scripts --no-audit --no-fund" in TEXT
+
+
+@pytest.mark.parametrize("scraper", ["tiktok_scraper", "rakko_scraper"])
+def test_puppeteer_lock_uses_native_patched_zod(scraper: str) -> None:
+    directory = ROOT / "tools" / scraper
+    package = json.loads((directory / "package.json").read_text(encoding="utf-8"))
+    lock = json.loads((directory / "package-lock.json").read_text(encoding="utf-8"))
+    packages = lock["packages"]
+    assert package["dependencies"]["puppeteer-core"] == "25.16.0"
+    assert packages[""]["dependencies"]["puppeteer-core"] == "25.16.0"
+    assert packages["node_modules/puppeteer-core"]["version"] == "25.16.0"
+    assert packages["node_modules/puppeteer-core"]["dependencies"]["chromium-bidi"] == (
+        "157.0.8090-0"
+    )
+    assert packages["node_modules/chromium-bidi"]["dependencies"]["zod"] == "^4.6.5"
+    zod_versions = [
+        tuple(map(int, entry["version"].split(".")))
+        for name, entry in packages.items()
+        if name.endswith("node_modules/zod")
+    ]
+    assert zod_versions and all(version >= (4, 6, 6) for version in zod_versions)
+    assert "zod" not in package.get("overrides", {})
+    assert "ARG PUPPETEER_VERSION=25.16.0" in TEXT
 
 
 @pytest.mark.parametrize(
