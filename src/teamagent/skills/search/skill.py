@@ -1431,23 +1431,10 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
 
     def _authorized_drive_reference(self, ref: DocumentReference, ctx: SkillContext) -> bool:
         """送信直前にも、使った原本を本人RLSまたは本人のDriveで再認可する。"""
-        from teamagent.skills.search.fanout_sources import rls_connection
-        from teamagent.skills.search.saved_file_refs import reauthorize_saved_reference
+        from teamagent.mcp_gateway.document_followup import reauthorize
 
         try:
-            if ref.file_record_number and ref.file_record_branch:
-                return reauthorize_saved_reference(self, ref, ctx)
-            if not ref.drive_file_id:
-                return False
-            with rls_connection(self._pgvector, ctx.metadata, app_role=self._app_role)() as conn:
-                rows = self._pgvector.list_authorized_document_references(
-                    conn, drive_file_ids=[ref.drive_file_id], request_id=ctx.request_id
-                )
-                return any(
-                    row.get("source_type") == "gdrive"
-                    and row.get("external_id") == ref.drive_file_id
-                    for row in rows
-                )
+            return bool(ref.drive_file_id and reauthorize(self, [ref], ctx))
         except Exception:
             return False
 
@@ -2984,7 +2971,12 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
             sections = [f"# 質問\n{query}\n\n# 参考資料（金庫の資料）\n{vault_block}"]
         else:
             sections = [f"# 質問\n{query}\n\n# 参考資料\n{primary_block}"]
-        comparison = comparison_table(query, primary_hits) if compact_sources is None else ""
+        comparison = (
+            comparison_table(query, primary_hits)
+            if compact_sources is None
+            and not (compact_drive_mode and classify_answer_mode(query) == "insight")
+            else ""
+        )
         if comparison:
             sections.append(comparison)
             sections.append(

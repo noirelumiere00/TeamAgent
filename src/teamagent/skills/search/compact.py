@@ -229,6 +229,7 @@ def strip_linkless_invitation(answer: str) -> str:
             r"(?:確認|検索)(?:してみて|してください)",
             sentence,
         )
+        and not re.search(r"何か他に[^\n。！？!?]*知りたい[^\n。！？!?]*ありますか", sentence)
     ).strip()
     has_link = any(_safe_url(url) for url in re.findall(r"https?://[^\s<>|\[\]()]+", answer))
     invitation = re.compile(
@@ -566,7 +567,8 @@ def build(
     if displayed_refs is not None and insight:
         # 効いた要素だけの聞き直しで、既出の数字を再掲しない。
         facts, fact_ids = "", []
-        show_metrics = bool(_METRICS.search(query))
+        # shortcut: OCの現依頼は先頭行、複数行の現依頼を扱う際はquery/contextを分離する。
+        show_metrics = bool(_METRICS.search(query.splitlines()[0]))
     metrics = video_stats_footer(hits, "", asked_industry=asked_industry) if show_metrics else ""
     if metrics and displayed_refs is not None:
         facts, fact_ids = "", []

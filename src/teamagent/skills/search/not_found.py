@@ -134,6 +134,17 @@ def case_query_target(query: str, asked_industry: str | None = None) -> str | No
     if not match:
         match = re.match(r"^([^の\s]+?)\s*事例", text, re.IGNORECASE)
     if not match:
+        # OC は今回の依頼、過去の依頼の順で送る。省略した一覧だけ直近の対象を補う。
+        lines = text.splitlines()
+        if len(lines) > 1 and re.fullmatch(
+            r"(?:一覧|リスト(?:アップ)?|列挙)(?:で|を|に)?"
+            r"(?:出して|見せて|して|ください|下さい)?[。！？!?\s]*",
+            lines[0],
+        ):
+            return next(
+                (target for line in reversed(lines[1:]) if (target := case_query_target(line))),
+                None,
+            )
         return None
     target = match[1].strip(" 「」『』\"'")
     # ルーターの業種推定より、利用者が指定した元の対象語を優先する。

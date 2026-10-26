@@ -321,3 +321,13 @@ for (const status of ['failed', 'uncertain', 'posted']) {
     assert.equal(p.calls.length, 1); assert.equal(p.posts.length, 0);
   });
 }
+
+for (const tail of ['資料が必要でしたら、お知らせください。', '詳しい内容をご覧になりたい場合は、お知らせください。', '何か他に知りたいことはありますか？']) {
+  test(`eval12 enforced reply uses final drive guard without OC drive env: ${tail}`, async () => {
+    const p = setup({search: {found: true, answer: '配信サービスです。' + tail, displayed_refs: []}});
+    await p.prompt();
+    const sent = await p.send();
+    assert.match(sent.payload.text, /配信サービスです/u);
+    assert.doesNotMatch(sent.payload.text, /お知らせ|ありますか/u);
+  });
+}

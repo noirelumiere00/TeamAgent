@@ -68,6 +68,17 @@ def _source_text(text: str) -> str:
 
 def _details(text: str) -> list[str]:
     text = _source_text(strip_advice(text, "事例"))
+    text = "\n".join(
+        line
+        for line in text.splitlines()
+        if not re.search(r"©|copyright|all\s+rights\s+reserved", line, re.IGNORECASE)
+        and not re.fullmatch(
+            r"\s*(?:[-–—]\s*)?(?:(?:page|p\.)\s*)?\d+"
+            r"(?:\s*[/／]\s*\d+)?\s*(?:ページ|頁)?\s*[-–—]?\s*",
+            line,
+            re.IGNORECASE,
+        )
+    )
     lines = []
     for part in re.split(r"[\r\n]+|(?<=[。！？])", text):
         part = re.sub(r"^[\s#*・•\-]+", "", part).strip()

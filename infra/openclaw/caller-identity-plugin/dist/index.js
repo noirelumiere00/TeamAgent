@@ -2892,6 +2892,28 @@ export function createDmCatchup({
     get stateStatus() { return journalStatus; }, get botUserId() { return authenticatedBot; }};
 }
 
+function stripDriveFirstInvitation(text) {
+  const materialLink = (whole, slackUrl, slackLabel, mdLabel, mdUrl) => {
+    const url = slackUrl ?? mdUrl, label = slackLabel ?? mdLabel;
+    try {
+      const parsed = new URL(url);
+      if (parsed.hostname.endsWith(".slack.com") && parsed.pathname.startsWith("/archives/") && label !== "会話の記録") return label;
+    } catch {}
+    return whole;
+  };
+  text = text.replace(/<(https?:\/\/[^\s<>|]+)\|([^>\n]+)>|\[([^\]\n]+)\]\((https?:\/\/[^\s)]+)\)/gu, materialLink)
+    .split(/(?<=[。！？!?\n])/u)
+    .filter(sentence => !/(?:正式社名|商材名|会社名)[^\n。！？!?]*確認(?:して|すると|すれば)|(?:確認|検索)(?:してみて|してください)|何か他に[^\n。！？!?]*知りたい[^\n。！？!?]*ありますか/u.test(sentence)).join('').trim();
+  const hasLink = /https?:\/\/[^\s<>|\[\]()]+/iu.test(text);
+  const invitation = /詳し[^\n。！？!?]*(?:こちら|どうぞ|ご覧)|(?:資料|詳細|元の会話)[^\n。！？!?]*(?:こちら|見たければ|見たい場合)|(?:資料|詳細|リンク|原本|ファイル)[^\n。！？!?]*(?:必要でしたら|見たいときは|お知らせください|声をかけてください|お送りすることも)|こちら(?:を|から|で|です)?(?:どうぞ|ご覧ください|確認してください)?[。！!]?\s*$/u;
+  const cleaned = text.split(/(?<=[。！？!?\n])/u)
+    .map(sentence => invitation.test(sentence)
+      ? (sentence.match(/<https?:\/\/[^>\n]+>|\[[^\]\n]+\]\(https?:\/\/[^)\n]+\)|https?:\/\/[^\s<>。！？!?]+/gu) ?? []).join(' / ')
+      : sentence).join('').trim();
+  return cleaned !== text && !hasLink
+    ? `${cleaned}\n\n資料は見つかりませんでした。`.trim() : cleaned;
+}
+
 function legacySearchRequirement(text) {
   // 資料の作成依頼は生成ツールの受付で答える。用語辞書に当たっても社内検索の作り直しに回さない。
   const documentGenerationRequest = typeof text === "string" &&
@@ -6638,7 +6660,8 @@ export function createCallerIdentityPlugin({
       const grounded = groundEvidenceReply(restoreEvidenceUrls(normalized, evidence?.urls), evidence);
       const sourced = evidence?.driveFirst || ["compact", "list"].includes(entry.preModel ? data.direct_delivery?.answer_format ?? data.answer_format : data.direct_delivery.answer_format)
         ? grounded : appendMissingSearchSources(grounded, evidence?.searchUrls);
-      const linked = sourced.replace(/\[([^\]\n]+)\]\(<?(https?:\/\/[^\s<>)]+)>?\)/gu, "$1 $2");
+      const finalAnswer = evidence?.driveFirst ? stripDriveFirstInvitation(sourced) : sourced;
+      const linked = finalAnswer.replace(/\[([^\]\n]+)\]\(<?(https?:\/\/[^\s<>)]+)>?\)/gu, "$1 $2");
       const text = scrubOutboundReplyText(linked, connectUrlsByRun.get(runId)?.urls).text
         .replace(/<[@!][^>\n]*>/gu, escapeSlackText);
       if (!text.trim()) return;
@@ -7837,28 +7860,7 @@ export function createCallerIdentityPlugin({
             ? "資料を添付します。" : sourced;
           let scrubbed = scrubOutboundReplyText(mediaCaption, replacements);
           if (finalTextOnly && evidence?.driveFirst) {
-            const materialLink = (whole, slackUrl, slackLabel, mdLabel, mdUrl) => {
-              const url = slackUrl ?? mdUrl, label = slackLabel ?? mdLabel;
-              try {
-                const parsed = new URL(url);
-                if (parsed.hostname.endsWith(".slack.com") && parsed.pathname.startsWith("/archives/") && label !== "会話の記録") return label;
-              } catch {}
-              return whole;
-            };
-            const text = scrubbed.text.replace(/<(https?:\/\/[^\s<>|]+)\|([^>\n]+)>|\[([^\]\n]+)\]\((https?:\/\/[^\s)]+)\)/gu, materialLink)
-              .split(/(?<=[。！？!?\n])/u)
-              .filter(sentence => !/(?:正式社名|商材名|会社名)[^\n。！？!?]*確認(?:して|すると|すれば)|(?:確認|検索)(?:してみて|してください)/u.test(sentence)).join('').trim();
-            scrubbed = {...scrubbed, text};
-          }
-          if (finalTextOnly && evidence?.driveFirst) {
-            const hasLink = /https?:\/\/[^\s<>|\[\]()]+/iu.test(scrubbed.text);
-            const invitation = /詳し[^\n。！？!?]*(?:こちら|どうぞ|ご覧)|(?:資料|詳細|元の会話)[^\n。！？!?]*(?:こちら|見たければ|見たい場合)|(?:資料|詳細|リンク|原本|ファイル)[^\n。！？!?]*(?:必要でしたら|見たいときは|お知らせください|声をかけてください|お送りすることも)|こちら(?:を|から|で|です)?(?:どうぞ|ご覧ください|確認してください)?[。！!]?\s*$/u;
-            const text = scrubbed.text.split(/(?<=[。！？!?\n])/u)
-              .map(sentence => invitation.test(sentence)
-                ? (sentence.match(/<https?:\/\/[^>\n]+>|\[[^\]\n]+\]\(https?:\/\/[^)\n]+\)|https?:\/\/[^\s<>。！？!?]+/gu) ?? []).join(' / ')
-                : sentence).join('').trim();
-            scrubbed = {...scrubbed, text: text !== scrubbed.text && !hasLink
-              ? `${text}\n\n資料は見つかりませんでした。`.trim() : text};
+            scrubbed = {...scrubbed, text: stripDriveFirstInvitation(scrubbed.text)};
           }
           if (scrubbed.text !== payload.text) {
             const { signedUrls, toolNames, urlSeparators, unverifiedConnectUrls = 0 } = scrubbed.counts;
