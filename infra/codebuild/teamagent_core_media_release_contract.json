@@ -119,12 +119,12 @@
         {
           "key": "binary.ffmpeg.sha256",
           "path": "/usr/bin/ffmpeg",
-          "sha256": "43aff9d9b8d8becd14f9e2a36a8497aa5c0e12454e60f7c0d3350ed5bef945ba"
+          "sha256": "137d90fd7626c4246ca994a1eec4ea898e4a0b8ad7042a3402603fc47f69a198"
         },
         {
           "key": "binary.node.sha256",
           "path": "/usr/bin/node",
-          "sha256": "885209faaed8be466b12c17a265f032c8522ab49a5986c219ad51cbbec56e153"
+          "sha256": "f801af10506e5e0afb1913b9c105e1f969c47801b7ecd3ee141b6991b25cd91c"
         },
         {
           "key": "binary.python.sha256",
@@ -135,7 +135,7 @@
       "source_assertions": [
         {
           "key": "artifact.apk-lock.sha256",
-          "value": "37d39a19abdcadc32c48680cfa4277400e8e6dbbb9c1d16c23d92e119e6f37c2",
+          "value": "ea51f0a4a3a3446e204e1e9b7268ca83a77524c34b7c1162ee34811faf3e560a",
           "build_arg": "MEDIA_APK_LOCK_SHA256",
           "oci_label": "io.teamagent.contract.apk-lock-sha256",
           "dockerfile_uses": [
@@ -321,7 +321,7 @@
         },
         {
           "key": "binary.ffmpeg.sha256",
-          "value": "43aff9d9b8d8becd14f9e2a36a8497aa5c0e12454e60f7c0d3350ed5bef945ba",
+          "value": "137d90fd7626c4246ca994a1eec4ea898e4a0b8ad7042a3402603fc47f69a198",
           "build_arg": "FFMPEG_BINARY_SHA256",
           "oci_label": "io.teamagent.contract.ffmpeg-binary-sha256",
           "dockerfile_uses": [
@@ -330,7 +330,7 @@
         },
         {
           "key": "binary.node.sha256",
-          "value": "885209faaed8be466b12c17a265f032c8522ab49a5986c219ad51cbbec56e153",
+          "value": "f801af10506e5e0afb1913b9c105e1f969c47801b7ecd3ee141b6991b25cd91c",
           "build_arg": "NODE_BINARY_SHA256",
           "oci_label": "io.teamagent.contract.node-binary-sha256",
           "dockerfile_uses": [
@@ -375,7 +375,7 @@
         },
         {
           "key": "component.node.version",
-          "value": "24.18.1",
+          "value": "24.22.1",
           "build_arg": "NODE_VERSION",
           "oci_label": "io.teamagent.contract.node-version",
           "dockerfile_uses": [
@@ -429,7 +429,7 @@
         },
         {
           "key": "package.ffmpeg.version",
-          "value": "8.1.2-r0",
+          "value": "8.1.2-r3",
           "build_arg": "FFMPEG_PACKAGE_VERSION",
           "oci_label": "io.teamagent.contract.ffmpeg-package-version",
           "dockerfile_uses": [
@@ -438,7 +438,7 @@
         },
         {
           "key": "package.node.version",
-          "value": "24.18.1-r0",
+          "value": "24.22.1-r0",
           "build_arg": "NODE_PACKAGE_VERSION",
           "oci_label": "io.teamagent.contract.node-package-version",
           "dockerfile_uses": [
