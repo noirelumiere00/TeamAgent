@@ -17,6 +17,17 @@ BUNDLE = Path(__file__).resolve().parents[4] / "tools/first_visit/sales25"
 LOCK_SHA256 = "03ea4a29ef59b16e325dcd2d07710a9511c55dd08cf4b17f96dfa3eeef2047ca"
 STATS = ("playCount", "diggCount", "commentCount", "shareCount", "collectCount")
 TOP = ("top_views", "top_eng", "top_saves")
+ROLES = (
+    "cover",
+    "overall_summary",
+    *(("search_order", *TOP) * 3),
+    *(("search_order", "neutral_comparison") * 3),
+    "pr_analysis",
+    "pr_analysis",
+    "pr_analysis",
+    "approach",
+    "methods",
+)
 
 
 def read_json(path: Path) -> Any:
@@ -268,6 +279,37 @@ def validate_inputs(root: Path, *, owner_id: str, bundle: Path = BUNDLE) -> None
                     raise ValueError("displayed TOP5 ranking mismatch")
     data = read_json(local_path(root, "deck-input.json"))
     reviews = read_json(local_path(root, "top5-analysis.json"))
+    # Audio-only gaps may ship as partial; identity and visual review remain mandatory.
+    if "status" in reviews and (
+        reviews["status"]
+        != (
+            "complete"
+            if all(p.get("status") == "complete" for p in reviews["posts"].values())
+            else "unmeasured"
+        )
+        or any(
+            not (
+                review.get("identity_verified") is True
+                and review.get("cover", {}).get("status") == "matched"
+                and review.get("visual", {}).get("status") == "reviewed"
+                and review.get("text", {}).get("status") == "reviewed"
+                and (
+                    (
+                        review.get("status") == "complete"
+                        and review.get("audio", {}).get("status") in {"listened", "silent"}
+                    )
+                    or (
+                        review.get("status") == "unmeasured"
+                        and review.get("audio", {}).get("status") == "unmeasured"
+                        and isinstance(review["audio"].get("reason"), str)
+                        and bool(review["audio"]["reason"].strip())
+                    )
+                )
+            )
+            for review in reviews["posts"].values()
+        )
+    ):
+        raise ValueError("sales25 full-media analysis incomplete")
     for pid, review in reviews["posts"].items():
         if review.get("url") != urls.get(pid):
             raise ValueError("review/raw post URL mismatch")
@@ -290,7 +332,10 @@ def validate_inputs(root: Path, *, owner_id: str, bundle: Path = BUNDLE) -> None
             if not local_path(root, relative).is_file():
                 raise ValueError("missing review evidence")
     for image in data["images"].values():
-        if not local_path(root, image["path"]).is_file():
+        if "unavailable_reason" in image:
+            if image.get("path") or not str(image["unavailable_reason"]).strip():
+                raise ValueError("invalid unavailable image")
+        elif not local_path(root, image["path"]).is_file():
             raise ValueError("missing image")
     for slide in slides:
         if slide["role"] in TOP:

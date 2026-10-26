@@ -170,7 +170,8 @@ def assert_current_contract:
   if (($container.environment // [] | map(.name) |
        . - ["SEARCH_DIRECT_ANSWER", "SEARCH_DIRECT_ANSWER_ALLOWED_EMAILS", "SEARCH_DIRECT_ANSWER_KINDS",
             "SEARCH_DRIVE_FIRST", "SEARCH_DRIVE_FIRST_ALLOWED_EMAILS",
-            "DM_CATCHUP_ENABLED", "DM_CATCHUP_ALLOWED_USERS"] | sort) ==
+            "DM_CATCHUP_ENABLED", "DM_CATCHUP_ALLOWED_USERS",
+            "TEAMAGENT_INBOUND_ROUTER", "TEAMAGENT_ROUTE_CLASSIFIER"] | sort) ==
       ["AWS_REGION", "SLACK_DM_ALLOWLIST", "SLACK_TEAM_ID", "TMPDIR"])
      then . else fail("environment must contain exact runtime and Slack inputs") end |
   if ($container.environment // []) |
@@ -185,6 +186,8 @@ def assert_current_contract:
            .name == "SLACK_DM_ALLOWLIST" and
            (.value | valid_slack_dm_allowlist)
          ) or
+         (.name == "TEAMAGENT_INBOUND_ROUTER" and (.value == "off" or .value == "shadow" or .value == "enforce")) or
+         (.name == "TEAMAGENT_ROUTE_CLASSIFIER" and .value == "0") or
          (
            (.name == "SEARCH_DIRECT_ANSWER" or .name == "SEARCH_DIRECT_ANSWER_ALLOWED_EMAILS" or
             .name == "SEARCH_DIRECT_ANSWER_KINDS" or .name == "SEARCH_DRIVE_FIRST" or

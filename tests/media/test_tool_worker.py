@@ -17,6 +17,7 @@ from teamagent.media import tool_worker
 from teamagent.media.contracts import (
     AcquireOperation,
     S3ObjectRef,
+    Sales25MediaOperation,
     TikTokAcquireOperation,
     make_job_request,
 )
@@ -426,6 +427,81 @@ def _identity_environment(control: ToolControl) -> dict[str, str]:
         "MEDIA_ATTEMPT_VERSION": str(control.attempt_version),
         "MEDIA_CAPABILITY_SHA256": hashlib.sha256(control.capability_secret.encode()).hexdigest(),
     }
+
+
+@pytest.mark.parametrize("fault", [None, "missing", "extra", "wrong_type", "duplicate", "metadata"])
+def test_sales25_worker_requires_two_exact_outputs_before_upload(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, fault: str | None
+) -> None:
+    base = _control()
+    request = make_job_request(
+        operation=Sales25MediaOperation(
+            kind="sales25_media",
+            post_id="9000000010",
+            url="https://www.tiktok.com/@synthetic/video/9000000010",
+            media_type="video",
+        ),
+        output_bucket=base.request.output_bucket,
+        request_fingerprint="sales25-worker",
+        now_epoch_s=1_000,
+        timeout_s=300,
+        job_id=base.request.job_id,
+    )
+    control = replace(
+        base,
+        request=request,
+        outputs=tuple(
+            _output_capability(name=name, key=f"{request.output_prefix}output/{name}")
+            for name in ("media-manifest.json", "media-bundle.zip")
+        ),
+    )
+    uploaded: list[str] = []
+
+    def execute(*_args: Any, **kwargs: Any) -> OperationOutput:
+        path = kwargs["workdir"] / "synthetic"
+        path.write_bytes(b"synthetic")
+        items = [
+            ProducedArtifact("media-manifest.json", path, "application/json"),
+            ProducedArtifact("media-bundle.zip", path, "application/zip"),
+        ]
+        if fault == "missing":
+            items.pop()
+        elif fault == "extra":
+            items.append(ProducedArtifact("extra", path, "application/json"))
+        elif fault == "wrong_type":
+            items[1] = ProducedArtifact("media-bundle.zip", path, "application/octet-stream")
+        elif fault == "duplicate":
+            items[1] = items[0]
+        metadata = {"post_id": "9000000010", "media_type": "video", "status": "ready"}
+        if fault == "metadata":
+            metadata["extra"] = "forbidden"
+        return OperationOutput(tuple(items), metadata)
+
+    def upload(capability: OutputCapability, **kwargs: Any) -> S3ObjectRef:
+        body = kwargs["path"].read_bytes()
+        uploaded.append(capability.name)
+        return S3ObjectRef(
+            bucket=request.output_bucket,
+            key=capability.key,
+            version_id="v1",
+            sha256=hashlib.sha256(body).hexdigest(),
+            size=len(body),
+            content_type=kwargs["content_type"],
+        )
+
+    monkeypatch.setattr(tool_worker, "_signal_scope", _no_signal)
+    monkeypatch.setattr(tool_worker, "execute_operation", execute)
+    monkeypatch.setattr(tool_worker, "_upload_path", upload)
+    result = tool_worker.run_tool(
+        control,
+        environ=_identity_environment(control),
+        temp_root=tmp_path,
+        clock=lambda: 1_001,
+    )
+    assert result.status == ("failed" if fault else "done")
+    assert uploaded == (
+        ["_completion"] if fault else ["media-manifest.json", "media-bundle.zip", "_completion"]
+    )
 
 
 @contextmanager

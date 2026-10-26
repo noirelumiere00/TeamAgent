@@ -47,3 +47,8 @@ lambda_timeout     = 300
 # proposal_builder_account_s3_size         = 0
 # proposal_builder_assets_kms_key_arn      = "<kms-key-arn>"
 # proposal_builder_news_channel_id         = "" # ingest metadataで実測後のみC...を設定
+
+# OC router PR1/PR2: no production activation in this change.
+openclaw_inbound_router   = "off"
+openclaw_route_classifier = "0"
+# search_direct_answer_allowed_emails = "" # verified owner only; empty denies all

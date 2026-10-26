@@ -1,0 +1,15 @@
+[
+  {"id":"completed_status","query":"青空社の施策は今どうなってる？","intent":"status","evidence":true,"presearch":true},
+  {"id":"named_proposal","query":"青空社の提案書PDFを送って","intent":"document","evidence":true,"presearch":false},
+  {"id":"metrics_explanation","query":"青空社の施策の動画ごとの再生数と保存数、何が効いた？","intent":"comparison","evidence":true,"presearch":true},
+  {"id":"own_answer_source","query":"あなたの説明ではなく元の資料をもとに説明して","intent":"document","evidence":true,"presearch":true},
+  {"id":"start_without_intake","query":"青空社の提案資料を作って。競合とKWはお任せ","intent":"generation","evidence":false,"presearch":false},
+  {"id":"food_industry","query":"食品メーカーの事例ある？","intent":"cases","evidence":true,"presearch":true},
+  {"id":"delivery_kanji","query":"宅配会社の事例を探して","intent":"cases","evidence":true,"presearch":true},
+  {"id":"list_cases","query":"その施策の事例を一覧で","intent":"cases","evidence":true,"presearch":true},
+  {"id":"compare_effect","query":"青空社と若葉社の施策を比較して","intent":"comparison","evidence":true,"presearch":true},
+  {"id":"slack_integration","query":"Slack連携","intent":"existing_operation","evidence":false,"presearch":false},
+  {"id":"brand_only_souvenir","query":"青空社のお土産資料を作って","intent":"generation","evidence":false,"presearch":false},
+  {"id":"internal_term","query":"社内でいうTTOとVVSは何？","intent":"internal_term","evidence":true,"presearch":true},
+  {"id":"unjoined_channel_topic","query":"新星展って何？うちも関わってる？","intent":"internal_topic","evidence":true,"presearch":true}
+]

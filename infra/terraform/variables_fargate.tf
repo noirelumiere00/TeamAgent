@@ -658,6 +658,26 @@ variable "search_direct_answer" {
   default     = "0"
 }
 
+variable "openclaw_inbound_router" {
+  description = "OC の受信規則。off は現行、shadow は判定のみ、enforce は本人確認済み allowlist の DM で検索を先行。既定 OFF。"
+  type        = string
+  default     = "off"
+  validation {
+    condition     = contains(["off", "shadow", "enforce"], var.openclaw_inbound_router)
+    error_message = "openclaw_inbound_router must be off, shadow or enforce."
+  }
+}
+
+variable "openclaw_route_classifier" {
+  description = "分類モデルは PR6 まで未実装。OC は 0 のみ受理する。"
+  type        = string
+  default     = "0"
+  validation {
+    condition     = var.openclaw_route_classifier == "0"
+    error_message = "Keep openclaw_route_classifier=0 until PR6 is implemented."
+  }
+}
+
 variable "openclaw_search_direct_answer" {
   description = "OC の検索回答抑止・直接実行（SEARCH_DIRECT_ANSWER）。既定 OFF。MCP より先に ON、停止時は MCP より後に OFF にする。"
   type        = string

@@ -49,7 +49,7 @@ def test_dispatcher_n_per_kw_maximum_matches_core_contract() -> None:
 
 
 def test_core_limit_is_within_contract_model_range() -> None:
-    # 契約モデル（le=120・深掘り実装の余地）より dispatcher 上限は狭い側にある。
+    # The ordinary model and dispatcher share the unchanged limit.
     operation = TikTokAcquireOperation(
         kind="tiktok_acquire",
         keywords=("シャンプー",),

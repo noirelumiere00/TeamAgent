@@ -117,6 +117,10 @@ jobs:
       - name: Install TikTok scraper Node dependencies
         run: npm ci --prefix tools/tiktok_scraper --no-audit --no-fund
 
+      # sales25 の実媒体テストは合成の有音/無音動画を ffmpeg で作って実処理する。
+      - name: Install ffmpeg for media tests
+        run: sudo apt-get update -q && sudo apt-get install -y -q --no-install-recommends ffmpeg
+
       - name: Pytest
         run: pytest tests/ -q --cov=teamagent --cov-report=term-missing
 
@@ -199,6 +203,10 @@ jobs:
 
       - name: Install TikTok scraper Node dependencies
         run: npm ci --prefix tools/tiktok_scraper --no-audit --no-fund
+
+      # sales25 の実媒体テストは合成の有音/無音動画を ffmpeg で作って実処理する。
+      - name: Install ffmpeg for media tests
+        run: sudo apt-get update -q && sudo apt-get install -y -q --no-install-recommends ffmpeg
 
       - name: Record installed dependency versions
         run: |

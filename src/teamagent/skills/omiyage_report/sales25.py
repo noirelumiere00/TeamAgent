@@ -1,4 +1,4 @@
-"""Flagged sales25 intake and resumable parent; production stage adapters are not wired."""
+"""Flagged sales25 intake, resumable stages and owner-bound delivery."""
 
 from __future__ import annotations
 
@@ -327,6 +327,16 @@ def preflight(
             + "、".join(labels)
             + "の未確定の項目を教えてください。候補をこちらで出すこともできます。",
         )
+    synonyms = case.get("brand_synonyms", {})
+    case["brand_synonyms"] = {
+        name: list(
+            dict.fromkeys(
+                [name, *synonyms.get(name, [])]
+                + (["コープ", "COOP", "生協"] if name == "コープデリ" else [])
+            )
+        )
+        for name in names[:3]
+    }
     case.update(edition=EDITION, queries=queries, mode=case.get("mode", "research"))
     return case, None
 
@@ -365,7 +375,11 @@ class Parent:
         heartbeat_seconds: int = 30,
     ) -> None:
         self.store = store
-        self.stages = stages or Stages()
+        if stages is None:
+            from teamagent.skills.omiyage_report.sales25_wire import production_stages
+
+            stages = production_stages(store=self.store)
+        self.stages = stages
         self.reader = reader
         self.slack = slack
         self.heartbeat_seconds = heartbeat_seconds
@@ -427,7 +441,12 @@ class Parent:
                     state.pop("total", None)
                 if not save():
                     return
-                case = {**summary["case"], "owner_id": summary["owner"], "job_id": job_id}
+                case = {
+                    **summary["case"],
+                    "owner_id": summary["owner"],
+                    "job_id": job_id,
+                    "started_at": row["created_at"],
+                }
                 if stage == "search":
                     case["query"] = case["queries"][int(key.split("_")[1]) - 1]
                     case["target"] = 100
