@@ -52,7 +52,7 @@ UV_DIGEST = "9941e2d8e06ff884d328905091eac0a6bc1e40e5ce12e6dd0de4ef4ee26baac4"
 # 2026-10-23: ncurses 6.6_p20260822-r0→6.6_p20261017-r0。人作成 lock は 112・115・184 行目のみ差分（241 行不変）、実物一致は段 3 の cmp で検証。
 # 2026-10-23: gdbm-1.26-r0 を 54 行目へ追加（241→242 行）。人作成 lock と実物の一致は段 3 の cmp で検証。
 # 2026-10-26: apk-tools 3.0.6 + aarch64 APKINDEX で再導出（242→241 行、sndio-libs 脱落）。
-APK_LOCK_SHA256 = "ea51f0a4a3a3446e204e1e9b7268ca83a77524c34b7c1162ee34811faf3e560a"
+APK_LOCK_SHA256 = "7aaf3b0b67606937f4795720a16bd27c61642fa8a9b188c56ba1849920674aff"
 CHROMIUM_PATH = "/usr/lib/chromium/chromium"
 
 
@@ -153,6 +153,7 @@ def test_base_bundled_cve_packages_are_pinned_to_the_fixed_versions() -> None:
     HIGH を期限付き例外へ逃がさないための封印なので、pin を外したらここが赤くなる。
     """
     fixed = {
+        "BROTLI_PACKAGE_VERSION": ("brotli-libs", "1.2.1-r0"),
         "LIBBLKID_PACKAGE_VERSION": ("libblkid", "2.42.3-r1"),
         "LIBMOUNT_PACKAGE_VERSION": ("libmount", "2.42.3-r1"),
         "LIBUUID_PACKAGE_VERSION": ("libuuid", "2.42.3-r1"),

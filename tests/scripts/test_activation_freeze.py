@@ -208,17 +208,17 @@ def test_unrelated_changes_still_pass(base: str, head: str, reason: str) -> None
 
 
 def test_unlock_matches_the_committed_declaration() -> None:
-    """Alpine 上流の APK 入替へ追随し、scope と退避した宣言を完全一致で封印する。"""
+    """brotli CRITICAL 対応へ追随し、scope と退避した宣言を完全一致で封印する。"""
     unlock = _freeze_doc()["unlock"]
     assert unlock["active"] is True
     assert unlock["scope_paths"] == ["infra/codebuild/teamagent_core_media_release_contract.json"]
     assert (
         unlock["reason"]
-        == "human gate 2026-10-26（小俣さん 10-21「マージまで全て任せる」・10-26「早く」・Alpine 上流で ffmpeg/nodejs/ada-libs 入替。r74 の空撃ちで検出）"
+        == "human gate 2026-10-26（小俣さん 10-21「マージまで全て任せる」・10-26「早く」・Alpine の brotli CRITICAL CVE-2026-111497。r74c の段 3 で検出）"
     )
     assert (
         unlock["gate"]
-        == "human gate 2026-10-26（小俣さん 10-21「マージまで全て任せる」・10-26「早く」・Alpine 上流で ffmpeg/nodejs/ada-libs 入替。r74 の空撃ちで検出）"
+        == "human gate 2026-10-26（小俣さん 10-21「マージまで全て任せる」・10-26「早く」・Alpine の brotli CRITICAL CVE-2026-111497。r74c の段 3 で検出）"
     )
     assert unlock["previous_scope_20261026_sales25"] == {
         "active": True,
@@ -231,6 +231,12 @@ def test_unlock_matches_the_committed_declaration() -> None:
         "scope_paths": ["infra/codebuild/teamagent_core_media_release_contract.json"],
         "reason": "human gate 2026-10-26（小俣さん 10-21「マージまで全て任せる」・10-23「どんどんデプロイして」・週末公表の依存脆弱性 brotli/filelock/pypdf/virtualenv/zod の解消）",
         "gate": "human gate 2026-10-26（小俣さん 10-21「マージまで全て任せる」・10-23「どんどんデプロイして」・週末公表の依存脆弱性 brotli/filelock/pypdf/virtualenv/zod の解消）",
+    }
+    assert unlock["previous_scope_20261026_apk"] == {
+        "active": True,
+        "scope_paths": ["infra/codebuild/teamagent_core_media_release_contract.json"],
+        "reason": "human gate 2026-10-26（小俣さん 10-21「マージまで全て任せる」・10-26「早く」・Alpine 上流で ffmpeg/nodejs/ada-libs 入替。r74 の空撃ちで検出）",
+        "gate": "human gate 2026-10-26（小俣さん 10-21「マージまで全て任せる」・10-26「早く」・Alpine 上流で ffmpeg/nodejs/ada-libs 入替。r74 の空撃ちで検出）",
     }
     assert unlock["previous_scope_20261023_gdbm"] == {
         "active": True,
