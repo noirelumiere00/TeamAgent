@@ -348,6 +348,73 @@
         "image_deployment_intent_id": "dc0db656-b306-41cd-9832-dc91a17eab69"
       },
       "reviewed_plan": null
+    },
+    "2026-10-tiktok-dispatch-sales25-v1": {
+      "kind": "config",
+      "enabled": false,
+      "expires_at": "2026-11-09T00:00:00Z",
+      "requires_migration": null,
+      "description": "PREPARATION ONLY: update only aws_lambda_function.tiktok_dispatch[0] archive code for sales25 (#690). Empty from values MUST be filled from a fresh guard snapshot and committed before preflight; never infer live values from r74d or old migrations. Keep to.images and to.rule_states identical to from, allowed_env_changes empty, and all other AWS application resources no-op. Current validate_plan permits archive-derived dispatcher code updates in config mode; bind the exact code-only diff through reviewed_plan. See report.md. Do not enable until the exact reviewed plan is reviewed and committed.",
+      "from": {
+        "task_definition_arns": {
+          "openclaw": "",
+          "mcp": "",
+          "connect_web": "",
+          "ingest": "",
+          "morning": "",
+          "canary": "",
+          "tiktok": "",
+          "x_buzz": ""
+        },
+        "images": {
+          "openclaw": "",
+          "mcp": "",
+          "connect_web": "",
+          "ingest": "",
+          "morning": "",
+          "canary": "",
+          "tiktok": "",
+          "x_buzz": ""
+        },
+        "rule_states": {
+          "ingest": "",
+          "morning": "",
+          "canary": ""
+        },
+        "dispatcher_code_sha256": {
+          "tiktok": "",
+          "x_buzz": ""
+        },
+        "monitoring": {
+          "container_insights": ""
+        }
+      },
+      "to": {
+        "images": {
+          "openclaw": "",
+          "mcp": "",
+          "connect_web": "",
+          "ingest": "",
+          "morning": "",
+          "canary": "",
+          "tiktok": "",
+          "x_buzz": ""
+        },
+        "rule_states": {
+          "ingest": "",
+          "morning": "",
+          "canary": ""
+        },
+        "allowed_resource_changes": [
+          "aws_lambda_function.tiktok_dispatch[0]"
+        ],
+        "allowed_env_changes": {}
+      },
+      "required_preflight_profiles": [],
+      "reviewed_inputs": {
+        "image_deployment_intent_id": "b9c6017d-7ce5-4fa9-9c48-fdbce1d4d308"
+      },
+      "reviewed_plan": null
     }
   },
   "external_state_handoffs": {
