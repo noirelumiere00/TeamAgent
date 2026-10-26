@@ -138,8 +138,11 @@ review-plan:
   - migrationはenabled=false/reviewed_plan=nullのcandidateであること。
   - reviewed_inputsの固定intent、同じpreflight/外部receipt、同じlive/stateから
     exact reviewed_planを抽出する。DynamoDB intent作成やapply可能plan公開は行わない。
+  - 内部reviewフラグはcandidateだけに注入する。保存planを直接applyしても
+    review専用preconditionが必ず失敗する。--outはplanではなくcontract JSON。
   - 抽出結果だけをmigration.reviewed_planへcommitしenabled=trueにした後、
-    planを再実行するとexact contract一致が必須になる。
+    planを再実行するとexact contract一致が必須になる。final/verify/applyは
+    reviewフラグ付きplanを拒否する。フラグを引数・環境変数で指定しない。
 
 重要:
   - TeamAgent dev / account 718959508629 / ap-northeast-1 / 固定S3 backend専用。
@@ -7689,6 +7692,82 @@ validate_config_migration_plan() {
     "$(jq -c '.to.allowed_env_changes' "$migration")"
 }
 
+prepare_plan_for_validation() {
+  local plan_json="$1" core="$2" contract_mode="$3"
+  local blocker="terraform_data.runtime_guard_review_blocker"
+  VALIDATION_PLAN_JSON="$TMP_ROOT/plan-validation-${RANDOM}.json"
+  # Terraform omits resource_drift when empty; explicit invalid values still fail.
+  jq -e '
+    select(type == "object") |
+    if has("resource_drift") then
+      select(.resource_drift | type == "array")
+    else .resource_drift = [] end
+  ' "$plan_json" > "$VALIDATION_PLAN_JSON" ||
+    die "plan JSONのresource_driftは配列（省略時だけ空配列）が必須です"
+  chmod 600 "$VALIDATION_PLAN_JSON"
+  plan_json="$VALIDATION_PLAN_JSON"
+  case "$contract_mode" in
+    verify)
+      jq -e --arg blocker "$blocker" '
+        .variables.runtime_guard_review_only.value == false and
+        ([.resource_changes[], .resource_drift[] |
+          select(.type == "terraform_data" and
+                 .name == "runtime_guard_review_blocker")] | length) == 0 and
+        (.checks | all(
+          if .address.to_display == $blocker then
+            .status == "pass" and ((.instances // []) | length) == 0
+          else true end
+        ))
+      ' "$plan_json" >/dev/null ||
+        die "final/verify/applyにreviewフラグまたはreview blockerは使用できません"
+      ;;
+    extract)
+      VALIDATION_PLAN_JSON="$TMP_ROOT/review-validation-${RANDOM}.json"
+      # Only the isolated deferred failure is omitted; all runtime checks stay strict.
+      jq -e --arg blocker "$blocker" --slurpfile core "$core" '
+        select(
+          $core[0].mode == "migration" and
+          .variables.runtime_guard_review_only.value == true and
+          ([.resource_changes[].address] | length == (unique | length)) and
+          ([.resource_changes[] |
+            select(.type == "terraform_data" and
+                   .name == "runtime_guard_review_blocker")] |
+            length == 1 and all(
+              .address == ($blocker + "[0]") and
+              .mode == "managed" and .index == 0 and
+              .module_address == null and .deposed == null and
+              .provider_name == "terraform.io/builtin/terraform" and
+              .change.actions == ["create"] and .change.before == null and
+              .change.after.input == {
+                aws_region:$core[0].aws_region, billing_region:"us-east-1"
+              } and
+              .change.after_unknown == {id:true, input:{}, output:true}
+            )) and
+          ([.resource_drift[] |
+            select(.type == "terraform_data" and
+                   .name == "runtime_guard_review_blocker")] | length) == 0 and
+          ([.checks[] | select(.address.to_display == $blocker)] |
+            length == 1 and all(
+              .address == {
+                kind:"resource", mode:"managed", type:"terraform_data",
+                name:"runtime_guard_review_blocker", to_display:$blocker
+              } and .status == "unknown" and
+              .instances == [{
+                address:{to_display:($blocker + "[0]"), instance_key:0},
+                status:"unknown"
+              }]
+            ))
+        ) |
+        .resource_changes |= map(select(.address != ($blocker + "[0]"))) |
+        .checks |= map(select(.address.to_display != $blocker))
+      ' "$plan_json" > "$VALIDATION_PLAN_JSON" ||
+        die "candidateのreviewフラグ/専用apply blockerが不正です"
+      chmod 600 "$VALIDATION_PLAN_JSON"
+      ;;
+    *) die "未知のplan contract modeです: $contract_mode" ;;
+  esac
+}
+
 validate_plan() {
   local plan_json="$1"
   local snapshot="$2"
@@ -7700,6 +7779,8 @@ validate_plan() {
   local contract_mode="${8:-verify}"
   local contract_output="${9:-}"
 
+  prepare_plan_for_validation "$plan_json" "$core" "$contract_mode"
+  plan_json="$VALIDATION_PLAN_JSON"
   validate_common_plan_schema "$plan_json" "$core"
   validate_hmac_runtime_mutation_gates "$plan_json"
   # config kind だけが manifest 側 allowlist（resource address / TD env key）を strict body へ
@@ -10704,6 +10785,7 @@ build_live_injection_args() {
   freeze_desired_state_binding
   LIVE_INJECTION_TF_ARGS=(
     "-var=activation_freeze_enabled=$FREEZE_DESIRED_ENABLED"
+    "-var=runtime_guard_review_only=false"
     "-var=runtime_guard_live=$CORE_JSON"
     "-var=openclaw_image=$DESIRED_OPENCLAW_IMAGE"
     "-var=mcp_image=$DESIRED_MCP_IMAGE"
@@ -12237,6 +12319,9 @@ case "$COMMAND" in
       "-out=$STAGE_PLAN"
       "${LIVE_INJECTION_TF_ARGS[@]}"
     )
+    if [ "$REVIEW_ONLY" = "true" ]; then
+      TF_ARGS+=("-var=runtime_guard_review_only=true")
+    fi
     terraform -chdir="$TF_DIR" "${TF_ARGS[@]}"
     if [ -n "$SYNC_DERIVED_VAR_FILE" ]; then
       [ "$(sha256_file "$SYNC_DERIVED_VAR_FILE")" = \

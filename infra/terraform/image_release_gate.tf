@@ -512,7 +512,7 @@ locals {
     contracts_json                 = jsonencode(local.deployment_contract_bindings)
     contract_ready_json            = jsonencode(local.deployment_contract_ready_bindings)
     application_json               = jsonencode(local.deployment_application_provenance)
-    shared_generation_ledger_json  = jsonencode(
+    shared_generation_ledger_json = jsonencode(
       local.deployment_shared_generation_ledger
     )
     signing_key_arn      = aws_kms_key.image_attestor_signing.arn
@@ -539,6 +539,8 @@ data "external" "signed_image_release_gate" {
 }
 
 resource "terraform_data" "production_image_release_gate" {
+  depends_on = [terraform_data.runtime_guard_review_blocker]
+
   input = {
     deployment_intent_id      = var.image_deployment_intent_id
     deployment_context_sha256 = try(data.external.signed_image_release_gate[0].result.deployment_context_sha256, "")

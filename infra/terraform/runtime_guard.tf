@@ -5,6 +5,13 @@
 # It must never be persisted in tfvars. Every protected runtime depends on the
 # always-present terraform_data resource below, so targeted plans cannot evade it.
 
+variable "runtime_guard_review_only" {
+  description = "Guard scriptだけがcandidate review-planに注入するapply禁止フラグ。tfvarsへ保存しない。"
+  type        = bool
+  default     = false
+  nullable    = false
+}
+
 variable "runtime_guard_live" {
   description = "Guard scriptがlive/preflight/migration manifestから生成する一時照合値。tfvarsへ保存しない。"
   type = object({
@@ -136,6 +143,17 @@ locals {
   runtime_selected_migration = var.runtime_guard_live == null ? null : try(
     local.runtime_migration_manifest.migrations[var.runtime_guard_live.migration_id],
     null,
+  )
+  runtime_migration_review_authorized = (
+    var.runtime_guard_review_only ?
+    (
+      try(local.runtime_selected_migration.enabled, null) == false &&
+      try(local.runtime_selected_migration.reviewed_plan, null) == null
+    ) :
+    (
+      try(local.runtime_selected_migration.enabled, false) == true &&
+      try(local.runtime_selected_migration.reviewed_plan, null) != null
+    )
   )
   legacy_tiktok_image_pattern = "^718959508629\\.dkr\\.ecr\\.ap-northeast-1\\.amazonaws\\.com/teamagent-dev-tiktok-acquire@sha256:[0-9a-f]{64}$"
   # The media cutover gate uses the canonical live task image to identify the
@@ -476,6 +494,7 @@ locals {
     (
       var.runtime_guard_live.mode == "sync" ?
       (
+        !var.runtime_guard_review_only &&
         var.runtime_guard_live.migration_id == "" &&
         var.runtime_guard_live.preflight_receipt_sha256 == "" &&
         var.runtime_guard_live.versioning_pre_cutover_receipt_sha256 == "" &&
@@ -489,7 +508,7 @@ locals {
       ) :
       (
         local.runtime_migration_manifest.schema_version == 1 &&
-        try(local.runtime_selected_migration.enabled, false) &&
+        local.runtime_migration_review_authorized &&
         can(regex("^[0-9a-f]{64}$", var.runtime_guard_live.preflight_receipt_sha256)) &&
         (
           local.runtime_is_config_migration ?
@@ -660,6 +679,22 @@ locals {
     束縛されていないため停止しました。plain terraform plan/applyは禁止です。
     infra/deploy/terraform_runtime_guard.sh を使用してください。
   EOT
+}
+
+resource "terraform_data" "runtime_guard_review_blocker" {
+  count = var.runtime_guard_review_only ? 1 : 0
+  input = {
+    aws_region     = var.aws_region
+    billing_region = "us-east-1"
+  }
+
+  lifecycle {
+    precondition {
+      # timestamp() is unknown during plan and always nonempty during apply.
+      condition     = !var.runtime_guard_review_only || timestamp() == ""
+      error_message = "review-only candidate planはapplyできません。承認後にfinal planを作り直してください。"
+    }
+  }
 }
 
 resource "terraform_data" "runtime_guard" {

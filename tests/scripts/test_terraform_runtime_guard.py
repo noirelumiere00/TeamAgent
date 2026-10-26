@@ -3496,6 +3496,9 @@ def _fake_terraform(path: Path) -> None:
                     )
                 },
                 "runtime_guard_live": {"value": core},
+                "runtime_guard_review_only": {
+                    "value": configured_var("runtime_guard_review_only", False)
+                },
             }
             consumer_by_address = {
                 consumer["terraform_task_definition_address"]: consumer["consumer_id"]
@@ -5763,6 +5766,7 @@ def test_invalid_bool_value_is_not_echoed(tmp_path: Path) -> None:
         "TF_WORKSPACE",
         "TF_DATA_DIR",
         "TF_VAR_MAIL_ACTION_HMAC_SECRET",
+        "TF_VAR_runtime_guard_review_only",
         "TF_CLI_CONFIG_FILE",
         "TF_REATTACH_PROVIDERS",
         "TF_LOG_PATH",
@@ -5782,6 +5786,53 @@ def test_terraform_environment_injection_is_removed_and_rejected_without_value_l
     assert variable_name in result.stdout + result.stderr
     assert secret_value not in result.stdout + result.stderr
     assert "plan " not in tf_log.read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize(
+    "argument",
+    ["--runtime-guard-review-only", "-var=runtime_guard_review_only=true"],
+)
+def test_review_only_cannot_be_injected_as_a_guard_argument(tmp_path: Path, argument: str) -> None:
+    env, var_file, tf_log = _harness(tmp_path)
+
+    result = _run([*_plan_command(var_file, tmp_path / "injected.tfplan"), argument], env)
+
+    assert result.returncode == 1
+    assert "不明な引数" in result.stderr
+    assert "plan " not in tf_log.read_text(encoding="utf-8")
+
+
+def test_sync_plan_overrides_user_review_flag_with_false(tmp_path: Path) -> None:
+    env, var_file, tf_log = _harness(tmp_path)
+    with var_file.open("a", encoding="utf-8") as handle:
+        handle.write("runtime_guard_review_only = true\n")
+    output = tmp_path / "sync-review-flag.tfplan"
+
+    result = _run(_plan_command(var_file, output), env)
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    saved_plan = json.loads(output.read_text(encoding="utf-8"))
+    assert saved_plan["variables"]["runtime_guard_review_only"]["value"] is False
+    commands = tf_log.read_text(encoding="utf-8")
+    assert "-var=runtime_guard_review_only=false" in commands
+    assert "-var=runtime_guard_review_only=true" not in commands
+
+
+def test_review_flag_true_is_injected_only_by_candidate_plan_branch() -> None:
+    guard = GUARD.read_text(encoding="utf-8")
+    shared_injection = _guard_function("build_live_injection_args")
+    branch = guard[guard.index("review-plan|plan)") : guard.index("\n  verify)")]
+
+    assert '"-var=runtime_guard_review_only=false"' in shared_injection
+    assert guard.count('"-var=runtime_guard_review_only=true"') == 1
+    assert re.search(
+        r'if \[ "\$REVIEW_ONLY" = "true" \]; then\s+'
+        r'TF_ARGS\+=\("-var=runtime_guard_review_only=true"\)\s+fi',
+        branch,
+    )
+    assert branch.index('migration_to_file "$MIGRATION_ID" "$MIGRATION_JSON" candidate') < (
+        branch.index('"-var=runtime_guard_review_only=true"')
+    )
 
 
 def test_workspace_state_list_and_import_ownership_collisions_fail_closed(
@@ -6466,6 +6517,29 @@ def test_config_migration_manifest_is_accepted_and_bound_to_exact_live(tmp_path:
         assert "liveはmigrationのexact one-time source allowlistと一致しません" in rejected.stderr
 
 
+@pytest.mark.parametrize("enabled", [False, True])
+@pytest.mark.parametrize("reviewed", [None, {}], ids=["unreviewed", "reviewed"])
+@pytest.mark.parametrize("phase", ["candidate", "final"])
+def test_migration_review_phase_requires_exact_enablement_state(
+    tmp_path: Path, enabled: bool, reviewed: dict[str, Any] | None, phase: str
+) -> None:
+    entry = _config_migration_entry()
+    entry.update(enabled=enabled, reviewed_plan=reviewed)
+
+    result, output = _run_migration_to_file(tmp_path, entry, phase)
+
+    expected = (
+        (not enabled and reviewed is None)
+        if phase == "candidate"
+        else (enabled and reviewed is not None)
+    )
+    assert result.returncode == (0 if expected else 1), result.stderr
+    if expected:
+        assert json.loads(output.read_text(encoding="utf-8")) == entry
+    else:
+        assert "review phase不一致" in result.stderr
+
+
 CONFIG_MANIFEST_REJECTIONS = {
     "to_image_digest": lambda e: e["to"]["images"].update(mcp=f"{REPOSITORY}@sha256:{'d' * 64}"),
     "from_image_digest": lambda e: e["from"]["images"].update(
@@ -7073,3 +7147,254 @@ def test_config_preflight_receipt_binds_live_and_images_without_profiles(tmp_pat
         rejected = run(mutated)
         assert rejected.returncode == 1
         assert expected in rejected.stderr
+
+
+REVIEW_BLOCKER_ADDRESS = "terraform_data.runtime_guard_review_blocker[0]"
+
+
+def _review_validation_plan() -> dict[str, Any]:
+    blocker = _change(
+        REVIEW_BLOCKER_ADDRESS,
+        "terraform_data",
+        ["create"],
+        None,
+        {"input": {"aws_region": REGION, "billing_region": "us-east-1"}},
+    )
+    blocker.update(
+        name="runtime_guard_review_blocker",
+        index=0,
+        provider_name="terraform.io/builtin/terraform",
+    )
+    blocker["change"]["after_unknown"] = {"id": True, "input": {}, "output": True}
+    return {
+        "variables": {"runtime_guard_review_only": {"value": True}},
+        "resource_changes": [blocker],
+        "resource_drift": [],
+        "checks": [
+            {
+                "address": {
+                    "kind": "resource",
+                    "mode": "managed",
+                    "type": "terraform_data",
+                    "name": "runtime_guard_review_blocker",
+                    "to_display": "terraform_data.runtime_guard_review_blocker",
+                },
+                "status": "unknown",
+                "instances": [
+                    {
+                        "address": {"to_display": REVIEW_BLOCKER_ADDRESS, "instance_key": 0},
+                        "status": "unknown",
+                    }
+                ],
+            }
+        ],
+    }
+
+
+def _run_prepare_review_validation(
+    tmp_path: Path,
+    plan: dict[str, Any],
+    *,
+    mode: str = "migration",
+    contract_mode: str = "extract",
+) -> tuple[subprocess.CompletedProcess[str], Path]:
+    plan_path = tmp_path / "review-validation-plan.json"
+    core_path = tmp_path / "review-validation-core.json"
+    plan_path.write_text(json.dumps(plan), encoding="utf-8")
+    core_path.write_text(json.dumps({"mode": mode, "aws_region": REGION}), encoding="utf-8")
+    result = _run_guard_functions(
+        ["prepare_plan_for_validation"],
+        'prepare_plan_for_validation "$1" "$2" "$3"\ncat "$VALIDATION_PLAN_JSON"',
+        [str(plan_path), str(core_path), contract_mode],
+        prelude=[f"TMP_ROOT={str(tmp_path)!r}"],
+    )
+    return result, plan_path
+
+
+def test_review_plan_validation_removes_only_exact_blocker_from_a_copy(tmp_path: Path) -> None:
+    plan = _review_validation_plan()
+    other_change = _change(
+        "aws_kms_key.proposal_builder_assets", "aws_kms_key", ["create"], None, {}
+    )
+    other_check = {
+        "address": {"to_display": "aws_kms_key.proposal_builder_assets"},
+        "status": "unknown",
+        "instances": [],
+    }
+    plan["resource_changes"].append(other_change)
+    plan["checks"].append(other_check)
+
+    result, original = _run_prepare_review_validation(tmp_path, plan)
+
+    assert result.returncode == 0, result.stderr
+    assert original.read_text(encoding="utf-8") == json.dumps(plan)
+    normalized = json.loads(result.stdout)
+    assert normalized == {
+        **plan,
+        "resource_changes": [other_change],
+        "checks": [other_check],
+    }
+
+
+@pytest.mark.parametrize("mode", ["sync", "migration"])
+@pytest.mark.parametrize("empty_review_check", [False, True])
+def test_final_plan_validation_requires_false_review_flag_and_keeps_plan(
+    tmp_path: Path, mode: str, empty_review_check: bool
+) -> None:
+    plan = {
+        "variables": {"runtime_guard_review_only": {"value": False}},
+        "resource_changes": [],
+        "resource_drift": [],
+        "checks": [],
+    }
+    if empty_review_check:
+        check = _review_validation_plan()["checks"][0]
+        check.update(status="pass", instances=[])
+        plan["checks"] = [check]
+
+    result, original = _run_prepare_review_validation(
+        tmp_path, plan, mode=mode, contract_mode="verify"
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout) == plan
+    assert original.read_text(encoding="utf-8") == json.dumps(plan)
+
+
+REVIEW_PLAN_REJECTIONS = {
+    "false_flag": lambda p: p["variables"]["runtime_guard_review_only"].update(value=False),
+    "missing_flag": lambda p: p["variables"].pop("runtime_guard_review_only"),
+    "missing_blocker": lambda p: p.update(resource_changes=[]),
+    "duplicate_blocker": lambda p: p["resource_changes"].append(
+        copy.deepcopy(p["resource_changes"][0])
+    ),
+    "duplicate_address_wrong_identity": lambda p: p["resource_changes"].append(
+        {
+            **copy.deepcopy(p["resource_changes"][0]),
+            "type": "aws_kms_key",
+            "name": "hidden",
+        }
+    ),
+    "wrong_provider": lambda p: p["resource_changes"][0].update(
+        provider_name="registry.terraform.io/hashicorp/aws"
+    ),
+    "wrong_type": lambda p: p["resource_changes"][0].update(type="aws_kms_key"),
+    "wrong_name": lambda p: p["resource_changes"][0].update(name="hidden"),
+    "wrong_address": lambda p: p["resource_changes"][0].update(
+        address=REVIEW_BLOCKER_ADDRESS + "x"
+    ),
+    "wrong_action": lambda p: p["resource_changes"][0]["change"].update(actions=["update"]),
+    "existing_blocker": lambda p: p["resource_changes"][0]["change"].update(before={"input": True}),
+    "false_input": lambda p: p["resource_changes"][0]["change"]["after"].update(input=False),
+    "wrong_input_region": lambda p: p["resource_changes"][0]["change"]["after"]["input"].update(
+        aws_region="us-east-2"
+    ),
+    "missing_input_mask": lambda p: p["resource_changes"][0]["change"]["after_unknown"].pop(
+        "input"
+    ),
+    "unknown_provider_region_mask": lambda p: p["resource_changes"][0]["change"][
+        "after_unknown"
+    ].update(input={"aws_region": True}),
+    "known_output": lambda p: p["resource_changes"][0]["change"]["after_unknown"].update(
+        output=False
+    ),
+    "deposed_blocker": lambda p: p["resource_changes"][0].update(deposed="deadbeef"),
+    "blocker_drift": lambda p: p["resource_drift"].append(copy.deepcopy(p["resource_changes"][0])),
+    "missing_check": lambda p: p.update(checks=[]),
+    "passed_check": lambda p: p["checks"][0].update(status="pass"),
+    "passed_instance": lambda p: p["checks"][0]["instances"][0].update(status="pass"),
+    "wrong_instance": lambda p: p["checks"][0]["instances"][0]["address"].update(
+        to_display="terraform_data.runtime_guard_review_blocker[1]"
+    ),
+}
+
+
+@pytest.mark.parametrize("scenario", tuple(REVIEW_PLAN_REJECTIONS))
+def test_review_plan_validation_rejects_nonexact_apply_blocker(
+    tmp_path: Path, scenario: str
+) -> None:
+    plan = _review_validation_plan()
+    REVIEW_PLAN_REJECTIONS[scenario](plan)
+
+    result, original = _run_prepare_review_validation(tmp_path, plan)
+
+    assert result.returncode == 1, result.stderr
+    assert original.read_text(encoding="utf-8") == json.dumps(plan)
+
+
+@pytest.mark.parametrize("mode", ["sync", "migration"])
+def test_review_flag_and_blocker_are_rejected_on_final_apply_path(
+    tmp_path: Path, mode: str
+) -> None:
+    for flag in (False, True):
+        for retain_resource, retain_check in ((True, False), (False, True), (True, True)):
+            plan = _review_validation_plan()
+            plan["variables"]["runtime_guard_review_only"]["value"] = flag
+            if not retain_resource:
+                plan["resource_changes"] = []
+            if not retain_check:
+                plan["checks"] = []
+            result, _ = _run_prepare_review_validation(
+                tmp_path, plan, mode=mode, contract_mode="verify"
+            )
+            assert result.returncode == 1, result.stderr
+
+
+def test_review_flag_is_rejected_in_sync_extract_mode(tmp_path: Path) -> None:
+    result, _ = _run_prepare_review_validation(tmp_path, _review_validation_plan(), mode="sync")
+
+    assert result.returncode == 1, result.stderr
+
+
+@pytest.mark.parametrize("value", [None, True, "false"])
+def test_final_plan_validation_rejects_missing_true_or_string_review_flag(
+    tmp_path: Path, value: Any
+) -> None:
+    plan = {
+        "variables": {},
+        "resource_changes": [],
+        "resource_drift": [],
+        "checks": [],
+    }
+    if value is not None:
+        plan["variables"]["runtime_guard_review_only"] = {"value": value}
+
+    result, _ = _run_prepare_review_validation(tmp_path, plan, contract_mode="verify")
+
+    assert result.returncode == 1, result.stderr
+
+
+@pytest.mark.parametrize("contract_mode", ["extract", "verify"])
+def test_plan_validation_normalizes_omitted_drift_only_in_a_copy(
+    tmp_path: Path, contract_mode: str
+) -> None:
+    plan = _review_validation_plan()
+    if contract_mode == "verify":
+        plan["variables"]["runtime_guard_review_only"]["value"] = False
+        plan["resource_changes"] = []
+        plan["checks"][0].update(status="pass", instances=[])
+    plan.pop("resource_drift")
+
+    result, original = _run_prepare_review_validation(tmp_path, plan, contract_mode=contract_mode)
+
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout)["resource_drift"] == []
+    assert original.read_text(encoding="utf-8") == json.dumps(plan)
+
+
+@pytest.mark.parametrize("contract_mode", ["extract", "verify"])
+@pytest.mark.parametrize("drift", [None, "invalid", {}], ids=["null", "string", "object"])
+def test_plan_validation_rejects_explicit_nonarray_drift(
+    tmp_path: Path, contract_mode: str, drift: Any
+) -> None:
+    plan = _review_validation_plan()
+    if contract_mode == "verify":
+        plan["variables"]["runtime_guard_review_only"]["value"] = False
+        plan["resource_changes"] = []
+        plan["checks"][0].update(status="pass", instances=[])
+    plan["resource_drift"] = drift
+
+    result, original = _run_prepare_review_validation(tmp_path, plan, contract_mode=contract_mode)
+
+    assert result.returncode == 1, result.stderr
+    assert original.read_text(encoding="utf-8") == json.dumps(plan)
