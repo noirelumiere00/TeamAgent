@@ -525,6 +525,31 @@ class GeminiClient:
                 log_event="gemini_analyze_image",
             )
 
+    def analyze_images_bytes(
+        self, images: list[tuple[bytes, str]], prompt: str, request_id: str
+    ) -> GeminiResponse:
+        """Review a small ordered batch at original resolution, retaining every image."""
+        from google.genai import types
+
+        if not 1 <= len(images) <= 4 or sum(len(data) for data, _ in images) > 20 * 1024 * 1024:
+            raise ValueError("bounded image batch required")
+        if any(
+            not data or mime not in {"image/jpeg", "image/png", "image/webp"}
+            for data, mime in images
+        ):
+            raise ValueError("supported nonempty images required")
+        return self._generate_video(
+            [types.Part.from_bytes(data=data, mime_type=mime) for data, mime in images]
+            + [types.Part(text=prompt)],
+            request_id,
+            system=None,
+            json_mode=True,
+            timeout_s=30,
+            media_resolution="high",
+            max_attempts=2,
+            rate_limit_attempts=2,
+        )
+
     def analyze_audio_bytes(
         self, data: bytes, mime_type: str, prompt: str, request_id: str
     ) -> GeminiResponse:

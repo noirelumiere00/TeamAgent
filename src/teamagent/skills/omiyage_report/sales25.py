@@ -7,13 +7,16 @@ import json
 import os
 import tempfile
 import threading
+import time
 import uuid
 from collections.abc import Callable, Mapping
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Annotated, Any, Final, Literal
 
+import structlog
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from teamagent.adapters.proposal_job_store import ProposalJobStore
@@ -31,6 +34,8 @@ from teamagent.skills.omiyage_report.schema import (
     Sales25Intake,
 )
 
+logger = structlog.get_logger(__name__)
+
 EDITION = "sales25"
 STAGES = ("relevance", "media", "analysis", "fill", "machine_check", "page_qa")
 LABELS = {
@@ -45,6 +50,17 @@ LABELS = {
     "delivery": "配信",
 }
 PPTX_TYPE: Final = "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+
+
+def search_concurrency() -> int:
+    value = int(os.getenv("OMIYAGE_SALES25_SEARCH_CONCURRENCY", "2"))
+    if not 1 <= value <= 2:
+        raise ValueError("sales25 search concurrency outside 1..2")
+    return value
+
+
+def time_estimate() -> str:
+    return "標準設定の目安は約35〜45分（暫定、混雑・長尺時は約90分以上）です。"
 
 
 def enabled(metadata: Mapping[str, Any]) -> bool:
@@ -193,6 +209,7 @@ class Stages:
     fill: Step = not_connected
     machine_check: Step = not_connected
     page_qa: Step = rendering_not_available
+    prefetch: Step | None = None
 
 
 def can_continue(key: str, result: StepResult) -> bool:
@@ -385,6 +402,7 @@ class Parent:
         self.heartbeat_seconds = heartbeat_seconds
 
     def execute(self, job_id: str, row: dict[str, Any]) -> None:
+        search_workers = search_concurrency()
         summary = json.loads(row["request_summary"])
         old = row.get("checkpoint_json")
         state = (
@@ -399,7 +417,7 @@ class Parent:
         ):
             return
         stop = threading.Event()
-        state_lock = threading.Lock()
+        state_lock = threading.RLock()
 
         def heartbeat() -> None:
             while not stop.wait(self.heartbeat_seconds):
@@ -424,6 +442,35 @@ class Parent:
                     current = updated
                 return saved
 
+        searches: dict[str, Future[StepResult]] = {}
+        prefetches: list[Future[StepResult]] = []
+        search_pool = ThreadPoolExecutor(max_workers=search_workers)
+        prefetch_pool = ThreadPoolExecutor(max_workers=2)
+
+        def progress(completed: int, total: int) -> None:
+            with state_lock:
+                state.update(completed=completed, total=total)
+                if not save():
+                    raise RuntimeError("sales25 checkpoint lease lost")
+
+        def run_search(
+            case: dict[str, Any], previous: dict[str, StepResult], key: str
+        ) -> StepResult:
+            result = self.stages.search(case, previous, key)
+            if self.stages.prefetch is not None and can_continue(key.rsplit(":", 1)[1], result):
+                future = prefetch_pool.submit(
+                    self.stages.prefetch,
+                    case,
+                    {
+                        **previous,
+                        key.rsplit(":", 1)[1]: result,
+                    },
+                    key,
+                )
+                with state_lock:
+                    prefetches.append(future)
+            return result
+
         try:
             steps = {k: StepResult.model_validate(v) for k, v in state["steps"].items()}
             plan = [(f"search_{i + 1}", "search") for i in range(6)] + [(s, s) for s in STAGES]
@@ -433,10 +480,32 @@ class Parent:
                 # The six search outcomes are all retained, including refused and true zero.
                 if stage != "search" and any(not can_continue(k, r) for k, r in steps.items()):
                     break
+                if stage == "relevance":
+                    # Early work is an optimization; final validation still decides delivery.
+                    started = time.monotonic()
+                    search_pool.shutdown(wait=True)
+                    prefetch_pool.shutdown(wait=True)
+                    logger.info(
+                        "sales25_prefetch_wait",
+                        job_id=job_id,
+                        duration_s=round(time.monotonic() - started, 3),
+                    )
+                    for future in prefetches:
+                        try:
+                            future.result()
+                        except Exception as exc:
+                            logger.warning(
+                                "sales25_prefetch_incomplete",
+                                job_id=job_id,
+                                error_type=type(exc).__name__,
+                            )
                 state["stage"] = key
+                state["completed"] = 0
                 if stage in {"media", "analysis"}:
                     source = steps.get("relevance" if stage == "media" else "media")
                     state["total"] = source.total if source is not None else None
+                    if stage == "analysis" and source is not None:
+                        state["completed"] = source.actual or 0
                 else:
                     state.pop("total", None)
                 if not save():
@@ -451,9 +520,22 @@ class Parent:
                     case["query"] = case["queries"][int(key.split("_")[1]) - 1]
                     case["target"] = 100
                 try:
-                    result = StepResult.model_validate(
-                        getattr(self.stages, stage)(case, dict(steps), f"{job_id}:{key}")
-                    )
+                    if stage == "search":
+                        if not searches:
+                            for index, query in enumerate(case["queries"], 1):
+                                search_key = f"search_{index}"
+                                if search_key not in steps:
+                                    searches[search_key] = search_pool.submit(
+                                        run_search,
+                                        {**case, "query": query},
+                                        dict(steps),
+                                        f"{job_id}:{search_key}",
+                                    )
+                        outcome = searches[key].result()
+                    else:
+                        case["_progress"] = progress
+                        outcome = getattr(self.stages, stage)(case, dict(steps), f"{job_id}:{key}")
+                    result = StepResult.model_validate(outcome)
                     if len(result.model_dump_json().encode()) > 4096:
                         raise ValueError("stage must return small references, not raw data")
                     if stage == "search" and (
@@ -605,6 +687,8 @@ class Parent:
                     job_id, parent_result.model_dump_json(), expected_checkpoint=current
                 )
         finally:
+            search_pool.shutdown(wait=True, cancel_futures=True)
+            prefetch_pool.shutdown(wait=True, cancel_futures=True)
             stop.set()
             if thread is not None:
                 thread.join(timeout=1)
@@ -731,17 +815,18 @@ class Parent:
         state = json.loads(row.get("checkpoint_json") or "{}")
         stage = state.get("stage", "intake")
         label = (
-            "検索 " + stage.split("_")[1] + "/6"
+            "検索 " + str(sum(k.startswith("search_") for k in state.get("steps", {}))) + "/6"
             if stage.startswith("search_")
             else LABELS.get(stage, "受付")
         )
         if stage in {"media", "analysis"} and state.get("total") is not None:
-            label += f" 0/{state['total']}（ID和集合）"
+            label = "媒体取得・分析" if stage == "media" else label
+            label += f" {state.get('completed', 0)}/{state['total']}（ID和集合）"
         return ParentStatus(
             job_id=job_id,
             status=row["status"],
             stage=stage,
             checkpoints=state.get("steps", {}),
-            message=f"sales25: {label}。目安は1〜3時間（仮）です。",
+            message=f"sales25: {label}。{time_estimate()}",
             retry_after_seconds=30,
         )

@@ -272,7 +272,7 @@ def test_fake_pipeline_partial_delivers_once_after_terminal_save(
     store = ProposalJobStore(table_name="", memory={})
     pipeline = Pipeline(actual=37, check_changes={"deck_qa_l1": {"review_pages": [3, 7, 21]}})
     accepted = build(store, pipeline).run(request(), ctx())
-    assert "1〜3時間（仮）" in accepted.message
+    assert "約35〜45分（暫定" in accepted.message
     saved = result(store, accepted.job_id)
     assert saved.status == "partial" and len(saved.checkpoints) == 12
     assert saved.final_pptx_ref is not None
@@ -404,7 +404,7 @@ def test_resume_after_restart_uses_saved_steps_and_same_child_key(
     assert result(store, job_id).status == "ready"
     assert sum(c.endswith(":search_1") for c in pipeline.calls) == 1
     assert sum(c.endswith(":search_3") for c in pipeline.calls) == 2
-    assert pipeline.calls[2] == pipeline.calls[3]
+    assert len({c for c in pipeline.calls if c.endswith(":search_3")}) == 1
     assert not store.mark_done(job_id, "{}", expected_checkpoint=old["checkpoint_json"])
 
 

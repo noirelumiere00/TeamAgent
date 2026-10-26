@@ -104,7 +104,14 @@ class Transport(MediaJobClient):
         op = request.operation
         if op.kind == "tiktok_acquire":
             assert len(op.keywords) == 1 and op.n_per_kw == 100 and op.videos_per_kw == 0
-            index = len([r for r in self.requests if r.operation.kind == "tiktok_acquire"]) - 1
+            index = [
+                "ブランドA",
+                "ブランドB",
+                "ブランドC",
+                "朝のケア",
+                "乾燥対策",
+                "時短ケア",
+            ].index(op.keywords[0])
             if self.failure == "timeout" and index == 1:
                 raise MediaJobError("MEDIA_JOB_TIMEOUT")
             raw = inputs()[1][f"q{index}"]
@@ -279,8 +286,13 @@ def test_real_failure_shapes_keep_all_searches_without_delivery(
     assert saved.checkpoints["search_2"].status == expected
     assert len(saved.checkpoints) == 6
     assert saved.delivery_status == "not_ready" and saved.final_pptx_ref is None
-    assert len(client.requests) == 6
-    approved.generate_text.assert_not_called()
+    assert len([r for r in client.requests if r.operation.kind == "tiktok_acquire"]) == 6
+    assert not any(r.operation.kind == "sales25_pptx" for r in client.requests)
+    # Completed companies may already have relevance evidence and early media.
+    assert all(
+        call.args[1].startswith("sales25-relevance-")
+        for call in approved.generate_text.call_args_list
+    )
 
 
 def test_synonyms_persist_and_change_revision_identity() -> None:

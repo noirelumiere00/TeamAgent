@@ -7,15 +7,19 @@ import io
 import json
 import os
 import tempfile
+import threading
 import time
 import uuid
 import zipfile
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict
 from datetime import datetime
 from functools import partial
 from pathlib import Path
 from typing import Any, cast
+
+import structlog
 
 from teamagent.adapters.gemini_client import GeminiClient, GeminiResponse
 from teamagent.adapters.media_job import MediaJobClient, MediaJobError
@@ -25,6 +29,8 @@ from teamagent.skills.first_visit import sales25_analysis as analysis
 from teamagent.skills.first_visit import sales25_authoring as authoring
 from teamagent.skills.first_visit import sales25_contract as contract
 from teamagent.skills.omiyage_report.sales25 import Artifact, MachineChecks, Stages, StepResult
+
+logger = structlog.get_logger(__name__)
 
 _SEARCH_SLOT_NAMES = ("dedup_sales25_search_slot_0", "dedup_sales25_search_slot_1")
 # shortcut: one 128 MiB snapshot reserves 16 MiB for metadata; split transfers for larger cases.
@@ -62,6 +68,16 @@ def pack_run(root: Path, owner_id: str) -> bytes:
     return output.getvalue()
 
 
+def _model_identity(value: Any) -> Any:
+    if isinstance(value, bytes):
+        return hashlib.sha256(value).hexdigest()
+    if isinstance(value, (list, tuple)):
+        return [_model_identity(item) for item in value]
+    if isinstance(value, dict):
+        return {key: _model_identity(item) for key, item in value.items()}
+    return value
+
+
 class _Model:
     """Cache model evidence in the same case folder, including across interrupted stages."""
 
@@ -70,12 +86,14 @@ class _Model:
         self.calls = 0
         self.cost_usd = 0.0
         self.maximum = _limit("OMIYAGE_SALES25_MODEL_CALLS_PER_STAGE", 2000, 1, 20000)
-        self.client: GeminiClient | None = None
+        self.local = threading.local()
+        self.lock = threading.Lock()
 
     def __getattr__(self, method: str) -> Callable[..., GeminiResponse]:
         if method not in {
             "generate_text",
             "analyze_image_bytes",
+            "analyze_images_bytes",
             "compare_image_bytes",
             "analyze_audio_bytes",
             "analyze_video_bytes",
@@ -84,29 +102,29 @@ class _Model:
 
         def invoke(*args: Any, **kwargs: Any) -> GeminiResponse:
             self.wire._remaining(self.case)
-            if self.calls >= self.maximum:
-                raise TimeoutError("sales25 model call limit")
-            self.calls += 1
+            with self.lock:
+                if self.calls >= self.maximum:
+                    raise TimeoutError("sales25 model call limit")
+                self.calls += 1
             identity = contract.json_bytes(
                 {
                     "method": method,
-                    "args": [
-                        hashlib.sha256(a).hexdigest() if isinstance(a, bytes) else a for a in args
-                    ],
-                    "kwargs": kwargs,
+                    "args": _model_identity(args),
+                    "kwargs": _model_identity(kwargs),
                     "model": os.getenv("GEMINI_MODEL_ID", ""),
                 }
             )
             name = "model-" + hashlib.sha256(identity).hexdigest() + ".json"
             cached = self.wire._find_json(self.case, name)
             if cached is None:
-                if self.client is None:
-                    self.client = self.wire.model_factory()
-                response = cast(GeminiResponse, getattr(self.client, method)(*args, **kwargs))
+                if not hasattr(self.local, "client"):
+                    self.local.client = self.wire.model_factory()
+                response = cast(GeminiResponse, getattr(self.local.client, method)(*args, **kwargs))
                 self.wire._save_json(self.case, name, asdict(response))
             else:
                 response = GeminiResponse(**cached)
-            self.cost_usd += response.cost_usd
+            with self.lock:
+                self.cost_usd += response.cost_usd
             return response
 
         return invoke
@@ -123,6 +141,11 @@ class Wire:
         self.client = client or MediaJobClient()
         self.model_factory = model_factory
         self.store = store or ProposalJobStore()
+        self.post_locks: dict[str, Any] = {}
+        self.post_locks_guard = threading.Lock()
+        self.post_workers = threading.BoundedSemaphore(
+            _limit("OMIYAGE_SALES25_POST_CONCURRENCY", 2, 1, 4)
+        )
 
     @staticmethod
     def _case_id(case: dict[str, Any]) -> str:
@@ -191,26 +214,49 @@ class Wire:
         self, stage: str, case: dict[str, Any], previous: dict[str, StepResult], step_key: str
     ) -> StepResult:
         name = step_key.split(":")[-1].replace("_", "-") + "-result.json"
+        started = time.monotonic()
         cached = self._find_json(case, name)
         if cached is not None:
-            return StepResult.model_validate(cached)
-        result = cast(StepResult, getattr(self, stage)(case, previous, step_key))
-        self._save_json(case, name, result.model_dump())
+            result = StepResult.model_validate(cached)
+        else:
+            result = cast(StepResult, getattr(self, stage)(case, previous, step_key))
+            self._save_json(case, name, result.model_dump())
+        logger.info(
+            "sales25_stage_complete",
+            job_id=case["job_id"],
+            stage=stage,
+            duration_s=round(time.monotonic() - started, 3),
+            cached=cached is not None,
+            status=result.status,
+            actual=result.actual,
+        )
         return result
 
     def _claim_search_slot(self, case: dict[str, Any]) -> tuple[str, str, int]:
+        return self._claim_acquisition_slot(
+            case, _limit("OMIYAGE_SALES25_SEARCH_SECONDS", 300, 270, 900)
+        )
+
+    def _claim_acquisition_slot(self, case: dict[str, Any], seconds: int) -> tuple[str, str, int]:
+        started = time.monotonic()
         while True:
-            timeout = min(
-                self._remaining(case), _limit("OMIYAGE_SALES25_SEARCH_SECONDS", 300, 270, 900)
-            )
+            timeout = min(self._remaining(case), seconds)
             now = int(time.time())
             target = f"{now + timeout + 60}:{uuid.uuid4().hex}"
-            for name in _SEARCH_SLOT_NAMES:
+            for name in _SEARCH_SLOT_NAMES[
+                : _limit("OMIYAGE_SALES25_ACQUIRE_CONCURRENCY", 2, 1, 2)
+            ]:
                 current = self.store.get_dedup_lock(name)
                 previous = current["target_job_id"] if current else None
                 if previous and int(previous.split(":", 1)[0]) > now:
                     continue
                 if self.store.put_dedup_lock(name, target, expected_target=previous):
+                    logger.info(
+                        "sales25_acquisition_slot_claimed",
+                        job_id=case["job_id"],
+                        wait_s=round(time.monotonic() - started, 3),
+                        timeout_s=timeout,
+                    )
                     return name, target, timeout
             time.sleep(min(1, self._remaining(case)))
 
@@ -260,12 +306,11 @@ class Wire:
             child_job_ids=[result["media_job_id"]],
         )
 
-    def relevance(
-        self, case: dict[str, Any], previous: dict[str, StepResult], step_key: str
-    ) -> StepResult:
+    @staticmethod
+    def _authored_case(case: dict[str, Any]) -> dict[str, Any]:
         groups = [case["brand"], *case["competitors"], *case["keywords"]]
-        authored_case = {
-            **case,
+        return {
+            **{k: v for k, v in case.items() if not k.startswith("_")},
             "queries": [
                 {
                     "query_id": f"q{i}",
@@ -277,6 +322,32 @@ class Wire:
                 for i, query in enumerate(case["queries"])
             ],
         }
+
+    def prefetch(
+        self, case: dict[str, Any], previous: dict[str, StepResult], step_key: str
+    ) -> StepResult:
+        """Only brand TOP10s are stable before all six searches; PR selection waits."""
+        index = int(step_key.rsplit("_", 1)[1]) - 1
+        if index >= 3:
+            return StepResult(status="complete")
+        authored = self._authored_case(case)
+        query = authored["queries"][index]
+        raw = self._json(case, previous[f"search_{index + 1}"].refs[0])["raw"]
+        model = _Model(self, case, step_key)
+        decisions = authoring.judge_query(
+            authored, query, raw, owner_id=case["owner_id"], model=cast(GeminiClient, model)
+        )
+        source = contract._source(query, raw, decisions, case["owner_id"])
+        ids = {pid for ranking in contract._rankings(source["posts"]).values() for pid in ranking}
+        for post in source["posts"]:
+            if post["id"] in ids:
+                self._acquire_post(case, post)
+        return StepResult(status="complete")
+
+    def relevance(
+        self, case: dict[str, Any], previous: dict[str, StepResult], step_key: str
+    ) -> StepResult:
+        authored_case = self._authored_case(case)
         raw = {
             f"q{i}": self._json(case, previous[f"search_{i + 1}"].refs[0])["raw"] for i in range(6)
         }
@@ -292,54 +363,127 @@ class Wire:
             total = len(analysis.selected_posts(root, case["owner_id"]))
         return StepResult(status="complete", refs=[ref], total=total)
 
+    def _acquire_post(self, case: dict[str, Any], post: dict[str, Any]) -> dict[str, Any]:
+        # Same ID across companies must agree before reusing an early acquisition.
+        operation = analysis.media_operation(post)
+        with self.post_locks_guard:
+            lock = self.post_locks.setdefault(
+                self._case_id(case) + ":" + post["id"], threading.Lock()
+            )
+        with lock, self.post_workers:
+            name = "media-" + post["id"]
+            record = self._find_json(case, name + ".json")
+            if record is None:
+                slot, lease, timeout = self._claim_acquisition_slot(case, 900)
+                artifacts = self.client.acquire_sales25_media(
+                    operation,
+                    request_fingerprint=case["job_id"] + ":media:" + post["id"],
+                    timeout_s=timeout,
+                )
+                self.store.put_dedup_lock(slot, "", expected_target=lease)
+                analysis.validate_media(operation, artifacts)
+                record = {
+                    filename: self._save(
+                        case,
+                        name + "-" + filename,
+                        body,
+                        "application/zip" if filename.endswith("zip") else "application/json",
+                    )
+                    for filename, body in artifacts.items()
+                }
+                self._save_json(case, name + ".json", record)
+            return cast(dict[str, Any], record)
+
+    @staticmethod
+    def _review_name(post: dict[str, Any], manifest: dict[str, Any], batch_size: int) -> str:
+        return (
+            "review-"
+            + hashlib.sha256(
+                contract.json_bytes(
+                    [
+                        analysis.media_operation(post).model_dump(),
+                        manifest,
+                        batch_size,
+                        os.getenv("GEMINI_MODEL_ID", ""),
+                    ]
+                )
+            ).hexdigest()
+            + ".json"
+        )
+
     def media(
         self, case: dict[str, Any], previous: dict[str, StepResult], step_key: str
     ) -> StepResult:
         inputs = self._json(case, previous["relevance"].refs[0])
         collected = {}
         snapshot_bytes = sum(len(contract.json_bytes(value)) for value in inputs.values())
+        batch_size = _limit("OMIYAGE_SALES25_IMAGE_BATCH_SIZE", 4, 1, 4)
+        model = _Model(self, case, step_key)
+        mutex = threading.Lock()
+        completed = 0
+        oversized = threading.Event()
         with tempfile.TemporaryDirectory(prefix="sales25-selection-") as work:
             root = Path(work).resolve() / "run"
             contract.write_inputs(root, inputs)
-            for post in analysis.selected_posts(root, case["owner_id"]):
-                name = "media-" + post["id"]
-                record = self._find_json(case, name + ".json")
-                if record is None:
-                    operation = analysis.media_operation(post)
-                    artifacts = self.client.acquire_sales25_media(
-                        operation,
-                        request_fingerprint=step_key + ":" + post["id"],
-                        timeout_s=min(900, self._remaining(case)),
+            selected = analysis.selected_posts(root, case["owner_id"])
+
+            def review(post: dict[str, Any]) -> tuple[str, dict[str, Any]]:
+                nonlocal snapshot_bytes, completed
+                if oversized.is_set():
+                    raise OverflowError("snapshot_size_limit")
+                record = self._acquire_post(case, post)
+                artifacts = {name: self._download(case, ref) for name, ref in record.items()}
+                manifest, files = analysis.validate_media(analysis.media_operation(post), artifacts)
+                with mutex:
+                    snapshot_bytes += sum(asset["bytes"] for asset in manifest["assets"])
+                    snapshot_bytes += len(contract.json_bytes(manifest))
+                    if snapshot_bytes > MAX_INPUT_BYTES - _SNAPSHOT_METADATA_RESERVE:
+                        oversized.set()
+                        raise OverflowError("snapshot_size_limit")
+                name = self._review_name(post, manifest, batch_size)
+                cached = self._find_json(case, name)
+                if cached is None:
+                    cached = analysis._review(
+                        root,
+                        post,
+                        manifest,
+                        files,
+                        cast(GeminiClient, model),
+                        batch_size=batch_size,
                     )
-                    manifest, _files = analysis.validate_media(operation, artifacts)
-                    record = {
-                        filename: self._save(
-                            case,
-                            name + "-" + filename,
-                            body,
-                            "application/zip" if filename.endswith("zip") else "application/json",
-                        )
-                        for filename, body in artifacts.items()
-                    }
-                    self._save_json(case, name + ".json", record)
-                else:
-                    manifest = json.loads(self._download(case, record["media-manifest.json"]))
-                snapshot_bytes += sum(asset["bytes"] for asset in manifest["assets"])
-                snapshot_bytes += len(contract.json_bytes(manifest))
-                if snapshot_bytes > MAX_INPUT_BYTES - _SNAPSHOT_METADATA_RESERVE:
-                    ref = self._save_json(
-                        case,
-                        "media-size-limit.json",
-                        {
-                            "status": "incomplete",
-                            "reason": "snapshot_size_limit",
-                            "bytes": snapshot_bytes,
-                            "limit_bytes": MAX_INPUT_BYTES,
-                            "metadata_reserve_bytes": _SNAPSHOT_METADATA_RESERVE,
-                        },
-                    )
-                    return StepResult(status="incomplete", reason="media_missing", refs=[ref])
-                collected[post["id"]] = record
+                    self._save_json(case, name, cached)
+                with mutex:
+                    completed += 1
+                    if case.get("_progress"):
+                        case["_progress"](completed, len(selected))
+                return post["id"], record
+
+            try:
+                with ThreadPoolExecutor(
+                    max_workers=_limit("OMIYAGE_SALES25_POST_CONCURRENCY", 2, 1, 4)
+                ) as pool:
+                    collected = dict(pool.map(review, selected))
+            except OverflowError:
+                ref = self._save_json(
+                    case,
+                    "media-size-limit.json",
+                    {
+                        "status": "incomplete",
+                        "reason": "snapshot_size_limit",
+                        "bytes": snapshot_bytes,
+                        "limit_bytes": MAX_INPUT_BYTES,
+                        "metadata_reserve_bytes": _SNAPSHOT_METADATA_RESERVE,
+                    },
+                )
+                return StepResult(status="incomplete", reason="media_missing", refs=[ref])
+        self._save_json(
+            case,
+            "media-analysis-usage.json",
+            {
+                "calls": model.calls,
+                "cost_usd": model.cost_usd,
+            },
+        )
         ref = self._save_json(case, "media.json", collected)
         return StepResult(
             status="complete", refs=[ref], actual=len(collected), total=len(collected)
@@ -362,7 +506,18 @@ class Wire:
                 }
 
             result = analysis.analyze_selection(
-                root, owner_id=case["owner_id"], acquire=acquire, model=cast(GeminiClient, model)
+                root,
+                owner_id=case["owner_id"],
+                acquire=acquire,
+                model=cast(GeminiClient, model),
+                concurrency=_limit("OMIYAGE_SALES25_POST_CONCURRENCY", 2, 1, 4),
+                batch_size=_limit("OMIYAGE_SALES25_IMAGE_BATCH_SIZE", 4, 1, 4),
+                review_cache=lambda post, manifest: self._find_json(
+                    case,
+                    self._review_name(
+                        post, manifest, _limit("OMIYAGE_SALES25_IMAGE_BATCH_SIZE", 4, 1, 4)
+                    ),
+                ),
             )
             (root / "analysis-usage.json").write_bytes(
                 contract.json_bytes({"calls": model.calls, "cost_usd": model.cost_usd})
@@ -425,6 +580,7 @@ class Wire:
 def production_stages(wire: Wire | None = None, *, store: ProposalJobStore | None = None) -> Stages:
     adapter = wire or Wire(store=store)
     return Stages(
+        prefetch=adapter.prefetch,
         **{
             name: partial(adapter.run, name)
             for name in (
@@ -435,5 +591,5 @@ def production_stages(wire: Wire | None = None, *, store: ProposalJobStore | Non
                 "fill",
                 "machine_check",
             )
-        }
+        },
     )
