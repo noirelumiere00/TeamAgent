@@ -348,6 +348,73 @@
         "image_deployment_intent_id": "dc0db656-b306-41cd-9832-dc91a17eab69"
       },
       "reviewed_plan": null
+    },
+    "2026-10-tiktok-dispatch-sales25-v1": {
+      "kind": "config",
+      "enabled": false,
+      "expires_at": "2026-11-09T00:00:00Z",
+      "requires_migration": null,
+      "description": "PREPARATION ONLY: update only aws_lambda_function.tiktok_dispatch[0] archive code for sales25 (#690). Empty from values MUST be filled from a fresh guard snapshot and committed before preflight; never infer live values from r74d or old migrations. Keep to.images and to.rule_states identical to from, allowed_env_changes empty, and all other AWS application resources no-op. Current validate_plan permits archive-derived dispatcher code updates in config mode; bind the exact code-only diff through reviewed_plan. See report.md. Do not enable until the exact reviewed plan is reviewed and committed.",
+      "from": {
+        "task_definition_arns": {
+          "canary": "arn:aws:ecs:ap-northeast-1:718959508629:task-definition/teamagent-dev-canary:81",
+          "connect_web": "arn:aws:ecs:ap-northeast-1:718959508629:task-definition/teamagent-dev-connect-web:139",
+          "ingest": "arn:aws:ecs:ap-northeast-1:718959508629:task-definition/teamagent-dev-ingest:117",
+          "mcp": "arn:aws:ecs:ap-northeast-1:718959508629:task-definition/teamagent-dev-mcp:188",
+          "morning": "arn:aws:ecs:ap-northeast-1:718959508629:task-definition/teamagent-dev-morning-digest:117",
+          "openclaw": "arn:aws:ecs:ap-northeast-1:718959508629:task-definition/teamagent-dev-openclaw:85",
+          "tiktok": "arn:aws:ecs:ap-northeast-1:718959508629:task-definition/teamagent-dev-tiktok-acquire:81",
+          "x_buzz": "arn:aws:ecs:ap-northeast-1:718959508629:task-definition/teamagent-dev-x-buzz-worker:1"
+        },
+        "images": {
+          "canary": "718959508629.dkr.ecr.ap-northeast-1.amazonaws.com/teamagent-mcp@sha256:05c20412fe2b4d6b7393212db1a53d264bafcf13a28051e172e5dc996cd24fde",
+          "connect_web": "718959508629.dkr.ecr.ap-northeast-1.amazonaws.com/teamagent-mcp@sha256:05c20412fe2b4d6b7393212db1a53d264bafcf13a28051e172e5dc996cd24fde",
+          "ingest": "718959508629.dkr.ecr.ap-northeast-1.amazonaws.com/teamagent-mcp@sha256:05c20412fe2b4d6b7393212db1a53d264bafcf13a28051e172e5dc996cd24fde",
+          "mcp": "718959508629.dkr.ecr.ap-northeast-1.amazonaws.com/teamagent-mcp@sha256:05c20412fe2b4d6b7393212db1a53d264bafcf13a28051e172e5dc996cd24fde",
+          "morning": "718959508629.dkr.ecr.ap-northeast-1.amazonaws.com/teamagent-mcp@sha256:05c20412fe2b4d6b7393212db1a53d264bafcf13a28051e172e5dc996cd24fde",
+          "openclaw": "718959508629.dkr.ecr.ap-northeast-1.amazonaws.com/teamagent-openclaw@sha256:0651b5ac7a687c1c14cb2bbc8fc1cab56fda8128d9524f9963ef031b49898a4c",
+          "tiktok": "718959508629.dkr.ecr.ap-northeast-1.amazonaws.com/teamagent-media-worker@sha256:92c22e4a717611d31790be450f7d34c6188156c2346c92dcf214413a9f092c22",
+          "x_buzz": "718959508629.dkr.ecr.ap-northeast-1.amazonaws.com/teamagent-mcp@sha256:1747d2d0729d2c30ae04ab4d21dc9dc10c1351553684eb10303e157f58a227e8"
+        },
+        "rule_states": {
+          "canary": "DISABLED",
+          "ingest": "ENABLED",
+          "morning": "ENABLED"
+        },
+        "dispatcher_code_sha256": {
+          "tiktok": "dWHRNMdYfn/yLE+fMPK8AfHSZkeOtGSpyzzCAxOZBYU=",
+          "x_buzz": "JiirdLXChG81fmIdt8BIRXc55RR8CoRrZxgDbwdYSBc="
+        },
+        "monitoring": {
+          "container_insights": "disabled"
+        }
+      },
+      "to": {
+        "images": {
+          "canary": "718959508629.dkr.ecr.ap-northeast-1.amazonaws.com/teamagent-mcp@sha256:05c20412fe2b4d6b7393212db1a53d264bafcf13a28051e172e5dc996cd24fde",
+          "connect_web": "718959508629.dkr.ecr.ap-northeast-1.amazonaws.com/teamagent-mcp@sha256:05c20412fe2b4d6b7393212db1a53d264bafcf13a28051e172e5dc996cd24fde",
+          "ingest": "718959508629.dkr.ecr.ap-northeast-1.amazonaws.com/teamagent-mcp@sha256:05c20412fe2b4d6b7393212db1a53d264bafcf13a28051e172e5dc996cd24fde",
+          "mcp": "718959508629.dkr.ecr.ap-northeast-1.amazonaws.com/teamagent-mcp@sha256:05c20412fe2b4d6b7393212db1a53d264bafcf13a28051e172e5dc996cd24fde",
+          "morning": "718959508629.dkr.ecr.ap-northeast-1.amazonaws.com/teamagent-mcp@sha256:05c20412fe2b4d6b7393212db1a53d264bafcf13a28051e172e5dc996cd24fde",
+          "openclaw": "718959508629.dkr.ecr.ap-northeast-1.amazonaws.com/teamagent-openclaw@sha256:0651b5ac7a687c1c14cb2bbc8fc1cab56fda8128d9524f9963ef031b49898a4c",
+          "tiktok": "718959508629.dkr.ecr.ap-northeast-1.amazonaws.com/teamagent-media-worker@sha256:92c22e4a717611d31790be450f7d34c6188156c2346c92dcf214413a9f092c22",
+          "x_buzz": "718959508629.dkr.ecr.ap-northeast-1.amazonaws.com/teamagent-mcp@sha256:1747d2d0729d2c30ae04ab4d21dc9dc10c1351553684eb10303e157f58a227e8"
+        },
+        "rule_states": {
+          "canary": "DISABLED",
+          "ingest": "ENABLED",
+          "morning": "ENABLED"
+        },
+        "allowed_resource_changes": [
+          "aws_lambda_function.tiktok_dispatch[0]"
+        ],
+        "allowed_env_changes": {}
+      },
+      "required_preflight_profiles": [],
+      "reviewed_inputs": {
+        "image_deployment_intent_id": "b9c6017d-7ce5-4fa9-9c48-fdbce1d4d308"
+      },
+      "reviewed_plan": null
     }
   },
   "external_state_handoffs": {
