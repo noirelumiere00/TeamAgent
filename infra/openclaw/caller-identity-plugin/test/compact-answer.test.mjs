@@ -32,7 +32,7 @@ for (const direct of [false, true]) {
         const link = '<https://example.slack.com/archives/CPUBLIC/p1792727460000000|会話の記録>';
         const answer = body + tail + (hasLink ? '\n' + link : '');
         p.remember({answer, found: true, displayed_refs: [], answer_format: null});
-        assert.equal(p.send('長い書き直しです。'), hasLink ? answer : body);
+        assert.equal(p.send('長い書き直しです。'), body + (hasLink ? '\n' + link : '\n\n資料は見つかりませんでした。'));
       });
     }
   }
@@ -211,11 +211,11 @@ test('fact reply removes advice added by OC', () => {
 });
 
 for (const query of ['JAL の過去提案で何が効いた？', 'JAL の過去提案で効いたのは？']) {
-  test('what worked keeps requested insight: ' + query, () => {
+  test('what worked keeps analysis without unsolicited advice: ' + query, () => {
     const p = setup(query);
     const answer = '提案は採用されています。\n\n💡 推奨アクション\n同じ条件で試す。';
     p.remember({answer, found: true});
-    assert.equal(p.send(answer), answer);
+    assert.equal(p.send(answer), '提案は採用されています。');
   });
 }
 
@@ -311,3 +311,61 @@ test('legacy search leaves material-shaped Slack links alone', () => {
   p.remember({answer: text, found: true});
   assert.equal(p.send(text), text);
 });
+
+for (const link of ['', '<https://drive.google.com/file/d/USED/view|資料を見る>', '<https://example.slack.com/archives/C1/p1234567890123456|会話の記録>', 'https://example.test/app']) {
+  for (const tail of ['詳しい資料が必要でしたらお知らせください。', '詳しい資料が見たいときは、お知らせください。', '提案資料や詳細が必要でしたら、声をかけてください。']) {
+    test(`PR3 invitation removed with original, conversation or Vault: ${link}/${tail}`, () => {
+      const p = setup('社内でいう動画商品とは？');
+      p.remember({answer: '配信サービスです。' + tail + (link ? '\n' + link : ''), found: true, displayed_refs: []});
+      const out = p.send('書き直した説明です。');
+      assert.doesNotMatch(out, /お知らせ|声をかけ/u);
+      assert.equal(out.includes('資料は見つかりませんでした。'), !link);
+      if (link) assert.ok(out.includes(link));
+    });
+  }
+}
+
+for (const question of ['どの期間の数字か、お知らせください。', '決まったら声をかけてください。']) {
+  test(`PR3 invitation guard keeps clarifying question: ${question}`, () => {
+    const p = setup('社内でいう動画商品とは？');
+    p.remember({answer: '配信サービスです。' + question, found: true, displayed_refs: []});
+    const out = p.send('配信サービスです。' + question);
+    assert.ok(out.includes(question));
+    assert.ok(!out.includes('資料は見つかりませんでした。'));
+  });
+}
+
+test('PR3 comparison analysis keeps explanation and strips unsolicited next action', () => {
+  const p = setup('比較して何が効いた？');
+  const body = '冒頭で完成形を示した点が効いたと考えられます。';
+  p.remember({answer: body, found: true});
+  assert.equal(p.send(body + '\n\n:alarm_clock: ネクストアクション\n同条件での配信が推奨です。'), body);
+});
+
+for (const link of ['<https://drive.google.com/file/d/USED/view|資料を見る>', '[資料を見る](https://drive.google.com/file/d/USED/view)', 'https://drive.google.com/file/d/USED/view']) {
+  test(`PR3 invitation removal preserves the source in the same sentence: ${link}`, () => {
+    const p = setup('社内でいう動画商品とは？');
+    p.remember({answer: '配信サービスです。詳しい資料が必要でしたらお知らせください ' + link + '。', found: true, displayed_refs: []});
+    const out = p.send('説明です。');
+    assert.ok(out.includes('https://drive.google.com/file/d/USED/view'));
+    assert.doesNotMatch(out, /お知らせ|資料は見つかりませんでした/u);
+  });
+}
+
+for (const [id, query, body, tail] of [
+  ['list_cases', '青空社の事例を一覧で出して', '青空社の動画施策です。', '詳しい資料が見たいときは、お知らせください。'],
+  ['internal_term', '社内でいう動画商品とは？', '動画商品は配信サービスです。', '詳しい資料が必要でしたらお知らせください。'],
+  ['unjoined_channel_topic', '展示企画って何？うちも関わってる？', '展示企画の広報を担当しました。', '提案資料や詳細が必要でしたら、お知らせください。'],
+  ['delivery_kanji', '宅配サービスの事例は？', '宅配サービスの提案です。', '詳しい資料が必要でしたら声をかけてください。'],
+  ['completed_status', '青空社の施策は今どうなっている？', '青空社の施策は完了しました。', '提案資料や詳細が必要でしたら、お知らせください。'],
+]) {
+  test(`PR3 batch-11 anonymous ${id} sends its original without an invitation`, () => {
+    const p = setup(query);
+    const url = 'https://drive.google.com/file/d/USED/view';
+    const link = `<${url}|資料を見る>`;
+    p.remember({answer: body + tail + '\n' + link, found: true,
+      ...(id === 'list_cases' ? {answer_format: 'list'} : {}),
+      displayed_refs: [{kind: 'drive', drive_file_id: 'USED', url}]});
+    assert.equal(p.send('モデルが追加した説明です。'), body + '\n' + link);
+  });
+}

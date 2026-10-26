@@ -40,10 +40,10 @@ def test_targeted_case_noun_requests_a_list(query):
 
 
 @pytest.mark.parametrize("query", ["JAL の過去提案で何が効いた？", "JAL の過去提案で効いたのは？"])
-def test_what_worked_requests_insight_and_keeps_advice(query):
+def test_what_worked_requests_analysis_without_advice(query):
     assert classify_answer_mode(query) == "insight"
     answer = "実施案が採用されています。\n\n💡 推奨アクション\n次回も同じ条件で試す。"
-    assert strip_advice(answer, query) == answer
+    assert strip_advice(answer, query) == "実施案が採用されています。"
 
 
 def test_baby_list_merges_five_cases_without_recommendations(monkeypatch):

@@ -218,13 +218,20 @@ def test_saved_attachment_survives_normal_fallback_without_index_match(
     monkeypatch.setenv("USE_SEARCH_FANOUT", str(int(fanout_enabled)))
     hit = _vault_hit(1, source_type="slack", source_uri=POST, file_names=["0824_提案資料.pdf"])
     saved = SimpleNamespace(
-        drive_url=DRIVE, title="0824_提案資料.pdf", record_number="42", branch_number="1"
+        drive_url=DRIVE,
+        drive_file_id="SAVED",
+        title="0824_提案資料.pdf",
+        record_number="42",
+        branch_number="1",
     )
     monkeypatch.setattr(
         drive_first,
         "resolve_saved_files",
         lambda s, hits, c: [saved if authorized else None for _ in hits],
     )
+    from teamagent.skills.search import saved_file_refs
+
+    monkeypatch.setattr(saved_file_refs, "resolve_saved_files", drive_first.resolve_saved_files)
     skill, pg = make([hit])
     pg.list_authorized_document_references.return_value = []
     normal = f"紹介投稿があります。[S:1]\n資料: [0824_提案資料]({POST})"

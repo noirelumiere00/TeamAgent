@@ -74,24 +74,60 @@ def append_used_drive_links(
     displayed_refs: list[DocumentReference],
     *,
     slack_items: Sequence[SlackItem] = (),
+    authorize_drive: Callable[[DocumentReference], bool] | None = None,
 ) -> str:
     """通常回答の引用・明記した資料名から、会話と正本を最大3件残す。"""
     from teamagent.skills.search.case_list import case_link
 
     used_keys = set(_CITATION.findall(answer))
-    answer = strip_linkless_invitation(_CITATION.sub("", answer))
-    body = unicodedata.normalize("NFKC", answer).casefold()
-    # URL 内のファイル名は、回答本文で使った資料名とはみなさない。
-    body = re.sub(r"https?://[^\s<>)]*", "", body)
+    answer = re.sub(
+        r"<(https?://[^\s<>|]+)\|([^>\n]+)>|\[([^\]\n]+)\]\((https?://[^\s)]+)\)",
+        _material_link,
+        _CITATION.sub("", answer),
+    )
     links: list[str] = []
     seen = {ref.url for ref in displayed_refs}
     candidates = [(str(h.chunk_id), h) for h in hits]
     candidates.extend(
         (f"slack{i}", drive_first.slack_hit(item, i)) for i, item in enumerate(slack_items)
     )
+    originals = {
+        ref.drive_file_id: ref.url
+        for _, hit in candidates
+        if (ref := drive_first.canonical_reference(hit.metadata, hit.content)).kind == "drive"
+        and ref.drive_file_id
+        and ref.url
+        and ref.url not in seen
+    }
+    used_urls: set[str] = set()
+
+    def original_link(match: re.Match[str]) -> str:
+        for url in drive_first.drive_urls(match[0]):
+            original = originals.get(drive_first.drive_file_id(url) or "")
+            if original:
+                used_urls.add(original)
+                return ""
+        return match[0]
+
+    # 共有URLの表記違いも原本IDで束ね、再認可・件数制限したリンクに置き換える。
+    answer = re.sub(
+        r"<https?://[^>\n]+>|\[[^\]\n]*\]\(<?https?://[^)\n]+>?\)|https?://[^\s<>。！？!?]+",
+        original_link,
+        answer,
+    ).strip()
+    body = unicodedata.normalize("NFKC", answer).casefold()
+    # URL 内のファイル名は、回答本文で使った資料名とはみなさない。
+    body = re.sub(r"https?://[^\s<>)]*", "", body)
+    candidates.sort(
+        key=lambda pair: (
+            drive_first.canonical_reference(pair[1].metadata, pair[1].content).kind != "drive"
+        )
+    )
     channels = {f"slack{i}": item.hit.channel or "" for i, item in enumerate(slack_items)}
-    shown = 0
+    shown = len(displayed_refs)
     for key, hit in candidates:
+        if shown >= 3:
+            break
         if used_keys and key not in used_keys:
             continue
         meta = hit.metadata or {}
@@ -120,7 +156,7 @@ def append_used_drive_links(
                 )
             ),
         ]
-        used = key in used_keys
+        used = key in used_keys or ref.url in used_urls
         for name in names:
             name = re.sub(
                 r"\.(?:pdf|pptx?|docx?|xlsx?)$", "", unicodedata.normalize("NFKC", name).casefold()
@@ -153,6 +189,8 @@ def append_used_drive_links(
         link = case_link(ref.url, "会話の記録" if conversation else "資料を見る")
         if not used or link is None or "/spreadsheets/" in (ref.url or ""):
             continue
+        if not conversation and authorize_drive is not None and not authorize_drive(ref):
+            continue
         seen.add(ref.url)
         if not conversation:
             displayed_refs.append(ref)
@@ -164,22 +202,23 @@ def append_used_drive_links(
     return "\n\n".join(part for part in (answer, " / ".join(links)) if part)
 
 
-def strip_linkless_invitation(answer: str) -> str:
-    """本人限定の最終出力で、資料扱いの会話リンク・確認依頼・リンク無しの誘いを除く。"""
-
-    def material_link(match: re.Match[str]) -> str:
-        url, label = (match[1], match[2]) if match[1] else (match[4], match[3])
-        try:
-            parsed = urlsplit(url)
-        except ValueError:
-            return match[0]
-        if (parsed.hostname or "").endswith(".slack.com") and parsed.path.startswith("/archives/"):
-            return match[0] if label == "会話の記録" else label
+def _material_link(match: re.Match[str]) -> str:
+    url, label = (match[1], match[2]) if match[1] else (match[4], match[3])
+    try:
+        parsed = urlsplit(url)
+    except ValueError:
         return match[0]
+    if (parsed.hostname or "").endswith(".slack.com") and parsed.path.startswith("/archives/"):
+        return match[0] if label == "会話の記録" else label
+    return match[0]
+
+
+def strip_linkless_invitation(answer: str) -> str:
+    """本人限定の最終出力で、資料扱いの会話リンク・確認依頼・資料の誘いを除く。"""
 
     answer = re.sub(
         r"<(https?://[^\s<>|]+)\|([^>\n]+)>|\[([^\]\n]+)\]\((https?://[^\s)]+)\)",
-        material_link,
+        _material_link,
         answer,
     )
     answer = "".join(
@@ -191,18 +230,29 @@ def strip_linkless_invitation(answer: str) -> str:
             sentence,
         )
     ).strip()
-    if any(_safe_url(url) for url in re.findall(r"https?://[^\s<>|\[\]()]+", answer)):
-        return answer
+    has_link = any(_safe_url(url) for url in re.findall(r"https?://[^\s<>|\[\]()]+", answer))
     invitation = re.compile(
         r"詳し[^\n。！？!?]*(?:こちら|どうぞ|ご覧)|"
         r"(?:資料|詳細|元の会話)[^\n。！？!?]*(?:こちら|見たければ|見たい場合)|"
+        # 聞き返しの「お知らせください」は残す。資料の誘いだけを除く。
+        r"(?:資料|詳細|リンク|原本|ファイル)[^\n。！？!?]*"
+        r"(?:必要でしたら|見たいときは|お知らせください|声をかけてください|お送りすることも)|"
         r"こちら(?:を|から|で|です)?(?:どうぞ|ご覧ください|確認してください)?[。！!]?\s*$"
     )
-    return "".join(
-        sentence
+    cleaned = "".join(
+        " / ".join(
+            re.findall(
+                r"<https?://[^>\n]+>|\[[^\]\n]+\]\(https?://[^)\n]+\)|https?://[^\s<>。！？!?]+",
+                sentence,
+            )
+        )
+        if invitation.search(sentence)
+        else sentence
         for sentence in re.split(r"(?<=[。！？!?\n])", answer)
-        if not invitation.search(sentence)
     ).strip()
+    if cleaned != answer and not has_link:
+        return (cleaned + "\n\n資料は見つかりませんでした。").strip()
+    return cleaned
 
 
 def append_comparison_drive_links(

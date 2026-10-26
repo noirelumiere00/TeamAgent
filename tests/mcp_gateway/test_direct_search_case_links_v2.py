@@ -17,7 +17,7 @@ POST = "https://example.slack.com/archives/C0PUBLIC/p1234567890123456?thread_ts=
 @pytest.fixture
 def slack(monkeypatch: pytest.MonkeyPatch) -> _FakeSlack:
     client = _FakeSlack()
-    monkeypatch.setenv("SEARCH_DIRECT_ANSWER_KINDS", "list_fast,comparison")
+    monkeypatch.setenv("SEARCH_DIRECT_ANSWER_KINDS", "list_fast,comparison,case_cards")
     monkeypatch.setattr(detached_jobs, "_slack_client", lambda timeout_seconds: client)
     monkeypatch.setattr(detached_jobs, "_POST_RETRY_WAIT_S", 0)
     return client
@@ -111,7 +111,7 @@ def test_block_rejection_retries_with_a_clickable_plain_url(
     assert "|資料を見る>" not in slack.posts[1]["text"]
 
 
-@pytest.mark.parametrize("kind", ["comparison", "list_fast"])
+@pytest.mark.parametrize("kind", ["comparison", "list_fast", "case_cards"])
 def test_enabled_non_card_answer_keeps_document_link(slack: _FakeSlack, kind: str) -> None:
     answer = f"資料では同じ進め方です。\n\n<{DRIVE}|資料を見る>"
     assert _deliver(answer, kind=kind)["delivered"] is True

@@ -96,12 +96,15 @@ def test_topic_normal_fallback_keeps_only_used_slack_and_drive_sources(
     )
     lookup = SlackLookup("ok", "ok", (item,))
     monkeypatch.setattr(fanout, "lookup_slack", lambda **kw: lookup)
-    skill, _ = make(
+    skill, pg = make(
         [
             _case(1, title="{newspaper}_{exhibition_b}_効果分析レポート.pptx"),
             _case(2, title="{unused}_提案書.pptx"),
         ]
     )
+    pg.list_authorized_document_references.return_value = [
+        {"source_type": "gdrive", "external_id": "FILE1"}
+    ]
     skill._start_slack_lookup = MagicMock(return_value=MagicMock())
     skill._collect_slack_lookup = MagicMock(return_value=lookup)
     skill._summarize = MagicMock(
@@ -225,7 +228,8 @@ def test_linkless_invitation_is_removed_at_mcp_output(
         normal += f"\n<{POST}|会話の記録>"
     skill._summarize = MagicMock(side_effect=[("", 0.0), (normal, 0.0)])
     out = skill.run(SearchInput(query=QUERY), SkillContext(metadata=META))
-    assert (tail in out.answer) is has_link
+    assert tail not in out.answer
+    assert ("資料は見つかりませんでした。" in out.answer) is not has_link
     assert "動画制作を担当" in out.answer
 
 

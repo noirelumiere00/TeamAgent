@@ -92,12 +92,18 @@ async def dispatch(
         ("comparison", "# 施策比較表\nA社 1,000\n📎 資料 <https://example.test/report>"),
         ("list_fast", "資料の一覧です。\n<https://example.test/file>"),
         ("video_metrics", ANSWER),
+        (
+            "case_cards",
+            "*匿名案件*（2026年9月）\n• 実施内容。\n• https://drive.google.com/file/d/ALPHA/view",
+        ),
     ],
 )
 async def test_confirmed_search_answer_is_delivered_once_with_suppression_marker(
     monkeypatch: pytest.MonkeyPatch, kind: str, answer: str
 ) -> None:
     enable(monkeypatch)
+    if kind == "case_cards":
+        monkeypatch.setenv("SEARCH_DIRECT_ANSWER_KINDS", "case_cards")
     slack = _FakeSlack()
     monkeypatch.setattr(detached_jobs, "_slack_client", lambda timeout_seconds: slack)
     result = await dispatch(kind, answer)
@@ -147,17 +153,25 @@ async def test_failed_direct_answer_keeps_old_answer_and_does_not_suppress(
     ("emails", "email", "channel", "verified"),
     [("", ME, DM, True), (ME, OTHER, DM, True), (ME, ME, CHANNEL, True), (ME, ME, DM, False)],
 )
+@pytest.mark.parametrize("kind", ["not_found", "case_cards"])
 async def test_direct_answer_gate_is_byte_identical_to_off(
-    monkeypatch: pytest.MonkeyPatch, emails: str, email: str, channel: str, verified: bool
+    monkeypatch: pytest.MonkeyPatch,
+    emails: str,
+    email: str,
+    channel: str,
+    verified: bool,
+    kind: str,
 ) -> None:
-    baseline = await dispatch(email=email, channel=channel, verified=verified)
+    baseline = await dispatch(kind, email=email, channel=channel, verified=verified)
     enable(monkeypatch, emails)
+    if kind == "case_cards":
+        monkeypatch.setenv("SEARCH_DIRECT_ANSWER_KINDS", "case_cards")
     monkeypatch.setattr(
         detached_jobs,
         "post_to_origin_status",
         lambda *a, **kw: pytest.fail("not an allowed verified DM"),
     )
-    assert await dispatch(email=email, channel=channel, verified=verified) == baseline
+    assert await dispatch(kind, email=email, channel=channel, verified=verified) == baseline
 
 
 async def test_wildcard_still_requires_verified_identity(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -252,7 +266,7 @@ async def test_missing_empty_or_unknown_kinds_deny_all_direct_delivery(
     assert posts == []
 
 
-@pytest.mark.parametrize("kind", ["comparison", "list_fast", "video_metrics"])
+@pytest.mark.parametrize("kind", ["comparison", "list_fast", "video_metrics", "case_cards"])
 async def test_not_found_only_blocks_other_kinds(
     monkeypatch: pytest.MonkeyPatch, kind: str
 ) -> None:

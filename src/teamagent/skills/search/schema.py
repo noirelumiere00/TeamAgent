@@ -348,7 +348,9 @@ _OMIT_WHEN_NONE: tuple[str, ...] = (
 )
 
 
-SearchDirectAnswerKind = Literal["not_found", "comparison", "list_fast", "video_metrics"]
+SearchDirectAnswerKind = Literal[
+    "not_found", "comparison", "list_fast", "video_metrics", "case_cards"
+]
 
 
 class SearchOutput(BaseModel):

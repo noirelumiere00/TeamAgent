@@ -110,7 +110,10 @@ def test_normal_fallback_links_only_named_used_drive_materials(
             source_uri="https://docs.google.com/spreadsheets/d/SHEET/edit",
         ),
     ]
-    skill, _ = make(hits)
+    skill, pg = make(hits)
+    pg.list_authorized_document_references.return_value = [
+        {"source_type": "gdrive", "external_id": f"FILE{i}"} for i in range(1, 7)
+    ]
     skill._use_cohere_rerank = False
     normal = "食品会社Aの提案では商品ベータを紹介。第三の動画資料と第四の動画資料、Slack投稿、保管台帳も参照した。"
     skill._summarize = MagicMock(side_effect=[("", 0.0), (normal, 0.0)])

@@ -303,3 +303,21 @@ test('the real MCP deadline ends a pending search without retry or draft fallbac
   assert.ok(p.logs.some(line => line.includes('outcome=failed reason=timeout')));
   assert.equal((await p.send()).payload.text, '社内資料の確認を完了できませんでした。');
 });
+
+for (const status of ['failed', 'uncertain', 'posted']) {
+  test(`PR3 pre-model case_cards receipt ${status} preserves cards and delivery boundaries`, async () => {
+    const url = 'https://drive.google.com/file/d/CASE/view';
+    const cards = `*匿名案件*（2026年9月）\n• 紹介動画を配信。\n• 結果を確認。\n• <${url}|資料を見る>`;
+    const p = setup({query: '事例出して', env: {SEARCH_DIRECT_ANSWER_KINDS: 'case_cards'}, search: {
+      found: true, answer: cards, answer_format: 'list', displayed_refs: [{kind: 'drive', url}],
+      direct_delivery: {answer_kind: 'case_cards', answer: cards, answer_format: 'list'},
+      status, delivered: status === 'posted', delivery: {kind: 'search_direct_answer', answer_kind: 'case_cards', status},
+    }});
+    await p.prompt(); await p.prompt(); p.end();
+    const sent = await p.send('モデルの追加', {mediaUrl: 'https://example.test/file.pdf'});
+    assert.equal(sent.payload.text, status === 'posted' ? '' : status === 'uncertain'
+      ? '社内資料の検索結果の配送を確認できませんでした。' : cards);
+    assert.equal(sent.payload.mediaUrl, 'https://example.test/file.pdf');
+    assert.equal(p.calls.length, 1); assert.equal(p.posts.length, 0);
+  });
+}

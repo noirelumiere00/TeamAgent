@@ -78,14 +78,19 @@ def is_case_list(query: str) -> bool:
 
 
 def strip_advice(answer: str, query: str) -> str:
-    """事実・一覧では、モデルが混ぜた提言の段落を出さない。"""
-    if classify_answer_mode(query) == "insight":
+    """分析の依頼だけでは提言を足さず、明示された打ち手だけ残す。"""
+    if re.search(
+        r"打ち手|推奨|おすすめ|ネクストアクション|次の(?:一手|アクション)|"
+        r"戦略|攻め方|改善|アイデア|ヒント|コツ|提案して|案を|考えて|"
+        r"どう(?:攻め|動|提案|進め|すれば|したら)",
+        query,
+    ):
         return answer
     kept = []
     dropping = False
     for paragraph in re.split(r"\n\s*\n", answer):
         if re.search(
-            r"推奨アクション|次の(?:一手|アクション)|おすすめ(?:の施策|アクション)|"
+            r"推奨アクション|ネクストアクション|次の(?:一手|アクション)|おすすめ(?:の施策|アクション)|"
             r"効くパターン(?:です|と)|有効なパターン",
             paragraph,
         ):

@@ -26,7 +26,7 @@ function setup({env = {}, query = '比較して何が効いた？', email = 'kom
     TEAMAGENT_CALLER_CLAIM_SECRET: 'x'.repeat(48), SLACK_TEAM_ID: 'T07MU5P2PBR',
     TEAMAGENT_MCP_BEARER: 'test-bearer', SLACK_BOT_TOKEN: 'test-token',
     SEARCH_DIRECT_ANSWER: '1', SEARCH_DIRECT_ANSWER_ALLOWED_EMAILS: 'komata@example.test',
-    SEARCH_DIRECT_ANSWER_KINDS: 'not_found,comparison,list_fast,video_metrics', ...env,
+    SEARCH_DIRECT_ANSWER_KINDS: 'not_found,comparison,list_fast,video_metrics,case_cards', ...env,
   }, ...(now ? {now} : {}), sleepFn: async () => {}, onBackgroundTask: task => tasks.push(task),
   fetchFn: async (url, options) => {
     const body = JSON.parse(options.body);
@@ -64,7 +64,7 @@ function setup({env = {}, query = '比較して何が効いた？', email = 'kom
   const end = () => hooks.get('agent_end')({runId: ctx.runId, success: true}, ctx);
   return {hooks, ctx, posts, calls, tasks, logs, finalize, remember, send, end};
 }
-for (const kind of ['not_found', 'comparison', 'list_fast', 'video_metrics']) {
+for (const kind of ['not_found', 'comparison', 'list_fast', 'video_metrics', 'case_cards']) {
   test(`iter5 direct ${kind} suppresses model additions after agent_end and rates once`, async () => {
     const p = setup({env: {TEAMAGENT_ANSWER_FEEDBACK: '1'}});
     p.remember(posted(kind)); p.remember(posted(kind)); p.end();
@@ -385,4 +385,19 @@ test('direct Drive normal fallback does not append unused search sources', async
   await p.finalize();
   assert.equal(p.posts.length, 1);
   assert.equal(p.posts[0].text, answer);
+});
+
+test('PR3 case_cards fallback reads the new kind and posts the canonical cards once', async () => {
+  const url = 'https://drive.google.com/file/d/CASE/view';
+  const answer = `*匿名案件*（2026年9月）\n• 紹介動画を配信。\n• 結果を確認。\n• <${url}|資料を見る>`;
+  const p = setup({query: '事例を一覧で出して', env: {SEARCH_DIRECT_ANSWER_KINDS: 'case_cards'}, searchResult: {
+    answer, found: true, answer_format: 'list', displayed_refs: [{kind: 'drive', url}],
+    direct_delivery: {answer_kind: 'case_cards', answer_format: 'list', answer},
+  }});
+  await p.finalize();
+  await p.finalize();
+  assert.equal(p.posts.length, 1);
+  assert.equal(p.posts[0].text, answer);
+  p.end();
+  assert.equal((await p.send('追加の説明'))?.cancel, true);
 });

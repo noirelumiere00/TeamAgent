@@ -1660,7 +1660,8 @@ async def dispatch_tool(
                 search_direct_destination,
                 request_id=ctx.request_id,
                 allow_case_links=(
-                    drive_first_enabled(ctx.metadata)
+                    direct_kind == "case_cards"
+                    or drive_first_enabled(ctx.metadata)
                     or (
                         direct_kind == "list_fast"
                         and ctx.metadata.get("_search_compact_answer") is True
