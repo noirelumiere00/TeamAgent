@@ -209,6 +209,9 @@ def test_cumulative_media_size_stops_before_analysis(monkeypatch: pytest.MonkeyP
     monkeypatch.setattr(wire, "_find_json", lambda *args: None)
     monkeypatch.setattr(wire, "_save", lambda *args: {})
     monkeypatch.setattr(wire, "_save_json", save)
+    monkeypatch.setattr(wire, "_download", lambda *args: b"{}")
+    monkeypatch.setattr(wire, "_review_name", lambda *args: "review.json")
+    monkeypatch.setattr(sales25_analysis, "_review", lambda *args, **kwargs: {})
     result = wire.media(
         case(), {"relevance": StepResult(status="complete", refs=[{}])}, "job:media"
     )

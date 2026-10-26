@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import re
 import threading
 import time
 from collections.abc import Callable
@@ -273,8 +274,8 @@ def _run_completion_notice(
         else:
             if status == "running" and message.startswith("sales25:"):
                 phase = message.split("。", 1)[0]
-                if "検索" in phase:
-                    phase = "sales25: 検索"
+                # 件数（検索 1/6・分析 3/30）だけの変化では知らせない。大きな工程の切り替わりだけ。
+                phase = re.sub(r"\s*\d+\s*/\s*\d+.*$", "", phase)
                 publish_notice(
                     message,
                     origin=origin,
@@ -294,7 +295,7 @@ def _run_completion_notice(
                     return True
         if last_status not in {"done", "failed"} and _monotonic() - started >= _TIMEOUT_SECONDS:
             message = (
-                "sales25の作業はまだ完了していません。目安は1〜3時間（仮）です。引き続き確認し、結果をこの会話にお届けします。"
+                "sales25の作業はまだ完了していません。通常の目安は約35〜45分（暫定）、混雑・長尺時は約90分以上です。引き続き確認し、結果をこの会話にお届けします。"
                 if message.startswith("sales25:") and last_status in {"queued", "running"}
                 else (
                     "作業はまだ完了していません。通常より時間がかかっています。"

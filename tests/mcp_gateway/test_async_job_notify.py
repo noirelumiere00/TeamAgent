@@ -1041,3 +1041,31 @@ def test_dm_fallback_timeout_is_uncertain(monkeypatch: pytest.MonkeyPatch) -> No
         )
         == "uncertain"
     )
+
+
+def test_sales25_counts_notify_once_per_count_and_finish(
+    notices: list[dict[str, Any]], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(notify, "_INITIAL_DELAY_SECONDS", 0)
+    monkeypatch.setattr(notify, "_wait_until_next_poll", lambda *args: None)
+    updates = iter(
+        [
+            ("running", "sales25: 検索 1/6。標準設定の目安は約35〜45分。"),
+            ("running", "sales25: 検索 1/6。標準設定の目安は約35〜45分。"),
+            ("running", "sales25: 検索 6/6。標準設定の目安は約35〜45分。"),
+            ("running", "sales25: 媒体取得・分析 1/30（ID和集合）。"),
+            ("running", "sales25: 媒体取得・分析 30/30（ID和集合）。"),
+            ("done", "sales25の資料は機械検査を通過しました。"),
+        ]
+    )
+    assert notify._run_completion_notice(
+        job_id="synthetic-sales25-counts",
+        origin=target(),
+        request_id="synthetic",
+        poll=lambda: next(updates),
+    )
+    # 件数だけの変化では知らせず、工程の切り替わり（検索→媒体取得・分析）と完了だけ。
+    assert len(notices) == 3
+    assert "検索 1/6" in notices[0]["text"]
+    assert "分析 1/30" in notices[1]["text"]
+    assert "機械検査" in notices[2]["text"]

@@ -868,7 +868,8 @@ class OmiyageReportSubmitSkill(BaseSkill[OmiyageReportSubmitInput, OmiyageReport
                 job_id=dedup.duplicate_of,
                 deduplicated=True,
                 retry_after_seconds=self._retry_after_seconds,
-                message="同じsales25の依頼を受け付け済みです。既存の進捗を確認します。目安は1〜3時間（仮）です。",
+                message="同じsales25の依頼を受け付け済みです。既存の進捗を確認します。"
+                + sales25.time_estimate(),
             )
         admission = self._admission
         if not admission.try_acquire(eta_minutes=180, waiter_key=owner):
@@ -913,7 +914,9 @@ class OmiyageReportSubmitSkill(BaseSkill[OmiyageReportSubmitInput, OmiyageReport
             status="queued",
             job_id=job_id,
             retry_after_seconds=self._retry_after_seconds,
-            message="25頁のお土産資料（sales25）を受け付けました。目安は1〜3時間（仮）です。大きな工程の切り替わりと長い停滞時にお知らせします。",
+            message="25頁のお土産資料（sales25）を受け付けました。"
+            + sales25.time_estimate()
+            + "検索・分析の進捗と完成をお知らせします。",
         )
 
     def _run_sales25_parent(self, admission: JobAdmission, job_id: str) -> None:

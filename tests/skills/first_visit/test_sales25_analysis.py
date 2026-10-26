@@ -106,6 +106,12 @@ def fake_model() -> Any:
             "unconfirmed": [],
         }
     )
+
+    def images(images: list[tuple[bytes, str]], *args: Any) -> GeminiResponse:
+        point = json.loads(model.analyze_image_bytes.return_value.text)
+        return reply({"observations": [{"index": i, **point} for i in range(len(images))]})
+
+    model.analyze_images_bytes.side_effect = images
     model.compare_image_bytes.return_value = reply({"match": True, "basis": "同じ合成図形。"})
     model.analyze_audio_bytes.return_value = reply(
         {
@@ -541,3 +547,35 @@ def test_product_evidence_uses_observed_presence(run: Path, visible: bool) -> No
     review = analysis._review(run, post, manifest, files, model)
     assert review["evidence"]["product"]["photo_index"] == 1
     assert ("Product not observed" in review["evidence"]["product"]["observation"]) is not visible
+
+
+@pytest.mark.parametrize("invalid", ["missing", "reversed", "bool_index"])
+def test_batch_requires_every_image_in_order(run: Path, invalid: str) -> None:
+    post = analysis.selected_posts(run, OWNER)[0]
+    manifest, files = analysis.validate_media(analysis.media_operation(post), package(post))
+    model = fake_model()
+    point = json.loads(model.analyze_image_bytes.return_value.text)
+    values = [{"index": i, **point} for i in range(3)]
+    if invalid == "missing":
+        values.pop()
+    elif invalid == "reversed":
+        values.reverse()
+    else:
+        values[0]["index"] = False
+    model.analyze_images_bytes.side_effect = None
+    model.analyze_images_bytes.return_value = reply({"observations": values})
+    with pytest.raises(ValueError, match="batch"):
+        analysis._review(run, post, manifest, files, model, batch_size=4)
+
+
+def test_large_images_are_split_without_dropping_frames(
+    run: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    post = analysis.selected_posts(run, OWNER)[0]
+    manifest, files = analysis.validate_media(analysis.media_operation(post), package(post))
+    monkeypatch.setattr(analysis, "MAX_INLINE", 2 * len(files["photo-1.jpg"]))
+    model = fake_model()
+    result = analysis._review(run, post, manifest, files, model, batch_size=4)
+    assert len(result["timeline"]) == 3
+    assert len(model.analyze_images_bytes.call_args.args[0]) == 2
+    model.analyze_image_bytes.assert_called_once()
