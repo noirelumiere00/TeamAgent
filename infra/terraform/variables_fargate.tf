@@ -685,7 +685,7 @@ variable "openclaw_search_direct_answer" {
 }
 
 variable "search_direct_answer_kinds" {
-  description = "直接配信する検索回答の種類（MCP・OC 共通）。空は全拒否。初回は not_found のみ。"
+  description = "直接配信する検索回答の種類（not_found,comparison,list_fast,video_metrics,case_cards・MCP/OC 共通）。空は全拒否。case_cards は両側配備後に本人限定で追加する。"
   type        = string
   default     = ""
 }

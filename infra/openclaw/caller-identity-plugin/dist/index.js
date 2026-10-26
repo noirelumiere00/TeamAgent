@@ -3034,7 +3034,7 @@ export function createCallerIdentityPlugin({
   if (!["off", "shadow", "enforce"].includes(inboundRouterMode)) fail("invalid TEAMAGENT_INBOUND_ROUTER");
   if (String(env.TEAMAGENT_ROUTE_CLASSIFIER ?? "0").trim() !== "0")
     fail("TEAMAGENT_ROUTE_CLASSIFIER requires PR6; keep 0");
-  const searchDirectKnownKinds = new Set(["not_found", "comparison", "list_fast", "video_metrics"]);
+  const searchDirectKnownKinds = new Set(["not_found", "comparison", "list_fast", "video_metrics", "case_cards"]);
   const documentFollowupEnabled = ["1", "true", "yes"].includes(String(env.SEARCH_DRIVE_FIRST ?? "").trim().toLowerCase());
   const documentFollowupAllowedEmails = new Set(String(env.SEARCH_DRIVE_FIRST_ALLOWED_EMAILS ?? "")
     .split(",").map(value => value.trim().toLowerCase()).filter(Boolean));
@@ -3950,6 +3950,7 @@ export function createCallerIdentityPlugin({
       threadTs,
       requestText: SLACK_DM_CHANNEL_RE.test(channelId) || channelId === `DM:${senderId}`
         ? proposalRequestText(event?.content) : undefined,
+      searchAdviceRequested: /打ち手|推奨|おすすめ|ネクストアクション|次の(?:一手|アクション)|戦略|攻め方|改善|アイデア|ヒント|コツ|提案して|案を|考えて|どう(?:攻め|動|提案|進め|すれば|したら)/u.test(event?.content ?? ""),
       searchInsightRequested: /傾向|パターン|共通点|勝ち筋|示唆|戦略|打ち手|攻め方|刺さ|改善|アイデア|ヒント|学び|教訓|コツ|提案して|案を|考えて|なぜ|何が効いた|効いたのは|どう(?:攻め|動|提案|進め|すれば|したら)/u.test(event?.content ?? ""),
       messageId,
       actionFingerprint: null,
@@ -7810,11 +7811,12 @@ export function createCallerIdentityPlugin({
             : null;
           if (compactText) evidence.compactPayload = event.payload;
           const noAdvice = finalTextOnly && evidence?.searchCompleted && !evidence.otherReplyRequired && !evidence.needsInput && !evidence.listMode &&
-            !connectIngressByRun.get(runId)?.searchInsightRequested;
+            !connectIngressByRun.get(runId)?.searchAdviceRequested;
           const canonical = compactText ?? payload.text;
           let droppingAdvice = false;
-          const cleanAnswer = noAdvice ? canonical.split(/\n\s*\n/u).filter(paragraph => {
-            if (/推奨アクション|次の(?:一手|アクション)|おすすめ(?:の施策|アクション)|効くパターン(?:です|と)|有効なパターン/u.test(paragraph)) {
+          const adviceParagraph = /推奨アクション|ネクストアクション|次の(?:一手|アクション)|おすすめ(?:の施策|アクション)|効くパターン(?:です|と)|有効なパターン/u;
+          const cleanAnswer = noAdvice && adviceParagraph.test(canonical) ? canonical.split(/\n\s*\n/u).filter(paragraph => {
+            if (adviceParagraph.test(paragraph)) {
               droppingAdvice = true; return false;
             }
             if (droppingAdvice && !/^\s*[#*📎 ]*(?:出典|根拠|資料リンク|事実|結果)/u.test(paragraph) && !paragraph.includes("[S:")) return false;
@@ -7848,11 +7850,15 @@ export function createCallerIdentityPlugin({
               .filter(sentence => !/(?:正式社名|商材名|会社名)[^\n。！？!?]*確認(?:して|すると|すれば)|(?:確認|検索)(?:してみて|してください)/u.test(sentence)).join('').trim();
             scrubbed = {...scrubbed, text};
           }
-          if (finalTextOnly && evidence?.driveFirst &&
-              !/https?:\/\/[^\s<>|\[\]()]+/iu.test(scrubbed.text)) {
-            const invitation = /詳し[^\n。！？!?]*(?:こちら|どうぞ|ご覧)|(?:資料|詳細|元の会話)[^\n。！？!?]*(?:こちら|見たければ|見たい場合)|こちら(?:を|から|で|です)?(?:どうぞ|ご覧ください|確認してください)?[。！!]?\s*$/u;
-            scrubbed = {...scrubbed, text: scrubbed.text.split(/(?<=[。！？!?\n])/u)
-              .filter(sentence => !invitation.test(sentence)).join('').trim()};
+          if (finalTextOnly && evidence?.driveFirst) {
+            const hasLink = /https?:\/\/[^\s<>|\[\]()]+/iu.test(scrubbed.text);
+            const invitation = /詳し[^\n。！？!?]*(?:こちら|どうぞ|ご覧)|(?:資料|詳細|元の会話)[^\n。！？!?]*(?:こちら|見たければ|見たい場合)|(?:資料|詳細|リンク|原本|ファイル)[^\n。！？!?]*(?:必要でしたら|見たいときは|お知らせください|声をかけてください|お送りすることも)|こちら(?:を|から|で|です)?(?:どうぞ|ご覧ください|確認してください)?[。！!]?\s*$/u;
+            const text = scrubbed.text.split(/(?<=[。！？!?\n])/u)
+              .map(sentence => invitation.test(sentence)
+                ? (sentence.match(/<https?:\/\/[^>\n]+>|\[[^\]\n]+\]\(https?:\/\/[^)\n]+\)|https?:\/\/[^\s<>。！？!?]+/gu) ?? []).join(' / ')
+                : sentence).join('').trim();
+            scrubbed = {...scrubbed, text: text !== scrubbed.text && !hasLink
+              ? `${text}\n\n資料は見つかりませんでした。`.trim() : text};
           }
           if (scrubbed.text !== payload.text) {
             const { signedUrls, toolNames, urlSeparators, unverifiedConnectUrls = 0 } = scrubbed.counts;

@@ -583,7 +583,9 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
 
     def run(self, input: SearchInput, ctx: SkillContext) -> SearchOutput:
         """検索 Skill のメインフロー。"""
-        drive_mode = drive_first.enabled(ctx.metadata)
+        drive_mode = drive_first.enabled(ctx.metadata) or (
+            self._direct_answer_allowed(ctx, "case_cards") and is_case_list(input.query)
+        )
         if drive_mode and input.filter_doc_type == "事例":
             # 事例は検索の目的で、提案書・報告書を横断する。SQLと後段の両方で絞らせない。
             input = input.model_copy(update={"filter_doc_type": None})
@@ -679,7 +681,7 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
 
             hits = [
                 *hits,
-                *_case_hits(case_probe["case"], drive_mode=drive_first.enabled(ctx.metadata)),
+                *_case_hits(case_probe["case"], drive_mode=drive_mode),
             ]
         timings["retrieve_ms"] = (time.perf_counter() - _t) * 1000
 
@@ -964,13 +966,6 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
                                 if drive_fallback
                                 else None,
                             )
-                            if drive_fallback and displayed_refs is not None:
-                                answer = compact.append_used_drive_links(
-                                    answer,
-                                    summary_hits,
-                                    displayed_refs,
-                                    slack_items=slack_items,
-                                )
                         except Exception as exc:
                             log.warning("search_compact_fallback_failed", error=type(exc).__name__)
                             answer = ""
@@ -1088,7 +1083,13 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
             )
             found = visible_found = bool(displayed_refs)
             suggested_next = None
-            direct_kind = "list_fast" if self._direct_answer_allowed(ctx, "list_fast") else None
+            direct_kind = (
+                "case_cards"
+                if self._direct_answer_allowed(ctx, "case_cards")
+                else "list_fast"
+                if self._direct_answer_allowed(ctx, "list_fast")
+                else None
+            )
         logger.info(
             "search_found_decision",
             request_id=ctx.request_id,
@@ -1185,14 +1186,17 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
                 case_target,
                 lambda h: self._hit_url(h, file_urls=file_urls),
                 displayed_refs=displayed_refs,
-                cards=bool(compact_fallback_cards),
+                cards=self._direct_answer_allowed(ctx, "case_cards")
+                or bool(compact_fallback_cards),
                 drive_only=drive_case_listing,
             )
             if listed:
                 answer = listed
                 if drive_case_listing:
                     found = True
-                if (drive_case_listing or compact_fallback_cards) and self._direct_answer_allowed(
+                if self._direct_answer_allowed(ctx, "case_cards"):
+                    direct_kind = "case_cards"
+                elif (drive_case_listing or compact_fallback_cards) and self._direct_answer_allowed(
                     ctx, "list_fast"
                 ):
                     direct_kind = "list_fast"
@@ -1221,6 +1225,21 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
                     answer, summary_hits, case_probe["comparison_clients"], displayed_refs
                 )
         if drive_mode:
+            assert displayed_refs is not None
+            if (
+                found
+                and input.include_answer
+                and not compact_mode
+                and not case_listing
+                and not visit
+            ):
+                answer = compact.append_used_drive_links(
+                    strip_advice(answer, input.query),
+                    summary_hits,
+                    displayed_refs,
+                    slack_items=slack_items,
+                    authorize_drive=lambda ref: self._authorized_drive_reference(ref, ctx),
+                )
             answer = compact.strip_linkless_invitation(answer)
         output = SearchOutput(
             answer=answer,
@@ -1409,6 +1428,28 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
             if part
         )
         return "\n\n".join(part for part in (answer, footer) if part)
+
+    def _authorized_drive_reference(self, ref: DocumentReference, ctx: SkillContext) -> bool:
+        """送信直前にも、使った原本を本人RLSまたは本人のDriveで再認可する。"""
+        from teamagent.skills.search.fanout_sources import rls_connection
+        from teamagent.skills.search.saved_file_refs import reauthorize_saved_reference
+
+        try:
+            if ref.file_record_number and ref.file_record_branch:
+                return reauthorize_saved_reference(self, ref, ctx)
+            if not ref.drive_file_id:
+                return False
+            with rls_connection(self._pgvector, ctx.metadata, app_role=self._app_role)() as conn:
+                rows = self._pgvector.list_authorized_document_references(
+                    conn, drive_file_ids=[ref.drive_file_id], request_id=ctx.request_id
+                )
+                return any(
+                    row.get("source_type") == "gdrive"
+                    and row.get("external_id") == ref.drive_file_id
+                    for row in rows
+                )
+        except Exception:
+            return False
 
     @staticmethod
     def _direct_answer_allowed(ctx: SkillContext, kind: SearchDirectAnswerKind | None) -> bool:

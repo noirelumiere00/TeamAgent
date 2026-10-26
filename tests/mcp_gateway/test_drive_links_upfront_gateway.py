@@ -97,3 +97,44 @@ async def test_first_answer_and_followup_keep_the_same_used_document(
     assert (URL in followup_answer) is not fallback
     assert "DOC1" not in followup_answer and "DOC3" not in followup_answer
     skill._bedrock.converse.assert_not_called()
+
+
+@pytest.mark.parametrize("fanout_enabled", [False, True])
+@pytest.mark.parametrize("delivery", ["posted", "failed"])
+async def test_case_cards_gateway_uses_new_kind_and_preserves_original_links(
+    monkeypatch, isolated, fanout_enabled, delivery
+):
+    monkeypatch.setenv("USE_SEARCH_FANOUT", str(int(fanout_enabled)))
+    monkeypatch.setenv("SEARCH_FANOUT_ALLOWED_EMAILS", ME)
+    monkeypatch.setenv("SEARCH_DRIVE_FIRST", "0")
+    monkeypatch.setattr(
+        drive_first, "resolve_saved_files", lambda skill, hits, ctx: [None] * len(hits)
+    )
+    skill, _ = make(
+        [_vault_hit(1, title="匿名案件", source_uri="gdrive://ORIGINAL", updated_at="2026-09-01")]
+    )
+    enable(monkeypatch)
+    monkeypatch.setenv("SEARCH_DIRECT_ANSWER_KINDS", "case_cards")
+    slack = _FakeSlack()
+    if delivery == "failed":
+        monkeypatch.setattr(slack, "post_message", AsyncMock(side_effect=RuntimeError("offline")))
+    monkeypatch.setattr(detached_jobs, "_slack_client", lambda timeout_seconds: slack)
+    result = await server.dispatch_tool(
+        _spec(skill, "search"),
+        "search",
+        {"query": "事例出して"},
+        identity_resolver=_resolver_for(ME),
+        caller_claim_verifier=cast(Any, _Verifier(_claim())),
+    )
+    payload = json.loads(result[0].text)
+    assert payload["direct_delivery"]["answer_kind"] == "case_cards"
+    answer = payload["direct_delivery"]["answer"]
+    assert "*匿名案件*（2026年9月）" in answer
+    assert "<https://drive.google.com/file/d/ORIGINAL/view|資料を見る>" in answer
+    if delivery == "posted":
+        assert payload["delivered"] is True and len(slack.posts) == 1
+        assert slack.posts[0]["text"] == answer
+        assert slack.posts[0]["blocks"][0]["text"]["verbatim"] is True
+    else:
+        assert payload["answer"] == answer and payload["delivery"]["status"] == "failed"
+        assert payload["displayed_refs"][0]["drive_file_id"] == "ORIGINAL"

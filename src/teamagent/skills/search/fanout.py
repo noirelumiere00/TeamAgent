@@ -22,7 +22,7 @@ from teamagent.adapters.retry import RetryPolicy
 from teamagent.mcp_gateway.allowlist import email_allowed
 from teamagent.skills.base import SkillContext
 from teamagent.skills.search import compact, drive_first, timeline_status, visit_cases
-from teamagent.skills.search.answer_mode import classify_answer_mode, is_case_list
+from teamagent.skills.search.answer_mode import classify_answer_mode, is_case_list, strip_advice
 from teamagent.skills.search.answer_sections import (
     ANSWER_MAX_CHARS,
     SCOPE_PREFIX,
@@ -305,7 +305,9 @@ def _case_hits(result: SourceResult[Any], *, drive_mode: bool = False) -> list[S
 def run_fanout(skill: Any, input: SearchInput, ctx: SkillContext) -> SearchOutput:
     """並行取得→従来の found 判定→専用要約→コードの節と探した範囲。"""
     started = time.perf_counter()
-    drive_mode = drive_first.enabled(ctx.metadata)
+    drive_mode = drive_first.enabled(ctx.metadata) or (
+        skill._direct_answer_allowed(ctx, "case_cards") and is_case_list(input.query)
+    )
     visit = visit_cases.parse(input.query) if drive_mode else None
     drive_case_listing = drive_mode and (bool(visit) or is_case_list(input.query))
     if drive_case_listing:
@@ -691,13 +693,6 @@ def run_fanout(skill: Any, input: SearchInput, ctx: SkillContext) -> SearchOutpu
                     direct_kind = None
                     if drive_fallback:
                         head = "資料は見つかりましたが、回答の作成を完了できませんでした。"
-                elif drive_fallback and displayed_refs is not None:
-                    head = compact.append_used_drive_links(
-                        head,
-                        [*summary_hits, *karte.items],
-                        displayed_refs,
-                        slack_items=slack.items,
-                    )
     if found and input.include_answer and not compact_mode and not drive_fallback:
         head = skill._append_campaign_footer(head, summary_hits, asked_industry=asked_industry)
     # 広げる処理は 10s 以内。回収の追加待ちは該当ありで 1s、該当なしで 0s に抑える。
@@ -925,12 +920,14 @@ def run_fanout(skill: Any, input: SearchInput, ctx: SkillContext) -> SearchOutpu
             case_target,
             lambda h: skill._hit_url(h, file_urls=file_urls),
             displayed_refs=displayed_refs,
-            cards=bool(compact_fallback_cards),
+            cards=skill._direct_answer_allowed(ctx, "case_cards") or bool(compact_fallback_cards),
             drive_only=drive_case_listing,
         )
         if listed:
             answer, found, visible_found = listed, True, True
-            if skill._direct_answer_allowed(ctx, "list_fast"):
+            if skill._direct_answer_allowed(ctx, "case_cards"):
+                direct_kind = "case_cards"
+            elif skill._direct_answer_allowed(ctx, "list_fast"):
                 direct_kind = "list_fast"
         elif drive_case_listing:
             answer, found, visible_found = EMPTY_DRIVE_CASES, False, False
@@ -961,7 +958,13 @@ def run_fanout(skill: Any, input: SearchInput, ctx: SkillContext) -> SearchOutpu
             category_hits=category_hits if extra.get("category_hits") is not None else None,
         )
         found = visible_found = bool(displayed_refs)
-        direct_kind = "list_fast" if skill._direct_answer_allowed(ctx, "list_fast") else None
+        direct_kind = (
+            "case_cards"
+            if skill._direct_answer_allowed(ctx, "case_cards")
+            else "list_fast"
+            if skill._direct_answer_allowed(ctx, "list_fast")
+            else None
+        )
     logger.info(
         "search_found_decision",
         request_id=ctx.request_id,
@@ -1056,6 +1059,15 @@ def run_fanout(skill: Any, input: SearchInput, ctx: SkillContext) -> SearchOutpu
                 answer, summary_hits, extra["comparison_clients"], displayed_refs
             )
     if drive_mode:
+        assert displayed_refs is not None
+        if found and input.include_answer and not compact_mode and not case_listing and not visit:
+            answer = compact.append_used_drive_links(
+                strip_advice(answer, input.query),
+                [*summary_hits, *karte.items],
+                displayed_refs,
+                slack_items=slack.items,
+                authorize_drive=lambda ref: skill._authorized_drive_reference(ref, ctx),
+            )
         answer = compact.strip_linkless_invitation(answer)
     return SearchOutput(
         answer=answer,
