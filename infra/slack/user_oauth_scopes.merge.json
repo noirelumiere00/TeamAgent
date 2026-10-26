@@ -1,0 +1,17 @@
+{
+  "oauth_config": {
+    "scopes": {
+      "user": [
+        "search:read",
+        "files:read",
+        "channels:read",
+        "channels:history",
+        "groups:read",
+        "groups:history",
+        "im:history",
+        "mpim:history",
+        "users:read"
+      ]
+    }
+  }
+}

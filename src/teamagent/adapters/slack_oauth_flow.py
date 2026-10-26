@@ -234,7 +234,8 @@ class SlackOAuthConsentFlow:
             raise ValueError("Slack user token (xoxp) を取得できません（user_scope の同意を確認）")
         team: dict[str, Any] = resp.get("team") or {}
         scope_str = str(authed.get("scope") or "")
-        scopes = tuple(s for s in scope_str.split(",") if s) or self._scopes
+        # 要求 scope を認可済みと推定すると、files:read 不足の再連携を検知できない。
+        scopes = tuple(s for s in scope_str.split(",") if s)
         return SlackOAuthToken(
             access_token=str(xoxp),
             scopes=scopes,
