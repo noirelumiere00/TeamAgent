@@ -57,7 +57,7 @@ from teamagent.skills.first_visit.recording import (
     capture_enabled,
     upload_capture,
 )
-from teamagent.skills.omiyage_report import sales25
+from teamagent.skills.omiyage_report import omakase, sales25
 from teamagent.skills.omiyage_report.compose import (
     build_all_failed_message,
     build_analysis_note,
@@ -511,6 +511,8 @@ class OmiyageReportSubmitSkill(BaseSkill[OmiyageReportSubmitInput, OmiyageReport
         "に添えること（任意・1行1要点+出典URL・「生活者の声」「検索面の勢力図」の章に反映）。"
         "「◯◯のお土産資料つくって。競合は△△」を受け付ける。競合は依頼者が名前を出した"
         "ものだけを入れる（推測で埋めない。親会社・飲食店・小売は競合にしない）。"
+        "本人限定sales25では自社名だけでsubmitしてよい。未指定・お任せの条件は"
+        "ツールが候補を補完して受付文に明示するので、利用者に埋めさせずそのまま呼ぶ。"
         "商材カテゴリ（category・例: スパイス・調味料）が分かれば入れる。"
         "対象ブランド・競合(1社以上)・"
         "一般検索キーワード(1つ以上)がそろえば job_id を即返し、TikTok検索実測→決定論集計"
@@ -869,7 +871,8 @@ class OmiyageReportSubmitSkill(BaseSkill[OmiyageReportSubmitInput, OmiyageReport
                 deduplicated=True,
                 retry_after_seconds=self._retry_after_seconds,
                 message="同じsales25の依頼を受け付け済みです。既存の進捗を確認します。"
-                + sales25.time_estimate(),
+                + sales25.time_estimate()
+                + omakase.note(case),
             )
         admission = self._admission
         if not admission.try_acquire(eta_minutes=180, waiter_key=owner):
@@ -916,6 +919,7 @@ class OmiyageReportSubmitSkill(BaseSkill[OmiyageReportSubmitInput, OmiyageReport
             retry_after_seconds=self._retry_after_seconds,
             message="25頁のお土産資料（sales25）を受け付けました。"
             + sales25.time_estimate()
+            + omakase.note(case)
             + "検索・分析の進捗と完成をお知らせします。",
         )
 

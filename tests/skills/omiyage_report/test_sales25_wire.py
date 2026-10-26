@@ -211,14 +211,23 @@ def model() -> Any:
     return approved
 
 
+@pytest.mark.parametrize("omakase_request", [False, True])
 def test_real_stages_deliver_25_pages_with_partial_and_restore(
     monkeypatch: pytest.MonkeyPatch,
+    omakase_request: bool,
 ) -> None:
+    from teamagent.skills.omiyage_report import input_check, omakase
+    from tests.skills.omiyage_report.test_sales25_omakase import candidates
+
     store = ProposalJobStore(table_name="", memory={})
     client = Transport()
     approved = model()
     wire = Wire(client, lambda: approved, store=store)
-    accepted = build(store, sales25_stages=production_stages(wire)).run(request(), ctx())
+    submitted = request()
+    if omakase_request:
+        monkeypatch.setattr(input_check, "bedrock_text_caller", lambda *a: candidates())
+        submitted = request(competitors=[], keywords=["お任せ"], category="", sales25=None)
+    accepted = build(store, sales25_stages=production_stages(wire)).run(submitted, ctx())
     saved = result(store, accepted.job_id)
     assert saved.delivery_status == "pending", saved.model_dump_json(indent=2)
     assert saved.status == "partial" and len(saved.checkpoints) == 12
@@ -239,6 +248,13 @@ def test_real_stages_deliver_25_pages_with_partial_and_restore(
         )
     assert "100本目標→12本取得" in text
     assert "数え方" in text
+    if omakase_request:
+        case = json.loads(store.get_job(accepted.job_id)["request_summary"])["case"]
+        disclosure = omakase.note(case)
+        assert disclosure in accepted.message
+        with zipfile.ZipFile(io.BytesIO(deck)) as archive:
+            assert disclosure in archive.read("ppt/slides/slide25.xml").decode()
+            assert disclosure in archive.read("ppt/notesSlides/notesSlide25.xml").decode()
     # New parent and no local work directories: restore immutable final bytes only.
     slack = FakeSlack(store, accepted.job_id)
     parent = sales25.Parent(

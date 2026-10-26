@@ -25,6 +25,7 @@ from teamagent.skills._shared.deck_review import format_slides
 from teamagent.skills._shared.long_jobs import _OWNER_KEY, origin
 from teamagent.skills._shared.rollout import rollout_allowed
 from teamagent.skills.base import ASYNC_JOB_POLL_METADATA_KEY, SkillContext
+from teamagent.skills.omiyage_report import input_check, omakase
 from teamagent.skills.omiyage_report.schema import (
     MissingField,
     OmiyageReportResult,
@@ -64,13 +65,17 @@ def time_estimate() -> str:
 
 
 def enabled(metadata: Mapping[str, Any]) -> bool:
+    allowed = os.getenv("OMIYAGE_SALES25_ALLOWED_EMAILS", "").strip()
     return (
         os.getenv("USE_OMIYAGE_SALES25", "").strip().lower() in {"1", "true", "yes"}
         and metadata.get("identity_verified") is True
         and bool(metadata.get("verified_slack_user_id"))
         and bool(metadata.get("verified_slack_team_id"))
-        and bool(os.getenv("OMIYAGE_SALES25_ALLOWED_EMAILS", "").strip())
-        and rollout_allowed("OMIYAGE_SALES25_ALLOWED_EMAILS", metadata.get("user_email"))
+        and bool(allowed)
+        and (
+            "*" in {email.strip() for email in allowed.split(",")}
+            or rollout_allowed("OMIYAGE_SALES25_ALLOWED_EMAILS", metadata.get("user_email"))
+        )
     )
 
 
@@ -297,10 +302,13 @@ def preflight(
         for name, value in request.model_dump().items():
             if value:
                 case[name] = value
+                case.get("omakase_values", {}).pop(name, None)
         details = request.sales25 or Sales25Intake()
         for name, value in details.model_dump(exclude_unset=True).items():
             if value:
                 case[name] = value
+                case.get("omakase_values", {}).pop(name, None)
+        omakase.complete(case, input_check.bedrock_text_caller, ctx.request_id)
         if store.put_dedup_lock(lock_id, json.dumps(case, ensure_ascii=False), expected_target=raw):
             break
     else:
@@ -317,11 +325,13 @@ def preflight(
     )
     for name, label in required_fields:
         value = case.get(name)
-        valid = bool(value) and (not isinstance(value, str) or bool(value.strip()))
-        if isinstance(value, str) and value.strip() in {"未定", "不明", "お任せ", "おまかせ"}:
-            valid = False
+        valid = omakase.known(value)
         if name in {"competitors", "keywords"}:
-            valid = isinstance(value, list) and len(value) == (2 if name == "competitors" else 3)
+            valid = (
+                isinstance(value, list)
+                and len(value) == (2 if name == "competitors" else 3)
+                and all(omakase.known(v) for v in value)
+            )
         if not valid:
             missing.append(name)
             labels.append(label)
@@ -329,7 +339,7 @@ def preflight(
     queries = case.get("queries") or names
     if (
         len(queries) != 6
-        or any(not q.strip() for q in queries)
+        or any(not omakase.known(q) for q in queries)
         or len({q.strip().casefold() for q in queries}) != 6
         or len({n.strip().casefold() for n in names}) != 6
     ):
