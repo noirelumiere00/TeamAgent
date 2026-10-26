@@ -19,6 +19,9 @@
 !infra/docker/core-ca-bundle.lock.json
 !infra/docker/vendor/
 !infra/docker/vendor/ca-certificates-bundle-20260909-r3.apk
+!infra/docker/vendor/libbrotlicommon1-1.2.1-r0.apk
+!infra/docker/vendor/libbrotlidec1-1.2.1-r0.apk
+!infra/docker/vendor/libbrotlienc1-1.2.1-r0.apk
 !infra/migrations/
 !infra/migrations/**
 !data/

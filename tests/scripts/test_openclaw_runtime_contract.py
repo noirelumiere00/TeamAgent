@@ -419,6 +419,11 @@ def test_dockerfile_uses_exact_arm64_children_and_chainguard_final() -> None:
             "1.16.1",
             "/opt/teamagent/plugins/slack/node_modules/follow-redirects",
         ),
+        ("undici", "8.12.2", "/app/node_modules/undici"),
+        ("body-parser", "2.4.0", "/app/node_modules/body-parser"),
+        ("zod", "4.6.6", "/app/node_modules/zod"),
+        ("body-parser", "2.4.0", "/opt/teamagent/plugins/slack/node_modules/body-parser"),
+        ("zod", "4.6.6", "/opt/teamagent/plugins/slack/node_modules/zod"),
     ],
 )
 def test_vulnerability_overrides_are_verified_before_pruning(
@@ -437,6 +442,27 @@ def test_vulnerability_overrides_are_verified_before_pruning(
         assert directory in paths
     assert "if(got!==v)throw new Error" in patch
     assert dockerfile.index(pack) < dockerfile.index("RUN node /tmp/prune-runtime.mjs")
+
+
+@pytest.mark.parametrize(
+    ("package", "version"),
+    [("qs", "6.16.1"), ("iconv-lite", "0.7.3"), ("content-type", "2.1.0")],
+)
+def test_body_parser_patch_includes_its_raised_dependency_minima(
+    package: str, version: str
+) -> None:
+    dockerfile = DOCKERFILE.read_text()
+    pack = f'npm pack {package}@{version} --ignore-scripts --pack-destination "$patch_dir";'
+    for root in ("/app/node_modules", "/opt/teamagent/plugins/slack/node_modules"):
+        directory = f"{root}/body-parser/node_modules/{package}"
+        mkdir = f"mkdir -p {directory};"
+        extract = (
+            f'tar -xzf "$patch_dir/{package}-{version}.tgz" --strip-components=1 -C {directory};'
+        )
+        expected = f'"{directory}":"{version}"'
+        assert dockerfile.index(pack) < dockerfile.index(mkdir) < dockerfile.index(extract)
+        assert dockerfile.index(extract) < dockerfile.index(expected)
+        assert dockerfile.index(expected) < dockerfile.index("RUN node /tmp/prune-runtime.mjs")
 
 
 def test_config_loads_only_reviewed_plugins_and_not_browser() -> None:

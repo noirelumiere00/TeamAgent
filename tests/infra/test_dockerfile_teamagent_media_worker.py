@@ -51,7 +51,8 @@ UV_DIGEST = "9941e2d8e06ff884d328905091eac0a6bc1e40e5ce12e6dd0de4ef4ee26baac4"
 # 2026-10-22: c-ares 1.34.8-r0→1.34.9-r0。人作成 lock は 19 行目のみ差分（241 行不変）、実物一致は段 3 の cmp で検証。
 # 2026-10-23: ncurses 6.6_p20260822-r0→6.6_p20261017-r0。人作成 lock は 112・115・184 行目のみ差分（241 行不変）、実物一致は段 3 の cmp で検証。
 # 2026-10-23: gdbm-1.26-r0 を 54 行目へ追加（241→242 行）。人作成 lock と実物の一致は段 3 の cmp で検証。
-APK_LOCK_SHA256 = "37d39a19abdcadc32c48680cfa4277400e8e6dbbb9c1d16c23d92e119e6f37c2"
+# 2026-10-26: apk-tools 3.0.6 + aarch64 APKINDEX で再導出（242→241 行、sndio-libs 脱落）。
+APK_LOCK_SHA256 = "7aaf3b0b67606937f4795720a16bd27c61642fa8a9b188c56ba1849920674aff"
 CHROMIUM_PATH = "/usr/lib/chromium/chromium"
 
 
@@ -80,12 +81,13 @@ def test_media_runtime_packages_versions_and_binaries_are_exact() -> None:
         "CHROMIUM_BINARY_SHA256": (
             "13eaa3cbe73f39b5feafcd767db0771c4f25d626a3927ba216ac43cde3abaf79"
         ),
-        "FFMPEG_PACKAGE_VERSION": "8.1.2-r0",
+        "FFMPEG_PACKAGE_VERSION": "8.1.2-r3",
         "FFMPEG_BINARY_SHA256": (
-            "43aff9d9b8d8becd14f9e2a36a8497aa5c0e12454e60f7c0d3350ed5bef945ba"
+            "137d90fd7626c4246ca994a1eec4ea898e4a0b8ad7042a3402603fc47f69a198"
         ),
-        "NODE_PACKAGE_VERSION": "24.18.1-r0",
-        "NODE_BINARY_SHA256": ("885209faaed8be466b12c17a265f032c8522ab49a5986c219ad51cbbec56e153"),
+        "NODE_PACKAGE_VERSION": "24.22.1-r0",
+        "NODE_VERSION": "24.22.1",
+        "NODE_BINARY_SHA256": ("f801af10506e5e0afb1913b9c105e1f969c47801b7ecd3ee141b6991b25cd91c"),
         "PYTHON_PACKAGE_VERSION": "3.14.8-r0",
         "PYTHON_BINARY_SHA256": (
             "6bb6a4862a8812fb98be66b68ae7669c6588ff11ef9ee9f1b97b721d3801d565"
@@ -121,8 +123,8 @@ def test_media_chromium_path_matches_the_measured_binary_everywhere() -> None:
 
 def test_apk_inventory_is_exact_and_hash_pinned() -> None:
     assert (
-        len(APK_LOCK.read_text(encoding="utf-8").splitlines()) == 242
-    )  # 2026-10-23: gdbm-1.26-r0 の依存追加に追随。実物一致は段 3 の cmp で検証。
+        len(APK_LOCK.read_text(encoding="utf-8").splitlines()) == 241
+    )  # 2026-10-26: APKINDEX から再導出。実物一致は段 3 の cmp で検証。
     assert _sha256(APK_LOCK) == APK_LOCK_SHA256
     assert f"ARG MEDIA_APK_LOCK_SHA256={APK_LOCK_SHA256}" in TEXT
     assert "cmp /tmp/media-apk.lock /tmp/actual-apk.lock" in TEXT
@@ -151,6 +153,7 @@ def test_base_bundled_cve_packages_are_pinned_to_the_fixed_versions() -> None:
     HIGH を期限付き例外へ逃がさないための封印なので、pin を外したらここが赤くなる。
     """
     fixed = {
+        "BROTLI_PACKAGE_VERSION": ("brotli-libs", "1.2.1-r0"),
         "LIBBLKID_PACKAGE_VERSION": ("libblkid", "2.42.3-r1"),
         "LIBMOUNT_PACKAGE_VERSION": ("libmount", "2.42.3-r1"),
         "LIBUUID_PACKAGE_VERSION": ("libuuid", "2.42.3-r1"),

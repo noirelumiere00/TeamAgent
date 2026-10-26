@@ -9,6 +9,8 @@ from __future__ import annotations
 import base64
 import hashlib
 import hmac
+import json
+from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 import pytest
@@ -87,6 +89,24 @@ def test_slack_user_scopes_read_only() -> None:
     assert {"files:read", "channels:read", "groups:read"} <= set(SLACK_USER_SCOPES)
     assert all(s.endswith(":read") or s.endswith(":history") for s in SLACK_USER_SCOPES)
     assert not any("write" in s for s in SLACK_USER_SCOPES)
+
+
+def test_user_scope_manifest_fragment_matches_consent_url(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fragment = Path(__file__).resolve().parents[2] / "infra/slack/user_oauth_scopes.merge.json"
+    manifest = json.loads(fragment.read_text())
+    assert manifest == {"oauth_config": {"scopes": {"user": list(SLACK_USER_SCOPES)}}}
+    monkeypatch.setenv("CONNECT_SLACK_CLIENT_ID", "client-id")
+    monkeypatch.setenv("SLACK_OAUTH_STATE_SECRET", "unit-test-secret")
+    url, state = SlackOAuthConsentFlow(
+        "https://example.com/slack/oauth/callback"
+    ).authorization_url("a@x.com", slack_user_id="U123", slack_team_id="T123")
+    params = parse_qs(urlparse(url).query)
+    assert params["user_scope"][0].split(",") == manifest["oauth_config"]["scopes"]["user"]
+    assert "files:read" in params["user_scope"][0].split(",")
+    assert "scope" not in params
+    assert params["state"] == [state]
 
 
 def test_bound_state_roundtrip_keeps_three_field_body() -> None:
@@ -225,3 +245,24 @@ def test_exchange_reads_identity_from_real_slack_response_shape(
         "code": "oauth-code",
         "redirect_uri": "https://example.com/callback",
     }
+
+
+@pytest.mark.parametrize("scope", [None, "", "search:read"])
+def test_exchange_never_infers_files_read_from_requested_scopes(
+    monkeypatch: pytest.MonkeyPatch, scope: str | None
+) -> None:
+    from slack_sdk import web as slack_web
+
+    class _FakeWebClient:
+        def oauth_v2_access(self, **_kwargs: str) -> dict[str, object]:
+            authed_user = {"id": "U123", "access_token": "test-user-credential"}
+            if scope is not None:
+                authed_user["scope"] = scope
+            return {"ok": True, "authed_user": authed_user, "team": {"id": "T123"}}
+
+    monkeypatch.setattr(slack_web, "WebClient", _FakeWebClient)
+    monkeypatch.setenv("CONNECT_SLACK_CLIENT_ID", "client-id")
+    monkeypatch.setenv("CONNECT_SLACK_CLIENT_SECRET", "client-secret")
+    token = SlackOAuthConsentFlow("https://example.com/callback").exchange("oauth-code")
+    assert "files:read" not in token.scopes
+    assert token.scopes == ((scope,) if scope else ())

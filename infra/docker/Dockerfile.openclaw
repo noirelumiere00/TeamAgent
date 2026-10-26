@@ -90,7 +90,8 @@ RUN set -eux; \
 #                                     CVE-2026-75975, CVE-2026-76172 (3.1.6),
 #                                     GHSA-qw65-cvwx-89v3, GHSA-58mr-gqgx-xq4g (3.1.7)
 #   ip-address      10.2.0 -> 10.3.1  CVE-2026-69192
-#   undici          8.5.0  -> 8.10.2  CVE-2026-13697 (8.9.0), CVE-2026-19534, CVE-2026-84961 (8.10.2)
+#   undici          8.5.0  -> 8.12.2  CVE-2026-13697 (8.9.0), CVE-2026-19534, CVE-2026-84961 (8.10.2),
+#                                     CVE-2026-109869 (8.12.2)
 #   tar             7.5.19 -> 7.5.21  CVE-2026-73566 (long-path DoS)
 # tar 7.5.21 declares the identical dependency closure as 7.5.19 (chownr,
 # yallist, minipass, minizlib, @isaacs/fs-minipass — registry-verified), so the
@@ -116,6 +117,11 @@ RUN set -eux; \
 #     1.32.0 が最小の修正版。依存・engines は 1.31.0 と同一（registry で確認）。
 #   follow-redirects 1.16.0 -> 1.16.1  CVE-2026-111755 / CVE-2026-111756 (oc28)
 #     Slack's axios 1.20.0 accepts ^1.16.0; dependencies and Node >=4.0 are unchanged.
+# 2026-10-26 (oc32): body-parser 2.3.0 -> 2.4.0 (CVE-2026-111181) and
+# zod 4.4.3 -> 4.6.6 (CVE-2023-54404), in both /app and the Slack plugin.
+# body-parser 2.4.0 raises three dependency minima. Keep those exact versions
+# private to body-parser; its other dependencies (including qs's side-channel
+# and es-define-property) already exist in both production trees.
 RUN set -eux; \
     chmod -R u+w /opt/teamagent; \
     patch_dir=/tmp/openclaw-vulnerability-patches; \
@@ -126,13 +132,22 @@ RUN set -eux; \
     npm pack brace-expansion@5.0.11 --ignore-scripts --pack-destination "$patch_dir"; \
     npm pack fast-uri@3.1.7 --ignore-scripts --pack-destination "$patch_dir"; \
     npm pack ip-address@10.3.1 --ignore-scripts --pack-destination "$patch_dir"; \
-    npm pack undici@8.10.2 --ignore-scripts --pack-destination "$patch_dir"; \
+    npm pack undici@8.12.2 --ignore-scripts --pack-destination "$patch_dir"; \
     npm pack tar@7.5.21 --ignore-scripts --pack-destination "$patch_dir"; \
+    npm pack body-parser@2.4.0 --ignore-scripts --pack-destination "$patch_dir"; \
+    npm pack zod@4.6.6 --ignore-scripts --pack-destination "$patch_dir"; \
+    npm pack qs@6.16.1 --ignore-scripts --pack-destination "$patch_dir"; \
+    npm pack iconv-lite@0.7.3 --ignore-scripts --pack-destination "$patch_dir"; \
+    npm pack content-type@2.1.0 --ignore-scripts --pack-destination "$patch_dir"; \
     npm pack https-proxy-agent@5.0.1 --ignore-scripts --pack-destination "$patch_dir"; \
     npm pack agent-base@6.0.2 --ignore-scripts --pack-destination "$patch_dir"; \
     npm pack proxy-addr@2.0.8 --ignore-scripts --pack-destination "$patch_dir"; \
     npm pack @modelcontextprotocol/sdk@1.32.0 --ignore-scripts --pack-destination "$patch_dir"; \
     rm -rf \
+      /app/node_modules/body-parser \
+      /app/node_modules/zod \
+      /opt/teamagent/plugins/slack/node_modules/body-parser \
+      /opt/teamagent/plugins/slack/node_modules/zod \
       /opt/teamagent/plugins/slack/node_modules/axios \
       /opt/teamagent/plugins/slack/node_modules/follow-redirects \
       /opt/teamagent/plugins/slack/node_modules/https-proxy-agent \
@@ -146,6 +161,10 @@ RUN set -eux; \
       /opt/teamagent/plugins/slack/node_modules/proxy-addr \
       /app/node_modules/@modelcontextprotocol/sdk; \
     mkdir -p \
+      /app/node_modules/body-parser \
+      /app/node_modules/zod \
+      /opt/teamagent/plugins/slack/node_modules/body-parser \
+      /opt/teamagent/plugins/slack/node_modules/zod \
       /opt/teamagent/plugins/slack/node_modules/axios \
       /opt/teamagent/plugins/slack/node_modules/follow-redirects \
       /opt/teamagent/plugins/slack/node_modules/https-proxy-agent \
@@ -165,14 +184,30 @@ RUN set -eux; \
     tar -xzf "$patch_dir/brace-expansion-5.0.11.tgz" --strip-components=1 -C /app/node_modules/brace-expansion; \
     tar -xzf "$patch_dir/fast-uri-3.1.7.tgz" --strip-components=1 -C /app/node_modules/fast-uri; \
     tar -xzf "$patch_dir/ip-address-10.3.1.tgz" --strip-components=1 -C /app/node_modules/ip-address; \
-    tar -xzf "$patch_dir/undici-8.10.2.tgz" --strip-components=1 -C /app/node_modules/undici; \
+    tar -xzf "$patch_dir/undici-8.12.2.tgz" --strip-components=1 -C /app/node_modules/undici; \
     tar -xzf "$patch_dir/tar-7.5.21.tgz" --strip-components=1 -C /app/node_modules/tar; \
     tar -xzf "$patch_dir/proxy-addr-2.0.8.tgz" --strip-components=1 -C /app/node_modules/proxy-addr; \
     tar -xzf "$patch_dir/proxy-addr-2.0.8.tgz" --strip-components=1 -C /opt/teamagent/plugins/slack/node_modules/proxy-addr; \
     tar -xzf "$patch_dir/modelcontextprotocol-sdk-1.32.0.tgz" --strip-components=1 -C /app/node_modules/@modelcontextprotocol/sdk; \
+    tar -xzf "$patch_dir/body-parser-2.4.0.tgz" --strip-components=1 -C /app/node_modules/body-parser; \
+    tar -xzf "$patch_dir/zod-4.6.6.tgz" --strip-components=1 -C /app/node_modules/zod; \
+    mkdir -p /app/node_modules/body-parser/node_modules/qs; \
+    tar -xzf "$patch_dir/qs-6.16.1.tgz" --strip-components=1 -C /app/node_modules/body-parser/node_modules/qs; \
+    mkdir -p /app/node_modules/body-parser/node_modules/iconv-lite; \
+    tar -xzf "$patch_dir/iconv-lite-0.7.3.tgz" --strip-components=1 -C /app/node_modules/body-parser/node_modules/iconv-lite; \
+    mkdir -p /app/node_modules/body-parser/node_modules/content-type; \
+    tar -xzf "$patch_dir/content-type-2.1.0.tgz" --strip-components=1 -C /app/node_modules/body-parser/node_modules/content-type; \
+    tar -xzf "$patch_dir/body-parser-2.4.0.tgz" --strip-components=1 -C /opt/teamagent/plugins/slack/node_modules/body-parser; \
+    tar -xzf "$patch_dir/zod-4.6.6.tgz" --strip-components=1 -C /opt/teamagent/plugins/slack/node_modules/zod; \
+    mkdir -p /opt/teamagent/plugins/slack/node_modules/body-parser/node_modules/qs; \
+    tar -xzf "$patch_dir/qs-6.16.1.tgz" --strip-components=1 -C /opt/teamagent/plugins/slack/node_modules/body-parser/node_modules/qs; \
+    mkdir -p /opt/teamagent/plugins/slack/node_modules/body-parser/node_modules/iconv-lite; \
+    tar -xzf "$patch_dir/iconv-lite-0.7.3.tgz" --strip-components=1 -C /opt/teamagent/plugins/slack/node_modules/body-parser/node_modules/iconv-lite; \
+    mkdir -p /opt/teamagent/plugins/slack/node_modules/body-parser/node_modules/content-type; \
+    tar -xzf "$patch_dir/content-type-2.1.0.tgz" --strip-components=1 -C /opt/teamagent/plugins/slack/node_modules/body-parser/node_modules/content-type; \
     cd /tmp; \
     rm -rf "$patch_dir"; \
-    node -e 'const fs=require("fs");const want={"/app/node_modules/brace-expansion":"5.0.11","/app/node_modules/fast-uri":"3.1.7","/app/node_modules/ip-address":"10.3.1","/app/node_modules/undici":"8.10.2","/app/node_modules/tar":"7.5.21","/app/node_modules/proxy-addr":"2.0.8","/opt/teamagent/plugins/slack/node_modules/proxy-addr":"2.0.8","/app/node_modules/@modelcontextprotocol/sdk":"1.32.0","/opt/teamagent/plugins/slack/node_modules/agent-base":"6.0.2","/opt/teamagent/plugins/slack/node_modules/axios":"1.20.0","/opt/teamagent/plugins/slack/node_modules/follow-redirects":"1.16.1","/opt/teamagent/plugins/slack/node_modules/https-proxy-agent":"5.0.1"};for(const [dir,v] of Object.entries(want)){const got=JSON.parse(fs.readFileSync(dir+"/package.json")).version;if(got!==v)throw new Error(`vulnerability patch mismatch: ${dir} is ${got}, expected ${v}`)}'; \
+    node -e 'const fs=require("fs");const want={"/app/node_modules/body-parser":"2.4.0","/app/node_modules/zod":"4.6.6","/opt/teamagent/plugins/slack/node_modules/body-parser":"2.4.0","/opt/teamagent/plugins/slack/node_modules/zod":"4.6.6","/app/node_modules/body-parser/node_modules/qs":"6.16.1","/app/node_modules/body-parser/node_modules/iconv-lite":"0.7.3","/app/node_modules/body-parser/node_modules/content-type":"2.1.0","/opt/teamagent/plugins/slack/node_modules/body-parser/node_modules/qs":"6.16.1","/opt/teamagent/plugins/slack/node_modules/body-parser/node_modules/iconv-lite":"0.7.3","/opt/teamagent/plugins/slack/node_modules/body-parser/node_modules/content-type":"2.1.0","/app/node_modules/brace-expansion":"5.0.11","/app/node_modules/fast-uri":"3.1.7","/app/node_modules/ip-address":"10.3.1","/app/node_modules/undici":"8.12.2","/app/node_modules/tar":"7.5.21","/app/node_modules/proxy-addr":"2.0.8","/opt/teamagent/plugins/slack/node_modules/proxy-addr":"2.0.8","/app/node_modules/@modelcontextprotocol/sdk":"1.32.0","/opt/teamagent/plugins/slack/node_modules/agent-base":"6.0.2","/opt/teamagent/plugins/slack/node_modules/axios":"1.20.0","/opt/teamagent/plugins/slack/node_modules/follow-redirects":"1.16.1","/opt/teamagent/plugins/slack/node_modules/https-proxy-agent":"5.0.1"};for(const [dir,v] of Object.entries(want)){const got=JSON.parse(fs.readFileSync(dir+"/package.json")).version;if(got!==v)throw new Error(`vulnerability patch mismatch: ${dir} is ${got}, expected ${v}`)}'; \
     chmod -R a-w /opt/teamagent
 
 # The upstream release contains its complete development workspace. Resolve the
