@@ -3,20 +3,13 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Mapping
 from typing import Annotated, Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from teamagent.skills.first_visit.sales25_contract import OMAKASE_LABELS as LABELS
+from teamagent.skills.first_visit.sales25_contract import omakase_note as note
 from teamagent.skills.omiyage_report.input_check import TextCaller, find_input_problems
-
-LABELS = {
-    "competitors": "競合",
-    "category": "カテゴリー",
-    "keywords": "中立語",
-    "target_product": "対象商品",
-    "claim_constraints": "守る訴求条件",
-}
 
 
 def known(value: Any) -> bool:
@@ -95,17 +88,4 @@ def complete(case: dict[str, Any], caller: TextCaller, request_id: str) -> None:
                 used.add(value.casefold())
 
 
-def note(case: Mapping[str, Any]) -> str:
-    values = case.get("omakase_values", {})
-    parts = [
-        label
-        + ": "
-        + ("・".join(values[field]) if isinstance(values[field], list) else values[field])
-        for field, label in LABELS.items()
-        if values.get(field)
-    ]
-    return (
-        "お任せで次の条件にしました: " + "／".join(parts) + "（違えばこのスレッドで直してください）"
-        if parts
-        else ""
-    )
+__all__ = ["LABELS", "complete", "known", "note"]

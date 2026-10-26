@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from teamagent.skills.first_visit import sales25_contract as contract
-from teamagent.skills.omiyage_report.omakase import note as omakase_note
+from teamagent.skills.first_visit.sales25_contract import omakase_note
 
 if TYPE_CHECKING:
     from teamagent.adapters.gemini_client import GeminiClient
