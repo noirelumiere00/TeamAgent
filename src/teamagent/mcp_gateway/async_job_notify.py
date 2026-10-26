@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import re
 import threading
 import time
 from collections.abc import Callable
@@ -273,6 +274,8 @@ def _run_completion_notice(
         else:
             if status == "running" and message.startswith("sales25:"):
                 phase = message.split("。", 1)[0]
+                # 件数（検索 1/6・分析 3/30）だけの変化では知らせない。大きな工程の切り替わりだけ。
+                phase = re.sub(r"\s*\d+\s*/\s*\d+.*$", "", phase)
                 publish_notice(
                     message,
                     origin=origin,

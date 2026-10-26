@@ -1064,9 +1064,8 @@ def test_sales25_counts_notify_once_per_count_and_finish(
         request_id="synthetic",
         poll=lambda: next(updates),
     )
-    assert len(notices) == 5
+    # 件数だけの変化では知らせず、工程の切り替わり（検索→媒体取得・分析）と完了だけ。
+    assert len(notices) == 3
     assert "検索 1/6" in notices[0]["text"]
-    assert "検索 6/6" in notices[1]["text"]
-    assert "分析 1/30" in notices[2]["text"]
-    assert "分析 30/30" in notices[3]["text"]
-    assert "機械検査" in notices[4]["text"]
+    assert "分析 1/30" in notices[1]["text"]
+    assert "機械検査" in notices[2]["text"]
