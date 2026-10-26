@@ -208,18 +208,24 @@ def test_unrelated_changes_still_pass(base: str, head: str, reason: str) -> None
 
 
 def test_unlock_matches_the_committed_declaration() -> None:
-    """sales25 の統合契約へ追随し、scope と退避した宣言を完全一致で封印する。"""
+    """依存脆弱性の解消へ追随し、scope と退避した宣言を完全一致で封印する。"""
     unlock = _freeze_doc()["unlock"]
     assert unlock["active"] is True
     assert unlock["scope_paths"] == ["infra/codebuild/teamagent_core_media_release_contract.json"]
     assert (
         unlock["reason"]
-        == "human gate 2026-10-23（小俣さん: sales25 の最終ブランチへ固定キット・runner 実行口・core_media release 契約を収録し、未公開の中間世代を残さず live 本文から最終世代へ1段で再導出することを許可。AWS・Slack・本番への書き込みと commit は行わない）"
+        == "human gate 2026-10-26（小俣さん 10-21「マージまで全て任せる」・10-23「どんどんデプロイして」・週末公表の依存脆弱性 brotli/filelock/pypdf/virtualenv/zod の解消）"
     )
     assert (
         unlock["gate"]
-        == "human gate 2026-10-23（小俣さん: sales25 の最終ブランチへ固定キット・runner 実行口・core_media release 契約を収録し、未公開の中間世代を残さず live 本文から最終世代へ1段で再導出することを許可。AWS・Slack・本番への書き込みと commit は行わない）"
+        == "human gate 2026-10-26（小俣さん 10-21「マージまで全て任せる」・10-23「どんどんデプロイして」・週末公表の依存脆弱性 brotli/filelock/pypdf/virtualenv/zod の解消）"
     )
+    assert unlock["previous_scope_20261026_sales25"] == {
+        "active": True,
+        "scope_paths": ["infra/codebuild/teamagent_core_media_release_contract.json"],
+        "reason": "human gate 2026-10-23（小俣さん: sales25 の最終ブランチへ固定キット・runner 実行口・core_media release 契約を収録し、未公開の中間世代を残さず live 本文から最終世代へ1段で再導出することを許可。AWS・Slack・本番への書き込みと commit は行わない）",
+        "gate": "human gate 2026-10-23（小俣さん: sales25 の最終ブランチへ固定キット・runner 実行口・core_media release 契約を収録し、未公開の中間世代を残さず live 本文から最終世代へ1段で再導出することを許可。AWS・Slack・本番への書き込みと commit は行わない）",
+    }
     assert unlock["previous_scope_20261023_gdbm"] == {
         "active": True,
         "scope_paths": ["infra/codebuild/teamagent_core_media_release_contract.json"],

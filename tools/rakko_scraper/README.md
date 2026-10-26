@@ -12,6 +12,8 @@ VSEO 提案書の検索量データ (月間検索数 / SEO 難易度 / CPC) を�
 
 ## セットアップ
 
+Node.js 22.12.0 以上が必要です（puppeteer-core 25.16.0）。
+
 ```bash
 cd tools/rakko_scraper
 npm install            # puppeteer-core (node_modules は gitignore)
