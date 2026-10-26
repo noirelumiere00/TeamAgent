@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import hashlib
 import re
+import tarfile
 import tomllib
 from pathlib import Path
 
@@ -148,6 +150,36 @@ def test_core_ca_bundle_uses_the_official_fixed_apk_without_changing_python() ->
     assert "COPY infra/docker/replace_core_ca_bundle.py " in builder
     assert '--apk-sha256 "$CA_CERTIFICATES_BUNDLE_APK_SHA256"' in builder
     assert '--version "$CA_CERTIFICATES_BUNDLE_VERSION"' in builder
+
+
+def test_core_brotli_apks_are_pinned_glibc_arm64_libraries() -> None:
+    builder = _stage("builder", "final")
+    final = _stage("final")
+    assert "ARG BROTLI_PACKAGE_VERSION=1.2.1-r0" in TEXT
+    assert "apk --root /tmp/core-ca/root --no-network --no-scripts --allow-untrusted add" in builder
+    for part, digest in {
+        "common": "1801ba6f752b201c5d52fadd98a3698a672a5695ad18d2321169b9e1c9fabe3e",
+        "dec": "a5a25fb6a8238af95af1c21f039ecb4cb1a32fadd040ac276d73532ffd72fb1c",
+        "enc": "d15c3aaa157a5fa281768fe5e69ae3da9357d3e58668ca47aa7bf2c3442d09b8",
+    }.items():
+        relative = f"infra/docker/vendor/libbrotli{part}1-1.2.1-r0.apk"
+        assert hashlib.sha256((ROOT / relative).read_bytes()).hexdigest() == digest
+        assert f"ARG BROTLI_{part.upper()}_APK_SHA256={digest}" in TEXT
+        assert f"!{relative}" in DOCKERIGNORE.read_text()
+        assert f"/tmp/core-brotli/libbrotli{part}1-${{BROTLI_PACKAGE_VERSION}}.apk" in builder
+        with tarfile.open(ROOT / relative) as archive:
+            metadata = archive.extractfile(".PKGINFO").read().decode()
+            assert f"pkgname = libbrotli{part}1\n" in metadata
+            assert "pkgver = 1.2.1-r0\n" in metadata
+            assert "arch = aarch64\n" in metadata
+            library = archive.extractfile(f"usr/lib/libbrotli{part}.so.1.2.1").read()
+            assert library[:5] == b"\x7fELF\x02"
+            assert int.from_bytes(library[18:20], "little") == 183
+            assert b"libc.so.6\x00" in library
+    assert "BrotliDecoderVersion() == 0x1002001" in final
+    assert "BrotliEncoderVersion() == 0x1002001" in final
+    assert "libbrotli'+part+'.so.1.2.0').unlink()" in final
+    assert "libbrotli'+part+'1-1.2.0-r5.spdx.json').unlink()" in final
 
 
 def test_core_runtime_is_uid_10001_read_only_ready_and_python_health_checked() -> None:

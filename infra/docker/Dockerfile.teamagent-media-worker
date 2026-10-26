@@ -121,6 +121,8 @@ ARG ZLIB_PACKAGE_VERSION=1.3.2-r1
 # 2026-10-02 便 r43 段3: base(v3.24)同梱の pcre2 10.47-r1 に公開済み CVE 8 件（HIGH 4）。secdb v3.24 main で 10.48-r0 が 7 件・10.49-r0 が CVE-2026-103111 を fixed。glib 等の依存で外せないため修正版を明示 pin。
 # 対象: CVE-2026-86145 / CVE-2026-89156 / CVE-2026-89157 / CVE-2026-89158 / CVE-2026-89160 / CVE-2026-89161 / CVE-2026-89162 / CVE-2026-103111
 ARG PCRE2_PACKAGE_VERSION=10.49-r0
+# r74c: base-bundled brotli-libs needs an explicit upgrade for CVE-2026-111497.
+ARG BROTLI_PACKAGE_VERSION=1.2.1-r0
 
 RUN --mount=type=cache,id=teamagent-media-apk-arm64-v3,target=/var/cache/apk,sharing=locked \
     --mount=type=secret,id=teamagent_ca,required=false \
@@ -138,6 +140,7 @@ RUN --mount=type=cache,id=teamagent-media-apk-arm64-v3,target=/var/cache/apk,sha
       --cache-max-age 1440 \
       --repositories-file /tmp/teamagent-apk-repositories \
       add \
+      "brotli-libs=$BROTLI_PACKAGE_VERSION" \
       "ca-certificates=$CA_CERTIFICATES_PACKAGE_VERSION" \
       "ffmpeg=$FFMPEG_PACKAGE_VERSION" \
       "font-liberation=$FONT_LIBERATION_PACKAGE_VERSION" \
@@ -325,7 +328,7 @@ ARG YTDLP_SDIST_SHA256=9e213e48cea35c66b378e4447903f118f6392a5fa380a2b6d7070ec86
 ARG YTDLP_REMOVED_EXTRACTOR_SET_SHA256=ea414688b508a2a77bf006e5928536603a51e7ab3b8664c13dd6d21b1140b80b
 ARG YTDLP_SANITIZED_TREE_SHA256=47c027c33b5750234293613987caf3e63ca93823c785580d334c1d29ee733f8f
 ARG YTDLP_SANITIZER_SHA256=4e7464710094be2eb6205fdc1ea207cfe62b99db1b34f9d31691e9a606bcb5db
-ARG MEDIA_APK_LOCK_SHA256=ea51f0a4a3a3446e204e1e9b7268ca83a77524c34b7c1162ee34811faf3e560a
+ARG MEDIA_APK_LOCK_SHA256=7aaf3b0b67606937f4795720a16bd27c61642fa8a9b188c56ba1849920674aff
 ARG TIKTOK_PACKAGE_JSON_SHA256=6b7328c05e81a9508371cd5bbf24735d3d21a6d6e43d3e8ba66c47459acebf48
 ARG TIKTOK_PACKAGE_LOCK_SHA256=66eb17e9aa0b4293c022887a17934b171da1268a049b5f35273089daff165a28
 ARG TIKTOK_SCRAPER_SHA256=e27f612bbdc799ee6f788fed1fc66d611f5566d264650fbcbe4f02101bfe96d3

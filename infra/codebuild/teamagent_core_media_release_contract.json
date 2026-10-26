@@ -84,7 +84,46 @@
           "sha256": "775bf454e5816503fe56f81c9b9e0d3f03790694bdce576cbbefd60971fc88ca"
         }
       ],
-      "source_assertions": []
+      "source_assertions": [
+        {
+          "key": "artifact.brotli-common-apk-sha256",
+          "value": "1801ba6f752b201c5d52fadd98a3698a672a5695ad18d2321169b9e1c9fabe3e",
+          "build_arg": "BROTLI_COMMON_APK_SHA256",
+          "oci_label": "io.teamagent.contract.brotli-common-apk-sha256",
+          "dockerfile_uses": [
+            "printf '%s  %s\\n' \"$BROTLI_COMMON_APK_SHA256\" /tmp/core-brotli/libbrotlicommon1-1.2.1-r0.apk | sha256sum -c -"
+          ]
+        },
+        {
+          "key": "artifact.brotli-dec-apk-sha256",
+          "value": "a5a25fb6a8238af95af1c21f039ecb4cb1a32fadd040ac276d73532ffd72fb1c",
+          "build_arg": "BROTLI_DEC_APK_SHA256",
+          "oci_label": "io.teamagent.contract.brotli-dec-apk-sha256",
+          "dockerfile_uses": [
+            "printf '%s  %s\\n' \"$BROTLI_DEC_APK_SHA256\" /tmp/core-brotli/libbrotlidec1-1.2.1-r0.apk | sha256sum -c -"
+          ]
+        },
+        {
+          "key": "artifact.brotli-enc-apk-sha256",
+          "value": "d15c3aaa157a5fa281768fe5e69ae3da9357d3e58668ca47aa7bf2c3442d09b8",
+          "build_arg": "BROTLI_ENC_APK_SHA256",
+          "oci_label": "io.teamagent.contract.brotli-enc-apk-sha256",
+          "dockerfile_uses": [
+            "printf '%s  %s\\n' \"$BROTLI_ENC_APK_SHA256\" /tmp/core-brotli/libbrotlienc1-1.2.1-r0.apk | sha256sum -c -"
+          ]
+        },
+        {
+          "key": "artifact.brotli-package-version",
+          "value": "1.2.1-r0",
+          "build_arg": "BROTLI_PACKAGE_VERSION",
+          "oci_label": "io.teamagent.contract.brotli-package-version",
+          "dockerfile_uses": [
+            "/tmp/core-brotli/libbrotlicommon1-${BROTLI_PACKAGE_VERSION}.apk",
+            "/tmp/core-brotli/libbrotlidec1-${BROTLI_PACKAGE_VERSION}.apk",
+            "/tmp/core-brotli/libbrotlienc1-${BROTLI_PACKAGE_VERSION}.apk"
+          ]
+        }
+      ]
     },
     {
       "name": "media",
@@ -135,7 +174,7 @@
       "source_assertions": [
         {
           "key": "artifact.apk-lock.sha256",
-          "value": "ea51f0a4a3a3446e204e1e9b7268ca83a77524c34b7c1162ee34811faf3e560a",
+          "value": "7aaf3b0b67606937f4795720a16bd27c61642fa8a9b188c56ba1849920674aff",
           "build_arg": "MEDIA_APK_LOCK_SHA256",
           "oci_label": "io.teamagent.contract.apk-lock-sha256",
           "dockerfile_uses": [
