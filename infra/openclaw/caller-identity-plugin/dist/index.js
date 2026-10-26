@@ -20,6 +20,10 @@ const VIDEO_REQUEST_TTL_MS = 45 * 60 * 1000;
 const HEAVY_VIDEO_TOOLS = new Set([
   "video_algorithm", "video_analysis", "tiktok_acquire", "search_surface_check",
 ]);
+const DOCUMENT_GENERATION_TOOLS = new Set([
+  "omiyage_report_submit", "proposal_builder", "proposal_builder_submit",
+  "proposal_deck", "proposal_draft", "proposal_campaign", "clip_proposal_submit",
+]);
 
 function videoQueryHash(query) {
   return createHash("sha256").update(String(query ?? "").normalize("NFKC")
@@ -2889,12 +2893,15 @@ export function createDmCatchup({
 }
 
 function legacySearchRequirement(text) {
+  // 資料の作成依頼は生成ツールの受付で答える。用語辞書に当たっても社内検索の作り直しに回さない。
+  const documentGenerationRequest = typeof text === "string" &&
+    /(?:資料|提案書|スライド|PPTX?|PowerPoint|パワーポイント)[^。！？?!\n]*(?:作って|つくって|作成して|制作して|お願い)/iu.test(text);
   return typeof text === "string" && (
-    /社内で(?:いう|言う|の)|(?:うち|当社|弊社|自社)(?:も|は|が|の)?.{0,12}(?:関わ|関与|担当)/u.test(text) ? "internal_topic" :
+    !documentGenerationRequest && /社内で(?:いう|言う|の)|(?:うち|当社|弊社|自社)(?:も|は|が|の)?.{0,12}(?:関わ|関与|担当)/u.test(text) ? "internal_topic" :
     explicitlyRequestsFreshVideoAnalysis(text) ? null :
     /比較|比べ|何が効|どっちが|どちらが|勝ち|効果/u.test(text) ? "comparison" :
     /一覧|リスト(?:アップ)?|列挙|(?:資料|事例|案件)を全部|全部(?:の資料)?を?(?:出|見せ|並べ)/u.test(text) ? "list" :
-    /ビデオリリース|\bTTO\b|切り抜き|\bVVS\b|タテガタ|ショートドラマ|スワイプ\s*LP|ソリューションプラン|\bVSEO\b|検索面|お土産資料|ケイパ|感触|BANT|営業\s*FB|カルテ|二次利用費/iu.test(text)
+    !documentGenerationRequest && /ビデオリリース|\bTTO\b|切り抜き|\bVVS\b|タテガタ|ショートドラマ|スワイプ\s*LP|ソリューションプラン|\bVSEO\b|検索面|お土産資料|ケイパ|感触|BANT|営業\s*FB|カルテ|二次利用費/iu.test(text)
       ? "internal_term" : /元の資料|根拠|資料を(?:もと|基)に|ソース/u.test(text)
         ? "source" : null);
 }
@@ -3171,6 +3178,10 @@ export function createCallerIdentityPlugin({
     if (connectIngressByRun.get(runId)?.searchInsightRequested && previous &&
         now() - previous.updatedAtMs <= INBOUND_CONTEXT_TTL_MS) entry.postedMetrics ??= previous.postedMetrics;
     const searchTool = ["search", "teamagent__search"].includes(event?.toolName);
+    // Generation results require their own reply, even when no internal search ran.
+    if (DOCUMENT_GENERATION_TOOLS.has(canonicalToolName(event?.toolName) ?? event?.toolName)) {
+      entry.generationToolCalled = true;
+    }
     if (!searchTool) {
       const routed = searchDirectByRun.get(runId);
       const data = !event?.error && searchResultData(event.result);
@@ -6345,7 +6356,7 @@ export function createCallerIdentityPlugin({
     const searched = ["internal_term", "internal_topic"].includes(ingress?.searchRequired)
       ? evidenceByRun.get(runId)?.searchCompleted : evidenceByRun.has(runId);
     if (!ingress?.searchRequired || ingress.connectRequest ||
-        searched || unrelatedToolSatisfies ||
+        searched || unrelatedToolSatisfies || evidenceByRun.get(runId)?.generationToolCalled ||
         typeof event?.lastAssistantMessage !== "string" || !event.lastAssistantMessage.trim() ||
         searchRevisionsByRun.has(runId) ||
         connectRevisionsByRun.has(runId) || videoRevisionsByRun.has(runId)) return undefined;
@@ -6706,7 +6717,7 @@ export function createCallerIdentityPlugin({
   function revisedReplyFallback(entry, runId) {
     const evidence = evidenceByRun.get(runId);
     if (["internal_term", "internal_topic"].includes(connectIngressByRun.get(runId)?.searchRequired) &&
-        !evidence?.searchCompleted) return "社内資料の確認を完了できませんでした。";
+        !evidence?.searchCompleted && !evidence?.generationToolCalled) return "社内資料の確認を完了できませんでした。";
     const reply = (evidence?.driveFirst ? evidence.compactAnswer : null) ?? entry.originalReply;
     if (entry.searchRequired && visibleReplyText(reply)) {
       const normalized = finalizeOutgoingText({payload: {text: reply}}, undefined, runId)
@@ -6732,7 +6743,8 @@ export function createCallerIdentityPlugin({
     const hasContent = !result?.cancel && (visibleReplyText(payload?.text) ||
       payload?.mediaUrl || payload?.mediaUrls?.length || payload?.attachments?.length || payload?.blocks?.length);
     if (!entry.payloadSeen && (!hasContent ||
-        (entry.searchRequired && !evidenceByRun.get(runId)?.searchCompleted))) {
+        (entry.searchRequired && !evidenceByRun.get(runId)?.searchCompleted &&
+          !evidenceByRun.get(runId)?.generationToolCalled))) {
       entry.payloadSeen = true;
       entry.replaced = true;
       return {payload: {...payload, text: revisedReplyFallback(entry, runId)}};
