@@ -319,3 +319,134 @@ def test_runtime_guard_review_plan_is_side_effect_free_until_final_plan() -> Non
     review_exit = branch.index('echo "✅ exact reviewed plan candidate')
     intent_write = branch.index("prepare_image_deployment_intent")
     assert review_exit < intent_write
+
+
+def _run_prepare_validation(
+    tmp_path: Path, plan: dict[str, Any], contract_mode: str
+) -> subprocess.CompletedProcess[str]:
+    plan_path = tmp_path / f"{contract_mode}-plan.json"
+    core_path = tmp_path / "core.json"
+    plan_path.write_text(json.dumps(plan), encoding="utf-8")
+    core_path.write_text(
+        json.dumps({"mode": "migration", "aws_region": "ap-northeast-1"}), encoding="utf-8"
+    )
+    function = re.search(
+        r"^prepare_plan_for_validation\(\) \{\n.*?\n\}\n",
+        _GUARD.read_text(encoding="utf-8"),
+        flags=re.DOTALL | re.MULTILINE,
+    )
+    assert function is not None
+    shell = "\n".join(
+        (
+            "set -euo pipefail",
+            f"TMP_ROOT={str(tmp_path)!r}",
+            'die() { echo "FATAL: $*" >&2; return 1; }',
+            function.group(0),
+            'prepare_plan_for_validation "$1" "$2" "$3"',
+            'cat "$VALIDATION_PLAN_JSON"',
+        )
+    )
+    result = subprocess.run(
+        ["bash", "-c", shell, "validator", str(plan_path), str(core_path), contract_mode],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert plan_path.read_text(encoding="utf-8") == json.dumps(plan)
+    return result
+
+
+def _review_plan_pair() -> tuple[dict[str, Any], dict[str, Any]]:
+    final = _plan()
+    final.pop("resource_drift")
+    final["variables"] = {"runtime_guard_review_only": {"value": False}}
+    final["checks"] = [
+        {
+            "address": {
+                "kind": "resource",
+                "mode": "managed",
+                "type": "terraform_data",
+                "name": "runtime_guard_review_blocker",
+                "to_display": "terraform_data.runtime_guard_review_blocker",
+            },
+            "status": "pass",
+            "instances": [],
+        }
+    ]
+    review = copy.deepcopy(final)
+    review["variables"]["runtime_guard_review_only"]["value"] = True
+    blocker = _change(
+        "terraform_data.runtime_guard_review_blocker[0]",
+        actions=["create"],
+        after={"input": {"aws_region": "ap-northeast-1", "billing_region": "us-east-1"}},
+    )
+    blocker.update(
+        name="runtime_guard_review_blocker",
+        index=0,
+        provider_name="terraform.io/builtin/terraform",
+    )
+    blocker["change"].update(before=None, after_unknown={"id": True, "input": {}, "output": True})
+    review["resource_changes"].append(blocker)
+    review["checks"][0].update(
+        status="unknown",
+        instances=[
+            {
+                "address": {
+                    "to_display": "terraform_data.runtime_guard_review_blocker[0]",
+                    "instance_key": 0,
+                },
+                "status": "unknown",
+            }
+        ],
+    )
+    return review, final
+
+
+def test_review_blocker_is_excluded_from_exact_final_contract(tmp_path: Path) -> None:
+    review, final = _review_plan_pair()
+    # Similar names still bind their complete change hash; only the exact blocker is omitted.
+    lookalike = _change("terraform_data.runtime_guard_review_blocker_extra")
+    review["resource_changes"].append(lookalike)
+    final["resource_changes"].append(copy.deepcopy(lookalike))
+
+    normalized_review = _run_prepare_validation(tmp_path, review, "extract")
+    assert normalized_review.returncode == 0, normalized_review.stderr
+    extracted, reviewed_path = _run_shell_extract(tmp_path, json.loads(normalized_review.stdout))
+    assert extracted.returncode == 0, extracted.stderr
+    reviewed = json.loads(reviewed_path.read_text(encoding="utf-8"))
+    assert reviewed == module.extract_contract(final)
+    assert "terraform_data.runtime_guard_review_blocker_extra" in {
+        row["address"] for row in reviewed["resource_changes"]
+    }
+
+    normalized_final = _run_prepare_validation(tmp_path, final, "verify")
+    assert normalized_final.returncode == 0, normalized_final.stderr
+    verified = _run_shell_guard(tmp_path, json.loads(normalized_final.stdout), reviewed)
+    assert verified.returncode == 0, verified.stderr
+
+
+@pytest.mark.parametrize("mutation", ["before", "unknown", "actions", "drift", "output"])
+def test_review_normalization_preserves_nonblocker_contract_mutations(
+    tmp_path: Path, mutation: str
+) -> None:
+    review, final = _review_plan_pair()
+    normalized = _run_prepare_validation(tmp_path, review, "extract")
+    assert normalized.returncode == 0, normalized.stderr
+    reviewed = module.extract_contract(json.loads(normalized.stdout))
+    row = final["resource_changes"][0]["change"]
+    if mutation == "before":
+        row["before"] = {"unexpected": True}
+    elif mutation == "unknown":
+        row["after_unknown"] = {"unexpected": True}
+    elif mutation == "actions":
+        row["actions"] = ["create", "delete"]
+    elif mutation == "drift":
+        final["resource_drift"] = [_change("aws_sqs_queue.drift")]
+    elif mutation == "output":
+        final["output_changes"] = {"unexpected": {"actions": ["update"]}}
+
+    normalized_final = _run_prepare_validation(tmp_path, final, "verify")
+    assert normalized_final.returncode == 0, normalized_final.stderr
+    result = _run_verify(tmp_path, json.loads(normalized_final.stdout), reviewed)
+    assert result.returncode == 1
+    assert "differs from the exact reviewed contract" in result.stderr

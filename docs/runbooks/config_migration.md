@@ -82,33 +82,54 @@ placeholder の採り方（すべて read-only）:
 | intent id | `uuidgen \| tr 'A-F' 'a-f'`（UUIDv4） |
 | reviewed_plan | §3 の `review-plan` の `--out` 実体 |
 
-## 3. コマンド列（同一 commit・clean tree・AIIAdev の MFA 一時 session）
+## 3. コマンド列（candidate → manifest の承認 commit・各段階で clean tree）
+
+guard 修正・Terraform 構成・テストは candidate とともに preflight より前に取り込む。
+実行前に AIIAdev の MFA 一時 session から既存の trusted automation role を exact session 名で assume する。
+role は `teamagent-dev-terraform-runtime-automation`、session 名は `teamagent-terraform-worker`。
+preflight もこの role を要求するため、以下の全段階で同じ認可済み role を使う。
+正規の backend 設定で初期化した同じ checkout から guard を直接呼ぶ。
+`bootstrap_runtime_session.sh` は呼び出すたびに未初期化の一時 checkout を作るため、以下の連続手順には使わない。
 
 ```bash
 # 0) live の実測（read-only）→ manifest candidate を commit / merge
-bash infra/deploy/bootstrap_runtime_session.sh snapshot --evidence-json-out /secure/snap.json
+bash infra/deploy/terraform_runtime_guard.sh snapshot --evidence-json-out /secure/snap.json
 
 # 1) preflight（Fargate task なし。live fingerprint と contract SHA を receipt に焼く）
-bash infra/deploy/bootstrap_runtime_session.sh preflight \
+bash infra/deploy/terraform_runtime_guard.sh preflight \
   --migration <ID> --out /secure/preflight.json
 
-# 2) review-plan（外部 receipt は --preflight-receipt だけ）
-bash infra/deploy/bootstrap_runtime_session.sh review-plan \
+# 2) review-plan（enabled=false / reviewed_plan=null。出力は contract JSON）
+bash infra/deploy/terraform_runtime_guard.sh review-plan \
   --var-file <tfvars> --out /secure/reviewed-plan.json \
   --runtime-migration <ID> --preflight-receipt /secure/preflight.json
 
-# 3) reviewed-plan.json を manifest の reviewed_plan に貼り enabled=true にする commit（migrations.json だけ）→ merge
+# 3) JSON 全体を manifest の reviewed_plan に貼り enabled=true にする commit（migrations.json だけ）→ merge
 
-# 4) plan → verify → apply（sync / runtime と同じ）
-bash infra/deploy/bootstrap_runtime_session.sh plan \
+# 4) final plan を新規生成 → verify → apply（enabled=true / exact reviewed_plan 必須）
+bash infra/deploy/terraform_runtime_guard.sh plan \
   --var-file <tfvars> --out /secure/plan.tfplan \
   --runtime-migration <ID> --preflight-receipt /secure/preflight.json
-bash infra/deploy/bootstrap_runtime_session.sh verify --plan /secure/plan.tfplan
-bash infra/deploy/bootstrap_runtime_session.sh apply --plan /secure/plan.tfplan --out /secure/apply-receipt.json
+bash infra/deploy/terraform_runtime_guard.sh verify --plan /secure/plan.tfplan
+bash infra/deploy/terraform_runtime_guard.sh apply --plan /secure/plan.tfplan --out /secure/apply-receipt.json
 ```
 
 `--alarm-delivery-receipt` / `--versioning-receipt` / `--log-readiness-receipt` / `--alarm-migration-receipt` /
 `--prior-apply-receipt` を config kind に渡すと die する。
+
+`review-plan --out` は reviewed contract JSON だけを公開し、binary plan / apply receipt は公開しない。
+内部の `runtime_guard_review_only=true` は shell が candidate にだけ注入する。利用者が `-var` / `TF_VAR_*`
+で指定してはならず、tfvars に保存しない。final / sync は shell が false を注入し、verify / apply も
+保存 plan のフラグが false であることを要求する。
+
+review 用 binary plan が残っていて直接 `terraform apply <review plan>` された場合も、
+専用 `terraform_data.runtime_guard_review_blocker[0]` の precondition が apply 時に必ず失敗する。
+`timestamp()` は plan 時に unknown、apply 時に非空なので、review 中の `timestamp() == ""` はその時点で false になる。
+全 AWS provider は review 時に blocker の既知の input から region を読むため、apply の依存 graph は
+blocker → provider 設定 → AWS resource となり、KMS / IAM を含む AWS の変更より前に停止する。
+この専用 resource とその unknown check だけを検証用コピーから除き、既存の全検査と contract 抽出を実行する。
+元の binary plan / JSON は変更せず、他 resource の change / drift / unknown check は従来どおり検証する。
+承認後は review 用 plan を流用せず、新しい final plan が contract と完全一致することを確認する。
 
 ## 4. 時間制約と順序
 
@@ -119,7 +140,7 @@ bash infra/deploy/bootstrap_runtime_session.sh apply --plan /secure/plan.tfplan 
 | review-plan → plan の間に変えてよい file | **`infra/deploy/terraform_runtime_migrations.json` だけ** | `assert_review_commit_transition` |
 | receipt が束縛するもの | git commit・guard/jq/manifest SHA・全 `*.tf` の config manifest SHA・live fingerprint | `write_preflight_receipt` / plan receipt |
 
-したがって 1) → 4) を **2 時間以内・同一 tree** で通す。3) の commit に migrations.json 以外を混ぜると 2) の receipt は無効になり、
+したがって 1) → 4) を **2 時間以内・承認用 manifest 変更だけ**で通す。3) の commit に migrations.json 以外を混ぜると 2) の receipt は無効になり、
 preflight からやり直しになる。guard 本体・`*.tf` を触った場合も同様（SHA が変わる）。
 
 ## 5. config kind が通さないもの（設計上の制限）

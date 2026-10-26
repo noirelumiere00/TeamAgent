@@ -48,7 +48,12 @@ terraform {
 }
 
 provider "aws" {
-  region              = var.aws_region
+  # Known input preserves plan values; the provider must await the blocker at apply.
+  region = (
+    var.runtime_guard_review_only ?
+    terraform_data.runtime_guard_review_blocker[0].input.aws_region :
+    var.aws_region
+  )
   allowed_account_ids = ["718959508629"]
 
   default_tags {
