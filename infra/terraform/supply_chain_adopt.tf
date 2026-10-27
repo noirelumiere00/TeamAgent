@@ -177,6 +177,12 @@ locals {
       content_type                  = "text/yaml"
       object_lock_retain_until_date = "2099-12-31T00:00:00Z"
     }
+    # 2026-10-27 オフライン導出（未公開）。Alpine 上流の入替に追随: media simdutf を 9.3.2-r0 へ。
+    # SHA 確認済み live 本文の core_media 契約1か所だけを置換し、逆置換で一致を確認。
+    "ae075a43b359e43e5e93ae45188cdb112a40f5dfc9b3960721731aa1dc725949" = {
+      content_type                  = "text/yaml"
+      object_lock_retain_until_date = "2099-12-31T00:00:00Z"
+    }
   }
 
   image_attestor_buildspec_generations = {
@@ -320,6 +326,12 @@ locals {
       content_type                  = "text/yaml"
       object_lock_retain_until_date = "2099-12-31T00:00:00Z"
     }
+    # 2026-10-27 オフライン導出（未公開）。Alpine 上流の入替に追随: media simdutf を 9.3.2-r0 へ。
+    # SHA 確認済み live 本文の core_media 契約1か所だけを置換し、逆置換で一致を確認。
+    "992152ad02e02f870e2d52a5847af2c2c93229caf334818c4f15b09860545e25" = {
+      content_type                  = "text/yaml"
+      object_lock_retain_until_date = "2099-12-31T00:00:00Z"
+    }
   }
 
   image_promoter_buildspec_generations = {
@@ -450,6 +462,12 @@ locals {
     # 2026-10-26 オフライン導出（未公開）。CVE-2026-111497 対応: core Wolfi 3 libraries / media brotli-libs を 1.2.1-r0 に固定。
     # SHA 確認済み live 本文の core_media 契約1か所だけを置換し、逆置換で一致を確認。
     "d0e37a21609320c998244a03f90bed5797835b3bf1233e130258b0d89ba0bf8e" = {
+      content_type                  = "text/yaml"
+      object_lock_retain_until_date = "2099-12-31T00:00:00Z"
+    }
+    # 2026-10-27 オフライン導出（未公開）。Alpine 上流の入替に追随: media simdutf を 9.3.2-r0 へ。
+    # SHA 確認済み live 本文の core_media 契約1か所だけを置換し、逆置換で一致を確認。
+    "a21ba745445f952bd325ba57a3839a143b64fb3e33cc2bc321bb41a57d9050a9" = {
       content_type                  = "text/yaml"
       object_lock_retain_until_date = "2099-12-31T00:00:00Z"
     }
@@ -648,18 +666,18 @@ removed {
 }
 
 import {
-  to = aws_s3_object.mcp_source_publisher_buildspec_generation["6bbee9dec75c9b851dfb1df0eb6eae7bb36cfde378efc332dd15acb88553ba2b"]
-  id = "teamagent-dev-image-release-evidence/codebuild-buildspecs/teamagent-dev-mcp-source-publisher/6bbee9dec75c9b851dfb1df0eb6eae7bb36cfde378efc332dd15acb88553ba2b.yml"
+  to = aws_s3_object.mcp_source_publisher_buildspec_generation["ae075a43b359e43e5e93ae45188cdb112a40f5dfc9b3960721731aa1dc725949"]
+  id = "teamagent-dev-image-release-evidence/codebuild-buildspecs/teamagent-dev-mcp-source-publisher/ae075a43b359e43e5e93ae45188cdb112a40f5dfc9b3960721731aa1dc725949.yml"
 }
 
 import {
-  to = aws_s3_object.image_attestor_buildspec_generation["4f134bee3ba671613576efffc1044210426c02935a41230b3bbf4d9f3add5b9d"]
-  id = "teamagent-dev-image-release-evidence/codebuild-buildspecs/teamagent-dev-image-attestor/4f134bee3ba671613576efffc1044210426c02935a41230b3bbf4d9f3add5b9d.yml"
+  to = aws_s3_object.image_attestor_buildspec_generation["992152ad02e02f870e2d52a5847af2c2c93229caf334818c4f15b09860545e25"]
+  id = "teamagent-dev-image-release-evidence/codebuild-buildspecs/teamagent-dev-image-attestor/992152ad02e02f870e2d52a5847af2c2c93229caf334818c4f15b09860545e25.yml"
 }
 
 import {
-  to = aws_s3_object.image_promoter_buildspec_generation["d0e37a21609320c998244a03f90bed5797835b3bf1233e130258b0d89ba0bf8e"]
-  id = "teamagent-dev-image-release-evidence/codebuild-buildspecs/teamagent-dev-image-promoter/d0e37a21609320c998244a03f90bed5797835b3bf1233e130258b0d89ba0bf8e.yml"
+  to = aws_s3_object.image_promoter_buildspec_generation["a21ba745445f952bd325ba57a3839a143b64fb3e33cc2bc321bb41a57d9050a9"]
+  id = "teamagent-dev-image-release-evidence/codebuild-buildspecs/teamagent-dev-image-promoter/a21ba745445f952bd325ba57a3839a143b64fb3e33cc2bc321bb41a57d9050a9.yml"
 }
 
 import {
