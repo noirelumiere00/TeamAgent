@@ -627,7 +627,7 @@ class Parent:
             stage = "delivery" if complete else state["stage"]
             reasons = {
                 "timeout": "時間切れ",
-                "refused": "取得拒否",
+                "refused": "TikTok に取得を断られた",
                 "incomplete": "未接続・未確認",
                 "partial": "100本目標に未達",
                 "zero": "正常0件",
@@ -656,12 +656,14 @@ class Parent:
                 analysis_check.status == "incomplete" or analysis_check.reason is not None
             ):
                 shortages.append(f"分析検査: {reasons[analysis_check.reason or 'incomplete']}")
+            brand = summary["case"].get("brand") or "ご依頼"
+            # 利用者に見せる文。内部の名前（sales25・incomplete 等）は出さない。
             message = (
-                "sales25の資料は機械検査を通過しました。"
+                f"{brand}のお土産資料ができました。"
                 if report_status == "ready"
-                else "sales25は部分結果（partial）です。不足・未確認事項があります。"
+                else f"{brand}のお土産資料ができました（一部の数字が足りません）。"
                 if complete
-                else "sales25は未完成（incomplete）です。完成資料としてはお届けしません。"
+                else f"{brand}のお土産資料は作れませんでした。"
             )
             if complete and checks is not None:
                 pages = format_slides(checks.deck_qa_l1.review_pages, limit=25)
@@ -674,23 +676,23 @@ class Parent:
                     "\n"
                     + visual
                     + (
-                        f"PowerPoint の左の一覧で {pages}がL1の要確認です"
+                        f"PowerPoint の左の一覧で {pages}は要確認です"
                         "（確かめてから使ってください）。"
                         if pages
-                        else "L1の要確認頁はありません。"
+                        else "要確認のページはありません。"
                     )
                 )
-            next_step = ("不足: " + "、".join(shortages) + "。" if shortages else "") + (
-                "本人DMへの添付を確認します。"
+            next_step = ("理由: " + "、".join(shortages) + "。" if shortages else "") + (
+                "このあと資料を添付します。"
                 if complete
-                else f"再開地点: {LABELS.get(stage, '検索')}。"
-                "未確認の工程を接続・確認する必要があります。"
+                else "少し時間をおいて、もう一度同じ依頼をしてください。"
+                f"（止まった段: {LABELS.get(stage, '検索')}）"
             )
             parent_result = ParentResult(
                 status=report_status,
                 message=message,
                 summary_lines=[" / ".join(lines[i : i + 2]) for i in range(0, len(lines), 2)]
-                or ["6語とも100本目標を取得しました。" if complete else "工程を確認中です。"],
+                or [f"6語とも{search_depth()}本目標を取得しました。" if complete else ""],
                 next_step=next_step,
                 stage=stage,
                 checkpoints=steps,

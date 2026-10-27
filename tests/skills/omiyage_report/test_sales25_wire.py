@@ -274,7 +274,12 @@ def test_real_stages_deliver_25_pages_with_partial_and_restore(
     comment = slack.uploads[0]["initial_comment"]
     assert all(
         word in comment
-        for word in ("partial", "100本目標→12本取得", "原音が未確認", "見た目（描画）は未確認")
+        for word in (
+            "一部の数字が足りません",
+            "100本目標→12本取得",
+            "原音が未確認",
+            "見た目（描画）は未確認",
+        )
     )
     assert slack.uploads[0]["data"] == deck
     assert result(store, accepted.job_id).delivery_status == "delivered"
