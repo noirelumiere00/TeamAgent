@@ -24,6 +24,7 @@ import structlog
 from teamagent.adapters.gemini_client import GeminiClient, GeminiResponse
 from teamagent.adapters.media_job import MediaJobClient, MediaJobError
 from teamagent.adapters.proposal_job_store import ProposalJobStore
+from teamagent.adapters.tiktok_search_fallback import apply_sales25_fallback
 from teamagent.media.contracts import MAX_INPUT_BYTES, S3ObjectRef
 from teamagent.skills.first_visit import sales25_analysis as analysis
 from teamagent.skills.first_visit import sales25_authoring as authoring
@@ -278,6 +279,12 @@ class Wire:
                 return StepResult(status="timeout", reason="timeout")
             raise
         self.store.put_dedup_lock(slot, "", expected_target=lease)
+        result = apply_sales25_fallback(
+            result,
+            media_client=self.client,
+            deadline_s=self._remaining(case),
+            request_id=step_key,
+        )
         ref = self._save_json(case, step_key.split(":")[-1].replace("_", "-") + ".json", result)
         raw, acquisition = result["raw"], result["acquisition_status"]
         if not acquisition["accepted"]:
