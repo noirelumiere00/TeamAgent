@@ -229,3 +229,23 @@ def test_placeholders_in_all_fields_are_completed(monkeypatch: pytest.MonkeyPatc
     )
     assert missing is None and len(set(case["queries"])) == 6
     assert set(case["omakase_values"]) == set(omakase.LABELS)
+
+
+def test_unknown_product_falls_back_to_whole_brand(monkeypatch: pytest.MonkeyPatch) -> None:
+    """10-27 本番: 商品の多いブランドで対象商品が空になり聞き返した。ブランド全般で着手する。"""
+    caller = Mock(return_value=candidates(target_product=""))
+    monkeypatch.setattr(input_check, "bedrock_text_caller", caller)
+    store = ProposalJobStore(table_name="", memory={})
+    accepted = build(store, Pipeline()).run(OmiyageReportSubmitInput(brand="ブランドA"), ctx())
+    assert accepted.status == "queued"
+    assert "ブランドA（ブランド全般）" in accepted.message
+
+
+def test_missing_competitors_still_ask_even_with_product_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    caller = Mock(return_value=candidates(competitors=[], target_product=""))
+    monkeypatch.setattr(input_check, "bedrock_text_caller", caller)
+    store = ProposalJobStore(table_name="", memory={})
+    out = build(store, Pipeline()).run(OmiyageReportSubmitInput(brand="ブランドA"), ctx())
+    assert out.status == "needs_input"
