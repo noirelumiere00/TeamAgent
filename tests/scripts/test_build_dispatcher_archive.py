@@ -38,6 +38,12 @@ def test_go_archive_builder_self_tests(tmp_path: Path) -> None:
     go = shutil.which("go")
     if go is None:
         pytest.skip("Go 1.25.8 is not installed; archive builder execution requires it")
+    version = subprocess.run([go, "env", "GOVERSION"], capture_output=True, text=True, check=False)
+    if version.stdout.strip() != "go1.25.8":
+        # 圧縮の byte は Go の版で変わる。本物の ZIP は 1.25.8 でしか作らないので、他の版では検査しない。
+        pytest.skip(
+            f"Go 1.25.8 is required for byte-identical archives (found {version.stdout.strip()})"
+        )
     result = subprocess.run(
         [go, "test", "build_dispatcher_archive.go", "build_dispatcher_archive_test.go"],
         cwd=ROOT / "infra/deploy",
