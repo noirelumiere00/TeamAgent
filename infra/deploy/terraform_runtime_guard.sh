@@ -153,7 +153,7 @@ review-plan:
   - legacy→generic media applyはMFA attestorが署名証跡・intent・lockを
     1回のDynamoDB transactionで消費したauthorizationを必須にする。
   - runtime preflightはCosign+exact KMS keyで新core digestの署名とRekor証跡も検証する。
-  - planはrefreshとTerraform state lockのみ行う。
+  - planはrefreshとTerraform state lockに加え、production deployment intentを作成する。
   - 出力directoryは0700、var-fileは0600相当、出力plan/receiptは未存在が必須。
   - tfvars や receipt に secret 値は書かない。
 EOF
@@ -11068,21 +11068,41 @@ REBIND_HELPER="$REPO_ROOT/infra/deploy/state_rebind.py"
 rebind_require_helpers() {
   for rebind_path in "$REBIND_MAPPING" "$REBIND_HELPER"; do
     [ -f "$rebind_path" ] || die "rebind の必須ファイルがありません: $rebind_path"
+    assert_regular_nonwritable "$rebind_path"
+    assert_git_tracked_clean "$rebind_path"
+  done
+}
+
+rebind_assert_dispatcher_hashes() {
+  local alignment="$1" component function expected observed
+  for component in tiktok x_buzz; do
+    function="$(jq -er --arg c "$component" '.dispatcher_archives[$c].function_name' "$alignment")"
+    expected="$(jq -er --arg c "$component" '.dispatcher_archives[$c].code_sha256' "$alignment")"
+    observed="$(aws_cli lambda get-function-configuration --function-name "$function" \
+      --query CodeSha256 --output text)" || die "rebind: dispatcher hashを取得できません"
+    [ "$expected" = "$observed" ] ||
+      die "rebind: dispatcher CodeSha256がreview対象ZIPと不一致です: $component"
   done
 }
 
 # mapping の consumer 宣言に基づき、live の参照先が target_arn と一致することを確認する。
 # これは検証であって再解決ではない（mapping の動的追随は禁止 — 不一致なら die）。
 rebind_assert_consumer_points_at_target() {
-  local kind="$1" name="$2" cluster="$3" target_arn="$4" live_arn=""
+  local kind="$1" name="$2" cluster="$3" target_arn="$4" live_arn="" target_id targets
   case "$kind" in
     ecs-service)
       live_arn="$(aws_cli ecs describe-services --cluster "$cluster" --services "$name"         --query 'services[0].taskDefinition' --output text)" ||
         die "rebind: consumer service $name を describe できません"
       ;;
     events-rule)
-      live_arn="$(aws_cli events list-targets-by-rule --rule "$name"         --query 'Targets[0].EcsParameters.TaskDefinitionArn' --output text)" ||
+      target_id="$(jq -er --arg rule "$name" '.event_target_ids[$rule]' "$REBIND_ALIGNMENT_PLAN")" ||
+        die "rebind: reviewed EventBridge target IDがありません"
+      targets="$(aws_cli events list-targets-by-rule --rule "$name" --output json)" ||
         die "rebind: rule $name の target を取得できません"
+      live_arn="$(jq -er --arg id "$target_id" '
+        [.Targets[] | select(.Id == $id)] |
+        if length == 1 then .[0].EcsParameters.TaskDefinitionArn else error("target ownership") end
+      ' <<< "$targets")" || die "rebind: reviewed EventBridge targetが一意ではありません"
       ;;
     lambda-env)
       live_arn="$(aws_cli lambda get-function-configuration --function-name "$name"         --query 'Environment.Variables.TASKDEF_ARN' --output text)" ||
@@ -11120,6 +11140,13 @@ rebind_precheck() {
   terraform -chdir="$TF_DIR" state list > "$out_dir/state-list.txt"
   chmod 600 "$out_dir/state-list.txt"
 
+  REBIND_ALIGNMENT_PLAN="$out_dir/alignment-plan.json"
+  python3 "$REBIND_HELPER" alignment-plan \
+    --repo-root "$REPO_ROOT" --mapping "$REBIND_MAPPING" \
+    --state-json "$out_dir/state-backup.json" --out "$REBIND_ALIGNMENT_PLAN" ||
+    die "rebind: pointer/hashの限定修正をレビュー用に構築できません"
+  rebind_assert_dispatcher_hashes "$REBIND_ALIGNMENT_PLAN"
+
   local address family target_arn kind name cluster current_arn
   while IFS=$'\t' read -r address family target_arn kind name cluster; do
     grep -Fxq "$address" "$out_dir/state-list.txt" ||
@@ -11146,9 +11173,10 @@ for t in json.load(open(sys.argv[1]))["targets"]:
   python3 "$REBIND_HELPER" record \
     --repo-root "$REPO_ROOT" --out-dir "$out_dir" --mapping "$REBIND_MAPPING" \
     --state "$out_dir/state-backup.json" \
+    --alignment-plan "$REBIND_ALIGNMENT_PLAN" \
     --account "$EXPECTED_ACCOUNT_ID" --principal-arn "$principal_arn" ||
     die "rebind binding の作成に失敗しました"
-  echo "✅ rebind precheck 完了: $out_dir/rebind-plan.tsv（人間レビュー後、表示された承認トークンで apply）"
+  echo "✅ rebind precheck 完了: $out_dir/rebind-plan.tsv / $REBIND_ALIGNMENT_PLAN（両方を人間レビュー後、表示された承認トークンで apply）"
 }
 
 rebind_apply() {
@@ -11157,7 +11185,7 @@ rebind_apply() {
   adopt_assert_out_dir_outside_repo "$out_dir"
   ensure_tmp
   var_file="$(secure_existing_file "$var_file")"
-  for rebind_artifact in state-backup.json rebind-plan.tsv rebind-binding.json; do
+  for rebind_artifact in state-backup.json rebind-plan.tsv rebind-binding.json alignment-plan.json; do
     [ -f "$out_dir/$rebind_artifact" ] || die "rebind 成果物がありません: $out_dir/$rebind_artifact"
   done
   principal_arn="$(adopt_trusted_principal_arn "$out_dir/identity-apply.json")"
@@ -11165,9 +11193,18 @@ rebind_apply() {
   # precheck した世界と apply する世界の完全一致（mapping/state/commit/principal）+ 承認束縛。
   terraform -chdir="$TF_DIR" state pull > "$out_dir/state-now.json"
   chmod 600 "$out_dir/state-now.json"
+  REBIND_ALIGNMENT_PLAN="$TMP_ROOT/alignment-now.json"
+  python3 "$REBIND_HELPER" alignment-plan \
+    --repo-root "$REPO_ROOT" --mapping "$REBIND_MAPPING" \
+    --state-json "$out_dir/state-now.json" --out "$REBIND_ALIGNMENT_PLAN" ||
+    die "rebind: pointer/hashのレビュー内容を再生成できません"
+  cmp -s "$REBIND_ALIGNMENT_PLAN" "$out_dir/alignment-plan.json" ||
+    die "rebind: レビューしたpointer/hash修正が変化しました"
+  rebind_assert_dispatcher_hashes "$REBIND_ALIGNMENT_PLAN"
   python3 "$REBIND_HELPER" verify \
     --repo-root "$REPO_ROOT" --out-dir "$out_dir" --mapping "$REBIND_MAPPING" \
     --state "$out_dir/state-now.json" \
+    --alignment-plan "$REBIND_ALIGNMENT_PLAN" \
     --account "$EXPECTED_ACCOUNT_ID" --principal-arn "$principal_arn" \
     --approve "$approve" ||
     die "rebind binding の再照合に失敗しました（apply は行いません）"
@@ -11205,6 +11242,53 @@ for t in json.load(open(sys.argv[1]))["targets"]:
     c = t["consumer"]
     print(t["address"], t["family"], t["target_arn"], c["kind"], c["name"], c.get("cluster",""), sep="\t")' "$REBIND_MAPPING")
 
+  # Import skips refresh; project only approved leaves, preserving provider-only metadata.
+  terraform -chdir="$TF_DIR" state pull > "$out_dir/state-before-alignment.json"
+  chmod 600 "$out_dir/state-before-alignment.json"
+  python3 "$REBIND_HELPER" alignment-candidate \
+    --repo-root "$REPO_ROOT" --mapping "$REBIND_MAPPING" \
+    --state-json "$out_dir/state-before-alignment.json" \
+    --alignment-plan "$REBIND_ALIGNMENT_PLAN" --out "$out_dir/state-aligned-candidate.json" ||
+    die "rebind: レビュー外のpointer/hash変更を検出しました（復旧はhuman裁定）"
+  python3 "$IMAGE_CONTEXT_HELPER" build-sync-consumer-manifest \
+    --state "$out_dir/state-aligned-candidate.json" --output "$out_dir/aligned-consumer-manifest.json" ||
+    die "rebind: candidate stateのexact-8整合性検査に失敗しました（pushしません）"
+  chmod 600 "$out_dir/aligned-consumer-manifest.json"
+  local candidate_sha alignment_sha
+  candidate_sha="$(sha256_file "$out_dir/state-aligned-candidate.json")"
+  alignment_sha="$(sha256_file "$REBIND_ALIGNMENT_PLAN")"
+  while IFS=$'\t' read -r address family target_arn kind name cluster; do
+    rebind_assert_consumer_points_at_target "$kind" "$name" "$cluster" "$target_arn"
+  done < <(python3 -c 'import json,sys
+for t in json.load(open(sys.argv[1]))["targets"]:
+    c = t["consumer"]
+    print(t["address"], t["family"], t["target_arn"], c["kind"], c["name"], c.get("cluster",""), sep="\t")' "$REBIND_MAPPING")
+  rebind_assert_dispatcher_hashes "$REBIND_ALIGNMENT_PLAN"
+  python3 "$REBIND_HELPER" alignment-plan \
+    --repo-root "$REPO_ROOT" --mapping "$REBIND_MAPPING" \
+    --state-json "$out_dir/state-before-alignment.json" --out "$TMP_ROOT/alignment-before-push.json" ||
+    die "rebind: push直前のZIP/source検査に失敗しました"
+  [ "$alignment_sha" = "$(sha256_file "$TMP_ROOT/alignment-before-push.json")" ] ||
+    die "rebind: push直前にZIP/sourceが変化しました"
+  jq -n --arg id "$DEPLOYMENT_LOCK_ID" '{LockID:{S:$id}}' > "$TMP_ROOT/rebind-lock-key.json"
+  aws_cli dynamodb get-item --table-name teamagent-tflock --consistent-read \
+    --key "file://$TMP_ROOT/rebind-lock-key.json" --output json > "$TMP_ROOT/rebind-lock-now.json" ||
+    die "rebind: push直前に共有lockを確認できません"
+  jq -e --arg owner "$DEPLOYMENT_LOCK_OWNER" --argjson now "$(date +%s)" '
+    .Item.OwnerToken.S == $owner and (.Item.ExpiresAt.N | tonumber) > ($now + 300)
+  ' "$TMP_ROOT/rebind-lock-now.json" >/dev/null || die "rebind: 共有lockの所有者/有効期限が変化しました"
+  terraform -chdir="$TF_DIR" state pull > "$out_dir/state-immediately-before-push.json"
+  chmod 600 "$out_dir/state-immediately-before-push.json"
+  python3 "$REBIND_HELPER" same-state --before "$out_dir/state-before-alignment.json" \
+    --after "$out_dir/state-immediately-before-push.json" || die "rebind: push直前にstateが変化しました"
+  [ "$candidate_sha" = "$(sha256_file "$out_dir/state-aligned-candidate.json")" ] ||
+    die "rebind: state candidateが差し替えられました"
+  terraform -chdir="$TF_DIR" state push -lock-timeout=5m "$out_dir/state-aligned-candidate.json" ||
+    die "rebind: 限定state pushに失敗しました（force/retryは禁止、復旧はhuman裁定）"
+  terraform -chdir="$TF_DIR" state pull > "$out_dir/state-final.json"
+  chmod 600 "$out_dir/state-final.json"
+  python3 "$REBIND_HELPER" verify-pushed-state --candidate "$out_dir/state-aligned-candidate.json" \
+    --state-json "$out_dir/state-final.json" || die "rebind: push後stateがcandidateと一致しません"
   release_deployment_lock
   echo "✅ state rebind 完了（AWS managed application resources mutation = 0 / Terraform remote state mutation only）"
 }

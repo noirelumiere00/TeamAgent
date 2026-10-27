@@ -2,6 +2,10 @@
 
 **正式契約**: `AWS managed application resources mutation = 0 / Terraform remote state mutation only`
 
+2026-10-27 の実施順序、dispatcher ZIP の正規化、参照先 state の追従、
+正本 tfvars と停止・復旧条件は [report-state-sync.md](../../report-state-sync.md) を参照。
+この runbook の台帳を無更新で再実行しないこと。
+
 ## いつ使うか
 
 ```
@@ -25,8 +29,9 @@ import は config 存在を要求し矛盾する）。よって `state rm → �
    - taskdef ARN を参照する Lambda env の変更
    - rebind 対象 consumer の参照先変更
    （generation publisher freeze は継続。無関係な AWS 変更まで止める必要はない）
-2. freeze 後に **6 consumer の live ARN を fresh に再解決**し、
+2. freeze 後に **registry の全8 consumer の live ARN を fresh に再解決**し、
    `infra/deploy/state_rebind_targets.json` の `targets` を確定して merge する。
+   targets は state の TD binding が古い consumer だけ（全8件とは限らない）。
    調査時点の ARN を焼かない（2026-08-20 に調査中 `mcp:86` が増えた実例）。
 3. 実行 session は可能なら **application write を絞った一時 session** を使う（下記）。
 
@@ -96,15 +101,22 @@ apply は 1 address ずつ atomic-like に進む:
 ```
 consumer 参照の直前再検証（動いていれば STALE MAPPING で停止）
 → state rm → 即 import → state と live DescribeTaskDefinition の機械比較 → 次へ
+→ レビュー済みの consumer 参照 / dispatcher source_code_hash だけを候補 state へ投影
+→ exact-8 の内部整合と live/ZIP/変更範囲を再検証 → non-force state push
 ```
 
 - **一括 rm は構造的に不可能**（テストが per-address 順序を固定している）
+- TD import は他 resource を refresh しない。guard 内の限定 state 投影だけが、
+  参照先と hash の追従のための例外。素の state 編集・push、activation resource の rm/import は行わない
 - 失敗した場合は**次の resource へ進まず停止**する。deployment lock は TTL まで残り、
   復旧判断まで他の guard 操作を塞ぐ（意図された fail-closed）
 - 復旧は human 裁定: `state-backup.json`（out ディレクトリ・0600）からの復元を第一候補とする
 
 ## 完了後
 
-- 直後の guarded plan で rebind 対象が **no-op** であることを確認（これが成功の定義）
+- 通常 session で直後の guarded `plan --runtime-sync --var-file <正本>` / verify を行い、
+  全 AWS managed resource が import なしの **no-op** であることを確認（これが成功の定義）。
+  intent ID を持つ `terraform_data` control gate の差分は既存 guard validator に従い別に確認する。
+  plan は deployment intent を作成するため read-only とは扱わない。no-op の saved plan の apply は不要
 - evidence 一式（binding / rebind-plan.tsv / per-address の describe と state 比較結果 /
   session policy）を保全し、freeze は activation 全体の完了まで解除しない

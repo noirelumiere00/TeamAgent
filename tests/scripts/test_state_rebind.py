@@ -10,7 +10,10 @@ from __future__ import annotations
 
 import copy
 import json
+import os
+import subprocess
 import sys
+import zipfile
 from pathlib import Path
 from typing import Any
 
@@ -24,13 +27,17 @@ MAPPING = ROOT / "infra/deploy/state_rebind_targets.json"
 sys.path.insert(0, str(ROOT / "infra/deploy"))
 
 from state_rebind import (  # noqa: E402
+    ALIGNMENT_POINTERS,
     APPROVE_TOKEN,
     BOUND_FIELDS,
     RebindError,
+    alignment_candidate,
+    build_alignment_plan,
     compare_binding,
     compare_state_to_live,
     expected_approval,
     load_targets,
+    verify_pushed_state,
 )
 
 ARN = "arn:aws:ecs:ap-northeast-1:718959508629:task-definition/teamagent-dev-mcp:86"
@@ -224,6 +231,7 @@ def _binding() -> dict[str, Any]:
     return {
         "schema_version": 1,
         "mapping_sha256": "a" * 64,
+        "alignment_sha256": "d" * 64,
         "git_head": "b" * 40,
         "git_tree_clean": True,
         "state_lineage": "11111111-2222-3333-4444-555555555555",
@@ -379,6 +387,299 @@ def test_state_sha_still_detects_resource_tampering(tmp_path: Path) -> None:
     p1.write_text(json.dumps({"serial": 187, "resources": [{"a": 1}]}))
     p2.write_text(json.dumps({"serial": 187, "resources": [{"a": 2}]}))
     assert _state_canonical_sha256(p1) != _state_canonical_sha256(p2)
+
+
+def _alignment_fixture(
+    tmp_path: Path, short_address: str = "mcp"
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    state: dict[str, Any] = {"version": 4, "serial": 242, "lineage": "unchanged", "resources": []}
+    family_suffix, kind, name_suffix, pointer_address = ALIGNMENT_POINTERS[short_address]
+    family = f"teamagent-dev-{family_suffix}"
+    old_arn = ARN.replace("teamagent-dev-mcp:86", f"{family}:41")
+    new_arn = old_arn.removesuffix(":41") + ":86"
+    consumer = {"kind": kind, "name": f"teamagent-dev-{name_suffix}"}
+    if kind == "ecs-service":
+        consumer["cluster"] = "teamagent-dev"
+        pointer = {
+            "name": consumer["name"],
+            "cluster": "teamagent-dev",
+            "task_definition": old_arn,
+            "wait_for_steady_state": True,
+        }
+    elif kind == "events-rule":
+        pointer = {
+            "rule": consumer["name"],
+            "target_id": "morning" if family_suffix == "morning-digest" else "tf-canary",
+            "ecs_target": [{"task_definition_arn": old_arn, "task_count": 1}],
+        }
+    else:
+        pointer = {
+            "function_name": consumer["name"],
+            "environment": [{"variables": {"TASKDEF_ARN": old_arn, "KEEP": "same"}}],
+        }
+
+    def resource(address: str, attributes: dict[str, Any]) -> dict[str, Any]:
+        resource_type, name = address.split(".")
+        instance: dict[str, Any] = {"attributes": attributes, "private": "preserve-me"}
+        if name.endswith("[0]"):
+            name = name[:-3]
+            instance["index_key"] = 0
+        return {"mode": "managed", "type": resource_type, "name": name, "instances": [instance]}
+
+    address = f"aws_ecs_task_definition.{short_address}"
+    state["resources"].append(resource(address, {"arn": new_arn, "family": family}))
+    pointer_resource = resource(pointer_address, pointer)
+    state["resources"].append(pointer_resource)
+    for archive_name, function_name in (
+        ("tiktok_dispatch", "teamagent-dev-tiktok-acquire-dispatch"),
+        ("x_dispatch", "teamagent-dev-x-buzz-dispatch"),
+    ):
+        source = tmp_path / f"infra/terraform/lambda/{archive_name}/handler.py"
+        source.parent.mkdir(parents=True)
+        source.write_bytes(b"def handler(event, context): return event\n")
+        archive = tmp_path / f"infra/terraform/build/{archive_name}.zip"
+        archive.parent.mkdir(parents=True, exist_ok=True)
+        with zipfile.ZipFile(archive, "w") as zipped:
+            zipped.writestr("handler.py", source.read_bytes())
+        dispatch_address = f"aws_lambda_function.{archive_name}[0]"
+        attributes = {
+            "function_name": function_name,
+            "source_code_hash": "old hash",
+            "filename": f"build/{archive_name}.zip",
+            "environment": [{"variables": {"KEEP": "same"}}],
+        }
+        if dispatch_address == pointer_address:
+            pointer.update(
+                {key: value for key, value in attributes.items() if key != "environment"}
+            )
+        else:
+            state["resources"].append(resource(dispatch_address, attributes))
+    return state, [
+        {"address": address, "family": family, "target_arn": new_arn, "consumer": consumer}
+    ]
+
+
+@pytest.mark.parametrize("short_address", list(ALIGNMENT_POINTERS))
+def test_alignment_changes_only_reviewed_leaves_and_preserves_provider_metadata(
+    tmp_path: Path, short_address: str
+) -> None:
+    from state_rebind import _leaf_parent, _state_attributes
+
+    state, targets = _alignment_fixture(tmp_path, short_address)
+    reviewed = build_alignment_plan(state, targets, tmp_path)
+    candidate = alignment_candidate(state, targets, tmp_path, reviewed)
+    restored = copy.deepcopy(candidate)
+    for change in reviewed["changes"]:
+        parent = _leaf_parent(_state_attributes(restored, change["address"]), change["path"])
+        assert parent[change["path"][-1]] == change["after"]
+        parent[change["path"][-1]] = change["before"]
+    restored["serial"] -= 1
+    assert restored == state
+    assert candidate["lineage"] == state["lineage"]
+    assert len(reviewed["changes"]) == 3
+
+
+@pytest.mark.parametrize(
+    "mutation", ["pointer", "hash", "zip", "source", "arbitrary_path", "target", "consumer"]
+)
+def test_alignment_refuses_every_unreviewed_change(tmp_path: Path, mutation: str) -> None:
+    state, targets = _alignment_fixture(tmp_path)
+    reviewed = build_alignment_plan(state, targets, tmp_path)
+    if mutation == "pointer":
+        state["resources"][1]["instances"][0]["attributes"]["task_definition"] = ARN
+    elif mutation == "hash":
+        state["resources"][2]["instances"][0]["attributes"]["source_code_hash"] = "changed"
+    elif mutation == "zip":
+        archive = tmp_path / "infra/terraform/build/tiktok_dispatch.zip"
+        with zipfile.ZipFile(archive, "a") as zipped:
+            zipped.writestr("extra.py", "unexpected")
+    elif mutation == "source":
+        (tmp_path / "infra/terraform/lambda/tiktok_dispatch/handler.py").write_text("changed")
+    elif mutation == "arbitrary_path":
+        reviewed["changes"][0]["path"] = ["wait_for_steady_state"]
+    elif mutation == "target":
+        targets[0]["target_arn"] = targets[0]["target_arn"].removesuffix(":86") + ":87"
+    else:
+        targets[0]["consumer"]["name"] = "teamagent-dev-other"
+    with pytest.raises(RebindError):
+        alignment_candidate(state, targets, tmp_path, reviewed)
+
+
+def test_alignment_rejects_old_unindexed_openclaw_mapping(tmp_path: Path) -> None:
+    state, targets = _alignment_fixture(tmp_path, "openclaw[0]")
+    targets[0]["address"] = "aws_ecs_task_definition.openclaw"
+    with pytest.raises(RebindError, match="current consumer registry"):
+        build_alignment_plan(state, targets, tmp_path)
+
+
+def test_alignment_verification_allows_backend_serial_increment_only(tmp_path: Path) -> None:
+    state, targets = _alignment_fixture(tmp_path)
+    candidate = alignment_candidate(
+        state, targets, tmp_path, build_alignment_plan(state, targets, tmp_path)
+    )
+    observed = copy.deepcopy(candidate)
+    observed["serial"] += 1
+    verify_pushed_state(candidate, observed)
+    observed["lineage"] = "changed"
+    with pytest.raises(RebindError, match="differs"):
+        verify_pushed_state(candidate, observed)
+
+
+def test_alignment_fixed_consumers_match_the_independent_registry() -> None:
+    registry = json.loads((ROOT / "infra/codebuild/image_deployment_consumers.json").read_text())
+    assert len(ALIGNMENT_POINTERS) == len(registry["consumers"]) == 8
+    for consumer in registry["consumers"]:
+        short_address = consumer["terraform_task_definition_address"].removeprefix(
+            "aws_ecs_task_definition."
+        )
+        family, kind, name, _ = ALIGNMENT_POINTERS[short_address]
+        assert f"teamagent-dev-{family}" == consumer["ecs_family"]
+        if consumer["consumer_id"] == "ingest":
+            assert (kind, name) == ("lambda-env", "ingest-dispatch")
+        else:
+            assert (
+                kind
+                == {
+                    "ecs_service": "ecs-service",
+                    "eventbridge_rule_ecs_target": "events-rule",
+                    "lambda_taskdef_arn_environment": "lambda-env",
+                }[consumer["activator"]["type"]]
+            )
+            assert f"teamagent-dev-{name}" == consumer["activator"]["identity"]
+
+
+def test_alignment_candidate_satisfies_the_real_exact_eight_manifest_builder(
+    tmp_path: Path,
+) -> None:
+    from tests.scripts.test_terraform_runtime_guard import _fake_state_from_plan, _safe_plan
+
+    sys.path.insert(0, str(ROOT / "infra/terraform"))
+    from image_release_context import ContextError, build_sync_consumer_manifest
+    from state_rebind import _leaf_parent, _state_attributes
+
+    _alignment_fixture(tmp_path)
+    state = _fake_state_from_plan(_safe_plan())
+    targets = []
+    for short_address, (family, kind, name, pointer_address) in ALIGNMENT_POINTERS.items():
+        address = f"aws_ecs_task_definition.{short_address}"
+        target_arn = _state_attributes(state, address)["arn"]
+        consumer = {"kind": kind, "name": f"teamagent-dev-{name}"}
+        if kind == "ecs-service":
+            consumer["cluster"] = "teamagent-dev"
+        targets.append(
+            {
+                "address": address,
+                "family": f"teamagent-dev-{family}",
+                "target_arn": target_arn,
+                "consumer": consumer,
+            }
+        )
+        attributes = _state_attributes(state, pointer_address)
+        paths: dict[str, list[Any]] = {
+            "ecs-service": ["task_definition"],
+            "lambda-env": ["environment", 0, "variables", "TASKDEF_ARN"],
+            "events-rule": ["ecs_target", 0, "task_definition_arn"],
+        }
+        path = paths[kind]
+        _leaf_parent(attributes, path)[path[-1]] = target_arn.rsplit(":", 1)[0] + ":999"
+    with pytest.raises(ContextError, match="activation points at another"):
+        build_sync_consumer_manifest(state)
+    reviewed = build_alignment_plan(state, targets, tmp_path)
+    candidate = alignment_candidate(state, targets, tmp_path, reviewed)
+    assert len(build_sync_consumer_manifest(candidate)["consumers"]) == 8
+
+
+@pytest.mark.parametrize(
+    "failure", ["none", "binding", "compare", "exact8", "zip", "lock", "state", "push"]
+)
+def test_guard_alignment_stops_before_push_on_failed_checks(tmp_path: Path, failure: str) -> None:
+    """Execute the actual guard function using fake AWS/Terraform and helper commands."""
+    state, targets = _alignment_fixture(tmp_path)
+    reviewed = build_alignment_plan(state, targets, tmp_path)
+    out = tmp_path / "out"
+    out.mkdir()
+    for name, value in (
+        ("state-backup.json", state),
+        ("rebind-binding.json", {}),
+        ("alignment-plan.json", reviewed),
+    ):
+        (out / name).write_text(json.dumps(value, indent=2, sort_keys=True) + "\n")
+    (out / "rebind-plan.tsv").write_text("reviewed")
+    mapping = _mapping_file(tmp_path, targets)
+    helper = tmp_path / "fake-helper.py"
+    helper.write_text("""import json, os, pathlib, shutil, sys
+command = sys.argv[1]
+failure = os.environ["FAILURE"]
+args = sys.argv[2:]
+def value(flag): return pathlib.Path(args[args.index(flag) + 1])
+if command == "verify" and failure == "binding": sys.exit(1)
+if command == "compare" and failure == "compare": sys.exit(1)
+if command == "same-state" and failure == "state": sys.exit(1)
+if command == "build-sync-consumer-manifest" and failure == "exact8": sys.exit(1)
+if command == "alignment-plan":
+    output = value("--out")
+    if failure == "zip" and output.name == "alignment-before-push.json": sys.exit(1)
+    shutil.copyfile(os.environ["REVIEWED"], output)
+elif command == "alignment-candidate": shutil.copyfile(value("--state-json"), value("--out"))
+elif command == "build-sync-consumer-manifest": value("--output").write_text("{}")
+""")
+    shell = tmp_path / "run.sh"
+    shell.write_text(
+        """set -euo pipefail
+die() { echo "$*" >&2; exit 1; }
+rebind_require_helpers() { :; }
+adopt_assert_out_dir_outside_repo() { :; }
+ensure_tmp() { mkdir -p "$TMP_ROOT"; }
+secure_existing_file() { echo "$1"; }
+adopt_trusted_principal_arn() { echo "arn:approved"; }
+acquire_deployment_lock() { echo acquire >> "$CALLS"; }
+release_deployment_lock() { echo release >> "$CALLS"; }
+rebind_assert_consumer_points_at_target() { :; }
+rebind_assert_dispatcher_hashes() { :; }
+sha256_file() { command python3 -c 'import hashlib,sys; print(hashlib.sha256(open(sys.argv[1],"rb").read()).hexdigest())' "$1"; }
+terraform() {
+  echo "terraform $*" >> "$CALLS"
+  case "$2 $3" in
+    "state pull") cat "$OUT/state-backup.json" ;;
+    "state push") [ "$FAILURE" != push ] ;;
+  esac
+}
+aws_cli() {
+  if [ "$1 $2" = "dynamodb get-item" ]; then
+    command python3 -c 'import json,os,time; print(json.dumps({"Item":{"OwnerToken":{"S":"wrong" if os.environ["FAILURE"] == "lock" else "owner"},"ExpiresAt":{"N":str(int(time.time())+7200)}}}))'
+  else echo '{}'; fi
+}
+"""
+        + _apply_loop()
+        + """
+rebind_apply "$OUT" "$OUT/state-backup.json" "approved"
+"""
+    )
+    env = {
+        **os.environ,
+        "REPO_ROOT": str(tmp_path),
+        "TF_DIR": str(tmp_path),
+        "TMP_ROOT": str(tmp_path / "private"),
+        "REBIND_MAPPING": str(mapping),
+        "REBIND_HELPER": str(helper),
+        "IMAGE_CONTEXT_HELPER": str(helper),
+        "OUT": str(out),
+        "REVIEWED": str(out / "alignment-plan.json"),
+        "CALLS": str(tmp_path / "calls"),
+        "FAILURE": failure,
+        "EXPECTED_ACCOUNT_ID": "718959508629",
+        "DEPLOYMENT_LOCK_ID": "lock",
+        "DEPLOYMENT_LOCK_OWNER": "owner",
+    }
+    result = subprocess.run(["bash", str(shell)], env=env, capture_output=True, text=True)
+    calls = (tmp_path / "calls").read_text() if (tmp_path / "calls").exists() else ""
+    assert (result.returncode == 0) == (failure == "none"), result.stdout + result.stderr
+    assert ("state push" in calls) == (failure in {"none", "push"})
+    assert "-force" not in calls
+    if failure == "binding":
+        assert "state rm" not in calls
+    if failure != "none":
+        assert "release" not in calls
 
 
 # ── P0: rebind session policy の least-privilege 契約 ─────────────────────────
