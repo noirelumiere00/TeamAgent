@@ -23,9 +23,10 @@ def test_regression_fixture_matches_tracked_handler_and_provider_zip_metadata() 
     with zipfile.ZipFile(FIXTURE) as archive:
         assert archive.namelist() == ["handler.py"]
         entry = archive.getinfo("handler.py")
-        assert archive.read(entry) == (
-            ROOT / "infra/terraform/lambda/x_dispatch/handler.py"
-        ).read_bytes()
+        assert (
+            archive.read(entry)
+            == (ROOT / "infra/terraform/lambda/x_dispatch/handler.py").read_bytes()
+        )
         assert entry.compress_type == zipfile.ZIP_DEFLATED
         assert entry.external_attr >> 16 == 0o100644
         assert entry.date_time == (2049, 1, 1, 0, 0, 0)
