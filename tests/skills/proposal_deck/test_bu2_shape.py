@@ -11,7 +11,7 @@ from pptx import Presentation
 from pptx.util import Inches
 
 from teamagent.media.operations import MediaOperationError
-from teamagent.media.proposal_template import KNOWN_TEMPLATE_SLIDES
+from teamagent.media.proposal_template import BU2_AUXILIARY_KEYS, KNOWN_TEMPLATE_SLIDES
 from teamagent.media.render_child import _proposal
 from teamagent.skills.proposal_deck.contract import (
     PROPOSAL_BUILDER_REQUIRED_AUXILIARY,
@@ -27,7 +27,7 @@ from tests.skills.proposal_deck.test_decoration_geometry import _geometry
 from tests.skills.proposal_deck.test_decoration_geometry import _template as _decorated_template
 
 
-def _template(path: Path) -> None:
+def _legacy_template(path: Path) -> None:
     _decorated_template(path)
     prs = Presentation(path)
     titles = {
@@ -55,6 +55,21 @@ def _template(path: Path) -> None:
         + [f"{{{{PB-DATE:{offset}:%m/%d}}}}" for offset in range(-56, 22, 7)]
         + ["{{PB-TEMPLATE:proposal-builder-v1}}"]
     )
+    prs.save(path)
+
+
+def _template(path: Path) -> None:
+    _legacy_template(path)
+    prs = Presentation(path)
+    for prefix in ("PB-BU2-PLAN-", "PB-BU2-SIM-", "PB-BU2-HEARING"):
+        slide = prs.slides.add_slide(prs.slide_layouts[6])
+        keys = {key for key in BU2_AUXILIARY_KEYS if key.startswith(prefix)}
+        if prefix == "PB-BU2-PLAN-":
+            keys.add("PB-BU2-ESTIMATE-NOTES")
+        for index, key in enumerate(sorted(keys)):
+            slide.shapes.add_textbox(
+                0, Inches(index / 4), Inches(9), Inches(0.25)
+            ).text = f"{{{{{key}}}}}"
     prs.save(path)
 
 
@@ -90,7 +105,7 @@ def _render(root: Path, backend: str, **context: Any) -> Path:
     return output
 
 
-def _pin_template(monkeypatch: pytest.MonkeyPatch, path: Path, slide_count: int = 83) -> None:
+def _pin_template(monkeypatch: pytest.MonkeyPatch, path: Path, slide_count: int = 86) -> None:
     monkeypatch.setitem(
         KNOWN_TEMPLATE_SLIDES, hashlib.sha256(path.read_bytes()).hexdigest(), slide_count
     )
@@ -107,11 +122,12 @@ def test_bu2_selection_preserves_remaining_geometry(
     _pin_template(monkeypatch, template)
     before = template.read_bytes()
     source = Presentation(template)
-    excluded = ({12, 13} | set(range(34, 46))) if unit != "BU1" else set()
+    excluded = ({12, 13} | set(range(34, 46))) if unit != "BU1" else {84, 85, 86}
     if sector == "食品":
         excluded.update(range(67, 71))
-    kept = [number for number in range(1, 84) if number not in excluded]
+    kept = [number for number in range(1, 87) if number not in excluded]
     context = {"business_unit": unit} if unit else {}
+    context["hearing_items"] = [f"確認事項{number}" for number in range(1, 7)]
     output = _render(tmp_path, backend, product_sector=sector, **context)
     rendered = Presentation(output)
     assert [slide.slide_id for slide in rendered.slides] == [
@@ -128,6 +144,14 @@ def test_bu2_selection_preserves_remaining_geometry(
     assert rendered.slides[0].shapes[0].text == "｜ショート動画を成果につなげる5つのポイント"
 
 
+@pytest.mark.parametrize("value", [0, False, [], {}, "", "未定", "2026-99-99"])
+def test_worker_rejects_invalid_posting_date(tmp_path: Path, value: Any) -> None:
+    _template(tmp_path / "template.pptx")
+    with pytest.raises(MediaOperationError, match="composer JSON is invalid"):
+        _render(tmp_path, "worker", posting_start_date=value)
+    assert not (tmp_path / "output.pptx").exists()
+
+
 @pytest.mark.parametrize("backend", ["local", "worker"])
 @pytest.mark.parametrize("missing_page", [34, 46, 47, 48])
 def test_incomplete_pr_chapter_is_retained(
@@ -140,7 +164,7 @@ def test_incomplete_pr_chapter_is_retained(
     prs.save(template)
     _pin_template(monkeypatch, template)
     output = _render(tmp_path, backend)
-    assert len(Presentation(output).slides) == 81
+    assert len(Presentation(output).slides) == 84
 
 
 @pytest.mark.parametrize("backend", ["local", "worker"])

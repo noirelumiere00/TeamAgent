@@ -12,6 +12,10 @@ def test_proposal_request_is_not_souvenir_or_outline():
     assert "お土産資料へ読み替えない" in section
     assert "競合・キーワードが「お任せ」なら自分で選び、聞き返さない" in section
     assert "公式URL・投稿開始日" in section
+    assert "投稿開始日は省略可" in section
+    assert "投稿開始日が無ければnullで渡し" in section
+    assert "「未定」で作成する" in section
+    assert "投稿開始日が未指定です" not in section
     assert "ツールが無い場合は「提案書PPTXの自動作成はこの環境では準備中です。」の一文" in section
     assert "骨子（`proposal_draft`）＋お土産資料を案内する" not in section
 

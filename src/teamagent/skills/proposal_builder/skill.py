@@ -101,7 +101,7 @@ _DM_CHANNEL_KEY = "_proposal_delivery_dm"
 RESEARCH_AUTO_ENV = "PROPOSAL_RESEARCH_AUTO"
 RESEARCH_NOT_READY_MESSAGE = "調査からの提案書PPTXの自動作成は準備中です。"
 
-# 83 枚提案書の段階公開（2026-10-07）。submit の入口で「誰が使えるか」を env で決める。
+# 統合提案書の段階公開（2026-10-07）。submit の入口で「誰が使えるか」を env で決める。
 # - 空・未設定: 全員拒否（今の本番と同じ＝使えない）
 # - ``*``: 本人確認済みの全員
 # - カンマ区切り: その人だけ（小俣さんだけで E2E する段階）
@@ -669,12 +669,13 @@ def _build_research_material(
 
 @register
 class ProposalBuilderSkill(BaseSkill[ProposalBuilderInput, ProposalBuilderOutput]):
-    """SlackからGemini JSONとDだけで統合提案書を生成・検証・添付するSkill。"""
+    """SlackからGemini JSONで統合提案書を生成・検証・添付するSkill。"""
 
     name: ClassVar[str] = "proposal_builder"
     description: ClassVar[str] = (
-        "Gemini v3 JSONと投稿開始日Dから、社内RAGの実績・保護アカウント候補を選び、"
+        "Gemini v3 JSONから、社内RAGの実績・保護アカウント候補を選び、"
         "出典検証済みの提案書PPTXを生成して依頼元Slackスレッドへ添付する。"
+        "投稿開始日は省略でき、未指定時は日付を補完せず未定と表示する。"
         "BU2の段階見積（本数・再生数・単価・期間・見積条件）と試算の仮定は、"
         + BU2_REQUEST_VALUES_ONLY
     )
@@ -1126,7 +1127,11 @@ class ProposalBuilderSkill(BaseSkill[ProposalBuilderInput, ProposalBuilderOutput
             product_name=product_name,
             goal=" / ".join(safe_purpose),
             target_persona=safe_target_persona,
-            deadline=(f"投稿開始日は統合FMTの決定論的スケジュール欄へ反映 / {safe_moment}"),
+            deadline=(
+                f"投稿開始日は統合FMTの決定論的スケジュール欄へ反映 / {safe_moment}"
+                if input.posting_start_date is not None
+                else "投稿開始日・スケジュール・日付に依存する期間は未定。日付を補完しない。"
+            ),
             urls=evidence_urls,
             research_material=research_material,
             evidence_images=tiktok_enrichment.evidence_images,
@@ -1144,7 +1149,11 @@ class ProposalBuilderSkill(BaseSkill[ProposalBuilderInput, ProposalBuilderOutput
                 "PB-CLIENT-NAME": safe_client_name,
                 "PB-DATETIME": input.proposal_date.strftime("%Y年%m月%d日"),
                 "PB-EXPERIENCE": experience_text,
-                "PB-MONTH": input.posting_start_date.strftime("%Y年%m月"),
+                "PB-MONTH": (
+                    input.posting_start_date.strftime("%Y年%m月")
+                    if input.posting_start_date is not None
+                    else "未定"
+                ),
                 "PB-PRODUCT-NAME": product_name,
             },
             derived_auxiliary_placeholders={"PB-KEY-MESSAGE": 46},
@@ -1567,9 +1576,10 @@ class ProposalBuilderSubmitSkill(
 
     name: ClassVar[str] = "proposal_builder_submit"
     description: ClassVar[str] = (
-        "統合FMTの提案書を作成する。商材名・公式URL・与件・投稿開始日があれば、"
+        "86枚の統合FMTから提案書を作成する。商材名・与件を渡す。公式URL・投稿開始日は省略可。"
         "PROPOSAL_RESEARCH_AUTOが有効なときはresearch_briefで調査から作成でき、JSONは不要。"
-        "従来のGemini v3 JSONと投稿開始日Dからの作成にも対応し、どちらか一方を指定する。"
+        "従来のGemini v3 JSONからの作成にも対応し、どちらか一方を指定する。"
+        "投稿開始日が未指定なら日付を補完せず未定と表示して作成する。"
         "重い処理を待たずにjob_idを返す。"
         "生成はMCP内のバックグラウンドthreadで継続するため、返された秒数後に"
         "proposal_builder_statusで同じjob_idを照会する。queued/running中は再submitしない。"
@@ -1669,7 +1679,11 @@ class ProposalBuilderSubmitSkill(
         job_id = new_proposal_job_id()
         request_summary = {
             "request_id": ctx.request_id,
-            "posting_start_date": input.posting_start_date.isoformat(),
+            "posting_start_date": (
+                input.posting_start_date.isoformat()
+                if input.posting_start_date is not None
+                else None
+            ),
             "confidential_product_name": input.confidential_product_name,
             "case_limit": input.case_limit,
             "max_repair": input.max_repair,

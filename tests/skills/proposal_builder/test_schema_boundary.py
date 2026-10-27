@@ -9,7 +9,10 @@ from datetime import date
 import pytest
 from pydantic import ValidationError
 
-from teamagent.skills.proposal_builder.schema import ProposalBuilderInput
+from teamagent.skills.proposal_builder.schema import (
+    ProposalBuilderInput,
+    ProposalBuilderSubmitInput,
+)
 
 
 def _minimal_payload() -> dict:
@@ -21,6 +24,15 @@ def test_mcp_json_iso_date_string_is_accepted() -> None:
 
     value = ProposalBuilderInput.model_validate(_minimal_payload())
     assert value.posting_start_date == date(2026, 9, 1)
+
+
+@pytest.mark.parametrize("model", [ProposalBuilderInput, ProposalBuilderSubmitInput])
+@pytest.mark.parametrize("extra", [{}, {"posting_start_date": None}])
+def test_omitted_and_null_posting_dates_are_accepted(model: type, extra: dict) -> None:
+    value = model.model_validate({"gemini_json": "{}", **extra})
+    assert value.posting_start_date is None
+    assert "posting_start_date" not in model.model_json_schema().get("required", [])
+    assert value.model_dump(mode="json")["posting_start_date"] is None
 
 
 def test_child_config_explicitly_disables_strict() -> None:

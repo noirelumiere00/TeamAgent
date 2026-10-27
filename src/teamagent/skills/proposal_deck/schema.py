@@ -52,7 +52,7 @@ class ProposalDeckInput(BU2Content):
     )
     posting_start_date: date | None = Field(
         default=None,
-        description="投稿開始日 D（ISO date）。スケジュール/ガント生成を行わない場合は未指定。",
+        description="投稿開始日 D（ISO date）。未指定時は日付を補完せずスケジュールを未定と表示。",
     )
     product_sector: str = Field(
         default="", max_length=200, description="既存調査の業種。媒体ページの適合判定に使う。"

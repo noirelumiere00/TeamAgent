@@ -15,23 +15,13 @@ from teamagent.media.render_child import _proposal
 from teamagent.skills.proposal_deck.contract import ComposerOutput
 from teamagent.skills.proposal_deck.renderer import UnfilledPlaceholderError, render_deck
 from tests.skills.proposal_deck.test_bu2_content import bu2_payload
-from tests.skills.proposal_deck.test_bu2_shape import _pin_template, _render, _template
+from tests.skills.proposal_deck.test_bu2_shape import (
+    _legacy_template,
+    _pin_template,
+    _render,
+    _template,
+)
 from tests.skills.proposal_deck.test_proposal_deck_skill import _full_composer_json
-
-
-def _extension(path: Path) -> None:
-    _template(path)
-    prs = Presentation(path)
-    for prefix in ("PB-BU2-PLAN-", "PB-BU2-SIM-", "PB-BU2-HEARING"):
-        slide = prs.slides.add_slide(prs.slide_layouts[6])
-        keys = {key for key in proposal_template.BU2_AUXILIARY_KEYS if key.startswith(prefix)}
-        if prefix == "PB-BU2-PLAN-":
-            keys.add("PB-BU2-ESTIMATE-NOTES")
-        for index, key in enumerate(sorted(keys)):
-            slide.shapes.add_textbox(
-                0, Inches(index / 4), Inches(9), Inches(0.25)
-            ).text = f"{{{{{key}}}}}"
-    prs.save(path)
 
 
 @pytest.mark.parametrize("backend", ["local", "worker"])
@@ -40,7 +30,7 @@ def test_extension_pages_are_bu2_only_and_missing_values_go_to_notes(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, backend: str, unit: str, expected: int
 ) -> None:
     path = tmp_path / "template.pptx"
-    _extension(path)
+    _template(path)
     _pin_template(monkeypatch, path, 86)
     before = path.read_bytes()
     output = _render(tmp_path, backend, business_unit=unit)
@@ -62,7 +52,7 @@ def test_extension_pages_are_bu2_only_and_missing_values_go_to_notes(
 @pytest.mark.parametrize("slide_count", [83, 86])
 def test_unknown_sha_cannot_enable_template(tmp_path: Path, backend: str, slide_count: int) -> None:
     path = tmp_path / "template.pptx"
-    (_extension if slide_count == 86 else _template)(path)
+    (_template if slide_count == 86 else _legacy_template)(path)
     with pytest.raises(
         (UnfilledPlaceholderError, MediaOperationError, ProposalAssetProvisionError)
     ):
@@ -75,7 +65,7 @@ def test_edited_extension_bytes_do_not_reuse_a_valid_sha(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, backend: str
 ) -> None:
     path = tmp_path / "template.pptx"
-    _extension(path)
+    _template(path)
     _pin_template(monkeypatch, path, 86)
     with path.open("ab") as output:
         output.write(b"changed after review")
@@ -86,30 +76,60 @@ def test_edited_extension_bytes_do_not_reuse_a_valid_sha(
     assert not (tmp_path / "output.pptx").exists()
 
 
-def test_asset_validator_accepts_old_and_pinned_new_inventory(
+def test_asset_validator_accepts_canonical_inventory_and_rejects_legacy(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     path = tmp_path / "template.pptx"
+    _legacy_template(path)
+    _pin_template(monkeypatch, path, 83)
+    with pytest.raises(ProposalAssetProvisionError):
+        _validate_template(path)
     _template(path)
-    _pin_template(monkeypatch, path)
-    _validate_template(path)
-    _extension(path)
     _pin_template(monkeypatch, path, 86)
     _validate_template(path)
 
 
+def test_only_canonical_86_page_template_is_pinned() -> None:
+    assert proposal_template.INTEGRATED_TEMPLATE_SLIDE_COUNT == 86
+    assert proposal_template.KNOWN_TEMPLATE_SLIDES == {
+        "07ea41700933d380295c5b8e713d803c8276c46c94b18008dbd8bf230539f883": 86,
+    }
+
+
 @pytest.mark.parametrize("backend", ["local", "worker", "assets"])
-@pytest.mark.parametrize("damage", ["auxiliary", "numeric", "page"])
+def test_legacy_template_is_rejected_even_if_its_sha_is_known(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, backend: str
+) -> None:
+    path = tmp_path / "template.pptx"
+    _legacy_template(path)
+    _pin_template(monkeypatch, path, 83)
+    with pytest.raises(
+        (UnfilledPlaceholderError, MediaOperationError, ProposalAssetProvisionError)
+    ):
+        _validate_template(path) if backend == "assets" else _render(tmp_path, backend)
+    assert not (tmp_path / "output.pptx").exists()
+
+
+@pytest.mark.parametrize("backend", ["local", "worker", "assets"])
+@pytest.mark.parametrize("damage", ["auxiliary", "numeric", "page", "schedule", "version"])
 def test_pinned_extension_still_requires_its_exact_inventory(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, backend: str, damage: str
 ) -> None:
     path = tmp_path / "template.pptx"
-    _extension(path)
+    _template(path)
     prs = Presentation(path)
     if damage == "auxiliary":
         prs.slides[-1].shapes[0].text = "{{PB-UNKNOWN}}"
     elif damage == "numeric":
         prs.slides[2].shapes[0].text += " {104}"
+    elif damage in {"schedule", "version"}:
+        frame = prs.slides[3].shapes[-1].text_frame
+        marker = (
+            "{{PB-DATE:-56:%m/%d}}"
+            if damage == "schedule"
+            else "{{PB-TEMPLATE:proposal-builder-v1}}"
+        )
+        frame.text = frame.text.replace(marker, "")
     else:
         slide = prs.slides._sldIdLst[-1]
         prs.part.drop_rel(slide.rId)
@@ -119,7 +139,9 @@ def test_pinned_extension_still_requires_its_exact_inventory(
     with pytest.raises(
         (UnfilledPlaceholderError, MediaOperationError, ProposalAssetProvisionError)
     ):
-        _validate_template(path) if backend == "assets" else _render(tmp_path, backend)
+        _validate_template(path) if backend == "assets" else _render(
+            tmp_path, backend, posting_start_date=None
+        )
 
 
 @pytest.mark.parametrize("partial_terms", [False, True])
@@ -128,7 +150,7 @@ def test_structured_values_and_source_notes_match_in_both_renderers(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, partial_terms: bool, hearing_count: int
 ) -> None:
     path = tmp_path / "template.pptx"
-    _extension(path)
+    _template(path)
     _pin_template(monkeypatch, path, 86)
     payload = json.loads(_full_composer_json())
     payload.update(
@@ -199,7 +221,7 @@ def test_ungrounded_bu2_values_are_blank_with_review_notes_in_both_renderers(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, request_text: str
 ) -> None:
     path = tmp_path / "template.pptx"
-    _extension(path)
+    _template(path)
     _pin_template(monkeypatch, path, 86)
     supplied = bu2_payload()
     supplied["plans"][0]["assumption"] = "料金は900000円、単価2.5円で計算"
@@ -249,7 +271,7 @@ def test_ungrounded_bu2_values_are_blank_with_review_notes_in_both_renderers(
 
 
 def test_worker_rejects_invalid_simulation_before_output(tmp_path: Path) -> None:
-    _extension(tmp_path / "template.pptx")
+    _template(tmp_path / "template.pptx")
     with pytest.raises(MediaOperationError, match="composer JSON is invalid"):
         _render(
             tmp_path,
