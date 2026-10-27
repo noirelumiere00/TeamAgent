@@ -86,6 +86,13 @@ def complete(case: dict[str, Any], caller: TextCaller, request_id: str) -> None:
                 case[field].append(value)
                 automatic.setdefault(field, []).append(value)
                 used.add(value.casefold())
+    # 商品の多いブランド（コンビニ等）は対象商品を選べない。聞き返さずブランド全体を対象にする。
+    if (
+        len(case["competitors"]) >= 2
+        and len(case["keywords"]) >= 3
+        and not known(case.get("target_product"))
+    ):
+        case["target_product"] = automatic["target_product"] = f"{case['brand']}（ブランド全般）"
 
 
 __all__ = ["LABELS", "complete", "known", "note"]
