@@ -19,6 +19,10 @@ def test_proposal_request_is_not_souvenir_or_outline():
 def test_slack_usage_only_uses_real_help_links():
     text = SOUL.read_text()
     assert "Slack の使い方は App Home" in text
-    assert "使い方の固定URLは未確認" in text
+    assert (
+        "使い方を聞かれたら [Aico の使い方](https://vector-workspcae.slack.com/docs/T07MU5P2PBR/F0CCGL1SFPW) を付ける"
+        in text
+    )
+    assert "使い方の固定URLは未確認" not in text
     assert "ヘルプやキャンバスのURLを作らない" in text
     assert "使い始めるには、このDMに「連携」" in text
