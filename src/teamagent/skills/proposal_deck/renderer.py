@@ -299,10 +299,9 @@ def _replace_auxiliary(
 
 
 def _replace_schedule_dates(prs: Any, posting_start_date: date | None) -> None:
-    if posting_start_date is None:
-        return
-
     def resolve(match: re.Match[str]) -> str:
+        if posting_start_date is None:
+            return "未定"
         offset = int(match.group(1))
         return (posting_start_date + timedelta(days=offset)).strftime(match.group(2))
 
@@ -491,8 +490,6 @@ def render_pptx(
             raise UnfilledPlaceholderError(
                 "integrated template version marker is missing or ambiguous"
             )
-        if posting_start_date is None:
-            raise UnfilledPlaceholderError("proposal-builder posting_start_date is required")
         if not _PROPOSAL_BUILDER_REQUIRED_DATE_OFFSETS.issubset(inventory.date_offsets):
             raise UnfilledPlaceholderError(
                 "integrated template D-56 through D+21 schedule markers are incomplete"

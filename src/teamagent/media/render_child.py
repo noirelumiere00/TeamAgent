@@ -199,13 +199,14 @@ def _replace_proposal_special_tokens(
         lambda match: auxiliary.get(match.group(1), match.group(0)),
         combined,
     )
-    if posting_start_date is not None:
-        replaced = _DATE.sub(
-            lambda match: (posting_start_date + timedelta(days=int(match.group(1)))).strftime(
-                match.group(2)
-            ),
-            replaced,
-        )
+    replaced = _DATE.sub(
+        lambda match: (
+            (posting_start_date + timedelta(days=int(match.group(1)))).strftime(match.group(2))
+            if posting_start_date is not None
+            else "未定"
+        ),
+        replaced,
+    )
     replaced = _TEMPLATE_VERSION.sub(
         lambda match: "" if match.group(1) == _PROPOSAL_BUILDER_PROFILE else match.group(0),
         replaced,
@@ -262,6 +263,8 @@ def _proposal(root: Path, manifest: dict[str, Any]) -> dict[str, Any]:
         source_notes = bu2_source_notes(raw)
         profile = str(raw.get("template_profile", "base"))
         raw_start_date = raw.get("posting_start_date")
+        if raw_start_date is not None and not isinstance(raw_start_date, str):
+            raise ValueError("invalid posting_start_date")
         posting_start_date = (
             date.fromisoformat(raw_start_date) if isinstance(raw_start_date, str) else None
         )
@@ -325,11 +328,9 @@ def _proposal(root: Path, manifest: dict[str, Any]) -> dict[str, Any]:
                 "MEDIA_PPTX_TEMPLATE_PROFILE_INVALID",
                 "integrated proposal template inventory is incomplete",
             )
-        if (
-            posting_start_date is None
-            or template_versions != {_PROPOSAL_BUILDER_PROFILE}
-            or not _PROPOSAL_BUILDER_REQUIRED_DATE_OFFSETS.issubset(template_date_offsets)
-        ):
+        if template_versions != {
+            _PROPOSAL_BUILDER_PROFILE
+        } or not _PROPOSAL_BUILDER_REQUIRED_DATE_OFFSETS.issubset(template_date_offsets):
             raise MediaOperationError(
                 "MEDIA_PPTX_TEMPLATE_PROFILE_INVALID",
                 "integrated proposal template schedule markers are incomplete",

@@ -321,5 +321,7 @@ def test_research_heartbeat_keeps_five_minute_job_alive() -> None:
 
 def test_submit_description_explains_json_free_research_input() -> None:
     description = ProposalBuilderSubmitSkill.description
-    assert "商材名・公式URL・与件・投稿開始日" in description
+    assert "商材名・与件" in description
+    assert "公式URL・投稿開始日は省略可" in description
+    assert "日付を補完せず未定" in description
     assert "PROPOSAL_RESEARCH_AUTO" in description and "JSONは不要" in description

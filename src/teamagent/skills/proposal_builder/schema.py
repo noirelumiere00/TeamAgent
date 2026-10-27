@@ -348,7 +348,9 @@ class ProposalBuilderInput(_StrictModel, BU2Content):
             "PROPOSAL_RESEARCH_AUTOが有効なときのみ利用でき、gemini_jsonとの同時指定は不可。"
         ),
     )
-    posting_start_date: date = Field(description="投稿開始日D（YYYY-MM-DD）")
+    posting_start_date: date | None = Field(
+        default=None, description="投稿開始日D（YYYY-MM-DD）。省略・nullは未定。日付を補完しない。"
+    )
     proposal_date: date = Field(
         default_factory=proposal_today, description="提案書の作成日。未指定時は日本時間の受付日。"
     )
