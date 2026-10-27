@@ -38,6 +38,11 @@ def test_prompts_are_japanese_ready_to_send_and_within_slack_limit() -> None:
     assert "Aico にこう頼めます" in PATCH.read_text(encoding="utf-8")
 
 
+def test_home_includes_approved_usage_canvas() -> None:
+    home = PATCH.read_text(encoding="utf-8").split("home 本文", 1)[1].split("home 注記", 1)[0]
+    assert "<https://vector-workspcae.slack.com/docs/T07MU5P2PBR/F0CCGL1SFPW|Aico の使い方>" in home
+
+
 def test_patch_applies_to_the_shipped_slack_plugin() -> None:
     """上流の実物（@openclaw/slack 2026.7.1 の dist）に当てて置換と構文を確かめる。
 

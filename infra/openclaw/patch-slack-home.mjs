@@ -62,6 +62,7 @@ replaceOnce(
 \t\t\t\t\t"📧 メールと予定 — 未読の仕分け・空き時間の提示・返信の下書き\\n" +
 \t\t\t\t\t"📱 SNS を調べる — TikTok の伸び動画・X の生活者の声・上位動画の分析\\n" +
 \t\t\t\t\t"🔗 メールと予定を使う方は、DM に「連携」と送ってください\\n" +
+\t\t\t\t\t"<https://vector-workspcae.slack.com/docs/T07MU5P2PBR/F0CCGL1SFPW|Aico の使い方>\\n" +
 \t\t\t\t\t"⚠️ 依頼はチャンネルでもこの DM でも OK ／ 困ったときは小俣に DM"`,
 );
 replaceOnce(
