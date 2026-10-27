@@ -13,6 +13,7 @@ import subprocess
 import sys
 import textwrap
 import time
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
@@ -137,11 +138,42 @@ def _release_contract_bindings() -> tuple[dict[str, str], dict[str, bool]]:
 
 
 @pytest.fixture(scope="module", autouse=True)
-def _canonical_backend_metadata_for_guard_tests() -> None:
-    """Guard subprocesses must not depend on a developer's prior terraform init."""
-    metadata = PROJECT_ROOT / "infra" / "terraform" / ".terraform" / "terraform.tfstate"
-    previous = metadata.read_bytes() if metadata.exists() else None
-    previous_mode = stat.S_IMODE(metadata.stat().st_mode) if metadata.exists() else None
+def _canonical_backend_metadata_for_guard_tests(
+    tmp_path_factory: pytest.TempPathFactory,
+) -> Iterator[None]:
+    """Give each worker its own Git-clean guard sources and backend metadata."""
+    assert not subprocess.check_output(
+        [
+            "git",
+            "status",
+            "--porcelain",
+            "--untracked-files=all",
+            "--",
+            ".gitignore",
+            "infra",
+            "scripts",
+        ],
+        cwd=PROJECT_ROOT,
+    ), "Guard tests require committed infra/scripts sources before copying HEAD"
+    repository = tmp_path_factory.mktemp("guard-repository") / "repo"
+    subprocess.run(
+        [
+            "git",
+            "clone",
+            "--quiet",
+            "--shared",
+            "--no-checkout",
+            str(PROJECT_ROOT),
+            str(repository),
+        ],
+        check=True,
+    )
+    subprocess.run(
+        ["git", "-C", str(repository), "checkout", "HEAD", "--", ".gitignore", "infra", "scripts"],
+        check=True,
+        capture_output=True,
+    )
+    metadata = repository / "infra" / "terraform" / ".terraform" / "terraform.tfstate"
     metadata.parent.mkdir(parents=True, exist_ok=True)
     metadata.write_text(
         json.dumps(
@@ -166,15 +198,11 @@ def _canonical_backend_metadata_for_guard_tests() -> None:
         encoding="utf-8",
     )
     metadata.chmod(0o600)
-    try:
+    # A worker's module teardown must not remove another worker's backend metadata.
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setitem(globals(), "PROJECT_ROOT", repository)
+        patch.setitem(globals(), "GUARD", repository / "infra" / "deploy" / GUARD.name)
         yield
-    finally:
-        if previous is None:
-            metadata.unlink(missing_ok=True)
-        else:
-            metadata.write_bytes(previous)
-            assert previous_mode is not None
-            metadata.chmod(previous_mode)
 
 
 COMPONENTS = {

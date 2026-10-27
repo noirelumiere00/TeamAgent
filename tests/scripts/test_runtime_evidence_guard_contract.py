@@ -529,8 +529,10 @@ def test_export_binding_rejects_byte_inode_rename_size_and_hardlink_mutation(
     with pytest.raises(evidence.ContractError):
         evidence.verify_file_binding(binding)
 
-    original.unlink()
-    _bound_file(original)
+    # Allocate before removing the old file so the filesystem cannot reuse its inode.
+    replacement = tmp_path / "replacement.bin"
+    _bound_file(replacement)
+    replacement.replace(original)
     with pytest.raises(evidence.ContractError):
         evidence.verify_file_binding(binding)
 
