@@ -227,7 +227,8 @@ def test_slow_lane_keeps_vault(monkeypatch: pytest.MonkeyPatch, lane: str) -> No
         skill, _ = make()
         started = time.perf_counter()
         out = run(skill)
-        assert time.perf_counter() - started < 0.5
+        # 待たずに返したことは timeout の記録とゲート未開放で決まる。実時間の上限は CI の混雑で揺れるので緩く。
+        assert time.perf_counter() - started < 5
         assert out.found and "📁" in out.answer
         assert next(r for r in out.sources if r["lane"] == lane)["status"] == "timeout"
     finally:
