@@ -52,7 +52,8 @@ UV_DIGEST = "9941e2d8e06ff884d328905091eac0a6bc1e40e5ce12e6dd0de4ef4ee26baac4"
 # 2026-10-23: ncurses 6.6_p20260822-r0→6.6_p20261017-r0。人作成 lock は 112・115・184 行目のみ差分（241 行不変）、実物一致は段 3 の cmp で検証。
 # 2026-10-23: gdbm-1.26-r0 を 54 行目へ追加（241→242 行）。人作成 lock と実物の一致は段 3 の cmp で検証。
 # 2026-10-26: apk-tools 3.0.6 + aarch64 APKINDEX で再導出（242→241 行、sndio-libs 脱落）。
-APK_LOCK_SHA256 = "7aaf3b0b67606937f4795720a16bd27c61642fa8a9b188c56ba1849920674aff"
+# 2026-10-27: fresh aarch64 APKINDEX + apk-tools 3.0.6 で simdutf 9.3.0-r0→9.3.2-r0 のみ再導出（241 行不変）。実物一致は段 3 の cmp。
+APK_LOCK_SHA256 = "b589be112ee5f3aa0ec8874cfcad691c62dc61ab42007c5dd53a8b80b012dbbd"
 CHROMIUM_PATH = "/usr/lib/chromium/chromium"
 
 
