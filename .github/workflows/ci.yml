@@ -7,6 +7,8 @@ on:
     branches: [main, dev]
   pull_request:
     branches: [main, dev]
+  schedule:
+    - cron: "30 18 * * *" # 毎日 03:30 JST。schedule は default branch の HEAD を検証する。
 
 # 同じブランチで複数 push されたら古いランをキャンセル
 concurrency:
@@ -36,7 +38,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        python-version: ["3.11", "3.13", "3.14"]
+        python-version: ${{ github.event_name == 'pull_request' && fromJSON('["3.14"]') || fromJSON('["3.11", "3.13", "3.14"]') }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -68,7 +70,7 @@ jobs:
             pyyaml pypdf python-pptx pillow python-docx openpyxl \
             'fonttools[woff]>=4.63.0' defusedxml types-defusedxml \
             google-auth google-api-python-client google-auth-oauthlib 'google-genai==2.7.0' \
-            pytest pytest-asyncio pytest-cov mypy 'ruff==0.15.15' bandit import-linter
+            pytest pytest-asyncio pytest-cov 'pytest-xdist>=3.8.0' mypy 'ruff==0.15.15' bandit import-linter
 
       - name: Prepare disposable PostgreSQL test role
         run: |
@@ -122,7 +124,8 @@ jobs:
         run: sudo apt-get update -q && sudo apt-get install -y -q --no-install-recommends ffmpeg
 
       - name: Pytest
-        run: pytest tests/ -q --cov=teamagent --cov-report=term-missing
+        # coverage は 3.14 の最新版依存ジョブだけで収集する（PR でも 1 本）。
+        run: pytest tests/ -q -n auto --dist=loadgroup --durations=20 ${{ matrix.python-version == '3.14' && '--cov=teamagent --cov-report=term-missing' || '' }}
 
       - name: Bandit (security scan)
         run: bandit -r src/teamagent -ll  # low+ severity 以上
@@ -214,7 +217,7 @@ jobs:
           cat /tmp/pip-freeze.txt
 
       - name: Pytest
-        run: pytest tests/ -q
+        run: pytest tests/ -q -n auto --dist=loadgroup --durations=20
 
   activation-freeze:
     name: activation freeze (frozen surface)

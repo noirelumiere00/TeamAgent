@@ -20,6 +20,9 @@ from tests.personal_memory.conftest import PmDb
 
 _TEAM = "T0123ABCDE"
 
+# DB は UUID で分離済みだが、ロールは PostgreSQL クラスタ全体で共有される。
+pytestmark = pytest.mark.xdist_group("postgres_roles")
+
 
 def _principal(user: str) -> Principal:
     return Principal(team_id=_TEAM, slack_user_id=user, user_email=f"{user.lower()}@example.com")
