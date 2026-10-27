@@ -6,6 +6,7 @@ import io
 import json
 import os
 import re
+import shutil
 import subprocess
 import tarfile
 from pathlib import Path
@@ -1427,11 +1428,17 @@ def test_codebuild_and_local_runtime_have_one_fail_closed_release_boundary() -> 
 def test_blocked_bundle_interface_stops_before_output_or_external_work(
     tmp_path: Path,
 ) -> None:
-    # The checked-in contract is open now, and the emitter accepts only the
-    # canonical path, so block the canonical file in place and restore its exact
-    # bytes afterwards. The invariant under test is the emitter's behaviour when
-    # the gate is closed, not the current state of the file: a blocked contract
-    # must stop before it writes a manifest or touches a registry, and say why.
+    # The emitter requires a canonical path; keep its layout in a private copy.
+    repository = tmp_path / "repo"
+    for source in (
+        BUNDLE_HELPER,
+        TRUST_CONTRACT,
+        ROOT / "infra/codebuild/openclaw_provenance.py",
+    ):
+        destination = repository / source.relative_to(ROOT)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(source, destination)
+    contract = repository / TRUST_CONTRACT.relative_to(ROOT)
     original_bytes = TRUST_CONTRACT.read_bytes()
     blocked_contract = json.loads(original_bytes)
     assert blocked_contract["release"]["ready"] is True
@@ -1441,29 +1448,26 @@ def test_blocked_bundle_interface_stops_before_output_or_external_work(
     }
 
     manifest = tmp_path / "bundle.json"
-    try:
-        TRUST_CONTRACT.write_text(json.dumps(blocked_contract, indent=2) + "\n", encoding="utf-8")
-        completed = subprocess.run(
-            [
-                "bash",
-                str(BUNDLE_HELPER),
-                "--bundle-contract",
-                str(TRUST_CONTRACT),
-                "--core-image",
-                "example.invalid/core:candidate",
-                "--media-image",
-                "example.invalid/media:candidate",
-                "--push",
-                "--manifest",
-                str(manifest),
-            ],
-            cwd=ROOT,
-            check=False,
-            text=True,
-            capture_output=True,
-        )
-    finally:
-        TRUST_CONTRACT.write_bytes(original_bytes)
+    contract.write_text(json.dumps(blocked_contract, indent=2) + "\n", encoding="utf-8")
+    completed = subprocess.run(
+        [
+            "bash",
+            str(repository / BUNDLE_HELPER.relative_to(ROOT)),
+            "--bundle-contract",
+            str(contract),
+            "--core-image",
+            "example.invalid/core:candidate",
+            "--media-image",
+            "example.invalid/media:candidate",
+            "--push",
+            "--manifest",
+            str(manifest),
+        ],
+        cwd=repository,
+        check=False,
+        text=True,
+        capture_output=True,
+    )
 
     assert TRUST_CONTRACT.read_bytes() == original_bytes
     assert completed.returncode != 0

@@ -43,7 +43,7 @@ def test_home_includes_approved_usage_canvas() -> None:
     assert "<https://vector-workspcae.slack.com/docs/T07MU5P2PBR/F0CCGL1SFPW|Aico の使い方>" in home
 
 
-def test_patch_applies_to_the_shipped_slack_plugin() -> None:
+def test_patch_applies_to_the_shipped_slack_plugin(tmp_path: Path) -> None:
     """上流の実物（@openclaw/slack 2026.7.1 の dist）に当てて置換と構文を確かめる。
 
     任意実行: OPENCLAW_SLACK_DIST_DIR を付けたときだけ（CI では Docker ビルドの node 実行が門）。
@@ -51,8 +51,7 @@ def test_patch_applies_to_the_shipped_slack_plugin() -> None:
     raw = os.environ.get("OPENCLAW_SLACK_DIST_DIR")
     if not raw:
         pytest.skip("OPENCLAW_SLACK_DIST_DIR（@openclaw/slack の package/dist）が無い")
-    work = Path(os.environ.get("TMPDIR", "/tmp")) / "slack-dist-patch-test"
-    shutil.rmtree(work, ignore_errors=True)
+    work = tmp_path / "slack-dist"
     shutil.copytree(raw, work)
     subprocess.run(["node", str(PATCH), str(work)], check=True, capture_output=True)
     provider = next(work.glob("provider-*.js"))

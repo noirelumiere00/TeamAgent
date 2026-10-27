@@ -29,10 +29,14 @@ _FN = "public.history_view_record(text,text,text,integer,text)"
 _TEAM = "T0123ABCDE"
 _USER = "U0AAAAAAA1"
 
-pytestmark = pytest.mark.skipif(
-    _DB_DSN is None,
-    reason="disposable PostgreSQL validation requires TEAMAGENT_TEST_DB_DSN",
-)
+# DB は UUID で分離済みだが、ロールは PostgreSQL クラスタ全体で共有される。
+pytestmark = [
+    pytest.mark.xdist_group("postgres_roles"),
+    pytest.mark.skipif(
+        _DB_DSN is None,
+        reason="disposable PostgreSQL validation requires TEAMAGENT_TEST_DB_DSN",
+    ),
+]
 
 
 def _sha16(principal: str) -> str:
