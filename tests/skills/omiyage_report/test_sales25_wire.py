@@ -415,3 +415,16 @@ def test_model_limit_and_persisted_response_cache(monkeypatch: pytest.MonkeyPatc
     resumed = _Model(wire, case, "analysis")
     assert resumed.analyze_image_bytes(b"synthetic", "image/jpeg", "Observe", "one") == response
     approved.analyze_image_bytes.assert_called_once()
+
+
+def test_search_depth_setting_bounds(monkeypatch: pytest.MonkeyPatch) -> None:
+    from teamagent.skills.omiyage_report import sales25
+
+    monkeypatch.delenv("OMIYAGE_SALES25_SEARCH_DEPTH", raising=False)
+    assert sales25.search_depth() == 100
+    monkeypatch.setenv("OMIYAGE_SALES25_SEARCH_DEPTH", "50")
+    assert sales25.search_depth() == 50
+    for bad in ("5", "101"):
+        monkeypatch.setenv("OMIYAGE_SALES25_SEARCH_DEPTH", bad)
+        with pytest.raises(ValueError):
+            sales25.search_depth()

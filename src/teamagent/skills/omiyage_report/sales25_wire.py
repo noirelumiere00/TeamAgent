@@ -28,7 +28,13 @@ from teamagent.media.contracts import MAX_INPUT_BYTES, S3ObjectRef
 from teamagent.skills.first_visit import sales25_analysis as analysis
 from teamagent.skills.first_visit import sales25_authoring as authoring
 from teamagent.skills.first_visit import sales25_contract as contract
-from teamagent.skills.omiyage_report.sales25 import Artifact, MachineChecks, Stages, StepResult
+from teamagent.skills.omiyage_report.sales25 import (
+    Artifact,
+    MachineChecks,
+    Stages,
+    StepResult,
+    search_depth,
+)
 
 logger = structlog.get_logger(__name__)
 
@@ -269,7 +275,7 @@ class Wire:
                 case["query"],
                 owner_id=case["owner_id"],
                 request_fingerprint=step_key,
-                max_videos=100,
+                max_videos=search_depth(),
                 timeout_s=timeout,
             )
         except MediaJobError as exc:
@@ -297,9 +303,10 @@ class Wire:
                 child_job_ids=[result["media_job_id"]],
             )
         actual = acquisition["actual"]
+        depth = search_depth()
         return StepResult(
-            status="zero" if actual == 0 else "partial" if actual < 100 else "complete",
-            reason="shortfall" if actual < 100 else None,
+            status="zero" if actual == 0 else "partial" if actual < depth else "complete",
+            reason="shortfall" if actual < depth else None,
             actual=actual,
             fetched_at=raw["fetched_at"],
             refs=[ref],

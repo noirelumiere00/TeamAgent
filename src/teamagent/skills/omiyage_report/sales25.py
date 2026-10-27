@@ -53,6 +53,14 @@ LABELS = {
 PPTX_TYPE: Final = "application/vnd.openxmlformats-officedocument.presentationml.presentation"
 
 
+def search_depth() -> int:
+    """1 語あたりの検索の目標件数（既定 100）。深いスクロールがボット壁に当たるとき設定で絞る。"""
+    value = int(os.getenv("OMIYAGE_SALES25_SEARCH_DEPTH", "100"))
+    if not 10 <= value <= 100:
+        raise ValueError("sales25 search depth outside 10..100")
+    return value
+
+
 def search_concurrency() -> int:
     value = int(os.getenv("OMIYAGE_SALES25_SEARCH_CONCURRENCY", "2"))
     if not 1 <= value <= 2:
@@ -528,7 +536,7 @@ class Parent:
                 }
                 if stage == "search":
                     case["query"] = case["queries"][int(key.split("_")[1]) - 1]
-                    case["target"] = 100
+                    case["target"] = search_depth()
                 try:
                     if stage == "search":
                         if not searches:
@@ -636,8 +644,9 @@ class Parent:
             lines = []
             for i, query in enumerate(summary["case"]["queries"], 1):
                 search = steps.get(f"search_{i}")
-                if search is not None and search.actual is not None and search.actual < 100:
-                    lines.append(f"「{query}」100本目標→{search.actual}本取得")
+                depth = search_depth()
+                if search is not None and search.actual is not None and search.actual < depth:
+                    lines.append(f"「{query}」{depth}本目標→{search.actual}本取得")
             shortages = [
                 f"{LABELS.get(k, k.replace('search_', '検索 '))}: {reasons[r.reason or r.status]}"
                 for k, r in steps.items()
