@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from teamagent.skills.first_visit import sales25_contract as contract
+from teamagent.skills.first_visit.sales25_contract import omakase_note
 
 if TYPE_CHECKING:
     from teamagent.adapters.gemini_client import GeminiClient
@@ -447,11 +448,14 @@ def build_manuscript(root: Path, *, owner_id: str) -> None:
                     + "を同じ仲間として集計。全同義語はこのページのノートに記載。"
                 )
             notes[str(page)] += "\n数え方（全同義語）：" + aliases
+            assumptions = omakase_note(case)
+            if assumptions:
+                notes[str(page)] += "\n" + assumptions
             put(
                 prose,
                 [
                     "原音未確認を含む。見た目未確認。因果関係・市場全体の推計ではありません。",
-                    counts,
+                    counts + ("\n" + assumptions if assumptions else ""),
                     counting,
                     "関連投稿の判明した再生数の合計。欠損はゼロに置換しない。",
                     "（いいね＋コメント＋シェア＋保存）÷再生数×100。欠損・再生ゼロは除外。",

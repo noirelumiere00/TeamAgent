@@ -441,3 +441,29 @@ def verify_manifest(root: Path, *, owner_id: str, bundle: Path = BUNDLE) -> None
     validate_inputs(root, owner_id=owner_id, bundle=bundle)
     if read_json(root / "sales25-manifest.json") != _manifest(root, owner_id):
         raise ValueError("inputs changed during validation")
+
+
+# お任せで補った条件の一文（media 画像でも使うので標準ライブラリだけで書く）。
+OMAKASE_LABELS = {
+    "competitors": "競合",
+    "category": "カテゴリー",
+    "keywords": "中立語",
+    "target_product": "対象商品",
+    "claim_constraints": "守る訴求条件",
+}
+
+
+def omakase_note(case: Mapping[str, Any]) -> str:
+    values = case.get("omakase_values", {})
+    parts = [
+        label
+        + ": "
+        + ("・".join(values[field]) if isinstance(values[field], list) else values[field])
+        for field, label in OMAKASE_LABELS.items()
+        if values.get(field)
+    ]
+    return (
+        "お任せで次の条件にしました: " + "／".join(parts) + "（違えばこのスレッドで直してください）"
+        if parts
+        else ""
+    )

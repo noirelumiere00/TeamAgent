@@ -17,7 +17,7 @@ from teamagent.mcp_gateway import async_job_notify as notify
 from teamagent.mcp_gateway import detached_jobs
 from teamagent.skills._shared.long_jobs import _OWNER_KEY, ORIGIN_KEY, Origin
 from teamagent.skills.base import SkillContext
-from teamagent.skills.omiyage_report import sales25
+from teamagent.skills.omiyage_report import input_check, sales25
 from teamagent.skills.omiyage_report.schema import (
     OmiyageReportStatusInput,
     OmiyageReportSubmitInput,
@@ -66,6 +66,7 @@ def flags(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("USE_OMIYAGE_SALES25", "1")
     monkeypatch.setenv("OMIYAGE_SALES25_ALLOWED_EMAILS", "self@example.test")
     monkeypatch.setenv("USE_LONG_JOB_NOTIFY", "1")
+    monkeypatch.setattr(input_check, "bedrock_text_caller", lambda *a: "")
     monkeypatch.delenv("PROPOSAL_JOBS_TABLE", raising=False)
     monkeypatch.setattr(detached_jobs, "post_to_origin_status", lambda *a, **k: "posted")
     monkeypatch.setattr(detached_jobs, "post_to_origin", lambda *a, **k: True)
@@ -211,7 +212,7 @@ def test_flag_default_off(monkeypatch: pytest.MonkeyPatch, flag: str | None) -> 
     [
         ("", True, "self@example.test"),
         (" , ", True, "self@example.test"),
-        ("*", True, "self@example.test"),
+        ("*", False, "self@example.test"),
         ("self@example.test", False, "self@example.test"),
         ("self@example.test", True, "other@example.test"),
     ],
@@ -224,11 +225,55 @@ def test_empty_allowlist_and_unverified_are_off(
     assert not sales25.enabled(metadata)
 
 
+@pytest.mark.parametrize("allowed", ["*", " * ", "self@example.test, *, other@example.test"])
+@pytest.mark.parametrize("user", ["U_SELF", "U_OTHER"])
+def test_wildcard_routes_verified_users_to_sales25(
+    monkeypatch: pytest.MonkeyPatch, allowed: str, user: str
+) -> None:
+    from teamagent.skills.omiyage_report import skill as module
+
+    monkeypatch.setenv("OMIYAGE_SALES25_ALLOWED_EMAILS", allowed)
+    monkeypatch.setattr(module, "run_preflight", lambda *a: pytest.fail("legacy path"))
+    context = ctx(user)
+    context.metadata["user_email"] = user.lower() + "@example.test"
+    store = ProposalJobStore(table_name="", memory={})
+    accepted = build(store, Pipeline()).run(request(), context)
+    assert accepted.status == "queued"
+    assert json.loads(store.get_job(accepted.job_id)["request_summary"])["edition"] == "sales25"
+
+
+@pytest.mark.parametrize(
+    "field", ["identity_verified", "verified_slack_user_id", "verified_slack_team_id"]
+)
+def test_wildcard_keeps_identity_guards(monkeypatch: pytest.MonkeyPatch, field: str) -> None:
+    monkeypatch.setenv("OMIYAGE_SALES25_ALLOWED_EMAILS", "*")
+    metadata = {**ctx().metadata, field: False if field == "identity_verified" else ""}
+    assert not sales25.enabled(metadata)
+
+
+@pytest.mark.parametrize("allowed", [None, "", "   ", " , "])
+def test_empty_sales25_allowlist_stays_closed_but_shared_rollout_is_unchanged(
+    monkeypatch: pytest.MonkeyPatch, allowed: str | None
+) -> None:
+    from teamagent.skills._shared.rollout import rollout_allowed
+
+    if allowed is None:
+        monkeypatch.delenv("OMIYAGE_SALES25_ALLOWED_EMAILS", raising=False)
+    else:
+        monkeypatch.setenv("OMIYAGE_SALES25_ALLOWED_EMAILS", allowed)
+    assert not sales25.enabled(ctx().metadata)
+    assert rollout_allowed("OMIYAGE_SALES25_ALLOWED_EMAILS", "self@example.test") is (
+        allowed != " , "
+    )
+    monkeypatch.setenv("OMIYAGE_SALES25_ALLOWED_EMAILS", "*")
+    assert not rollout_allowed("OMIYAGE_SALES25_ALLOWED_EMAILS", "other@example.test")
+
+
 def test_preflight_remembers_confirmed_answers_across_skill_instances() -> None:
     store = ProposalJobStore(table_name="", memory={})
     first = build(store).run(request(competitors=[], keywords=[], sales25=None), ctx())
     assert first.status == "needs_input"
-    assert first.missing == ["competitors", "keywords", "target_product", "claim_constraints"]
+    assert first.missing == ["competitors", "keywords", "target_product"]
     assert "カテゴリー" not in first.message and "JSON" not in first.message
     second = build(store).run(
         OmiyageReportSubmitInput(
@@ -238,8 +283,8 @@ def test_preflight_remembers_confirmed_answers_across_skill_instances() -> None:
         ),
         ctx(),
     )
-    assert second.missing == ["claim_constraints"]
-    assert "競合" not in second.message
+    assert second.status == "queued"
+    assert "条件なし（お任せ）" in second.message
     third = build(store).run(
         OmiyageReportSubmitInput(sales25=Sales25Intake(claim_constraints="条件なし")), ctx()
     )
@@ -261,7 +306,6 @@ def test_input_policy_cannot_skip_sales25_requirements(monkeypatch: pytest.Monke
             "category",
             "keywords",
             "target_product",
-            "claim_constraints",
         } <= set(response.missing)
     assert not store._memory
 

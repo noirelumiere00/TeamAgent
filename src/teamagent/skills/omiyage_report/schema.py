@@ -11,9 +11,9 @@
 from __future__ import annotations
 
 import re
-from typing import Annotated, Literal
+from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 OMIYAGE_JOB_ID_PATTERN = r"^omy_[0-9a-f]{32}$"
 # 先行調査メモ（research_notes）の上限文字数（設計C・2026-09-03）。
@@ -112,6 +112,25 @@ class OmiyageReportSubmitInput(_StrictModel):
         exclude=True,
         description="本人限定sales25の対象商品・守る訴求条件。条件なしも明示する",
     )
+
+    @model_validator(mode="before")
+    @classmethod
+    def _nest_sales25_fields(cls, data: Any) -> Any:
+        fields = ("target_product", "claim_constraints", "queries", "brand_synonyms")
+        if not isinstance(data, dict) or not any(key in data for key in fields):
+            return data
+        nested = data.get("sales25")
+        if isinstance(nested, Sales25Intake):
+            nested = nested.model_dump(exclude_unset=True)
+        elif nested is not None and not isinstance(nested, dict):
+            return data
+        out = dict(data)
+        details = dict(nested) if nested is not None else {}
+        for key in fields:
+            if key in out:
+                details.setdefault(key, out.pop(key))
+        out["sales25"] = details
+        return out
 
     @field_validator("brand", "official_tiktok_account", "category")
     @classmethod

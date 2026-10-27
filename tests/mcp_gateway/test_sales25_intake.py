@@ -14,11 +14,12 @@ from tests.caller_claim_testkit import make_verifier, sign_arguments
 
 
 @pytest.mark.parametrize("shared", [False, True])
+@pytest.mark.parametrize("allowed", ["self@example.test", "*"])
 async def test_rollout_uses_resolver_email_instead_of_declared_email(
-    monkeypatch: pytest.MonkeyPatch, shared: bool
+    monkeypatch: pytest.MonkeyPatch, shared: bool, allowed: str
 ) -> None:
     monkeypatch.setenv("USE_OMIYAGE_SALES25", "1")
-    monkeypatch.setenv("OMIYAGE_SALES25_ALLOWED_EMAILS", "self@example.test")
+    monkeypatch.setenv("OMIYAGE_SALES25_ALLOWED_EMAILS", allowed)
     args = sign_arguments(
         "omiyage_report_submit",
         {},
@@ -40,7 +41,7 @@ async def test_rollout_uses_resolver_email_instead_of_declared_email(
         tool="omiyage_report_submit",
     )
     assert error is None and metadata["identity_verified"] is True
-    assert not sales25.enabled(metadata)
+    assert sales25.enabled(metadata) is (allowed == "*")
     metadata["user_email"] = "self@example.test"
     assert sales25.enabled(metadata)
 
