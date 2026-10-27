@@ -431,6 +431,18 @@ def build_manuscript(root: Path, *, owner_id: str) -> None:
                 )
             put(prose, [columns[column][row] for row in range(7) for column in range(2)])
         elif role == "methods":
+            routes = [
+                contract.read_json(root / f"raw/{q['query_id']}.json").get("acquired_via", "worker")
+                for q in queries
+            ]
+            route_labels = ["Apify" if route == "apify" else "ブラウザ" for route in routes]
+            route_text = "取得経路: " + "／".join(dict.fromkeys(route_labels))
+            notes[str(page)] += "\n" + "\n".join(
+                f"{q['query']}: {label}（Apifyは返却順を表示順として記録）"
+                if route == "apify"
+                else f"{q['query']}: {label}"
+                for q, route, label in zip(queries, routes, route_labels, strict=True)
+            )
             counts = "／".join(
                 label + ":" + _acquisition(sources[q["query"]])
                 for label, q in zip(
@@ -454,7 +466,8 @@ def build_manuscript(root: Path, *, owner_id: str) -> None:
             put(
                 prose,
                 [
-                    "原音未確認を含む。見た目未確認。因果関係・市場全体の推計ではありません。",
+                    route_text
+                    + "。原音・見た目未確認を含む。因果関係・市場全体の推計ではありません。",
                     counts + ("\n" + assumptions if assumptions else ""),
                     counting,
                     "関連投稿の判明した再生数の合計。欠損はゼロに置換しない。",

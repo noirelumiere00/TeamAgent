@@ -1034,6 +1034,35 @@ class ApifyClient:
 
     # ---- 型付き入口: TikTok 動画実体（tiktok_acquire の mcp 側フォールバック） ------
 
+    def tiktok_search(
+        self,
+        query: str,
+        *,
+        max_items: int = 100,
+        deadline_s: int = _DEFAULT_DEADLINE_S,
+        request_id: str = "apify",
+        user_email: str = "",
+    ) -> ApifyRunResult:
+        """Metadata in dataset order, using the existing TikTok actor and cost reservation."""
+        if not query.strip() or not 1 <= max_items <= 100:
+            raise ValueError("TikTok search requires a query and 1..100 items")
+        return self.run_actor_sync(
+            ACTOR_TIKTOK_VIDEO,
+            {
+                "searchQueries": [query],
+                "searchSection": "",
+                "resultsPerPage": max_items,
+                "shouldDownloadVideos": False,
+                "shouldDownloadCovers": False,
+                "shouldDownloadSlideshowImages": False,
+            },
+            max_items=max_items,
+            deadline_s=deadline_s,
+            request_id=request_id,
+            user_email=user_email,
+            require_cost_reservation=True,
+        )
+
     def tiktok_download_videos(
         self,
         post_urls: list[str],
