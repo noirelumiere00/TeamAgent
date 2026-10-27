@@ -3,14 +3,16 @@
 from __future__ import annotations
 
 import os
+import re
 import unicodedata
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from typing import Any
 
 from teamagent.adapters.pgvector_client import SearchHit
 from teamagent.skills.search.dates import extract_title_date
+from teamagent.skills.search.schema import DocumentReference
 
 JST = timezone(timedelta(hours=9))
 
@@ -95,6 +97,7 @@ class TimelineStatus:
     label: str
     text: str
     sections: tuple[str, ...]
+    source: SearchHit
 
     @property
     def line(self) -> str:
@@ -148,6 +151,7 @@ def resolve_statuses(hits: Sequence[SearchHit]) -> tuple[TimelineStatus, ...]:
             actual = max(posted, key=lambda h: day((h.metadata or {}).get("last_posted_on")))
             m = actual.metadata or {}
             last = day(m.get("last_posted_on")) or "日付不明"
+            latest = actual
             text = f"実施済み（投稿 {int(str(m['video_count']))} 本・最終投稿 {last}）"
         else:
             found, _ = evidence_date(latest)
@@ -182,7 +186,7 @@ def resolve_statuses(hits: Sequence[SearchHit]) -> tuple[TimelineStatus, ...]:
                     "状態は資料からは確認できません"
                     f"（最新の記録: {found or '日付不明'} の{source}）"
                 )
-        out.append(TimelineStatus(label, text, sections))
+        out.append(TimelineStatus(label, text, sections, latest))
     return tuple(out)
 
 
@@ -191,3 +195,48 @@ def prompt_block(statuses: Sequence[TimelineStatus]) -> str:
     return f"# 時系列の基準\n今日は {today}（JST）\n# コードが決めた状態\n" + "\n".join(
         s.line for s in statuses
     )
+
+
+def status_answer(
+    query: str,
+    hits: Sequence[SearchHit],
+    url_of: Callable[[SearchHit], str | None],
+    displayed_refs: list[DocumentReference] | None = None,
+) -> str:
+    """現況の問いだけ、RLS下の根拠と同じ日付・リンクをコードで回答に残す。"""
+    from teamagent.skills.search import drive_first
+    from teamagent.skills.search.case_list import case_link
+
+    own = query.split("\n", 1)[0]
+    if not re.search(r"今どう|どうなって|進捗|現況|状況|現状|今の状態|ステータス", own):
+        return ""
+    named = {
+        identity(h)
+        for h in hits
+        if not identity(h)[1].startswith("unknown:") and identity(h)[1] in _norm(own)
+    }
+    scoped = [h for h in hits if not named or identity(h) in named]
+    lines = []
+    for status in resolve_statuses(scoped)[:3]:
+        source = status.source
+        ref = drive_first.canonical_reference(source.metadata or {}, source.content)
+        url = url_of(source)
+        link = case_link(url, "資料を見る" if ref.kind == "drive" else "会話の記録")
+        text = status.text
+        if not re.search(r"\d{4}-\d{2}-\d{2} 時点では", text):
+            found, _ = evidence_date(source)
+            prefix = f"{found} 時点では" if found else "日付不明: "
+            if text.startswith("実施済み"):
+                text += "（現在の状態は資料からは確認できません）"
+            text = prefix + text
+        lines.append(
+            f"{status.label}: {text}" + (f"\n{link}" if link else "\n根拠リンクは確認できません。")
+        )
+        if (
+            link
+            and ref.kind == "drive"
+            and displayed_refs is not None
+            and ref not in displayed_refs
+        ):
+            displayed_refs.append(ref)
+    return "\n\n".join(lines)
