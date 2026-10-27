@@ -339,8 +339,9 @@ def test_fake_pipeline_partial_delivers_once_after_terminal_save(
     assert slack.uploads[0]["data"] == pipeline.data
     assert slack.uploads[0]["channel"] == "D_SELF"
     comment = slack.uploads[0]["initial_comment"]
-    assert "partial" in comment
-    assert "見た目（描画）は未確認。PowerPoint の左の一覧で 3・7・21枚目がL1の要確認です" in comment
+    assert "一部の数字が足りません" in comment
+    assert "sales25" not in comment and "partial" not in comment and "L1" not in comment
+    assert "見た目（描画）は未確認。PowerPoint の左の一覧で 3・7・21枚目は要確認です" in comment
     assert result(store, accepted.job_id).delivery_status == "delivered"
     # A restarted watcher shares the durable notice lock, not the old Origin object.
     again = ctx()
@@ -361,7 +362,11 @@ def test_refusal_and_timeout_never_imply_complete(stage: str, cause: str) -> Non
     saved = result(store, accepted.job_id)
     assert saved.status == "incomplete" and saved.delivery_status == "not_ready"
     assert saved.checkpoints[stage].status == cause
-    assert "再開地点" in saved.next_step and "private" not in saved.model_dump_json()
+    assert "もう一度同じ依頼" in saved.next_step and "private" not in saved.model_dump_json()
+    assert "作れませんでした" in saved.message
+    assert not any(
+        w in saved.message + saved.next_step for w in ("sales25", "incomplete", "再開地点")
+    )
     assert not any(c.endswith(":fill") for c in pipeline.calls)
 
 
@@ -553,7 +558,7 @@ def test_normal_zero_is_distinct_from_refusal_and_not_ready() -> None:
     saved = result(store, accepted.job_id)
     assert saved.status == "partial"  # the fake subsequent stages and QA are complete
     assert all(saved.checkpoints[f"search_{i}"].status == "zero" for i in range(1, 7))
-    assert "正常0件" in saved.next_step and "取得拒否" not in saved.next_step
+    assert "正常0件" in saved.next_step and "取得を断られた" not in saved.next_step
 
 
 def test_refused_response_is_preserved_without_exception() -> None:
@@ -571,7 +576,7 @@ def test_refused_response_is_preserved_without_exception() -> None:
     accepted = skill.run(request(), ctx())
     saved = result(store, accepted.job_id)
     assert saved.status == "incomplete" and saved.checkpoints["search_1"].status == "refused"
-    assert "取得拒否" in saved.next_step
+    assert "TikTok に取得を断られた" in saved.next_step
 
 
 def test_stale_duplicate_keeps_the_original_parent() -> None:
@@ -631,7 +636,7 @@ def test_incomplete_analysis_delivers_partial_with_shortage(
         job_id=accepted.job_id,
     )
     comment = slack.uploads[0]["initial_comment"]
-    assert "partial" in comment and "見た目（描画）は未確認" in comment
+    assert "一部の数字が足りません" in comment and "見た目（描画）は未確認" in comment
     assert ("原音が未確認" if reason == "audio_unverified" else "必要件数が不足") in comment
 
 
