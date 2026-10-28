@@ -571,7 +571,7 @@ class Parent:
                                 child_job_ids=result.child_job_ids,
                             )
                         elif result.status == "incomplete" or (
-                            result.actual < 100 and result.status == "complete"
+                            result.actual < search_depth() and result.status == "complete"
                         ):
                             result = result.model_copy(update={"status": "partial"})
                     if stage == "machine_check":
