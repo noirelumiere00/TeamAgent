@@ -109,6 +109,7 @@ class ChunkUpsert:
     contextualized: str | None = None
     page_num: int | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
+    embedding_column: str = "embedding"
 
 
 @dataclass(frozen=True)
@@ -1884,13 +1885,15 @@ class IngestRepository:
 
         sql = """
             INSERT INTO chunks
-                (document_id, chunk_idx, content, contextualized, embedding, page_num, metadata)
+                (document_id, chunk_idx, content, contextualized, {column}, page_num, metadata)
             VALUES (%s, %s, %s, %s, %s::vector, %s, %s::jsonb)
         """
         with conn.cursor() as cur:
             for c in chunks:
+                if c.embedding_column not in {"embedding", "embedding_cohere"}:
+                    raise ValueError("unsupported embedding column")
                 cur.execute(
-                    sql,
+                    sql.format(column=c.embedding_column),
                     (
                         document_id,
                         c.chunk_idx,

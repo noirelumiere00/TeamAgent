@@ -96,7 +96,9 @@ OAUTH_CONNECT_TOOL_NAME = "oauth_connect"
 
 # submit 応答を返した後も MCP process 内で完了を待つ対象。SQS/DynamoDB/worker の契約は
 # 変えず、それぞれの status skill を通常どおり呼んで利用者向けサマリへ整形する。
-_ASYNC_JOB_TOOLS = frozenset({"tiktok_acquire", "proposal_builder_submit", "omiyage_report_submit"})
+_ASYNC_JOB_TOOLS = frozenset(
+    {"tiktok_acquire", "proposal_builder_submit", "omiyage_report_submit", "media_case_search"}
+)
 
 # usage_events 記録器は本番 MCP プロセス内で 1 つだけ遅延生成する。初期化失敗時の None も
 # キャッシュし、env 不足等を各 tool 呼び出しで繰り返さない（利用者処理は常に fail-open）。
@@ -429,6 +431,11 @@ def _build_async_job_poll(
                 VideoAlgorithmStatusInput(job_id=job_id), poll_ctx
             )
             return output.status, output.message
+
+        if tool == "media_case_search":
+            from teamagent.skills.media_case_search.skill import production_skill
+
+            return production_skill().poll(job_id, poll_ctx)
 
         if tool == "tiktok_acquire":
             from teamagent.skills.tiktok_acquire.schema import TikTokAcquireStatusInput

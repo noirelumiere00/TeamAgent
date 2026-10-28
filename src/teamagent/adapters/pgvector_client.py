@@ -429,6 +429,59 @@ class PgVectorClient:
         )
         return hits
 
+    def search_media_cases(
+        self,
+        conn: psycopg.Connection[dict[str, Any]],
+        embedding: list[float],
+        *,
+        filters: dict[str, Any],
+        query: str,
+        embedding_col: str = "embedding",
+        limit: int = 3,
+    ) -> list[dict[str, Any]]:
+        """Return every authorized scope member before campaign grouping; never truncate totals."""
+        if embedding_col not in _ALLOWED_EMBEDDING_COLUMNS or not 1 <= limit <= 3:
+            raise ValueError("invalid media search bounds")
+        where = [
+            "d.source_type='other'",
+            "d.metadata->>'corpus'='media_case'",
+            "d.metadata->>'deleted' IS DISTINCT FROM 'true'",
+        ]
+        params: list[Any] = []
+        for key, op in (("posted_from", ">="), ("posted_to", "<=")):
+            if filters.get(key):
+                where.append(f"d.metadata->>'posted_on' {op} %s")
+                params.append(str(filters[key]))
+        if filters.get("accounts"):
+            where.append("d.metadata->>'account_handle'=ANY(%s)")
+            params.append(filters["accounts"])
+        if filters.get("pr_only"):
+            where.append("d.metadata->>'pr_status'='disclosed'")
+        terms = [t for t in re.split(r"\s+", query) if len(t) > 1][:12]
+        patterns = [
+            "%" + t.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
+            for t in terms
+        ]
+        # MATERIALIZED bounds the small corpus before distance sorting (no ANN post-filter loss).
+        sql = f"""
+            WITH candidates AS MATERIALIZED (
+                SELECT d.metadata, c.content, c.{embedding_col} AS embedding
+                FROM documents d JOIN chunks c ON c.document_id=d.id
+                WHERE {" AND ".join(where)} AND c.{embedding_col} IS NOT NULL
+            )
+            SELECT metadata, 1-(embedding <=> %s::vector) AS score
+            FROM candidates
+            ORDER BY (1-(embedding <=> %s::vector)) + 0.05 * (
+                SELECT count(*) FROM unnest(%s::text[]) term
+                WHERE content ILIKE term
+            ) DESC, metadata->>'posted_at' DESC NULLS LAST
+        """  # nosec B608 -- fixed predicates and allowlisted vector column; values are bound.
+        params.extend([embedding, embedding, patterns])
+        with conn.cursor() as cur:
+            cur.execute(sql, params)
+            rows = cur.fetchall()
+        return [{**dict(row["metadata"]), "score": float(row["score"] or 0)} for row in rows]
+
     def search_similar_new_schema(
         self,
         conn: psycopg.Connection[dict[str, Any]],
@@ -564,7 +617,7 @@ class PgVectorClient:
                 f"embedding_col は {sorted(_ALLOWED_EMBEDDING_COLUMNS)} のいずれか "
                 f"(got {embedding_col!r})"
             )
-        where_parts: list[str] = []
+        where_parts: list[str] = ["d.metadata->>'corpus' IS DISTINCT FROM 'media_case'"]
         params: list[Any] = [embedding]  # score 算出の 1st %s
 
         if filter_source_types:
@@ -1629,7 +1682,7 @@ class PgVectorClient:
                 to_char(d.modified_at AT TIME ZONE 'Asia/Tokyo', 'YYYY-MM-DD') AS updated_at
             FROM chunks c
             JOIN documents d ON d.id = c.document_id
-            WHERE {condition}
+            WHERE ({condition}) AND d.metadata->>'corpus' IS DISTINCT FROM 'media_case'
             ORDER BY {order}
         """  # nosec B608 — embedding_col は上の許可リストで縛っている
         if topic is None:

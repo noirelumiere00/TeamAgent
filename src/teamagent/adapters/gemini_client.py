@@ -526,7 +526,12 @@ class GeminiClient:
             )
 
     def analyze_images_bytes(
-        self, images: list[tuple[bytes, str]], prompt: str, request_id: str
+        self,
+        images: list[tuple[bytes, str]],
+        prompt: str,
+        request_id: str,
+        *,
+        max_cost_usd: float | None = None,
     ) -> GeminiResponse:
         """Review a small ordered batch at original resolution, retaining every image."""
         from google.genai import types
@@ -538,16 +543,18 @@ class GeminiClient:
             for data, mime in images
         ):
             raise ValueError("supported nonempty images required")
+        parts = [types.Part.from_bytes(data=data, mime_type=mime) for data, mime in images]
+        parts.append(types.Part(text=prompt))
+        limits: dict[str, Any] = dict(timeout_s=30, max_attempts=2, rate_limit_attempts=2)
+        if max_cost_usd is not None:
+            limits = self._bounded_limits(parts, None, max_cost_usd, images=True)
         return self._generate_video(
-            [types.Part.from_bytes(data=data, mime_type=mime) for data, mime in images]
-            + [types.Part(text=prompt)],
+            parts,
             request_id,
             system=None,
             json_mode=True,
-            timeout_s=30,
-            media_resolution="high",
-            max_attempts=2,
-            rate_limit_attempts=2,
+            media_resolution="high" if self.use_vertex or max_cost_usd is None else None,
+            **limits,
         )
 
     def analyze_audio_bytes(
@@ -615,35 +622,47 @@ class GeminiClient:
         """テキストのみの生成 (複数動画分析の横断まとめ等)。動画 part は含めない。"""
         from google.genai import types
 
-        limits: dict[str, Any] = {}
-        if max_cost_usd is not None:
-            price = _PRICE_TABLE.get(self.model_id)
-            if price is None or not 0 < max_cost_usd <= 0.1:
-                raise ValueError("unsupported bounded generation budget or model")
-            client = self._ensure_client()
-            counted = client.models.count_tokens(
-                model=self.model_id,
-                contents=[types.Content(role="user", parts=[types.Part(text=prompt)])],
-                config=types.CountTokensConfig(
-                    system_instruction=system,
-                    http_options=types.HttpOptions(
-                        timeout=90_000, retry_options=types.HttpRetryOptions(attempts=1)
-                    ),
+        parts = [types.Part(text=prompt)]
+        limits = (
+            self._bounded_limits(parts, system, max_cost_usd) if max_cost_usd is not None else {}
+        )
+        return self._generate_video(parts, request_id, system=system, json_mode=json_mode, **limits)
+
+    def _bounded_limits(
+        self, parts: list[Any], system: str | None, max_cost_usd: float, *, images: bool = False
+    ) -> dict[str, Any]:
+        """Count the actual multimodal input and bound one billable attempt."""
+        from google.genai import types
+
+        price = _PRICE_TABLE.get(self.model_id)
+        if price is None or not 0 < max_cost_usd <= 0.1:
+            raise ValueError("unsupported bounded generation budget or model")
+        counted = self._ensure_client().models.count_tokens(
+            model=self.model_id,
+            contents=[types.Content(role="user", parts=parts)],
+            config=types.CountTokensConfig(
+                system_instruction=system,
+                generation_config=(
+                    types.GenerationConfig(
+                        media_resolution=types.MediaResolution.MEDIA_RESOLUTION_HIGH
+                    )
+                    if images and self.use_vertex
+                    else None
                 ),
-            )
-            tokens = counted.total_tokens
-            if not isinstance(tokens, int) or tokens < 0:
-                raise ValueError("input token count unavailable")
-            # Counted input + thought/output cap bound the single billable attempt.
-            remaining = max_cost_usd - (tokens + 1024) * price[0] / 1_000_000
-            output_limit = min(8192, int(remaining * 1_000_000 / price[1]))
-            if output_limit < 256:
-                raise ValueError("section generation budget exhausted")
-            limits = dict(
-                max_output_tokens=output_limit, max_attempts=1, rate_limit_attempts=1, timeout_s=90
-            )
-        return self._generate_video(
-            [types.Part(text=prompt)], request_id, system=system, json_mode=json_mode, **limits
+                http_options=types.HttpOptions(
+                    timeout=90_000, retry_options=types.HttpRetryOptions(attempts=1)
+                ),
+            ),
+        )
+        tokens = counted.total_tokens
+        if not isinstance(tokens, int) or tokens < 0:
+            raise ValueError("input token count unavailable")
+        remaining = max_cost_usd - (tokens + 1024) * price[0] / 1_000_000
+        output_limit = min(8192, int(remaining * 1_000_000 / price[1]))
+        if output_limit < 256:
+            raise ValueError("section generation budget exhausted")
+        return dict(
+            max_output_tokens=output_limit, max_attempts=1, rate_limit_attempts=1, timeout_s=90
         )
 
     def generate_with_google_search(

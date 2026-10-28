@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import os
 import re
 import threading
 import time
@@ -431,6 +432,7 @@ def recover_pending_notices() -> int:
             "omiyage_report_submit",
             "proposal_builder_submit",
             "video_algorithm",
+            "media_case_search",
         }:
             continue
         target = Origin(entry["channel_id"], entry["thread_ts"], entry["user_id"])
@@ -479,6 +481,10 @@ def start_recovery() -> None:
     def run() -> None:
         while not _recovery_stop.is_set() and enabled():
             try:
+                if os.environ.get("USE_MEDIA_CASE_SEARCH", "").lower() in {"1", "true", "yes"}:
+                    from teamagent.skills.media_case_search.skill import production_skill
+
+                    production_skill().recover()
                 recover_pending_notices()
             except Exception as exc:
                 logger.warning("long_job_recovery_failed", error=type(exc).__name__)
