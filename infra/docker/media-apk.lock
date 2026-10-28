@@ -197,10 +197,10 @@ pcre2-10.49-r0
 pipewire-libs-1.6.6-r0
 pixman-0.46.4-r0
 pkgconf-2.5.1-r0
-pyc-3.14.10-r0
-python3-3.14.10-r0
-python3-pyc-3.14.10-r0
-python3-pycache-pyc0-3.14.10-r0
+pyc-3.14.10-r1
+python3-3.14.10-r1
+python3-pyc-3.14.10-r1
+python3-pycache-pyc0-3.14.10-r1
 rav1e-libs-0.8.1-r0
 readline-8.3.3-r1
 roc-toolkit-libs-0.4.0-r1

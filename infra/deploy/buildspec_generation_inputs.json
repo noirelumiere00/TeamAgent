@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "description": "PR2-A0.3 activation manifest の generation input 束縛。buildspec 世代の content-addressed key へ影響する入力を Generation Baseline 時点の git blob へ固定する。1 つでも変化したら STALE MANIFEST（adopt へ進まず manifest を再生成する）。検証: infra/deploy/verify_generation_inputs.py",
-  "generation_baseline": "2eb1e1ee5a11d7578fda5a09e257664c03175835",
+  "generation_baseline": "1a0967cc4f287a27c8336ff7f91154b4aded47fb",
   "inputs": {
     "infra/codebuild/mcp-source-publisher-buildspec.yml": "9cdb0123e96a8f79a0886d40c29efb4fa30dac15",
     "infra/codebuild/image-attestor-buildspec.yml": "d9b2573bd11f57914941be000b996d2afbc2ea32",
@@ -16,7 +16,7 @@
     "infra/codebuild/tiktok_source_provenance.py": "77e61e9eb2606b295ae5adfe47ea8bde1c1960eb",
     "infra/codebuild/verify_actual_image.sh": "74795d433d3bb9c42e4922b799ccb2f9f7059063",
     "infra/codebuild/teamagent_runtime_contract.json": "f57aa1dd80bfd49ef9dd5166a69e56dbded7c4c8",
-    "infra/codebuild/teamagent_core_media_release_contract.json": "b27a86b3037ba1b05fa1effe77b4513d6892bf49",
+    "infra/codebuild/teamagent_core_media_release_contract.json": "6e9981093eccbe059b6ec00ba66b6a49f40a1ca3",
     "infra/codebuild/tiktok_release_contract.json": "6e65b8e2ff695a89782c8b83647450ce9a4720ad",
     "infra/codebuild/openclaw_bundle_contract.json": "6e466a9f83ef7895b58ad1d6ae6a8bfdd298de58",
     "infra/terraform/codebuild.tf": "eb3589566c44ad089817e1820d7e898784aee785",
@@ -39,9 +39,9 @@
     "evaluated_at": "2026-08-21T07:15:42Z"
   },
   "expected_generation_sha256": {
-    "teamagent-dev-mcp-source-publisher": "625688efa38a2b309696843baad4b941ec488de7e89ba05fa6ec0007a97f2920",
-    "teamagent-dev-image-attestor": "ffa50d0ca69b4e90538d84c46172786450ed87941261c54872b1049491fef84d",
-    "teamagent-dev-image-promoter": "9d503e472feee65caff26d4bb8ae72c82637efcf9d202a6bfc6bfc3702da12ef",
+    "teamagent-dev-mcp-source-publisher": "11818eb59e09e77050ebe3187fc77c0d2be1aeb8af1f9ce52fdbff05613acc72",
+    "teamagent-dev-image-attestor": "be2f5f8bc023f252ae742385fce710ac8819dd1752fd20cfd120ce0d3c0b79a9",
+    "teamagent-dev-image-promoter": "8d295b279e12c101c25cad7adb8b16b6a483b08190a5991cf9b238e4f4f6df35",
     "teamagent-dev-approval-publisher": "33e2a64353969f75e941a9524fcd76919c2dfcc7d192aabb67ecc09c9921ddf4"
   }
 }
