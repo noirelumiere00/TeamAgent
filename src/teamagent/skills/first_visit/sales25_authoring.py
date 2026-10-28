@@ -21,6 +21,11 @@ def _pr(post: Mapping[str, Any]) -> bool:
     )
 
 
+# 25 件の判定は思考 ~2,700＋出力 ~2,500 トークン。
+# 0.05 だと出力上限 ~4,500 で JSON が途中で切れた（10-28 本番）。
+RELEVANCE_MAX_COST_USD = 0.1
+
+
 def judge_query(
     case: Mapping[str, Any],
     query: Mapping[str, Any],
@@ -72,7 +77,7 @@ def judge_query(
             + evidence.decode(),
             f"sales25-relevance-{qid}-{start}",
             json_mode=True,
-            max_cost_usd=0.05,
+            max_cost_usd=RELEVANCE_MAX_COST_USD,
         )
         result = json.loads(response.text)
         if not isinstance(result, dict) or set(result) != {"decisions"}:
