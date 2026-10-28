@@ -1186,7 +1186,7 @@ class MediaJobClient:
         request_fingerprint: str,
         search_type: Literal["keyword", "hashtag"] = "keyword",
         max_videos: int = 100,
-        timeout_s: int = 300,
+        timeout_s: int = 780,
     ) -> dict[str, Any]:
         """Return one lossless search and its acceptance evidence for the owning case."""
 

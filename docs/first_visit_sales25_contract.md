@@ -4,7 +4,7 @@
 
 ## 内部100件検索（PR3）
 
-`MediaJobClient.search_tiktok_sales25(query, *, owner_id, request_fingerprint, search_type="keyword", max_videos=100, timeout_s=300)` は `raw / acquisition_status / artifacts / media_job_id` を返す。本人確認済みの呼出側が渡す `owner_id` を、検証済みのworker rawへ結び付ける。`artifacts` の不変参照・SHAはworkerが保存した元のバイト列に対応し、ownerを結び付けた案件rawはその後のsales25 manifestで封印する。
+`MediaJobClient.search_tiktok_sales25(query, *, owner_id, request_fingerprint, search_type="keyword", max_videos=100, timeout_s=780)` は `raw / acquisition_status / artifacts / media_job_id` を返す。本人確認済みの呼出側が渡す `owner_id` を、検証済みのworker rawへ結び付ける。`artifacts` の不変参照・SHAはworkerが保存した元のバイト列に対応し、ownerを結び付けた案件rawはその後のsales25 manifestで封印する。
 
 内部要求の `edition="sales25"` は1語・最大100件・`metadata_only`・動画0・`sort="display"` に限定する。公開 `tiktok_acquire` と従来の内部検索は上限30。edition未指定の要求JSONには新しいeditionキーを出さない。親ジョブのrollout、同時実行制御、通常お土産経路への接続はPR6で扱う。
 
@@ -18,7 +18,17 @@ workerは次の3成果物を必須で保存し、欠落やupload失敗はジョ�
 
 100件未達は `acquisition_status.status="partial"` と実数で返す。正常なrawのstatusは既存の入力契約に合わせて `ok`、正常0件は `observed_zero` + `TIKTOK_TRULY_EMPTY`。CAPTCHA・CDN拒否・異常API応答は、途中の投稿をrawに保持しても `accepted=false / status="failed"` として採用しない。別セッション・hashtagからkeywordへのfallback・失敗後のworker自動再検索で穴埋めしない。取得日時がない失敗には日時を補完しない。
 
-検索見積もりは30件以下120秒、31〜100件240秒をcore・worker・Lambdaで揃える。100件取得の実時間は未実測。DNS-pinned proxyとredirect制御を維持し、正本キットのengineは収録しない。mediaのJS固定SHAはDockerfile・release契約・連動テストを同時更新する。PR3/4/5統合後の世代再導出まで、変更済みrelease契約によるgeneration inputの不一致を解消しない。
+sales25 の検索実行・受付見積もりは720秒、呼出側の既定期限は780秒（`OMIYAGE_SALES25_SEARCH_SECONDS` は780〜900秒）。edition未指定は30件以下120秒、31〜100件240秒のまま。50/100件取得の実時間は未実測。DNS-pinned proxyとredirect制御を維持し、正本キットのengineは収録しない。mediaのJS固定SHAはDockerfile・release契約・連動テストを同時更新する。PR3/4/5統合後の世代再導出まで、変更済みrelease契約によるgeneration inputの不一致を解消しない。
+
+## 穏やかな取得（sales25 のみ）
+
+検索はジョブ内で常に直列（旧 `OMIYAGE_SALES25_SEARCH_CONCURRENCY=2` も直列へ制限）。最初の検索API応答を処理してから初回スクロールまで20秒、以後10〜14秒待ち、1回につき1画面だけ進む。前の応答処理が終わるまで次へ進まない。下端以外の新規0件は終了判定に数えず、下端で5回新規0件・最大40スクロール・開始から600秒・最大18応答のいずれかで終了する。時間上限は処理境界で確認し、応答処理自体の停止はworkerの720秒期限が担う。
+
+ブラウザ取得終了から次のブラウザ検索まで最低30秒。拒否（captcha / cdn_denied / api_error / no_api_response / refused）を一度でも観測したら、同じ親ジョブ実行の残りはブラウザを起動せず既存Apify予備へ送る。切替状態は実行中のメモリだけに置き、他ジョブと共有・永続化しない。予備が無効・失敗なら未完了として保持する。直接予備へ送った語は `browser_skipped` を記録し、worker子ジョブとしては扱わない。
+
+`diagnostics.scrollCount` と `pageTimings`（検索処理開始からの `elapsedSeconds`・追加件数・成功可否）、`diagnostics.stop_reason` を保存する。上限終了時のrawの `stop_reason` は既存契約の `capped`、具体的な上限は診断に残す。Cookie・トークンは診断へ追加しない。
+
+親期限の既定は10,800→14,400秒。受付・継続通知の目安は35〜45分→45〜60分（ブラウザが断られた後は Apify に切り替わるため AWS では従来並み）、混雑・長尺時は90分以上（暫定）。6語×780秒＋語間150秒でも約81分で、後続分析・QAの余裕を確保する。既存の親期限上書きは引き続き有効。
 
 ## 固定取得物
 

@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import test from "node:test";
+import { runInNewContext } from "node:vm";
 import { parseArgs, normalizeVideo, parseSearchItem, searchOnce, sales25Result } from "./search.mjs";
 
 const fixture = (name) => JSON.parse(readFileSync(new URL(`./fixtures/anonymous-${name}.json`, import.meta.url)));
@@ -11,8 +12,8 @@ const refused = fixture("refused-response");
 const now = new Date("2026-10-23T23:45:00.000Z");
 const cli = (...argv) => parseArgs(["node", "search.mjs", ...argv]);
 
-function browserFixture(initial, { scroll = [], captcha = false, cdn = false, ssr = null } = {}) {
-  const calls = { contexts: 0, navigations: [], scrolls: 0, pageClosed: false, contextClosed: false };
+function browserFixture(initial, { scroll = [], captcha = false, cdn = false, ssr = null, container = false, height = 1000 } = {}) {
+  const calls = { contexts: 0, navigations: [], scrolls: 0, moves: [], waits: [], bodiesProcessed: 0, pageClosed: false, contextClosed: false };
   let responseHandler;
   const emit = (responses) => {
     for (const entry of responses) {
@@ -21,6 +22,7 @@ function browserFixture(initial, { scroll = [], captcha = false, cdn = false, ss
         status: () => entry.httpStatus ?? 200,
         text: async () => {
           if (entry.slow) await new Promise((resolve) => setTimeout(resolve, 5));
+          calls.bodiesProcessed++;
           return typeof entry.body === "string" ? entry.body : JSON.stringify(entry.body ?? entry);
         },
       });
@@ -39,9 +41,20 @@ function browserFixture(initial, { scroll = [], captcha = false, cdn = false, ss
     waitForSelector: async () => {},
     evaluate: async (fn, arg) => {
       const source = fn.toString();
-      if (source.includes("location.href")) return calls.navigations.length > 1 && captcha;
+      if (source.includes("location.href")) return calls.navigations.length > 1 && (typeof captcha === "function" ? captcha(calls) : captcha);
       if (source.includes("Access Denied")) return calls.navigations.length > 1 && cdn;
       if (source.includes("__UNIVERSAL_DATA_FOR_REHYDRATION__")) return ssr;
+      if (source.includes("clientHeight")) {
+        const viewport = container ? 600 : 900;
+        const scroller = { clientHeight: viewport, scrollHeight: height,
+          get scrollTop() { return calls.moves.at(-1) ?? 0; },
+          set scrollTop(value) { calls.moves.push(Math.min(value, height - viewport)); } };
+        const document = { querySelector: () => container ? scroller : null,
+          scrollingElement: container ? {} : scroller };
+        const bottom = runInNewContext(`(${source})()`, { document, window: { innerHeight: 900 } });
+        emit(scroll[calls.scrolls++] ?? []);
+        return bottom;
+      }
       if (typeof arg === "number") emit(scroll[calls.scrolls++] ?? []);
       return null;
     },
@@ -58,7 +71,9 @@ function browserFixture(initial, { scroll = [], captcha = false, cdn = false, ss
 
 async function capture(initial, options = {}, target = 100, edition = "sales25") {
   const { browser, calls } = browserFixture(initial, options);
-  const search = await searchOnce(browser, "anonymous", "keyword", target, { edition, delay: async () => {} });
+  let elapsed = 0;
+  const search = await searchOnce(browser, "anonymous", "keyword", target, { edition, clock: () => elapsed,
+    delay: async (min, max) => { calls.waits.push({ min, max, processed: calls.bodiesProcessed }); elapsed += min; } });
   const envelope = { ok: search.videos.length > 0, query: "anonymous", type: "keyword", count: search.videos.length,
     videos: search.videos, error: null, errorCode: null, diag: { ...search.diag, sessionsRun: 1 } };
   return { result: edition === "sales25" ? sales25Result(envelope, target, now) : envelope, calls };
@@ -201,4 +216,36 @@ test("edition OFF preserves legacy result and diagnostic keys", async () => {
   assert.deepEqual(legacy.videos, fixture("legacy-videos"));
   assert.deepEqual(Object.keys(legacy), ["ok", "query", "type", "count", "videos", "error", "errorCode", "diag"]);
   assert.deepEqual(Object.keys(legacy.diag), ["pagesFetched", "captchaDetected", "gridFound", "ssrCount", "videosFound", "sessionsRun"]);
+});
+
+test("sales25 reads page one, moves one viewport at a time, awaits bodies and stops at page-two CAPTCHA", async () => {
+  for (const container of [false, true]) {
+    const { result, calls } = await capture([{ body: { ...saved, has_more: true }, slow: true }], {
+      container, height: 20000,
+      // Six viewports with no new rows must not stop traversal before the bottom.
+      scroll: [...Array.from({ length: 6 }, () => []), [{ body: "<html>captcha</html>", slow: true }]],
+    }, 50);
+    const viewport = container ? 600 : 900;
+    assert.deepEqual(calls.moves, Array.from({ length: 7 }, (_, i) => (i + 1) * viewport));
+    assert.deepEqual(calls.waits.slice(2), [
+      { min: 20000, max: 20000, processed: 1 },
+      ...Array.from({ length: 6 }, () => ({ min: 10000, max: 14000, processed: 1 })),
+    ]);
+    assert.equal(result.count, 3);
+    assert.equal(result.stop_reason, "captcha");
+    assert.equal(result.diag.scrollCount, 7);
+    assert.deepEqual(result.diag.pageTimings, [
+      { elapsedSeconds: 4, added: 3, accepted: true },
+      { elapsedSeconds: 84, added: 0, accepted: false },
+    ]);
+    assert.equal(result.diagnostics.stop_reason, "captcha");
+    assert(calls.pageClosed && calls.contextClosed);
+  }
+});
+
+test("sales25 bounds scrolling even when no response arrives before the bottom", async () => {
+  const { result, calls } = await capture([{ ...saved, has_more: true }], { height: 1000000 });
+  assert.equal(calls.scrolls, 40);
+  assert.equal(result.stop_reason, "capped");
+  assert.equal(result.diagnostics.stop_reason, "scroll_limit");
 });

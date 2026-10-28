@@ -1093,7 +1093,7 @@ def _tiktok_sales25(
             ],
             workdir=workdir,
             budget=budget,
-            timeout_s=tiktok_search_timeout_seconds(operation.n_per_kw),
+            timeout_s=tiktok_search_timeout_seconds(operation.n_per_kw, edition=operation.edition),
             capture=captured.append,
         )
     except MediaOperationError as exc:

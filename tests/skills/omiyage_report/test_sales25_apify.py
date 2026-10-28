@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import io
 import json
+from datetime import UTC, datetime
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import Mock
 
@@ -16,6 +18,7 @@ from teamagent.adapters.media_job import MediaMarkerExistsError
 from teamagent.adapters.proposal_job_store import ProposalJobStore
 from teamagent.adapters.tiktok_search_fallback import apply_sales25_fallback
 from teamagent.media.contracts import MediaArtifact, MediaJobResult, S3ObjectRef
+from teamagent.skills.omiyage_report import sales25_wire
 from teamagent.skills.omiyage_report.sales25_wire import Wire, production_stages
 from tests.skills.first_visit.sales25_fixture import inputs
 from tests.skills.omiyage_report.test_sales25_wire import (
@@ -57,8 +60,18 @@ class Worker(Transport):
                     status="failed",
                     error_code=code,
                     stop_reason="refused" if code == "TIKTOK_BOT_WALL" else "api_error",
+                    diagnostics={
+                        "pagesFetched": 1,
+                        "scrollCount": 1,
+                        "captchaDetected": code == "TIKTOK_BOT_WALL",
+                    },
                 )
-                status.update(accepted=False, status="failed", stop_reason=raw["stop_reason"])
+                status.update(
+                    accepted=False,
+                    status="failed",
+                    stop_reason=raw["stop_reason"],
+                    diagnostics=raw["diagnostics"],
+                )
                 files.update(
                     {
                         "sales25-raw.json": json.dumps(raw).encode(),
@@ -137,6 +150,7 @@ def apify(monkeypatch: pytest.MonkeyPatch) -> Mock:
 def test_intake_recovers_only_failed_queries_and_renders_provenance(
     apify: Mock, failed: list[int]
 ) -> None:
+    failed = list(range(min(failed), 6))
     client = Worker({n: "TIKTOK_BOT_WALL" if n < 4 else "TIKTOK_API_ERROR" for n in failed})
     store = ProposalJobStore(table_name="", memory={})
     wire = Wire(client, model, store=store)
@@ -172,7 +186,9 @@ def test_intake_recovers_only_failed_queries_and_renders_provenance(
             assert [p["rank_display"] for p in payload["raw"]["videos"]] == list(range(1, 13))
             assert payload["worker_evidence"]["raw"]["status"] == "failed"
             assert payload["raw"]["order_provider"] == "apify_dataset_order"
-    assert len([r for r in client.requests if r.operation.kind == "tiktok_acquire"]) == 6
+    assert (
+        len([r for r in client.requests if r.operation.kind == "tiktok_acquire"]) == min(failed) + 1
+    )
     deck = Presentation(io.BytesIO(client.download(saved.final_pptx_ref)))
     text = "\n".join(
         node.text or ""
@@ -210,6 +226,76 @@ def test_double_failure_remains_incomplete_and_off_never_calls_apify(
     assert saved.final_pptx_ref is None and saved.delivery_status == "not_ready"
     assert apify.tiktok_search.call_count == (6 if enabled else 0)
     assert not any(r.operation.kind == "sales25_pptx" for r in client.requests)
+
+
+def test_page_two_captcha_sends_remaining_queries_directly_to_apify_and_is_job_local(
+    apify: Mock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("OMIYAGE_SALES25_SEARCH_DEPTH", "50")
+    client = Worker({0: "TIKTOK_BOT_WALL"})
+    wire = Wire(client, model, store=ProposalJobStore(table_name="", memory={}))
+    base: dict[str, Any] = {
+        "owner_id": "synthetic",
+        "job_id": "gentle",
+        "started_at": datetime.now(UTC).isoformat(),
+        "_search_session": {},
+    }
+    outcomes = [
+        wire.search({**base, "query": query}, {}, f"gentle:search_{i}")
+        for i, query in enumerate(QUERIES, 1)
+    ]
+    assert all(outcome.status == "partial" and outcome.actual == 12 for outcome in outcomes)
+    assert [r.operation.keywords for r in client.requests] == [(QUERIES[0],)]
+    assert [call.args[0] for call in apify.tiktok_search.call_args_list] == QUERIES
+    assert all(call.kwargs["max_items"] == 50 for call in apify.tiktok_search.call_args_list)
+    first = wire._json(base, outcomes[0].refs[0])["worker_evidence"]
+    assert len(first["raw"]["videos"]) == 12
+    assert first["raw"]["diagnostics"]["pagesFetched"] == 1
+    assert first["raw"]["diagnostics"]["captchaDetected"] is True
+    for outcome in outcomes[1:]:
+        assert outcome.child_job_ids == []
+        skipped = wire._json(base, outcome.refs[0])
+        assert skipped["worker_evidence"]["browser_skipped"] is True
+    wire.search(
+        {**base, "job_id": "other", "query": QUERIES[1], "_search_session": {}},
+        {},
+        "other:search_1",
+    )
+    assert len(client.requests) == 2
+
+
+def test_successful_browser_queries_pause_thirty_seconds_with_fake_time(
+    apify: Mock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    elapsed = [0.0]
+    pauses = []
+
+    def sleep(seconds: float) -> None:
+        pauses.append(seconds)
+        elapsed[0] += seconds
+
+    monkeypatch.setattr(
+        sales25_wire,
+        "time",
+        SimpleNamespace(
+            time=lambda: datetime.now(UTC).timestamp(),
+            monotonic=lambda: elapsed[0],
+            sleep=sleep,
+        ),
+    )
+    client = Worker({})
+    wire = Wire(client, model, store=ProposalJobStore(table_name="", memory={}))
+    base: dict[str, Any] = {
+        "owner_id": "synthetic",
+        "job_id": "gentle",
+        "started_at": datetime.now(UTC).isoformat(),
+        "_search_session": {},
+    }
+    for i, query in enumerate(QUERIES[:2], 1):
+        assert wire.search({**base, "query": query}, {}, f"gentle:search_{i}").actual == 12
+    assert pauses == [30]
+    assert len(client.requests) == 2
+    apify.tiktok_search.assert_not_called()
 
 
 @pytest.mark.parametrize("parent_deadline,maximum", [(35, 35), (300, 50)])

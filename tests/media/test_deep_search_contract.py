@@ -73,6 +73,21 @@ def test_shallow_search_budget_is_unchanged() -> None:
     assert operation.artifact_mode == "metadata_only"
 
 
+def test_sales25_gentle_budget_covers_fifty_results_without_changing_legacy() -> None:
+    assert tiktok_search_timeout_seconds(50, edition="sales25") == 720
+    assert tiktok_search_timeout_seconds(50) == 240
+    assert (
+        estimate_tiktok_operation_seconds(
+            keyword_count=1,
+            n_per_kw=50,
+            videos_per_kw=0,
+            artifact_mode="metadata_only",
+            edition="sales25",
+        )
+        == 720
+    )
+
+
 @pytest.mark.parametrize("count", [31, 100])
 def test_ordinary_search_stays_at_thirty(count: int) -> None:
     with pytest.raises(ValidationError, match="ordinary TikTok"):
