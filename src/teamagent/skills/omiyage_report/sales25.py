@@ -571,7 +571,7 @@ class Parent:
                                 child_job_ids=result.child_job_ids,
                             )
                         elif result.status == "incomplete" or (
-                            result.actual < 100 and result.status == "complete"
+                            result.actual < search_depth() and result.status == "complete"
                         ):
                             result = result.model_copy(update={"status": "partial"})
                     if stage == "machine_check":
@@ -629,7 +629,7 @@ class Parent:
                 "timeout": "時間切れ",
                 "refused": "TikTok に取得を断られた",
                 "incomplete": "未接続・未確認",
-                "partial": "100本目標に未達",
+                "partial": f"{search_depth()}本目標に未達",
                 "zero": "正常0件",
                 "not_connected": "工程が未接続",
                 "shortfall": "必要件数が不足",
