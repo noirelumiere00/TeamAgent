@@ -190,6 +190,16 @@ function stripTrailingOffers(text) {
   return text;
 }
 
+const AICO_USAGE_CANVAS_URL = "https://vector-workspcae.slack.com/docs/T07MU5P2PBR/F0CCGL1SFPW";
+function isAicoUsageQuestion(content) {
+  if (typeof content !== "string") return undefined;
+  const text = content.normalize("NFKC").trim();
+  if (/(?:資料|スライド|提案書).*(?:作って|作成)|検索して|探して|要約して|まとめて/u.test(text)) return false;
+  const usage = /使い方|何が(?:でき|出来)|使い始め|どう使|どう.*始め|slack\s*連携/iu;
+  const subject = /aico|アイコ|slack\s*連携/iu.test(text) || /^(?:使い方|何が(?:でき|出来)|使い始め|どう使)/u.test(text);
+  return subject && usage.test(text) && /教えて|知りたい|[?？]|(?:です|ます|できる|出来る)か/u.test(text);
+}
+
 // 純関数: 本文と変更件数だけ返す。payload の blocks/value/ファイル情報には触れない。
 export function scrubOutboundReplyText(text, replacementConnectUrls = new Set(), toolNamesAreInternal = false) {
   const counts = { signedUrls: 0, toolNames: 0, urlSeparators: 0 };
@@ -3846,6 +3856,7 @@ export function createCallerIdentityPlugin({
         if (ingress.searchRequired) existing.searchRequired = ingress.searchRequired;
         if (ingress.videoAnalysisQuerySlots?.length) existing.videoAnalysisQuerySlots = ingress.videoAnalysisQuerySlots;
         if (existing.requestText === undefined) existing.requestText = ingress.requestText;
+        if (ingress.aicoUsageQuestion !== undefined) existing.aicoUsageQuestion = ingress.aicoUsageQuestion;
         // 再通知でも抑止用台帳を確実に持つ（agent_end 後に ingressByRun 側が消えた後、
         // 同じ受信の再通知が来る順序でも判定が失われないように）。
         rememberConnectIngress(runId, existing);
@@ -3984,6 +3995,7 @@ export function createCallerIdentityPlugin({
       threadTs,
       requestText: SLACK_DM_CHANNEL_RE.test(channelId) || channelId === `DM:${senderId}`
         ? proposalRequestText(event?.content) : undefined,
+      aicoUsageQuestion: isAicoUsageQuestion(event?.content),
       searchAdviceRequested: /打ち手|推奨|おすすめ|ネクストアクション|次の(?:一手|アクション)|戦略|攻め方|改善|アイデア|ヒント|コツ|提案して|案を|考えて|どう(?:攻め|動|提案|進め|すれば|したら)/u.test(event?.content ?? ""),
       searchInsightRequested: /傾向|パターン|共通点|勝ち筋|示唆|戦略|打ち手|攻め方|刺さ|改善|アイデア|ヒント|学び|教訓|コツ|提案して|案を|考えて|なぜ|何が効いた|効いたのは|どう(?:攻め|動|提案|進め|すれば|したら)/u.test(event?.content ?? ""),
       messageId,
@@ -4024,6 +4036,7 @@ export function createCallerIdentityPlugin({
     }
     if (existing?.searchRequired && !ingress.searchRequired) ingress.searchRequired = existing.searchRequired;
     if (ingress.requestText === undefined) ingress.requestText = existing?.requestText;
+    if (ingress.aicoUsageQuestion === undefined) ingress.aicoUsageQuestion = existing?.aicoUsageQuestion;
     if (existing?.videoAnalysisQuerySlots?.length && !ingress.videoAnalysisQuerySlots.length) {
       ingress.videoAnalysisQuerySlots = existing.videoAnalysisQuerySlots;
     }
@@ -7873,6 +7886,10 @@ export function createCallerIdentityPlugin({
           let scrubbed = scrubOutboundReplyText(mediaCaption, replacements);
           if (finalTextOnly && evidence?.driveFirst) {
             scrubbed = {...scrubbed, text: stripDriveFirstInvitation(scrubbed.text)};
+          }
+          if (finalTextOnly && authoritative && connectIngressByRun.get(runId)?.aicoUsageQuestion &&
+              scrubbed.text.trim() && !scrubbed.text.includes(AICO_USAGE_CANVAS_URL)) {
+            scrubbed = {...scrubbed, text: `${scrubbed.text.trimEnd()}\n<${AICO_USAGE_CANVAS_URL}|Aico の使い方>`};
           }
           if (scrubbed.text !== payload.text) {
             const { signedUrls, toolNames, urlSeparators, unverifiedConnectUrls = 0 } = scrubbed.counts;

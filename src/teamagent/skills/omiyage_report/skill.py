@@ -1628,6 +1628,7 @@ class OmiyageReportStatusSkill(BaseSkill[OmiyageReportStatusInput, OmiyageReport
         "omiyage_report_submitが返したjob_id（omy_...）のqueued/running/done/failedを照会する。"
         "doneなら要点3行・次の一手・スレッド添付済みフラグ・検索軸ごとの取得状況を返す。"
         "番号省略時は本人の直近を照会する。実行中は再submitしない。"
+        "「もう一度作って」「作り直して」は照会せずomiyage_report_submitを呼ぶ。"
     )
     input_schema: ClassVar[type[BaseModel]] = OmiyageReportStatusInput
     output_schema: ClassVar[type[BaseModel]] = OmiyageReportStatusOutput

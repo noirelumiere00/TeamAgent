@@ -107,7 +107,7 @@ class Pipeline:
             raise PermissionError("private diagnostics")
         if stage.startswith("search_"):
             assert case["query"] == case["queries"][int(stage.split("_")[1]) - 1]
-            assert case["target"] == 100
+            assert case["target"] == sales25.search_depth()
             return sales25.StepResult(
                 status="incomplete" if self.outcomes.get(stage) == "shortfall" else "complete",
                 reason="shortfall" if self.outcomes.get(stage) == "shortfall" else None,
@@ -740,3 +740,16 @@ def test_completed_stage_with_shortage_remains_partial(
     accepted = build(store, pipeline).run(request(), ctx())
     saved = result(store, accepted.job_id)
     assert saved.status == "partial" and saved.delivery_status == "pending"
+
+
+def test_depth_setting_is_the_target_for_shortfall(monkeypatch: pytest.MonkeyPatch) -> None:
+    # 10-28 本番: 深さ 50 で 6 語とも 50 本取れたのに「100本目標に未達」と出た。
+    monkeypatch.setenv("OMIYAGE_SALES25_SEARCH_DEPTH", "50")
+    store = ProposalJobStore(table_name="", memory={})
+    accepted = build(store, Pipeline(actual=50)).run(request(), ctx())
+    saved = result(store, accepted.job_id)
+    assert saved.status == "ready" and saved.summary_lines == ["6語とも50本目標を取得しました。"]
+    short = ProposalJobStore(table_name="", memory={})
+    accepted = build(short, Pipeline(actual=37)).run(request(), ctx())
+    lines = "\n".join(result(short, accepted.job_id).summary_lines)
+    assert "50本目標→37本取得" in lines and "100本" not in lines
