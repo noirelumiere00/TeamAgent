@@ -39,16 +39,13 @@ def test_search_is_serial_even_with_legacy_parallel_setting_and_prefetches_early
         active = maximum = completed = 0
         mutex = threading.Lock()
         early = threading.Event()
-        first_pair = threading.Barrier(concurrency)
 
         def search(case: Any, previous: Any, key: str) -> sales25.StepResult:
             nonlocal active, maximum, completed
             with mutex:
                 active += 1
                 maximum = max(maximum, active)
-            if key.endswith(("1", "2")):
-                first_pair.wait(timeout=10)
-            if key.endswith("6"):
+            if key.endswith("2"):
                 assert early.wait(10)
             outcome = pipeline.step(case, previous, key)
             with mutex:
@@ -59,7 +56,7 @@ def test_search_is_serial_even_with_legacy_parallel_setting_and_prefetches_early
         def prefetch(case: Any, previous: Any, key: str) -> sales25.StepResult:
             if key.endswith("1"):
                 with mutex:
-                    assert completed < 6
+                    assert completed == 1
                 early.set()
             return sales25.StepResult(status="complete")
 

@@ -259,6 +259,7 @@ jobs:
         with:
           name: pytest-lock-3.14-shard-${{ matrix.shard }}
           path: .ci-results/
+          include-hidden-files: true
           if-no-files-found: error
           retention-days: 7
           overwrite: true # failed-job rerun は同じ shard の古い artifact を置き換える。
