@@ -124,3 +124,20 @@ def test_video_algorithm_mcp_path_reads_prompt_version_env(
     monkeypatch.setenv("VIDEO_ALGO_PROMPT_VERSION", " ")
     skill = spec.instantiate()
     assert isinstance(skill, VideoAlgorithmSkill) and skill._prompt_version == "v2"
+
+
+def test_media_case_search_is_gated_and_reuses_search_adapters(monkeypatch):
+    from types import SimpleNamespace
+
+    import teamagent.skills.media_case_search.skill as module
+
+    search = SimpleNamespace(pgvector=object(), embedder=object())
+    monkeypatch.setattr(factory, "_build_search_skill", lambda: search)
+    monkeypatch.setattr(module, "_production_skill", None)
+    monkeypatch.delenv("USE_MEDIA_CASE_SEARCH", raising=False)
+    assert "media_case_search" not in {s.name for s in factory.build_production_tools()}
+    monkeypatch.setenv("USE_MEDIA_CASE_SEARCH", "1")
+    spec = next(s for s in factory.build_production_tools() if s.name == "media_case_search")
+    skill = spec.instantiate()
+    assert skill.store.pg is search.pgvector and skill.store.embedder is search.embedder
+    assert "CP=キャンペーン" in spec.description

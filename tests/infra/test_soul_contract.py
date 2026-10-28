@@ -1102,3 +1102,27 @@ def test_oauth_usage_question_must_check_current_tool_result(soul: str) -> None:
     assert "聞き返さず `oauth_connect` を呼ぶ" in rule
     assert "連携状態は同じ回のツール結果だけ" in rule
     assert "連携 URL は自分で書かない" in rule
+
+
+def test_media_case_routing_requires_explicit_scope_and_is_conversational(soul: str) -> None:
+    section = soul.split("## 自社トレンドメディアの事例\n", 1)[1].split("\n## ", 1)[0]
+    for phrase in (
+        "CP＝キャンペーン",
+        "枕詞あり→media_case_search のみ",
+        "枕詞なし→search のみ",
+        "「トレンドメディア」「自社メディア」",
+        "media_accounts.csv のhandle（@有無不問、ツール説明に列挙）",
+        "登録handleは枕詞と同扱い",
+        "本節を一般のsearch規則より優先",
+        "2ソース併用しない",
+        "query は枕詞と直後の「での／で／の」を除いた残り",
+        '「トレンドメディア 国内 旅行 CP」→ query="国内 旅行 CP"',
+        "「動画出して」「まとめて」は共に案件単位＋いちばん伸びた1本の投稿リンク",
+        "選択式で聞き返さない",
+        "PR不明をPR確定にせず",
+        "最大3案件＋関連1行",
+    ):
+        assert phrase in section
+    assert "2ソースを使う" not in soul
+    assert "2本目禁止の例外" not in soul
+    assert utf16_units(soul) <= 28_000

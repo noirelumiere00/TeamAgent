@@ -424,7 +424,7 @@ data "aws_iam_policy_document" "mcp_task" {
   # どちらか一方の点灯でも ledger 権限が要る。enable_omiyage_report 単独点灯で本 statement を
   # 落とすと、PROPOSAL_JOBS_TABLE は注入されるのに PutItem が AccessDenied になり submit 全滅。
   dynamic "statement" {
-    for_each = (var.enable_proposal_builder || var.enable_omiyage_report) ? [1] : []
+    for_each = (var.enable_proposal_builder || var.enable_omiyage_report || var.enable_media_case_search) ? [1] : []
     content {
       sid       = "ProposalBuilderJobLedger"
       actions   = ["dynamodb:GetItem", "dynamodb:PutItem", "dynamodb:UpdateItem"]
@@ -889,6 +889,12 @@ resource "aws_ecs_task_definition" "mcp" {
       { name = "PROPOSAL_BUILDER_ACCOUNT_S3_SHA256", value = var.proposal_builder_account_s3_sha256 },
       { name = "PROPOSAL_BUILDER_ACCOUNT_S3_SIZE", value = tostring(var.proposal_builder_account_s3_size) },
       { name = "PROPOSAL_BUILDER_ASSETS_KMS_KEY_ARN", value = var.proposal_builder_assets_kms_key_arn },
+      ] : [], var.enable_media_case_search ? [
+      { name = "USE_MEDIA_CASE_SEARCH", value = "1" },
+      { name = "COST_MEDIA_CASE_GEMINI_MONTHLY_USD", value = var.media_case_gemini_monthly_usd },
+      { name = "COST_MEDIA_CASE_GEMINI_PER_CALL_USD", value = "0.03" },
+      ] : [], (var.enable_media_case_search && !var.enable_omiyage_report && !var.enable_proposal_builder) ? [
+      { name = "PROPOSAL_JOBS_TABLE", value = aws_dynamodb_table.proposal_builder_jobs.name },
       ] : [], var.enable_omiyage_report ? [
       # お土産資料 便1（omiyage_report_submit/status）の点灯。TikTok検索実測と動画DL/フレーム
       # 抽出は media worker 委譲（下の precondition で強制）・解析は Bedrock 視覚推論＝課金あり。
@@ -1010,6 +1016,11 @@ resource "aws_ecs_task_definition" "mcp" {
     precondition {
       condition     = !var.enable_proposal_builder || local.media_enabled == 1
       error_message = "enable_proposal_builder requires the generic media worker for the integrated PPTX renderer."
+    }
+
+    precondition {
+      condition     = !var.enable_media_case_search || (var.enable_x_research && var.enable_scrape_tools && var.tiktok_apify_secret_arn != "")
+      error_message = "media_case_search requires the existing Apify cost ledger/token and Gemini authentication."
     }
 
     precondition {
