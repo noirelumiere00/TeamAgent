@@ -83,7 +83,7 @@ def test_relevance_every_row_aliases_bounded_calls_and_raw_unchanged() -> None:
     assert raw == before
     assert model.generate_text.call_count == 24
     for call in model.generate_text.call_args_list:
-        assert call.kwargs["max_cost_usd"] == 0.05
+        assert call.kwargs["max_cost_usd"] == sales25_authoring.RELEVANCE_MAX_COST_USD
         assert all(alias in call.args[0] for alias in ("コープ", "COOP", "生協"))
     for qid in raw:
         decisions = values[f"selection/decisions_{qid}.json"]
@@ -173,3 +173,24 @@ def test_audio_partial_mutations_do_not_weaken_identity_gate(tmp_path: Path, mut
     (root / "top5-analysis.json").write_bytes(contract.json_bytes(result))
     with pytest.raises(ValueError, match="full-media analysis incomplete"):
         contract.seal_inputs(root, owner_id=OWNER)
+
+
+def test_relevance_budget_leaves_room_for_thinking_and_a_full_batch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # 10-28 本番: 入力 5,485・思考 2,706 で出力が ~1,800 に削られ、25 件の JSON が途中で切れた。
+    from types import SimpleNamespace
+
+    from teamagent.adapters import gemini_client
+
+    client = gemini_client.GeminiClient.__new__(gemini_client.GeminiClient)
+    client.model_id = "gemini-3.5-flash"
+    counted = SimpleNamespace(total_tokens=5485)
+    fake = SimpleNamespace(models=SimpleNamespace(count_tokens=lambda **_: counted))
+    monkeypatch.setattr(client, "_ensure_client", lambda: fake)
+    seen: dict[str, Any] = {}
+    monkeypatch.setattr(client, "_generate_video", lambda *a, **kw: seen.update(kw))
+    client.generate_text(
+        "x", "r", json_mode=True, max_cost_usd=sales25_authoring.RELEVANCE_MAX_COST_USD
+    )
+    assert seen["max_output_tokens"] >= 2706 + 2500

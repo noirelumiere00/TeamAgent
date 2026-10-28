@@ -296,7 +296,7 @@ def _run_completion_notice(
                     return True
         if last_status not in {"done", "failed"} and _monotonic() - started >= _TIMEOUT_SECONDS:
             message = (
-                "sales25の作業はまだ完了していません。通常の目安は約35〜45分（暫定）、混雑・長尺時は約90分以上です。引き続き確認し、結果をこの会話にお届けします。"
+                "お土産資料の作業はまだ完了していません。通常の目安は約45〜60分（暫定）、混雑・長尺時は約90分以上です。引き続き確認し、結果をこの会話にお届けします。"
                 if message.startswith("sales25:") and last_status in {"queued", "running"}
                 else (
                     "作業はまだ完了していません。通常より時間がかかっています。"

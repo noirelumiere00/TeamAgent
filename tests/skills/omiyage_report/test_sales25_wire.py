@@ -103,7 +103,11 @@ class Transport(MediaJobClient):
         self.requests.append(request)
         op = request.operation
         if op.kind == "tiktok_acquire":
-            assert len(op.keywords) == 1 and op.n_per_kw == 100 and op.videos_per_kw == 0
+            assert (
+                len(op.keywords) == 1
+                and op.n_per_kw == sales25.search_depth()
+                and op.videos_per_kw == 0
+            )
             index = [
                 "ブランドA",
                 "ブランドB",
@@ -135,9 +139,9 @@ class Transport(MediaJobClient):
                 query=raw["query"],
                 accepted=accepted,
                 status="partial" if accepted else "failed",
-                target=100,
+                target=op.n_per_kw,
                 actual=12,
-                shortfall=88,
+                shortfall=op.n_per_kw - 12,
                 stop_reason=raw["stop_reason"],
                 diagnostics=raw["diagnostics"],
                 raw_ref="sales25-raw.json",
@@ -307,7 +311,9 @@ def test_real_failure_shapes_keep_all_searches_without_delivery(
     assert saved.checkpoints["search_2"].status == expected
     assert len(saved.checkpoints) == 6
     assert saved.delivery_status == "not_ready" and saved.final_pptx_ref is None
-    assert len([r for r in client.requests if r.operation.kind == "tiktok_acquire"]) == 6
+    assert len([r for r in client.requests if r.operation.kind == "tiktok_acquire"]) == (
+        2 if failure == "refused" else 6
+    )
     assert not any(r.operation.kind == "sales25_pptx" for r in client.requests)
     # Completed companies may already have relevance evidence and early media.
     assert all(

@@ -29,7 +29,7 @@ from tests.skills.omiyage_report.test_sales25_wire import Transport, build, mode
 __all__ = ["flags"]
 
 
-def test_delayed_search_is_faster_bounded_and_pipelines_before_last_query(
+def test_search_is_serial_even_with_legacy_parallel_setting_and_prefetches_early(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     def trial(concurrency: int) -> float:
@@ -67,16 +67,16 @@ def test_delayed_search_is_faster_bounded_and_pipelines_before_last_query(
         duration = time.perf_counter() - started
         saved = result(store, accepted.job_id)
         assert saved.status == "ready" and early.is_set()
-        assert maximum == concurrency
+        assert maximum == 1
         for index in range(1, 7):
             assert saved.checkpoints[f"search_{index}"].refs == [
                 {"raw": f"{accepted.job_id}:search_{index}"}
             ]
         return duration
 
-    # 並行の証明は trial 内の maximum == concurrency。実時間の比は CI の混雑で揺れるので判定に使わない。
+    # The old parallel setting remains accepted, but must never overlap searches.
     elapsed = [trial(concurrency) for concurrency in (1, 2)]
-    print(f"search serial={elapsed[0]:.3f}s parallel={elapsed[1]:.3f}s")
+    print(f"search setting=1: {elapsed[0]:.3f}s setting=2: {elapsed[1]:.3f}s")
 
 
 def test_post_pipeline_overlap_progress_and_restart_cache(monkeypatch: pytest.MonkeyPatch) -> None:

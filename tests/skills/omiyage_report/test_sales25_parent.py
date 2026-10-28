@@ -63,6 +63,16 @@ def request(**updates: Any) -> OmiyageReportSubmitInput:
 
 @pytest.fixture(autouse=True)
 def flags(monkeypatch: pytest.MonkeyPatch) -> None:
+    import time
+    from types import SimpleNamespace
+
+    from teamagent.skills.omiyage_report import sales25_wire
+
+    monkeypatch.setattr(
+        sales25_wire,
+        "time",
+        SimpleNamespace(time=time.time, monotonic=time.monotonic, sleep=lambda _: None),
+    )
     monkeypatch.setenv("USE_OMIYAGE_SALES25", "1")
     monkeypatch.setenv("OMIYAGE_SALES25_ALLOWED_EMAILS", "self@example.test")
     monkeypatch.setenv("USE_LONG_JOB_NOTIFY", "1")
@@ -316,7 +326,7 @@ def test_fake_pipeline_partial_delivers_once_after_terminal_save(
     store = ProposalJobStore(table_name="", memory={})
     pipeline = Pipeline(actual=37, check_changes={"deck_qa_l1": {"review_pages": [3, 7, 21]}})
     accepted = build(store, pipeline).run(request(), ctx())
-    assert "約35〜45分（暫定" in accepted.message
+    assert "約45〜60分（暫定" in accepted.message
     saved = result(store, accepted.job_id)
     assert saved.status == "partial" and len(saved.checkpoints) == 12
     assert saved.final_pptx_ref is not None

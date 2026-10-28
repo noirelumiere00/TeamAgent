@@ -161,7 +161,7 @@ class Wire:
 
     @staticmethod
     def _remaining(case: dict[str, Any]) -> int:
-        duration = _limit("OMIYAGE_SALES25_PARENT_SECONDS", 10800, 300, 86400)
+        duration = _limit("OMIYAGE_SALES25_PARENT_SECONDS", 14400, 300, 86400)
         remaining = int(
             datetime.fromisoformat(case["started_at"]).timestamp() + duration - time.time()
         )
@@ -241,7 +241,7 @@ class Wire:
 
     def _claim_search_slot(self, case: dict[str, Any]) -> tuple[str, str, int]:
         return self._claim_acquisition_slot(
-            case, _limit("OMIYAGE_SALES25_SEARCH_SECONDS", 300, 270, 900)
+            case, _limit("OMIYAGE_SALES25_SEARCH_SECONDS", 780, 780, 900)
         )
 
     def _claim_acquisition_slot(self, case: dict[str, Any], seconds: int) -> tuple[str, str, int]:
@@ -270,21 +270,72 @@ class Wire:
     def search(
         self, case: dict[str, Any], previous: dict[str, StepResult], step_key: str
     ) -> StepResult:
-        slot, lease, timeout = self._claim_search_slot(case)
-        try:
-            result = self.client.search_tiktok_sales25(
-                case["query"],
-                owner_id=case["owner_id"],
-                request_fingerprint=step_key,
-                max_videos=search_depth(),
-                timeout_s=timeout,
-            )
-        except MediaJobError as exc:
-            # A caller timeout does not stop the child; keep its slot until deadline + 60s.
-            if "TIMEOUT" in str(exc) or "DEADLINE_EXCEEDED" in str(exc):
-                return StepResult(status="timeout", reason="timeout")
-            raise
-        self.store.put_dedup_lock(slot, "", expected_target=lease)
+        # The parent shares this object only between the six serial searches of this run.
+        session = case.get("_search_session", {})
+        if session.get("refused"):
+            depth = search_depth()
+            diagnostics = {"browserSkipped": True, "reason": "previous_browser_refused"}
+            result: dict[str, Any] = {
+                "browser_skipped": True,
+                "media_job_id": MediaJobClient._job_id(f"{step_key}:sales25-apify"),
+                "artifacts": [],
+                "raw": {
+                    "owner_id": case["owner_id"],
+                    "query": case["query"],
+                    "videos": [],
+                    "ok": False,
+                    "status": "failed",
+                    "error_code": "TIKTOK_BOT_WALL",
+                    "stop_reason": "refused",
+                    "diagnostics": diagnostics,
+                },
+                "acquisition_status": {
+                    "query": case["query"],
+                    "accepted": False,
+                    "status": "failed",
+                    "target": depth,
+                    "actual": 0,
+                    "shortfall": depth,
+                    "stop_reason": "refused",
+                    "diagnostics": diagnostics,
+                    "raw_ref": "sales25-raw.json",
+                },
+            }
+        else:
+            if "browser_finished" in session:
+                pause = 30 - (time.monotonic() - session["browser_finished"])
+                if pause > 0:
+                    time.sleep(min(pause, self._remaining(case)))
+            slot, lease, timeout = self._claim_search_slot(case)
+            try:
+                result = self.client.search_tiktok_sales25(
+                    case["query"],
+                    owner_id=case["owner_id"],
+                    request_fingerprint=step_key,
+                    max_videos=search_depth(),
+                    timeout_s=timeout,
+                )
+            except MediaJobError as exc:
+                # A caller timeout does not stop the child; keep its slot until deadline + 60s.
+                if "TIMEOUT" in str(exc) or "DEADLINE_EXCEEDED" in str(exc):
+                    return StepResult(status="timeout", reason="timeout")
+                raise
+            finally:
+                session["browser_finished"] = time.monotonic()
+            self.store.put_dedup_lock(slot, "", expected_target=lease)
+            raw = result["raw"]
+            if raw.get("stop_reason") in {
+                "refused",
+                "captcha",
+                "cdn_denied",
+                "api_error",
+                "no_api_response",
+            } or raw.get("error_code") in {
+                "TIKTOK_BOT_WALL",
+                "TIKTOK_CDN_DENIED",
+                "TIKTOK_API_ERROR",
+            }:
+                session["refused"] = True
         result = apply_sales25_fallback(
             result,
             media_client=self.client,
@@ -293,6 +344,7 @@ class Wire:
         )
         ref = self._save_json(case, step_key.split(":")[-1].replace("_", "-") + ".json", result)
         raw, acquisition = result["raw"], result["acquisition_status"]
+        children = [] if result.get("browser_skipped") else [result["media_job_id"]]
         if not acquisition["accepted"]:
             error = str(raw.get("error_code", ""))
             timeout = "TIMEOUT" in error or "DEADLINE_EXCEEDED" in error
@@ -307,7 +359,7 @@ class Wire:
                 status="timeout" if timeout else "refused" if refused else "incomplete",
                 reason="timeout" if timeout else "refused" if refused else None,
                 refs=[ref],
-                child_job_ids=[result["media_job_id"]],
+                child_job_ids=children,
             )
         actual = acquisition["actual"]
         depth = search_depth()
@@ -317,7 +369,7 @@ class Wire:
             actual=actual,
             fetched_at=raw["fetched_at"],
             refs=[ref],
-            child_job_ids=[result["media_job_id"]],
+            child_job_ids=children,
         )
 
     @staticmethod

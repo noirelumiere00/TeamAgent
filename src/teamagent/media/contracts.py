@@ -59,8 +59,10 @@ _TIKTOK_THUMBNAIL_WORST_CASE_SECONDS = 50
 _TIKTOK_VIDEO_WORST_CASE_SECONDS = 120
 
 
-def tiktok_search_timeout_seconds(n_per_kw: int) -> int:
+def tiktok_search_timeout_seconds(n_per_kw: int, *, edition: str | None = None) -> int:
     """1キーワード検索のnode実行上限秒（worker側subprocessとadmission見積りで共用）。"""
+    if edition == "sales25":
+        return 720
     if n_per_kw <= _TIKTOK_DEEP_SEARCH_THRESHOLD_N_PER_KW:
         return _TIKTOK_SEARCH_WORST_CASE_SECONDS
     return _TIKTOK_DEEP_SEARCH_WORST_CASE_SECONDS
@@ -194,8 +196,9 @@ def estimate_tiktok_operation_seconds(
     n_per_kw: int,
     videos_per_kw: int,
     artifact_mode: Literal["metadata_only", "full"],
+    edition: str | None = None,
 ) -> int:
-    search_seconds = keyword_count * tiktok_search_timeout_seconds(n_per_kw)
+    search_seconds = keyword_count * tiktok_search_timeout_seconds(n_per_kw, edition=edition)
     if artifact_mode == "metadata_only":
         return search_seconds
     return search_seconds + keyword_count * (
@@ -260,6 +263,7 @@ class TikTokAcquireOperation(_StrictModel):
             n_per_kw=self.n_per_kw,
             videos_per_kw=self.videos_per_kw,
             artifact_mode=self.artifact_mode,
+            edition=self.edition,
         )
         if estimated_seconds > TIKTOK_OPERATION_EXECUTION_LIMIT_SECONDS:
             raise ValueError(

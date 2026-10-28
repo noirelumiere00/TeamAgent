@@ -416,7 +416,7 @@ def test_media_sources_and_js_lock_are_content_addressed() -> None:
     expected = {
         PACKAGE: "6b7328c05e81a9508371cd5bbf24735d3d21a6d6e43d3e8ba66c47459acebf48",
         PACKAGE_LOCK: "66eb17e9aa0b4293c022887a17934b171da1268a049b5f35273089daff165a28",
-        SCRAPER: "e27f612bbdc799ee6f788fed1fc66d611f5566d264650fbcbe4f02101bfe96d3",
+        SCRAPER: "46e24c03e810eea6b397e32a5fdbab3d9bf3e91df6617f49d9d5c7c2aa1e438f",
         DNS_PINNED_PROXY: ("ccac597a429069074d2b362d6b15ad75c00c23941be97e9ea87503d36fd50e19"),
     }
     for path, digest in expected.items():

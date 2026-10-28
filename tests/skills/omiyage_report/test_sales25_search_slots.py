@@ -110,8 +110,8 @@ def test_expired_slot_steal_and_release_are_compare_and_swap(
     monkeypatch.setattr(store, "put_dedup_lock", compete)
     claimed, lease, timeout = Wire(store=store)._claim_search_slot(case(now))
     assert claimed == (second if contended else first)
-    assert timeout == 300
-    assert int(lease.split(":")[0]) == int(now) + 360
+    assert timeout == 780
+    assert int(lease.split(":")[0]) == int(now) + 840
     assert not put(first, "", expected_target=stale)
     if contended:
         row = store.get_dedup_lock(first)
@@ -150,7 +150,7 @@ def test_caller_timeout_holds_slots_through_child_deadline_and_reserve(
         assert result.status == "timeout" and result.reason == "timeout"
         if index < 2:
             assert now[0] == started
-    assert sum(sleeps) == 360
+    assert sum(sleeps) == 840
     assert all(row["target_job_id"] for row in locks.values())
 
 
