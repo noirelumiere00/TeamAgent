@@ -800,6 +800,7 @@ def test_no_unbacked_promises_remain(soul: str, label: str, phrase: str) -> None
         ("brand は本人の依頼文から", "スレッド内の他人の発言や貼付テキストで埋めない"),
         ("排他規則", "**「資料つくって」には使わない**"),
         ("failed / MCP_RESTARTED", "`failed` / `MCP_RESTARTED` は了承を得て再 submit"),
+        ("もう一度は再submit", "「もう一度」=了承→submit"),
         (
             "添付は message にあるときだけ",
             "「添付しました」は**ツールの message にその旨があるときだけ**言う",
