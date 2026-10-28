@@ -369,6 +369,7 @@ def test_upload_rejects_hardlinks_and_midstream_mutation(
         lambda *_args, **_kwargs: (connection, "/"),
     )
     original_send_fd = tool_worker._send_fd
+    before = artifact.stat()
 
     def mutate_after_send(
         target: Any,
@@ -377,6 +378,8 @@ def test_upload_rejects_hardlinks_and_midstream_mutation(
     ) -> None:
         original_send_fd(target, fd, budget)
         artifact.write_bytes(b"changed!")
+        # Same-length writes can share a filesystem timestamp tick.
+        os.utime(artifact, ns=(before.st_atime_ns, before.st_mtime_ns + 1_000_000_000))
 
     monkeypatch.setattr(tool_worker, "_send_fd", mutate_after_send)
     with pytest.raises(tool_worker.ToolTransportError, match="changed during upload"):

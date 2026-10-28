@@ -1,6 +1,6 @@
 """検索上位チェックの 2 段目と、MCP 返却の絞り込みのテスト（server.dispatch_tool 経由）。
 
-本物の SearchSurfaceCheckSkill と本物の VideoAlgorithmSkill（Gemini・取得だけ偽物）を、本物の
+本物の SearchSurfaceCheckSkill と本物の VideoAlgorithmSkill（Gemini・取得・フレームは偽物）を、本物の
 dispatch_tool・登録簿・post_to_origin に通す。Slack は偽物。確かめること:
 - フラグ OFF / allowlist 外 / DM 以外 / LEGACY は 1 段目が今と同じで、2 段目を登録しない
 - 対象なら 1 段目の文面（レポート行の前）に予告が付き、2 段目が検証済みの DM へ追記される
@@ -38,7 +38,7 @@ from teamagent.skills.search_surface_check.summary import (
     followup_notice_line,
     followup_reused_line,
 )
-from teamagent.skills.video_algorithm import thumbnails
+from teamagent.skills.video_algorithm import frames, thumbnails
 from tests.skills.search_surface_check.fixtures import KEYWORD, NOW, s3_rows
 from tests.skills.search_surface_check.video_fakes import (
     FakeDownloader,
@@ -235,6 +235,8 @@ def usage(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, Any]]:
     ):
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setenv("TEAMAGENT_LOCAL_MEDIA_RUNTIME", "true")
+    # FakeDownloader's bytes are not a video; real ffmpeg only retries to return no frames.
+    monkeypatch.setattr(frames, "extract_frames", lambda *a, **k: [])
     monkeypatch.setattr(thumbnails, "fetch_cover", lambda *a, **k: None)
     monkeypatch.setattr(detached_jobs, "REGISTRY", detached_jobs.DetachedJobRegistry())
     monkeypatch.setattr(surface_video_followup, "CACHE", surface_video_followup.FollowupCache())
@@ -868,7 +870,7 @@ def test_explicit_video_algorithm_starts_before_the_automatic_followup() -> None
 
 
 async def test_followup_is_queued_with_the_automatic_priority(
-    monkeypatch: pytest.MonkeyPatch, slack: _FakeSlack
+    monkeypatch: pytest.MonkeyPatch, slack: _FakeSlack, usage: list[dict[str, Any]]
 ) -> None:
     seen: list[int] = []
     real_start = detached_jobs.DetachedJobRegistry.start
@@ -883,8 +885,8 @@ async def test_followup_is_queued_with_the_automatic_priority(
     skill, _g, _d = _skill(downloader=FakeDownloader(gate=gate))
     await _call(_spec(skill))
     assert seen == [detached_jobs.PRIORITY_AUTO]
-    detached_jobs.REGISTRY.interrupt_all()
     gate.set()
+    await _eventually(lambda: any(u["skill"] == surface_video_followup.USAGE_SKILL for u in usage))
 
 
 # ── 1 通で届ける（SURFACE_VIDEO_ONE_SHOT・10-05 小俣さん裁定）と取得の前の確認 ──────────────

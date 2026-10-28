@@ -80,11 +80,17 @@ def test_heartbeat_failure_terminates_and_waits_for_the_terraform_process_group(
         encoding="utf-8",
     )
 
+    # Fail the heartbeat after the child is recorded, regardless of process startup latency.
+    heartbeat = (
+        "from pathlib import Path; "
+        f"path = Path({str(child_pid_path)!r}); "
+        "raise SystemExit(bool(path.read_text() if path.exists() else ''))"
+    )
     status = SUPERVISOR.run_supervised(
         [sys.executable, str(terraform)],
-        [sys.executable, "-c", "raise SystemExit(1)"],
+        [sys.executable, "-c", heartbeat],
         heartbeat_interval_seconds=0.2,
-        heartbeat_timeout_seconds=1,
+        heartbeat_timeout_seconds=10,
         termination_grace_seconds=1,
     )
 

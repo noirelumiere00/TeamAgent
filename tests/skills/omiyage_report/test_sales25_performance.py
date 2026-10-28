@@ -39,14 +39,17 @@ def test_search_is_serial_even_with_legacy_parallel_setting_and_prefetches_early
         active = maximum = completed = 0
         mutex = threading.Lock()
         early = threading.Event()
+        first_pair = threading.Barrier(concurrency)
 
         def search(case: Any, previous: Any, key: str) -> sales25.StepResult:
             nonlocal active, maximum, completed
             with mutex:
                 active += 1
                 maximum = max(maximum, active)
-            # Different delays force completion to differ from query order.
-            time.sleep(0.08 if key.endswith("1") else 0.06)
+            if key.endswith(("1", "2")):
+                first_pair.wait(timeout=10)
+            if key.endswith("6"):
+                assert early.wait(10)
             outcome = pipeline.step(case, previous, key)
             with mutex:
                 active -= 1
@@ -105,7 +108,6 @@ def test_post_pipeline_overlap_progress_and_restart_cache(monkeypatch: pytest.Mo
         elif index == 2:
             second_acquiring.set()
             assert first_reviewing.wait(5)
-        time.sleep(0.005)
         value = acquire(*args, **kwargs)
         with mutex:
             acquiring -= 1
@@ -119,7 +121,6 @@ def test_post_pipeline_overlap_progress_and_restart_cache(monkeypatch: pytest.Mo
             if acquiring:
                 overlap.set()
             first_reviewing.set()
-        time.sleep(0.02)
         value = batch(*args, **kwargs)
         with mutex:
             reviewing -= 1

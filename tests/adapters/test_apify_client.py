@@ -69,6 +69,19 @@ class _FakeApify:
         return ApifyClient("tok", http=http, poll_interval_s=0.0)
 
 
+@pytest.fixture
+def poll_clock(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Actor startup precedes the deadline; polling consumes its budget deterministically.
+    now = 0.0
+
+    def sleep(seconds: float) -> None:
+        nonlocal now
+        now += seconds
+
+    monkeypatch.setattr("teamagent.adapters.apify_client.time.monotonic", lambda: now)
+    monkeypatch.setattr("teamagent.adapters.apify_client.time.sleep", sleep)
+
+
 def test_required_cost_reservation_blocks_before_actor_start() -> None:
     fake = _FakeApify()
     with pytest.raises(CostLimitExceededError):
@@ -132,6 +145,7 @@ def test_tier_error_surfaces_on_silent_zero() -> None:
         fake.client().run_actor_sync(ACTOR_X_SEARCH, {"query": "x"}, max_items=5, request_id="t")
 
 
+@pytest.mark.usefixtures("poll_clock")
 def test_deadline_aborts_run() -> None:
     fake = _FakeApify()
     fake.final_status = "RUNNING"  # 永遠に終わらない run
@@ -141,7 +155,7 @@ def test_deadline_aborts_run() -> None:
         client.run_actor_sync(
             ACTOR_X_SEARCH, {"query": "x"}, max_items=5, deadline_s=0.001, request_id="t"
         )
-    assert fake.aborted  # 課金停止の abort が呼ばれている
+    assert fake.aborted == [f"/v2/actor-runs/run-{ACTOR_X_SEARCH}/abort"]
 
 
 def test_verify_posts_maps_by_status_id() -> None:
@@ -491,6 +505,7 @@ def test_token_sent_via_header_not_url() -> None:
     assert not any(seen_query_has_token)  # URLクエリにトークンは絶対に載らない
 
 
+@pytest.mark.usefixtures("poll_clock")
 def test_timeout_records_partial_cost_and_no_token_in_error() -> None:
     fake = _FakeApify()
     fake.final_status = "RUNNING"
