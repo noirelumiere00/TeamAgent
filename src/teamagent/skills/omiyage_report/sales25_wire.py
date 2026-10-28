@@ -275,7 +275,7 @@ class Wire:
         if session.get("refused"):
             depth = search_depth()
             diagnostics = {"browserSkipped": True, "reason": "previous_browser_refused"}
-            result = {
+            result: dict[str, Any] = {
                 "browser_skipped": True,
                 "media_job_id": MediaJobClient._job_id(f"{step_key}:sales25-apify"),
                 "artifacts": [],
