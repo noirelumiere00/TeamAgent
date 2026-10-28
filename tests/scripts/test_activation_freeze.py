@@ -208,17 +208,17 @@ def test_unrelated_changes_still_pass(base: str, head: str, reason: str) -> None
 
 
 def test_unlock_matches_the_committed_declaration() -> None:
-    """python3 の上流入替へ追随し、scope と退避した宣言を完全一致で封印する。"""
+    """python3 の上流再ビルドへ追随し、scope と退避した宣言を完全一致で封印する。"""
     unlock = _freeze_doc()["unlock"]
     assert unlock["active"] is True
     assert unlock["scope_paths"] == ["infra/codebuild/teamagent_core_media_release_contract.json"]
     assert (
         unlock["reason"]
-        == "human gate 2026-10-27（小俣さん 10-26『どんどんデプロイ』・お土産資料を今日中に・Alpine 上流で python3 3.14.8-r0 が削除。r79 の空撃ちで検出）"
+        == "human gate 2026-10-27（小俣さん 10-26『どんどんデプロイ』・お土産資料を今日中に・Alpine 上流で python3 3.14.10-r0 が r1 に再ビルド。r79 の空撃ちで検出（2 回目））"
     )
     assert (
         unlock["gate"]
-        == "human gate 2026-10-27（小俣さん 10-26『どんどんデプロイ』・お土産資料を今日中に・Alpine 上流で python3 3.14.8-r0 が削除。r79 の空撃ちで検出）"
+        == "human gate 2026-10-27（小俣さん 10-26『どんどんデプロイ』・お土産資料を今日中に・Alpine 上流で python3 3.14.10-r0 が r1 に再ビルド。r79 の空撃ちで検出（2 回目））"
     )
     assert unlock["previous_scope_20261026_sales25"] == {
         "active": True,
@@ -249,6 +249,12 @@ def test_unlock_matches_the_committed_declaration() -> None:
         "scope_paths": ["infra/codebuild/teamagent_core_media_release_contract.json"],
         "reason": "human gate 2026-10-27（小俣さん 10-26『どんどんデプロイ』『なるべく早く』・Alpine 上流で simdutf 9.3.0-r0 が削除。r76 の空撃ちで検出）",
         "gate": "human gate 2026-10-27（小俣さん 10-26『どんどんデプロイ』『なるべく早く』・Alpine 上流で simdutf 9.3.0-r0 が削除。r76 の空撃ちで検出）",
+    }
+    assert unlock["previous_scope_20261027_python_r1"] == {
+        "active": True,
+        "scope_paths": ["infra/codebuild/teamagent_core_media_release_contract.json"],
+        "reason": "human gate 2026-10-27（小俣さん 10-26『どんどんデプロイ』・お土産資料を今日中に・Alpine 上流で python3 3.14.8-r0 が削除。r79 の空撃ちで検出）",
+        "gate": "human gate 2026-10-27（小俣さん 10-26『どんどんデプロイ』・お土産資料を今日中に・Alpine 上流で python3 3.14.8-r0 が削除。r79 の空撃ちで検出）",
     }
     assert unlock["previous_scope_20261023_gdbm"] == {
         "active": True,

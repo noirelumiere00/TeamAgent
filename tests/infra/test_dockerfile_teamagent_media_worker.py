@@ -54,7 +54,8 @@ UV_DIGEST = "9941e2d8e06ff884d328905091eac0a6bc1e40e5ce12e6dd0de4ef4ee26baac4"
 # 2026-10-26: apk-tools 3.0.6 + aarch64 APKINDEX で再導出（242→241 行、sndio-libs 脱落）。
 # 2026-10-27: fresh aarch64 APKINDEX + apk-tools 3.0.6 で simdutf 9.3.0-r0→9.3.2-r0 のみ再導出（241 行不変）。実物一致は段 3 の cmp。
 # 2026-10-27: Python / pyc 3.14.10-r0 を fresh APKINDEX + apk-tools 3.0.6 で再導出（241→240 行、gdbm 脱落）。
-APK_LOCK_SHA256 = "0d090d5b45f870e56a750900f24ec7822f7401780d49a31d613ccdca283c74a8"
+# 2026-10-27: Python / pyc 3.14.10-r0→r1、署名検証済み APKINDEX + apk-tools 3.0.6 で再導出（240 行不変、ELF SHA 不変）。
+APK_LOCK_SHA256 = "23fa5b5699bf7bc0eea62bcbe4b9a5cda36b77dd0cab6e6c08e0685fb4d9ed39"
 CHROMIUM_PATH = "/usr/lib/chromium/chromium"
 
 
@@ -90,7 +91,7 @@ def test_media_runtime_packages_versions_and_binaries_are_exact() -> None:
         "NODE_PACKAGE_VERSION": "24.22.1-r0",
         "NODE_VERSION": "24.22.1",
         "NODE_BINARY_SHA256": ("f801af10506e5e0afb1913b9c105e1f969c47801b7ecd3ee141b6991b25cd91c"),
-        "PYTHON_PACKAGE_VERSION": "3.14.10-r0",
+        "PYTHON_PACKAGE_VERSION": "3.14.10-r1",
         "PYTHON_VERSION": "3.14.10",
         "PYTHON_BINARY_SHA256": (
             "b776d2d6601ffe3bebbae359a8560a7efd0fe1d80b33b6235035225090a567db"

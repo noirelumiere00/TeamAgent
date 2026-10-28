@@ -377,8 +377,8 @@
     "scope_paths": [
       "infra/codebuild/teamagent_core_media_release_contract.json"
     ],
-    "reason": "human gate 2026-10-27（小俣さん 10-26『どんどんデプロイ』・お土産資料を今日中に・Alpine 上流で python3 3.14.8-r0 が削除。r79 の空撃ちで検出）",
-    "gate": "human gate 2026-10-27（小俣さん 10-26『どんどんデプロイ』・お土産資料を今日中に・Alpine 上流で python3 3.14.8-r0 が削除。r79 の空撃ちで検出）",
+    "reason": "human gate 2026-10-27（小俣さん 10-26『どんどんデプロイ』・お土産資料を今日中に・Alpine 上流で python3 3.14.10-r0 が r1 に再ビルド。r79 の空撃ちで検出（2 回目））",
+    "gate": "human gate 2026-10-27（小俣さん 10-26『どんどんデプロイ』・お土産資料を今日中に・Alpine 上流で python3 3.14.10-r0 が r1 に再ビルド。r79 の空撃ちで検出（2 回目））",
     "folded_2026_08_28": {
       "decision": "裁定③（relock せず相乗り）を打ち切り、本 PR で unlock を畳む。Human Gate ⑤ を 2026-08-28 にユーザーが通した。",
       "why_now": "①本 PR は frozen surface を 1 path も変更していない（assert-frozen-surface --base origin/dev --head HEAD が「frozen surface 無変更（監視対象 21 path）」を返す実測）。∴ この unlock は本 PR には不要。②active のままだと test_unlock_is_inactive_and_empty_by_default が落ち、CI が 1 failed / 7,474 passed で恒常的に赤になる（3.11 / 3.13 / 3.14 すべてで実測）。本物の失敗と見分けがつかなくなる。③裁定③の rationale「いま relock すると同じ宣言を立て直す往復が発生する」は成立しない。retention_ruling_2026_08_27.landmine_partial_scope のとおり、相乗り PR は scope_paths を自分の変更集合へ絞り込まねばならず、**どのみち書き直しが必須**だから。",
@@ -589,6 +589,14 @@
       ],
       "reason": "human gate 2026-10-27（小俣さん 10-26『どんどんデプロイ』『なるべく早く』・Alpine 上流で simdutf 9.3.0-r0 が削除。r76 の空撃ちで検出）",
       "gate": "human gate 2026-10-27（小俣さん 10-26『どんどんデプロイ』『なるべく早く』・Alpine 上流で simdutf 9.3.0-r0 が削除。r76 の空撃ちで検出）"
+    },
+    "previous_scope_20261027_python_r1": {
+      "active": true,
+      "scope_paths": [
+        "infra/codebuild/teamagent_core_media_release_contract.json"
+      ],
+      "reason": "human gate 2026-10-27（小俣さん 10-26『どんどんデプロイ』・お土産資料を今日中に・Alpine 上流で python3 3.14.8-r0 が削除。r79 の空撃ちで検出）",
+      "gate": "human gate 2026-10-27（小俣さん 10-26『どんどんデプロイ』・お土産資料を今日中に・Alpine 上流で python3 3.14.8-r0 が削除。r79 の空撃ちで検出）"
     }
   },
   "production_deployment_freeze": {

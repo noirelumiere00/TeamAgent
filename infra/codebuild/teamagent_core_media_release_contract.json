@@ -174,7 +174,7 @@
       "source_assertions": [
         {
           "key": "artifact.apk-lock.sha256",
-          "value": "0d090d5b45f870e56a750900f24ec7822f7401780d49a31d613ccdca283c74a8",
+          "value": "23fa5b5699bf7bc0eea62bcbe4b9a5cda36b77dd0cab6e6c08e0685fb4d9ed39",
           "build_arg": "MEDIA_APK_LOCK_SHA256",
           "oci_label": "io.teamagent.contract.apk-lock-sha256",
           "dockerfile_uses": [
@@ -486,7 +486,7 @@
         },
         {
           "key": "package.python.version",
-          "value": "3.14.10-r0",
+          "value": "3.14.10-r1",
           "build_arg": "PYTHON_PACKAGE_VERSION",
           "oci_label": "io.teamagent.contract.python-package-version",
           "dockerfile_uses": [
