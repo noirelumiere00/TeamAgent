@@ -300,8 +300,11 @@ function normalizeVideo(v, edition) {
   return normalized;
 }
 
-async function searchOnce(browser, query, type, maxVideos, { edition, delay = humanDelay } = {}) {
+async function searchOnce(browser, query, type, maxVideos, { edition, delay = humanDelay, clock = Date.now } = {}) {
   const sales25 = edition === "sales25";
+  const startedAt = clock();
+  let scrollCount = 0;
+  const pageTimings = [];
   const isTag = type === "hashtag";
   const context = await browser.createBrowserContext();
   const page = await context.newPage();
@@ -321,7 +324,7 @@ async function searchOnce(browser, query, type, maxVideos, { edition, delay = hu
   const refused = () => captchaDetected || cdnDenied || apiInvalidResponses > 0 || apiNonZeroStatus.length > 0 || apiHttpErrors.length > 0;
   const makeDiag = () => ({
     pagesFetched, captchaDetected, gridFound, ssrCount, videosFound: allVideos.length,
-    ...(sales25 ? { cdnDenied, apiNonZeroStatus, apiHttpErrors, apiInvalidResponses, stop_reason: stopReason } : {}),
+    ...(sales25 ? { cdnDenied, apiNonZeroStatus, apiHttpErrors, apiInvalidResponses, scrollCount, pageTimings, stop_reason: stopReason } : {}),
   });
   const checkWalls = async () => {
     captchaDetected = (await detectBotWall(page)) || captchaDetected;
@@ -331,11 +334,16 @@ async function searchOnce(browser, query, type, maxVideos, { edition, delay = hu
         const body = (document.body?.innerText || "").slice(0, 2000);
         return /Access Denied|^\s*(403 Forbidden|Forbidden)\s*$/i.test(title) || /You don't have permission to access/i.test(body);
       })) || cdnDenied;
+      await drainResponses();
     }
   };
 
   const MAX_PAGES = 18;
   const MAX_SCROLL = 20;
+  const drainResponses = async () => {
+    let pending;
+    do { pending = responses; await pending; } while (pending !== responses);
+  };
 
   try {
     await page.setViewport({ width: 1280, height: 900 });
@@ -360,6 +368,8 @@ async function searchOnce(browser, query, type, maxVideos, { edition, delay = hu
       const isChallenge = isTag && url.includes("/api/challenge/item_list/");
       if (!isSearch && !isChallenge) return;
       if (sales25 && !isCanonicalTikTokUrl(url)) return;
+      const before = allVideos.length;
+      let accepted = false;
       try {
         if (sales25 && (resp.status() < 200 || resp.status() >= 300)) {
           apiHttpErrors.push(resp.status());
@@ -396,9 +406,13 @@ async function searchOnce(browser, query, type, maxVideos, { edition, delay = hu
           if (v && !allVideos.find((e) => e.id === v.id)) { allVideos.push(v); added++; }
         }
         pagesFetched++;
+        accepted = true;
         latestHasMore = json.has_more === true || json.has_more === 1 || json.hasMore === true || (sales25 && json.hasMore === 1);
         log(`API page ${pagesFetched}: +${added} (total ${allVideos.length}) has_more=${latestHasMore}`);
       } catch { if (sales25) apiInvalidResponses++; }
+      finally {
+        if (sales25) pageTimings.push({ elapsedSeconds: (clock() - startedAt) / 1000, added: allVideos.length - before, accepted });
+      }
     };
     const responseHandler = (resp) => {
       if (sales25 && !searchStarted) return;
@@ -439,10 +453,11 @@ async function searchOnce(browser, query, type, maxVideos, { edition, delay = hu
       gridFound = true;
     } catch { log("grid selector timeout, continue with SSR/scroll"); }
     // captcha/verify を能動検出 (0件の原因を推測でなく実検知で切り分け)
-    await responses;
+    if (sales25) await drainResponses();
+    else await responses;
     await checkWalls();
     if (captchaDetected) log("CAPTCHA/verify page detected (bot wall)");
-    await delay(3000, 4500);
+    if (!sales25) await delay(3000, 4500);
 
     // SSR フォールバック (傍受で 0 件のとき埋め込み JSON から)
     if (allVideos.length === 0 && (!sales25 || !refused())) {
@@ -473,12 +488,47 @@ async function searchOnce(browser, query, type, maxVideos, { edition, delay = hu
     // ページネーション (スクロールで内部 API を誘発)
     let noNew = 0;
     let hasMoreFalseRetries = 0;
-    for (let s = 0; s < MAX_SCROLL; s++) {
-      if (sales25) {
-        await responses;
+    if (sales25) {
+      let lastCount = allVideos.length;
+      let atBottom = false;
+      stopReason = "scroll_limit";
+      for (let s = 0; s < 40; s++) {
+        await drainResponses();
         await checkWalls();
-        if (refused()) break;
+        if (refused()) { stopReason = "refused"; break; }
+        if (!pagesFetched) { stopReason = "no_api_response"; break; }
+        if (allVideos.length >= maxVideos) { stopReason = "capped"; break; }
+        if (!latestHasMore) { stopReason = "exhausted"; break; }
+        if (pagesFetched >= MAX_PAGES) { stopReason = "page_limit"; break; }
+        if (clock() - startedAt >= 600000) { stopReason = "time_limit"; break; }
+        // Read the first page, then leave at least 10 seconds between viewport moves.
+        await delay(s === 0 ? 20000 : 10000, s === 0 ? 20000 : 14000);
+        await drainResponses();
+        await checkWalls();
+        if (refused()) { stopReason = "refused"; break; }
+        if (allVideos.length >= maxVideos) { stopReason = "capped"; break; }
+        if (!latestHasMore) { stopReason = "exhausted"; break; }
+        if (pagesFetched >= MAX_PAGES) { stopReason = "page_limit"; break; }
+        if (clock() - startedAt >= 600000) { stopReason = "time_limit"; break; }
+        // Count an empty bottom only after allowing its asynchronous API response to arrive.
+        if (s > 0) noNew = allVideos.length > lastCount || !atBottom ? 0 : noNew + 1;
+        if (noNew >= 5) { stopReason = "no_new"; break; }
+        lastCount = allVideos.length;
+        atBottom = await page.evaluate(() => {
+          const grid = document.querySelector("#grid-main");
+          const c = grid && grid.clientHeight > 0 && grid.scrollHeight > grid.clientHeight
+            ? grid : document.scrollingElement;
+          if (!c) return true;
+          const height = c === document.scrollingElement ? window.innerHeight : c.clientHeight;
+          c.scrollTop += height;
+          return c.scrollTop + height >= c.scrollHeight - 1;
+        });
+        scrollCount++;
+        await drainResponses();
+        await checkWalls();
+        if (refused()) { stopReason = "refused"; break; }
       }
+    } else for (let s = 0; s < MAX_SCROLL; s++) {
       if (allVideos.length >= maxVideos) { log(`reached target ${allVideos.length}/${maxVideos}`); break; }
       if (pagesFetched >= MAX_PAGES) break;
       if (!latestHasMore && pagesFetched > 0) {
@@ -497,7 +547,6 @@ async function searchOnce(browser, query, type, maxVideos, { edition, delay = hu
         window.scrollTo(0, Math.max(document.body.scrollHeight, (idx + 1) * 3000));
       }, s);
       await delay(3000, 4500);
-      if (sales25) await responses;
       if (allVideos.length > prev) { noNew = 0; hasMoreFalseRetries = 0; }
       else { noNew++; if (noNew >= 5) { stopReason = "no_new"; log("no new data x5, stop"); break; } if (noNew >= 2) await delay(2000, 3000); }
     }
@@ -505,7 +554,7 @@ async function searchOnce(browser, query, type, maxVideos, { edition, delay = hu
     if (sales25) {
       await checkWalls();
       page.off("response", responseHandler);
-      await responses;
+      await drainResponses();
     }
     return { videos: allVideos.slice(0, maxVideos), diag: makeDiag() };
   } catch (error) {
@@ -543,6 +592,7 @@ function sales25Result(result, target, now = new Date()) {
     stopReason = "incomplete_empty";
   }
   const accepted = errorCode === null;
+  if (accepted && ["scroll_limit", "page_limit", "time_limit"].includes(stopReason)) stopReason = "capped";
   const videos = result.videos.map((video, index) => ({ ...video, rank_display: index + 1 }));
   if (accepted && !videos.length) errorCode = "TIKTOK_TRULY_EMPTY";
   return {
@@ -562,7 +612,7 @@ function sales25Result(result, target, now = new Date()) {
     stop_reason: stopReason,
     status: accepted ? (videos.length ? "ok" : "observed_zero") : "failed",
     error_code: errorCode,
-    diagnostics,
+    diagnostics: { ...diagnostics, stop_reason: accepted ? (diagnostics.stop_reason || stopReason) : stopReason },
     acquisition_status: {
       accepted,
       status: accepted ? (videos.length < target ? "partial" : "complete") : "failed",

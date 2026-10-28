@@ -76,7 +76,7 @@ def _client(
 
     def run_sync(request: MediaJobRequest, **kwargs: Any) -> tuple[Any, Any]:
         sent.append(request)
-        assert kwargs["timeout_s"] == 300
+        assert kwargs["timeout_s"] == 780
         assert "capture_result" in kwargs
         return artifacts, {}
 
@@ -96,7 +96,7 @@ def test_sales25_returns_lossless_evidence_once_and_binds_trusted_owner(
     assert len(sent) == 1
     assert sent[0].operation.model_dump(mode="json")["edition"] == "sales25"
     assert sent[0].operation.model_dump(mode="json")["n_per_kw"] == 100
-    assert sent[0].deadline_epoch_s == 1_300
+    assert sent[0].deadline_epoch_s == 1_780
     expected = json.loads(artifacts["sales25-raw.json"])
     expected["owner_id"] = "owner-anonymous"
     assert result["raw"] == expected

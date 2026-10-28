@@ -62,14 +62,15 @@ def search_depth() -> int:
 
 
 def search_concurrency() -> int:
-    value = int(os.getenv("OMIYAGE_SALES25_SEARCH_CONCURRENCY", "2"))
+    value = int(os.getenv("OMIYAGE_SALES25_SEARCH_CONCURRENCY", "1"))
     if not 1 <= value <= 2:
         raise ValueError("sales25 search concurrency outside 1..2")
-    return value
+    # Existing deployments may still set 2; sales25 searches now always run serially.
+    return 1
 
 
 def time_estimate() -> str:
-    return "標準設定の目安は約35〜45分（暫定、混雑・長尺時は約90分以上）です。"
+    return "標準設定の目安は約45〜60分（暫定、混雑・長尺時は約90分以上）です。"
 
 
 def enabled(metadata: Mapping[str, Any]) -> bool:
@@ -460,6 +461,7 @@ class Parent:
                     current = updated
                 return saved
 
+        search_session: dict[str, Any] = {}
         searches: dict[str, Future[StepResult]] = {}
         prefetches: list[Future[StepResult]] = []
         search_pool = ThreadPoolExecutor(max_workers=search_workers)
@@ -533,6 +535,7 @@ class Parent:
                     "owner_id": summary["owner"],
                     "job_id": job_id,
                     "started_at": row["created_at"],
+                    "_search_session": search_session,
                 }
                 if stage == "search":
                     case["query"] = case["queries"][int(key.split("_")[1]) - 1]

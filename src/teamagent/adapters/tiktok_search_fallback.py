@@ -132,8 +132,9 @@ def apply_sales25_fallback(
     if not apify_fallback_enabled():
         return original
     out = copy.deepcopy(original)
-    out["acquired_via"] = out["raw"]["acquired_via"] = "worker"
-    out["acquisition_status"]["acquired_via"] = "worker"
+    source = "browser_skipped" if original.get("browser_skipped") else "worker"
+    out["acquired_via"] = out["raw"]["acquired_via"] = source
+    out["acquisition_status"]["acquired_via"] = source
     raw, status = original["raw"], original["acquisition_status"]
     if (
         status["actual"] != 0

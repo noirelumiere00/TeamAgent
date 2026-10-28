@@ -84,7 +84,7 @@ def _browser(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, payload: Any) -> l
 
     def process(command: list[str], **kwargs: Any) -> subprocess.CompletedProcess[bytes]:
         commands.append(command)
-        assert kwargs["timeout_s"] == 240
+        assert kwargs["timeout_s"] == 720
         body = payload if isinstance(payload, bytes) else json.dumps(payload).encode()
         return subprocess.CompletedProcess(command, 0, body, b"")
 
