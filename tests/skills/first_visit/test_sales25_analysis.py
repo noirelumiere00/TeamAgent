@@ -7,6 +7,7 @@ import io
 import json
 import stat
 import zipfile
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock
@@ -579,3 +580,42 @@ def test_large_images_are_split_without_dropping_frames(
     assert len(result["timeline"]) == 3
     assert len(model.analyze_images_bytes.call_args.args[0]) == 2
     model.analyze_image_bytes.assert_called_once()
+
+
+@pytest.mark.parametrize("shape", ["fenced", "one_item_list"])
+def test_single_image_answer_tolerates_fence_and_one_item_list(run: Path, shape: str) -> None:
+    # 10-29 本番: 画像 1 枚の判定が JSON の object でなく、資料全体が「JSON object required」で止まった。
+    post = analysis.selected_posts(run, OWNER)[0]
+    manifest, files = analysis.validate_media(analysis.media_operation(post), package(post))
+    model = fake_model()
+    point = json.loads(model.analyze_image_bytes.return_value.text)
+    text = json.dumps(point if shape == "fenced" else [point], ensure_ascii=False)
+    if shape == "fenced":
+        text = "```json\n" + text + "\n```"
+    model.analyze_image_bytes.return_value = replace(reply(point), text=text)
+    review = analysis._review(run, post, manifest, files, model)
+    assert review["evidence"]["product"]["photo_index"] == 1
+
+
+@pytest.mark.parametrize("broken_every_time", [False, True])
+def test_malformed_image_answer_is_reasked_under_a_new_id(
+    run: Path, broken_every_time: bool
+) -> None:
+    # 答えは request id でキャッシュされるので、同じ id では同じ壊れた答えが返る（本番の失敗の形）。
+    post = analysis.selected_posts(run, OWNER)[0]
+    manifest, files = analysis.validate_media(analysis.media_operation(post), package(post))
+    model = fake_model()
+    good = model.analyze_image_bytes.return_value
+
+    def cached(body: bytes, mime: str, prompt: str, request_id: str) -> GeminiResponse:
+        if broken_every_time or not request_id.endswith("-again"):
+            return replace(good, text='["not", "an", "object"]')
+        return good
+
+    model.analyze_image_bytes.side_effect = cached
+    if broken_every_time:
+        with pytest.raises(ValueError, match="JSON object required"):
+            analysis._review(run, post, manifest, files, model)
+    else:
+        analysis._review(run, post, manifest, files, model)
+        assert any(c.args[3].endswith("-again") for c in model.analyze_image_bytes.call_args_list)
