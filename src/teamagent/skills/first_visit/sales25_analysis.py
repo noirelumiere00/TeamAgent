@@ -15,7 +15,7 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 
 from teamagent.adapters.gemini_client import GeminiClient, GeminiResponse
-from teamagent.media.contracts import Sales25MediaOperation
+from teamagent.media.contracts import SALES25_MAX_DURATION_SECONDS, Sales25MediaOperation
 from teamagent.skills.first_visit import sales25_contract as contract
 
 MAX_BUNDLE = 128 * 1024 * 1024
@@ -191,6 +191,17 @@ def media_operation(post: Mapping[str, Any]) -> Sales25MediaOperation:
     )
 
 
+def media_exclusion_reason(post: Mapping[str, Any]) -> str | None:
+    duration: Any = post.get("duration")
+    if (
+        post.get("mediaType") == "video"
+        and _number(duration)
+        and duration > SALES25_MAX_DURATION_SECONDS
+    ):
+        return "動画は確認対象外（長尺）"
+    return None
+
+
 def validate_media(
     operation: Sales25MediaOperation, artifacts: Mapping[str, bytes]
 ) -> tuple[dict[str, Any], dict[str, bytes]]:
@@ -318,7 +329,8 @@ def validate_media(
             or (duration > 3 and len(frames) < 3)
             or (
                 operation.expected_duration_sec is not None
-                and abs(duration - operation.expected_duration_sec) > 0.5
+                and abs(duration - operation.expected_duration_sec)
+                > (1.0 if operation.expected_duration_sec.is_integer() else 0.5)
             )
         ):
             raise ValueError("media duration/count mismatch")
@@ -668,8 +680,24 @@ def _slides(root: Path, posts: dict[str, Any], model: GeminiClient) -> list[dict
         selection = next(
             q for q in plan["analysis_selection"]["queries"] if q["query"] == slide["query"]
         )
-        allowed = selection["rankings"][slide["role"]]
+        ranked = selection["rankings"][slide["role"]]
+        allowed = [pid for pid in ranked if pid in posts]
         if not allowed:
+            if ranked:
+                slides.append(
+                    {
+                        "page": page,
+                        "elements": [
+                            {
+                                "text": "媒体不足のため動画内容は未確認。",
+                                "observation": "媒体不足のため動画内容は未確認。",
+                                "interpretation": "未確認のため解釈できません。",
+                                "proposal": "動画を確認してから検討してください。",
+                                "refs": [{"post_id": ranked[0], "evidence": "opening"}],
+                            }
+                        ],
+                    }
+                )
             continue
         observations = {pid: posts[pid]["evidence"] for pid in allowed}
         response = model.generate_text(
@@ -726,9 +754,15 @@ def analyze_selection(
     concurrency: int = 1,
     batch_size: int = 1,
     review_cache: Callable[[dict[str, Any], dict[str, Any]], dict[str, Any] | None] | None = None,
+    media_missing: Mapping[str, str] | None = None,
 ) -> dict[str, Any]:
     """Run only by explicit invocation. Same-ID reuse is confined to this verified owner/run."""
     selected = selected_posts(root, owner_id)
+    missing = {
+        post["id"]: {"url": post["url"], "reason": reason}
+        for post in selected
+        if (reason := (media_missing or {}).get(post["id"]) or media_exclusion_reason(post))
+    }
     output = contract.local_path(root, "top5-analysis.json")
     if output.exists():
         raise ValueError("analysis output already exists")
@@ -761,13 +795,14 @@ def analyze_selection(
         )
 
     with ThreadPoolExecutor(max_workers=concurrency) as pool:
-        posts = dict(pool.map(review, selected))
+        posts = dict(pool.map(review, [p for p in selected if p["id"] not in missing]))
     result = {
         "version": 1,
         "posts": posts,
+        "media_missing": missing,
         "slides": _slides(root, posts, approved),
         "status": "complete"
-        if all(p["status"] == "complete" for p in posts.values())
+        if not missing and all(p["status"] == "complete" for p in posts.values())
         else "unmeasured",
     }
     with output.open("xb") as stream:

@@ -122,6 +122,9 @@ class Transport(MediaJobClient):
             raw.update(
                 ok=True, query=op.keywords[0], videos=raw["videos"][:12], stop_reason="exhausted"
             )
+            if self.failure == "media_partial" and index == 0:
+                raw["videos"][0].update(mediaType="video", duration=200)
+                raw["videos"][0]["url"] = raw["videos"][0]["url"].replace("/photo/", "/video/")
             accepted = not (self.failure in {"refused", "worker_timeout", "failed"} and index == 1)
             if not accepted:
                 raw.update(
@@ -151,6 +154,12 @@ class Transport(MediaJobClient):
                 "acquisition-status.json": contract.json_bytes(status),
             }
         elif op.kind == "sales25_media":
+            if self.failure == "media_partial" and op.post_id in {"9000000002", "9000000003"}:
+                raise MediaJobError(
+                    "MEDIA_SALES25_DURATION_MISMATCH"
+                    if op.post_id == "9000000002"
+                    else "MEDIA_SALES25_ACQUIRE_FAILED"
+                )
             files = photos({"id": op.post_id, "url": op.url})
         elif op.kind == "sales25_pptx":
             with tempfile.TemporaryDirectory() as work:
@@ -213,6 +222,82 @@ def model() -> Any:
 
     approved.generate_text.side_effect = generate
     return approved
+
+
+def test_post_media_failures_deliver_partial_deck_with_missing_pr_and_top(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = ProposalJobStore(table_name="", memory={})
+    client = Transport("media_partial")
+    wire = Wire(client, model, store=store)
+    accepted = build(store, sales25_stages=production_stages(wire)).run(request(), ctx())
+    saved = result(store, accepted.job_id)
+    assert saved.status == "partial" and saved.delivery_status == "pending", saved.model_dump_json(
+        indent=2
+    )
+    assert "一部の数字が足りません" in saved.message
+    assert saved.checkpoints["media"].status == "partial"
+    assert saved.checkpoints["media"].reason == "media_missing"
+    assert saved.checkpoints["media"].actual == 27
+    assert saved.checkpoints["media"].total == 30
+    assert saved.checkpoints["analysis"].reason == "media_missing"
+    checks = saved.checkpoints["machine_check"].checks
+    assert checks is not None and checks.check_top5_analysis.reason == "media_missing"
+    acquired = [r.operation.post_id for r in client.requests if r.operation.kind == "sales25_media"]
+    assert "9000000001" not in acquired
+    assert len(acquired) == len(set(acquired)) == 29
+    assert saved.final_pptx_ref is not None
+    deck = client.objects[saved.final_pptx_ref.key, saved.final_pptx_ref.version_id]
+    assert len(Presentation(io.BytesIO(deck)).slides) == 25
+    with zipfile.ZipFile(io.BytesIO(deck)) as archive:
+        text = archive.read("ppt/slides/slide23.xml").decode()
+        assert "動画は確認対象外（長尺）" in text
+    media_ref = S3ObjectRef.model_validate(saved.checkpoints["media"].refs[0]["object"])
+    media = json.loads(client.download(media_ref))["data"]
+    assert len([r for r in media.values() if "media_missing" in r]) == 3
+    slack = FakeSlack(store, accepted.job_id)
+    parent = sales25.Parent(
+        store, reader=lambda ref: client.objects[ref.key, ref.version_id], slack=slack
+    )
+    context = ctx()
+    output = OmiyageReportStatusSkill(store=store, sales25_parent=parent).run(
+        OmiyageReportStatusInput(job_id=accepted.job_id), context
+    )
+    monkeypatch.setattr(notify, "ProposalJobStore", lambda: store)
+    assert notify.publish_notice(
+        output.message,
+        origin=context.metadata[ORIGIN_KEY],
+        request_id="missing-media",
+        job_id=accepted.job_id,
+    )
+    assert slack.uploads[0]["data"] == deck
+    assert "媒体不足" in slack.uploads[0]["initial_comment"]
+    assert result(store, accepted.job_id).delivery_status == "delivered"
+
+
+def test_all_media_unavailable_keeps_numbers_without_inventing_observations() -> None:
+    class UnavailableTransport(Transport):
+        def run_sync(self, request: Any, **kwargs: Any) -> tuple[dict[str, bytes], dict[str, Any]]:
+            if request.operation.kind == "sales25_media":
+                raise MediaJobError("MEDIA_SALES25_ACQUIRE_FAILED")
+            return super().run_sync(request, **kwargs)
+
+    store = ProposalJobStore(table_name="", memory={})
+    client = UnavailableTransport()
+    accepted = build(store, sales25_stages=production_stages(Wire(client, model, store=store))).run(
+        request(), ctx()
+    )
+    saved = result(store, accepted.job_id)
+    assert saved.status == "partial" and saved.delivery_status == "pending", saved.model_dump_json(
+        indent=2
+    )
+    assert saved.checkpoints["media"].actual == 0
+    assert saved.checkpoints["analysis"].actual == 0
+    analysis_ref = S3ObjectRef.model_validate(saved.checkpoints["analysis"].refs[0]["object"])
+    with zipfile.ZipFile(io.BytesIO(client.download(analysis_ref))) as archive:
+        reviews = json.loads(archive.read("top5-analysis.json"))
+        assert reviews["posts"] == {} and len(reviews["media_missing"]) == 30
+        assert all("未確認" in slide["elements"][0]["observation"] for slide in reviews["slides"])
 
 
 @pytest.mark.parametrize("omakase_request", [False, True])

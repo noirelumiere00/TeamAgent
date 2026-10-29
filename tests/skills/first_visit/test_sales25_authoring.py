@@ -175,6 +175,47 @@ def test_audio_partial_mutations_do_not_weaken_identity_gate(tmp_path: Path, mut
         contract.seal_inputs(root, owner_id=OWNER)
 
 
+@pytest.mark.parametrize("mutation", ["url", "review_overlap", "undisclosed_image", "forged_plan"])
+def test_media_missing_cannot_hide_wrong_identity_or_undisclosed_gaps(
+    tmp_path: Path,
+    mutation: str,
+) -> None:
+    case, raw = case_inputs(6)
+    root = tmp_path / "run"
+    model = relevance_model()
+    contract.write_inputs(
+        root, sales25_authoring.prepare_inputs(case, raw, owner_id=OWNER, model=model)
+    )
+    pid = "9000000001"
+    result = sales25_analysis.analyze_selection(
+        root,
+        owner_id=OWNER,
+        model=model,
+        acquire=real_images,
+        media_missing={pid: "動画は確認対象外（長尺）"},
+    )
+    sales25_authoring.build_manuscript(root, owner_id=OWNER)
+    contract.validate_inputs(root, owner_id=OWNER)
+    if mutation == "url":
+        result["media_missing"][pid]["url"] += "wrong"
+    elif mutation == "review_overlap":
+        result["media_missing"]["9000000002"] = {
+            "url": result["posts"]["9000000002"]["url"],
+            "reason": "媒体不足",
+        }
+    elif mutation == "undisclosed_image":
+        data = contract.read_json(root / "deck-input.json")
+        data["images"]["p04_image_01"]["unavailable_reason"] = "別の理由"
+        (root / "deck-input.json").write_bytes(contract.json_bytes(data))
+    else:
+        plan = contract.read_json(root / "deck-plan.json")
+        plan["slides"][3]["media_missing"]["9000000002"] = "媒体不足"
+        (root / "deck-plan.json").write_bytes(contract.json_bytes(plan))
+    (root / "top5-analysis.json").write_bytes(contract.json_bytes(result))
+    with pytest.raises(ValueError, match=r"media_missing|must be disclosed"):
+        contract.seal_inputs(root, owner_id=OWNER)
+
+
 def test_relevance_budget_leaves_room_for_thinking_and_a_full_batch(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

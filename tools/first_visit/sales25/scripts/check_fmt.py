@@ -72,6 +72,11 @@ def validate_plan(plan):
             elif len(ids) != len(set(ids)):
                 errors.append(f"plan slide {n}: duplicate post_ids")
         if role in TOP:
+            missing = slide.get("media_missing", {})
+            if (not isinstance(missing, dict) or not isinstance(slide.get("post_ids"), list)
+                    or any(pid not in slide["post_ids"] or not isinstance(reason, str) or not reason.strip()
+                           for pid, reason in missing.items())):
+                errors.append(f"plan slide {n}: media_missing must name selected posts with explicit reasons")
             count = slide.get("expected_image_count")
             if type(count) is not int or not (count == 0 if unavailable else 1 <= count <= 5):
                 errors.append(f"plan slide {n}: expected_image_count must be 0 for unavailable TOP, otherwise 1..5")
@@ -208,7 +213,11 @@ def check(pptx, plan, template=False):
                     continue
                 off, ext = transform.find("a:off", NS), transform.find("a:ext", NS)
                 pictures.append(tuple(int(e.get(k)) for e, k in [(off, "x"), (off, "y"), (ext, "cx"), (ext, "cy")]))
-            expected = declared["expected_image_count"]
+            missing = declared.get("media_missing", {})
+            for reason in missing.values():
+                if reason not in text:
+                    errors.append(f"slide {n}: missing media reason is absent from slide")
+            expected = declared["expected_image_count"] - len(missing)
             if len(pictures) != expected:
                 message = f"slide {n}: embedded image count {len(pictures)}, expected {expected}"
                 (unchecked if template and len(pictures) < expected else errors).append(message)

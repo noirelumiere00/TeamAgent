@@ -300,6 +300,14 @@ def build_manuscript(root: Path, *, owner_id: str) -> None:
                 f"{p['id']} {p['url']} 関連判定: {p['reason']}" for p in rows
             )
         role = slide["role"]
+        if role in contract.TOP:
+            missing = {
+                pid: reviews["media_missing"][pid]["reason"]
+                for pid in slide["post_ids"]
+                if pid in reviews.get("media_missing", {})
+            }
+            if missing:
+                slide["media_missing"] = missing
         if role == "overall_summary":
             texts["t001"] = (
                 "各語100本目標。取得範囲の関連投稿を比較（市場全体の推計ではありません）。"
@@ -335,7 +343,9 @@ def build_manuscript(root: Path, *, owner_id: str) -> None:
                 else:
                     images[slot["key"]] = {
                         "url": post["url"],
-                        "unavailable_reason": "実媒体分析の対象外",
+                        "unavailable_reason": reviews.get("media_missing", {})
+                        .get(post["id"], {})
+                        .get("reason", "実媒体分析の対象外"),
                     }
                 if _pr(post) and "pr_badge_bbox" in slot:
                     images[slot["key"]]["pr_confirmed"] = True
@@ -403,7 +413,9 @@ def build_manuscript(root: Path, *, owner_id: str) -> None:
                     raise ValueError("analysis text exceeds pinned slide fields")
                 summaries = [e["text"] for e in elements]
                 summaries += [
-                    elements[0]["proposal"] if elements else slide["unavailable_reason"]
+                    elements[0]["proposal"]
+                    if elements
+                    else slide.get("unavailable_reason", "媒体不足")
                 ] * (len(prose) - len(summaries))
                 put(prose, summaries)
         elif role == "neutral_comparison":
@@ -421,22 +433,34 @@ def build_manuscript(root: Path, *, owner_id: str) -> None:
             put(numbered, values)
         elif role == "pr_analysis":
             example = next(e for e in plan["pr_examples"] if e["page"] == page)
-            review = reviews["posts"][example["post_id"]]
-            opened = review["visual"]["opened_files"]
-            if len(set(opened)) < 3:
+            review = reviews["posts"].get(example["post_id"])
+            missing = reviews.get("media_missing", {}).get(example["post_id"])
+            opened = review["visual"]["opened_files"] if review else []
+            if review and len(set(opened)) < 3:
                 raise ValueError("PR requires three distinct reviewed source images")
-            for slot, path in zip(
-                slots, [opened[0], opened[len(opened) // 2], opened[-1]], strict=True
-            ):
-                images[slot["key"]] = {"path": path, "url": review["url"]}
-            points = [review["evidence"][name] for name in ("opening", "product", "ending")]
-            observation = "\n".join(p["observation"] for p in points)
-            proposal = points[1]["proposal"]
+            if review:
+                for slot, path in zip(
+                    slots, [opened[0], opened[len(opened) // 2], opened[-1]], strict=True
+                ):
+                    images[slot["key"]] = {"path": path, "url": review["url"]}
+                points = [review["evidence"][name] for name in ("opening", "product", "ending")]
+                observation = "\n".join(p["observation"] for p in points)
+                proposal = points[1]["proposal"]
+            elif missing:
+                for slot in slots:
+                    images[slot["key"]] = {
+                        "url": missing["url"],
+                        "unavailable_reason": missing["reason"],
+                    }
+                observation = missing["reason"]
+                proposal = "動画を確認してから検討してください。"
+            else:
+                raise ValueError("PR review or media_missing required")
             texts[f"pr_title_{page - 20}"] = next(
                 q["group"] for q in queries if q["query_id"] == example["query_id"]
             )
             texts[f"pr_meta_{page - 20}"] = "#PR / 広告表記確認｜原音" + (
-                "未確認" if review["audio"]["status"] == "unmeasured" else "確認済み"
+                "未確認" if not review or review["audio"]["status"] == "unmeasured" else "確認済み"
             )
             put(
                 prose,
@@ -450,7 +474,7 @@ def build_manuscript(root: Path, *, owner_id: str) -> None:
                 example[kind] = value
         elif role == "approach":
             proposals = list(reviews["posts"].values())[:2]
-            if len(proposals) < 2:
+            if len(proposals) < 2 and not reviews.get("media_missing"):
                 raise ValueError("two observed examples required for proposals")
             columns = []
             for review in proposals:
@@ -466,6 +490,8 @@ def build_manuscript(root: Path, *, owner_id: str) -> None:
                         "再生数・反応率・保存数",
                     ]
                 )
+            while len(columns) < 2:
+                columns.append(["媒体不足のため未確認"] * 7)
             put(prose, [columns[column][row] for row in range(7) for column in range(2)])
         elif role == "methods":
             routes = [
@@ -510,7 +536,9 @@ def build_manuscript(root: Path, *, owner_id: str) -> None:
                     "関連投稿の判明した再生数の合計。欠損はゼロに置換しない。",
                     "（いいね＋コメント＋シェア＋保存）÷再生数×100。欠損・再生ゼロは除外。",
                     "取得メタデータの isAd=true または #PR。広告費・効果は未確認。",
-                    "ブランド3語の各指標TOP10和集合＋PR3事例。原音未確認は未計測として区別。",
+                    "ブランド3語の各指標TOP10和集合＋PR3事例。媒体不足・長尺は内容未確認。"
+                    if reviews.get("media_missing")
+                    else "ブランド3語の各指標TOP10和集合＋PR3事例。原音未確認は未計測として区別。",
                 ],
             )
     required = {f["key"] for f in fields if f["kind"] == "text"}

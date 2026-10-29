@@ -230,11 +230,11 @@
         },
         {
           "key": "artifact.sales25-kit-lock.sha256",
-          "value": "03ea4a29ef59b16e325dcd2d07710a9511c55dd08cf4b17f96dfa3eeef2047ca",
+          "value": "9b27c72411f5dc8b95c24c3e34661fa345a335e5caabd161f06d0099e900de01",
           "build_arg": "SALES25_KIT_LOCK_SHA256",
           "oci_label": "io.teamagent.contract.sales25-kit-lock-sha256",
           "dockerfile_uses": [
-            "test \"$SALES25_KIT_LOCK_SHA256\" = \"03ea4a29ef59b16e325dcd2d07710a9511c55dd08cf4b17f96dfa3eeef2047ca\"",
+            "test \"$SALES25_KIT_LOCK_SHA256\" = \"9b27c72411f5dc8b95c24c3e34661fa345a335e5caabd161f06d0099e900de01\"",
             "printf '%s  %s\\n' \"$SALES25_KIT_LOCK_SHA256\" /app/tools/first_visit/sales25.lock.json | sha256sum -c -",
             "from teamagent.skills.first_visit.sales25_contract import verify_bundle; verify_bundle()"
           ]

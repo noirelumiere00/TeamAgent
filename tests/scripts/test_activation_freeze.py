@@ -208,17 +208,17 @@ def test_unrelated_changes_still_pass(base: str, head: str, reason: str) -> None
 
 
 def test_unlock_matches_the_committed_declaration() -> None:
-    """nodejs の上流再ビルドへ追随し、scope と退避した宣言を完全一致で封印する。"""
+    """sales25 キット pin へ追随し、scope と退避した宣言を完全一致で封印する。"""
     unlock = _freeze_doc()["unlock"]
     assert unlock["active"] is True
     assert unlock["scope_paths"] == ["infra/codebuild/teamagent_core_media_release_contract.json"]
     assert (
         unlock["reason"]
-        == "human gate 2026-10-29（小俣さん 10-29『できるだけ早く』・Alpine 上流で nodejs の再ビルド。r82 の段 3 で検出）"
+        == "human gate 2026-10-29（小俣さん 10-29『できるだけ早く』・sales25 の動画長の許容と媒体不足の partial）"
     )
     assert (
         unlock["gate"]
-        == "human gate 2026-10-29（小俣さん 10-29『できるだけ早く』・Alpine 上流で nodejs の再ビルド。r82 の段 3 で検出）"
+        == "human gate 2026-10-29（小俣さん 10-29『できるだけ早く』・sales25 の動画長の許容と媒体不足の partial）"
     )
     assert unlock["previous_scope_20261026_sales25"] == {
         "active": True,
@@ -267,6 +267,12 @@ def test_unlock_matches_the_committed_declaration() -> None:
         "scope_paths": ["infra/codebuild/teamagent_core_media_release_contract.json"],
         "reason": "human gate 2026-10-28（小俣さん 10-28『ゆっくり確実に取得』・TikTok 検索の穏やかな取得 #725 で search.mjs の SHA が変わる）",
         "gate": "human gate 2026-10-28（小俣さん 10-28『ゆっくり確実に取得』・TikTok 検索の穏やかな取得 #725 で search.mjs の SHA が変わる）",
+    }
+    assert unlock["previous_scope_20261029_s25dur"] == {
+        "active": True,
+        "scope_paths": ["infra/codebuild/teamagent_core_media_release_contract.json"],
+        "reason": "human gate 2026-10-29（小俣さん 10-29『できるだけ早く』・Alpine 上流で nodejs の再ビルド。r82 の段 3 で検出）",
+        "gate": "human gate 2026-10-29（小俣さん 10-29『できるだけ早く』・Alpine 上流で nodejs の再ビルド。r82 の段 3 で検出）",
     }
     assert unlock["previous_scope_20261023_gdbm"] == {
         "active": True,
