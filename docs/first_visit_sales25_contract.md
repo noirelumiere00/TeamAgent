@@ -30,6 +30,16 @@ sales25 の検索実行・受付見積もりは720秒、呼出側の既定期限
 
 親期限の既定は10,800→14,400秒。受付・継続通知の目安は35〜45分→45〜60分（ブラウザが断られた後は Apify に切り替わるため AWS では従来並み）、混雑・長尺時は90分以上（暫定）。6語×780秒＋語間150秒でも約81分で、後続分析・QAの余裕を確保する。既存の親期限上書きは引き続き有効。
 
+### Apify の途中終了（2026-10-29）
+
+Actor が `SUCCEEDED` でも目標未達なら `accepted=true / status=partial`、`actual=取得行数 / shortfall=target-actual` を保持する。raw の `requested=target / actual=取得行数` は整数で整合している必要があり、正の実数が目標以下なら入力契約で受け入れる。URL、表示順位、欠測、owner、全IDの関連判定などの検証は維持する。Actor 完了を表す既存の `stop_reason=exhausted / stop_reason_basis=apify_actor_completed` は、検索結果を全件取得できた証明ではない。
+
+目標未達かつ Apify 予算・親期限内に時間が残る場合は、同じ語を1回だけ再取得する。既存の `tiktok_search` が追加run分も費用予約・精算する。2回の行は結合せず、多く取れた単一runの表示順を採用し、両runの根拠を `apify_attempts` に保持する。再取得が失敗・予算不足・期限切れでも先の有効なpartialを破棄しない。試行マーカーと保存済み結果により再開時の追加課金を防ぐ。最終配送は既存の「一部の数字が足りません」を使う。
+
+r81相当の偽物（6語中5語50件、3語目は221秒・`SUCCEEDED / Scraped 0/1 search queries / 13件`）で関連判定・PPTX生成・偽DM配送を検証する。再取得50件では検索3のcheckpointは `complete`。固定キットの100件基準は維持するため、資料全体のQAでは引き続きpartialになり得る。
+
+調査上の限界: 修正前のsrcでも `_evidence → _source → judge_query → prepare_inputs` は13/50の偽物を受け入れた。件数不足だけから本番の `ValueError` は再現できず、原因は未特定。元raw・モデル応答または例外メッセージが必要。prefetch警告とstageの未完了化には、例外型に加えてURL・トークン等を伏せたメッセージ先頭200字を記録する。
+
 ## 固定取得物
 
 `tools/first_visit/sales25.lock.json` と `sales25/` を組にする。正本 `tiktok-sales-research-kit` の commit `f8c98b4a5555479e28fee71a4195eaf38feeec09`、version `1.2.4`、format `sales25` から、4資産と5スクリプトをバイト変更せず同梱した。
