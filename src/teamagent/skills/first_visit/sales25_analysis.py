@@ -398,10 +398,35 @@ def _usage(response: GeminiResponse) -> dict[str, Any]:
     }
 
 
+def _model_json(text: str) -> dict[str, Any]:
+    """Parse a model answer; tolerate a ```json fence or a one-object list (10-29 本番)."""
+    body = text.strip()
+    if body.startswith("```"):
+        body = body.split("\n", 1)[1] if "\n" in body else ""
+        body = body.rsplit("```", 1)[0].strip()
+    if body.startswith("["):
+        wrapped = json.loads(body)
+        if isinstance(wrapped, list) and len(wrapped) == 1 and isinstance(wrapped[0], dict):
+            body = json.dumps(wrapped[0], ensure_ascii=False)
+    return _json(body)
+
+
 def _response(response: GeminiResponse, keys: set[str]) -> dict[str, Any]:
-    result = _json(response.text)
+    result = _model_json(response.text)
     _keys(result, keys)
     return result
+
+
+def _ask_again(ask: Callable[[str], Any], request_id: str, read: Callable[[Any], Any]) -> Any:
+    """Answers are cached by request id, so a malformed one is re-asked under a new id once."""
+    for attempt in range(2):
+        response = ask(request_id + ("-again" if attempt else ""))
+        try:
+            return response, read(response)
+        except ValueError:
+            if attempt:
+                raise
+    raise AssertionError("unreachable")
 
 
 def _review(
@@ -450,38 +475,53 @@ def _review(
             batch = batch[:-1]
         if len(batch) == 1:
             asset = batch[0]
-            response = model.analyze_image_bytes(
-                files[asset["path"]],
-                _image_mime(files[asset["path"]]),
-                prompt
-                + "Return a JSON object. "
-                + json.dumps({"sec": asset["timestamp_sec"], "photo_index": asset["photo_index"]}),
-                f"sales25-{pid}-{start}",
+
+            def ask_one(request_id: str, asset: dict[str, Any] = asset) -> GeminiResponse:
+                return model.analyze_image_bytes(
+                    files[asset["path"]],
+                    _image_mime(files[asset["path"]]),
+                    prompt
+                    + "Return a JSON object. "
+                    + json.dumps(
+                        {"sec": asset["timestamp_sec"], "photo_index": asset["photo_index"]}
+                    ),
+                    request_id,
+                )
+
+            response, point = _ask_again(
+                ask_one, f"sales25-{pid}-{start}", lambda answer: _model_json(answer.text)
             )
-            points = [_json(response.text)]
+            points = [point]
         else:
-            response = model.analyze_images_bytes(
-                [(files[a["path"]], _image_mime(files[a["path"]])) for a in batch],
-                prompt + 'Return JSON {"observations": [objects with index and all fields]}. '
-                "Return exactly one object per image in input order, index starts at 0. "
-                + json.dumps(
-                    [
-                        {"index": i, "sec": a["timestamp_sec"], "photo_index": a["photo_index"]}
-                        for i, a in enumerate(batch)
-                    ]
-                ),
-                f"sales25-{pid}-batch-{start}",
-            )
-            points = _response(response, {"observations"})["observations"]
-            if not isinstance(points, list) or len(points) != len(batch):
-                raise ValueError("image batch must cover every input")
-            for index, point in enumerate(points):
-                if (
-                    not isinstance(point, dict)
-                    or type(point.get("index")) is not int
-                    or point.pop("index") != index
-                ):
-                    raise ValueError("image batch order mismatch")
+
+            def read_batch(answer: Any, batch: list[dict[str, Any]] = batch) -> list[Any]:
+                points = _response(answer, {"observations"})["observations"]
+                if not isinstance(points, list) or len(points) != len(batch):
+                    raise ValueError("image batch must cover every input")
+                for index, point in enumerate(points):
+                    if (
+                        not isinstance(point, dict)
+                        or type(point.get("index")) is not int
+                        or point.pop("index") != index
+                    ):
+                        raise ValueError("image batch order mismatch")
+                return points
+
+            def ask_batch(request_id: str, batch: list[dict[str, Any]] = batch) -> GeminiResponse:
+                return model.analyze_images_bytes(
+                    [(files[a["path"]], _image_mime(files[a["path"]])) for a in batch],
+                    prompt + 'Return JSON {"observations": [objects with index and all fields]}. '
+                    "Return exactly one object per image in input order, index starts at 0. "
+                    + json.dumps(
+                        [
+                            {"index": i, "sec": a["timestamp_sec"], "photo_index": a["photo_index"]}
+                            for i, a in enumerate(batch)
+                        ]
+                    ),
+                    request_id,
+                )
+
+            response, points = _ask_again(ask_batch, f"sales25-{pid}-batch-{start}", read_batch)
         observations.extend((a, point, response) for a, point in zip(batch, points, strict=True))
         start += len(batch)
     for asset, point, response in observations:
