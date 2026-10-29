@@ -18,7 +18,7 @@ from importlib.resources import files
 from typing import Any, ClassVar
 
 import structlog
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 
 from teamagent.adapters.apify_client import ApifyClient, ApifyRunResult
 from teamagent.adapters.apify_media_cases import ApifyCaseAssets
@@ -29,15 +29,27 @@ from teamagent.adapters.pgvector_client import PgVectorClient
 from teamagent.adapters.proposal_job_store import ProposalJobStore
 from teamagent.identity import shared_company_domains_from_env
 from teamagent.ingest.media_cases import MediaCaseStore
+from teamagent.observability import redact_secrets_and_pii
 from teamagent.skills._shared.long_jobs import _OWNER_KEY, enabled, origin
 from teamagent.skills.base import BaseSkill, SkillContext, register
 from teamagent.skills.media_case_search.campaigns import render_hits
-from teamagent.skills.media_case_search.distill import CaseDistiller, normalize_post
+from teamagent.skills.media_case_search.distill import CaseDistiller, clean_text, normalize_post
 from teamagent.skills.media_case_search.schema import MediaCaseInput, MediaCaseOutput
 
 logger = structlog.get_logger(__name__)
 _LOCK_ID = "dedup_media_case_ingest"
 _TERMINAL = {"SUCCEEDED", "FAILED", "TIMED-OUT", "ABORTED"}
+
+
+def _post_error_message(exc: Exception) -> str:
+    message = str(exc)
+    if isinstance(exc, ValidationError):
+        # Pydantic's default string also echoes untrusted input, including personal names.
+        message = "; ".join(
+            f"{'.'.join(map(str, error['loc']))}: {error['msg']}"
+            for error in exc.errors(include_input=False, include_context=False, include_url=False)
+        )
+    return clean_text(redact_secrets_and_pii(message))[:200]
 
 
 @dataclass
@@ -643,7 +655,10 @@ class MediaCaseSearchSkill(BaseSkill[MediaCaseInput, MediaCaseOutput]):
                         if isinstance(exc, CostLimitExceededError):
                             budget_error = exc
                         logger.warning(
-                            "media_case_post_failed", error=type(exc).__name__, job_id=job_id
+                            "media_case_post_failed",
+                            error=type(exc).__name__,
+                            job_id=job_id,
+                            error_message=_post_error_message(exc),
                         )
                     finally:
                         if progress:

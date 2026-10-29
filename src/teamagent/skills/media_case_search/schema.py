@@ -3,9 +3,18 @@
 from __future__ import annotations
 
 from datetime import date
-from typing import Literal
+from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    ModelWrapValidatorHandler,
+    PrivateAttr,
+    ValidationInfo,
+    field_validator,
+    model_validator,
+)
 
 
 class MediaCaseInput(BaseModel):
@@ -27,15 +36,56 @@ class MediaCaseInput(BaseModel):
         return self
 
 
-class Evidence(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+class ExtractionModel(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    @model_validator(mode="before")
+    @classmethod
+    def normalize(cls, value: Any, info: ValidationInfo) -> Any:
+        if not isinstance(value, dict):
+            return value
+        value = dict(value)
+        for name, field in cls.model_fields.items():
+            if value.get(name) is None and not field.is_required():
+                value.pop(name, None)
+            text = value.get(name)
+            for constraint in field.metadata:
+                limit = getattr(constraint, "max_length", None)
+                if isinstance(text, str) and limit is not None and len(text) > limit:
+                    value[name] = text[:limit]
+                    if info.context is not None:
+                        info.context.setdefault("truncated_fields", []).append(name)
+                        info.context.setdefault("truncated_texts", []).append(text)
+        return value
+
+
+class Evidence(ExtractionModel):
     source: Literal["caption", "hashtag", "thumbnail", "subtitle", "slide"]
     excerpt: str = Field(min_length=1, max_length=200)
     image_index: int | None = Field(default=None, ge=0, le=10)
+    _original_excerpt: str = PrivateAttr(default="")
+
+    @model_validator(mode="wrap")
+    @classmethod
+    def preserve_excerpt(cls, value: Any, handler: ModelWrapValidatorHandler[Evidence]) -> Evidence:
+        parsed = handler(value)
+        # Check the entire quote before truncation, including any invented suffix.
+        if isinstance(value, dict):
+            parsed._original_excerpt = value.get("excerpt", "")
+        return parsed
+
+    @field_validator("source", mode="before")
+    @classmethod
+    def normalize_source(cls, value: Any) -> Any:
+        if isinstance(value, str):
+            value = value.strip().lower()
+            return {"hashtags": "hashtag", "subtitles": "subtitle", "cover": "thumbnail"}.get(
+                value, value
+            )
+        return value
 
 
-class CaseItem(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+class CaseItem(ExtractionModel):
     brand: str | None = Field(default=None, max_length=100)
     product: str | None = Field(default=None, max_length=100)
     campaign: str | None = Field(default=None, max_length=100)
@@ -50,12 +100,54 @@ class CaseItem(BaseModel):
         ]
     ] = Field(default_factory=list, max_length=6)
     geography: Literal["domestic", "overseas", "mixed", "unknown"] = "unknown"
-    summary: str = Field(max_length=200)
+    summary: str = Field(default="", max_length=200)
     evidence: list[Evidence] = Field(default_factory=list, max_length=8)
 
+    @field_validator("geography", mode="before")
+    @classmethod
+    def normalize_geography(cls, value: Any) -> Any:
+        if isinstance(value, str):
+            value = value.strip().lower()
+            return {"国内": "domestic", "海外": "overseas", "不明": "unknown"}.get(value, value)
+        return value
 
-class Distillation(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    @field_validator("category", mode="before")
+    @classmethod
+    def normalize_category(cls, value: Any) -> Any:
+        if isinstance(value, str):
+            value = value.strip().lower()
+            return {
+                "travel": "旅行",
+                "food": "食品",
+                "beauty": "美容",
+                "other": "その他",
+                "unknown": "不明",
+            }.get(value, value)
+        return value
+
+    @field_validator("campaign_types", mode="before")
+    @classmethod
+    def normalize_campaign_types(cls, value: Any) -> Any:
+        if not isinstance(value, list):
+            return value
+        aliases = {
+            "cp": "campaign",
+            "キャンペーン": "campaign",
+            "新商品": "new_product",
+            "イベント": "event",
+            "ブランド紹介": "brand_intro",
+            "その他": "other",
+            "不明": "unknown",
+        }
+        return [
+            aliases.get(v.strip().lower(), v.strip().lower().replace("-", "_").replace(" ", "_"))
+            if isinstance(v, str)
+            else v
+            for v in value
+        ]
+
+
+class Distillation(ExtractionModel):
     is_roundup: bool
     contains_personal_names: bool
     items: list[CaseItem] = Field(max_length=10)

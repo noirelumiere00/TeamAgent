@@ -10,6 +10,8 @@ from datetime import UTC, datetime, timedelta, timezone
 from typing import Any
 from urllib.parse import urlsplit
 
+from pydantic import ValidationError
+
 from teamagent.adapters.apify_media_cases import ApifyCaseAssets
 from teamagent.adapters.cost_guard import CostGuard, CostLimitExceededError
 from teamagent.adapters.gemini_client import GeminiClient, _env_int, _is_rate_limited_vertex
@@ -19,7 +21,7 @@ from teamagent.skills._shared.text_safety import sanitize_llm_text
 from teamagent.skills.media_case_search.schema import Distillation, Evidence
 
 VERSION = "media-case-v2"
-CALL_BUDGET = 0.03
+CALL_BUDGET = 0.015
 _GEMINI_SLOTS = threading.BoundedSemaphore(12)
 _PR = re.compile(r"(?i)(?<![\w])#pr(?![\w])|タイアップ|プロモーション|商品提供|提供を受け|広告")
 _PRIVATE = re.compile(r"https?://\S+|[\w.+-]+@[\w.-]+|@[\w.]+|\b\d{2,4}-\d{2,4}-\d{3,4}\b")
@@ -73,13 +75,18 @@ def normalize_post(item: dict[str, Any], handle: str) -> dict[str, Any]:
 
 
 def _valid_evidence(evidence: Evidence, texts: dict[str, str], images: set[int]) -> bool:
-    if clean_text(evidence.excerpt) != evidence.excerpt:
+    excerpt = evidence._original_excerpt or evidence.excerpt
+    if clean_text(excerpt) != excerpt:
         return False
     if evidence.source in {"thumbnail", "slide"}:
         return evidence.image_index in images and (
             (evidence.source == "thumbnail") == (evidence.image_index == 0)
         )
-    return evidence.excerpt in texts.get(evidence.source, "")
+    return excerpt in texts.get(evidence.source, "")
+
+
+class EvidenceMismatchError(ValueError):
+    pass
 
 
 class CaseDistiller:
@@ -89,7 +96,7 @@ class CaseDistiller:
 
     def _call(
         self, prompt: str, images: list[tuple[bytes, str]], request_id: str
-    ) -> tuple[Distillation, float]:
+    ) -> tuple[str, float]:
         def rate_limited(exc: BaseException) -> bool:
             return not isinstance(exc, (CostLimitExceededError, ValueError)) and (
                 _is_rate_limited_vertex(exc.__cause__ or exc)
@@ -111,7 +118,7 @@ class CaseDistiller:
 
     def _attempt(
         self, prompt: str, images: list[tuple[bytes, str]], request_id: str
-    ) -> tuple[Distillation, float]:
+    ) -> tuple[str, float]:
         with _GEMINI_SLOTS:
             if self.ledger is None or "flash" not in self.gemini.model_id:
                 raise CostLimitExceededError("画像判定の予算設定を確認できません。")
@@ -123,17 +130,23 @@ class CaseDistiller:
                 raise CostLimitExceededError("画像判定の費用予約を確認できません。")
             cost = CALL_BUDGET
             try:
+                # Gemini 3.x requires a level instead of the numeric budget supported by 2.5.
+                thinking: dict[str, Any] = (
+                    {"thinking_budget": 0}
+                    if self.gemini.model_id.startswith("gemini-2.5-")
+                    else {"thinking_level": "minimal"}
+                )
                 result = (
                     self.gemini.analyze_images_bytes(
-                        images, prompt, request_id, max_cost_usd=CALL_BUDGET
+                        images, prompt, request_id, max_cost_usd=CALL_BUDGET, **thinking
                     )
                     if images
                     else self.gemini.generate_text(
-                        prompt, request_id, json_mode=True, max_cost_usd=CALL_BUDGET
+                        prompt, request_id, json_mode=True, max_cost_usd=CALL_BUDGET, **thinking
                     )
                 )
                 cost = result.cost_usd
-                return Distillation.model_validate_json(result.text), cost
+                return result.text, cost
             finally:
                 self.ledger.settle(reservation, cost_usd=cost, units=1, request_id=request_id)
 
@@ -153,6 +166,7 @@ class CaseDistiller:
         }
         images: list[tuple[bytes, str]] = []
         warnings: list[str] = []
+        truncated_fields: list[str] = []
         if refs.cover_key:
             try:
                 images.append(assets.image(refs.cover_key))
@@ -200,9 +214,37 @@ class CaseDistiller:
                 + "\n"
                 + f"投稿データ: {json.dumps(texts, ensure_ascii=False)}"
             )
-            parsed, cost = self._call(prompt, batch, request_id)
-            if parsed.contains_personal_names:
-                raise ValueError("personal names excluded")
+            cost = 0.0
+            for attempt in range(2):
+                text, attempt_cost = self._call(
+                    prompt
+                    if attempt == 0
+                    else "前回答は検証に失敗しました。原文の引用とスキーマを厳守して再抽出。\n"
+                    + prompt,
+                    batch,
+                    request_id if attempt == 0 else f"{request_id}:repair",
+                )
+                cost += attempt_cost
+                truncations: list[str] = []
+                context: dict[str, Any] = {"truncated_fields": truncations}
+                try:
+                    parsed = Distillation.model_validate_json(text, context=context)
+                    if parsed.contains_personal_names:
+                        raise ValueError("personal names excluded")
+                    if any(_PRIVATE.search(value) for value in context.get("truncated_texts", [])):
+                        raise ValueError("personal contact or external URL in extraction")
+                    evidence = [e for entry in parsed.items for e in entry.evidence]
+                    if any(
+                        not _valid_evidence(e, texts, set(indices))
+                        for e in [*evidence, *parsed.pr_evidence]
+                    ):
+                        raise EvidenceMismatchError("evidence does not match supplied source")
+                except (ValidationError, EvidenceMismatchError):
+                    if attempt == 1:
+                        raise
+                    continue
+                truncated_fields.extend(truncations)
+                break
             for entry in parsed.items:
                 if any(
                     _PRIVATE.search(value or "")
@@ -274,7 +316,7 @@ class CaseDistiller:
         pr_excerpts = [
             e.excerpt
             for e in result.pr_evidence
-            if not _NEGATED_PR.search(texts.get(e.source, e.excerpt))
+            if not _NEGATED_PR.search(texts.get(e.source, e._original_excerpt or e.excerpt))
         ]
         for source in (texts["caption"], texts["hashtag"]):
             match = re.search(r"(?i)(?<!\w)#pr(?!\w)", source)
@@ -333,6 +375,7 @@ class CaseDistiller:
             "image_count": viewed,
             "has_subtitles": bool(texts["subtitle"]),
             "warnings": sorted(set(warnings)),
+            "coverage": {"truncated_fields": sorted(set(truncated_fields))},
             "analysis_complete": not any(w != "thumbnail_missing" for w in warnings),
             "cost_usd": cost,
         }

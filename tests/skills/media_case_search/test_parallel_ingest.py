@@ -92,7 +92,7 @@ def test_dataset_parallel_limits_and_coordinator_only_post_writes(ledger):
 
 
 def test_parallel_reservations_never_exceed_monthly_cap(ledger, monkeypatch):
-    monkeypatch.setenv("COST_MEDIA_CASE_GEMINI_MONTHLY_USD", "0.09")
+    monkeypatch.setenv("COST_MEDIA_CASE_GEMINI_MONTHLY_USD", "0.045")
     release, denied_all = threading.Event(), threading.Event()
     barrier = threading.Barrier(20)
     lock = threading.Lock()
@@ -113,9 +113,9 @@ def test_parallel_reservations_never_exceed_monthly_cap(ledger, monkeypatch):
             nonlocal calls
             with lock:
                 calls += 1
-                assert sum(row["cost_micro"] for row in ledger._ddb.rows.values()) >= 30000
+                assert sum(row["cost_micro"] for row in ledger._ddb.rows.values()) >= 15000
             assert release.wait(10)
-            return SimpleNamespace(text=json.dumps(extraction()), cost_usd=0.03)
+            return SimpleNamespace(text=json.dumps(extraction()), cost_usd=0.015)
 
     distiller = CaseDistiller(Model(), ledger)
 
@@ -138,16 +138,16 @@ def test_parallel_reservations_never_exceed_monthly_cap(ledger, monkeypatch):
             release.set()
         for future in futures:
             future.result(timeout=10)
-    assert calls == 3 and denied == 17 and peak == 90000
-    assert next(iter(ledger._ddb.rows.values()))["cost_micro"] == 90000
+    assert calls == 3 and denied == 17 and peak == 45000
+    assert next(iter(ledger._ddb.rows.values()))["cost_micro"] == 45000
 
 
 def test_budget_stop_drains_and_saves_inflight_posts(ledger, monkeypatch):
-    monkeypatch.setenv("COST_MEDIA_CASE_GEMINI_MONTHLY_USD", "0.09")
+    monkeypatch.setenv("COST_MEDIA_CASE_GEMINI_MONTHLY_USD", "0.045")
 
     class Model(FakeGemini):
         def _reply(self, prompt, images, cap):
-            return SimpleNamespace(text=json.dumps(extraction()), cost_usd=0.03)
+            return SimpleNamespace(text=json.dumps(extraction()), cost_usd=0.015)
 
     skill, _ = snapshot_skill(ledger, Model(), [HANDLE])
     progress = IngestProgress()

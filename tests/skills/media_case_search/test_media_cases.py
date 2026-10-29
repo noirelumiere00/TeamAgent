@@ -76,18 +76,19 @@ class FakeGemini:
         self.calls = []
 
     def _reply(self, prompt, images, cap):
-        assert cap == 0.03
+        assert cap == 0.015
         self.calls.append((prompt, len(images)))
         caption = json.loads(prompt.split("投稿データ: ", 1)[1])["caption"]
         result = self.replies.pop(0) if self.replies else extraction()
         text = "{invalid JSON" if caption.endswith(" 5") else json.dumps(result, ensure_ascii=False)
         return SimpleNamespace(text=text, cost_usd=0.0001)
 
-    def generate_text(self, prompt, request_id, *, json_mode, max_cost_usd):
-        assert json_mode
+    def generate_text(self, prompt, request_id, *, json_mode, max_cost_usd, thinking_budget):
+        assert json_mode and thinking_budget == 0
         return self._reply(prompt, [], max_cost_usd)
 
-    def analyze_images_bytes(self, images, prompt, request_id, *, max_cost_usd):
+    def analyze_images_bytes(self, images, prompt, request_id, *, max_cost_usd, thinking_budget):
+        assert thinking_budget == 0
         return self._reply(prompt, images, max_cost_usd)
 
 
@@ -156,7 +157,7 @@ def test_initial_import_partial_json_missing_thumbnail_and_saved_search(ledger):
     assert len(fake.post_bodies) == 1 and len(skill.store.posts) == 149
     assert skill.store.state(HANDLE)["failed_ids"] == [raw[5]["id"]]
     assert skill.store.post(raw[3]["id"])["image_count"] == 0
-    assert len(model.calls) == 150
+    assert len(model.calls) == 151
     assert [
         json.loads(prompt.split("投稿データ: ")[1])["caption"]
         for prompt, image_count in model.calls
@@ -232,10 +233,9 @@ def test_personal_names_and_unfounded_evidence_are_not_saved(ledger):
     personal = {**extraction(), "contains_personal_names": True}
     with pytest.raises(ValueError, match="personal names"):
         analyze(ledger, replies=[personal])
-    (metadata, text, _), _ = analyze(
-        ledger, replies=[extraction(evidence=[{"source": "caption", "excerpt": "存在しない文章"}])]
-    )
-    assert metadata["items"] == [] and text == ""
+    bad = extraction(evidence=[{"source": "caption", "excerpt": "存在しない文章"}])
+    with pytest.raises(ValueError, match="evidence does not match"):
+        analyze(ledger, replies=[bad, bad])
 
 
 def test_budget_failure_clears_unstarted_intent(ledger, monkeypatch):
@@ -248,7 +248,7 @@ def test_budget_failure_clears_unstarted_intent(ledger, monkeypatch):
 
 
 def test_model_reservation_refusal_does_not_call_gemini(ledger, monkeypatch):
-    monkeypatch.setenv("COST_MEDIA_CASE_GEMINI_MONTHLY_USD", "0.02")
+    monkeypatch.setenv("COST_MEDIA_CASE_GEMINI_MONTHLY_USD", "0.01")
     with pytest.raises(CostLimitExceededError):
         analyze(ledger)
 

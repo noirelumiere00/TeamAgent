@@ -532,6 +532,8 @@ class GeminiClient:
         request_id: str,
         *,
         max_cost_usd: float | None = None,
+        thinking_level: str | None = None,
+        thinking_budget: int | None = None,
     ) -> GeminiResponse:
         """Review a small ordered batch at original resolution, retaining every image."""
         from google.genai import types
@@ -553,6 +555,8 @@ class GeminiClient:
             request_id,
             system=None,
             json_mode=True,
+            thinking_level=thinking_level,
+            thinking_budget=thinking_budget,
             media_resolution="high" if self.use_vertex or max_cost_usd is None else None,
             **limits,
         )
@@ -618,6 +622,8 @@ class GeminiClient:
         system: str | None = None,
         json_mode: bool = False,
         max_cost_usd: float | None = None,
+        thinking_level: str | None = None,
+        thinking_budget: int | None = None,
     ) -> GeminiResponse:
         """テキストのみの生成 (複数動画分析の横断まとめ等)。動画 part は含めない。"""
         from google.genai import types
@@ -626,7 +632,15 @@ class GeminiClient:
         limits = (
             self._bounded_limits(parts, system, max_cost_usd) if max_cost_usd is not None else {}
         )
-        return self._generate_video(parts, request_id, system=system, json_mode=json_mode, **limits)
+        return self._generate_video(
+            parts,
+            request_id,
+            system=system,
+            json_mode=json_mode,
+            thinking_level=thinking_level,
+            thinking_budget=thinking_budget,
+            **limits,
+        )
 
     def _bounded_limits(
         self, parts: list[Any], system: str | None, max_cost_usd: float, *, images: bool = False
@@ -807,6 +821,7 @@ class GeminiClient:
         timeout_s: float | None = None,
         json_mode: bool = False,
         thinking_level: str | None = None,
+        thinking_budget: int | None = None,
         media_resolution: str | None = None,
         max_attempts: int | None = None,
         rate_limit_attempts: int | None = None,
@@ -836,7 +851,13 @@ class GeminiClient:
                 timeout=int((timeout_s or 90) * 1000),
                 retry_options=types.HttpRetryOptions(attempts=1),
             )
-        if thinking_level:
+        if thinking_level is not None and thinking_budget is not None:
+            raise ValueError("thinking_level and thinking_budget are mutually exclusive")
+        if thinking_budget is not None:
+            if thinking_budget < 0:
+                raise ValueError("thinking_budget must be nonnegative")
+            config_kwargs["thinking_config"] = types.ThinkingConfig(thinking_budget=thinking_budget)
+        elif thinking_level:
             config_kwargs["thinking_config"] = types.ThinkingConfig(
                 thinking_level=types.ThinkingLevel(thinking_level.upper())
             )
