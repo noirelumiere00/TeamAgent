@@ -127,6 +127,11 @@ def _owner(ctx: SkillContext) -> str:
     )
 
 
+def _with_notice(message: str, notice: str) -> str:
+    body, footer = message.rsplit("\n※ ", 1)
+    return f"{body}\n{notice}\n※ {footer}"
+
+
 @register
 class MediaCaseSearchSkill(BaseSkill[MediaCaseInput, MediaCaseOutput]):
     name: ClassVar[str] = "media_case_search"
@@ -138,6 +143,7 @@ class MediaCaseSearchSkill(BaseSkill[MediaCaseInput, MediaCaseOutput]):
         "例: トレンドメディア 国内 旅行 CP → query=国内 旅行 CP。handle指定はaccountsに渡す。"
         "保存済み投稿を案件単位で最大3件に集計。初回は管理者取り込み。古い収録分だけ差分更新。"
         "「動画出して」「まとめて」は共に案件単位の回答＋いちばん伸びた1本の投稿リンク。"
+        "回答末尾は収録範囲と次の一手の2行。投稿リンクの説明は繰り返さない。"
         "選択式で聞き返さない。登録handle: " + ", ".join(accounts())
     )
     input_schema: ClassVar[type[BaseModel]] = MediaCaseInput
@@ -204,12 +210,24 @@ class MediaCaseSearchSkill(BaseSkill[MediaCaseInput, MediaCaseOutput]):
         message = render_hits(hits, filters, input.limit)
         count = self.store.coverage(filters["accounts"], ctx.metadata)
         operators = "・".join(sorted({accounts()[h]["operator"] for h in filters["accounts"]}))
+        dates = sorted(
+            {str(p["metrics_observed_at"])[:10] for p in hits if p.get("metrics_observed_at")}
+        )
+        observed = (
+            f" 数値は {dates[0]}"
+            + (f"〜{dates[-1]}" if dates[0] != dates[-1] else "")
+            + " の取得時点。"
+            if dates
+            else ""
+        )
         return (
             message
             + f"\n※ {operators} の {len(states)} アカウント・{count:,} 投稿から"
             + f"（収録 {ready}/{len(states)}）。"
             + ("未収録分は管理者の初回取り込み後に検索できます。" if ready < len(states) else "")
             + (f"うち{partial}件は取得・判定が一部未完了です。" if partial else "")
+            + observed
+            + "\n施設名やブランド名でも事例を探せます。"
         )
 
     def run(self, input: MediaCaseInput, ctx: SkillContext) -> MediaCaseOutput:
@@ -223,8 +241,9 @@ class MediaCaseSearchSkill(BaseSkill[MediaCaseInput, MediaCaseOutput]):
         message = self._search(input, ctx)
         if self._durable_required and not self.jobs.uses_dynamodb:
             return MediaCaseOutput(
-                message=message
-                + "\n追加取得の保存設定を確認できないため、保存済みの範囲で返しています。"
+                message=_with_notice(
+                    message, "追加取得の保存設定を確認できないため、保存済みの範囲で返しています。"
+                )
             )
         now = datetime.now(UTC)
         due = []
@@ -250,8 +269,9 @@ class MediaCaseSearchSkill(BaseSkill[MediaCaseInput, MediaCaseOutput]):
         if previous and previous.get("status") in {"queued", "running"}:
             self._start(str(previous_id))
             return MediaCaseOutput(
-                message=message
-                + "\n保存済みの事例を返しながら、新しい投稿を最大3アカウントで更新中です。",
+                message=_with_notice(
+                    message, "保存済みの事例を返しながら、新しい投稿を最大3アカウントで更新中です。"
+                ),
                 status="running",
                 deduplicated=True,
             )
@@ -269,8 +289,9 @@ class MediaCaseSearchSkill(BaseSkill[MediaCaseInput, MediaCaseOutput]):
         if not self.jobs.put_dedup_lock(_LOCK_ID, job_id, expected_target=previous_id):
             self.jobs.mark_failed(job_id, "MEDIA_CASE_DEDUPLICATED")
             return MediaCaseOutput(
-                message=message
-                + "\n保存済みの事例を返しながら、新しい投稿を最大3アカウントで更新中です。",
+                message=_with_notice(
+                    message, "保存済みの事例を返しながら、新しい投稿を最大3アカウントで更新中です。"
+                ),
                 status="running",
                 deduplicated=True,
             )
@@ -281,10 +302,12 @@ class MediaCaseSearchSkill(BaseSkill[MediaCaseInput, MediaCaseOutput]):
             else "次回の検索から取り込めた分を返します。"
         )
         return MediaCaseOutput(
-            message=message
-            + f"\n{len(due)}アカウントの追加確認を始めました。"
-            + "保存済みの事例はそのまま使えます。"
-            + notice,
+            message=_with_notice(
+                message,
+                f"{len(due)}アカウントの追加確認を始めました。"
+                + "保存済みの事例はそのまま使えます。"
+                + notice,
+            ),
             status="queued",
             job_id=job_id,
         )
@@ -306,8 +329,9 @@ class MediaCaseSearchSkill(BaseSkill[MediaCaseInput, MediaCaseOutput]):
                 reason
                 or "投稿の取り込みが完了しました。同じ言葉で検索すると保存済みの事例を返します。"
             )
-        return status, self._search(MediaCaseInput.model_validate(summary["input"]), ctx) + (
-            "\n" + reason if status == "failed" else "\n投稿の追加確認が完了しました。"
+        return status, _with_notice(
+            self._search(MediaCaseInput.model_validate(summary["input"]), ctx),
+            reason if status == "failed" else "投稿の追加確認が完了しました。",
         )
 
     def _worker(self, job_id: str) -> None:

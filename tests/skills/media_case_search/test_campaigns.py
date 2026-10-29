@@ -1,5 +1,7 @@
 """Campaign totals include every member, independent of the top-k retrieval score."""
 
+import pytest
+
 from teamagent.skills.media_case_search.campaigns import aggregate_cases, render_hits
 from teamagent.skills.media_case_search.schema import MediaCaseInput
 from teamagent.skills.media_case_search.skill import query_filters
@@ -69,6 +71,14 @@ def test_same_brand_and_campaign_without_tag_merge_but_generic_labels_do_not():
     assert (
         len(
             aggregate_cases(
+                [post(0, campaign=None), post(1, campaign="リリースキャンペーン", tags=[])]
+            )
+        )
+        == 1
+    )
+    assert (
+        len(
+            aggregate_cases(
                 [
                     post(0, campaign=None, tags=["旅行", "TikTokGO"]),
                     post(1, campaign="キャンペーン", tags=["PR"]),
@@ -77,7 +87,138 @@ def test_same_brand_and_campaign_without_tag_merge_but_generic_labels_do_not():
         )
         == 2
     )
-    assert len(aggregate_cases([post(0), post(1, brand="別会社")])) == 2
+    assert len(aggregate_cases([post(0, tags=[]), post(1, brand="別会社", tags=[])])) == 2
+
+
+def test_specific_hashtag_merges_missing_known_and_different_brands_with_exact_totals():
+    rows = [
+        post(0, brand=None, campaign="tiktokgo", tags=["#PR", "#tiktokgo"]),
+        post(1, brand="TikTokGO", campaign=None, tags=["＃ＴｉｋＴｏｋＧＯ"]),
+        post(2, brand="別ブランド", campaign="宿泊紹介", tags=["#TikTok_GO"]),
+    ]
+    rows[0]["metrics"] = {"playCount": 9374, "collectCount": 44}
+    rows[1]["metrics"] = {"playCount": 10500, "collectCount": 61}
+    rows[2]["metrics"] = {"playCount": 12000, "collectCount": 70}
+    groups = aggregate_cases([*rows, rows[0]])
+    assert len(groups) == 1
+    assert groups[0]["post_count"] == 3 and groups[0]["account_count"] == 3
+    assert groups[0]["play_count"] == 31874 and groups[0]["save_count"] == 175
+    assert groups[0]["top"]["post_id"] == "2"
+    message = render_hits(rows, {})
+    assert "**TikTok GO の宿泊紹介（2025年9月）**" in message
+    assert "未特定" not in message
+    assert "31,874再生・保存 175件。最大は12,000再生" in message
+    assert "〔いちばん伸びた投稿〕" + rows[2]["post_url"] in message
+
+
+def test_rakuten_campaign_and_tiktok_go_stays_separate_without_splitting_facilities():
+    rakuten = [post(i, tags=["#TikTokGO", "#楽天トラベルリリースキャンペーン"]) for i in range(5)]
+    stays = [
+        post(
+            i + 5,
+            brand=f"ホテル{i % 2}",
+            campaign="宿泊紹介",
+            tags=[f"#施設{i % 2}", "＃ＴｉｋＴｏｋＧＯ", "#旅行"],
+        )
+        for i in range(6)
+    ]
+    for i, row in enumerate(rakuten):
+        row["account_handle"] = f"rakuten{i % 3}"
+    for i, row in enumerate(stays):
+        row["account_handle"] = f"stay{i % 4}"
+    groups = aggregate_cases([*rakuten, *stays])
+    assert len(groups) == 2
+    assert set(groups[0]["posts"]) == {row["post_id"] for row in rakuten}
+    assert groups[0]["post_count"] == 5 and groups[0]["account_count"] == 3
+    assert set(groups[1]["posts"]) == {row["post_id"] for row in stays}
+    assert groups[1]["post_count"] == 6 and groups[1]["account_count"] == 4
+    for group, rows in zip(groups, [rakuten, stays], strict=True):
+        assert group["play_count"] == sum(row["metrics"]["playCount"] for row in rows)
+        assert group["save_count"] == sum(row["metrics"]["collectCount"] for row in rows)
+
+
+@pytest.mark.parametrize(
+    "name", ["新春キャンペーン", "SpringCampaign", "ＳｐｒｉｎｇＣＡＭＰＡＩＧＮ", "春ＣＰ", "春cp"]
+)
+@pytest.mark.parametrize("source", ["tag", "campaign"])
+def test_explicit_campaign_takes_priority_over_more_frequent_shared_tag(name, source):
+    rows = [post(i, campaign=None, tags=["#TikTokGO"]) for i in range(3)]
+    for row in rows[:2]:
+        item = row["items"][0]
+        if source == "tag":
+            item["campaign_tags"].append("#" + name)
+        else:
+            item["campaign"] = name
+    groups = aggregate_cases(rows)
+    assert {frozenset(group["posts"]) for group in groups} == {
+        frozenset({"0", "1"}),
+        frozenset({"2"}),
+    }
+
+
+def test_shared_tags_require_multiple_accounts_and_count_unique_posts():
+    rows = [
+        post(0, campaign=None, tags=["#施設名", "#TikTokGO", "＃ＴｉｋＴｏｋＧＯ"]),
+        post(1, campaign=None, tags=["#施設名", "#TikTokGO"]),
+        post(2, campaign=None, tags=["#TikTokGO"]),
+        post(3, campaign=None, tags=["#施設名"]),
+    ]
+    rows[3]["account_handle"] = rows[0]["account_handle"]
+    groups = aggregate_cases([*rows, *([rows[3]] * 5)])
+    assert {frozenset(group["posts"]) for group in groups} == {
+        frozenset({"0", "1", "2"}),
+        frozenset({"3"}),
+    }
+    for row in rows:
+        row["account_handle"] = "same_account"
+    assert len(aggregate_cases(rows)) == 4
+
+
+def test_multiple_items_in_one_post_choose_one_campaign_without_bridging():
+    rows = [post(0), post(1), post(2, tags=["#別キャンペーン"])]
+    rows[0]["items"].append(rows[2]["items"][0])
+    groups = aggregate_cases(rows)
+    assert len(groups) == 2
+    assert sum(group["post_count"] for group in groups) == 3
+    assert next(group for group in groups if "1" in group["posts"]) is not next(
+        group for group in groups if "2" in group["posts"]
+    )
+    assert aggregate_cases([{**rows[0], "items": []}]) == []
+
+
+@pytest.mark.parametrize("tag", ["#旅行", "＃ＰＲ", "#お出かけ", "#ホテル", "#おすすめ"])
+@pytest.mark.parametrize("brand", [None, "旅行社"])
+def test_generic_hashtags_alone_do_not_merge_posts(tag, brand):
+    assert (
+        len(aggregate_cases([post(i, brand=brand, campaign=None, tags=[tag]) for i in range(2)]))
+        == 2
+    )
+
+
+@pytest.mark.parametrize("brand", [None, "ブランド未特定", "不明"])
+def test_missing_brand_uses_readable_campaign_tag_without_unknown_label(brand):
+    message = render_hits(
+        [post(0, brand=brand, campaign="宿泊紹介", tags=["#PR", "#tiktokgo"])], {}
+    )
+    assert "**TikTok GO の宿泊紹介（2025年9月）**" in message
+    assert "未特定" not in message and "不明" not in message
+
+
+def test_brand_from_later_member_and_top_three_facilities_or_products():
+    rows = [post(i, brand=None, campaign=None) for i in range(7)]
+    rows[1]["items"][0]["brand"] = "楽天トラベル"
+    rows[1]["items"][0]["campaign"] = "リリースキャンペーン"
+    for row in rows:
+        row["items"][0]["facility"] = (
+            "人気ホテル" if int(row["post_id"]) >= 3 else f"施設{row['post_id']}"
+        )
+    message = render_hits(rows, {})
+    assert "**楽天トラベル リリースキャンペーン" in message
+    assert "（人気ホテル、施設0、施設1 など4施設）" in message
+    assert "施設2" not in message
+    for row in rows:
+        row["items"][0]["product"] = row["items"][0].pop("facility")
+    assert "（人気ホテル、施設0、施設1 など4商品）" in render_hits(rows, {})
 
 
 def test_max_three_campaigns_plus_one_related_line_and_no_invented_metrics():
