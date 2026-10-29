@@ -23,6 +23,7 @@ from pathlib import Path
 from typing import Any
 
 from teamagent.skills.base import SkillRegistry
+from teamagent.skills.media_case_search.skill import accounts
 from teamagent.skills.search_surface_check.skill import SearchSurfaceCheckSkill
 from teamagent.skills.tiktok_acquire.skill import TikTokAcquireSkill, TikTokAcquireStatusSkill
 from teamagent.skills.tiktok_comment_mining.skill import TikTokCommentMiningSkill
@@ -274,6 +275,9 @@ NON_TOOL_IDENTIFIERS = frozenset(
         "s3_key",
         "cls_doc_type",
         "external_file",
+        # 自社メディアの登録 CSV 名と handle（ルーティング対象でありツール名ではない）。
+        "media_accounts",
+        *accounts(),
     }
 )
 

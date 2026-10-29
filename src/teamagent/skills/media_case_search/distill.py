@@ -6,10 +6,9 @@ import hashlib
 import json
 import re
 import threading
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta, timezone
 from typing import Any
 from urllib.parse import urlsplit
-from zoneinfo import ZoneInfo
 
 from teamagent.adapters.apify_media_cases import ApifyCaseAssets
 from teamagent.adapters.cost_guard import CostGuard, CostLimitExceededError
@@ -67,7 +66,7 @@ def normalize_post(item: dict[str, Any], handle: str) -> dict[str, Any]:
         try:
             stamp = datetime.fromtimestamp(post["createTime"], UTC)
             post["posted_at"] = stamp.isoformat()
-            post["posted_on"] = stamp.astimezone(ZoneInfo("Asia/Tokyo")).date().isoformat()
+            post["posted_on"] = stamp.astimezone(timezone(timedelta(hours=9))).date().isoformat()
         except (ValueError, OverflowError, OSError):
             pass
     return post

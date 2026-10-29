@@ -90,6 +90,7 @@ OPAQUE_TOKEN_OK: dict[Key, str] = {
 # 「利用者の言葉そのもの」が正解の自由文。依頼文を渡すのが正しい挙動＝ハザードではない。
 USER_VERBATIM_OK: dict[Key, str] = {
     ("search", "query"): "自然文クエリ",
+    ("media_case_search", "query"): "自社メディアの投稿から探したい事例の自然文",
     ("knowledge_deliver", "query"): "探したい資料の自然文",
     ("proposal_draft", "brief"): "案件概要（自然文）",
     ("recommend", "brief"): "案件概要（自然文）",

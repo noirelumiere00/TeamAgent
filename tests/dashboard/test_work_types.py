@@ -140,6 +140,10 @@ def test_mcp_side_usage_skills_have_a_work_type() -> None:
     assert work_type_of(USAGE_SKILL) == WORK_TYPE_INVESTIGATE
 
 
+def test_media_case_search_is_investigation() -> None:
+    assert work_type_of("media_case_search") == WORK_TYPE_INVESTIGATE
+
+
 @pytest.mark.parametrize("tool", ["not_a_real_tool", "run_agent", "chitchat", "", None])
 def test_unknown_tool_falls_back_to_other(tool: str | None) -> None:
     """未知ツール・空・None は例外を投げず「その他」へ落ちる（fail-open）。"""

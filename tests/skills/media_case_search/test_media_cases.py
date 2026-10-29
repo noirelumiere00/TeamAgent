@@ -40,6 +40,14 @@ def raw_post(number=1, **extra):
     }
 
 
+@pytest.mark.parametrize("hour, day", [(14, "2026-10-28"), (15, "2026-10-29")])
+def test_posted_on_uses_japan_date(hour, day):
+    stamp = datetime(2026, 10, 28, hour, tzinfo=UTC)
+    post = normalize_post(raw_post(createTime=int(stamp.timestamp())), HANDLE)
+    assert post["posted_at"] == stamp.isoformat()
+    assert post["posted_on"] == day
+
+
 def extraction(*, brand="テスト旅行社", roundup=False, evidence=None):
     return {
         "is_roundup": roundup,
