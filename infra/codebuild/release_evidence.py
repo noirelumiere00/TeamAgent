@@ -514,8 +514,7 @@ def _validate_approval_locator_pair(
     if (
         payload_key != expected_payload_key
         or signature_key != f"{expected_payload_key}.sig"
-        or ".." in payload_key
-        or payload_key.startswith("/")
+        or any(part in {"", ".", ".."} for part in payload_key.split("/"))
     ):
         raise EvidenceError(f"{label} key is not content-addressed")
     payload_version_id = _version_id(
@@ -1109,7 +1108,9 @@ def validate_release_receipt(
         "tiktok": f"source-manifests/tiktok/{commit}/",
         "openclaw": f"source-manifests/{commit}/",
     }[pipeline]
-    if not key.startswith(allowed_prefix) or ".." in key or key.startswith("/"):
+    if not key.startswith(allowed_prefix) or any(
+        part in {"", ".", ".."} for part in key.split("/")
+    ):
         raise EvidenceError("source evidence key is not allowlisted")
     _version_id(source_evidence["version_id"], label="source evidence VersionId")
     _sha256(source_evidence["sha256"], label="source evidence SHA-256")
@@ -2957,7 +2958,11 @@ def _terraform_gate(
                 rf"([0-9a-f]{{40}})/({re.escape(claim_id)})\.json"
             )
             key_match = expected_key_pattern.fullmatch(key)
-            if key_match is None or signature_key != f"{key}.sig" or ".." in key:
+            if (
+                key_match is None
+                or signature_key != f"{key}.sig"
+                or any(part in {"", ".", ".."} for part in key.split("/"))
+            ):
                 raise EvidenceError("release evidence key is not content-addressed")
             version_id = _version_id(reference["version_id"], label="release VersionId")
             signature_version_id = _version_id(
