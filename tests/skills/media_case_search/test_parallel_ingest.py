@@ -59,7 +59,7 @@ def test_dataset_parallel_limits_and_coordinator_only_post_writes(ledger):
                 peaks[0] = max(peaks[0], sum(active.values()))
                 peaks[1] = max(peaks[1], max(active.values()))
                 peaks[2] = max(peaks[2], sum(n > 0 for n in active.values()))
-                if peaks[0] == 12:
+                if peaks[0] == 6:
                     reached.set()
             try:
                 assert release.wait(10)
@@ -86,13 +86,13 @@ def test_dataset_parallel_limits_and_coordinator_only_post_writes(ledger):
         finally:
             release.set()
         assert future.result(timeout=15)["failed"] == 0
-    assert peaks[0] == 12 and peaks[1] <= 6 and peaks[2] <= 3
+    assert peaks[0] == 6 and peaks[1] <= 2 and peaks[2] <= 3
     assert progress.snapshot() == (32, 32, 0)
     assert len(skill.store.posts) == 32
 
 
 def test_parallel_reservations_never_exceed_monthly_cap(ledger, monkeypatch):
-    monkeypatch.setenv("COST_MEDIA_CASE_GEMINI_MONTHLY_USD", "0.045")
+    monkeypatch.setenv("COST_MEDIA_CASE_GEMINI_MONTHLY_USD", "0.09")
     release, denied_all = threading.Event(), threading.Event()
     barrier = threading.Barrier(20)
     lock = threading.Lock()
@@ -113,9 +113,9 @@ def test_parallel_reservations_never_exceed_monthly_cap(ledger, monkeypatch):
             nonlocal calls
             with lock:
                 calls += 1
-                assert sum(row["cost_micro"] for row in ledger._ddb.rows.values()) >= 15000
+                assert sum(row["cost_micro"] for row in ledger._ddb.rows.values()) >= 30000
             assert release.wait(10)
-            return SimpleNamespace(text=json.dumps(extraction()), cost_usd=0.015)
+            return SimpleNamespace(text=json.dumps(extraction()), cost_usd=0.03)
 
     distiller = CaseDistiller(Model(), ledger)
 
@@ -138,16 +138,54 @@ def test_parallel_reservations_never_exceed_monthly_cap(ledger, monkeypatch):
             release.set()
         for future in futures:
             future.result(timeout=10)
-    assert calls == 3 and denied == 17 and peak == 45000
-    assert next(iter(ledger._ddb.rows.values()))["cost_micro"] == 45000
+    assert calls == 3 and denied == 17 and peak == 90000
+    assert next(iter(ledger._ddb.rows.values()))["cost_micro"] == 90000
 
 
-def test_budget_stop_drains_and_saves_inflight_posts(ledger, monkeypatch):
-    monkeypatch.setenv("COST_MEDIA_CASE_GEMINI_MONTHLY_USD", "0.045")
+def test_gemini_limit_is_shared_across_distiller_instances(ledger):
+    reached, seventh, release = threading.Event(), threading.Event(), threading.Event()
+    lock = threading.Lock()
+    active = peak = calls = 0
 
     class Model(FakeGemini):
         def _reply(self, prompt, images, cap):
-            return SimpleNamespace(text=json.dumps(extraction()), cost_usd=0.015)
+            nonlocal active, peak, calls
+            with lock:
+                active += 1
+                calls += 1
+                peak = max(peak, active)
+                if active == 6:
+                    reached.set()
+                if active > 6:
+                    seventh.set()
+            try:
+                assert release.wait(10)
+                return SimpleNamespace(text="{}", cost_usd=0.0001)
+            finally:
+                with lock:
+                    active -= 1
+
+    with ThreadPoolExecutor(max_workers=12) as executor:
+        futures = [
+            executor.submit(CaseDistiller(Model(), ledger)._call, "data", [], str(n))
+            for n in range(12)
+        ]
+        try:
+            assert reached.wait(10)
+            assert not seventh.wait(0.1)
+        finally:
+            release.set()
+        for future in futures:
+            future.result(timeout=10)
+    assert peak == 6 and calls == 12
+
+
+def test_budget_stop_drains_and_saves_inflight_posts(ledger, monkeypatch):
+    monkeypatch.setenv("COST_MEDIA_CASE_GEMINI_MONTHLY_USD", "0.09")
+
+    class Model(FakeGemini):
+        def _reply(self, prompt, images, cap):
+            return SimpleNamespace(text=json.dumps(extraction()), cost_usd=0.03)
 
     skill, _ = snapshot_skill(ledger, Model(), [HANDLE])
     progress = IngestProgress()

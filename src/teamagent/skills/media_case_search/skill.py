@@ -628,11 +628,11 @@ class MediaCaseSearchSkill(BaseSkill[MediaCaseInput, MediaCaseOutput]):
             return post, previous, metadata, text
 
         remaining = iter(rows.items())
-        with ThreadPoolExecutor(max_workers=6, thread_name_prefix="media-post") as executor:
+        with ThreadPoolExecutor(max_workers=2, thread_name_prefix="media-post") as executor:
             active: dict[Any, str] = {}
 
             def fill() -> None:
-                while len(active) < 6 and budget_error is None:
+                while len(active) < 2 and budget_error is None:
                     entry = next(remaining, None)
                     if entry is None:
                         break
