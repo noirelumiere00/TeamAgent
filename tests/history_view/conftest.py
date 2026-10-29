@@ -45,7 +45,7 @@ def _dsn_with(dsn: str, **overrides: str) -> str:
 
 
 @pytest.fixture(scope="module", params=[False, True], ids=["production", "bypassrls"])
-def hv_db(request: pytest.FixtureRequest) -> Iterator[HvDb]:
+def hv_db(request: pytest.FixtureRequest, postgres_roles_lock: None) -> Iterator[HvDb]:
     import psycopg
     from psycopg import sql
 

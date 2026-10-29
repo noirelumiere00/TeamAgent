@@ -53,6 +53,13 @@ def _connect(env: PmDb) -> Any:
     return psycopg.connect(env.migrator_dsn)
 
 
+def test_fixture_serializes_cluster_roles(env: PmDb) -> None:
+    import psycopg
+
+    with psycopg.connect(_DB_DSN, dbname="postgres", autocommit=True) as conn:
+        assert conn.execute("SELECT pg_try_advisory_lock(29, 33)").fetchone() == (False,)
+
+
 def _as_app(cur: Any, principal: str | None) -> None:
     cur.execute("SET ROLE personal_memory_app")
     if principal is not None:

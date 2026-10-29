@@ -1,10 +1,27 @@
 """Suite-wide isolation for process-local HMAC rotation clock state."""
 
+import os
 from collections.abc import Iterator
 
 import pytest
 
 import teamagent.hmac_keyring as hmac_keyring_module
+
+
+@pytest.fixture(scope="module")
+def postgres_roles_lock() -> Iterator[None]:
+    """Hold shared migration roles through setup, tests and teardown across workers."""
+    dsn = os.environ.get("TEAMAGENT_TEST_DB_DSN")
+    if dsn is None:
+        yield
+        return
+
+    import psycopg
+
+    # A fixed database makes this lock cluster-wide even when test DSNs differ.
+    with psycopg.connect(dsn, dbname="postgres", autocommit=True) as conn:
+        conn.execute("SELECT pg_advisory_lock(29, 33)")
+        yield
 
 
 @pytest.fixture(autouse=True)
