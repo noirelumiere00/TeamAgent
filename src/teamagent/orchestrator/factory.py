@@ -368,6 +368,20 @@ def build_production_tools() -> list[ToolSpec]:
             )
         )
 
+    if _envflag("USE_MEDIA_CASE_SEARCH"):
+        from teamagent.ingest.media_cases import MediaCaseStore
+        from teamagent.skills.media_case_search.skill import MediaCaseSearchSkill, production_skill
+
+        media_cases = production_skill(MediaCaseStore(search.pgvector, search.embedder))
+        specs.append(
+            ToolSpec(
+                MediaCaseSearchSkill.name,
+                MediaCaseSearchSkill.description,
+                MediaCaseSearchSkill,
+                factory=lambda: media_cases,
+            )
+        )
+
     # omiyage_report: お土産資料 便1（TikTok検索実測→決定論集計→PPTX→依頼スレッド添付）。
     # ジョブ行は proposal_builder と同じ ProposalJobStore（同一 DynamoDB table）へ相乗りし、
     # job_id の omy_ プレフィクス + request_summary.kind + 両 status skill の kind ガードで

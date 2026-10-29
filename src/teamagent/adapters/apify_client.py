@@ -23,7 +23,9 @@ from __future__ import annotations
 import os
 import re
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
+from datetime import date
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -173,6 +175,7 @@ class ApifyRunResult:
     warnings: list[str] = field(default_factory=list)
     # run の既定 Key-Value store id（video download add-on の mp4 実体はここに置かれる）。
     kvs_id: str = ""
+    observed_at: str | None = None
 
 
 @dataclass(frozen=True)
@@ -532,6 +535,8 @@ class ApifyClient:
         request_id: str = "apify",
         user_email: str = "",
         require_cost_reservation: bool = False,
+        usage_mode: str = "default",
+        on_run_started: Callable[[str], None] | None = None,
     ) -> ApifyRunResult:
         """actor run を起動し、完了までポーリングして dataset items を返す。
 
@@ -540,7 +545,16 @@ class ApifyClient:
         実件数ベースの金額へ精算する。
         """
         unit_price = _ACTOR_PRICE_PER_ITEM.get(actor_id, 0.001)
-        est_cost = round(unit_price * max_items, 6)
+        start_price = 0.0
+        if usage_mode != "default":
+            if actor_id != ACTOR_TIKTOK_VIDEO or usage_mode not in {
+                "tiktok_profiles",
+                "tiktok_profiles_date",
+            }:
+                raise ValueError("unsupported Actor pricing mode")
+            unit_price = 0.004 if usage_mode == "tiktok_profiles_date" else 0.003
+            start_price = 0.001
+        est_cost = round(start_price + unit_price * max_items, 6)
         warnings, reservation = self._reserve_cost(user_email, est_cost, request_id)
         if require_cost_reservation and not getattr(reservation, "global_reserved", False):
             self._settle_cost(
@@ -600,6 +614,8 @@ class ApifyClient:
                 _settle_once(est_cost if require_cost_reservation else 0.0, 0)
                 raise ApifyError(f"APIFY_HTTP: actor起動応答が不正です ({actor_id}, run_id無し)")
             logger.info("apify_run_started", request_id=request_id, actor=actor_id, run_id=run_id)
+            if on_run_started is not None:
+                on_run_started(run_id)
 
             # ポーリング（READY/RUNNING の間は待つ）。ポーリング/dataset の httpx 例外も
             # ApifyError に変換する（起動POSTと同じ扱い＝URLを含む生の httpx 例外を skill 層へ
@@ -650,17 +666,24 @@ class ApifyClient:
                     f"(status={getattr(getattr(e, 'response', None), 'status_code', '?')})"
                 ) from None
             items_raw = items_resp.json()
+            if require_cost_reservation and (
+                not isinstance(items_raw, list)
+                or len(items_raw) > max_items
+                or any(not isinstance(item, dict) for item in items_raw)
+            ):
+                _settle_once(est_cost, 0)
+                raise ApifyError("APIFY_DATASET_INVALID")
             items: list[dict[str, Any]] = [it for it in items_raw if isinstance(it, dict)]
 
             # FREE tier の沈黙0件を顕在化（SKILL.md 実測: プラン不足でも SUCCEEDED+0件になる）
             if not items and any(h in status_message.lower() for h in _TIER_HINTS):
-                _settle_once(0.0, 0)
+                _settle_once(start_price, 0)
                 raise ApifyError(
                     f"APIFY_TIER: {actor_id} が0件を返しました。Apifyプラン起因の可能性があります"
                     f"（statusMessage: {status_message[:120]}）。BRONZE以上のプランが必要です。"
                 )
 
-            actual_cost = round(unit_price * len(items), 6)
+            actual_cost = round(start_price + unit_price * len(items), 6)
             _settle_once(actual_cost, len(items))
             logger.info(
                 "apify_run_done",
@@ -698,6 +721,135 @@ class ApifyClient:
             _settle_once(est_cost if require_cost_reservation else 0.0, 0)
 
     # ---- 型付き入口: X ------------------------------------------------------
+
+    def tiktok_profiles(
+        self,
+        handle: str,
+        *,
+        max_items: int = 400,
+        oldest_date: str | None = None,
+        request_id: str = "media-case",
+        on_run_started: Callable[[str], None] | None = None,
+    ) -> ApifyRunResult:
+        """One profile, metadata and Apify-hosted images/subtitles; no video add-ons."""
+        if not re.fullmatch(r"[A-Za-z0-9_.]{1,24}", handle) or not 1 <= max_items <= 400:
+            raise ValueError("invalid profile or result limit")
+        body: dict[str, Any] = {
+            "profiles": [handle],
+            "resultsPerPage": max_items,
+            "profileSorting": "latest",
+            "profileScrapeSections": ["videos"],
+            "excludePinnedPosts": False,
+            "shouldDownloadCovers": True,
+            "shouldDownloadSlideshowImages": True,
+            "downloadSubtitlesOptions": "DOWNLOAD_SUBTITLES",
+            "shouldDownloadVideos": False,
+        }
+        if oldest_date is not None:
+            body["oldestPostDateUnified"] = date.fromisoformat(oldest_date).isoformat()
+        return self.run_actor_sync(
+            ACTOR_TIKTOK_VIDEO,
+            body,
+            max_items=max_items,
+            deadline_s=600,
+            request_id=request_id,
+            require_cost_reservation=True,
+            usage_mode="tiktok_profiles_date" if oldest_date else "tiktok_profiles",
+            on_run_started=on_run_started,
+        )
+
+    def resume_tiktok_profile_run(self, run_id: str, *, max_items: int = 400) -> ApifyRunResult:
+        """Read an already reserved run; never start or charge for a second Actor."""
+        if not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", run_id) or not 1 <= max_items <= 400:
+            raise ValueError("invalid run reference")
+        body = self._request("GET", f"/actor-runs/{run_id}").json()
+        run = _as_dict(body.get("data"))
+        status = str(run.get("status") or "UNKNOWN")
+        items: list[dict[str, Any]] = []
+        if status == "SUCCEEDED":
+            dataset_id = str(run.get("defaultDatasetId") or "")
+            if not _KVS_ID_RE.fullmatch(dataset_id):
+                raise ApifyError("APIFY_DATASET_INVALID")
+            raw = self._request(
+                "GET", f"/datasets/{dataset_id}/items", params={"limit": max_items, "clean": "true"}
+            ).json()
+            if not isinstance(raw, list) or any(not isinstance(item, dict) for item in raw):
+                raise ApifyError("APIFY_DATASET_INVALID")
+            items = raw[:max_items]
+        return ApifyRunResult(
+            items=items,
+            actor_id=ACTOR_TIKTOK_VIDEO,
+            run_id=run_id,
+            status=status,
+            estimated_cost_usd=0.0,
+            kvs_id=str(run.get("defaultKeyValueStoreId") or ""),
+            warnings=["RESUMED_RESERVATION_RETAINED"],
+        )
+
+    def read_media_dataset(self, dataset_id: str, kvs: str) -> ApifyRunResult:
+        """Read an immutable acquisition snapshot; never start an Actor or reserve its fee."""
+        from datetime import datetime
+
+        if not _KVS_ID_RE.fullmatch(dataset_id):
+            raise ValueError("invalid dataset ID")
+        meta = _as_dict(self._request("GET", f"/datasets/{dataset_id}").json().get("data"))
+        count = meta.get("itemCount")
+        if type(count) is not int or not 0 <= count <= 4000:
+            raise ApifyError("APIFY_DATASET_BOUND: expected at most 4000 posts")
+        observed = str(meta.get("modifiedAt") or "")
+        if datetime.fromisoformat(observed.replace("Z", "+00:00")).tzinfo is None:
+            raise ValueError("dataset observation timestamp requires timezone")
+        items: list[dict[str, Any]] = []
+        for offset in range(0, count, 1000):
+            expected = min(1000, count - offset)
+            page = self._request(
+                "GET",
+                f"/datasets/{dataset_id}/items",
+                params={"offset": offset, "limit": expected, "clean": "true"},
+            ).json()
+            if (
+                not isinstance(page, list)
+                or len(page) != expected
+                or any(not isinstance(row, dict) for row in page)
+            ):
+                raise ApifyError("APIFY_DATASET_INVALID")
+            items.extend(page)
+        current = _as_dict(self._request("GET", f"/datasets/{dataset_id}").json().get("data"))
+        if current.get("modifiedAt") != observed or current.get("itemCount") != count:
+            raise ApifyError("APIFY_DATASET_CHANGED: retry after acquisition finishes")
+        store_id = self.resolve_kvs_id(kvs)
+        return ApifyRunResult(
+            items=items,
+            actor_id=ACTOR_TIKTOK_VIDEO,
+            run_id="",
+            status="SUCCEEDED",
+            estimated_cost_usd=0.0,
+            kvs_id=store_id,
+            observed_at=observed,
+        )
+
+    def resolve_kvs_id(self, reference: str) -> str:
+        """Accept a store ID or resolve an existing named store without creating one."""
+        if _KVS_ID_RE.fullmatch(reference):
+            return reference
+        if not re.fullmatch(r"[A-Za-z0-9_-]{1,100}", reference):
+            raise ValueError("invalid KVS name")
+        for offset in range(0, 20000, 1000):
+            body = self._request(
+                "GET", "/key-value-stores", params={"offset": offset, "limit": 1000}
+            ).json()
+            data = _as_dict(body.get("data"))
+            entries = data.get("items")
+            if not isinstance(entries, list):
+                raise ApifyError("APIFY_KVS_LIST_INVALID")
+            for entry in entries:
+                if isinstance(entry, dict) and entry.get("name") == reference:
+                    store_id = str(entry.get("id") or "")
+                    if _KVS_ID_RE.fullmatch(store_id):
+                        return store_id
+            if len(entries) < 1000:
+                break
+        raise ApifyError("APIFY_KVS_NOT_FOUND")
 
     def search_posts(
         self,
@@ -931,36 +1083,52 @@ class ApifyClient:
 
     # ---- 低レベル: Key-Value store（動画 record の取得） -------------------------
 
-    def list_kvs_keys(self, store_id: str, *, deadline_s: int = _DEFAULT_DEADLINE_S) -> list[str]:
-        """Key-Value store のキー一覧（先頭1ページ・最大 1000 件）。"""
+    def list_kvs_keys(
+        self, store_id: str, *, deadline_s: int = _DEFAULT_DEADLINE_S, max_keys: int = 1000
+    ) -> list[str]:
+        """Bounded KVS listing; existing callers still request one 1000-key page."""
         if not _KVS_ID_RE.fullmatch(store_id):
             raise ApifyError("APIFY_KVS_ID_INVALID: key-value store id の形式が不正です")
+        if not 1 <= max_keys <= 50000:
+            raise ValueError("invalid KVS listing bound")
         deadline_at = time.monotonic() + max(0, deadline_s)
-        try:
-            body = self._request(
-                "GET",
-                f"/key-value-stores/{store_id}/keys",
-                deadline_at=deadline_at,
-                params={"limit": _KVS_KEYS_PAGE_LIMIT},
-            ).json()
-        except _DeadlineExceededError:
-            raise ApifyError(
-                "APIFY_TIMEOUT: key-value store のキー一覧が期限内に取れませんでした"
-            ) from None
-        except httpx.HTTPError as e:
-            raise ApifyError(
-                "APIFY_HTTP: key-value store のキー一覧取得に失敗しました "
-                f"(status={getattr(getattr(e, 'response', None), 'status_code', '?')})"
-            ) from None
-        data = _as_dict(body.get("data") if isinstance(body, dict) else None)
-        items = data.get("items")
         keys: list[str] = []
-        if isinstance(items, list):
-            for it in items:
-                key = it.get("key") if isinstance(it, dict) else None
-                if isinstance(key, str) and key:
-                    keys.append(key)
-        return keys
+        cursor = ""
+        while len(keys) < max_keys:
+            params: dict[str, Any] = {"limit": min(_KVS_KEYS_PAGE_LIMIT, max_keys - len(keys))}
+            if cursor:
+                params["exclusiveStartKey"] = cursor
+            try:
+                body = self._request(
+                    "GET",
+                    f"/key-value-stores/{store_id}/keys",
+                    deadline_at=deadline_at,
+                    params=params,
+                ).json()
+            except _DeadlineExceededError:
+                raise ApifyError(
+                    "APIFY_TIMEOUT: key-value store のキー一覧が期限内に取れませんでした"
+                ) from None
+            except httpx.HTTPError:
+                raise ApifyError(
+                    "APIFY_HTTP: key-value store のキー一覧取得に失敗しました"
+                ) from None
+            data = _as_dict(body.get("data") if isinstance(body, dict) else None)
+            page = data.get("items")
+            if not isinstance(page, list):
+                raise ApifyError("APIFY_KVS_LIST_INVALID")
+            keys.extend(
+                str(row["key"])
+                for row in page
+                if isinstance(row, dict) and isinstance(row.get("key"), str) and row["key"]
+            )
+            if not data.get("isTruncated") or max_keys == 1000:
+                return keys[:max_keys]
+            next_cursor = str(data.get("nextExclusiveStartKey") or "")
+            if not next_cursor or next_cursor == cursor:
+                raise ApifyError("APIFY_KVS_CURSOR_INVALID")
+            cursor = next_cursor
+        raise ApifyError("APIFY_KVS_BOUND: key listing exceeds configured bound")
 
     def get_kvs_record(
         self,

@@ -188,8 +188,8 @@ def test_search_similar_new_schema_default_no_boilerplate_clause() -> None:
     client.search_similar_new_schema(conn=conn, embedding=[0.1] * 1024, limit=5)
     sql: str = cur.execute.call_args.args[0]
     assert "boilerplate" not in sql
-    # フィルタ無し既定では WHERE 句自体が生成されない（現行 SQL と完全一致）
-    assert "WHERE" not in sql
+    # 一般ナレッジ検索はメディア投稿を受注案件と混同しない。
+    assert "WHERE d.metadata->>'corpus' IS DISTINCT FROM 'media_case'" in sql
 
 
 def test_search_similar_new_schema_exclude_boilerplate_adds_where() -> None:
@@ -238,8 +238,8 @@ def test_search_similar_new_schema_default_no_duplicates_clause() -> None:
     client.search_similar_new_schema(conn=conn, embedding=[0.1] * 1024, limit=5)
     sql: str = cur.execute.call_args.args[0]
     assert "suppressed" not in sql
-    # フィルタ無し既定では WHERE 句自体が生成されない（現行 SQL と完全一致）
-    assert "WHERE" not in sql
+    # 一般ナレッジ検索はメディア投稿を受注案件と混同しない。
+    assert "WHERE d.metadata->>'corpus' IS DISTINCT FROM 'media_case'" in sql
 
 
 def test_search_similar_new_schema_exclude_duplicates_adds_where() -> None:

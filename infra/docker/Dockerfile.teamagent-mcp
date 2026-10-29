@@ -143,6 +143,7 @@ COPY scripts/run_mcp_http_server.py \
      scripts/run_canary_health.py \
      scripts/run_ingest_fargate.py \
      scripts/ingest_sources.py \
+     scripts/ingest_media_cases.py \
      scripts/run_morning_digest_fargate.py \
      ./scripts/
 COPY infra/migrations/ ./infra/migrations/

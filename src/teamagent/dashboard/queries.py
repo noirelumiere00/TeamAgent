@@ -102,6 +102,7 @@ _SIBLING_WORK_TYPE_TOOLS: dict[str, tuple[str, ...]] = {
         "x_buzz_measure",
         "x_buzz_measure_status",
         "recommend",
+        "media_case_search",
         "search_surface_check_video",
         "slack_search",
     ),

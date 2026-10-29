@@ -223,6 +223,7 @@ def test_core_dockerignore_is_deny_by_default_and_excludes_sensitive_state() -> 
         "!scripts/run_canary_health.py",
         "!scripts/run_ingest_fargate.py",
         "!scripts/ingest_sources.py",
+        "!scripts/ingest_media_cases.py",
         "!scripts/run_morning_digest_fargate.py",
         "!infra/codebuild/teamagent_runtime_contract.json",
         "!infra/docker/replace_core_ca_bundle.py",
@@ -230,6 +231,7 @@ def test_core_dockerignore_is_deny_by_default_and_excludes_sensitive_state() -> 
         "!infra/docker/vendor/ca-certificates-bundle-20260909-r3.apk",
     ):
         assert allowed in text
+    assert "scripts/ingest_media_cases.py" in _stage("builder", "final")
     assert "!scripts/**" not in text
     for blocked in (
         "**/.env",
