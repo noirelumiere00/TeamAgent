@@ -95,7 +95,16 @@ def render_sales25(workdir: Path, source: Path, owner_id: str) -> dict[str, Any]
     shortfall = any(item["shortfall"] for item in result["acquisition"]) or any(
         len(ranking) < 10 for item in selection for ranking in item.get("rankings", {}).values()
     )
-    reason = "audio_unverified" if audio_unverified else "shortfall" if shortfall else None
+    media_missing = bool(contract.read_json(inputs / "top5-analysis.json").get("media_missing"))
+    reason = (
+        "media_missing"
+        if media_missing
+        else "audio_unverified"
+        if audio_unverified
+        else "shortfall"
+        if shortfall
+        else None
+    )
     if analysis_status == "incomplete" and reason is None:
         analysis_status = "failed"
         result["status"] = "invalid"

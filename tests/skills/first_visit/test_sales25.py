@@ -70,10 +70,19 @@ def test_plan_fingerprints_and_minimal_bundle() -> None:
         lock["files"]["scripts/fill_template.py"]
         == "8d85602234cfa542282e866b8d6d715cd61b157869391c49fcbadde7958c5feb"
     )
+    assert lock["local_patches"]["scripts/check_fmt.py"]["upstream_sha256"] == (
+        "4cd0df65a60564718ce9d13f7058ed78569b3fa3be9aa4b6ea44d0a1c1ec28e5"
+    )
 
 
 @pytest.mark.parametrize(
-    "relative", ["scripts/fill_template.py", "assets/template.pptx", "../sales25.lock.json"]
+    "relative",
+    [
+        "scripts/fill_template.py",
+        "scripts/check_fmt.py",
+        "assets/template.pptx",
+        "../sales25.lock.json",
+    ],
 )
 def test_bundle_sha_tamper(tmp_path: Path, relative: str) -> None:
     bundle = tmp_path / "sales25"

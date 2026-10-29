@@ -127,7 +127,7 @@ class CheckResult(BaseModel):
     model_config = ConfigDict(extra="forbid")
     status: Literal["passed", "failed", "incomplete"]
     checked_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
-    reason: Literal["audio_unverified", "shortfall"] | None = None
+    reason: Literal["audio_unverified", "shortfall", "media_missing"] | None = None
 
 
 class DeckQaCheck(CheckResult):
@@ -167,7 +167,7 @@ class MachineChecks(BaseModel):
                 analysis.status == "passed"
                 or (
                     analysis.status == "incomplete"
-                    and analysis.reason in {"audio_unverified", "shortfall"}
+                    and analysis.reason in {"audio_unverified", "shortfall", "media_missing"}
                 )
             )
         )
@@ -249,7 +249,14 @@ def can_continue(key: str, result: StepResult) -> bool:
     return result.status == "complete" or (
         key in {"relevance", "media", "analysis", "machine_check"}
         and result.status in {"partial", "incomplete"}
-        and result.reason in {"audio_unverified", "shortfall"}
+        and (
+            result.reason in {"audio_unverified", "shortfall"}
+            or (
+                key in {"media", "analysis"}
+                and result.status == "partial"
+                and result.reason == "media_missing"
+            )
+        )
     )
 
 

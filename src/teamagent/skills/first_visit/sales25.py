@@ -96,7 +96,10 @@ def check_deck(
             {"query_id": qid, "target": 100, "actual": actual, "shortfall": max(0, 100 - actual)}
         )
     status = "invalid" if not valid else analysis["result"]["status"]
-    if status == "passed" and any(q["shortfall"] for q in acquisition):
+    if status == "passed" and (
+        any(q["shortfall"] for q in acquisition)
+        or contract.read_json(root / "top5-analysis.json").get("media_missing")
+    ):
         status = "incomplete"
     result = {
         "status": status,

@@ -14,7 +14,7 @@ from urllib.parse import urlsplit
 
 CONTRACT_VERSION = 1
 BUNDLE = Path(__file__).resolve().parents[4] / "tools/first_visit/sales25"
-LOCK_SHA256 = "03ea4a29ef59b16e325dcd2d07710a9511c55dd08cf4b17f96dfa3eeef2047ca"
+LOCK_SHA256 = "9b27c72411f5dc8b95c24c3e34661fa345a335e5caabd161f06d0099e900de01"
 STATS = ("playCount", "diggCount", "commentCount", "shareCount", "collectCount")
 TOP = ("top_views", "top_eng", "top_saves")
 ROLES = (
@@ -287,12 +287,27 @@ def validate_inputs(root: Path, *, owner_id: str, bundle: Path = BUNDLE) -> None
                     raise ValueError("displayed TOP5 ranking mismatch")
     data = read_json(local_path(root, "deck-input.json"))
     reviews = read_json(local_path(root, "top5-analysis.json"))
-    # Audio-only gaps may ship as partial; identity and visual review remain mandatory.
+    missing = reviews.get("media_missing", {})
+    required = {
+        pid for item in selected for ranking in item["rankings"].values() for pid in ranking
+    } | {e["post_id"] for e in plan.get("pr_examples", [])}
+    if not isinstance(missing, dict) or any(
+        pid not in required
+        or pid in reviews["posts"]
+        or not isinstance(record, dict)
+        or set(record) != {"url", "reason"}
+        or record["url"] != urls.get(pid)
+        or not isinstance(record["reason"], str)
+        or not record["reason"].strip()
+        for pid, record in missing.items()
+    ):
+        raise ValueError("invalid media_missing record")
+    # Acquired posts still require full identity and visual verification.
     if "status" in reviews and (
         reviews["status"]
         != (
             "complete"
-            if all(p.get("status") == "complete" for p in reviews["posts"].values())
+            if not missing and all(p.get("status") == "complete" for p in reviews["posts"].values())
             else "unmeasured"
         )
         or any(
@@ -348,13 +363,24 @@ def validate_inputs(root: Path, *, owner_id: str, bundle: Path = BUNDLE) -> None
     for slide in slides:
         if slide["role"] in TOP:
             item = next(q for q in selected if q["query"] == slide["query"])
-            if set(item["rankings"][slide["role"]]) - reviews["posts"].keys():
+            if set(item["rankings"][slide["role"]]) - reviews["posts"].keys() - missing.keys():
                 raise ValueError("TOP10 review missing")
     for page, slide in enumerate(slides, 1):
         if slide["role"] not in TOP:
             continue
+        if slide.get("media_missing", {}) != {
+            pid: missing[pid]["reason"] for pid in slide["post_ids"] if pid in missing
+        }:
+            raise ValueError("TOP5 media_missing differs from recorded shortages")
         for index, pid in enumerate(slide["post_ids"], 1):
             image = data["images"][f"p{page:02d}_image_{index:02d}"]
+            if pid in missing:
+                if (
+                    image.get("url") != urls[pid]
+                    or image.get("unavailable_reason") != missing[pid]["reason"]
+                ):
+                    raise ValueError("missing TOP5 media must be disclosed")
+                continue
             if image.get("url") != urls[pid] or image["path"] not in (
                 reviews["posts"][pid]["visual"]["opened_files"]
                 + reviews["posts"][pid]["visual"].get("opened_display_files", [])
@@ -382,20 +408,28 @@ def _validate_pr(
                     for tag in post.get("hashtags", [])
                 )
             )
-            or pid not in reviews["posts"]
+            or (pid not in reviews["posts"] and pid not in reviews.get("media_missing", {}))
         ):
             raise ValueError("PR post/evidence mismatch")
-        visual = reviews["posts"][pid]["visual"]
+        missing = reviews.get("media_missing", {}).get(pid)
+        visual = reviews["posts"].get(pid, {}).get("visual", {"opened_files": []})
         # Display derivatives must not inflate the checker's original photo count.
         opened = visual["opened_files"] + visual.get("opened_display_files", [])
         paths = []
         for index in range(1, 4):
             image = data["images"][f"p{page}_image_{index:02d}"]
+            if missing:
+                if (
+                    image.get("url") != post["url"]
+                    or image.get("unavailable_reason") != missing["reason"]
+                ):
+                    raise ValueError("missing PR media must be disclosed")
+                continue
             if image.get("url") != post["url"] or image["path"] not in opened:
                 raise ValueError("PR three images must refer to the reviewed post")
             local_path(root, image["path"])
             paths.append(image["path"])
-        if len(set(paths)) != 3:
+        if not missing and len(set(paths)) != 3:
             raise ValueError("three distinct PR images required")
         fields = read_json(bundle / "assets/fields.json")["fields"]
         right_keys = [

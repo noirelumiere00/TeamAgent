@@ -107,6 +107,61 @@ def test_complete_synthetic_video_has_hashes_timestamps_and_original_audio(
         assert any(a["kind"] == "contact" for a in manifest["assets"])
 
 
+@pytest.mark.parametrize(
+    "expected,returned,accepted",
+    [
+        (16, 16, True),
+        (16, 15.73, True),
+        (15, 15, True),
+        (16.2, 15.73, True),
+        (16.3, 15.73, False),
+        (16, 16.3, False),
+        (20, 15.73, False),
+    ],
+)
+def test_rounded_duration_metadata_keeps_fractional_and_truncation_checks(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    expected: float,
+    returned: float,
+    accepted: bool,
+) -> None:
+    from teamagent.skills.first_visit.sales25_analysis import validate_media
+
+    source = tmp_path / "fixture.mp4"
+    _ffmpeg(
+        "-f",
+        "lavfi",
+        "-i",
+        "color=c=blue:size=64x64:rate=100",
+        "-t",
+        "15.73",
+        "-c:v",
+        "mpeg4",
+        str(source),
+    )
+    _fixture_acquire(monkeypatch, [source], duration=returned)
+    if not accepted:
+        with pytest.raises(MediaOperationError, match="partial media is rejected"):
+            _run(tmp_path, expected_duration_sec=expected)
+        return
+    output = _run(tmp_path, expected_duration_sec=expected)
+    operation = Sales25MediaOperation(
+        kind="sales25_media",
+        post_id=POST_ID,
+        url=URL,
+        media_type="video",
+        expected_duration_sec=expected,
+    )
+    manifest, _ = validate_media(operation, {a.name: a.path.read_bytes() for a in output.artifacts})
+    assert manifest["duration_sec"] == pytest.approx(15.73)
+    with pytest.raises(ValueError, match="media duration/count mismatch"):
+        validate_media(
+            operation.model_copy(update={"expected_duration_sec": 16.3}),
+            {a.name: a.path.read_bytes() for a in output.artifacts},
+        )
+
+
 @pytest.mark.parametrize("with_audio", [True, False])
 def test_all_photos_keep_original_bytes_order_and_audio_measurement(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, with_audio: bool
@@ -157,7 +212,8 @@ def test_id_mismatch_is_rejected_before_extraction(
 
 
 @pytest.mark.parametrize(
-    "duration,expected,code", [(181, None, "DURATION_EXCEEDED"), (2, 9, "DURATION_MISMATCH")]
+    "duration,expected,code",
+    [(181, None, "DURATION_EXCEEDED"), (2, 9, "DURATION_MISMATCH"), (12, 16, "DURATION_MISMATCH")],
 )
 def test_long_or_truncated_video_never_produces_partial_success(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, duration: int, expected: int | None, code: str

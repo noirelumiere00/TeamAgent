@@ -249,7 +249,8 @@ def acquire_sales25_media(
             if expected is not None and (
                 type(expected) not in (float, int)
                 or not math.isfinite(expected)
-                or abs(duration - expected) > 0.5
+                # Search providers may round duration metadata to whole seconds.
+                or abs(duration - expected) > (1.0 if float(expected).is_integer() else 0.5)
             ):
                 _fail("DURATION_MISMATCH", "acquired duration differs; partial media is rejected")
         source_sha256 = add(source, "video")

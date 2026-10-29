@@ -358,7 +358,7 @@ COPY --chown=10001:10001 tools/tiktok_scraper/search.mjs \
 COPY --chown=10001:10001 tools/tiktok_scraper/dns_pinned_proxy.mjs \
   /app/tools/tiktok_scraper/dns_pinned_proxy.mjs
 # Sales25 kit and selected-post inputs are fixed independently of the legacy kit.
-ARG SALES25_KIT_LOCK_SHA256=03ea4a29ef59b16e325dcd2d07710a9511c55dd08cf4b17f96dfa3eeef2047ca
+ARG SALES25_KIT_LOCK_SHA256=9b27c72411f5dc8b95c24c3e34661fa345a335e5caabd161f06d0099e900de01
 ARG SALES25_ANALYSIS_LOCK_SHA256=67741470f8502ae88340154d135985f06ea6aebdc5c40bcb52fea3663c73bb50
 ARG SALES25_FRAME_EXTRACTOR_SHA256=38b7e8f5fd0fb6dc158167dc4718d1fb5ee715cfa055097badd623ba710adac3
 ARG SALES25_MEDIA_SCRAPER_SHA256=4588cb208b7c4f94a427e41b71d1dfbf93af9bdad40cb2614b77b9a560b1b450
@@ -373,7 +373,7 @@ COPY --chown=10001:10001 tools/first_visit/sales25-analysis/extract_frames.py \
 COPY --chown=10001:10001 tools/tiktok_scraper/sales25_media.mjs \
   /app/tools/tiktok_scraper/sales25_media.mjs
 RUN set -eu; \
-    test "$SALES25_KIT_LOCK_SHA256" = "03ea4a29ef59b16e325dcd2d07710a9511c55dd08cf4b17f96dfa3eeef2047ca"; \
+    test "$SALES25_KIT_LOCK_SHA256" = "9b27c72411f5dc8b95c24c3e34661fa345a335e5caabd161f06d0099e900de01"; \
     printf '%s  %s\n' "$SALES25_KIT_LOCK_SHA256" /app/tools/first_visit/sales25.lock.json | sha256sum -c -; \
     test "$SALES25_ANALYSIS_LOCK_SHA256" = "67741470f8502ae88340154d135985f06ea6aebdc5c40bcb52fea3663c73bb50"; \
     printf '%s  %s\n' "$SALES25_ANALYSIS_LOCK_SHA256" /app/tools/first_visit/sales25-analysis.lock.json | sha256sum -c -; \

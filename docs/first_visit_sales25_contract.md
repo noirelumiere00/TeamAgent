@@ -42,13 +42,17 @@ r81相当の偽物（6語中5語50件、3語目は221秒・`SUCCEEDED / Scraped 
 
 ## 固定取得物
 
-`tools/first_visit/sales25.lock.json` と `sales25/` を組にする。正本 `tiktok-sales-research-kit` の commit `f8c98b4a5555479e28fee71a4195eaf38feeec09`、version `1.2.4`、format `sales25` から、4資産と5スクリプトをバイト変更せず同梱した。
+`tools/first_visit/sales25.lock.json` と `sales25/` を組にする。正本 `tiktok-sales-research-kit` の commit `f8c98b4a5555479e28fee71a4195eaf38feeec09`、version `1.2.4`、format `sales25` から、4資産と5スクリプトを同梱した。`check_fmt.py` の投稿別媒体不足への対応はローカル修正であり、lock の `local_patches` に正本の SHA と理由を記録する。
 
 - 資産: `build-info.json / template.pptx / fields.json / template-plan.json`。
 - CLI: `fill_template.py / check_fmt.py / check_top5_analysis.py`。
 - 直接依存: `kit_contract.py / metrics.py`。
 
 配布 ZIP と計画表の8つの SHA を正本で照合して取り込んだ。lock は全9ファイルの SHA、正本の依存ファイル2点の SHA（出所情報。インストールはしない）、adapter 契約版を記録する。lock 自身の SHA は adapter に固定する。追加・削除・改変・symlink を拒否する。キットの自動取得・展開・更新・依存インストールはない。Docker 収録やリリース契約への追加は後続 PR。
+
+期待長が整数値の場合は丸めを考慮して実測との差を1秒、小数値は0.5秒まで許容する。実測・操作の180秒上限は維持する。既知の180秒超は操作を作らず「動画は確認対象外（長尺）」、取得失敗は「媒体不足」として投稿別に記録する。分析の `media_missing` は投稿ID・元URL・理由を保持し、その投稿の観察事実や画像を作らない。取得済み投稿の同一性・全区間検証は従来どおり必須。
+
+TOP5の不足画像は理由を表示し、計画の `media_missing` と分析記録の一致を検証する。FMT検査は明示した不足分だけ画像数から差し引く。ランキング・取得済みの数値は保持し、PR事例や提案の未確認部分も明示した25ページを partial で配送する。スナップショットのサイズ超過や同一性不一致など、投稿別の取得失敗以外は従来どおり停止する。
 
 ## 入力と API
 

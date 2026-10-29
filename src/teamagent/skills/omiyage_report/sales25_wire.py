@@ -431,6 +431,9 @@ class Wire:
 
     def _acquire_post(self, case: dict[str, Any], post: dict[str, Any]) -> dict[str, Any]:
         # Same ID across companies must agree before reusing an early acquisition.
+        exclusion = analysis.media_exclusion_reason(post)
+        if exclusion:
+            return {"media_missing": exclusion}
         operation = analysis.media_operation(post)
         with self.post_locks_guard:
             lock = self.post_locks.setdefault(
@@ -441,11 +444,25 @@ class Wire:
             record = self._find_json(case, name + ".json")
             if record is None:
                 slot, lease, timeout = self._claim_acquisition_slot(case, 900)
-                artifacts = self.client.acquire_sales25_media(
-                    operation,
-                    request_fingerprint=case["job_id"] + ":media:" + post["id"],
-                    timeout_s=timeout,
-                )
+                try:
+                    artifacts = self.client.acquire_sales25_media(
+                        operation,
+                        request_fingerprint=case["job_id"] + ":media:" + post["id"],
+                        timeout_s=timeout,
+                    )
+                except MediaJobError as exc:
+                    # Timed-out children retain their lease until its deadline.
+                    if "TIMEOUT" not in str(exc) and "DEADLINE_EXCEEDED" not in str(exc):
+                        self.store.put_dedup_lock(slot, "", expected_target=lease)
+                    logger.warning(
+                        "sales25_post_media_missing", post_id=post["id"], error_message=str(exc)
+                    )
+                    record = {
+                        "media_missing": "媒体不足（動画を取得できませんでした）",
+                        "error_code": str(exc),
+                    }
+                    self._save_json(case, name + ".json", record)
+                    return record
                 self.store.put_dedup_lock(slot, "", expected_target=lease)
                 analysis.validate_media(operation, artifacts)
                 record = {
@@ -498,6 +515,12 @@ class Wire:
                 if oversized.is_set():
                     raise OverflowError("snapshot_size_limit")
                 record = self._acquire_post(case, post)
+                if "media_missing" in record:
+                    with mutex:
+                        completed += 1
+                        if case.get("_progress"):
+                            case["_progress"](completed, len(selected))
+                    return post["id"], record
                 artifacts = {name: self._download(case, ref) for name, ref in record.items()}
                 manifest, files = analysis.validate_media(analysis.media_operation(post), artifacts)
                 with mutex:
@@ -551,8 +574,13 @@ class Wire:
             },
         )
         ref = self._save_json(case, "media.json", collected)
+        actual = sum("media_missing" not in record for record in collected.values())
         return StepResult(
-            status="complete", refs=[ref], actual=len(collected), total=len(collected)
+            status="partial" if actual < len(collected) else "complete",
+            reason="media_missing" if actual < len(collected) else None,
+            refs=[ref],
+            actual=actual,
+            total=len(collected),
         )
 
     def analysis(
@@ -584,6 +612,11 @@ class Wire:
                         post, manifest, _limit("OMIYAGE_SALES25_IMAGE_BATCH_SIZE", 4, 1, 4)
                     ),
                 ),
+                media_missing={
+                    pid: record["media_missing"]
+                    for pid, record in media.items()
+                    if "media_missing" in record
+                },
             )
             (root / "analysis-usage.json").write_bytes(
                 contract.json_bytes({"calls": model.calls, "cost_usd": model.cost_usd})
@@ -594,12 +627,13 @@ class Wire:
         if any(p["cover"]["status"] != "matched" for p in result["posts"].values()):
             return StepResult(status="incomplete", reason="media_mismatch", refs=[ref])
         partial_audio = any(p["audio"]["status"] == "unmeasured" for p in result["posts"].values())
+        missing = result["media_missing"]
         return StepResult(
-            status="partial" if partial_audio else "complete",
-            reason="audio_unverified" if partial_audio else None,
+            status="partial" if missing or partial_audio else "complete",
+            reason="media_missing" if missing else "audio_unverified" if partial_audio else None,
             refs=[ref],
             actual=len(result["posts"]),
-            total=len(result["posts"]),
+            total=len(result["posts"]) + len(missing),
         )
 
     def fill(
