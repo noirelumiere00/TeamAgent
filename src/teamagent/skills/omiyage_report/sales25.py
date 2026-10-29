@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import tempfile
 import threading
 import time
@@ -21,6 +22,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from teamagent.adapters.proposal_job_store import ProposalJobStore
 from teamagent.media.deck_qa import DeckQaReport
+from teamagent.observability import redact_secrets_and_pii
 from teamagent.skills._shared.deck_review import format_slides
 from teamagent.skills._shared.long_jobs import _OWNER_KEY, origin
 from teamagent.skills._shared.rollout import rollout_allowed
@@ -51,6 +53,19 @@ LABELS = {
     "delivery": "配信",
 }
 PPTX_TYPE: Final = "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+
+
+def _error_message(exc: Exception) -> str:
+    message = redact_secrets_and_pii(str(exc))
+    message = re.sub(r"(?i)\b[a-z][a-z0-9+.-]*://\S+", "[REDACTED_URL]", message)
+    message = re.sub(r"(?i)\bBearer\s+\S+", "Bearer [REDACTED_SECRET]", message)
+    message = re.sub(r"\bapify_api_[A-Za-z0-9_-]+", "[REDACTED_SECRET]", message)
+    message = re.sub(
+        r"(?i)\b(token|api[_-]?key|secret|password)\b[\"']?\s*[:=]\s*[\"']?[^\s,;\"']+",
+        r"\1=[REDACTED_SECRET]",
+        message,
+    )
+    return message[:200]
 
 
 def search_depth() -> int:
@@ -518,6 +533,7 @@ class Parent:
                                 "sales25_prefetch_incomplete",
                                 job_id=job_id,
                                 error_type=type(exc).__name__,
+                                error_message=_error_message(exc),
                             )
                 state["stage"] = key
                 state["completed"] = 0
@@ -601,7 +617,14 @@ class Parent:
                     result = StepResult(status="timeout")
                 except PermissionError:
                     result = StepResult(status="refused")
-                except Exception:
+                except Exception as exc:
+                    logger.warning(
+                        "sales25_stage_incomplete",
+                        job_id=job_id,
+                        stage=key,
+                        error_type=type(exc).__name__,
+                        error_message=_error_message(exc),
+                    )
                     result = StepResult(status="incomplete")
                 steps[key] = result
                 state["steps"][key] = result.model_dump()

@@ -215,7 +215,7 @@ def test_cumulative_media_size_stops_before_analysis(monkeypatch: pytest.MonkeyP
     result = wire.media(
         case(), {"relevance": StepResult(status="complete", refs=[{}])}, "job:media"
     )
-    assert acquired == ["1", "2"]
+    assert sorted(acquired) == ["1", "2"]
     assert result.status == "incomplete" and result.reason == "media_missing"
     assert not can_continue("media", result)
     assert saved["media-size-limit.json"]["reason"] == "snapshot_size_limit"

@@ -217,3 +217,34 @@ def test_relevance_retries_one_transient_server_error(failures: int) -> None:
     else:
         with pytest.raises(RuntimeError, match="504"):
             sales25_authoring.prepare_inputs(case, raw, owner_id=OWNER, model=model)
+
+
+@pytest.mark.parametrize("broken_every_time", [False, True])
+def test_relevance_reasks_with_a_fresh_request_when_the_answer_is_malformed(
+    broken_every_time: bool,
+) -> None:
+    # 10-29 本番: 13 件の判定の答えが形を崩し（ID の欠け等）、答えはキャッシュされるので
+    # 同じ request_id で何度やり直しても同じ壊れた答えが返り、資料全体が止まった。
+    case, raw = case_inputs()
+    model = relevance_model()
+    judge = model.generate_text.side_effect
+
+    def cached_and_sometimes_broken(prompt: str, request_id: str, **kwargs: Any) -> Any:
+        good = judge(prompt, request_id, **kwargs)
+        if request_id.startswith("sales25-relevance") and (
+            broken_every_time or not request_id.endswith("-again")
+        ):
+            data = json.loads(good.text)
+            data["decisions"] = data["decisions"][
+                1:
+            ]  # 1 件欠ける（同じ id には毎回同じ壊れた答え）
+            return reply(data)
+        return good
+
+    model.generate_text.side_effect = cached_and_sometimes_broken
+    if broken_every_time:
+        with pytest.raises(ValueError, match="every batch ID"):
+            sales25_authoring.prepare_inputs(case, raw, owner_id=OWNER, model=model)
+    else:
+        values = sales25_authoring.prepare_inputs(case, raw, owner_id=OWNER, model=model)
+        assert all(len(values[f"selection/decisions_{qid}.json"]) == 100 for qid in raw)

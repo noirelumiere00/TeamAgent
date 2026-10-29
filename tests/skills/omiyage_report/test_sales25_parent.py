@@ -208,6 +208,58 @@ def result(store: ProposalJobStore, job_id: str) -> sales25.ParentResult:
     return sales25.ParentResult.model_validate_json(row["result_json"])
 
 
+def test_prefetch_and_stage_exceptions_log_scrubbed_message(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from dataclasses import replace
+
+    from structlog.testing import capture_logs
+
+    message = (
+        "invalid relevance evidence https://example.invalid/?token=url-secret "
+        "apify_api_apify-secret Bearer bearer-secret token=plain-secret "
+        '"api_key": "key-secret" xoxb-1234567890-secret ' + "長" * 300
+    )
+
+    def fail(*args: Any, **kwargs: Any) -> sales25.StepResult:
+        raise ValueError(message)
+
+    pipeline = Pipeline()
+    stages = replace(pipeline.stages(), prefetch=fail, relevance=fail)
+    monkeypatch.setattr(pipeline, "stages", lambda: stages)
+    store = ProposalJobStore(table_name="", memory={})
+    with capture_logs() as logs:
+        accepted = build(store, pipeline).run(request(), ctx())
+    errors = [
+        entry
+        for entry in logs
+        if entry["event"] in {"sales25_prefetch_incomplete", "sales25_stage_incomplete"}
+    ]
+    assert {entry["event"] for entry in errors} == {
+        "sales25_prefetch_incomplete",
+        "sales25_stage_incomplete",
+    }
+    for entry in errors:
+        assert entry["error_type"] == "ValueError"
+        assert entry["error_message"].startswith("invalid relevance evidence ")
+        assert len(entry["error_message"]) == 200
+        assert not any(
+            secret in entry["error_message"]
+            for secret in (
+                "example.invalid",
+                "url-secret",
+                "apify-secret",
+                "bearer-secret",
+                "plain-secret",
+                "key-secret",
+                "xoxb-1234567890-secret",
+            )
+        )
+    saved = result(store, accepted.job_id)
+    assert saved.checkpoints["relevance"].status == "incomplete"
+    assert "invalid relevance evidence" not in saved.model_dump_json()
+
+
 @pytest.mark.parametrize("flag", [None, "", "0", "false", "no"])
 def test_flag_default_off(monkeypatch: pytest.MonkeyPatch, flag: str | None) -> None:
     if flag is None:

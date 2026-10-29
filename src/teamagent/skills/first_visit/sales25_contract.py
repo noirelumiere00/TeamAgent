@@ -114,6 +114,14 @@ def _source(
     videos = raw["videos"]
     if not isinstance(videos, list):
         raise ValueError("raw videos must be a list")
+    if raw.get("acquired_via") == "apify" and (
+        type(raw.get("requested")) is not int
+        or not 1 <= raw["requested"] <= 100
+        or type(raw.get("actual")) is not int
+        or raw["actual"] != len(videos)
+        or not 0 < len(videos) <= raw["requested"]
+    ):
+        raise ValueError("Apify requested/actual must match acquired rows")
     if raw.get("status") != ("ok" if videos else "observed_zero") or (
         not videos and raw.get("error_code") != "TIKTOK_TRULY_EMPTY"
     ):
