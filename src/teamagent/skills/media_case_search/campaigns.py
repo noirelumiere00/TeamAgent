@@ -5,7 +5,40 @@ from __future__ import annotations
 import html
 import re
 import unicodedata
+from collections import Counter
 from typing import Any
+
+# shortcut: generic tags use this denylist; extend it when another generic tag appears.
+_GENERIC = {
+    "campaign",
+    "cp",
+    "キャンペーン",
+    "pr",
+    "広告",
+    "提供",
+    "旅行",
+    "国内旅行",
+    "海外旅行",
+    "お出かけ",
+    "おすすめ",
+    "新商品",
+    "イベント",
+    "tiktok",
+    "fyp",
+    "ホテル",
+    "宿泊",
+    "観光",
+    "おすすめスポット",
+    "旅行好き",
+    "旅行好きな人と繋がりたい",
+    "観光スポット",
+    "ホテル紹介",
+    "ホテルステイ",
+    "グルメ",
+    "おすすめにのりたい",
+    "foryou",
+    "foryoupage",
+}
 
 
 def _norm(value: str) -> str:
@@ -27,63 +60,56 @@ def matching_item(item: dict[str, Any], filters: dict[str, Any]) -> bool:
     )
 
 
-def _identities(item: dict[str, Any], post_id: str) -> list[str]:
-    brand = _norm(item.get("brand") or "")
-    # Generic labels are not identities, even when the model calls them a campaign.
-    generic = {
-        "campaign",
-        "キャンペーン",
-        "pr",
-        "旅行",
-        "国内旅行",
-        "おすすめ",
-        "新商品",
-        "イベント",
-        "tiktok",
-        "tiktokgo",
-        "fyp",
-        "ホテル",
-        "観光",
-        "おすすめスポット",
+def _tags(post: dict[str, Any]) -> set[str]:
+    return {
+        tag
+        for item in post.get("items", [])
+        for name in item.get("campaign_tags", [])
+        if len(tag := _norm(name)) >= 3 and tag not in _GENERIC
     }
-    names = [item.get("campaign") or "", *item.get("campaign_tags", [])]
-    identities = []
-    for name in names:
-        normalized = _norm(name)
-        if brand and normalized.startswith(brand):
-            normalized = normalized[len(brand) :]
-        if brand and len(normalized) >= 3 and normalized not in generic:
-            identities.append(brand + ":" + normalized)
+
+
+def _identity(post: dict[str, Any], common_tags: dict[str, int]) -> str:
+    tags = _tags(post)
+    explicit = sorted(
+        tag for tag in tags if any(s in tag for s in ("キャンペーン", "campaign", "cp"))
+    )
+    if explicit:
+        return "tag:" + explicit[0]
+    for item in post["items"]:
+        name = _norm(item.get("campaign") or "")
+        if name not in _GENERIC and any(s in name for s in ("キャンペーン", "campaign", "cp")):
+            brand = _norm(item.get("brand") or "")
+            return "tag:" + (name if name.startswith(brand) else brand + name)
+    shared = tags & common_tags.keys()
+    if shared:
+        return "tag:" + min(shared, key=lambda tag: (-common_tags[tag], tag))
     # Missing campaign identity must never merge all posts from one brand.
-    return identities or [f"post:{post_id}:{brand}:{_norm(item.get('product') or '')}"]
+    item = post["items"][0]
+    brand = _norm(item.get("brand") or "")
+    return f"post:{post['post_id']}:{brand}:{_norm(item.get('product') or '')}"
 
 
 def aggregate_cases(hits: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    parents: dict[str, str] = {}
-
-    def root(key: str) -> str:
-        parents.setdefault(key, key)
-        path = []
-        while parents[key] != key:
-            path.append(key)
-            key = parents[key]
-        for visited in path:
-            parents[visited] = key
-        return key
-
-    entries = []
-    for hit in hits:
-        for item in hit.get("items", []):
-            keys = _identities(item, hit["post_id"])
-            for key in keys[1:]:
-                parents[root(key)] = root(keys[0])
-            entries.append((keys[0], hit, item))
+    posts_by_id = {post["post_id"]: post for post in hits}
+    tag_counts: Counter[str] = Counter()
+    tag_accounts: dict[str, set[str]] = {}
+    for post in posts_by_id.values():
+        tags = _tags(post)
+        tag_counts.update(tags)
+        for tag in tags:
+            tag_accounts.setdefault(tag, set()).add(post["account_handle"])
+    common_tags = {tag: count for tag, count in tag_counts.items() if len(tag_accounts[tag]) >= 2}
     groups: dict[str, dict[str, Any]] = {}
-    for key, post, item in entries:
-        group = groups.setdefault(root(key), {"posts": {}, "items": []})
+    for post in posts_by_id.values():
+        if not post.get("items"):
+            continue
+        key = _identity(post, common_tags)
+        group = groups.setdefault(key, {"posts": {}, "items": []})
         group["posts"][post["post_id"]] = post
-        if item not in group["items"]:
-            group["items"].append(item)
+        for item in post["items"]:
+            if item not in group["items"]:
+                group["items"].append(item)
     result = []
     for group in groups.values():
         posts = list(group["posts"].values())
@@ -126,12 +152,54 @@ def _period(group: dict[str, Any]) -> str:
 
 
 def _title(group: dict[str, Any]) -> str:
-    first = group["items"][0]
-    name = first.get("campaign") or next(iter(first.get("campaign_tags") or []), "")
-    if not name:
-        name = first.get("product") or "施策名未特定"
-    brand = first.get("brand") or "ブランド未特定"
+    def known(value: str | None) -> str:
+        return value if value and "未特定" not in value and "不明" not in value else ""
+
+    items = group["items"]
+    brand = next((b for item in items if (b := known(item.get("brand")))), "")
+    campaign = next(
+        (c for item in items if (c := known(item.get("campaign"))) and _norm(c) not in _GENERIC),
+        "",
+    )
+    tag = next(
+        (
+            tag
+            for item in items
+            for tag in item.get("campaign_tags", [])
+            if known(tag) and len(_norm(tag)) >= 3 and _norm(tag) not in _GENERIC
+        ),
+        "",
+    )
+    name = ((campaign or tag) if brand else (tag or campaign)) or "施策紹介"
+    if _norm(name) == "tiktokgo":
+        name = "TikTok GO の" + (
+            "宿泊紹介" if any(i.get("category") in {"旅行", "宿泊"} for i in items) else "施策紹介"
+        )
+    else:
+        name = name.lstrip("#＃")
+    if _norm(brand) == "tiktokgo":
+        brand = "TikTok GO"
     return _line(name if _norm(name).startswith(_norm(brand)) else brand + " " + name)
+
+
+def _details(group: dict[str, Any]) -> str:
+    field = "facility" if any(i.get("facility") for i in group["items"]) else "product"
+    names = Counter(
+        name
+        for post in group["posts"].values()
+        for name in {
+            item[field] for item in post["items"] if item in group["items"] and item.get(field)
+        }
+    )
+    if not names:
+        return ""
+    unit = "施設" if field == "facility" else "商品"
+    return (
+        "（"
+        + "、".join(_line(name) for name, _ in names.most_common(3))
+        + (f" など{len(names)}{unit}" if len(names) > 3 else "を紹介")
+        + "）"
+    )
 
 
 def _metric(group: dict[str, Any], name: str, label: str) -> str:
@@ -165,16 +233,6 @@ def render_hits(hits: list[dict[str, Any]], filters: dict[str, Any], limit: int 
     ][:limit]
     cards = []
     for group in primary:
-        facilities = sorted({x["facility"] for x in group["items"] if x.get("facility")})
-        detail = (
-            (
-                "。"
-                + "、".join(_line(f) for f in facilities[:2])
-                + (f" など{len(facilities)}施設" if len(facilities) > 2 else "を紹介")
-            )
-            if facilities
-            else ""
-        )
         top = group["top"]
         biggest = (
             f"。最大は{top['metrics']['playCount']:,}再生（@{_line(top['account_handle'])}）"
@@ -189,7 +247,7 @@ def render_hits(hits: list[dict[str, Any]], filters: dict[str, Any], limit: int 
         cards.append(
             f"**{_title(group)}（{_period(group)}）**\n"
             f"- {group['account_count']} アカウントで {group['post_count']} 本"
-            f"{detail}。{_pr(group)}\n"
+            f"{_details(group)}。{_pr(group)}\n"
             f"- 合計 {_metric(group, 'play', '再生')}・保存 {_metric(group, 'save', '件')}"
             f"{biggest}{link}"
         )
@@ -224,19 +282,5 @@ def render_hits(hits: list[dict[str, Any]], filters: dict[str, Any], limit: int 
             f"\n\n関連では、{_title(related)}（{_period(related)}・"
             f"{related['account_count']} アカウント・計 {_metric(related, 'play', '再生')}）"
             f"もあります。{_pr(related)}"
-        )
-    message += (
-        "\n施設名が分かれば、その言葉でも事例を探せます。"
-        if cards
-        else "\nブランド名や施策名でも探せます。"
-    )
-    dates = sorted(
-        {str(p.get("metrics_observed_at") or "")[:10] for p in hits if p.get("metrics_observed_at")}
-    )
-    if dates:
-        message += (
-            f"\n※ 数値は {dates[0]}"
-            + (f"〜{dates[-1]}" if dates[0] != dates[-1] else "")
-            + " の取得時点。"
         )
     return message

@@ -335,9 +335,46 @@ def test_tool_description_requires_explicit_media_scope():
         "トレンドメディア 国内 旅行 CP → query=国内 旅行 CP",
         "「動画出して」「まとめて」は共に案件単位の回答",
         "いちばん伸びた1本の投稿リンク",
+        "回答末尾は収録範囲と次の一手の2行",
     ):
         assert phrase in description
     assert description.split("登録handle: ")[1].split(", ") == list(accounts())
+
+
+@pytest.mark.parametrize("has_posts", [True, False])
+@pytest.mark.parametrize("refresh", [True, False])
+def test_search_ends_with_coverage_and_one_next_action(ledger, has_posts, refresh):
+    from tests.skills.media_case_search.test_campaigns import post
+
+    store = MemoryStore()
+    if has_posts:
+        store.posts = {str(i): {**post(i), "account_handle": HANDLE} for i in range(3)}
+    if refresh:
+        store.states[HANDLE] = {
+            "initialized": True,
+            "last_success": (datetime.now(UTC) - timedelta(days=8)).isoformat(),
+        }
+    skill = make_skill(ledger, store=store, launch=lambda fn: None)
+    input = MediaCaseInput(query="国内旅行 CP")
+    output = skill.run(input, CTX)
+    assert output.status == ("queued" if refresh else "ready")
+    message = output.message
+    coverage, next_action = message.splitlines()[-2:]
+    assert coverage.startswith(f"※ NewsTV の 10 アカウント・{3 if has_posts else 0} 投稿から")
+    assert ("数値は 2026-10-28 の取得時点。" in coverage) == has_posts
+    assert next_action == "施設名やブランド名でも事例を探せます。"
+    assert message.count("事例を探せます。") == 1
+    assert "最大はいちばん伸びた投稿の URL を載せています。" not in message
+    assert "未特定" not in message
+    if refresh:
+        running = skill.run(input, CTX)
+        assert running.status == "running"
+        assert running.message.splitlines()[-2:] == [coverage, next_action]
+        skill.jobs.mark_running(output.job_id)
+        skill.jobs.mark_done(output.job_id, "{}")
+        status, completed = skill.poll(output.job_id, CTX)
+        assert status == "done" and "投稿の追加確認が完了しました。" in completed
+        assert completed.splitlines()[-2:] == [coverage, next_action]
 
 
 def test_domestic_travel_cp_filters_and_no_unverified_access(ledger):
