@@ -26,6 +26,34 @@ def _pr(post: Mapping[str, Any]) -> bool:
 RELEVANCE_MAX_COST_USD = 0.1
 
 
+def _relevance_decisions(
+    text: str, batch: list[dict[str, Any]], brands: Mapping[str, Any]
+) -> list[dict[str, Any]]:
+    """Gemini の関連判定の答えを検証する（形が崩れていれば ValueError）。"""
+    result = json.loads(text)
+    if not isinstance(result, dict) or set(result) != {"decisions"}:
+        raise ValueError("relevance object required")
+    values = result["decisions"]
+    if (
+        not isinstance(values, list)
+        or len(values) != len(batch)
+        or {v.get("id") for v in values if isinstance(v, dict)} != {p["id"] for p in batch}
+    ):
+        raise ValueError("relevance must cover every batch ID exactly once")
+    for decision in values:
+        if (
+            set(decision) != {"id", "eligible", "reason", "brand_matches"}
+            or type(decision["eligible"]) is not bool
+            or not isinstance(decision["reason"], str)
+            or not 0 < len(decision["reason"].strip()) <= 500
+            or not isinstance(decision["brand_matches"], list)
+            or any(b not in brands for b in decision["brand_matches"])
+            or len(set(decision["brand_matches"])) != len(decision["brand_matches"])
+        ):
+            raise ValueError("invalid relevance evidence")
+    return values
+
+
 def judge_query(
     case: Mapping[str, Any],
     query: Mapping[str, Any],
@@ -76,42 +104,34 @@ def judge_query(
             '"brand_matches":[str]}]}. Give a short Japanese evidence reason per ID. Input:\n'
             + evidence.decode()
         )
-        # 一時的な 5xx・期限切れは 1 回だけやり直す（10-28 本番の 504 で資料全体が止まった）。
-        for attempt in range(2):
+        values: list[dict[str, Any]] | None = None
+        # 一時的な 5xx・期限切れは同じ request_id で 1 回だけやり直す（10-28 本番の 504）。
+        # 形の崩れた答え（ID の欠け等）は別の request_id で聞き直す。答えはキャッシュされ、
+        # 同じ request_id では同じ壊れた答えが返る（10-29 本番: これで資料全体が止まった）。
+        for shape_attempt in range(2):
+            request_id = f"sales25-relevance-{qid}-{start}" + ("-again" if shape_attempt else "")
+            for attempt in range(2):
+                try:
+                    response = model.generate_text(
+                        prompt,
+                        request_id,
+                        json_mode=True,
+                        max_cost_usd=RELEVANCE_MAX_COST_USD,
+                    )
+                    break
+                except ValueError:
+                    raise
+                except Exception:
+                    if attempt:
+                        raise
             try:
-                response = model.generate_text(
-                    prompt,
-                    f"sales25-relevance-{qid}-{start}",
-                    json_mode=True,
-                    max_cost_usd=RELEVANCE_MAX_COST_USD,
-                )
+                values = _relevance_decisions(response.text, batch, brands)
                 break
             except ValueError:
-                raise
-            except Exception:
-                if attempt:
+                if shape_attempt:
                     raise
-        result = json.loads(response.text)
-        if not isinstance(result, dict) or set(result) != {"decisions"}:
-            raise ValueError("relevance object required")
-        values = result["decisions"]
-        if (
-            not isinstance(values, list)
-            or len(values) != len(batch)
-            or {v.get("id") for v in values if isinstance(v, dict)} != {p["id"] for p in batch}
-        ):
-            raise ValueError("relevance must cover every batch ID exactly once")
+        assert values is not None
         for decision in values:
-            if (
-                set(decision) != {"id", "eligible", "reason", "brand_matches"}
-                or type(decision["eligible"]) is not bool
-                or not isinstance(decision["reason"], str)
-                or not 0 < len(decision["reason"].strip()) <= 500
-                or not isinstance(decision["brand_matches"], list)
-                or any(b not in brands for b in decision["brand_matches"])
-                or len(set(decision["brand_matches"])) != len(decision["brand_matches"])
-            ):
-                raise ValueError("invalid relevance evidence")
             decision.update(
                 input_sha256=hashlib.sha256(evidence).hexdigest(),
                 model_id=response.model_id,

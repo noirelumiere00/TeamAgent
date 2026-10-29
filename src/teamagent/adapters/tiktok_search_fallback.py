@@ -128,7 +128,7 @@ def apply_sales25_fallback(
     deadline_s: int,
     request_id: str,
 ) -> dict[str, Any]:
-    """Recover only blocked/API-error/empty searches, once per immutable worker job."""
+    """Recover blocked/API-error/empty searches, with at most one shortfall retry per job."""
     if not apify_fallback_enabled():
         return original
     out = copy.deepcopy(original)
@@ -181,6 +181,32 @@ def apply_sales25_fallback(
                 request_id=request_id,
             )
             recovered = _evidence(run, original)
+            remaining = int(budget - (time.monotonic() - started))
+            if recovered["acquisition_status"]["shortfall"] and remaining > 0:
+                try:
+                    retry = _evidence(
+                        apify.tiktok_search(
+                            raw["query"],
+                            max_items=status["target"],
+                            deadline_s=remaining,
+                            request_id=f"{request_id}:retry",
+                        ),
+                        original,
+                    )
+                    attempts = [recovered["apify_evidence"], retry["apify_evidence"]]
+                    # Never merge sessions: keep the more complete single-run display order.
+                    if (
+                        retry["acquisition_status"]["actual"]
+                        > recovered["acquisition_status"]["actual"]
+                    ):
+                        recovered = retry
+                    recovered["apify_attempts"] = attempts
+                except Exception as exc:
+                    recovered["apify_retry_warning"] = f"APIFY_RETRY_FAILED:{safe_reason(exc)}"
+            # A retry or cache-write failure must not discard already validated rows.
+            out.update(recovered)
+            out["acquired_via"] = "apify"
+            out["worker_evidence"] = original
             media_client.stage_bytes(
                 job_id=job_id,
                 name=_CACHE,

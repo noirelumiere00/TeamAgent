@@ -69,3 +69,46 @@ def test_bounded_multimodal_counts_images_and_disables_paid_retries(use_vertex: 
     with pytest.raises(RuntimeError):
         client.analyze_images_bytes([(b"png", "image/png")], "extract", "req", max_cost_usd=0.03)
     assert fake.models.generate_content.call_count == 1
+
+
+@pytest.mark.parametrize("image", [False, True])
+@pytest.mark.parametrize(
+    "thinking", [{"thinking_budget": 0}, {"thinking_budget": 256}, {"thinking_level": "minimal"}]
+)
+def test_structured_entries_forward_explicit_thinking_without_extra_requests(image, thinking):
+    fake = MagicMock()
+    fake.models.count_tokens.return_value = SimpleNamespace(total_tokens=1700)
+    fake.models.generate_content.return_value = SimpleNamespace(
+        text='{"items": []}',
+        usage_metadata=SimpleNamespace(
+            prompt_token_count=1700, candidates_token_count=360, thoughts_token_count=256
+        ),
+    )
+    client = GeminiClient(model_id="gemini-3.5-flash", client=fake)
+    if image:
+        result = client.analyze_images_bytes(
+            [(b"png", "image/png")], "extract", "req", max_cost_usd=0.015, **thinking
+        )
+    else:
+        result = client.generate_text(
+            "extract", "req", json_mode=True, max_cost_usd=0.015, **thinking
+        )
+    config = fake.models.generate_content.call_args.kwargs["config"]
+    for key, value in thinking.items():
+        assert getattr(config.thinking_config, key) == (
+            value.upper() if isinstance(value, str) else value
+        )
+    assert config.response_mime_type == "application/json"
+    assert config.max_output_tokens >= 360 + 256
+    assert result.cost_usd == pytest.approx((1700 * 1.5 + (360 + 256) * 9) / 1_000_000)
+    assert fake.models.generate_content.call_count == 1
+
+
+@pytest.mark.parametrize(
+    "thinking", [{"thinking_budget": -1}, {"thinking_budget": 0, "thinking_level": "minimal"}]
+)
+def test_invalid_thinking_settings_never_generate(thinking):
+    fake = MagicMock()
+    with pytest.raises(ValueError, match="thinking_"):
+        GeminiClient(client=fake).generate_text("extract", "req", **thinking)
+    fake.models.generate_content.assert_not_called()
