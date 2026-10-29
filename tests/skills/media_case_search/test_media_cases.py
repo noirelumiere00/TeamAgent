@@ -76,7 +76,7 @@ class FakeGemini:
         self.calls = []
 
     def _reply(self, prompt, images, cap):
-        assert cap == 0.015
+        assert cap == 0.03
         self.calls.append((prompt, len(images)))
         caption = json.loads(prompt.split("投稿データ: ", 1)[1])["caption"]
         result = self.replies.pop(0) if self.replies else extraction()
@@ -234,8 +234,10 @@ def test_personal_names_and_unfounded_evidence_are_not_saved(ledger):
     with pytest.raises(ValueError, match="personal names"):
         analyze(ledger, replies=[personal])
     bad = extraction(evidence=[{"source": "caption", "excerpt": "存在しない文章"}])
-    with pytest.raises(ValueError, match="evidence does not match"):
-        analyze(ledger, replies=[bad, bad])
+    (metadata, text, _), model = analyze(ledger, replies=[bad])
+    assert metadata["items"] == [] and text == "" and len(model.calls) == 1
+    assert metadata["coverage"]["dropped_evidence"] == 1
+    assert metadata["coverage"]["dropped_items"] == 1
 
 
 def test_budget_failure_clears_unstarted_intent(ledger, monkeypatch):
