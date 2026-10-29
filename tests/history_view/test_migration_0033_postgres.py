@@ -54,6 +54,13 @@ def _connect(env: HvDb) -> Any:
     return psycopg.connect(env.migrator_dsn)
 
 
+def test_fixture_serializes_cluster_roles(env: HvDb) -> None:
+    import psycopg
+
+    with psycopg.connect(_DB_DSN, dbname="postgres", autocommit=True) as conn:
+        assert conn.execute("SELECT pg_try_advisory_lock(29, 33)").fetchone() == (False,)
+
+
 def _audit_rows(env: HvDb) -> list[tuple[Any, ...]]:
     import psycopg
 
