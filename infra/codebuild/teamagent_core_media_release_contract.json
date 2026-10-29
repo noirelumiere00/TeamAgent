@@ -163,7 +163,7 @@
         {
           "key": "binary.node.sha256",
           "path": "/usr/bin/node",
-          "sha256": "f801af10506e5e0afb1913b9c105e1f969c47801b7ecd3ee141b6991b25cd91c"
+          "sha256": "5b783adaa4c44c648568373e40ad5e4c48070085a62d1afa1b24d15bf8ad5178"
         },
         {
           "key": "binary.python.sha256",
@@ -174,7 +174,7 @@
       "source_assertions": [
         {
           "key": "artifact.apk-lock.sha256",
-          "value": "23fa5b5699bf7bc0eea62bcbe4b9a5cda36b77dd0cab6e6c08e0685fb4d9ed39",
+          "value": "7d31efa3083417efb959d7229502294343e185b629fe288ccc55359da6e826a0",
           "build_arg": "MEDIA_APK_LOCK_SHA256",
           "oci_label": "io.teamagent.contract.apk-lock-sha256",
           "dockerfile_uses": [
@@ -369,7 +369,7 @@
         },
         {
           "key": "binary.node.sha256",
-          "value": "f801af10506e5e0afb1913b9c105e1f969c47801b7ecd3ee141b6991b25cd91c",
+          "value": "5b783adaa4c44c648568373e40ad5e4c48070085a62d1afa1b24d15bf8ad5178",
           "build_arg": "NODE_BINARY_SHA256",
           "oci_label": "io.teamagent.contract.node-binary-sha256",
           "dockerfile_uses": [
@@ -477,7 +477,7 @@
         },
         {
           "key": "package.node.version",
-          "value": "24.22.1-r0",
+          "value": "24.22.1-r1",
           "build_arg": "NODE_PACKAGE_VERSION",
           "oci_label": "io.teamagent.contract.node-package-version",
           "dockerfile_uses": [

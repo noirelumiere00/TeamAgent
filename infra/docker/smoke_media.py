@@ -34,7 +34,7 @@ from teamagent.media.security import validate_acquire_url
 
 EXPECTED_BINARY_HASHES = {
     "/usr/bin/python3": "b776d2d6601ffe3bebbae359a8560a7efd0fe1d80b33b6235035225090a567db",
-    "/usr/bin/node": "b9fb3beb6d397b33284966e6c1efb2056d6bc9ccc030f6f92caaac121c87a8e1",
+    "/usr/bin/node": "5b783adaa4c44c648568373e40ad5e4c48070085a62d1afa1b24d15bf8ad5178",
     "/usr/bin/ffmpeg": "43aff9d9b8d8becd14f9e2a36a8497aa5c0e12454e60f7c0d3350ed5bef945ba",
     "/usr/lib/chromium/chromium": (
         "13eaa3cbe73f39b5feafcd767db0771c4f25d626a3927ba216ac43cde3abaf79"
@@ -129,7 +129,7 @@ def _assert_content_boundary() -> None:
 
 def _assert_exact_runtime() -> None:
     assert sys.version.startswith("3.14.5 ")
-    assert subprocess.check_output(["node", "--version"], text=True).strip() == "v24.18.0"
+    assert subprocess.check_output(["node", "--version"], text=True).strip() == "v24.22.1"
     assert importlib.metadata.version("playwright") == "1.60.0"
     assert importlib.metadata.version("yt-dlp") == "2026.6.9"
     for raw_path, expected in EXPECTED_BINARY_HASHES.items():
