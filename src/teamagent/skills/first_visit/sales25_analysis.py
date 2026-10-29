@@ -475,8 +475,9 @@ def _review(
             batch = batch[:-1]
         if len(batch) == 1:
             asset = batch[0]
-            response, point = _ask_again(
-                lambda request_id, asset=asset: model.analyze_image_bytes(
+
+            def ask_one(request_id: str, asset: dict[str, Any] = asset) -> GeminiResponse:
+                return model.analyze_image_bytes(
                     files[asset["path"]],
                     _image_mime(files[asset["path"]]),
                     prompt
@@ -485,9 +486,10 @@ def _review(
                         {"sec": asset["timestamp_sec"], "photo_index": asset["photo_index"]}
                     ),
                     request_id,
-                ),
-                f"sales25-{pid}-{start}",
-                lambda answer: _model_json(answer.text),
+                )
+
+            response, point = _ask_again(
+                ask_one, f"sales25-{pid}-{start}", lambda answer: _model_json(answer.text)
             )
             points = [point]
         else:
@@ -505,8 +507,8 @@ def _review(
                         raise ValueError("image batch order mismatch")
                 return points
 
-            response, points = _ask_again(
-                lambda request_id, batch=batch: model.analyze_images_bytes(
+            def ask_batch(request_id: str, batch: list[dict[str, Any]] = batch) -> GeminiResponse:
+                return model.analyze_images_bytes(
                     [(files[a["path"]], _image_mime(files[a["path"]])) for a in batch],
                     prompt + 'Return JSON {"observations": [objects with index and all fields]}. '
                     "Return exactly one object per image in input order, index starts at 0. "
@@ -517,10 +519,9 @@ def _review(
                         ]
                     ),
                     request_id,
-                ),
-                f"sales25-{pid}-batch-{start}",
-                read_batch,
-            )
+                )
+
+            response, points = _ask_again(ask_batch, f"sales25-{pid}-batch-{start}", read_batch)
         observations.extend((a, point, response) for a, point in zip(batch, points, strict=True))
         start += len(batch)
     for asset, point, response in observations:
