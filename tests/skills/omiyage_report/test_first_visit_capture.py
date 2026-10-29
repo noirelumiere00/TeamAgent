@@ -7,11 +7,13 @@ import json
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+from unittest.mock import MagicMock
 
 import pytest
 
 from teamagent.adapters.proposal_job_store import ProposalJobStore
 from teamagent.adapters.tiktok_scraper import TikTokScrapeError, TikTokSearchResult
+from teamagent.skills.base import SkillContext
 from teamagent.skills.omiyage_report import skill as skill_module
 from teamagent.skills.omiyage_report.input_check import RelevanceCheck
 from teamagent.skills.omiyage_report.schema import OmiyageReportSubmitInput
@@ -216,8 +218,11 @@ def test_flag_off_preserves_output_and_existing_s3_bytes(
 
 
 def test_capture_storage_failure_does_not_fail_omiyage(
-    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    log = MagicMock()
+    monkeypatch.setattr(SkillContext, "bind_logger", lambda *args: log)
+
     def denied(*args: Any) -> Any:
         raise PermissionError("S3 AccessDenied")
 
@@ -225,7 +230,7 @@ def test_capture_storage_failure_does_not_fail_omiyage(
     result, actual_s3, _ = run_report(monkeypatch, "1", denied)
     assert result.model_dump_json() == baseline.model_dump_json()
     assert actual_s3.objects == baseline_s3.objects
-    assert "first_visit_capture_save_failed" in capsys.readouterr().out
+    log.warning.assert_any_call("first_visit_capture_save_failed", error_type="PermissionError")
 
 
 def test_all_failed_still_saves_each_axis_without_claiming_zero(

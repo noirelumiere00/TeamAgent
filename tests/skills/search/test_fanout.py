@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import threading
 import time
+from concurrent.futures import Future
 from dataclasses import replace
 from importlib import import_module
+from itertools import count
 from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock
@@ -26,6 +28,7 @@ from teamagent.skills.search.schema import SearchInput
 _fakes = import_module("tests.skills.search.test_composite_search")
 _slack_fakes = import_module("tests.skills.slack_search.test_slack_search")
 _summary_factory = fanout.build_summary_client
+_submit = fanout._submit
 ME = _fakes.ME
 _bedrock, _converse, _pg, _skill, _vault_hit = (
     _fakes._bedrock,
@@ -46,6 +49,22 @@ META = {
 
 @pytest.fixture(autouse=True)
 def setup(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Mock DB budgets advance independently of worker scheduling, with nonzero timings.
+    clock = count(100.0, 0.001)
+    monkeypatch.setattr(fanout.time, "perf_counter", lambda: next(clock))
+
+    # 文言の試験は言い換えの完了を固定する。実並行・期限の試験は本物の submit に戻す。
+    def submit(fn: Any, name: str) -> Any:
+        if name != "expand":
+            return _submit(fn, name)
+        future: Future[Any] = Future()
+        try:
+            future.set_result(fn())
+        except Exception as exc:
+            future.set_exception(exc)
+        return future
+
+    monkeypatch.setattr(fanout, "_submit", submit)
     monkeypatch.delenv("SEARCH_FANOUT_LIST_FAST", raising=False)
     monkeypatch.setenv("USE_SEARCH_FANOUT", "1")
     monkeypatch.setenv("SEARCH_FANOUT_ALLOWED_EMAILS", ME)
@@ -167,18 +186,19 @@ def test_kanji_expansion_is_not_promoted_or_summarized(monkeypatch: pytest.Monke
 
 
 def test_slack_and_expansion_start_with_vault(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(fanout, "_submit", _submit)
     slack_started, expand_started = threading.Event(), threading.Event()
     vault_started = threading.Event()
     original_slack = lookup_slack
 
     def slack(**kw: Any) -> Any:
         slack_started.set()
-        assert vault_started.wait(0.5)
+        assert vault_started.wait(10)
         return original_slack(**kw)
 
     def expand(*a: Any, **kw: Any) -> ExpansionResult:
         expand_started.set()
-        assert vault_started.wait(0.5)
+        assert vault_started.wait(10)
         return ExpansionResult((), None, (), "empty", 1, 0.0)
 
     monkeypatch.setattr(fanout, "lookup_slack", slack)
@@ -187,7 +207,7 @@ def test_slack_and_expansion_start_with_vault(monkeypatch: pytest.MonkeyPatch) -
     original_search = pg.search_similar_new_schema.side_effect
 
     def search(**kw: Any) -> Any:
-        assert slack_started.wait(0.5) and expand_started.wait(0.5)
+        assert slack_started.wait(10) and expand_started.wait(10)
         vault_started.set()
         return original_search(**kw)
 
@@ -198,10 +218,13 @@ def test_slack_and_expansion_start_with_vault(monkeypatch: pytest.MonkeyPatch) -
 
 @pytest.mark.parametrize("lane", ["slack", "expand", "summary"])
 def test_slow_lane_keeps_vault(monkeypatch: pytest.MonkeyPatch, lane: str) -> None:
+    monkeypatch.setattr(fanout, "_submit", _submit)
     gate = threading.Event()
+    returned = threading.Event()
 
     def slow(*a: Any, **kw: Any) -> Any:
-        gate.wait(1)
+        gate.wait()
+        returned.set()
         if lane == "expand":
             return ExpansionResult((), None, (), "empty", 1, 0.0)
         if lane == "summary":
@@ -225,10 +248,8 @@ def test_slow_lane_keeps_vault(monkeypatch: pytest.MonkeyPatch, lane: str) -> No
         monkeypatch.setattr(fanout, "lookup_slack" if lane == "slack" else "run_expansion", slow)
     try:
         skill, _ = make()
-        started = time.perf_counter()
         out = run(skill)
-        # 待たずに返したことは timeout の記録とゲート未開放で決まる。実時間の上限は CI の混雑で揺れるので緩く。
-        assert time.perf_counter() - started < 5
+        assert not returned.is_set()
         assert out.found and "📁" in out.answer
         assert next(r for r in out.sources if r["lane"] == lane)["status"] == "timeout"
     finally:
@@ -423,11 +444,14 @@ def test_named_timeout_preserves_vault_and_is_partial() -> None:
 
 
 def test_no_found_does_not_wait_for_expansion(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(fanout, "_submit", _submit)
     gate, entered = threading.Event(), threading.Event()
+    returned = threading.Event()
 
     def expand(*a: Any, **kw: Any) -> ExpansionResult:
         entered.set()
-        gate.wait(1)
+        gate.wait()
+        returned.set()
         return ExpansionResult((), None, (), "empty", 1, 0.0)
 
     monkeypatch.setattr(fanout, "run_expansion", expand)
@@ -435,14 +459,14 @@ def test_no_found_does_not_wait_for_expansion(monkeypatch: pytest.MonkeyPatch) -
     original_search = pg.search_similar_new_schema.side_effect
 
     def search(**kw: Any) -> Any:
-        assert entered.wait(0.3)
+        assert entered.wait(10)
         return original_search(**kw)
 
     pg.search_similar_new_schema.side_effect = search
     try:
-        started = time.perf_counter()
         out = run(skill, query="宅配系の事例")
-        assert time.perf_counter() - started < 0.3 and not out.found
+        assert not returned.is_set() and not out.found
+        assert next(r for r in out.sources if r["lane"] == "expand")["status"] == "timeout"
         assert "言い換え ✗" in out.answer
     finally:
         gate.set()
@@ -491,6 +515,7 @@ def test_expansion_bedrock_failure_is_failed_not_zero(monkeypatch: pytest.Monkey
 def test_rls_identity_and_peak_connections_at_most_three(monkeypatch: pytest.MonkeyPatch) -> None:
     from contextlib import contextmanager
 
+    monkeypatch.setattr(fanout, "_submit", _submit)
     active = peak = 0
     lock = threading.Lock()
     skill, pg = make([])
@@ -519,7 +544,7 @@ def test_rls_identity_and_peak_connections_at_most_three(monkeypatch: pytest.Mon
     def expand(*a: Any, **kw: Any) -> ExpansionResult:
         with kw["connection"]():
             occupied.set()
-            release.wait(1)
+            release.wait()
         return ExpansionResult((), None, (), "empty", 1, 0.0)
 
     monkeypatch.setattr(fanout, "run_expansion", expand)
@@ -527,7 +552,7 @@ def test_rls_identity_and_peak_connections_at_most_three(monkeypatch: pytest.Mon
 
     def search(**kw: Any) -> Any:
         nonlocal count
-        assert occupied.wait(0.5)
+        assert occupied.wait(10)
         count += 1
         if count > 1:
             release.set()
@@ -1036,13 +1061,15 @@ def test_slow_industry_case_lookup_keeps_vault(monkeypatch: pytest.MonkeyPatch) 
     from teamagent.skills.search.fanout_sources import SourceResult
 
     gate = threading.Event()
+    returned = threading.Event()
     from teamagent.skills.search.fanout_sources import case_lookup_by_industry
 
     original = case_lookup_by_industry
 
     def lookup(*a: Any, **kw: Any) -> Any:
         if kw.get("industry"):
-            gate.wait(1)
+            gate.wait()
+            returned.set()
             return SourceResult(source="case", status="zero", reason="no_records")
         return original(*a, **kw)
 
@@ -1053,10 +1080,9 @@ def test_slow_industry_case_lookup_keeps_vault(monkeypatch: pytest.MonkeyPatch) 
     # 該当なしでは回収の追加待ちは 0s。同業種 SQL の遅延も待たない。
     skill, _ = make([], client=_slack_client([]))
     try:
-        started = time.perf_counter()
-        out = run(skill, query="お酒の事例")
-        assert time.perf_counter() - started < 0.3 and not out.found
-        assert "お酒の事例は見つかりませんでした" in out.answer
+        out = run(skill, query="提案資料")
+        assert not returned.is_set() and not out.found
+        assert next(r for r in out.sources if r["lane"] == "case")["reason"] == "timeout"
         assert "🔎" not in out.answer
     finally:
         gate.set()

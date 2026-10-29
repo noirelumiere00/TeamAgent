@@ -17,8 +17,9 @@ concurrency:
 
 jobs:
   lint-and-test:
-    name: lint + mypy + pytest
+    name: pytest latest (Python ${{ matrix.python-version }}, shard ${{ matrix.shard }}/3)
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     services:
       postgres:
         image: postgres:16-alpine@sha256:57c72fd2a128e416c7fcc499958864df5301e940bca0a56f58fddf30ffc07777
@@ -38,6 +39,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        shard: [1, 2, 3]
         python-version: ${{ github.event_name == 'pull_request' && fromJSON('["3.14"]') || fromJSON('["3.11", "3.13", "3.14"]') }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -100,20 +102,25 @@ jobs:
           PY
 
       - name: Ruff (lint)
+        if: matrix.shard == 1
         run: ruff check src/ tests/ scripts/
 
       - name: Ruff (format check)
+        if: matrix.shard == 1
         run: ruff format --check src/ tests/ scripts/
 
       - name: Import layering (import-linter)
+        if: matrix.shard == 1
         run: lint-imports
 
       - name: OpenClaw config invariants
+        if: matrix.shard == 1
         # 設定矛盾（dmPolicy:open なのに allowFrom に "*" が無い等）を PR で fail-loud に弾く。
         # 2026-06-22 の無音 DM drop 事故の再発防止（柱1）。標準ライブラリのみで依存追加なし。
         run: python scripts/check_openclaw_config.py
 
       - name: Mypy (strict)
+        if: matrix.shard == 1
         run: mypy src/teamagent
 
       - name: Install TikTok scraper Node dependencies
@@ -123,18 +130,41 @@ jobs:
       - name: Install ffmpeg for media tests
         run: sudo apt-get update -q && sudo apt-get install -y -q --no-install-recommends ffmpeg
 
-      - name: Pytest
-        # coverage は 3.14 の最新版依存ジョブだけで収集する（PR でも 1 本）。
-        run: pytest tests/ -q -n auto --dist=loadgroup --durations=20 ${{ matrix.python-version == '3.14' && '--cov=teamagent --cov-report=term-missing' || '' }}
+      - name: Pytest (duration-balanced shard)
+        env:
+          COVERAGE_FILE: .ci-results/.coverage.${{ matrix.shard }}
+        run: >-
+          python -m pytest tests/ -q -n auto --dist=loadgroup --durations=20
+          -p tests.pytest_shard --ci-shards=3 --ci-shard=${{ matrix.shard }}
+          --ci-manifest=.ci-results/manifest.json
+          --ci-write-durations=.ci-results/durations.json
+          ${{ matrix.python-version == '3.14' && '--cov=teamagent --cov-report=' || '' }}
+
+      - name: Upload shard inventory, timings and coverage
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: pytest-latest-${{ matrix.python-version }}-shard-${{ matrix.shard }}
+          path: .ci-results/
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 7
+          overwrite: true # failed-job rerun は同じ shard の古い artifact を置き換える。
 
       - name: Bandit (security scan)
+        if: matrix.shard == 1
         run: bandit -r src/teamagent -ll  # low+ severity 以上
 
   # 既存ジョブは依存の最新版を検証し、こちらは本番と同じ uv.lock の版を検証する。
   # 2026-09-24 の anyio バンプ時に、CI が lock の 4.14.2 ではなく 4.15.1 を使った件の再発防止。
   lockfile-pytest:
-    name: pytest (uv.lock 固定版・3.14)
+    name: pytest uv.lock (Python 3.14, shard ${{ matrix.shard }}/3)
     runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3]
     services:
       postgres:
         image: postgres:16-alpine@sha256:57c72fd2a128e416c7fcc499958864df5301e940bca0a56f58fddf30ffc07777
@@ -216,12 +246,61 @@ jobs:
           pip freeze | sort > /tmp/pip-freeze.txt
           cat /tmp/pip-freeze.txt
 
-      - name: Pytest
-        run: pytest tests/ -q -n auto --dist=loadgroup --durations=20
+      - name: Pytest (duration-balanced shard)
+        run: >-
+          python -m pytest tests/ -q -n auto --dist=loadgroup --durations=20
+          -p tests.pytest_shard --ci-shards=3 --ci-shard=${{ matrix.shard }}
+          --ci-manifest=.ci-results/manifest.json
+          --ci-write-durations=.ci-results/durations.json
+
+      - name: Upload shard inventory and timings
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: pytest-lock-3.14-shard-${{ matrix.shard }}
+          path: .ci-results/
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 7
+          overwrite: true # failed-job rerun は同じ shard の古い artifact を置き換える。
+
+  pytest-summary:
+    name: pytest 全件照合 + combined coverage
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    needs: [lint-and-test, lockfile-pytest]
+    if: ${{ always() && !cancelled() }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.14"
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: pytest-*
+          path: artifacts
+      - name: Verify collection union and exactly-once execution
+        env:
+          PYTHON_VERSIONS: ${{ github.event_name == 'pull_request' && '3.14' || '3.11 3.13 3.14' }}
+        run: |
+          pip install pytest coverage
+          for version in $PYTHON_VERSIONS; do
+            python tests/pytest_shard.py artifacts/pytest-latest-$version-shard-*/manifest.json
+          done
+          python tests/pytest_shard.py artifacts/pytest-lock-3.14-shard-*/manifest.json
+      - name: Combine Python 3.14 latest-dependency coverage
+        run: |
+          test "$(find artifacts/pytest-latest-3.14-shard-* -name '.coverage.*' | wc -l)" -eq 3
+          coverage combine artifacts/pytest-latest-3.14-shard-*
+          coverage report --include='src/teamagent/*' --show-missing
+
+      - name: Require all pytest shards and checks to succeed
+        run: test '${{ needs.lint-and-test.result }}' = success && test '${{ needs.lockfile-pytest.result }}' = success
 
   activation-freeze:
     name: activation freeze (frozen surface)
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -249,6 +328,7 @@ jobs:
   gitleaks:
     name: gitleaks (secrets scan)
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Run gitleaks (CLI, no GitHub API)
@@ -264,6 +344,7 @@ jobs:
   trivy:
     name: trivy (vuln + misconfig scan)
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -308,6 +389,7 @@ jobs:
   terraform:
     name: terraform lock + offline validate
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     env:
       TF_IN_AUTOMATION: "1"
     steps:
@@ -360,8 +442,9 @@ jobs:
   smoke-test:
     name: smoke test (post-merge)
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    needs: [lint-and-test, gitleaks, trivy]
+    needs: [lint-and-test, lockfile-pytest, pytest-summary, gitleaks, trivy]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: 報告

@@ -181,7 +181,7 @@ def test_cost_cap_stops_remaining_chunks_and_discloses_skip() -> None:
     assert report.analyzed == 2
     assert report.skip_reason == "cost_cap"
     assert set(report.skipped_video_ids) == {"3", "4", "5", "6"}
-    assert client.acquire_calls == ["1", "2"]
+    assert sorted(client.acquire_calls) == ["1", "2"]  # Parallel calls may start in either order.
     assert report.cost_usd_estimate == pytest.approx(0.6)
     assert report.cost_cap_usd == 0.5
 

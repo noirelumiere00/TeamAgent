@@ -78,6 +78,7 @@ def test_in_place_source_mutation_during_copy_fails_closed(
     source = tmp_path / "source.tfplan"
     destination = tmp_path / "private" / "saved.tfplan"
     source.write_bytes(b"a" * (1024 * 1024 + 17))
+    before = source.stat()
     real_read = STAGER.os.read
     mutated = False
 
@@ -90,6 +91,8 @@ def test_in_place_source_mutation_during_copy_fails_closed(
                 handle.write(b"b" * 17)
                 handle.flush()
                 os.fsync(handle.fileno())
+            # Same-size writes may otherwise retain the same filesystem timestamp tick.
+            os.utime(source, ns=(before.st_atime_ns, before.st_mtime_ns + 1_000_000_000))
             mutated = True
         return chunk
 
@@ -97,6 +100,8 @@ def test_in_place_source_mutation_during_copy_fails_closed(
 
     with pytest.raises(STAGER.PlanStagingError, match="changed while"):
         STAGER.stage(source, destination)
+
+    assert mutated
 
 
 def test_symlink_source_is_rejected(tmp_path: Path) -> None:
