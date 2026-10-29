@@ -8,8 +8,14 @@ from unittest.mock import MagicMock
 import pytest
 from pydantic import ValidationError
 
+from teamagent.adapters.apify_media_cases import ApifyCaseAssets
 from teamagent.adapters.gemini_client import GeminiClient
-from teamagent.skills.media_case_search.schema import Distillation
+from teamagent.skills.media_case_search.distill import (
+    CaseDistiller,
+    _valid_evidence,
+    normalize_post,
+)
+from teamagent.skills.media_case_search.schema import Distillation, Evidence
 from teamagent.skills.media_case_search.skill import _post_error_message
 from tests.adapters.test_apify_media_cases import png
 from tests.adapters.test_apify_tiktok_video import _FakeTikTokApify
@@ -30,6 +36,137 @@ def changed(path, value):
         node = node[part]
     node[path[-1]] = value
     return result
+
+
+@pytest.mark.parametrize("source", ["caption", "hashtag", "subtitle"])
+@pytest.mark.parametrize(
+    "source_text,excerpt",
+    [
+        ("ＡＢＣ　ｶﾌｪ\n\n新商品✨🎉", "abc カフェ 新商品"),
+        ("★国内旅行★キャンペーン👩🏽‍💻", "国内旅行キャンペーン"),
+        ("＃国内旅行 ＃ＣＡＭＰＡＩＧＮ", "国内旅行 campaign"),
+        ("国内旅行 campaign", "#国内旅行 #CAMPAIGN"),
+        ("国内旅行\t　キャンペーン", " 国内旅行\nキャンペーン "),
+    ],
+)
+def test_text_evidence_accepts_only_cosmetic_differences(source, source_text, excerpt):
+    evidence = Evidence(source=source, excerpt=excerpt)
+    assert _valid_evidence(evidence, {source: source_text}, set())
+    assert evidence.excerpt == excerpt
+
+
+@pytest.mark.parametrize(
+    "source_text,excerpt",
+    [
+        ("国内旅行キャンペーン", "海外旅行キャンペーン"),
+        ("広告ではありません", "広告です"),
+        ("価格 -100円", "価格 100円"),
+        ("価格 $100", "価格 100"),
+        ("温度30℃", "温度30C"),
+        ("C# を紹介", "C を紹介"),
+        ("国内旅行", "✨"),
+        ("国内旅行", " \n "),
+    ],
+)
+def test_normalization_does_not_accept_invented_or_empty_quotes(source_text, excerpt):
+    assert not _valid_evidence(
+        Evidence(source="caption", excerpt=excerpt), {"caption": source_text}, set()
+    )
+
+
+def test_one_bad_quote_drops_only_unsupported_evidence_and_items_and_saves_post(ledger):
+    valid = {"source": "caption", "excerpt": "国内旅行キャンペーン"}
+    invented = {"source": "caption", "excerpt": "原文にない引用"}
+    payload = extraction(evidence=[invented, valid])
+    payload["items"].append({**payload["items"][0], "brand": "捏造", "evidence": [invented]})
+    payload["pr_evidence"] = [{"source": "caption", "excerpt": "#PR"}]
+    raw = raw_post()
+    model = FakeGemini([payload])
+    skill = make_skill(ledger, _FakeTikTokApify({}, [raw]), model=model)
+    result = skill.ingest_initial([HANDLE])
+    metadata = skill.store.post(raw["id"])
+    assert result["failed"] == 0 and len(model.calls) == 1
+    assert len(metadata["items"]) == 1 and metadata["items"][0]["evidence"] == [
+        {**valid, "image_index": None}
+    ]
+    assert metadata["pr_status"] == "unknown" and metadata["pr_evidence"] == []
+    assert metadata["coverage"] == {
+        "truncated_fields": [],
+        "dropped_evidence": 3,
+        "dropped_items": 1,
+    }
+
+
+def test_no_supported_items_still_saves_metadata_without_retry(ledger):
+    raw = raw_post()
+    payload = extraction(evidence=[{"source": "caption", "excerpt": "本文にない言葉"}])
+    model = FakeGemini([payload])
+    skill = make_skill(ledger, _FakeTikTokApify({}, [raw]), model=model)
+    result = skill.ingest_initial([HANDLE])
+    metadata = skill.store.post(raw["id"])
+    assert result["failed"] == 0 and len(model.calls) == 1
+    assert metadata["items"] == [] and metadata["analysis_complete"]
+    assert metadata["coverage"]["dropped_evidence"] == metadata["coverage"]["dropped_items"] == 1
+    assert skill.store.state(HANDLE)["failed_ids"] == []
+
+
+@pytest.mark.parametrize("source,index", [("thumbnail", 0), ("slide", 1)])
+def test_image_evidence_requires_supplied_image_but_no_text_match(source, index):
+    evidence = Evidence(source=source, excerpt="画像だけにある文字", image_index=index)
+    assert _valid_evidence(evidence, {}, {index})
+    assert not _valid_evidence(evidence, {}, set())
+    assert not _valid_evidence(evidence, {}, {1 - index})
+    assert not _valid_evidence(
+        Evidence(source=source, excerpt=" \n ", image_index=index), {}, {index}
+    )
+
+
+@pytest.mark.parametrize("level,budget", [("minimal", 0), ("low", 256), ("medium", 1024)])
+@pytest.mark.parametrize("model_id", ["gemini-2.5-flash", "gemini-3.5-flash"])
+@pytest.mark.parametrize("images", [[], [(b"image", "image/png")]])
+def test_thinking_environment_reaches_both_gemini_paths(
+    ledger, monkeypatch, level, budget, model_id, images
+):
+    monkeypatch.setenv("MEDIA_CASE_THINKING", level)
+    model = MagicMock(model_id=model_id)
+    model.generate_text.return_value = model.analyze_images_bytes.return_value = SimpleNamespace(
+        text="{}", cost_usd=0.001
+    )
+    CaseDistiller(model, ledger)._call("prompt", images, "thinking-test")
+    call = model.analyze_images_bytes if images else model.generate_text
+    assert call.call_args.kwargs == {
+        "max_cost_usd": 0.03,
+        **({"thinking_budget": budget} if "2.5" in model_id else {"thinking_level": level}),
+        **({} if images else {"json_mode": True}),
+    }
+
+
+def test_invalid_thinking_setting_fails_before_paid_call(ledger, monkeypatch):
+    monkeypatch.setenv("MEDIA_CASE_THINKING", "typo")
+    model = MagicMock()
+    with pytest.raises(ValueError, match="MEDIA_CASE_THINKING"):
+        CaseDistiller(model, ledger)
+    model.generate_text.assert_not_called()
+    model.analyze_images_bytes.assert_not_called()
+
+
+def test_thinking_setting_is_part_of_input_fingerprint(ledger, monkeypatch):
+    (previous, _, _), _ = analyze(ledger)
+    monkeypatch.setenv("MEDIA_CASE_THINKING", "low")
+    model = MagicMock(model_id=previous["model"])
+    model.generate_text.return_value = SimpleNamespace(
+        text=json.dumps(extraction()), cost_usd=0.001
+    )
+    raw = raw_post()
+    client = _FakeTikTokApify({}, [raw]).client(ledger)
+    metadata, _, _ = CaseDistiller(model, ledger).analyze(
+        normalize_post(raw, HANDLE),
+        raw,
+        ApifyCaseAssets(client, client.tiktok_profiles(HANDLE)),
+        "test",
+        previous,
+    )
+    assert metadata["thinking"] == "low" and model.generate_text.call_count == 1
 
 
 @pytest.mark.parametrize(
@@ -93,10 +230,7 @@ def test_empty_items_and_null_optional_evidence_do_not_invent_items(ledger, item
         (("items", 0, "evidence", 0, "excerpt"), ""),
         (("items", 0, "evidence", 0, "source"), "audio"),
         (("items", 0, "evidence", 0, "image_index"), 11),
-        (("items", 0, "evidence", 0, "excerpt"), "原文にない引用"),
-        (("items", 0, "evidence", 0, "source"), "slide"),
         (("items", 0, "evidence"), extraction()["items"][0]["evidence"] * 9),
-        (("pr_evidence",), [{"source": "caption", "excerpt": "#PR"}]),
     ],
 )
 def test_invalid_answer_gets_one_fresh_paid_attempt(ledger, path, value):
@@ -116,14 +250,14 @@ def test_second_invalid_answer_fails_and_both_attempts_are_settled(ledger):
     assert row["units"] == 2 and row["cost_micro"] == 200
 
 
-def test_real_adapter_makes_uncached_repair_with_minimal_thinking(ledger):
+def test_real_adapter_makes_uncached_repair_with_low_thinking(ledger):
     fake = MagicMock()
     fake.models.count_tokens.return_value = SimpleNamespace(total_tokens=1700)
     fake.models.generate_content.side_effect = [
         SimpleNamespace(
             text=text,
             usage_metadata=SimpleNamespace(
-                prompt_token_count=1700, candidates_token_count=360, thoughts_token_count=0
+                prompt_token_count=1700, candidates_token_count=360, thoughts_token_count=256
             ),
         )
         for text in ("{broken JSON", json.dumps(extraction()))
@@ -136,7 +270,7 @@ def test_real_adapter_makes_uncached_repair_with_minimal_thinking(ledger):
     )
     skill.ingest_initial([HANDLE])
     assert fake.models.generate_content.call_count == fake.models.count_tokens.call_count == 2
-    assert skill.store.post(raw["id"])["cost_usd"] == pytest.approx(0.01158)
+    assert skill.store.post(raw["id"])["cost_usd"] == pytest.approx(0.016188)
     for call in fake.models.generate_content.call_args_list:
         config = call.kwargs["config"]
         assert config.thinking_config.thinking_level == "MINIMAL"
@@ -172,8 +306,9 @@ def test_overlong_strings_record_coverage_and_full_quote_is_checked(ledger):
     assert metadata["analysis_complete"] and len(model.calls) == 1
     forged = copy.deepcopy(payload)
     forged["items"][0]["evidence"][0]["excerpt"] += "捏造"
-    with pytest.raises(ValueError, match="evidence does not match"):
-        analyze(ledger, raw=raw_post(text="旅" * 250), replies=[forged, forged])
+    (metadata, text, _), model = analyze(ledger, raw=raw_post(text="旅" * 250), replies=[forged])
+    assert metadata["items"] == [] and text == "" and len(model.calls) == 1
+    assert metadata["coverage"]["dropped_evidence"] == 1
 
 
 def test_truncation_cannot_hide_contacts(ledger):
@@ -200,8 +335,9 @@ def test_cover_alias_still_requires_the_supplied_image(ledger):
         ledger, raw=raw, records={f"cover-{raw['id']}.png": png()}, replies=[payload]
     )
     assert metadata["items"][0]["evidence"][0]["source"] == "thumbnail"
-    with pytest.raises(ValueError, match="evidence does not match"):
-        analyze(ledger, replies=[payload, payload])
+    (metadata, text, _), _ = analyze(ledger, replies=[payload])
+    assert metadata["items"] == [] and text == ""
+    assert metadata["coverage"]["dropped_evidence"] == 1
 
 
 def test_post_failure_logs_redacted_bounded_message_and_retains_failed_id(ledger, monkeypatch):

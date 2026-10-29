@@ -85,9 +85,10 @@ def test_cli_imports_1084_saved_posts_over_100_per_account_without_actor(ledger,
     assert main(["--dataset", DATASET, "--kvs", KVS], skill=skill) == 0
     assert not snapshot.calls
     preview = json.loads(capsys.readouterr().out)
-    assert preview["max_parallel_posts_per_account"] == 6
-    assert preview["max_parallel_gemini_calls"] == 12
+    assert preview["max_parallel_posts_per_account"] == 2
+    assert preview["max_parallel_gemini_calls"] == 6
     assert preview["gemini_monthly_usd"] == "15"
+    assert preview["gemini_thinking"] == "minimal"
     assert main(["--dataset", DATASET, "--kvs", KVS, "--commit"], skill=skill) == 0
     assert len(store.posts) == 1084 and len(model.calls) == 1084
     assert all(store.state(h)["initialized"] for h in accounts())
