@@ -14,7 +14,7 @@
     mapping_sha256 / state_lineage / state_serial /
     aws_account / terraform_workspace / terraform_version
 
-承認トークンも plan_sha256 に束縛する（`<TOKEN>:<plan_sha256 の先頭 16 桁>`）。
+承認トークンは plan と正本 tfvars の path/SHA256 へ束縛する。
 これにより「A という plan を承認したのに B を apply」ができなくなる。
 
 使い方:
@@ -37,13 +37,16 @@ from typing import Any
 
 BINDING_FILENAME = "adopt-binding.json"
 APPROVE_TOKEN = "I-HAVE-REVIEWED-THE-ADOPT-PLAN"
-# 2: aws_principal_arn を追加。principal を束縛しない v1 manifest は受け付けない。
-SCHEMA_VERSION = 2
+# 3: 正本 tfvars の path/SHA256 も束縛。旧 manifest は受け付けない。
+SCHEMA_VERSION = 3
 
 # apply 前に exact match を要求する全項目。
 BOUND_FIELDS = (
     "plan_sha256",
     "plan_json_sha256",
+    "var_file_path",
+    "var_file_sha256",
+    "approval_sha256",
     "git_head",
     "git_tree_clean",
     "mapping_sha256",
@@ -134,9 +137,14 @@ def assert_usable_principal(principal_arn: Any, *, source: str) -> str:
     return arn
 
 
-def expected_approval(plan_sha256: str) -> str:
-    """承認トークンを plan へ束縛した形にする（別 plan の承認を流用できないように）。"""
-    return f"{APPROVE_TOKEN}:{plan_sha256[:16]}"
+def expected_approval(approval_sha256: str) -> str:
+    """承認トークンを plan と tfvars へ束縛する。"""
+    return f"{APPROVE_TOKEN}:{approval_sha256[:16]}"
+
+
+def approval_sha256(plan_sha256: str, var_file_path: str, var_file_sha256: str) -> str:
+    payload = json.dumps([plan_sha256, var_file_path, var_file_sha256], separators=(",", ":"))
+    return hashlib.sha256(payload.encode()).hexdigest()
 
 
 def collect(
@@ -149,11 +157,17 @@ def collect(
     account: str,
     principal_arn: str,
     workspace: str,
+    var_file: Path,
 ) -> dict[str, Any]:
     lineage, serial = _state_identity(state_path)
+    plan_sha = _sha256_file(out_dir / "adopt.tfplan")
+    var_path, var_sha = str(var_file.resolve(strict=True)), _sha256_file(var_file)
     return {
         "schema_version": SCHEMA_VERSION,
-        "plan_sha256": _sha256_file(out_dir / "adopt.tfplan"),
+        "plan_sha256": plan_sha,
+        "var_file_path": var_path,
+        "var_file_sha256": var_sha,
+        "approval_sha256": approval_sha256(plan_sha, var_path, var_sha),
         "plan_json_sha256": _sha256_file(out_dir / "adopt-plan.json"),
         "git_head": _git(repo_root, "rev-parse", "HEAD"),
         "git_tree_clean": _tree_is_clean(repo_root),
@@ -190,8 +204,11 @@ def compare_binding(recorded: dict[str, Any], observed: dict[str, Any]) -> None:
 
 
 def check_approval(recorded: dict[str, Any], approve: str) -> None:
-    """承認トークンがこの plan の SHA256 に束縛されていることを要求する。"""
-    expected = expected_approval(str(recorded["plan_sha256"]))
+    """承認トークンがこの plan と tfvars に束縛されていることを要求する。"""
+    digest = approval_sha256(
+        recorded["plan_sha256"], recorded["var_file_path"], recorded["var_file_sha256"]
+    )
+    expected = expected_approval(digest)
     if approve != expected:
         raise BindingError(
             "承認トークンがこの plan に束縛されていません"
@@ -211,6 +228,7 @@ def main(argv: list[str] | None = None) -> int:
         item.add_argument("--account", required=True)
         item.add_argument("--principal-arn", required=True)
         item.add_argument("--workspace", required=True)
+        item.add_argument("--var-file", required=True, type=Path)
         if name == "record":
             item.add_argument("--state", required=True, type=Path)
         else:
@@ -229,6 +247,7 @@ def main(argv: list[str] | None = None) -> int:
                 account=args.account,
                 principal_arn=args.principal_arn,
                 workspace=args.workspace,
+                var_file=args.var_file,
             )
             if not binding["git_tree_clean"]:
                 raise BindingError("clean tree でない状態では plan を束縛できません")
@@ -261,6 +280,7 @@ def main(argv: list[str] | None = None) -> int:
                 account=args.account,
                 principal_arn=args.principal_arn,
                 workspace=args.workspace,
+                var_file=args.var_file,
             )
             compare_binding(recorded, observed)
             print("adopt plan binding verified: plan した世界と apply する世界が一致")

@@ -9,6 +9,7 @@ live の exact revision へ付け替える唯一の経路を fail-closed で固�
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
 import os
 import subprocess
@@ -33,8 +34,10 @@ from state_rebind import (  # noqa: E402
     RebindError,
     alignment_candidate,
     build_alignment_plan,
+    check_configuration,
     compare_binding,
     compare_state_to_live,
+    configuration_expression,
     expected_approval,
     load_targets,
     verify_pushed_state,
@@ -232,6 +235,8 @@ def _binding() -> dict[str, Any]:
         "schema_version": 1,
         "mapping_sha256": "a" * 64,
         "alignment_sha256": "d" * 64,
+        "var_file_path": "/canonical/terraform.tfvars",
+        "var_file_sha256": "e" * 64,
         "git_head": "b" * 40,
         "git_tree_clean": True,
         "state_lineage": "11111111-2222-3333-4444-555555555555",
@@ -268,6 +273,80 @@ def test_binding_rejects_root_even_when_both_sides_match() -> None:
 def test_approval_is_bound_to_the_precheck_binding() -> None:
     assert expected_approval("f" * 64) == f"{APPROVE_TOKEN}:{'f' * 16}"
     assert expected_approval("a" * 64) != expected_approval("b" * 64)
+
+
+def test_tfvars_path_and_bytes_are_bound_to_approval(tmp_path: Path, monkeypatch: Any) -> None:
+    import state_rebind
+
+    state = tmp_path / "state.json"
+    state.write_text(json.dumps({"lineage": "lineage", "serial": 1}))
+    alignment = tmp_path / "alignment.json"
+    alignment.write_text("{}")
+    var_file = tmp_path / "terraform.tfvars"
+    var_file.write_text("enable_connect_web = true")
+    monkeypatch.setattr(state_rebind, "_git", lambda *args: "commit")
+    monkeypatch.setattr(state_rebind, "_tree_is_clean", lambda *args: True)
+    kwargs: dict[str, Any] = dict(
+        repo_root=tmp_path,
+        mapping=_mapping_file(tmp_path, [_target()]),
+        state_path=state,
+        alignment_path=alignment,
+        account="718959508629",
+        principal_arn="arn:approved",
+        var_file=var_file,
+    )
+    recorded = state_rebind.collect(**kwargs)
+    assert recorded["var_file_path"] == str(var_file.resolve())
+    assert recorded["var_file_sha256"] == hashlib.sha256(var_file.read_bytes()).hexdigest()
+    binding = tmp_path / "binding.json"
+    binding.write_text(json.dumps(recorded))
+    token = expected_approval(hashlib.sha256(binding.read_bytes()).hexdigest())
+    state_rebind.check_approval(binding, token)
+    var_file.write_text("enable_connect_web = false")
+    observed = state_rebind.collect(**kwargs)
+    with pytest.raises(RebindError, match="var_file_sha256"):
+        compare_binding(recorded, observed)
+    binding.write_text(json.dumps(observed))
+    with pytest.raises(RebindError, match="承認トークン"):
+        state_rebind.check_approval(binding, token)
+    copied = tmp_path / "copied.tfvars"
+    copied.write_bytes(var_file.read_bytes())
+    kwargs["var_file"] = copied
+    with pytest.raises(RebindError, match="var_file_path"):
+        compare_binding(observed, state_rebind.collect(**kwargs))
+
+
+@pytest.mark.parametrize("count", ["0", "1", "var.enabled ? 1 : 0"])
+def test_configuration_uses_source_count_not_state(tmp_path: Path, count: str) -> None:
+    (tmp_path / "main.tf").write_text(
+        f'resource "aws_ecs_task_definition" "mcp" {{\n  count = {count}\n}}\n'
+    )
+    target = _target(address="aws_ecs_task_definition.mcp[0]")
+    assert f"({count}) == 1" in configuration_expression(tmp_path, [target])
+
+
+def test_configuration_covers_current_registry_counts() -> None:
+    targets = [{"address": "aws_ecs_task_definition." + name} for name in ALIGNMENT_POINTERS]
+    expression = configuration_expression(ROOT / "infra/terraform", targets)
+    for count in ("var.enable_connect_web", "local.tk_enabled", "local.xr_task_on"):
+        assert count in expression
+    assert expression.count("== 1") == 7
+
+
+@pytest.mark.parametrize("body", ["", "    for_each = var.tasks\n"])
+def test_configuration_rejects_missing_count_and_for_each(tmp_path: Path, body: str) -> None:
+    (tmp_path / "main.tf").write_text('resource "aws_ecs_task_definition" "mcp" {\n' + body + "}\n")
+    with pytest.raises(RebindError, match="config:"):
+        configuration_expression(tmp_path, [_target(address="aws_ecs_task_definition.mcp[0]")])
+
+
+@pytest.mark.parametrize("exists", [False, None, 1, "true"])
+def test_configuration_accepts_only_known_true_for_every_target(exists: Any) -> None:
+    checks = {"aws_ecs_task_definition.mcp": exists}
+    with pytest.raises(RebindError, match="absent"):
+        check_configuration(json.dumps(json.dumps(checks)), [_target()])
+    checks["aws_ecs_task_definition.mcp"] = True
+    check_configuration(json.dumps(json.dumps(checks)), [_target()])
 
 
 # ── guard 側の実行順序契約 ────────────────────────────────────────────────
@@ -590,29 +669,75 @@ def test_alignment_candidate_satisfies_the_real_exact_eight_manifest_builder(
 
 
 @pytest.mark.parametrize(
-    "failure", ["none", "binding", "compare", "exact8", "zip", "lock", "state", "push"]
+    "failure",
+    [
+        "none",
+        "binding",
+        "compare",
+        "exact8",
+        "zip",
+        "lock",
+        "state",
+        "push",
+        "tfvars-sha",
+        "tfvars-path",
+        "disabled",
+        "config-error",
+        "config-unknown",
+        "import",
+        "import-read-denied",
+    ],
 )
 def test_guard_alignment_stops_before_push_on_failed_checks(tmp_path: Path, failure: str) -> None:
     """Execute the actual guard function using fake AWS/Terraform and helper commands."""
     state, targets = _alignment_fixture(tmp_path)
+    # A later disabled target must prevent even the first target's rm.
+    connect_state, connect_targets = _alignment_fixture(tmp_path / "connect", "connect_web[0]")
+    state["resources"].extend(connect_state["resources"][:2])
+    targets.extend(connect_targets)
     reviewed = build_alignment_plan(state, targets, tmp_path)
+    canonical = (
+        tmp_path / "home/dev/worktrees/teamagent-activation/infra/terraform/terraform.tfvars"
+    )
+    canonical.parent.mkdir(parents=True)
+    canonical.write_text("enable_connect_web = " + ("false" if failure == "disabled" else "true"))
+    binding = _binding()
+    binding.update(
+        var_file_path=str(canonical),
+        var_file_sha256=hashlib.sha256(canonical.read_bytes()).hexdigest(),
+    )
     out = tmp_path / "out"
     out.mkdir()
     for name, value in (
         ("state-backup.json", state),
-        ("rebind-binding.json", {}),
+        ("rebind-binding.json", binding),
         ("alignment-plan.json", reviewed),
     ):
         (out / name).write_text(json.dumps(value, indent=2, sort_keys=True) + "\n")
     (out / "rebind-plan.tsv").write_text("reviewed")
     mapping = _mapping_file(tmp_path, targets)
     helper = tmp_path / "fake-helper.py"
-    helper.write_text("""import json, os, pathlib, shutil, sys
+    if failure == "tfvars-sha":
+        canonical.write_text("enable_connect_web = false")
+    supplied = canonical
+    if failure == "tfvars-path":
+        supplied = tmp_path / "build.tfvars"
+        supplied.write_bytes(canonical.read_bytes())
+    helper.write_text("""import hashlib, json, os, pathlib, shutil, sys
+sys.path.insert(0, os.environ["HELPER_DIR"])
+import state_rebind
 command = sys.argv[1]
 failure = os.environ["FAILURE"]
 args = sys.argv[2:]
 def value(flag): return pathlib.Path(args[args.index(flag) + 1])
-if command == "verify" and failure == "binding": sys.exit(1)
+if command == "verify":
+    if failure == "binding": sys.exit(1)
+    binding = value("--out-dir") / "rebind-binding.json"
+    state_rebind.check_approval(binding, str(value("--approve")))
+    recorded = json.loads(binding.read_text())
+    observed = dict(recorded, var_file_path=str(value("--var-file").resolve()), var_file_sha256=hashlib.sha256(value("--var-file").read_bytes()).hexdigest())
+    state_rebind.compare_binding(recorded, observed)
+if command == "check-configuration": sys.exit(state_rebind.main(sys.argv[1:]))
 if command == "compare" and failure == "compare": sys.exit(1)
 if command == "same-state" and failure == "state": sys.exit(1)
 if command == "build-sync-consumer-manifest" and failure == "exact8": sys.exit(1)
@@ -623,6 +748,35 @@ if command == "alignment-plan":
 elif command == "alignment-candidate": shutil.copyfile(value("--state-json"), value("--out"))
 elif command == "build-sync-consumer-manifest": value("--output").write_text("{}")
 """)
+    binary_dir = tmp_path / "bin"
+    binary_dir.mkdir()
+    terraform = binary_dir / "terraform"
+    terraform.write_text(
+        f"#!{sys.executable}\n"
+        + r"""import json, os, pathlib, sys
+args = sys.argv[1:]
+with open(os.environ["CALLS"], "a") as stream: stream.write("terraform " + " ".join(args) + "\n")
+failure = os.environ["FAILURE"]
+if args[1] == "console":
+    expression = sys.stdin.read()
+    assert "var.enable_connect_web" in expression
+    assert "aws_ecs_task_definition.connect_web[0]" in expression
+    if failure == "config-error": sys.exit(1)
+    if failure == "config-unknown": print("(known after apply)"); sys.exit(0)
+    var_file = pathlib.Path(next(arg.split("=", 1)[1] for arg in args if arg.startswith("-var-file=")))
+    targets = json.loads(pathlib.Path(os.environ["REBIND_MAPPING"]).read_text())["targets"]
+    checks = {target["address"]: True for target in targets}
+    if "false" in var_file.read_text(): checks["aws_ecs_task_definition.connect_web[0]"] = False
+    print(json.dumps(json.dumps(checks)))
+elif args[1:3] == ["state", "pull"]:
+    print(pathlib.Path(os.environ["OUT"], "state-backup.json").read_text())
+elif args[1:3] == ["state", "push"]: sys.exit(failure == "push")
+elif args[1] == "import" and failure in {"import", "import-read-denied"}:
+    print("Error: Configuration for import target does not exist" if failure == "import" else "Error: AccessDenied: ec2:DescribeImages", file=sys.stderr)
+    sys.exit(1)
+"""
+    )
+    terraform.chmod(0o700)
     shell = tmp_path / "run.sh"
     shell.write_text(
         """set -euo pipefail
@@ -637,28 +791,34 @@ release_deployment_lock() { echo release >> "$CALLS"; }
 rebind_assert_consumer_points_at_target() { :; }
 rebind_assert_dispatcher_hashes() { :; }
 sha256_file() { command python3 -c 'import hashlib,sys; print(hashlib.sha256(open(sys.argv[1],"rb").read()).hexdigest())' "$1"; }
-terraform() {
-  echo "terraform $*" >> "$CALLS"
-  case "$2 $3" in
-    "state pull") cat "$OUT/state-backup.json" ;;
-    "state push") [ "$FAILURE" != push ] ;;
-  esac
-}
 aws_cli() {
   if [ "$1 $2" = "dynamodb get-item" ]; then
     command python3 -c 'import json,os,time; print(json.dumps({"Item":{"OwnerToken":{"S":"wrong" if os.environ["FAILURE"] == "lock" else "owner"},"ExpiresAt":{"N":str(int(time.time())+7200)}}}))'
   else echo '{}'; fi
 }
 """
+        + "canonical_tfvars_file() {"
+        + GUARD.read_text()
+        .split("canonical_tfvars_file() {", 1)[1]
+        .split("adopt_require_helpers()", 1)[0]
         + _apply_loop()
         + """
-rebind_apply "$OUT" "$OUT/state-backup.json" "approved"
+rebind_apply "$OUT" "$SUPPLIED_TFVARS" "$APPROVE"
 """
     )
     env = {
         **os.environ,
+        "LC_ALL": "C",
+        "LANG": "C",
+        "HOME": str(tmp_path / "home"),
+        "PATH": str(binary_dir) + os.pathsep + os.environ["PATH"],
+        "HELPER_DIR": str(ROOT / "infra/deploy"),
+        "SUPPLIED_TFVARS": str(supplied),
+        "APPROVE": expected_approval(
+            hashlib.sha256((out / "rebind-binding.json").read_bytes()).hexdigest()
+        ),
         "REPO_ROOT": str(tmp_path),
-        "TF_DIR": str(tmp_path),
+        "TF_DIR": str(ROOT / "infra/terraform"),
         "TMP_ROOT": str(tmp_path / "private"),
         "REBIND_MAPPING": str(mapping),
         "REBIND_HELPER": str(helper),
@@ -676,8 +836,23 @@ rebind_apply "$OUT" "$OUT/state-backup.json" "approved"
     assert (result.returncode == 0) == (failure == "none"), result.stdout + result.stderr
     assert ("state push" in calls) == (failure in {"none", "push"})
     assert "-force" not in calls
-    if failure == "binding":
+    if failure in {
+        "binding",
+        "tfvars-sha",
+        "tfvars-path",
+        "disabled",
+        "config-error",
+        "config-unknown",
+    }:
         assert "state rm" not in calls
+        assert " import " not in calls
+    if failure in {"import", "import-read-denied"}:
+        assert calls.count("state rm") == 1
+        assert calls.count(" import ") == 1
+        assert "state_rebind.md" in result.stderr
+        assert str(out / "state-backup.json") in result.stderr
+        assert "旧token" in result.stderr
+        assert "Error:" in result.stderr
     if failure != "none":
         assert "release" not in calls
 

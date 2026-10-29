@@ -14,7 +14,7 @@ import は config 存在を要求し矛盾する）ため、`state rm → 即 im
 
 本 helper は判定ロジックだけを持つ:
   - mapping（infra/deploy/state_rebind_targets.json）の厳密検証
-  - precheck/apply 間の binding（mapping/state/principal/commit の exact 束縛と承認トークン）
+  - precheck/apply 間の binding（mapping/state/principal/commit/tfvars の束縛と承認）
   - rebind 後の state 属性 vs live DescribeTaskDefinition の機械比較
 実行順序・lock・per-address の atomic 進行は guard（terraform_runtime_guard.sh）が持つ。
 """
@@ -50,6 +50,8 @@ CONSUMER_KINDS = ("ecs-service", "events-rule", "lambda-env")
 BOUND_FIELDS = (
     "mapping_sha256",
     "alignment_sha256",
+    "var_file_path",
+    "var_file_sha256",
     "git_head",
     "git_tree_clean",
     "state_lineage",
@@ -209,6 +211,51 @@ class RebindError(Exception):
 
 def _sha256_file(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def configuration_expression(tf_dir: Path, targets: list[dict[str, Any]]) -> str:
+    """Evaluate config count expressions, never resource instances from the old state."""
+    blocks: list[re.Match[str]] = []
+    for source in sorted(tf_dir.glob("*.tf")):
+        blocks.extend(
+            re.finditer(
+                r'^resource "aws_ecs_task_definition" "([a-z0-9_]+)" \{\n(.*?)^\}',
+                source.read_text(encoding="utf-8"),
+                re.M | re.S,
+            )
+        )
+    checks = []
+    for target in targets:
+        address = target["address"]
+        name = address.removeprefix("aws_ecs_task_definition.").removesuffix("[0]")
+        matches = [block for block in blocks if block[1] == name]
+        if len(matches) != 1:
+            raise RebindError(f"config: expected one resource declaration: {address}")
+        body = matches[0][2]
+        # shortcut: only unindexed/[0] TDs; reject for_each until keyed rebind exists.
+        if re.search(r"^[ \t]*for_each\s*=", body, re.M):
+            raise RebindError(f"config: for_each rebind is unsupported: {address}")
+        counts = re.findall(r"^[ \t]*count\s*=[ \t]*(.+)$", body, re.M)
+        if address.endswith("[0]"):
+            if len(counts) != 1:
+                raise RebindError(f"config: expected one count expression: {address}")
+            condition = f"({counts[0]}) == 1"
+        else:
+            if re.search(r"^[ \t]*count\s*=", body, re.M):
+                raise RebindError(f"config: indexed resource needs [0]: {address}")
+            condition = "true"
+        checks.append(f"{json.dumps(address)} = ({condition})")
+    return "jsonencode({" + ", ".join(checks) + "})\n"
+
+
+def check_configuration(output: str, targets: list[dict[str, Any]]) -> None:
+    # console jsonencode returns a quoted JSON string; unknowns/errors must fail closed.
+    checks = json.loads(json.loads(output))
+    if not isinstance(checks, dict) or set(checks) != {t["address"] for t in targets}:
+        raise RebindError("config: unexpected address check result")
+    missing = [address for address, exists in checks.items() if exists is not True]
+    if missing:
+        raise RebindError(f"config: targets absent with reviewed tfvars: {missing}")
 
 
 def _state_canonical_sha256(state_path: Path) -> str:
@@ -589,6 +636,7 @@ def collect(
     account: str,
     principal_arn: str,
     alignment_path: Path,
+    var_file: Path,
 ) -> dict[str, Any]:
     targets = load_targets(mapping, require_targets=True)
     lineage, serial = _state_identity(state_path)
@@ -596,6 +644,8 @@ def collect(
         "schema_version": SCHEMA_VERSION,
         "mapping_sha256": _sha256_file(mapping),
         "alignment_sha256": _sha256_file(alignment_path),
+        "var_file_path": str(var_file.resolve(strict=True)),
+        "var_file_sha256": _sha256_file(var_file),
         "git_head": _git(repo_root, "rev-parse", "HEAD"),
         "git_tree_clean": _tree_is_clean(repo_root),
         "state_lineage": lineage,
@@ -788,6 +838,7 @@ def main(argv: list[str] | None = None) -> int:
         item.add_argument("--account", required=True)
         item.add_argument("--principal-arn", required=True)
         item.add_argument("--alignment-plan", required=True, type=Path)
+        item.add_argument("--var-file", required=True, type=Path)
         if name == "verify":
             item.add_argument("--approve", default="")
 
@@ -795,6 +846,11 @@ def main(argv: list[str] | None = None) -> int:
     compare.add_argument("--state-json", required=True, type=Path)
     compare.add_argument("--address", required=True)
     compare.add_argument("--describe-json", required=True, type=Path)
+
+    config = sub.add_parser("check-configuration")
+    config.add_argument("--tf-dir", required=True, type=Path)
+    config.add_argument("--mapping", required=True, type=Path)
+    config.add_argument("--var-file", required=True, type=Path)
 
     policy = sub.add_parser("validate-session-policy")
     policy.add_argument("--policy", type=Path, default=SESSION_POLICY_PATH)
@@ -830,6 +886,25 @@ def main(argv: list[str] | None = None) -> int:
                 json.loads(args.describe_json.read_text(encoding="utf-8")),
             )
             print(f"state == live verified: {args.address}")
+        elif args.command == "check-configuration":
+            targets = load_targets(args.mapping, require_targets=True)
+            result = subprocess.run(
+                [
+                    "terraform",
+                    f"-chdir={args.tf_dir}",
+                    "console",
+                    "-no-color",
+                    f"-var-file={args.var_file}",
+                ],
+                input=configuration_expression(args.tf_dir, targets),
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            if result.returncode != 0:
+                raise RebindError(f"config: console failed: {result.stderr.strip()}")
+            check_configuration(result.stdout, targets)
+            print("config: all rebind targets exist with reviewed tfvars")
         elif args.command in {"alignment-plan", "alignment-candidate"}:
             state = json.loads(args.state_json.read_text(encoding="utf-8"))
             targets = load_targets(args.mapping, require_targets=True)
@@ -862,6 +937,7 @@ def main(argv: list[str] | None = None) -> int:
                 account=args.account,
                 principal_arn=args.principal_arn,
                 alignment_path=args.alignment_plan,
+                var_file=args.var_file,
             )
             if args.command == "record":
                 if not binding["git_tree_clean"]:
@@ -871,6 +947,8 @@ def main(argv: list[str] | None = None) -> int:
                 )
                 binding_path.chmod(0o600)
                 print(f"rebind binding recorded: {binding_path}")
+                print(f"canonical tfvars: {binding['var_file_path']}")
+                print(f"tfvars SHA256: {binding['var_file_sha256']}")
                 print(f"approval token: {expected_approval(_sha256_file(binding_path))}")
             else:
                 check_approval(binding_path, args.approve)
