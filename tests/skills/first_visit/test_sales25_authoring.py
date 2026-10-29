@@ -194,3 +194,26 @@ def test_relevance_budget_leaves_room_for_thinking_and_a_full_batch(
         "x", "r", json_mode=True, max_cost_usd=sales25_authoring.RELEVANCE_MAX_COST_USD
     )
     assert seen["max_output_tokens"] >= 2706 + 2500
+
+
+@pytest.mark.parametrize("failures", [1, 2])
+def test_relevance_retries_one_transient_server_error(failures: int) -> None:
+    # 10-28 本番: 25 件の判定 1 回が Gemini 504 DEADLINE_EXCEEDED で落ち、資料全体が止まった。
+    case, raw = case_inputs()
+    model = relevance_model()
+    judge = model.generate_text.side_effect
+    seen: list[str] = []
+
+    def flaky(prompt: str, request_id: str, **kwargs: Any) -> Any:
+        if request_id.startswith("sales25-relevance") and seen.count(request_id) < failures:
+            seen.append(request_id)
+            raise RuntimeError("504 DEADLINE_EXCEEDED")
+        return judge(prompt, request_id, **kwargs)
+
+    model.generate_text.side_effect = flaky
+    if failures == 1:
+        values = sales25_authoring.prepare_inputs(case, raw, owner_id=OWNER, model=model)
+        assert all(len(values[f"selection/decisions_{qid}.json"]) == 100 for qid in raw)
+    else:
+        with pytest.raises(RuntimeError, match="504"):
+            sales25_authoring.prepare_inputs(case, raw, owner_id=OWNER, model=model)

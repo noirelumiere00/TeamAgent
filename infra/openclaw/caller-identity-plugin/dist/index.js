@@ -79,6 +79,7 @@ export const OUTBOUND_TOOL_NAMES = Object.freeze([
   "mail_reply",
   "mail_summary",
   "mail_to_internal_context",
+  "media_case_search",
   "meeting_prep",
   "morning_digest",
   "oauth_connect",

@@ -41,3 +41,21 @@ def test_tiktok_poll_ctx_carries_async_poll_marker(monkeypatch: pytest.MonkeyPat
     assert poll_ctx.metadata["user_email"] == "a@example.com"  # 元の metadata は保つ
     assert poll_ctx.request_id == "req-1"
     assert ASYNC_JOB_POLL_METADATA_KEY not in ctx.metadata  # 呼び出し元 ctx は汚さない
+
+
+def test_media_case_poll_preserves_verified_identity(monkeypatch: pytest.MonkeyPatch) -> None:
+    from unittest.mock import MagicMock
+
+    import teamagent.skills.media_case_search.skill as skill_module
+
+    skill = MagicMock()
+    skill.poll.return_value = ("done", "結果")
+    monkeypatch.setattr(skill_module, "production_skill", lambda: skill)
+    ctx = SkillContext(metadata={"identity_verified": True, "user_email": "a@example.com"})
+    assert server._build_async_job_poll("media_case_search", "media_case_" + "a" * 32, ctx)() == (
+        "done",
+        "結果",
+    )
+    polled = skill.poll.call_args.args[1]
+    assert polled.metadata["identity_verified"] and polled.metadata["user_email"] == "a@example.com"
+    assert "media_case_search" in server._ASYNC_JOB_TOOLS

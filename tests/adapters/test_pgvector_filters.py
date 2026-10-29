@@ -87,8 +87,8 @@ def test_no_new_filters_means_no_extra_params() -> None:
     sql_new, params_new = _run(sticky_filters=None, metadata_contains=None)
     assert sql_base == sql_new
     assert params_base == params_new
-    # WHERE 句が一切生成されない（フィルタ 0 件）
-    assert "WHERE" not in sql_new
+    # 投稿コーパスの除外だけを常時適用する。
+    assert "WHERE d.metadata->>'corpus' IS DISTINCT FROM 'media_case'" in sql_new
     assert "ILIKE" not in sql_new
 
 

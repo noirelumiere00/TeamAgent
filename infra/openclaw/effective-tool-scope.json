@@ -97,6 +97,14 @@
       "enabledBy": { "kind": "envAllTrue", "names": ["USE_OMIYAGE_REPORT_TOOLS"] }
     },
     {
+      "name": "media_case_search",
+      "effect": "company-data-read-external-apify-submit-image-subtitle-read-gemini-analysis-pgvector-write-dynamodb-job-write-slack-message-write",
+      "terraformGate": "enable_media_case_search",
+      "defaultEnabledByTerraform": false,
+      "enabledBy": { "kind": "envAllTrue", "names": ["USE_MEDIA_CASE_SEARCH"] },
+      "sideEffectGate": "優先10アカウント限定。Apify profilesを全レプリカで直列実行し、用途別料金を原子予約。動画DL/文字起こしなし。保存済み検索はRLS、取込状態はdocuments、job/outboxは既存DynamoDB、完了通知は署名済み依頼元のみ。"
+    },
+    {
       "name": "tiktok_search",
       "effect": "external-read-scrape",
       "terraformGate": "enable_scrape_tools",

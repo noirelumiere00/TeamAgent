@@ -45,7 +45,7 @@ def _dsn_with(dsn: str, **overrides: str) -> str:
 
 
 @pytest.fixture(scope="module", params=[False, True], ids=["production", "bypassrls"])
-def pm_db(request: pytest.FixtureRequest) -> Iterator[PmDb]:
+def pm_db(request: pytest.FixtureRequest, postgres_roles_lock: None) -> Iterator[PmDb]:
     import psycopg
     from psycopg import sql
 
