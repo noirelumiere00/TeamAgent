@@ -46,7 +46,7 @@ from teamagent.skills.search.client_match import (
 from teamagent.util.grapheme_cut import truncate_graphemes
 
 #: 該当なしの回答の書き出し（固定文言・テストと下流の判定がこの文字列を見る）。
-NOT_FOUND_HEAD = "金庫に該当する資料は見つかりませんでした"
+NOT_FOUND_HEAD = "データベースに該当する資料は見つかりませんでした"
 
 #: 「近いもの」に挙げる件数と、1 件あたりの表示字数。
 _NEAR_MAX = 3

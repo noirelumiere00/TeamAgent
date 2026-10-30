@@ -87,7 +87,7 @@ def scope_footer(queries: list[str], *, slack: SlackLookup | None, incomplete: b
         .replace("』", "")
         for q in queries
     ]
-    scope = f"探した範囲: 金庫を『{'／'.join(dict.fromkeys(labels))}』で検索"
+    scope = f"探した範囲: データベースを『{'／'.join(dict.fromkeys(labels))}』で検索"
     if incomplete:
         scope += "（再検索の一部は時間切れ・失敗）"
     if slack is not None:

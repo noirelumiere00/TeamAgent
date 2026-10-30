@@ -264,7 +264,7 @@ def test_pg_failure_is_failed_not_zero(exc: Exception) -> None:
     pg.connection.side_effect = exc
     out = run(skill)
     assert not out.found
-    assert "金庫 ✗" in out.answer and "金庫 0件" not in out.answer
+    assert "データベース ✗" in out.answer and "データベース 0件" not in out.answer
 
 
 @pytest.mark.parametrize("code", ["ratelimited", "invalid_auth"])
@@ -571,7 +571,7 @@ def test_shadow_grounding_counts_without_logging_text() -> None:
 
     hit = _vault_hit(title="資料A", updated_at="2026-10-01")
     with capture_logs() as logs:
-        fanout.shadow_grounding("本文1234（金庫: 資料A）。", "本文5678", [hit], "r1")
+        fanout.shadow_grounding("本文1234（データベース: 資料A）。", "本文5678", [hit], "r1")
     row = next(r for r in logs if r["event"] == "search_fanout_grounding")
     assert row["stray_count"] == 1 and row["citation_mismatch_count"] == 1
     assert "1234" not in str(row) and "資料A" not in str(row)
@@ -1122,7 +1122,7 @@ def test_failed_named_cases_are_not_overwritten_by_zero_industry_cases(
 
 
 def test_soul_fanout_rules_never_fire_on_the_existing_scope_footer() -> None:
-    """今の検索の「探した範囲: 金庫を『…』で検索」は fan-out の目印と違う書き出しにする。
+    """今の検索の「探した範囲: データベースを『…』で検索」は fan-out の目印と違う書き出しにする。
 
     同じ書き出しだと、SOUL の「2 本目のツールを呼ばない」「呼び直さない」が fan-out でない全員に効き、
     探す範囲をかえって狭める（10-14 Claude 審査で見つけた）。

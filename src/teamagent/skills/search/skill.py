@@ -2976,8 +2976,8 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
             for h in primary_hits
         )
         if slack_items:
-            vault_block = primary_block or "（金庫に該当する資料はありません）"
-            sections = [f"# 質問\n{query}\n\n# 参考資料（金庫の資料）\n{vault_block}"]
+            vault_block = primary_block or "（データベースに該当する資料はありません）"
+            sections = [f"# 質問\n{query}\n\n# 参考資料（データベースの資料）\n{vault_block}"]
         else:
             sections = [f"# 質問\n{query}\n\n# 参考資料\n{primary_block}"]
         comparison = (

@@ -14,7 +14,7 @@ def test_compact_keeps_only_cited_sources_and_no_inventory(monkeypatch, fanout_e
     skill, _ = make(hits)
     skill._bedrock.converse.return_value = _converse(
         "施策は実施済みです。[S:1]\n顧客は改善を求めています。[S:2]\n"
-        "次回提案を準備します。[S:1]\n\n📁 金庫の資料\n- 不使用の資料8\n"
+        "次回提案を準備します。[S:1]\n\n📁 データベースの資料\n- 不使用の資料8\n"
         "📎 資料リンク\nhttps://fabricated.test/file\n探した範囲: 長い一覧"
     )
     monkeypatch.setattr(fanout, "build_summary_client", lambda: skill._bedrock)
@@ -78,7 +78,7 @@ def test_compact_video_metrics_only_when_requested(monkeypatch, query, expected)
     assert ("507,700" in out.answer) is expected
     assert "施策の反応合計" not in out.answer
     assert "シートのみ" not in out.answer
-    assert "金庫の資料" not in out.answer
+    assert "データベースの資料" not in out.answer
     assert len(out.answer) <= 2500
 
 
@@ -95,10 +95,10 @@ def test_compact_annotated_inventory_cannot_return_as_prose():
 
     sources = {"1": ("報告書", "https://example.test/report", "実施済みです。")}
     answer = render(
-        "実施済みです。[S:1]\n📁 金庫の資料[S:1]\n- 報告書[S:1]\n施策の数字はシートのみ[S:1]",
+        "実施済みです。[S:1]\n📁 データベースの資料[S:1]\n- 報告書[S:1]\n施策の数字はシートのみ[S:1]",
         sources,
     )
-    assert "金庫の資料" not in answer
+    assert "データベースの資料" not in answer
     assert "シートのみ" not in answer
     assert "- 報告書" not in answer
     assert answer.count("https://") == 1
@@ -186,7 +186,7 @@ def test_recorded_answer_shape_is_five_sentences_and_three_sources_without_appen
         "次は完成形を冒頭に見せる案を検討します。[S:2]",
     ]
     sections = [
-        ("📁 金庫の資料", 4),
+        ("📁 データベースの資料", 4),
         ("🏆 事例・施策実績", 2),
         ("🗂 カルテ", 6),
         ("💬 Slack", 2),
@@ -200,7 +200,7 @@ def test_recorded_answer_shape_is_five_sentences_and_three_sources_without_appen
     ]
     for heading, count in sections:
         appendices.extend([heading + "[S:1]", *[f"- 資料{i}[S:4]" for i in range(count)]])
-    appendices.extend(["🕸 関係図[S:1]", "探した範囲: 金庫・事例・カルテ・Slack[S:1]"])
+    appendices.extend(["🕸 関係図[S:1]", "探した範囲: データベース・事例・カルテ・Slack[S:1]"])
     sources = {
         str(i): (
             f"根拠{i}",

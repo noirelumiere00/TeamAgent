@@ -1195,7 +1195,9 @@ def shadow_grounding(text: str, inputs: str, hits: list[SearchHit], request_id: 
     stray = NumberGrounder.from_inputs(inputs).stray(text)
     mismatch = unresolved = 0
     for sentence in re.split(r"[。\n]", text):
-        for match in re.finditer(r"[（(](金庫|カルテ|事例):\s*([^）)]+)[）)]", sentence):
+        for match in re.finditer(
+            r"[（(](データベース|金庫|カルテ|事例):\s*([^）)]+)[）)]", sentence
+        ):
             label = match.group(2).strip()
             cited = [
                 h

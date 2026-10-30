@@ -134,7 +134,7 @@ def test_case_without_a_verified_link_does_not_revive_inventory(monkeypatch, fan
     )
     assert "資料リンク" in out.answer
     assert len(out.answer.splitlines()) == 1
-    assert "金庫の資料" not in out.answer
+    assert "データベースの資料" not in out.answer
 
 
 def test_separate_advice_body_is_removed_but_sources_remain():

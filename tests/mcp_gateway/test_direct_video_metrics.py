@@ -217,7 +217,7 @@ def test_unexpected_post_exception_preserves_result(monkeypatch: pytest.MonkeyPa
     assert "private.example" not in str(logs)
 
 
-@pytest.mark.parametrize("suffix", ["", SUFFIX, "\n\n\n次の節", "\n\n探した範囲: 金庫"])
+@pytest.mark.parametrize("suffix", ["", SUFFIX, "\n\n\n次の節", "\n\n探した範囲: データベース"])
 def test_extract_preserves_all_characters_and_boundaries(suffix: str) -> None:
     assert video.extract_section(PREFIX + SECTION + suffix) == (PREFIX, SECTION, suffix)
 
@@ -249,7 +249,7 @@ def test_producer_lines_after_metrics_stay_outside_section(line: str) -> None:
     "line",
     [
         pytest.param("📎 実ファイルをお送りしますか？", id="clip"),
-        pytest.param("📁 金庫の資料（2件）", id="folder"),
+        pytest.param("📁 データベースの資料（2件）", id="folder"),
         pytest.param("🏆 事例・施策実績（1件）", id="trophy"),
         pytest.param("🤝 案件（決定・進行中の案件。実績ではありません）", id="handshake"),
         pytest.param("🗂 A社のカルテ（最新2件）", id="dividers"),
@@ -259,10 +259,10 @@ def test_producer_lines_after_metrics_stay_outside_section(line: str) -> None:
         pytest.param("🗃️ 過去の調べもの（異体字セレクタ付き）", id="filebox_vs16"),
         pytest.param("🔎 近い業種・言い換え（『宅配』そのものの資料ではありません）", id="search"),
         pytest.param("🌐 公開Web（他社・一般の情報で、自社の実績ではありません）", id="globe"),
-        pytest.param("ℹ️ Slack は未連携のため、金庫だけを探しました", id="info_vs16"),
+        pytest.param("ℹ️ Slack は未連携のため、データベースだけを探しました", id="info_vs16"),
         pytest.param("ℹ Slack は未連携（異体字セレクタ無し）", id="info_bare"),
         pytest.param("🔒 Slack の非公開の場所に一致が 1 件あります", id="lock"),
-        pytest.param("探した範囲: 金庫 ✓3件", id="scope_colon"),
+        pytest.param("探した範囲: データベース ✓3件", id="scope_colon"),
         pytest.param("探した範囲（コロン無し）", id="scope_bare"),
     ],
 )
@@ -442,5 +442,5 @@ def test_graph_heading_ends_video_section() -> None:
 
     metrics = VIDEO_METRICS_HEADING + "\n動画: 123再生"
     graph = "\n\n🕸 関係図で見る: <https://connect.newstv.co.jp/search/graph/focus?seed=id>"
-    answer = metrics + graph + "\n\n探した範囲: 金庫"
-    assert extract_section(answer) == ("", metrics, graph + "\n\n探した範囲: 金庫")
+    answer = metrics + graph + "\n\n探した範囲: データベース"
+    assert extract_section(answer) == ("", metrics, graph + "\n\n探した範囲: データベース")

@@ -121,7 +121,7 @@ class PreMeetingBriefOutput(BaseModel):
     corpus_available: bool = Field(
         default=False,
         description=(
-            "事例集（case_corpus）が金庫に取り込まれているか。False のときは"
+            "事例集（case_corpus）がデータベースに取り込まれているか。False のときは"
             "**節そのものを出さない**（「できません」を毎朝配信しない）"
         ),
     )

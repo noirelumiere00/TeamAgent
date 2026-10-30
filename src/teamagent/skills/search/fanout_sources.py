@@ -258,7 +258,7 @@ KIND_LABELS: dict[HitKind, str] = {
     "case": "事例",
     "deal": "案件",
     "sales_fb": "営業FB",
-    "vault": "金庫の資料",
+    "vault": "データベースの資料",
 }
 #: 社外利用の可否の表示（コードの定数だけ。metadata の注記文字列は答えに写さない）。
 EXTERNAL_USE_LABELS: dict[ExternalUse, str] = {
