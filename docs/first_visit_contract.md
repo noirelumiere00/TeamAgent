@@ -102,3 +102,42 @@ MYPYPATH=src .venv/bin/mypy src/teamagent/skills/first_visit tests/skills/first_
 - ruffは `src/ tests/ scripts/` 全体、mypyは新規モジュール・テスト6ファイルが合格。全体mypyは既存 `media/deck_qa.py` と `skills/proposal_deck/renderer.py` のPillow不足に伴う3エラーで不合格。依存追加・既存コードの変更で回避していない。
 
 全pytest・実媒体取得・実描画は対象外。キットのバイトコード生成、ネットワーク利用、commit/push、既存お土産経路への接続は行わない。
+
+## 具体提案（concrete）の組み立て入口
+
+`contract.missing_inputs`・`seal_inputs`・`verify_manifest` に `part="concrete"` を渡す。
+既定の `first` は従来通り。台本（既定3本）・PART 4のフック・口コミ実施時の原文／取得ログ／全件分類などの必須判定は固定版キット自身に任せる。
+
+```python
+from pathlib import Path
+from teamagent.skills.first_visit import contract
+from teamagent.skills.first_visit.concrete import build_concrete
+from teamagent.skills.first_visit.kit import ARCHIVE
+
+case = Path("/path/to/sealed-case")
+kit = Path("/path/to/extracted-kit")
+contract.seal_inputs(case, kit_path=kit, kit_archive=ARCHIVE, part="concrete")
+result = build_concrete(case, kit_path=kit, request_id="request-001")
+# result.status / pptx_path / pptx_sha256 / slide_count / preflight / cli
+```
+
+キットは既存tarを展開し、`tiktok-deck/node_modules` をlock通りに用意したものを使う。
+`kit_archive` 指定時はgit不要で、既存lockのtar SHAと33パスのバイトを照合する。
+`node_modules` 以外の追加ファイルも拒否する。引数を省略した従来の契約APIはgit検証を続ける。
+Node 24以降（filesystem permission対応）とpptxgenjs 3.12.0、Pillow入りPythonが必要。
+CIのlatest／uv.lock双方はtar展開・`npm ci --ignore-scripts --no-audit --no-fund` を行い、
+`FIRST_VISIT_CONCRETE_KIT_PATH` を設定して実Python→Node→前検テストを実行する。
+従来のgit用 `FIRST_VISIT_KIT_PATH` とは分け、CIでは具体提案テストの未設定skipを許さない。
+
+封印不一致・不足入力・キット改変・依存不足ならCLI開始前に停止する。
+検証後は案件内の新しい `concrete-*/case/` に入力をコピーして、
+`build_research_json.py --part concrete --no-videos --plain-name` → `build_research.js --client` → `preflight.py --json` を実行する。
+元の証拠は上書きせず、全出力も案件内に置く。出力追加後は元のmanifestのファイル集合と異なるため、
+再試行には出力を含まない封印済み案件のコピーを使う。
+Pythonは `-I -B` と監査フック、Nodeはfilesystem permissionと通信禁止で、キットへのpycache・案件外への書き込み・通信を防ぐ。
+各CLIは既定120秒で打ち切る（`timeout` で変更可能）。非0終了ではその段の終了コードとstderr要約を返して後段を実行しない。
+全stdout/stderrは作業案件に保存し、返り値には末尾2000文字を含める。これらには案件情報が含まれ得るため公開ログには流さない。
+構造化ログはrequest_id・段・所要時間・終了コードのみ。
+
+前検の重大／致命的が残ればPPTXを添えて `incomplete`、機械検査合格なら `build_verified` を返す。
+合格は目視確認や配布完了を意味しない。mediaの輸送・受付・取得・解剖・口コミ取得・原稿生成・配信はまだ接続していない。

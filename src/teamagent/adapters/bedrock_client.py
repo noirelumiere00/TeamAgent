@@ -341,6 +341,7 @@ class BedrockClient:
         temperature: float = 0.1,
         max_tokens: int = 4096,
         cache_system: bool = False,
+        max_attempts: int | None = None,
     ) -> ConverseResponse:
         """Bedrock Converse API を呼ぶ。
 
@@ -353,6 +354,7 @@ class BedrockClient:
             cache_system: True で system プロンプト末尾に cachePoint を入れる。
                 同じ system prompt を頻繁に呼ぶ場合（検索 Skill 等）に
                 input cost を 1/10 に削減する。Anthropic prompt caching を活用。
+            max_attempts: 用途側で試行ごとに費用予約する場合、1 で内部リトライを止める。
 
         Returns:
             ConverseResponse(text, usage, model_id, latency_ms, stop_reason)
@@ -377,7 +379,11 @@ class BedrockClient:
         resp = call_with_retry(
             lambda: self._client.converse(**kwargs),
             is_retryable=_is_bedrock_retryable,
-            policy=self._retry_policy,
+            policy=(
+                self._retry_policy
+                if max_attempts is None
+                else RetryPolicy(max_attempts=max_attempts)
+            ),
             on_retry=self._make_retry_logger("bedrock_converse_retry", request_id),
         )
         latency_ms = int((time.perf_counter() - start) * 1000)

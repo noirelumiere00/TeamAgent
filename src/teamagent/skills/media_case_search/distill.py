@@ -15,6 +15,13 @@ from urllib.parse import urlsplit
 from pydantic import ValidationError
 
 from teamagent.adapters.apify_media_cases import ApifyCaseAssets
+from teamagent.adapters.bedrock_client import (
+    BedrockClient,
+    _is_bedrock_retryable,
+)
+from teamagent.adapters.bedrock_client import (
+    _estimate_cost as bedrock_cost,
+)
 from teamagent.adapters.cost_guard import CostGuard, CostLimitExceededError
 from teamagent.adapters.gemini_client import GeminiClient, _env_int, _is_rate_limited_vertex
 from teamagent.adapters.retry import RateLimitPolicy, RetryPolicy, call_with_retry
@@ -25,6 +32,8 @@ from teamagent.skills.media_case_search.schema import Distillation, Evidence
 VERSION = "media-case-v3"
 # At 1,700 input + 360 output + 2,048 thought tokens, 3.5 Flash costs $0.024222.
 CALL_BUDGET = 0.03
+MODELS = ("gemini-3.5-flash", "gemini-3.6-flash", "bedrock-haiku")
+HAIKU_MODEL_ID = "jp.anthropic.claude-haiku-4-5-20251001-v1:0"
 _GEMINI_SLOTS = threading.BoundedSemaphore(6)
 _PR = re.compile(r"(?i)(?<![\w])#pr(?![\w])|タイアップ|プロモーション|商品提供|提供を受け|広告")
 _PRIVATE = re.compile(r"https?://\S+|[\w.+-]+@[\w.-]+|@[\w.]+|\b\d{2,4}-\d{2,4}-\d{3,4}\b")
@@ -113,23 +122,57 @@ def _valid_evidence(evidence: Evidence, texts: dict[str, str], images: set[int])
 
 
 class CaseDistiller:
-    def __init__(self, gemini: GeminiClient, ledger: CostGuard | None) -> None:
+    @classmethod
+    def from_env(cls, ledger: CostGuard | None, *, model: str | None = None) -> CaseDistiller:
+        selected = model if model is not None else os.environ.get("MEDIA_CASE_MODEL", MODELS[0])
+        if selected not in MODELS:
+            raise ValueError(f"MEDIA_CASE_MODEL must be one of {MODELS}")
+        client = (
+            BedrockClient.from_env(model_id_override=HAIKU_MODEL_ID)
+            if selected == "bedrock-haiku"
+            else GeminiClient.from_env(model_id_override=selected)
+        )
+        return cls(client, ledger)
+
+    def __init__(self, gemini: GeminiClient | BedrockClient, ledger: CostGuard | None) -> None:
         self.gemini = gemini
         self.ledger = ledger
-        self.thinking = os.environ.get("MEDIA_CASE_THINKING", "minimal").strip().lower()
+        self._costs = threading.local()
+        self.thinking = (
+            "disabled"
+            if isinstance(gemini, BedrockClient)
+            else os.environ.get("MEDIA_CASE_THINKING", "minimal").strip().lower()
+        )
+        if isinstance(gemini, BedrockClient):
+            return
         if self.thinking not in {"minimal", "low", "medium"}:
             raise ValueError("MEDIA_CASE_THINKING must be minimal, low or medium")
+
+    @property
+    def settled_cost_usd(self) -> float:
+        """Thread-local settled charges, including failed and repair attempts."""
+        return float(getattr(self._costs, "total", 0.0))
 
     def _call(
         self, prompt: str, images: list[tuple[bytes, str]], request_id: str
     ) -> tuple[str, float]:
+        before = self.settled_cost_usd
+        if isinstance(self.gemini, BedrockClient):
+            text, _ = call_with_retry(
+                lambda: self._attempt(prompt, images, request_id),
+                is_retryable=_is_bedrock_retryable,
+                policy=self.gemini._retry_policy,
+                on_retry=self.gemini._make_retry_logger("media_case_bedrock_retry", request_id),
+            )
+            return text, self.settled_cost_usd - before
+
         def rate_limited(exc: BaseException) -> bool:
             return not isinstance(exc, (CostLimitExceededError, ValueError)) and (
                 _is_rate_limited_vertex(exc.__cause__ or exc)
             )
 
         # Bounded Gemini calls have no internal retries; each 429 retry needs its own reservation.
-        return call_with_retry(
+        text, _ = call_with_retry(
             lambda: self._attempt(prompt, images, request_id),
             is_retryable=rate_limited,
             policy=RetryPolicy(max_attempts=1),
@@ -141,12 +184,39 @@ class CaseDistiller:
                 min_delay_s=0.5,
             ),
         )
+        return text, self.settled_cost_usd - before
+
+    def _bedrock_call(
+        self, client: BedrockClient, prompt: str, images: list[tuple[bytes, str]], request_id: str
+    ) -> tuple[str, float]:
+        # shortcut: conservative Haiku input estimate; use CountTokens if tighter bounds are needed.
+        input_tokens = len(prompt.encode("utf-8")) + 1024 + 2048 * len(images)
+        remaining = CALL_BUDGET - bedrock_cost(client.model_id, input_tokens, 0)
+        output_price = bedrock_cost(client.model_id, 0, 1_000_000)
+        max_tokens = min(8192, int(remaining * 1_000_000 / output_price))
+        if max_tokens < 256:
+            raise ValueError("section generation budget exhausted")
+        content: list[dict[str, Any]] = []
+        for body, mime in images:
+            if mime not in {"image/jpeg", "image/png", "image/webp"}:
+                raise ValueError("unsupported image format")
+            content.append({"image": {"format": mime.split("/")[1], "source": {"bytes": body}}})
+        content.append({"text": prompt})
+        result = client.converse(
+            [{"role": "user", "content": content}],
+            request_id,
+            max_tokens=max_tokens,
+            max_attempts=1,
+        )
+        return result.text, result.usage.cost_usd
 
     def _attempt(
         self, prompt: str, images: list[tuple[bytes, str]], request_id: str
     ) -> tuple[str, float]:
         with _GEMINI_SLOTS:
-            if self.ledger is None or "flash" not in self.gemini.model_id:
+            if self.ledger is None or not (
+                "flash" in self.gemini.model_id or self.gemini.model_id == HAIKU_MODEL_ID
+            ):
                 raise CostLimitExceededError("画像判定の予算設定を確認できません。")
             _, reservation = self.ledger.reserve(
                 "media_case_gemini", "", est_cost_usd=CALL_BUDGET, request_id=request_id
@@ -156,6 +226,9 @@ class CaseDistiller:
                 raise CostLimitExceededError("画像判定の費用予約を確認できません。")
             cost = CALL_BUDGET
             try:
+                if isinstance(self.gemini, BedrockClient):
+                    text, cost = self._bedrock_call(self.gemini, prompt, images, request_id)
+                    return text, cost
                 # Gemini 3.x requires a level instead of the numeric budget supported by 2.5.
                 thinking: dict[str, Any] = (
                     {"thinking_budget": {"minimal": 0, "low": 256, "medium": 1024}[self.thinking]}
@@ -175,6 +248,7 @@ class CaseDistiller:
                 return result.text, cost
             finally:
                 self.ledger.settle(reservation, cost_usd=cost, units=1, request_id=request_id)
+                self._costs.total = self.settled_cost_usd + cost
 
     def analyze(
         self,
@@ -303,6 +377,7 @@ class CaseDistiller:
             parsed.pr_evidence = valid_pr
             return parsed, cost
 
+        before = self.settled_cost_usd
         result, cost = classify(images, [0] if images else [])
         viewed = 1 if images else 0
         if (
@@ -377,6 +452,7 @@ class CaseDistiller:
             )
             for x in items
         ).replace("campaign", "キャンペーン")
+        cost = self.settled_cost_usd - before
         now = datetime.now(UTC).isoformat()
         metadata = {
             "post_id": post["id"],

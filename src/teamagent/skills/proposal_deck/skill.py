@@ -687,9 +687,10 @@ class ProposalDeckSkill(BaseSkill[ProposalDeckInput, ProposalDeckOutput]):
 
     @staticmethod
     def _finalize_composer(data: Any, input: ProposalDeckInput) -> ComposerOutput:
-        """モデル出力を契約検証し、決定論的入力を後付けして根拠検証まで通す。"""
+        """決定論的入力を先に適用し、モデル本文の契約・根拠検証を通す。"""
 
         if isinstance(data, dict):
+            # 日付・補助枠等は入力が正本。使わないモデル値で初回検証を失敗させない。
             data = {
                 **data,
                 **input.model_dump(include=set(BU2_INPUT_FIELDS)),
@@ -697,6 +698,10 @@ class ProposalDeckSkill(BaseSkill[ProposalDeckInput, ProposalDeckOutput]):
                 "proposal_date": input.proposal_date,
                 "business_unit": input.business_unit,
                 "agency_route": True,
+                "posting_start_date": input.posting_start_date,
+                "auxiliary_placeholders": input.auxiliary_placeholders,
+                "template_profile": input.template_profile,
+                "evidence_images": input.evidence_images,
             }
         composer_out = ComposerOutput.model_validate(data)
         forced_skips = set(input.forced_skipped_ids)
@@ -726,18 +731,13 @@ class ProposalDeckSkill(BaseSkill[ProposalDeckInput, ProposalDeckOutput]):
                 placeholder_id,
                 "要確認（データ未検出）",
             )
-        # LLMには95枠本文だけを生成させる。事例・アカウント・D起点日付と
-        # template profile は検証済みの決定論的入力を後付けし、モデルに改変させない。
         composer_out = ComposerOutput.model_validate(
             {
                 **composer_out.model_dump(mode="python"),
                 "placeholders": placeholders,
                 "citations_per_placeholder": citations,
                 "skipped_placeholders": skipped,
-                "evidence_images": input.evidence_images,
                 "auxiliary_placeholders": resolved_auxiliary,
-                "posting_start_date": input.posting_start_date,
-                "template_profile": input.template_profile,
             }
         )
         forbidden_ids = sorted(

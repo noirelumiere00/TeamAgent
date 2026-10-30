@@ -385,6 +385,11 @@ def _proposal(root: Path, manifest: dict[str, Any]) -> dict[str, Any]:
         product_sector=product_sector,
         proposal_date=proposal_date,
         posting_start_date=posting_start_date,
+        specified_periods=tuple(
+            value
+            for key, value in auxiliary.items()
+            if key.startswith("PB-BU2-PLAN-") and key.endswith("-PERIOD")
+        ),
         agency_route=agency_route,
     )
     remaining: list[int] = []

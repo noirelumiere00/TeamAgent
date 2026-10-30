@@ -375,9 +375,11 @@ class GeminiClient:
         self._client: Any | None = client
 
     @classmethod
-    def from_env(cls) -> GeminiClient:
+    def from_env(cls, *, model_id_override: str | None = None) -> GeminiClient:
         """環境変数から認証経路とモデルを読む。Vertex を優先する。"""
-        model_id = os.environ.get("GEMINI_MODEL_ID", DEFAULT_MODEL_ID).strip() or DEFAULT_MODEL_ID
+        model_id = model_id_override or (
+            os.environ.get("GEMINI_MODEL_ID", DEFAULT_MODEL_ID).strip() or DEFAULT_MODEL_ID
+        )
 
         use_vertex = os.environ.get("GEMINI_USE_VERTEX", "false").lower() in ("1", "true", "yes")
         if use_vertex:

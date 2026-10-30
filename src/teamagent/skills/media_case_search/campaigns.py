@@ -110,6 +110,37 @@ def aggregate_cases(hits: list[dict[str, Any]]) -> list[dict[str, Any]]:
         for item in post["items"]:
             if item not in group["items"]:
                 group["items"].append(item)
+    sizes = {key: len(group["posts"]) for key, group in groups.items()}
+    # Unknown brands are ignored on both sides: a 56-post group may hold a few posts without one.
+    brands = {
+        key: {
+            brand
+            for item in group["items"]
+            if (brand := _norm(item.get("brand") or ""))
+            and "未特定" not in brand
+            and "不明" not in brand
+        }
+        for key, group in groups.items()
+    }
+    # Use original identities and sizes, largest first, so absorbed tags cannot bridge groups.
+    for key in sorted(groups, key=lambda key: (-sizes[key], key)):
+        if sizes[key] > 2 or len(brands[key]) != 1:
+            continue
+        group = groups[key]
+        candidates = {
+            "tag:" + tag
+            for post in group["posts"].values()
+            for tag in _tags(post)
+            if "tag:" + tag in groups
+            and sizes["tag:" + tag] > sizes[key]
+            and brands["tag:" + tag] == brands[key]
+        }
+        if not candidates:
+            continue
+        target = groups[min(candidates, key=lambda key: (-sizes[key], key))]
+        target["posts"].update(group["posts"])
+        target["items"].extend(item for item in group["items"] if item not in target["items"])
+        del groups[key]
     result = []
     for group in groups.values():
         posts = list(group["posts"].values())

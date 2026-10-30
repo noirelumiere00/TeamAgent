@@ -504,6 +504,11 @@ def render_pptx(
         product_sector=product_sector,
         proposal_date=proposal_date,
         posting_start_date=posting_start_date,
+        specified_periods=tuple(
+            value
+            for key, value in (auxiliary_placeholders or {}).items()
+            if key.startswith("PB-BU2-PLAN-") and key.endswith("-PERIOD")
+        ),
         agency_route=agency_route,
     )
 

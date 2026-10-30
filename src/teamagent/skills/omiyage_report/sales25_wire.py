@@ -532,15 +532,24 @@ class Wire:
                 name = self._review_name(post, manifest, batch_size)
                 cached = self._find_json(case, name)
                 if cached is None:
-                    cached = analysis._review(
-                        root,
-                        post,
-                        manifest,
-                        files,
-                        cast(GeminiClient, model),
-                        batch_size=batch_size,
-                    )
-                    self._save_json(case, name, cached)
+                    try:
+                        cached = analysis._review(
+                            root,
+                            post,
+                            manifest,
+                            files,
+                            cast(GeminiClient, model),
+                            batch_size=batch_size,
+                        )
+                    except analysis.ModelResponseError as exc:
+                        logger.warning(
+                            "sales25_post_media_missing",
+                            post_id=post["id"],
+                            error_message=str(exc),
+                        )
+                        record = {"media_missing": "媒体不足（モデルの応答を確認できませんでした）"}
+                    else:
+                        self._save_json(case, name, cached)
                 with mutex:
                     completed += 1
                     if case.get("_progress"):

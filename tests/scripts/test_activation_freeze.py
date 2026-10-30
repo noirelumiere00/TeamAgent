@@ -208,17 +208,17 @@ def test_unrelated_changes_still_pass(base: str, head: str, reason: str) -> None
 
 
 def test_unlock_matches_the_committed_declaration() -> None:
-    """sales25 キット pin へ追随し、scope と退避した宣言を完全一致で封印する。"""
+    """evidence key の区切り単位の検査へ追随し、scope と退避した宣言を完全一致で封印する。"""
     unlock = _freeze_doc()["unlock"]
     assert unlock["active"] is True
-    assert unlock["scope_paths"] == ["infra/codebuild/teamagent_core_media_release_contract.json"]
+    assert unlock["scope_paths"] == ["infra/codebuild/release_evidence.py"]
     assert (
         unlock["reason"]
-        == "human gate 2026-10-29（小俣さん 10-29『できるだけ早く』・sales25 の動画長の許容と媒体不足の partial）"
+        == "human gate 2026-10-29（小俣さん 10-29 指示・r83 段 4 の source evidence key 誤検知（S3 VersionId に「..」）を区切り単位の検査へ。PR まで・マージと便は別途 OK）"
     )
     assert (
         unlock["gate"]
-        == "human gate 2026-10-29（小俣さん 10-29『できるだけ早く』・sales25 の動画長の許容と媒体不足の partial）"
+        == "human gate 2026-10-29（小俣さん 10-29 指示・r83 段 4 の source evidence key 誤検知（S3 VersionId に「..」）を区切り単位の検査へ。PR まで・マージと便は別途 OK）"
     )
     assert unlock["previous_scope_20261026_sales25"] == {
         "active": True,
@@ -273,6 +273,12 @@ def test_unlock_matches_the_committed_declaration() -> None:
         "scope_paths": ["infra/codebuild/teamagent_core_media_release_contract.json"],
         "reason": "human gate 2026-10-29（小俣さん 10-29『できるだけ早く』・Alpine 上流で nodejs の再ビルド。r82 の段 3 で検出）",
         "gate": "human gate 2026-10-29（小俣さん 10-29『できるだけ早く』・Alpine 上流で nodejs の再ビルド。r82 の段 3 で検出）",
+    }
+    assert unlock["previous_scope_20261029_evkey"] == {
+        "active": True,
+        "scope_paths": ["infra/codebuild/teamagent_core_media_release_contract.json"],
+        "reason": "human gate 2026-10-29（小俣さん 10-29『できるだけ早く』・sales25 の動画長の許容と媒体不足の partial）",
+        "gate": "human gate 2026-10-29（小俣さん 10-29『できるだけ早く』・sales25 の動画長の許容と媒体不足の partial）",
     }
     assert unlock["previous_scope_20261023_gdbm"] == {
         "active": True,
