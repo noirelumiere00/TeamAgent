@@ -625,11 +625,16 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
         }
         retry_ctx = replace(ctx, metadata={**ctx.metadata, "_search_recovery": trace})
         total_cost = output.total_cost_usd
-        floor = self._min_relevance_fallback or 0.05
-        for threshold in dict.fromkeys((max(floor, self._not_found_threshold), floor)):
+        floor = self._min_relevance_fallback
+        # fallback=0は緩和無効。別名・他の源は探すが、明示された閾値を下げない。
+        thresholds = (
+            (max(floor, self._not_found_threshold), floor) if floor > 0 else (self._min_relevance,)
+        )
+        for threshold in dict.fromkeys(thresholds):
             recovery._min_relevance = min(self._min_relevance, threshold)
             recovery._min_relevance_fallback = 0.0
-            recovery._not_found_threshold = min(self._not_found_threshold, threshold)
+            if floor > 0:
+                recovery._not_found_threshold = min(self._not_found_threshold, threshold)
             output = run_fanout(recovery, input, retry_ctx)
             output = output.model_copy(
                 update={
