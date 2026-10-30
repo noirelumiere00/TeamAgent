@@ -311,7 +311,9 @@ def _cover(row: Mapping[str, Any]) -> str:
     body = (
         f'<span class="placeholder" '
         f'data-category="{_e(row.get("business_category"))}"><strong>'
-        f"{_e(account[0].upper())}</strong><small>サムネ準備中</small></span>"
+        f"{_e(account[0].upper())}</strong>"
+        f'<span class="placeholder-account" title="{_e(account)}">{_e(account)}</span>'
+        "<small>サムネ準備中</small></span>"
     )
     if row.get("has_thumbnail") or row.get("thumbnail_s3_key"):
         path = "/".join(quote(str(row[key]), safe="") for key in ("platform", "video_id"))
@@ -373,16 +375,24 @@ def _video_card(row: Mapping[str, Any], *, selectable: bool = False) -> str:
                 f'<a class="badge" href="/library/videos?{_e(urlencode({field: row[field]}))}">'
                 f"{_e(row[field])}</a></div>"
             )
-    flags = ("PR" if row.get("is_pr") else "") + (" / 非公開" if row.get("is_private") else "")
+    account = row.get("account_name") or row.get("account_handle") or ""
+    metadata = []
+    if isinstance(row.get("posted_at"), datetime):
+        metadata.append(_day(row["posted_at"]))
+    if row.get("is_pr"):
+        metadata.append("PR")
+    if row.get("is_private"):
+        metadata.append("非公開")
+    period = f'<p class="period">{" · ".join(metadata)}</p>' if metadata else ""
     return (
         f'<article class="card">{_preview(row)}<div class="card-body"><div '
         f'class="card-tags">{tags}</div>'
-        f'<h3><a href="/library/v/{path}">'
-        f"{_e(row.get('account_name') or row.get('account_handle'))}</a>"
+        f'<h3><a class="account-name" title="{_e(account)}" href="/library/v/{path}">'
+        f"{_e(account)}</a>"
         f"</h3>"
         f'<p class="card-stats">再生 {plays} · 保存率 '
         f"{_rate(rates['save_rate'], rates['is_reference'])}</p>"
-        f'<p class="period">{_day(row.get("posted_at"))} · {flags}</p>'
+        f"{period}"
         f'<div class="actions"><a href="/library/v/{path}">詳細を見る</a>'
         f"{checkbox}</div></div></article>"
     )
@@ -404,6 +414,7 @@ def _filters(
         f"検索</button></div>"
     )
     for key in (
+        "all",
         "category",
         "pr",
         "advertiser",
@@ -425,6 +436,8 @@ def _filters(
         ),
         ("pr", [("", "PRすべて"), ("yes", "PRあり"), ("no", "PRなし")]),
     ):
+        if field == "pr":
+            body += '<details class="advanced-filters"><summary>詳しく絞り込む</summary><div>'
         body += (
             '<div class="chips" role="group" aria-label="'
             + ("区分" if field == "category" else "PRの有無")
@@ -489,7 +502,7 @@ def _filters(
             f'<span class="badge">{_e(params.get("industry", ""))} '
             f"{_e(params.get('purpose', ''))}</span>"
         )
-    return body + "</div></form>"
+    return body + "</div></div></details></form>"
 
 
 def search_campaigns(conn: Any, params: Mapping[str, str], *, admin: bool) -> list[Any]:
@@ -727,14 +740,39 @@ def register_library_routes(
             '<p class="muted">平均保存率は、再生が1以上で保存数がある動画の'
             "保存率の単純平均です。</p>"
         )
+        show_all = request.query_params.get("all") == "1" or any(
+            request.query_params.get(key, "").strip()
+            for key in (
+                "q",
+                "category",
+                "pr",
+                "industry",
+                "purpose",
+                "advertiser",
+                "campaign",
+                "account",
+                "from",
+                "to",
+                "unassigned",
+                "tag_group",
+                "tag",
+            )
+        )
+        visible_cases = cases if show_all else cases[:12]
         body += (
             '<div class="grid campaign-grid">'
-            + "".join(_campaign_card(row) for row in cases)
+            + "".join(_campaign_card(row) for row in visible_cases)
             + "</div>"
             if cases
             else '<p class="empty">条件に合う事例がありません。'
             "検索語や絞り込み条件を変えてみてください。</p>"
         )
+        if len(visible_cases) < len(cases):
+            all_url = "/library?" + urlencode({**request.query_params, "all": "1"})
+            body += (
+                f'<p class="catalog-more"><a class="button" href="{_e(all_url)}">'
+                f"すべての事例を見る（{len(cases):,}件）</a></p>"
+            )
         body += (
             '<div class="section-heading"><h2>よく伸びた動画</h2><a '
             'href="/library/videos?sort=plays">動画一覧で見る</a></div><p '
@@ -853,12 +891,16 @@ def register_library_routes(
                 f'<p><a href="{_e(url)}" target="_blank" rel="noopener noreferrer">'
                 f"TikTokで開く</a></p>"
             )
+        account = row.get("account_name") or row.get("account_handle") or ""
         body += (
-            f'<div class="detail-meta"><h2>'
-            f"{_e(row.get('account_name') or row.get('account_handle'))}</h2><p "
-            f'class="muted">{_day(row.get("posted_at"))}</p>'
+            f'<div class="detail-meta"><h2 class="account-name" title="{_e(account)}">'
+            f"{_e(account)}</h2>"
         )
-        body += _row_tags(row) + "<h3>投稿文</h3><pre>" + _e(row.get("caption")) + "</pre>"
+        if isinstance(row.get("posted_at"), datetime):
+            body += f'<p class="posted-date muted">{_day(row["posted_at"])}</p>'
+        body += _row_tags(row)
+        if str(row.get("caption") or "").strip():
+            body += "<h3>投稿文</h3><pre>" + _e(row["caption"]) + "</pre>"
         if row.get("advertiser") and row.get("campaign"):
             body += (
                 f'<p><a href="{_e(_campaign_url(row))}">{_e(row["advertiser"])} / '

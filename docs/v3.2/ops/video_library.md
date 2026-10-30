@@ -205,3 +205,28 @@ mypy strict、CI固定版ruff 0.15.15のcheck／format、import-linterの2契約
 スクリーンショットは fake DB で実ルートのレスポンスを生成し、ローカルHTMLをChromeで表示。画像は撮影専用の見本。`/tmp/library-v2-screenshots/` に `catalog`／`case`／`videos`／`detail`／`analysis`／`admin`／`accounts` のそれぞれ `-1440.png` と `-375.png` を保存した（CSS幅、DPR 2）。画面を目視し、広告指標の詰まり、CTAタグの配色、縦型サムネの比率、アカウント登録の入力欄配置を修正した。分析見本は区間をクリックして内容が開くことも確認。撮影用ブラウザウインドウは終了後に閉じた。
 
 未実施: 実DB3テストは `TEAMAGENT_TEST_DB_DSN` 未設定でスキップ。使い捨てPostgreSQLの起動もサンドボックスの共有メモリ制限で失敗（`/tmp/library-v2-initdb.log`）。実TikTok再生・本番S3との疎通、本番データ・デプロイは未検証。768／1024pxはCSS分岐の確認のみで実画面撮影は未実施。push・PRは実施していない。
+
+## 55事例・大量投稿のレビュー修正（2026-10-30）
+
+既定の `/library` は事例12件と「すべての事例を見る（件数）」を表示する。`/library?all=1`、検索・絞り込み時は該当事例を全件表示。並び替えだけの場合は12件を維持する。事例サムネは4:5、動画サムネは9:16。375pxでも事例は2列に収める。
+
+サムネ無しは控えめな頭文字とアカウント名を表示し、動画詳細では上部に配置して中央の再生ボタンと重ねない。アカウント名は1行省略と全文のtitle属性、投稿日欠損は非表示、空の投稿文は見出しごと省略する。768px未満では検索と区分だけを常時表示し、その他の条件を「詳しく絞り込む」にまとめる。デスクトップでは条件を展開する。
+
+変更ファイル: `src/teamagent/connect_web/library.py`、`src/teamagent/connect_web/library_assets.py`、`tests/connect_web/test_library_catalog_review.py`、`tests/connect_web/test_library_js.py`、本書。ページURLは前節のまま、全件表示の `/library?all=1` のみ追加。
+
+`LargeCatalogPg` は55事例・2,800動画、サムネ無し2,040本（約73%）、長いアカウント名、日付・投稿文欠損を再現する。関係するpytest 5ファイルは **126 passed / 3 skipped**。mypy strictは524ファイル、CI版ruff 0.15.15 check／formatは成功、import-linterは2契約とも成功。テストからログ設定は変更していない。
+
+| 修正 | 回帰テスト | 一時的に壊して失敗を確認した箇所 |
+| --- | --- | --- |
+| 既定12件・全件表示 | `test_catalog_limits_default_but_all_and_filters_show_every_match` | 12件の制限を除去 |
+| 事例の4:5比率 | `test_case_cover_is_compact_but_video_stays_portrait` | 事例を9:16へ戻す |
+| 控えめな仮表示・再生ボタンとの分離 | `test_placeholder_is_quiet_and_clear_of_detail_play_button` | 頭文字を64pxに戻す／詳細の仮表示を中央へ戻す（2件） |
+| アカウント名の省略・title | `test_account_names_are_single_line_with_escaped_full_title` | 折り返しを有効化 |
+| 空の日付・投稿文を非表示 | `test_absent_date_and_caption_do_not_render_empty_metadata` | 日付／投稿文の条件を常時表示へ変更（2件） |
+| モバイルの条件開閉 | `test_mobile_filters_keep_search_category_outside_disclosure` / `test_single_player_disposal_and_checked_urls_clipboard` | 幅に関係なく条件を開く |
+
+8件すべて失敗検出後に復元。結果は `/tmp/library-review-mutations.json`、失敗全文は `/tmp/library-review-mutation-*.log`。最終検証ログは `/tmp/library-review-pytest-final.log`、`/tmp/library-review-mypy.log`、`/tmp/library-review-ruff-check-final.log`、`/tmp/library-review-ruff-format.log`、`/tmp/library-review-imports.log`。
+
+今回のスクリーンショットは未取得。実ルートをfake DBで生成した `/tmp/library-review-preview/{catalog,all,case,videos,detail}.html` で撮影を準備したが、Chromeの共有操作が別作業の `/tmp/nsp-visual/after-400.html` と競合し、1440／375pxの撮影は完了していない。Safariは操作許可なし、独立ブラウザ接続も利用不可。撮影用Chromeはいったん終了し、その後に開いたゲストウインドウは別作業に切り替わったため終了操作を控えた。
+
+未実施: 上記の画面撮影、実DB3テスト（DSN未設定）、実TikTok再生・本番S3との疎通、本番データ確認・デプロイ。コミットも未完了: `git add` が `/Users/s-komata/dev/teamagent/.git/worktrees/teamagent-vl-ui/index.lock` の書き込みを `Operation not permitted` で拒否された。変更は作業ツリーに保持。push・PRは実施していない。

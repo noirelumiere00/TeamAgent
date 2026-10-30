@@ -19,6 +19,7 @@ function element(){return {events:{},children:[],dataset:{},attributes:{},
  addEventListener(name,fn){this.events[name]=fn;},
  appendChild(child){this.children.push(child);child.parent=this;},
  remove(){this.parent.children=this.parent.children.filter(child=>child!==this);}};}
+const filters=element(),desktop={matches:true,addEventListener(name,fn){this.change=fn;}};
 const cards=[element(),element()];
 cards.forEach((card,i)=>card.dataset.player='https://www.tiktok.com/player/v1/'+i+'?autoplay=1&muted=1');
 const imageBox=element(), pendingImage=element(), failedImage=element(), loadedImage=element();
@@ -40,6 +41,7 @@ const checks=[{checked:true,dataset:{url:'https://www.tiktok.com/@sample/video/1
 let copied=null;
 global.document=Object.assign(doc,{
  querySelectorAll(selector){
+  if(selector==='.advanced-filters')return [filters];
   if(selector==='.preview[data-player]')return cards;
   if(selector==='.preview img')return [pendingImage,failedImage,loadedImage];
   if(selector==='[data-copy]')return [caseCopy,urlCopy];
@@ -50,10 +52,14 @@ global.document=Object.assign(doc,{
  createElement(tag){assert.equal(tag,'iframe');return element();},
  getElementById(id){return ids[id];}
 });
-global.window=win;
+global.window=Object.assign(win,{matchMedia(query){assert.equal(query,'(min-width:768px)');return desktop;}});
 Object.defineProperty(global,'navigator',{value:{clipboard:{async writeText(text){copied=text;}}}});
 __SCRIPT__
 (async()=>{
+ assert.equal(filters.open,true);
+ desktop.matches=false;desktop.change();assert.equal(filters.open,false);
+ filters.open=true;assert.equal(filters.open,true);
+ desktop.matches=true;desktop.change();assert.equal(filters.open,true);
  assert.deepEqual(imageBox.children,[pendingImage,loadedImage]);
  pendingImage.events.error();assert.deepEqual(imageBox.children,[loadedImage]);
  cards[0].events.mouseenter();assert.equal(cards[0].children.length,1);
