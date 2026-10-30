@@ -1544,6 +1544,7 @@ class MediaJobClient:
         evidence_images: list[tuple[int, int, bytes, str]] | None = None,
         fail_if_missing: bool = True,
         timeout_s: int = _SYNC_TIMEOUT_DEFAULT_S,
+        metadata: dict[str, Any] | None = None,
     ) -> bytes:
         job_id = self._job_id(request_fingerprint)
 
@@ -1599,6 +1600,8 @@ class MediaJobClient:
         body = artifacts.get("proposal.pptx")
         if body is None:
             raise MediaJobError("MEDIA_PROPOSAL_ARTIFACT_MISSING")
+        if metadata is not None:
+            metadata.update(_metadata)
         return body
 
     def _request(

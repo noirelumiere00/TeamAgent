@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Callable
+from datetime import date
 from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock
@@ -11,7 +12,7 @@ from unittest.mock import AsyncMock
 import pytest
 from structlog.testing import capture_logs
 
-from teamagent.adapters.media_job import MediaJobError
+from teamagent.adapters.media_job import MediaJobClient, MediaJobError
 from teamagent.adapters.tiktok_scraper import (
     TikTokAuthor,
     TikTokScrapeError,
@@ -166,6 +167,7 @@ class _CapturingDeck:
             coverage_ratio=1.0,
             skipped_ids=[],
             total_cost_usd=0.0,
+            render_metadata={"deck_qa": {"error_count": 0}, "field_issues": []},
         )
 
     def cleanup_output(self, output: ProposalDeckOutput) -> None:
@@ -197,7 +199,7 @@ def _configure_builder_test(
     monkeypatch.setattr(builder_module, "load_and_select_accounts", lambda *_a, **_kw: [])
     monkeypatch.setattr(builder_module, "search_case_candidates", lambda *_a, **_kw: [])
     monkeypatch.setattr(
-        builder_module.MediaJobClient,
+        MediaJobClient,
         "is_configured",
         classmethod(lambda cls: media_configured),
     )
@@ -206,7 +208,7 @@ def _configure_builder_test(
 def _input(research: dict[str, Any], **kwargs: Any) -> ProposalBuilderInput:
     return ProposalBuilderInput(
         gemini_json=research,
-        posting_start_date="2026-09-01",
+        posting_start_date=date(2026, 9, 1),
         **kwargs,
     )
 

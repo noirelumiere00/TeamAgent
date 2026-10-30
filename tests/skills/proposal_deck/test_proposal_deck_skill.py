@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
@@ -144,6 +145,7 @@ def test_default_request_directory_is_removed_by_cleanup(
         out_path: Path,
         *,
         request_id: str,
+        metadata: dict[str, Any],
     ) -> Path:
         assert request_id == "cleanup-request"
         out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -185,6 +187,7 @@ def test_default_request_directory_is_removed_when_render_fails(
         out_path: Path,
         *,
         request_id: str,
+        metadata: dict[str, Any],
     ) -> Path:
         nonlocal request_dir
         del request_id
@@ -292,7 +295,7 @@ def test_exhausted_repair_logs_error_summary_without_model_text(tmp_path: Path) 
     skill = ProposalDeckSkill(bedrock=bedrock)
     ctx = SkillContext()
     logger = MagicMock()
-    ctx.bind_logger = lambda _name: logger  # type: ignore[method-assign]
+    ctx.bind_logger = lambda skill_name: logger  # type: ignore[method-assign]
     with pytest.raises(ValueError):
         skill.run(_input(template, tmp_path / "out", max_repair=0), ctx=ctx)
     calls = [
@@ -369,7 +372,7 @@ def test_final_attempt_autoskips_uncited_quantity_placeholders(tmp_path: Path) -
     )
     ctx = SkillContext()
     logger = MagicMock()
-    ctx.bind_logger = lambda _name: logger  # type: ignore[method-assign]
+    ctx.bind_logger = lambda skill_name: logger  # type: ignore[method-assign]
     out = skill.run(deck_input, ctx=ctx)
     assert bedrock.converse.call_count == 1
     assert out.skipped_ids == [4]
@@ -392,7 +395,7 @@ def test_autoskip_keeps_feeder_evidence_images_without_json_roundtrip() -> None:
     image = EvidenceImage(
         placeholder_id=4, rank=1, keyword="青汁", source_url="https://ex.com/a.jpg"
     )
-    data = {
+    data: dict[str, Any] = {
         "placeholders": {"4": "市場規模は1,200億円", "5": "b"},
         "citations_per_placeholder": {"4": ["https://ex.com/lp"]},
         "skipped_placeholders": [],
@@ -440,7 +443,7 @@ def test_final_attempt_autoskip_works_when_feeder_placed_evidence_images(tmp_pat
     )
     ctx = SkillContext()
     logger = MagicMock()
-    ctx.bind_logger = lambda _name: logger  # type: ignore[method-assign]
+    ctx.bind_logger = lambda skill_name: logger  # type: ignore[method-assign]
     out = skill.run(deck_input, ctx=ctx)
     assert bedrock.converse.call_count == 1
     assert out.skipped_ids == [4]

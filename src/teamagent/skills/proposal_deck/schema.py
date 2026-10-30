@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import re
 from datetime import date
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
@@ -287,9 +287,13 @@ class ProposalDeckOutput(BaseModel):
         default_factory=list, description="文字数の局所修復・要確認置換を行った枠の一覧"
     )
     quality_warnings: list[str] = Field(
-        default_factory=list, description="FMT見本・日付・本文500字超過の頁番号付き警告"
+        default_factory=list,
+        description="描画品質・画像未挿入・条件未指定の頁番号付き警告",
     )
     review_slides: list[int] | None = Field(
         default=None, description="『要確認』が残る枚目（表示順・1始まり）。None は未検査"
+    )
+    render_metadata: dict[str, Any] = Field(
+        default_factory=dict, description="最終PPTXのL1・必須補助欄・画像の検査結果"
     )
     total_cost_usd: float = Field(ge=0.0, description="この実行の概算コスト")

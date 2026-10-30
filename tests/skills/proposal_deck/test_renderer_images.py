@@ -1,8 +1,8 @@
-"""renderer の evidence_images 画像注入（Phase3）の単体テスト。実テンプレ(89MB)不使用。
+"""renderer の evidence_images 画像注入の単体テスト。実FMTは別テストで確認。
 
 合成方針:
-- python-pptx で「既知スロット座標(top=_SLOT_TOP_EMU, 幅/高=_SLOT_SIZE_EMU)に空 AUTO_SHAPE を
-  置いた最小テンプレ」を作る → _iter_image_slots が同ロジックで発見できる。
+- python-pptx で「任意の座標に「ここに画像」ラベル付きの AUTO_SHAPE を
+  置いた最小テンプレ」を作る → _iter_image_slots はラベルで発見する。
 - テスト画像は **埋め込み最小 JPEG バイト**（PIL/ffmpeg を使わない＝CI の ci.yml 手動列挙で
   Pillow 未導入でも import で落ちない／既知の罠回避）。
 - 検証は保存後 pptx を開き直し PICTURE 形状を計数（MVP _verify_picture と同パターン）。
@@ -24,13 +24,13 @@ from teamagent.skills.proposal_deck.contract import (
     EvidenceImage,
 )
 from teamagent.skills.proposal_deck.renderer import (
-    _SLOT_SIZE_EMU,
-    _SLOT_TOP_EMU,
     render_deck,
     render_pptx,
 )
 
 _SLOT_LEFT_EMU = 914400
+_SLOT_TOP_EMU = 5454720
+_SLOT_SIZE_EMU = 609905
 
 # 1x1 の最小有効 JPEG（base64）。python-pptx の add_picture が寸法を読める。
 _TINY_JPEG = base64.b64decode(
@@ -69,13 +69,14 @@ def _template_with_slots(path: Path, n_slots: int = 2) -> Path:
             tf.add_paragraph().text = f"｛{pid}：ラベル{pid}｝"
     assert slide is not None
     for k in range(n_slots):
-        slide.shapes.add_shape(
+        slot = slide.shapes.add_shape(
             MSO_SHAPE.RECTANGLE,
             Emu(_SLOT_LEFT_EMU + k * (_SLOT_SIZE_EMU + 50000)),
             Emu(_SLOT_TOP_EMU),
             Emu(_SLOT_SIZE_EMU),
             Emu(_SLOT_SIZE_EMU),
         )
+        slot.text = "ここに画像"
     path.parent.mkdir(parents=True, exist_ok=True)
     prs.save(str(path))
     return path

@@ -32,6 +32,7 @@ from teamagent.adapters.tiktok_scraper import (
 )
 from teamagent.mcp_gateway.allowlist import email_allowed
 from teamagent.media.proposal_bu2 import BU2_REQUEST_VALUES_ONLY
+from teamagent.media.proposal_quality import proposal_readiness_issues
 from teamagent.skills._shared.deck_review import UNAVAILABLE_WARNING, warning_lines
 from teamagent.skills._shared.long_jobs import enabled as long_jobs_enabled
 from teamagent.skills._shared.long_jobs import latest_job, open_dm_once_more, origin
@@ -1188,16 +1189,16 @@ class ProposalBuilderSkill(BaseSkill[ProposalBuilderInput, ProposalBuilderOutput
                 issues.append(f"composer_skipped_placeholders:{joined}")
             if not research.f_competitor:
                 issues.append("competitor_research_missing")
+            render_issues = proposal_readiness_issues(deck_output.render_metadata)
+            issues.extend(render_issues)
             status: Literal["ready", "draft"] = "ready" if not issues else "draft"
             warnings = [
                 "アカウントの直近投稿・死活はDB選定後に未検証",
                 "Drive 03_レポートは現行SearchInputにfolder厳密filterがなく資料種別で検索",
             ]
-            if not tiktok_enrichment.evidence_images:
-                warnings.insert(
-                    0,
-                    "SNSキャプチャは未自動化（既存media workerまたは人手貼付の別工程）",
-                )
+            warnings.extend(f"要対応（描画検査）: {issue}" for issue in render_issues)
+            if "pptx_l1_unavailable" in render_issues:
+                warnings.append("要対応: 最終PPTXのL1検査を実施できませんでした")
             if not os.environ.get("PROPOSAL_BUILDER_NEWS_CHANNEL_ID", "").strip():
                 warnings.append("general_news-tvはchannel_nameメタデータ一致のみで絞込")
 
