@@ -1,4 +1,4 @@
-"""Nonblocking date checks shared by local and isolated proposal renderers."""
+"""Schedule date cleanup and checks shared by local and isolated proposal renderers."""
 
 from __future__ import annotations
 
@@ -14,6 +14,75 @@ _DAY = re.compile(r"(?<!\d)(?:(20\d{2})[/年])?(1[0-2]|0?[1-9])[/月](3[01]|[12]
 _PRODUCTION = re.compile(
     r"制作(?:工程|開始|進行)|(?:スケジュール|ガント)[\s\S]*制作|制作[\s\S]*(?:スケジュール|ガント)"
 )
+_PLAN_LABEL = (
+    r"投稿|配信|制作|撮影|納品|入稿|校了|公開|実施|工程|フェーズ|PHASE|スケジュール|ガント"
+)
+# shortcut: 計画ラベル・見出しで範囲を限定。曖昧な固定欄は新FMTでPB-DATEへ移行する。
+_KEEP_LABEL = r"実績|事例|過去|出典|発行|公表|提案日|(?:利用者|依頼者|依頼文)指定|指定(?:の)?期間"
+_SCHEDULE_HEADING = re.compile(
+    r"[｜|\s]*(?:(?:投稿|配信|制作|実施)\s*)?(?:工程|スケジュール|ガント(?:チャート)?)[\s:：]*$"
+)
+_PLAN_DATE = (
+    r"(?<![\d/／.．])(?:\d{4}[-－/／.．]\d{1,2}(?:[-－/／.．]\d{1,2})?"
+    r"|(?:\d{4}年)?\d{1,2}月(?:\d{1,2}日)?|\d{1,2}[/／]\d{1,2})(?!\d)"
+)
+_SCHEDULE_PART = re.compile(
+    rf"(?P<date>{_PLAN_DATE})|(?P<keep>{_KEEP_LABEL})|(?P<plan>{_PLAN_LABEL})"
+    r"|(?P<break>[。；;、，\n\v]|／(?!\d))",
+    re.IGNORECASE,
+)
+
+
+def is_schedule_heading(text: str) -> bool:
+    """Only an explicit schedule heading gives unlabelled axis cells plan context."""
+    return _SCHEDULE_HEADING.fullmatch(text) is not None
+
+
+def undated_schedule_text(
+    text: str,
+    *,
+    field_label: str = "",
+    specified_periods: tuple[str, ...] = (),
+) -> str:
+    """Replace plan dates, keeping evidence clauses, URLs and request-bound periods."""
+    # shortcut: 「（1/2）」形のページ番号は日付と区別できないため保護。1桁同士の日付が来たら見直す。
+    protected = [
+        match.span() for match in re.finditer(r"https?://[^\s）)]+|[（(]\d[/／]\d[）)]", text)
+    ]
+    protected.extend(
+        match.span()
+        for period in specified_periods
+        if period
+        for match in re.finditer(re.escape(period), text)
+    )
+    default_context = ""
+    for label in _SCHEDULE_PART.finditer(field_label):
+        if label.lastgroup == "keep":
+            default_context = "keep"
+        elif label.lastgroup == "plan" and default_context != "keep":
+            default_context = "plan"
+    context = default_context
+    dates = []
+    for part in _SCHEDULE_PART.finditer(text):
+        if part.lastgroup == "break":
+            if part.group() not in ("\n", "\v", "、", "，") or context != "plan":
+                context = default_context
+        elif part.lastgroup == "keep":
+            context = "keep"
+        elif part.lastgroup == "plan" and context != "keep":
+            context = "plan"
+        elif part.lastgroup == "date" and context == "plan":
+            if any(start <= part.start() and part.end() <= end for start, end in protected):
+                continue
+            # 日付の直後に付く「発行」「投稿実績」も過去の根拠として保持する。
+            if re.match(
+                r"(?:の|に)?(?:投稿|配信|公開|制作)?(?:実績|発行|公表)", text[part.end() :]
+            ):
+                continue
+            dates.append(part.span())
+    for start, end in reversed(dates):
+        text = text[:start] + "未定" + text[end:]
+    return text
 
 
 def proposal_today() -> date:
