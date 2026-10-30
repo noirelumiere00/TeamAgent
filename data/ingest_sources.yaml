@@ -398,3 +398,7 @@ gdrive_exclude_folder_name_re: "^\\s*99[_＿]|一次倉庫|検索対象外|ナ�
 # - Slack: 15 分に 1 回 incremental（前回 ts 以降）
 # - Drive: 15 分に 1 回 changes.list で差分検知
 # - Sheets: 5 分に 1 回（フォーム回答は即時取り込みが価値）
+
+# 動画ライブラリ P1 の台帳読取のみ。未設定なら OFF（既存 ingest のソースには追加しない）。
+# VIDEO_LIBRARY_ACCOUNTS_SHEET_ID=<ベクトルメディア台帳 spreadsheet id>
+# 毎日の実行コマンド: python -m teamagent.ingest.video_library_sync
