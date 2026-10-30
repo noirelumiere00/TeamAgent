@@ -980,3 +980,19 @@ def test_negative_metric_warning_counts_cells_without_mixing_families() -> None:
     assert metrics.organic_plays is None and metrics.organic_saves is None
     assert metrics.total_plays == 17800 and metrics.total_saves == 178
     assert result.warnings["negative_metric"] == 2
+
+
+def test_default_sources_path_falls_back_to_workdir_data(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # 本番 image では site-packages からの相対が外れる。WORKDIR の data/ を拾うこと
+    monkeypatch.setattr(sync, "__file__", str(tmp_path / "a" / "b" / "c" / "d" / "sync.py"))
+    (tmp_path / "work" / "data").mkdir(parents=True)
+    (tmp_path / "work" / "data" / "ingest_sources.yaml").write_text("version: 1\n")
+    monkeypatch.chdir(tmp_path / "work")
+    assert sync._default_sources_path() == tmp_path / "work" / "data" / "ingest_sources.yaml"
+
+
+def test_default_sources_path_prefers_repository_copy() -> None:
+    path = sync._default_sources_path()
+    assert path.is_file() and path.parent.name == "data"
