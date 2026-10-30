@@ -53,6 +53,7 @@ def report_progress(progress: Any, interval_s: float = 10) -> Iterator[None]:
 
 
 def main(argv: list[str] | None = None, *, skill: Any | None = None) -> int:
+    from teamagent.skills.media_case_search.distill import MODELS
     from teamagent.skills.media_case_search.skill import (
         IngestProgress,
         MediaCaseSearchSkill,
@@ -65,8 +66,11 @@ def main(argv: list[str] | None = None, *, skill: Any | None = None) -> int:
     source.add_argument("--fetch", action="store_true", help="Start paid profiles runs")
     parser.add_argument("--kvs", default="aico-media-cases-newstv10-20261028")
     parser.add_argument("--accounts", nargs="+", default=list(accounts()))
-    parser.add_argument("--commit", action="store_true", help="Enable DB writes and Gemini charges")
+    parser.add_argument("--commit", action="store_true", help="Enable DB writes and model charges")
     args = parser.parse_args(argv)
+    model = os.environ.get("MEDIA_CASE_MODEL", MODELS[0])
+    if model not in MODELS:
+        parser.error(f"MEDIA_CASE_MODEL must be one of {MODELS}")
     handles = list(dict.fromkeys(args.accounts))
     if any(h not in accounts() for h in handles):
         parser.error("accounts must come from the approved ten-account CSV")
@@ -82,10 +86,15 @@ def main(argv: list[str] | None = None, *, skill: Any | None = None) -> int:
                     "max_parallel_accounts": 3,
                     "max_parallel_posts_per_account": 2,
                     "max_parallel_gemini_calls": 6,
-                    "gemini_thinking": os.environ.get("MEDIA_CASE_THINKING", "minimal"),
+                    "gemini_thinking": (
+                        "disabled"
+                        if model == "bedrock-haiku"
+                        else os.environ.get("MEDIA_CASE_THINKING", "minimal")
+                    ),
+                    "model": model,
                     "gemini_monthly_usd": os.environ.get("COST_MEDIA_CASE_GEMINI_MONTHLY_USD"),
                     "actor_start": args.fetch,
-                    "note": "No connections. --commit enables database writes and Gemini costs.",
+                    "note": "No connections. --commit enables database writes and model costs.",
                 },
                 ensure_ascii=False,
             )
