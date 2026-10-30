@@ -19,7 +19,9 @@ ALLOWED_EMAILS_ENV = "SEARCH_DIRECT_ANSWER_ALLOWED_EMAILS"
 CTX_KEY = "_search_direct_answer"
 KINDS_ENV = "SEARCH_DIRECT_ANSWER_KINDS"
 KINDS_CTX_KEY = "_search_direct_answer_kinds"
-KINDS = frozenset({"not_found", "comparison", "list_fast", "video_metrics", "case_cards"})
+KINDS = frozenset(
+    {"not_found", "comparison", "list_fast", "video_metrics", "case_cards", "case_state"}
+)
 POSTED_TEXT = "回答はこの会話に投稿済みです。同じ内容の要約・補足は書かないでください。"
 _MARKDOWN_LINK = re.compile(r"\[([^\]\n]+)\]\(<?(https?://[^\s<>)]+)>?\)")
 _CASE_LINK = re.compile(r"<(?P<url>https://[^\s<>|]+)\|(?P<label>資料を見る|会話の記録)>")
@@ -67,7 +69,7 @@ def deliver(
     allow_case_links: bool = False,
 ) -> dict[str, Any] | None:
     """投稿成功だけを抑止の根拠にする。失敗時は元のツール結果を返す。"""
-    if kind not in allowed_kinds() or not answer.strip():
+    if (kind != "case_state" and kind not in allowed_kinds()) or not answer.strip():
         return None
     # URL を Markdown の括弧から外し、共通の Slack エスケープを 1 回だけ掛ける。
     text = markdown_bold_to_mrkdwn(_MARKDOWN_LINK.sub(r"\1 \2", answer))

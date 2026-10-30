@@ -3250,6 +3250,11 @@ export function createCallerIdentityPlugin({
     }
     if (searchTool) entry.searchCompleted = true;
     const searchData = searchTool ? searchResultData(event.result) : null;
+    // This field is set only by the allowlisted MCP renderer, never by retrieved text.
+    if (typeof searchData?.case_state_answer === "string" && searchData.case_state_answer.trim()) {
+      entry.caseStateAnswer = searchData.case_state_answer;
+      entry.caseStatePosted = searchData.status === "posted" && searchData.delivered === true;
+    }
     if (searchData?.video_metrics_posted === true && typeof searchData.video_metrics_evidence?.text === "string") {
       entry.postedMetrics = searchData.video_metrics_evidence.text;
     }
@@ -7844,6 +7849,17 @@ export function createCallerIdentityPlugin({
             ? connectUrlsByRun.get(runId)?.urls : undefined;
           const authoritative = runId && runId === canonicalInvocationId(ctx?.runId);
           const evidence = authoritative ? evidenceByRun.get(runId) : undefined;
+          if (evidence?.caseStateAnswer && (event.kind === undefined || event.kind === "final") &&
+              payload.isCommentary !== true && payload.isReasoning !== true) {
+            if (evidence.caseStatePosted || evidence.caseStatePayload && evidence.caseStatePayload !== event.payload) {
+              return finishRevisedReply(event, ctx, {...result, cancel: true});
+            }
+            evidence.caseStatePayload = event.payload;
+            const canonical = scrubOutboundReplyText(evidence.caseStateAnswer.replace(
+              /\[([^\]\n]+)\]\(<?(https?:\/\/[^\s<>)]+)>?\)/gu, "$1 $2"), replacements).text;
+            return finishRevisedReply(event, ctx, {...result, payload: {...payload,
+              text: canonical, blocks: undefined, channelData: undefined}});
+          }
           const grounding = authoritative && !evidence && ["comparison", "list"].includes(connectIngressByRun.get(runId)?.searchRequired)
             ? conversationSearchEvidence(runId) : evidence;
           const session = authoritative ? evidenceSessionKey(runId) : null;

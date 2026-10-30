@@ -1263,6 +1263,18 @@ async def dispatch_tool(
             if name == SEARCH_TOOL_NAME:
                 metadata[direct_search_answer.CTX_KEY] = True
                 metadata[direct_search_answer.KINDS_CTX_KEY] = tuple(search_direct_kinds)
+    from teamagent.case_state import enabled as case_state_enabled
+
+    if name == SEARCH_TOOL_NAME and case_state_enabled(metadata.get("user_email")):
+        search_direct_kinds = search_direct_kinds | {"case_state"}
+        search_direct_destination, _ = direct_summary.decide_destination(
+            direct_summary.DirectPolicy(
+                enabled=True,
+                allowed_emails=frozenset({str(metadata["user_email"]).lower()}),
+            ),
+            verified_caller=verified_caller,
+            metadata=metadata,
+        )
     ctx = SkillContext(user_id=metadata.get("user_email"), metadata=metadata)
 
     # ── video_algorithm の切り離し（USE_VIDEO_ALGORITHM_DETACH 既定OFF＝以下は素通り）─────
@@ -1678,6 +1690,8 @@ async def dispatch_tool(
             )
             if posted is not None and posted.get("delivered") is True:
                 posted["direct_delivery"] = candidate
+                if data.get("case_state_answer") is not None:
+                    posted["case_state_answer"] = data["case_state_answer"]
                 if followup_available is not None:
                     posted["document_followup_available"] = followup_available
                 return [TextContent(type="text", text=json.dumps(posted, ensure_ascii=False))]
@@ -1706,7 +1720,7 @@ async def dispatch_tool(
     # usage DB/ログ記録は (0)。将来 quota を強制する場合もこの順序契約を保つ。
     if isinstance(data, dict):
         data = _relay_fields(spec, data)
-    if isinstance(data, dict):
+    if isinstance(data, dict) and data.get("case_state_answer") is None:
         from teamagent.mcp_gateway.payload_offload import maybe_offload
 
         data = await asyncio.to_thread(maybe_offload, name, data, request_id=ctx.request_id)

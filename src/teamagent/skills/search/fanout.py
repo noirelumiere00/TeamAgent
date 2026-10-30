@@ -1079,7 +1079,24 @@ def run_fanout(skill: Any, input: SearchInput, ctx: SkillContext) -> SearchOutpu
                 authorize_drive=lambda ref: skill._authorized_drive_reference(ref, ctx),
             )
         answer = compact.strip_linkless_invitation(answer)
-    if found and input.include_answer and timeline_status.enabled():
+    state_hits = []
+    case_answer = None
+    if case_state_enabled(ctx.metadata.get("user_email")):
+        state_hits = [
+            *hits,
+            *summary_hits,
+            *extra.get("named", []),
+            *karte.items,
+            *case_hits,
+            *(drive_first.slack_hit(i, n) for n, i in enumerate(slack.items)),
+        ]
+        case_answer = timeline_status.render_case_states(state_hits if found or slack.items else [])
+        if not complete:
+            case_answer += "\n\n検索は一部未確認です。"
+    if case_answer is not None and input.include_answer:
+        answer = case_answer
+        direct_kind = "case_state"
+    elif found and input.include_answer and timeline_status.enabled():
         status = timeline_status.status_answer(
             input.query,
             [*summary_hits, *karte.items],
@@ -1090,6 +1107,7 @@ def run_fanout(skill: Any, input: SearchInput, ctx: SkillContext) -> SearchOutpu
             answer = status + ("\n\n" + answer if answer else "")
     return SearchOutput(
         answer=answer,
+        case_state_answer=case_answer,
         answer_format="compact"
         if compact_mode
         else "list"
@@ -1100,7 +1118,11 @@ def run_fanout(skill: Any, input: SearchInput, ctx: SkillContext) -> SearchOutpu
         hits=[]
         if drive_case_listing and input.include_answer
         else _output_hits(
-            skill, hits, file_urls, case_state=case_state_enabled(ctx.metadata.get("user_email"))
+            skill,
+            hits,
+            file_urls,
+            case_state=case_state_enabled(ctx.metadata.get("user_email")),
+            state_hits=state_hits,
         ),
         displayed_refs=displayed_refs,
         found=found,
@@ -1115,7 +1137,7 @@ def run_fanout(skill: Any, input: SearchInput, ctx: SkillContext) -> SearchOutpu
             for r in results
         ],
         suggested_next=None
-        if case_listing
+        if case_listing or direct_kind == "case_state"
         else suggest_next_move(
             query=input.query,
             found=found,
@@ -1130,10 +1152,16 @@ def run_fanout(skill: Any, input: SearchInput, ctx: SkillContext) -> SearchOutpu
 
 
 def _output_hits(
-    skill: Any, hits: list[SearchHit], file_urls: dict[str, str], *, case_state: bool = False
+    skill: Any,
+    hits: list[SearchHit],
+    file_urls: dict[str, str],
+    *,
+    case_state: bool = False,
+    state_hits: list[SearchHit] | None = None,
 ) -> list[SearchHitOut]:
     """通常のリンク・配信情報を保ち、本文だけ 200 字へ抑える。"""
     search_hits: list[SearchHitOut] = []
+    state_evidence = timeline_status.resolved_evidence(state_hits or hits) if case_state else {}
     for h in hits:
         meta = h.metadata or {}
         resolved_file_ref = skill._resolved_file_ref(meta, h.content or "", file_urls)
@@ -1155,11 +1183,7 @@ def _output_hits(
         search_hits.append(
             SearchHitOut(
                 chunk_id=h.chunk_id,
-                case_state_evidence=(
-                    timeline_status.resolve_statuses([h], case_state=True)[0].evidence
-                    if case_state
-                    else None
-                ),
+                case_state_evidence=state_evidence.get(h.chunk_id),
                 reference=ref,
                 content=h.content[:200],
                 score=h.score,

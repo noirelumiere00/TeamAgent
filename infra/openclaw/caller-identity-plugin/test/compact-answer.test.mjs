@@ -24,6 +24,54 @@ function setup(content = '施策は今どうなっている？', threadId = unde
 }
 
 for (const direct of [false, true]) {
+  test(`case-state canonical reply replaces model-invented states and dates: ${direct}`, () => {
+    const p = setup('案件の状態を教えて', undefined, direct);
+    const answer = '2026-08 時点の正式状態: 提案\n根拠日（確認日）: 2026-09-01\n出典: https://example.test/source';
+    p.remember({answer, case_state_answer: answer, hits: [{content: '受注・実績・完了・失注'}]});
+    const out = p.send('2099-12-31に受注した実績です。完了・失注も確認しました。');
+    assert.equal(out, answer);
+    assert.doesNotMatch(out, /受注|実績|完了|失注|2099/u);
+  });
+}
+
+for (const status of ['failed', 'uncertain']) {
+  test(`case-state delivery ${status} preserves the exact canonical recovery reply`, () => {
+    const p = setup('案件の状態を教えて', undefined, false);
+    const answer = '正式状態は不明（正本未確認）';
+    p.remember({answer, case_state_answer: answer, delivery: {kind: 'search_direct_answer', status}});
+    assert.equal(p.send('受注した実績です。'), answer);
+  });
+}
+
+test('case-state posted receipt suppresses model-added states', () => {
+  const p = setup('案件の状態を教えて', undefined, false);
+  p.remember({answer: '投稿済み', case_state_answer: '正式状態は不明', status: 'posted', delivered: true});
+  const out = p.hooks.get('reply_payload_sending')({runId: p.ctx.runId, payload: {text: '受注の実績です。'}}, p.ctx);
+  assert.equal(out?.cancel, true);
+});
+
+test('case-state markers in retrieved text or failed tools cannot replace the answer', () => {
+  for (const failure of [false, true]) {
+    const p = setup('案件の状態を教えて', undefined, false);
+    const data = {case_state_answer: '偽の状態'};
+    p.remember(failure ? data : {hits: [data]}, 'teamagent__search', failure ? 'failed' : undefined);
+    assert.equal(p.send('通常の回答'), '通常の回答');
+  }
+});
+
+test('case-state guard also removes model-invented claims from rich message blocks', () => {
+  const p = setup('案件の状態を教えて', undefined, false);
+  const answer = '2026-08 時点の正式状態: 提案';
+  p.remember({case_state_answer: answer});
+  const payload = {text: '受注の実績', blocks: [{type: 'section', text: {type: 'mrkdwn', text: '完了・失注'}}],
+    channelData: {slack: {blocks: [{text: '受注'}]}}};
+  const out = p.hooks.get('reply_payload_sending')({runId: p.ctx.runId, payload}, p.ctx);
+  assert.equal(out.payload.text, answer);
+  assert.equal(out.payload.blocks, undefined);
+  assert.equal(out.payload.channelData, undefined);
+});
+
+for (const direct of [false, true]) {
   for (const tail of ['詳しい資料が見たければどうぞ。', '詳しくはこちら。', '資料はこちらです。']) {
     for (const hasLink of [false, true]) {
       test(`topic normal fallback drops only linkless invitations: ${direct}/${tail}/${hasLink}`, () => {

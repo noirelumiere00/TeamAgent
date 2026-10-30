@@ -11,6 +11,7 @@ from calendar import monthrange
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
+from html import escape
 from typing import Any
 
 from pydantic import ValidationError
@@ -308,6 +309,102 @@ def resolve_statuses(
                 )
         out.append(TimelineStatus(label, text, sections, latest))
     return tuple(out)
+
+
+def guard_state_words(text: str, statuses: Sequence[TimelineStatus] = ()) -> str:
+    """正式に解決した状態以外の強い断定を最終文から落とす。実績は状態から導かない。"""
+    allowed = {
+        {"won": "受注", "completed": "完了", "lost": "失注"}.get(s.evidence.state)
+        for s in statuses
+        if s.evidence is not None and s.evidence.resolution == "resolved"
+    }
+    return re.sub(r"受注|実績|完了|失注", lambda m: m[0] if m[0] in allowed else "不明", text)
+
+
+def resolved_evidence(hits: Sequence[SearchHit]) -> dict[int, CaseStateEvidence]:
+    """公開ヒットも全可視根拠で解決し、各ヒット自身の出典は維持する。"""
+    resolved = {
+        s.evidence.subject_ref: s.evidence
+        for s in resolve_statuses(hits, case_state=True)
+        if s.evidence is not None
+    }
+    out = {}
+    for hit in hits:
+        bundle = case_state_of(hit)
+        state = resolved[bundle.subject_ref]
+        out[hit.chunk_id] = bundle.model_copy(
+            update={
+                "state": state.state,
+                "authority": state.authority,
+                "resolution": state.resolution,
+            }
+        )
+    return out
+
+
+def render_case_states(hits: Sequence[SearchHit]) -> str:
+    """自由文を採用せず、同じ対象の状態・根拠日・原出典を一緒に描画する。"""
+    statuses = resolve_statuses(hits, case_state=True)
+    if not statuses:
+        return "正式状態は不明（参照できる根拠なし）。"
+    date_labels = {
+        "unknown": "種別不明",
+        "message_posted": "投稿日",
+        "form_submitted": "提出日",
+        "document_issued": "資料発行日",
+        "reviewed": "確認日",
+        "post_published": "公開日",
+    }
+
+    def literal(value: str) -> str:
+        # 題名・位置は引用であって状態の認定ではない。メンションや改行も持ち込まない。
+        return escape(guard_state_words(" ".join(value.split())), quote=False)
+
+    def link(value: str | None) -> str:
+        return (
+            escape(value, quote=False)
+            if value and re.fullmatch(r"https?://[^\s<>|]+", value)
+            else "リンク不明"
+        )
+
+    blocks = []
+    for index, status in enumerate(statuses, 1):
+        lines = [f"対象 {index}（資料名: {literal(status.label)}）", status.text]
+        for bundle in status.evidence_sources:
+            lines.append(f"資料種別: {literal(bundle.document_kind)}")
+            if not bundle.records:
+                lines.append("根拠日: 不明（状態の記録なし）")
+            for record in sorted(bundle.records, key=lambda r: r.model_dump_json()):
+                authority = (
+                    "確認済み記録" if record.authority == "official" else "報告（正式性未確認）"
+                )
+                lines.append(
+                    f"{authority} / 根拠日（{date_labels[record.evidence_date_kind]}）: "
+                    f"{record.evidence_date or '不明'}"
+                )
+                if record.authority != "official":
+                    lines.append(
+                        "報告の記載（正式状態ではありません）: "
+                        + literal(record.raw_value or "不明")
+                    )
+                ref = record.source_ref
+                lines.append(f"出典: {link(ref.url)} / 位置: {literal(ref.locator)}")
+            if not bundle.records:
+                ref = bundle.source_ref
+                lines.append(f"出典: {link(ref.url)} / 位置: {literal(ref.locator)}")
+            if observation := bundle.delivery_observation:
+                lines.append(
+                    f"投稿観測: {observation.video_count} 本 / "
+                    f"公開期間: {observation.first_posted_on or '不明'}"
+                    f" 〜 {observation.last_posted_on or '不明'}"
+                )
+                lines.append(f"投稿の出典: {link(observation.source_ref.url)}")
+                lines.extend(
+                    f"観測値 {key}: {value}" for key, value in sorted(observation.metrics.items())
+                )
+        # 案件ごとに検査する。他案件の受注を提案中の案件へ流用しない。
+        blocks.append(guard_state_words("\n".join(lines), [status]))
+    return "\n\n".join(blocks)
 
 
 def prompt_block(statuses: Sequence[TimelineStatus]) -> str:
