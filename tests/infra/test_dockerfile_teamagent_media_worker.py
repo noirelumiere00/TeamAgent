@@ -55,7 +55,8 @@ UV_DIGEST = "9941e2d8e06ff884d328905091eac0a6bc1e40e5ce12e6dd0de4ef4ee26baac4"
 # 2026-10-27: fresh aarch64 APKINDEX + apk-tools 3.0.6 で simdutf 9.3.0-r0→9.3.2-r0 のみ再導出（241 行不変）。実物一致は段 3 の cmp。
 # 2026-10-27: Python / pyc 3.14.10-r0 を fresh APKINDEX + apk-tools 3.0.6 で再導出（241→240 行、gdbm 脱落）。
 # 2026-10-27: Python / pyc 3.14.10-r0→r1、署名検証済み APKINDEX + apk-tools 3.0.6 で再導出（240 行不変、ELF SHA 不変）。
-APK_LOCK_SHA256 = "7d31efa3083417efb959d7229502294343e185b629fe288ccc55359da6e826a0"
+# 2026-10-30: 署名検証済み索引 + apk-tools 3.0.6 で ffmpeg 8.1.3-r0 と ffmpeg8 副パッケージを再導出（240 行不変）。
+APK_LOCK_SHA256 = "e60c8179777678a50a55d00fde9535bf25f710b4eaec071aecbc219837fb03cb"
 CHROMIUM_PATH = "/usr/lib/chromium/chromium"
 
 
@@ -84,9 +85,10 @@ def test_media_runtime_packages_versions_and_binaries_are_exact() -> None:
         "CHROMIUM_BINARY_SHA256": (
             "13eaa3cbe73f39b5feafcd767db0771c4f25d626a3927ba216ac43cde3abaf79"
         ),
-        "FFMPEG_PACKAGE_VERSION": "8.1.2-r3",
+        "FFMPEG_PACKAGE_VERSION": "8.1.3-r0",
+        "FFMPEG_VERSION": "8.1.3",
         "FFMPEG_BINARY_SHA256": (
-            "137d90fd7626c4246ca994a1eec4ea898e4a0b8ad7042a3402603fc47f69a198"
+            "c9673a510eedc733101481aabb420f434eddcaec2b50d4f8aca32e7fd652cbf9"
         ),
         "NODE_PACKAGE_VERSION": "24.22.1-r1",
         "NODE_VERSION": "24.22.1",
