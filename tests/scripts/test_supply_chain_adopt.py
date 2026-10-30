@@ -774,6 +774,7 @@ from supply_chain_adopt_binding import (  # noqa: E402
     BOUND_FIELDS,
     SCHEMA_VERSION,
     BindingError,
+    approval_sha256,
     assert_usable_principal,
     check_approval,
     compare_binding,
@@ -791,7 +792,10 @@ GUARD = ROOT / "infra/deploy/terraform_runtime_guard.sh"
 
 def _binding() -> dict[str, Any]:
     return {
-        "schema_version": 2,
+        "schema_version": 3,
+        "var_file_path": "/canonical/terraform.tfvars",
+        "var_file_sha256": "e" * 64,
+        "approval_sha256": approval_sha256("a" * 64, "/canonical/terraform.tfvars", "e" * 64),
         "plan_sha256": "a" * 64,
         "plan_json_sha256": "b" * 64,
         "git_head": "c" * 40,
@@ -810,7 +814,7 @@ def test_binding_accepts_the_identical_world() -> None:
     """同一 plan + 同一 commit + 同一 state + 正しい承認なら通る。"""
     recorded = _binding()
     compare_binding(recorded, copy.deepcopy(recorded))
-    check_approval(recorded, expected_approval(recorded["plan_sha256"]))
+    check_approval(recorded, expected_approval(recorded["approval_sha256"]))
 
 
 def test_binding_rejects_stale_plan_after_new_commit() -> None:
@@ -917,7 +921,7 @@ def test_guard_adopt_plan_records_binding_on_clean_tree_only() -> None:
 
 _TOKEN_CONTRACT_RE = re.compile(
     r"<!--\s*approval-token-contract\s*\n"
-    r"\s*plan_sha256:\s*(?P<sha>[0-9a-f]{64})\s*\n"
+    r"\s*approval_sha256:\s*(?P<sha>[0-9a-f]{64})\s*\n"
     r"\s*approve:\s*(?P<approve>\S+)\s*\n"
     r"\s*-->",
 )
@@ -966,13 +970,20 @@ def test_approval_token_is_bound_to_the_plan_hash() -> None:
     sha_b = hashlib.sha256(b"plan-b").hexdigest()
     assert expected_approval(sha_a) != expected_approval(sha_b)
 
-    check_approval({"plan_sha256": sha_a}, expected_approval(sha_a))
+    recorded = dict(_binding(), plan_sha256=sha_a)
+    digest = approval_sha256(sha_a, recorded["var_file_path"], recorded["var_file_sha256"])
+    check_approval(recorded, expected_approval(digest))
+    for field in ("plan_sha256", "var_file_path", "var_file_sha256"):
+        changed = dict(recorded)
+        changed[field] = "changed"
+        with pytest.raises(BindingError):
+            check_approval(changed, expected_approval(digest))
     with pytest.raises(BindingError):
-        check_approval({"plan_sha256": sha_a}, APPROVE_TOKEN)
+        check_approval(recorded, APPROVE_TOKEN)
     with pytest.raises(BindingError):
-        check_approval({"plan_sha256": sha_a}, expected_approval(sha_b))
+        check_approval(recorded, expected_approval(sha_b))
     with pytest.raises(BindingError):
-        check_approval({"plan_sha256": sha_a}, "")
+        check_approval(recorded, "")
 
 
 # ── PR2-A0.1: adopt-plan の --out が repository 配下なら plan 前に FATAL ───────
@@ -1146,7 +1157,7 @@ def test_principal_arn_is_a_bound_field() -> None:
 
 def test_binding_schema_version_rejects_manifests_without_principal_binding() -> None:
     """principal を束縛しない v1 manifest を黙って受け入れないこと。"""
-    assert SCHEMA_VERSION == 2
+    assert SCHEMA_VERSION == 3
     recorded = _binding()
     recorded["schema_version"] = 1
     with pytest.raises(BindingError, match="schema_version"):
@@ -1722,7 +1733,7 @@ def test_adopt_plan_reuses_the_shared_injection_path() -> None:
     assert '"${LIVE_INJECTION_TF_ARGS[@]}"' in body
     # var-file の後に注入（CLI -var が優先され、desired == live の sync 世界で plan される）
     plan_at = body.index('terraform -chdir="$TF_DIR" plan')
-    assert body.index('"-var-file=$var_file"', plan_at) < body.index(
+    assert body.index('"-var-file=$plan_vars"', plan_at) < body.index(
         '"${LIVE_INJECTION_TF_ARGS[@]}"', plan_at
     )
 

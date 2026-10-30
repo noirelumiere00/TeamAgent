@@ -122,7 +122,7 @@ adopt は Terraform state を書き換える操作なので、guard 自身が
 
 ```bash
 bash infra/deploy/bootstrap_runtime_session.sh adopt-plan \
-  --var-file infra/terraform/terraform.tfvars \
+  --var-file "$HOME/dev/worktrees/teamagent-activation/infra/terraform/terraform.tfvars" \
   --out /secure/path/adopt-$(date +%Y%m%d-%H%M%S)
 ```
 
@@ -155,43 +155,46 @@ repo 内へ戻る symlink を含む）を指定した場合、guard は plan を
 
 ### 4-2. apply（明示の承認が必要）
 
-承認トークンは **plan に束縛されている**。固定文字列ではなく、その plan の SHA256 を
+承認トークンは **plan と正本 tfvars の絶対パス・SHA256 に束縛されている**。その組の `approval_sha256` を
 連結した次の書式でなければ `check_approval()` が拒否する
 （実装: `infra/deploy/supply_chain_adopt_binding.py` の `expected_approval()`）。
 
 ```
-I-HAVE-REVIEWED-THE-ADOPT-PLAN:<plan_sha256 の先頭16文字>
+I-HAVE-REVIEWED-THE-ADOPT-PLAN:<approval_sha256 の先頭16文字>
 ```
 
-`plan_sha256` の入手方法は 2 通り。どちらも同じ値になる。
+`approval_sha256` は plan SHA256・正本パス・tfvars SHA256 の JSON 配列（空白なし）の SHA256。
+正本は `~/dev/worktrees/teamagent-activation/infra/terraform/terraform.tfvars`（本人所有・非 symlink・0600）。
+`adopt-plan` の出力でパス・SHA256 をレビューする。入手方法は2通り。
 
-- `adopt-plan` が完了時に標準出力へ出す（`承認は plan SHA256 に束縛されます: ...`）
-- `<out_dir>/adopt-binding.json` の `plan_sha256` フィールド
+- `adopt-plan` が完了時に標準出力へ出す（`承認トークン（plan / tfvars path / SHA256 に束縛）: ...`）
+- `<out_dir>/adopt-binding.json` の `approval_sha256` フィールド
 
 ```bash
-PLAN_SHA256="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["plan_sha256"])' \
+APPROVAL_SHA256="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["approval_sha256"])' \
   /secure/path/adopt-.../adopt-binding.json)"
 
 bash infra/deploy/bootstrap_runtime_session.sh adopt-apply --out /secure/path/adopt-... \
-  --approve "I-HAVE-REVIEWED-THE-ADOPT-PLAN:${PLAN_SHA256:0:16}"
+  --approve "I-HAVE-REVIEWED-THE-ADOPT-PLAN:${APPROVAL_SHA256:0:16}"
 ```
 
 書式の worked example（この値は contract test が実装から再計算して照合している。
 手で書き換えないこと）。
 
 <!-- approval-token-contract
-plan_sha256: 9842a7b6f7f24f5924bfbb2da4be3222d1c9e5c8b2bfdef222fb105d80eec6e3
+approval_sha256: 9842a7b6f7f24f5924bfbb2da4be3222d1c9e5c8b2bfdef222fb105d80eec6e3
 approve:     I-HAVE-REVIEWED-THE-ADOPT-PLAN:9842a7b6f7f24f59
 -->
 
 | 入力 | 結果 |
 | --- | --- |
-| 上記書式（この plan の SHA256 先頭16文字を連結） | 受理 |
+| 上記書式（この plan/tfvars 組の approval SHA256 先頭16文字を連結） | 受理 |
 | `:` 以降が無い裸のトークン | **拒否**（束縛されていない） |
 | 別 plan の SHA256 を連結したトークン | **拒否**（承認の流用不可） |
 | `--approve` 未指定 | **拒否** |
 
-plan を取り直すと `plan_sha256` が変わるため、**承認トークンも取り直しになる**。
+plan または正本 tfvars のパス・内容が変わると、**承認トークンも取り直しになる**。
+`adopt-apply` は保存した正本パスと現在の SHA256 も再照合し、違えば apply 前に停止する。
 
 
 apply は直前に validation と integrity を再実行し、apply 後にも integrity を再取得して比較する。

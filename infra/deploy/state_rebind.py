@@ -14,7 +14,7 @@ import は config 存在を要求し矛盾する）ため、`state rm → 即 im
 
 本 helper は判定ロジックだけを持つ:
   - mapping（infra/deploy/state_rebind_targets.json）の厳密検証
-  - precheck/apply 間の binding（mapping/state/principal/commit の exact 束縛と承認トークン）
+  - precheck/apply 間の binding（mapping/state/principal/commit/tfvars の束縛と承認）
   - rebind 後の state 属性 vs live DescribeTaskDefinition の機械比較
 実行順序・lock・per-address の atomic 進行は guard（terraform_runtime_guard.sh）が持つ。
 """
@@ -22,11 +22,16 @@ import は config 存在を要求し矛盾する）ため、`state rm → 即 im
 from __future__ import annotations
 
 import argparse
+import base64
+import copy
 import hashlib
+import io
 import json
+import os
 import re
 import subprocess
 import sys
+import zipfile
 from pathlib import Path
 from typing import Any
 
@@ -44,6 +49,9 @@ CONSUMER_KINDS = ("ecs-service", "events-rule", "lambda-env")
 # apply 前に exact match を要求する全項目。
 BOUND_FIELDS = (
     "mapping_sha256",
+    "alignment_sha256",
+    "var_file_path",
+    "var_file_sha256",
     "git_head",
     "git_tree_clean",
     "state_lineage",
@@ -53,6 +61,52 @@ BOUND_FIELDS = (
     "aws_principal_arn",
     "targets_count",
 )
+
+# TD import does not refresh these existing resources; retain their provider-only metadata.
+ALIGNMENT_POINTERS = {
+    "mcp": ("mcp", "ecs-service", "mcp", "aws_ecs_service.mcp[0]"),
+    "connect_web[0]": (
+        "connect-web",
+        "ecs-service",
+        "connect-web",
+        "aws_ecs_service.connect_web[0]",
+    ),
+    "openclaw[0]": ("openclaw", "ecs-service", "openclaw", "aws_ecs_service.openclaw[0]"),
+    "morning_digest[0]": (
+        "morning-digest",
+        "events-rule",
+        "morning-digest-weekday",
+        "aws_cloudwatch_event_target.morning_digest_run_task[0]",
+    ),
+    "canary[0]": (
+        "canary",
+        "events-rule",
+        "canary-hourly",
+        "aws_cloudwatch_event_target.canary_run_task[0]",
+    ),
+    "ingest[0]": (
+        "ingest",
+        "lambda-env",
+        "ingest-dispatch",
+        "aws_lambda_function.ingest_dispatch[0]",
+    ),
+    "tiktok_acquire[0]": (
+        "tiktok-acquire",
+        "lambda-env",
+        "tiktok-acquire-dispatch",
+        "aws_lambda_function.tiktok_dispatch[0]",
+    ),
+    "x_buzz_worker[0]": (
+        "x-buzz-worker",
+        "lambda-env",
+        "x-buzz-dispatch",
+        "aws_lambda_function.x_dispatch[0]",
+    ),
+}
+DISPATCHER_ARCHIVES = {
+    "tiktok": ("tiktok_dispatch", "teamagent-dev-tiktok-acquire-dispatch"),
+    "x_buzz": ("x_dispatch", "teamagent-dev-x-buzz-dispatch"),
+}
 
 _ROOT_PRINCIPAL_RE = re.compile(r"^arn:aws[a-z0-9-]*:iam::\d+:root$")
 
@@ -159,6 +213,51 @@ def _sha256_file(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+def configuration_expression(tf_dir: Path, targets: list[dict[str, Any]]) -> str:
+    """Evaluate config count expressions, never resource instances from the old state."""
+    blocks: list[re.Match[str]] = []
+    for source in sorted(tf_dir.glob("*.tf")):
+        blocks.extend(
+            re.finditer(
+                r'^resource "aws_ecs_task_definition" "([a-z0-9_]+)" \{\n(.*?)^\}',
+                source.read_text(encoding="utf-8"),
+                re.M | re.S,
+            )
+        )
+    checks = []
+    for target in targets:
+        address = target["address"]
+        name = address.removeprefix("aws_ecs_task_definition.").removesuffix("[0]")
+        matches = [block for block in blocks if block[1] == name]
+        if len(matches) != 1:
+            raise RebindError(f"config: expected one resource declaration: {address}")
+        body = matches[0][2]
+        # shortcut: only unindexed/[0] TDs; reject for_each until keyed rebind exists.
+        if re.search(r"^[ \t]*for_each\s*=", body, re.M):
+            raise RebindError(f"config: for_each rebind is unsupported: {address}")
+        counts = re.findall(r"^[ \t]*count\s*=[ \t]*(.+)$", body, re.M)
+        if address.endswith("[0]"):
+            if len(counts) != 1:
+                raise RebindError(f"config: expected one count expression: {address}")
+            condition = f"({counts[0]}) == 1"
+        else:
+            if re.search(r"^[ \t]*count\s*=", body, re.M):
+                raise RebindError(f"config: indexed resource needs [0]: {address}")
+            condition = "true"
+        checks.append(f"{json.dumps(address)} = ({condition})")
+    return "jsonencode({" + ", ".join(checks) + "})\n"
+
+
+def check_configuration(output: str, targets: list[dict[str, Any]]) -> None:
+    # console jsonencode returns a quoted JSON string; unknowns/errors must fail closed.
+    checks = json.loads(json.loads(output))
+    if not isinstance(checks, dict) or set(checks) != {t["address"] for t in targets}:
+        raise RebindError("config: unexpected address check result")
+    missing = [address for address, exists in checks.items() if exists is not True]
+    if missing:
+        raise RebindError(f"config: targets absent with reviewed tfvars: {missing}")
+
+
 def _state_canonical_sha256(state_path: Path) -> str:
     """state pull の canonical hash。
 
@@ -223,6 +322,192 @@ def load_targets(path: Path, *, require_targets: bool = False) -> list[dict[str,
         seen_addr.add(address)
         seen_arn.add(entry["target_arn"])
     return targets
+
+
+def _state_attributes(state: dict[str, Any], address: str) -> dict[str, Any]:
+    base = address.split("[", 1)[0]
+    matches = [
+        resource
+        for resource in state.get("resources", [])
+        if resource.get("mode") == "managed"
+        and not resource.get("module")
+        and f"{resource.get('type')}.{resource.get('name')}" == base
+    ]
+    if len(matches) != 1:
+        raise RebindError(f"alignment: expected one owned resource: {address}")
+    instances = matches[0].get("instances", [])
+    if len(instances) != 1 or instances[0].get("deposed"):
+        raise RebindError(f"alignment: expected one current instance: {address}")
+    expected_index = 0 if address.endswith("[0]") else None
+    if instances[0].get("index_key") != expected_index:
+        raise RebindError(f"alignment: state index differs: {address}")
+    attributes = instances[0].get("attributes")
+    if not isinstance(attributes, dict):
+        raise RebindError(f"alignment: attributes absent: {address}")
+    return attributes
+
+
+def _leaf_parent(attributes: dict[str, Any], path: list[Any]) -> Any:
+    parent: Any = attributes
+    try:
+        for key in path[:-1]:
+            parent = parent[key]
+        parent[path[-1]]
+    except (KeyError, IndexError, TypeError) as error:
+        raise RebindError("alignment: reviewed state leaf is absent") from error
+    return parent
+
+
+def dispatcher_archives(repo_root: Path) -> dict[str, Any]:
+    result = {}
+    for component, (archive_name, function_name) in DISPATCHER_ARCHIVES.items():
+        archive = repo_root / f"infra/terraform/build/{archive_name}.zip"
+        source = repo_root / f"infra/terraform/lambda/{archive_name}/handler.py"
+        if archive.is_symlink() or source.is_symlink():
+            raise RebindError("alignment: dispatcher archive/source symlink is forbidden")
+        payload, source_payload = archive.read_bytes(), source.read_bytes()
+        try:
+            with zipfile.ZipFile(io.BytesIO(payload)) as zipped:
+                if (
+                    zipped.namelist() != ["handler.py"]
+                    or zipped.read("handler.py") != source_payload
+                ):
+                    raise RebindError(
+                        f"alignment: ZIP handler differs from repository: {component}"
+                    )
+        except zipfile.BadZipFile as error:
+            raise RebindError(f"alignment: invalid dispatcher ZIP: {component}") from error
+        digest = hashlib.sha256(payload).digest()
+        result[component] = {
+            "function_name": function_name,
+            "code_sha256": base64.b64encode(digest).decode("ascii"),
+            "archive_sha256": digest.hex(),
+            "source_sha256": hashlib.sha256(source_payload).hexdigest(),
+        }
+    return result
+
+
+def build_alignment_plan(
+    state: dict[str, Any], targets: list[dict[str, Any]], repo_root: Path
+) -> dict[str, Any]:
+    """Review only fixed consumer pointer leaves and the two verified ZIP hashes."""
+    changes = []
+    event_target_ids = {}
+    for target in targets:
+        short_address = target["address"].removeprefix("aws_ecs_task_definition.")
+        spec = ALIGNMENT_POINTERS.get(short_address)
+        if spec is None:
+            raise RebindError(
+                f"alignment: task address outside current consumer registry: {target['address']}"
+            )
+        family_suffix, kind, name_suffix, pointer_address = spec
+        family = f"teamagent-dev-{family_suffix}"
+        consumer = {"kind": kind, "name": f"teamagent-dev-{name_suffix}"}
+        if kind == "ecs-service":
+            consumer["cluster"] = "teamagent-dev"
+        if target["family"] != family or target["consumer"] != consumer:
+            raise RebindError(
+                f"alignment: consumer/family differs from fixed registry: {target['address']}"
+            )
+        task = _state_attributes(state, target["address"])
+        if task.get("family") != family:
+            raise RebindError(f"alignment: state task family differs: {target['address']}")
+        attributes = _state_attributes(state, pointer_address)
+        identity_key = {
+            "ecs-service": "name",
+            "lambda-env": "function_name",
+            "events-rule": "rule",
+        }[kind]
+        if attributes.get(identity_key) != consumer["name"]:
+            raise RebindError(f"alignment: state consumer identity differs: {pointer_address}")
+        if kind == "ecs-service" and attributes.get("cluster") not in {
+            "teamagent-dev",
+            "arn:aws:ecs:ap-northeast-1:718959508629:cluster/teamagent-dev",
+        }:
+            raise RebindError(f"alignment: state consumer cluster differs: {pointer_address}")
+        if kind == "events-rule":
+            target_id = attributes.get("target_id")
+            if (
+                not isinstance(target_id, str)
+                or re.fullmatch(r"[A-Za-z0-9_.-]+", target_id) is None
+                or attributes.get("event_bus_name") not in {None, "", "default"}
+                or (family_suffix == "morning-digest" and target_id != "morning")
+            ):
+                raise RebindError(
+                    f"alignment: EventBridge target identity differs: {pointer_address}"
+                )
+            event_target_ids[consumer["name"]] = target_id
+        paths: dict[str, list[Any]] = {
+            "ecs-service": ["task_definition"],
+            "lambda-env": ["environment", 0, "variables", "TASKDEF_ARN"],
+            "events-rule": ["ecs_target", 0, "task_definition_arn"],
+        }
+        path = paths[kind]
+        before = _leaf_parent(attributes, path)[path[-1]]
+        match = TASKDEF_ARN_RE.fullmatch(before) if isinstance(before, str) else None
+        if match is None or match.group("family") != family:
+            raise RebindError(f"alignment: state consumer task ARN differs: {pointer_address}")
+        changes.append(
+            {
+                "address": pointer_address,
+                "path": path,
+                "before": before,
+                "after": target["target_arn"],
+            }
+        )
+    archives = dispatcher_archives(repo_root)
+    for component, (archive_name, function_name) in DISPATCHER_ARCHIVES.items():
+        address = f"aws_lambda_function.{archive_name}[0]"
+        attributes = _state_attributes(state, address)
+        if attributes.get("function_name") != function_name:
+            raise RebindError(f"alignment: dispatcher identity differs: {address}")
+        path = ["source_code_hash"]
+        before = _leaf_parent(attributes, path)[path[-1]]
+        changes.append(
+            {
+                "address": address,
+                "path": path,
+                "before": before,
+                "after": archives[component]["code_sha256"],
+            }
+        )
+    return {
+        "schema_version": 1,
+        "changes": changes,
+        "event_target_ids": event_target_ids,
+        "dispatcher_archives": archives,
+    }
+
+
+def alignment_candidate(
+    state: dict[str, Any], targets: list[dict[str, Any]], repo_root: Path, reviewed: dict[str, Any]
+) -> dict[str, Any]:
+    if build_alignment_plan(state, targets, repo_root) != reviewed:
+        raise RebindError("alignment: reviewed leaves or dispatcher ZIP/source changed")
+    serial = state.get("serial")
+    if state.get("version") != 4 or not isinstance(serial, int) or isinstance(serial, bool):
+        raise RebindError("alignment: unsupported state metadata")
+    for target in targets:
+        if _state_attributes(state, target["address"]).get("arn") != target["target_arn"]:
+            raise RebindError("alignment: task definition has not been rebound")
+    candidate = copy.deepcopy(state)
+    for change in reviewed["changes"]:
+        attributes = _state_attributes(candidate, change["address"])
+        path = change["path"]
+        _leaf_parent(attributes, path)[path[-1]] = change["after"]
+    candidate["serial"] = serial + 1
+    return candidate
+
+
+def verify_pushed_state(candidate: dict[str, Any], observed: dict[str, Any]) -> None:
+    expected, actual = copy.deepcopy(candidate), copy.deepcopy(observed)
+    if actual.get("serial", -1) < expected["serial"]:
+        raise RebindError("alignment: pushed state serial went backwards")
+    for doc in (expected, actual):
+        doc.pop("serial", None)
+        doc.pop("check_results", None)
+    if expected != actual:
+        raise RebindError("alignment: pushed state differs from reviewed candidate")
 
 
 def _normalized_container_defs(container_defs: Any) -> list[dict[str, Any]]:
@@ -350,12 +635,17 @@ def collect(
     state_path: Path,
     account: str,
     principal_arn: str,
+    alignment_path: Path,
+    var_file: Path,
 ) -> dict[str, Any]:
     targets = load_targets(mapping, require_targets=True)
     lineage, serial = _state_identity(state_path)
     return {
         "schema_version": SCHEMA_VERSION,
         "mapping_sha256": _sha256_file(mapping),
+        "alignment_sha256": _sha256_file(alignment_path),
+        "var_file_path": str(var_file.resolve(strict=True)),
+        "var_file_sha256": _sha256_file(var_file),
         "git_head": _git(repo_root, "rev-parse", "HEAD"),
         "git_tree_clean": _tree_is_clean(repo_root),
         "state_lineage": lineage,
@@ -547,6 +837,8 @@ def main(argv: list[str] | None = None) -> int:
         item.add_argument("--state", required=True, type=Path)
         item.add_argument("--account", required=True)
         item.add_argument("--principal-arn", required=True)
+        item.add_argument("--alignment-plan", required=True, type=Path)
+        item.add_argument("--var-file", required=True, type=Path)
         if name == "verify":
             item.add_argument("--approve", default="")
 
@@ -555,8 +847,28 @@ def main(argv: list[str] | None = None) -> int:
     compare.add_argument("--address", required=True)
     compare.add_argument("--describe-json", required=True, type=Path)
 
+    config = sub.add_parser("check-configuration")
+    config.add_argument("--tf-dir", required=True, type=Path)
+    config.add_argument("--mapping", required=True, type=Path)
+    config.add_argument("--var-file", required=True, type=Path)
+
     policy = sub.add_parser("validate-session-policy")
     policy.add_argument("--policy", type=Path, default=SESSION_POLICY_PATH)
+
+    for name in ("alignment-plan", "alignment-candidate"):
+        item = sub.add_parser(name)
+        item.add_argument("--repo-root", required=True, type=Path)
+        item.add_argument("--mapping", required=True, type=Path)
+        item.add_argument("--state-json", required=True, type=Path)
+        item.add_argument("--out", required=True, type=Path)
+        if name == "alignment-candidate":
+            item.add_argument("--alignment-plan", required=True, type=Path)
+    same = sub.add_parser("same-state")
+    same.add_argument("--before", required=True, type=Path)
+    same.add_argument("--after", required=True, type=Path)
+    pushed = sub.add_parser("verify-pushed-state")
+    pushed.add_argument("--candidate", required=True, type=Path)
+    pushed.add_argument("--state-json", required=True, type=Path)
 
     args = parser.parse_args(argv)
     try:
@@ -574,6 +886,48 @@ def main(argv: list[str] | None = None) -> int:
                 json.loads(args.describe_json.read_text(encoding="utf-8")),
             )
             print(f"state == live verified: {args.address}")
+        elif args.command == "check-configuration":
+            targets = load_targets(args.mapping, require_targets=True)
+            result = subprocess.run(
+                [
+                    "terraform",
+                    f"-chdir={args.tf_dir}",
+                    "console",
+                    "-no-color",
+                    f"-var-file={args.var_file}",
+                ],
+                input=configuration_expression(args.tf_dir, targets),
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            if result.returncode != 0:
+                raise RebindError(f"config: console failed: {result.stderr.strip()}")
+            check_configuration(result.stdout, targets)
+            print("config: all rebind targets exist with reviewed tfvars")
+        elif args.command in {"alignment-plan", "alignment-candidate"}:
+            state = json.loads(args.state_json.read_text(encoding="utf-8"))
+            targets = load_targets(args.mapping, require_targets=True)
+            if args.command == "alignment-plan":
+                output = build_alignment_plan(state, targets, args.repo_root)
+            else:
+                reviewed = json.loads(args.alignment_plan.read_text(encoding="utf-8"))
+                output = alignment_candidate(state, targets, args.repo_root, reviewed)
+            descriptor = os.open(args.out, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+                json.dump(output, stream, indent=2, sort_keys=True)
+                stream.write("\n")
+            args.out.chmod(0o600)
+            print(f"{args.command} recorded: {args.out}")
+        elif args.command == "same-state":
+            if _state_canonical_sha256(args.before) != _state_canonical_sha256(args.after):
+                raise RebindError("alignment: remote state changed before push")
+        elif args.command == "verify-pushed-state":
+            verify_pushed_state(
+                json.loads(args.candidate.read_text(encoding="utf-8")),
+                json.loads(args.state_json.read_text(encoding="utf-8")),
+            )
+            print("alignment: pushed state matches reviewed candidate")
         else:
             binding_path = args.out_dir / BINDING_FILENAME
             binding = collect(
@@ -582,6 +936,8 @@ def main(argv: list[str] | None = None) -> int:
                 state_path=args.state,
                 account=args.account,
                 principal_arn=args.principal_arn,
+                alignment_path=args.alignment_plan,
+                var_file=args.var_file,
             )
             if args.command == "record":
                 if not binding["git_tree_clean"]:
@@ -591,6 +947,8 @@ def main(argv: list[str] | None = None) -> int:
                 )
                 binding_path.chmod(0o600)
                 print(f"rebind binding recorded: {binding_path}")
+                print(f"canonical tfvars: {binding['var_file_path']}")
+                print(f"tfvars SHA256: {binding['var_file_sha256']}")
                 print(f"approval token: {expected_approval(_sha256_file(binding_path))}")
             else:
                 check_approval(binding_path, args.approve)
