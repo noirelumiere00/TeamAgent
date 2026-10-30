@@ -471,13 +471,16 @@ def post_to_origin_status(
     request_id: str,
     fallback_user_id: str | None = None,
     rich: RichMessage | None = None,
+    dm_only: bool = False,
 ) -> str:
     """``post_to_origin`` と同じ投稿。結果を ``posted`` / ``uncertain`` / ``failed`` で返す。
 
     ``uncertain`` はタイムアウト（Slack 側で届いている可能性がある）。呼び出し元が「届いたかも
     しれないので同じ文を別経路で出し直さない」判断に使う（``direct_summary``）。
+    ``dm_only`` は依頼元への投稿を省き、検証済み本人の既存DM退避経路だけを使う。
     """
-    for attempt in range(1, _POST_ATTEMPTS + 1):
+    attempts = 0 if dm_only else _POST_ATTEMPTS
+    for attempt in range(1, attempts + 1):
         # Block Kit は 1 回目だけ。2 回目は今までどおりの文字だけの投稿。
         use_rich = rich if attempt == 1 else None
         try:

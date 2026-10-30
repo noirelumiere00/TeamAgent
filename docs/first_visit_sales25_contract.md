@@ -40,6 +40,14 @@ r81相当の偽物（6語中5語50件、3語目は221秒・`SUCCEEDED / Scraped 
 
 調査上の限界: 修正前のsrcでも `_evidence → _source → judge_query → prepare_inputs` は13/50の偽物を受け入れた。件数不足だけから本番の `ValueError` は再現できず、原因は未特定。元raw・モデル応答または例外メッセージが必要。prefetch警告とstageの未完了化には、例外型に加えてURL・トークン等を伏せたメッセージ先頭200字を記録する。
 
+### 検索入力と未完了通知の確認（2026-10-30）
+
+`ApifyClient.tiktok_search` は `clockworks~tiktok-scraper` に `searchQueries=[query] / searchSection="" / resultsPerPage=target` とダウンロード無効の3項目を送る。`max_items` はREST入力の `maxItems` ではなく、dataset取得の `limit` と費用予約に使う。50件指定も偽HTTPで固定したが、リポジトリ内に検索用Actorの公式schema・READMEの写しは見つからない。**要確認**: 件数・ページ送りの正式項目、空の `searchSection` の意味、50件取得に必要な条件。根拠のない入力変更はしていない。
+
+再試行前の待機はなく、同一入力を最大1回繰り返す。初回・再試行・証拠保存は同じ `min(親の残り期限, TIKTOK_APIFY_FALLBACK_DEADLINE_S)` を共有する。240秒中221秒で初回13件なら再試行は19秒。RUNNINGのまま期限に達するとabortし、50×$0.004=$0.2を保守的に台帳計上する（実請求額の証明ではない）。この経路を偽時計で再現した。再試行0件・時間切れでも初回の検証済み13件は保持する。本番の0件の理由・実請求はActorのrunログ等が必要。
+
+完成時は `Parent.status → prepare_delivery → Origin.defer` で添付を予約し、共通の `async_job_notify.publish_notice` が送信・記録する。未完了時は `not_ready / none` のため添付を予約しないが、従来から共通監視の本文投稿対象ではある。したがって `slack_delivered=false` だけでは未通知を断定できない。未完了の終端本文は、同じ通知済みロックと既存DM退避経路で検証済み本人へ送る。成功時は `status=incomplete` を維持し、`slack_delivered=true / delivery_target=dm / delivery_status=delivered` と記録する。「添付済み」とは表示しない。確定した送信失敗は通知ロックを解放し、タイムアウト時は重複を避けて自動再送しない。
+
 ## 固定取得物
 
 `tools/first_visit/sales25.lock.json` と `sales25/` を組にする。正本 `tiktok-sales-research-kit` の commit `f8c98b4a5555479e28fee71a4195eaf38feeec09`、version `1.2.4`、format `sales25` から、4資産と5スクリプトを同梱した。`check_fmt.py` の投稿別媒体不足への対応はローカル修正であり、lock の `local_patches` に正本の SHA と理由を記録する。

@@ -488,17 +488,29 @@ class ProposalJobStore:
             return False
         result["slack_delivered"] = True
         summary = json.loads(row.get("request_summary") or "{}")
+        incomplete_sales25 = (
+            summary.get("edition") == "sales25" and result.get("status") == "incomplete"
+        )
         if summary.get("edition") == "sales25":
             result["delivery_status"] = "delivered"
         research_auto = isinstance(summary, dict) and summary.get("research_auto") is True
         target = (
             "dm"
-            if (research_auto or summary.get("edition") == "sales25")
-            and result.get("delivery_target") == "dm"
+            if incomplete_sales25
+            or (
+                (research_auto or summary.get("edition") == "sales25")
+                and result.get("delivery_target") == "dm"
+            )
             else "thread"
         )
         result["delivery_target"] = target
-        suffix = " DMへ添付しました。" if target == "dm" else " この会話へ添付しました。"
+        suffix = (
+            " DMへ通知しました。"
+            if incomplete_sales25
+            else " DMへ添付しました。"
+            if target == "dm"
+            else " この会話へ添付しました。"
+        )
         # 添付の報告は 1 行目（状態の文）に続ける。末尾に足すと、調査の行や要確認の警告の
         # 後ろに付いて文がつながらない（10-09 本番:「…作り直せます DMへ添付しました。」）。
         head, newline, rest = str(result.get("message") or "").partition("\n")

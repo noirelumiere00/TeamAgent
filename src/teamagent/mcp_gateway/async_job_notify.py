@@ -63,6 +63,21 @@ def publish_notice(
             )
 
     try:
+        incomplete_sales25 = False
+        if kind == "terminal":
+            row = store.get_job(job_id)
+            if row is not None and row.get("status") == "done":
+                summary = json.loads(row.get("request_summary") or "{}")
+                result = json.loads(row.get("result_json") or "{}")
+                incomplete_sales25 = (
+                    isinstance(summary, dict)
+                    and isinstance(result, dict)
+                    and summary.get("edition") == "sales25"
+                    and summary.get("user_id") == origin.user_id
+                    and result.get("status") == "incomplete"
+                )
+        if incomplete_sales25:
+            completed = False
         if not store.put_dedup_lock(key, "claimed", expected_target=None):
             if not store.put_dedup_lock(key, "claimed", expected_target=""):
                 return False
@@ -153,12 +168,15 @@ def publish_notice(
             request_id=request_id,
             fallback_user_id=origin.user_id,
             rich=rich,
+            dm_only=incomplete_sales25,
         )
         if status == "failed":
             store.put_dedup_lock(key, "", expected_target="claimed")
             origin.release_notice(kind)
         elif status == "uncertain":
             logger.warning("long_job_notice_uncertain", request_id=request_id, job_id=job_id)
+        elif status == "posted" and incomplete_sales25:
+            store.mark_delivered(job_id)
         return status == "posted"
     except Exception as exc:
         logger.warning("long_job_notice_failed", request_id=request_id, error=type(exc).__name__)
