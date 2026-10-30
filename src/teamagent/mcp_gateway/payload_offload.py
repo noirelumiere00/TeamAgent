@@ -59,7 +59,9 @@ PER_USER_KEYS: frozenset[str] = frozenset({"slack_hits", "hits", "related", "dis
 # 本人の Slack・資料を材料にした要約（複合検索の answer）も、本人限定の中身を
 # 含みうる。PER_USER_KEYS に中身がある（＝要約器に本人の Slack を渡した）回は、これらのキーも
 # 退避先から落とす。会話へ返す切り詰め版には残す（本人の会話なので見せてよい）。
-PER_USER_DERIVED_KEYS: frozenset[str] = frozenset({"answer", "direct_delivery"})
+PER_USER_DERIVED_KEYS: frozenset[str] = frozenset(
+    {"answer", "direct_delivery", "case_state_answer"}
+)
 
 # ペイロード全体（JSON 文字列長）がこれを超えたら退避＋切り詰めを発動。
 _DEFAULT_MAX_CHARS = 10_000

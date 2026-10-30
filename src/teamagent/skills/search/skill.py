@@ -1112,6 +1112,16 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
         # 4. 出力スキーマに整形。資料名解決はヒットごとに一度だけ行い、
         #    正準 URL と配信用の内部ファイル名で同じ結果を使う。
         search_hits: list[SearchHitOut] = []
+        state_hits = (
+            [
+                *hits,
+                *summary_hits,
+                *(drive_first.slack_hit(i, n) for n, i in enumerate(slack_items)),
+            ]
+            if case_state_enabled(ctx.metadata.get("user_email"))
+            else []
+        )
+        state_evidence = timeline_status.resolved_evidence(state_hits) if state_hits else {}
         for h in hits:
             meta = h.metadata or {}
             resolved_file_ref = self._resolved_file_ref(meta, h.content or "", file_urls)
@@ -1133,11 +1143,7 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
             search_hits.append(
                 SearchHitOut(
                     chunk_id=h.chunk_id,
-                    case_state_evidence=(
-                        timeline_status.resolve_statuses([h], case_state=True)[0].evidence
-                        if case_state_enabled(ctx.metadata.get("user_email"))
-                        else None
-                    ),
+                    case_state_evidence=state_evidence.get(h.chunk_id),
                     reference=ref,
                     content=h.content,
                     score=h.score,
@@ -1247,7 +1253,20 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
                     authorize_drive=lambda ref: self._authorized_drive_reference(ref, ctx),
                 )
             answer = compact.strip_linkless_invitation(answer)
-        if found and input.include_answer and timeline_status.enabled():
+        case_answer = None
+        if case_state_enabled(ctx.metadata.get("user_email")):
+            case_answer = timeline_status.render_case_states(
+                state_hits if found or slack_items else []
+            )
+            if slack_lookup is not None and slack_lookup.status != "ok":
+                case_answer += "\n\n検索は一部未確認です（Slack の確認ができませんでした）。"
+            if retries_incomplete or (probe or {}).get("incomplete"):
+                case_answer += "\n\n検索は一部未確認です。"
+        if case_answer is not None and input.include_answer:
+            answer = case_answer
+            direct_kind = "case_state"
+            suggested_next = None
+        elif found and input.include_answer and timeline_status.enabled():
             status = timeline_status.status_answer(
                 input.query,
                 summary_hits,
@@ -1258,6 +1277,7 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
                 answer = status + ("\n\n" + answer if answer else "")
         output = SearchOutput(
             answer=answer,
+            case_state_answer=case_answer,
             displayed_refs=displayed_refs,
             answer_format="list" if case_listing else "compact" if compact_mode else None,
             direct_answer=answer if direct_kind is not None else None,
@@ -2758,7 +2778,7 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
         3. ヒットが 1 件以上（0 件は元々 Bedrock を呼ばず速い。後追いしても価値が無い）
         4. 後追い投稿の宛先が ctx.metadata から決まる（決まらないなら同期要約に落とす）
         """
-        if not hits:
+        if case_state_enabled(ctx.metadata.get("user_email")) or not hits:
             return False
         if not two_stage_enabled():
             return False

@@ -356,11 +356,12 @@ _OMIT_WHEN_NONE: tuple[str, ...] = (
     "sources",
     "answer_format",
     "displayed_refs",
+    "case_state_answer",
 )
 
 
 SearchDirectAnswerKind = Literal[
-    "not_found", "comparison", "list_fast", "video_metrics", "case_cards"
+    "not_found", "comparison", "list_fast", "video_metrics", "case_cards", "case_state"
 ]
 
 
@@ -368,6 +369,7 @@ class SearchOutput(BaseModel):
     """検索 Skill の出力。"""
 
     answer: str = Field(description="Claude による要約（引用付き）")
+    case_state_answer: str | None = None
     displayed_refs: list[DocumentReference] | None = None
     answer_format: Literal["compact", "list"] | None = None
     direct_answer: str | None = Field(default=None, exclude=True)
