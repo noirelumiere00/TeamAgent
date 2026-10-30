@@ -148,6 +148,7 @@ RUN --mount=type=cache,id=teamagent-core-uv-arm64,target=/root/.cache/uv,sharing
     rm -f /tmp/teamagent-build-ca.pem
 
 COPY src/ ./src/
+COPY infra/openclaw/caller-identity-plugin/outbound_rules.json ./infra/openclaw/caller-identity-plugin/outbound_rules.json
 COPY scripts/run_mcp_http_server.py \
      scripts/run_mcp_vertex_entrypoint.py \
      scripts/run_canary_health.py \

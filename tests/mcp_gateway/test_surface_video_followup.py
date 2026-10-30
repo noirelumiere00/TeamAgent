@@ -928,7 +928,7 @@ def _confirm_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv(confirm.FOLLOWUP_ALLOWED_EMAILS_ENV, ME)
 
 
-async def test_one_shot_replies_with_a_wait_line_then_posts_everything_once(
+async def test_one_shot_replies_with_a_wait_line_then_posts_a_compact_result_once(
     monkeypatch: pytest.MonkeyPatch, slack: _FakeSlack, usage: list[dict[str, Any]]
 ) -> None:
     _one_shot(monkeypatch)
@@ -948,14 +948,12 @@ async def test_one_shot_replies_with_a_wait_line_then_posts_everything_once(
     await asyncio.sleep(0.05)
     assert len(slack.posts) == 1  # 1 通だけ
     post = slack.posts[0]
-    body = _blocks_text(post["blocks"])
-    assert post["blocks"][0]["text"]["text"] == f"検索上位チェック「{KEYWORD}」"
-    assert f"上位5本の動画の中身「{KEYWORD}」" in body
+    body = post["text"]
+    assert post["blocks"] is None  # 全文の長さも既存の回答上限に収める
+    assert f"検索上位チェック「{KEYWORD}」" in body
+    assert len(body) <= 2500 and body.endswith("…")
     assert "検索上位チェックの続き" not in body  # 同じ投稿なので「続き」と書かない
-    # レポートは動画の章つき（2 回目に発行した方）だけを指す
-    assert "<https://s3.example/surface-2|レポートを開く>" in body
     assert "surface-1" not in post["text"] and "surface-1" not in body
-    assert "全15本の一覧と上位5本の動画の中身つき" in body
     await _eventually(lambda: detached_jobs.REGISTRY.active_count() == 0)
 
 
@@ -1027,7 +1025,10 @@ async def test_one_shot_direct_post_shows_only_the_wait_line_first(
 
     gate.set()
     await _eventually(lambda: len(slack.posts) == 2)
-    assert f"上位5本の動画の中身「{KEYWORD}」" in _blocks_text(slack.posts[1]["blocks"])
+    final = slack.posts[1]
+    assert final["blocks"] is None
+    assert f"検索上位チェック「{KEYWORD}」" in final["text"]
+    assert len(final["text"]) <= 2500 and final["text"].endswith("…")
     await _eventually(lambda: detached_jobs.REGISTRY.active_count() == 0)
 
 

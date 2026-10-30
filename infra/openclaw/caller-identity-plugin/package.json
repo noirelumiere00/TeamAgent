@@ -13,6 +13,7 @@
   },
   "files": [
     "dist/**",
+    "outbound_rules.json",
     "openclaw.plugin.json",
     "package.json"
   ]
