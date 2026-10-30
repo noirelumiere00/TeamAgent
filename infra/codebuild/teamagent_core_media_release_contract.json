@@ -191,26 +191,6 @@
           ]
         },
         {
-          "key": "artifact.first-visit-kit-archive.sha256",
-          "value": "97baaaee69446c6d8672a6c1ad95856b41603d8cbeb968c5b2a7bebbcff6663d",
-          "build_arg": "FIRST_VISIT_KIT_ARCHIVE_SHA256",
-          "oci_label": "io.teamagent.contract.first-visit-kit-archive-sha256",
-          "dockerfile_uses": [
-            "test \"$FIRST_VISIT_KIT_ARCHIVE_SHA256\" = \"97baaaee69446c6d8672a6c1ad95856b41603d8cbeb968c5b2a7bebbcff6663d\"",
-            "printf '%s  %s\\n' \"$FIRST_VISIT_KIT_ARCHIVE_SHA256\" /app/tools/first_visit/tiktok-skills-kit-25eccd8.tar.gz | sha256sum -c -"
-          ]
-        },
-        {
-          "key": "artifact.first-visit-kit-lock.sha256",
-          "value": "c973d7452be1761ed92cbacd12aede883656ac7091e3ae7876f1d6d1394c84e1",
-          "build_arg": "FIRST_VISIT_KIT_LOCK_SHA256",
-          "oci_label": "io.teamagent.contract.first-visit-kit-lock-sha256",
-          "dockerfile_uses": [
-            "test \"$FIRST_VISIT_KIT_LOCK_SHA256\" = \"c973d7452be1761ed92cbacd12aede883656ac7091e3ae7876f1d6d1394c84e1\"",
-            "printf '%s  %s\\n' \"$FIRST_VISIT_KIT_LOCK_SHA256\" /app/tools/first_visit/kit.lock.json | sha256sum -c -"
-          ]
-        },
-        {
           "key": "artifact.playwright-core.npm-integrity",
           "value": "sha512-9bW6zvX/m0lEbgTKJ6YppOKx8H3VOPBMOCFh2irXFOT4BbHgrx5hPjwJYLT40Lu+4qtD36qKc/Hn56StUW57IA==",
           "build_arg": "PLAYWRIGHT_CORE_NPM_INTEGRITY",

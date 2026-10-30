@@ -258,27 +258,17 @@ def test_pptx_only_synthetic_smoke(
 def test_concrete_runtime_retains_verified_archive_and_minimal_sources() -> None:
     docker = (ROOT / "infra/docker/Dockerfile.teamagent-media-worker").read_text()
     ignore = (ROOT / "infra/docker/Dockerfile.teamagent-media-worker.dockerignore").read_text()
-    release = json.loads(
-        (ROOT / "infra/codebuild/teamagent_core_media_release_contract.json").read_text()
-    )
-    media = next(subject for subject in release["subjects"] if subject["name"] == "media")
-    for key, arg, name in (
-        ("first-visit-kit-lock", "FIRST_VISIT_KIT_LOCK_SHA256", "kit.lock.json"),
-        ("first-visit-kit-archive", "FIRST_VISIT_KIT_ARCHIVE_SHA256", BUNDLE.name),
+    # The js-deps stage pins both digests before the runtime stage copies the same bytes.
+    for tmp, name in (
+        ("/tmp/first-visit-kit.lock.json", "kit.lock.json"),
+        ("/tmp/first-visit-kit.tar.gz", BUNDLE.name),
     ):
         digest = hashlib.sha256((ROOT / "tools/first_visit" / name).read_bytes()).hexdigest()
-        assertion = next(
-            a for a in media["source_assertions"] if a["key"] == f"artifact.{key}.sha256"
-        )
-        assert assertion["value"] == digest and assertion["build_arg"] == arg
-        assert f"ARG {arg}={digest}" in docker
-        assert all(use in docker for use in assertion["dockerfile_uses"])
-        assert f'{assertion["oci_label"]}="${arg}"' in docker
+        assert f"printf '%s  %s\\n' {digest} {tmp} | sha256sum -c -" in docker
         assert f"/app/tools/first_visit/{name}" in docker
     assert "rm -f /tmp/teamagent-build-ca.pem /tmp/first-visit-kit.tar.gz" not in docker
     assert "COPY --from=js-deps /tmp/first-visit-kit.tar.gz /app/tools/first_visit/" in docker
     assert "COPY --from=js-deps /tmp/first-visit-kit.lock.json /app/tools/first_visit/" in docker
-    assert "['archive_sha256']" in docker
     for relative in (
         "src/teamagent/media/concrete_runner.py",
         "src/teamagent/skills/first_visit/concrete.py",

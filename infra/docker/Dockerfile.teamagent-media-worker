@@ -359,16 +359,6 @@ COPY --chown=10001:10001 tools/tiktok_scraper/search.mjs \
   /app/tools/tiktok_scraper/search.mjs
 COPY --chown=10001:10001 tools/tiktok_scraper/dns_pinned_proxy.mjs \
   /app/tools/tiktok_scraper/dns_pinned_proxy.mjs
-ARG FIRST_VISIT_KIT_LOCK_SHA256=c973d7452be1761ed92cbacd12aede883656ac7091e3ae7876f1d6d1394c84e1
-ARG FIRST_VISIT_KIT_ARCHIVE_SHA256=97baaaee69446c6d8672a6c1ad95856b41603d8cbeb968c5b2a7bebbcff6663d
-RUN set -eu; \
-    test "$FIRST_VISIT_KIT_LOCK_SHA256" = "c973d7452be1761ed92cbacd12aede883656ac7091e3ae7876f1d6d1394c84e1"; \
-    printf '%s  %s\n' "$FIRST_VISIT_KIT_LOCK_SHA256" /app/tools/first_visit/kit.lock.json | sha256sum -c -; \
-    test "$FIRST_VISIT_KIT_ARCHIVE_SHA256" = "97baaaee69446c6d8672a6c1ad95856b41603d8cbeb968c5b2a7bebbcff6663d"; \
-    printf '%s  %s\n' "$FIRST_VISIT_KIT_ARCHIVE_SHA256" /app/tools/first_visit/tiktok-skills-kit-25eccd8.tar.gz | sha256sum -c -; \
-    test "$(python3 -c "import json; print(json.load(open('/app/tools/first_visit/kit.lock.json'))['archive_sha256'])")" = "$FIRST_VISIT_KIT_ARCHIVE_SHA256"
-LABEL io.teamagent.contract.first-visit-kit-lock-sha256="$FIRST_VISIT_KIT_LOCK_SHA256" \
-      io.teamagent.contract.first-visit-kit-archive-sha256="$FIRST_VISIT_KIT_ARCHIVE_SHA256"
 # Sales25 kit and selected-post inputs are fixed independently of the legacy kit.
 ARG SALES25_KIT_LOCK_SHA256=9b27c72411f5dc8b95c24c3e34661fa345a335e5caabd161f06d0099e900de01
 ARG SALES25_ANALYSIS_LOCK_SHA256=67741470f8502ae88340154d135985f06ea6aebdc5c40bcb52fea3663c73bb50

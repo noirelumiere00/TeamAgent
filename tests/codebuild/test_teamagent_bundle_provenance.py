@@ -616,15 +616,13 @@ def test_pair_rejects_source_assertion_default_drift(tmp_path: Path) -> None:
 @pytest.mark.parametrize(
     "key",
     [
-        "artifact.first-visit-kit-lock.sha256",
-        "artifact.first-visit-kit-archive.sha256",
         "artifact.sales25-kit-lock.sha256",
         "artifact.sales25-analysis-lock.sha256",
         "artifact.sales25-frame-extractor.sha256",
         "artifact.sales25-media-scraper.sha256",
     ],
 )
-def test_pair_rejects_removed_kit_pin_override_guard(tmp_path: Path, key: str) -> None:
+def test_pair_rejects_removed_sales25_pin_override_guard(tmp_path: Path, key: str) -> None:
     runtime_path, contract_path = _copy_pair(tmp_path)
     assertion = next(
         item
