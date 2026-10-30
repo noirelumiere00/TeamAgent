@@ -26,7 +26,6 @@ import asyncio
 import functools
 import json
 import os
-import threading
 import time
 import uuid
 from collections.abc import Callable
@@ -97,7 +96,14 @@ OAUTH_CONNECT_TOOL_NAME = "oauth_connect"
 # submit 応答を返した後も MCP process 内で完了を待つ対象。SQS/DynamoDB/worker の契約は
 # 変えず、それぞれの status skill を通常どおり呼んで利用者向けサマリへ整形する。
 _ASYNC_JOB_TOOLS = frozenset(
-    {"tiktok_acquire", "proposal_builder_submit", "omiyage_report_submit", "media_case_search"}
+    {
+        "tiktok_acquire",
+        "proposal_builder_submit",
+        "omiyage_report_submit",
+        "media_case_search",
+        "clip_proposal_submit",
+        "x_buzz_measure",
+    }
 )
 
 # usage_events 記録器は本番 MCP プロセス内で 1 つだけ遅延生成する。初期化失敗時の None も
@@ -350,14 +356,21 @@ def _inject_search_web_links(data: dict[str, Any]) -> None:
 
 
 def _format_tiktok_completion(output: Any) -> str:
-    failed = output.status == "failed"
+    from teamagent.skills._shared.long_jobs import TERMINAL_STATES
+
+    failed = output.status in TERMINAL_STATES - {"done"}
     lines = [
         "❌ TikTok取得に失敗しました。" if failed else "✅ TikTok取得が完了しました。",
     ]
     if failed:
         from teamagent.skills._shared.long_jobs import failure_reason
 
-        return "❌ TikTok取得に失敗しました。" + failure_reason(output.error_code)
+        headline = (
+            "❌ TikTok取得に失敗しました。"
+            if output.status == "failed"
+            else "❌ TikTok取得は完了していません。"
+        )
+        return headline + failure_reason(output.error_code or output.status)
     if output.counts:
         counts = "、".join(
             f"{str(key)[:32]}={str(value)[:64]}" for key, value in list(output.counts.items())[:10]
@@ -423,6 +436,46 @@ def _build_async_job_poll(
 
     def _poll() -> tuple[str, str]:
         nonlocal status_skill
+        if tool in detached_jobs.DETACHABLE_TOOLS - {"video_algorithm"}:
+            from teamagent.adapters.proposal_job_store import ProposalJobStore
+            from teamagent.skills._shared.long_jobs import owner_key
+            from teamagent.skills.proposal_builder.skill import _configured_stale_seconds
+
+            store = ProposalJobStore()
+            row = store.get_job(job_id)
+            summary = json.loads(row.get("request_summary") or "{}") if row else {}
+            if not row or summary.get("owner") != owner_key(poll_ctx, tool):
+                return "unknown", "作業の状態を確認できません。"
+            alive = detached_jobs.REGISTRY.has_request(job_id.removeprefix("lj_"))
+            if not alive:
+                row = store.fail_stale(job_id, row, _configured_stale_seconds())
+            state = str(row.get("status") or "unknown")
+            if state == "done":
+                return state, str(json.loads(row["result_json"])["message"])
+            return state, str(
+                row.get("error_summary") or "作業が中断されました。"
+            ) if state == "failed" else "状態を確認しています。"
+
+        if tool == "x_buzz_measure":
+            from teamagent.skills.x_research.schema import XBuzzMeasureStatusInput
+            from teamagent.skills.x_research.skill import XBuzzMeasureStatusSkill
+
+            status_skill = status_skill or XBuzzMeasureStatusSkill()
+            output = status_skill.run(XBuzzMeasureStatusInput(job_id=job_id), poll_ctx)
+            return output.status, output.message
+
+        if tool == "clip_proposal_submit":
+            from teamagent.skills.clip_proposal.schema import ClipProposalStatusInput
+            from teamagent.skills.clip_proposal.skill import ClipProposalStatusSkill
+
+            status_skill = status_skill or ClipProposalStatusSkill()
+            output = status_skill.run(ClipProposalStatusInput(job_id=job_id), poll_ctx)
+            from teamagent.skills._shared.long_jobs import completed_delivery_failed, origin
+
+            if completed_delivery_failed(output.status, output.slack_delivered, origin(poll_ctx)):
+                return "failed", "切り抜き提案は生成できましたが、結果の配信が中断されました。"
+            return output.status, output.message
+
         if tool == "video_algorithm":
             from teamagent.skills.video_algorithm.schema import VideoAlgorithmStatusInput
             from teamagent.skills.video_algorithm.skill import VideoAlgorithmStatusSkill
@@ -521,10 +574,14 @@ def _schedule_async_job_notice(
         if isinstance(candidate, str) and candidate and candidate not in job_ids:
             job_ids.append(candidate)
     from teamagent.mcp_gateway.async_job_notify import schedule_completion_notice
-    from teamagent.skills._shared.long_jobs import origin, remember_latest
+    from teamagent.skills._shared.long_jobs import TERMINAL_STATES, origin, remember_latest
 
     target = origin(ctx)
-    if target is None or not job_ids or data.get("status") not in {"queued", "running", "done"}:
+    if (
+        target is None
+        or not job_ids
+        or data.get("status") not in {"queued", "running", "busy"} | TERMINAL_STATES
+    ):
         return
     try:
         remember_latest(ctx, tool, "|".join(job_ids))
@@ -534,12 +591,12 @@ def _schedule_async_job_notice(
 
         def poll_all() -> tuple[str, str]:
             results = [poll() for poll in polls]
-            if any(status not in {"queued", "running", "done", "failed"} for status, _ in results):
+            if any(status not in {"queued", "running"} | TERMINAL_STATES for status, _ in results):
                 return "unknown", "作業の状態を確認できません。"
             if any(status in {"queued", "running"} for status, _ in results):
                 state = "running" if any(status == "running" for status, _ in results) else "queued"
                 return state, "処理中です。"
-            state = "failed" if any(status == "failed" for status, _ in results) else "done"
+            state = "failed" if any(status != "done" for status, _ in results) else "done"
             return state, "\n\n".join(text for _, text in results)
 
         schedule_completion_notice(
@@ -943,6 +1000,8 @@ def _complete_detached(
     job_id: str = "",
 ) -> None:
     """切り離したジョブの完了処理（ジョブの thread で走る）: 投稿 → cleanup_output → usage 記録。"""
+    from teamagent.skills._shared.long_jobs import failure_reason
+
     if isinstance(error, detached_jobs.DetachInterruptedError):
         # 順番待ちのまま終了処理に入った＝skill.run は走っていない（quota も Gemini も未使用）。
         # 後始末も usage 記録も無い。中断通知がまだなら（通知の印より先に終わった）ここで送る。
@@ -952,9 +1011,20 @@ def _complete_detached(
             notified=interrupted,
         )
         if not interrupted:
-            detached_jobs.post_to_origin(
-                detached_jobs.interrupted_text(query), destination, request_id=request_id
-            )
+            if job_origin is not None:
+                from teamagent.mcp_gateway.async_job_notify import publish_notice
+
+                publish_notice(
+                    "作業が中断されました。",
+                    origin=job_origin,
+                    job_id=job_id,
+                    request_id=request_id,
+                    completed=False,
+                )
+            else:
+                detached_jobs.post_to_origin(
+                    detached_jobs.interrupted_text(query), destination, request_id=request_id
+                )
         return
     elapsed_ms = int((time.perf_counter() - started) * 1000)
     delivered = False
@@ -965,14 +1035,16 @@ def _complete_detached(
             logger.warning("video_algorithm_detach_done_after_interrupt", request_id=request_id)
         else:
             text = (
-                detached_jobs.completion_text(result, query)
+                detached_jobs.completion_text(result, query, tool=tool)
                 if error is None
                 else detached_jobs.error_text(query, error)
+                if tool == "video_algorithm"
+                else "作業を完了できませんでした。" + failure_reason(type(error).__name__)
             )
             # 完了は Block Kit で出す（描けなければ None＝今の文字だけの投稿）。
             rich = (
                 detached_jobs.completion_message(result, request_id=request_id)
-                if error is None
+                if error is None and tool == "video_algorithm"
                 else None
             )
             if job_origin is not None:
@@ -1282,11 +1354,18 @@ async def dispatch_tool(
     detach_policy: detached_jobs.DetachPolicy | None = None
     detach_destination: detached_jobs.Destination | None = None
     detach_key: str | None = None
-    detach_query = str(getattr(skill_input, "query", "") or "")
+    detach_query = str(
+        getattr(skill_input, "query", "")
+        or getattr(skill_input, "product_name", "")
+        or getattr(skill_input, "theme", "")
+        or name
+    )
     if name in detached_jobs.DETACHABLE_TOOLS:
         detach_policy = detached_jobs.load_policy()
         if detach_policy.enabled and verified_caller is not None:
             detach_key = detached_jobs.inflight_key(verified_caller.slack_user_id, detach_query)
+            if name != "video_algorithm":
+                detach_key = name + "\x1f" + detach_key
             running = detached_jobs.REGISTRY.get(detach_key)
             # 終了処理中は「お届けします」を約束しない（start が中断文を返す）。
             if running is not None and not detached_jobs.REGISTRY.closing:
@@ -1337,48 +1416,30 @@ async def dispatch_tool(
         from teamagent.adapters.proposal_job_store import ProposalJobStore
         from teamagent.skills._shared.long_jobs import origin, owner_key, remember_latest
 
-        video_job_id = f"va_{ctx.request_id}"
+        video_job_id = detached_jobs.detached_job_id(name, ctx.request_id)
         video_store = ProposalJobStore()
         video_origin = origin(ctx)
         if video_origin is not None:
             video_store.create_job(
                 video_job_id,
-                {"kind": "video_algorithm", "owner": owner_key(ctx, "video_algorithm")},
+                {
+                    "kind": name,
+                    "owner": owner_key(ctx, name),
+                    "user_id": verified_caller.slack_user_id,
+                },
             )
 
         def run_video() -> Any:
             if video_origin is None:
                 return skill.run(skill_input, ctx)
-            if not video_store.mark_running(video_job_id):
-                raise RuntimeError("VIDEO_ALGORITHM_STATE_WRITE_FAILED")
-            heartbeat_stop = threading.Event()
+            from teamagent.mcp_gateway.async_job_notify import run_persisted_job
 
-            def heartbeat() -> None:
-                while not heartbeat_stop.wait(30):
-                    try:
-                        if not video_store.heartbeat(video_job_id):
-                            return
-                    except Exception as exc:
-                        logger.warning("video_job_heartbeat_failed", error=type(exc).__name__)
-
-            heartbeat_thread = threading.Thread(target=heartbeat, daemon=True)
-            heartbeat_thread.start()
-            try:
-                result = skill.run(skill_input, ctx)
-                text = detached_jobs.completion_text(result, detach_query)
-                if not video_store.mark_done(video_job_id, json.dumps({"message": text})):
-                    raise RuntimeError("VIDEO_ALGORITHM_STATE_WRITE_FAILED")
-                return result
-            except Exception as exc:
-                video_store.mark_failed(
-                    video_job_id,
-                    "VIDEO_ALGORITHM_FAILED",
-                    error_summary=detached_jobs.user_message_for_error(exc),
-                )
-                raise
-            finally:
-                heartbeat_stop.set()
-                heartbeat_thread.join(timeout=1)
+            return run_persisted_job(
+                video_job_id,
+                video_store,
+                lambda: skill.run(skill_input, ctx),
+                lambda result: detached_jobs.completion_text(result, detach_query, tool=name),
+            )
 
         detached_job, start_state = detached_jobs.REGISTRY.start(
             key=detach_key,
@@ -1407,6 +1468,8 @@ async def dispatch_tool(
                 job_id=video_job_id,
             ),
         )
+        if video_origin is not None and start_state != "started":
+            video_store.mark_failed(video_job_id, "JOB_NOT_STARTED")
         if start_state == "duplicate" and detached_job is not None:
             # precheck と start の間に同じキーが登録された（同時に 2 通届いた）。
             logger.info(
@@ -1439,7 +1502,7 @@ async def dispatch_tool(
                 detach_query, detached_jobs.busy_text(detach_query), status="busy"
             )
         if video_origin is not None and start_state not in {"duplicate", "closing", "full"}:
-            remember_latest(ctx, "video_algorithm", video_job_id)
+            remember_latest(ctx, name, video_job_id)
 
     try:
         if detached_job is not None and detach_policy is not None:
@@ -1457,21 +1520,13 @@ async def dispatch_tool(
             if wait_state == detached_jobs.DETACH_DETACHED:
                 if video_origin is not None:
                     from teamagent.mcp_gateway.async_job_notify import schedule_completion_notice
-                    from teamagent.skills.video_algorithm.schema import VideoAlgorithmStatusInput
-                    from teamagent.skills.video_algorithm.skill import VideoAlgorithmStatusSkill
-
-                    def video_poll() -> tuple[str, str]:
-                        status = VideoAlgorithmStatusSkill().run(
-                            VideoAlgorithmStatusInput(job_id=video_job_id), ctx
-                        )
-                        return status.status, status.message
 
                     schedule_completion_notice(
                         tool=name,
                         job_id=video_job_id,
                         origin=video_origin,
                         request_id=ctx.request_id,
-                        poll=video_poll,
+                        poll=_build_async_job_poll(name, video_job_id, ctx),
                         ctx=ctx,
                     )
                 queued = detached_job.queued
@@ -1485,7 +1540,13 @@ async def dispatch_tool(
                 # 完了時の投稿・cleanup_output・usage 記録はジョブの thread が 1 回だけ行う。
                 return _detach_response(
                     detach_query,
-                    detached_jobs.queued_receipt_text(detach_query)
+                    (
+                        "作業は順番待ちです。結果をこの会話にお届けします。"
+                        if queued
+                        else "作業を続けています。結果をこの会話にお届けします。"
+                    )
+                    if name != "video_algorithm"
+                    else detached_jobs.queued_receipt_text(detach_query)
                     if queued
                     else detached_jobs.receipt_text(detach_query),
                 )

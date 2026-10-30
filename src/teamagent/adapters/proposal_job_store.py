@@ -323,14 +323,46 @@ class ProposalJobStore:
             next_status="running",
         )
 
-    def heartbeat(self, job_id: str, *, expected_checkpoint: str | None = None) -> bool:
+    def fail_stale(self, job_id: str, row: dict[str, Any], stale_seconds: float) -> dict[str, Any]:
+        """Heartbeat 切れだけを CAS で失敗にする。更新・完了した worker は上書きしない。"""
+        if row.get("status") not in {"queued", "running"}:
+            return row
+        stamp = row.get("updated_at")
+        try:
+            updated = datetime.fromisoformat(str(stamp).replace("Z", "+00:00"))
+            now = self._clock()
+            if now.tzinfo is None:
+                now = now.replace(tzinfo=UTC)
+            stale = (now.astimezone(UTC) - updated).total_seconds() > stale_seconds
+        except (ValueError, TypeError):
+            stale = True
+        if not stale:
+            return row
+        cas: dict[str, Any] = (
+            {"expected_updated_at": stamp}
+            if isinstance(stamp, str)
+            else {"expected_updated_at_invalid": True}
+            if "updated_at" in row or row.get("_updated_at_invalid")
+            else {"expected_updated_at_missing": True}
+        )
+        self.mark_failed(job_id, "MCP_RESTARTED", **cas)
+        latest = self.get_job(job_id)
+        if latest is None or latest == row:
+            raise RuntimeError("stale job state could not be terminalized")
+        return latest
+
+    def heartbeat(
+        self, job_id: str, *, expected_checkpoint: str | None = None, include_queued: bool = False
+    ) -> bool:
         """Refresh a running row without changing its state."""
 
         now_text = _isoformat(self._clock())
         if not self.uses_dynamodb:
             with self._memory_lock:
                 row = self._memory.get(job_id)
-                if row is None or row.get("status") != "running":
+                if row is None or row.get("status") not in (
+                    {"queued", "running"} if include_queued else {"running"}
+                ):
                     return False
                 if (
                     expected_checkpoint is not None
@@ -345,7 +377,11 @@ class ProposalJobStore:
                 TableName=self._table_name,
                 Key={"job_id": {"S": job_id}},
                 UpdateExpression="SET #updated_at = :updated_at",
-                ConditionExpression="#status = :running"
+                ConditionExpression=(
+                    "(#status = :running OR #status = :queued)"
+                    if include_queued
+                    else "#status = :running"
+                )
                 + (" AND #checkpoint = :checkpoint" if expected_checkpoint is not None else ""),
                 ExpressionAttributeNames={
                     "#status": "status",
@@ -358,6 +394,7 @@ class ProposalJobStore:
                 },
                 ExpressionAttributeValues={
                     ":running": {"S": "running"},
+                    **({":queued": {"S": "queued"}} if include_queued else {}),
                     ":updated_at": {"S": now_text},
                     **(
                         {":checkpoint": {"S": expected_checkpoint}}

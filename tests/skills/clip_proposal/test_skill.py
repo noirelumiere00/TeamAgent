@@ -17,6 +17,7 @@ from typing import Any
 
 import pytest
 
+from teamagent.adapters.proposal_job_store import ProposalJobStore
 from teamagent.skills.base import SkillContext
 from teamagent.skills.clip_proposal.limits import DailyQuota
 from teamagent.skills.clip_proposal.notices import has_all_required_notices
@@ -44,36 +45,12 @@ _ME = "komata@example.com"
 _OTHER = "someone@example.com"
 
 
-class _MemoryStore:
-    """ProposalJobStore の最小フェイク（本番と同じ「行が無い」形を返す）。"""
+class _MemoryStore(ProposalJobStore):
+    """外部接続せず、本番と同じ状態遷移・heartbeat・CASを使う。"""
 
     def __init__(self) -> None:
-        self.rows: dict[str, dict[str, Any]] = {}
-
-    def create_job(self, job_id: str, request_summary: dict[str, Any]) -> None:
-        self.rows[job_id] = {
-            "status": "queued",
-            "request_summary": json.dumps(request_summary, ensure_ascii=False),
-        }
-
-    def get_job(self, job_id: str) -> dict[str, Any] | None:
-        return self.rows.get(job_id)
-
-    def mark_running(self, job_id: str) -> bool:
-        self.rows[job_id]["status"] = "running"
-        return True
-
-    def mark_done(self, job_id: str, result_json: str) -> bool:
-        self.rows[job_id].update(status="done", result_json=result_json)
-        return True
-
-    def mark_failed(
-        self, job_id: str, error_code: str, *, expected_statuses: tuple[str, ...] = ()
-    ) -> bool:
-        # 本番の ProposalJobStore は失敗コードを ``error_code`` 列に置く。
-        # ここを ``failure_code`` にすると、実装の読み違いをテストが隠してしまう。
-        self.rows[job_id].update(status="failed", error_code=error_code)
-        return True
+        super().__init__(table_name="", memory={})
+        self.rows = self._memory
 
 
 class _InlineLauncher:
@@ -283,7 +260,7 @@ def _submit_skill(
     job_slots: JobSlots | None = None,
 ) -> ClipProposalSubmitSkill:
     return ClipProposalSubmitSkill(
-        store=store,  # type: ignore[arg-type]
+        store=store,
         quota=quota or DailyQuota(),
         active_jobs=active_jobs or ActiveJobIndex(),
         job_slots=job_slots or JobSlots(limit=8),
@@ -410,7 +387,7 @@ def test_failed_status_reads_the_stores_error_code_column() -> None:
     submitted = _submit_skill(
         store, analyzer=_StubAnalyzer(raises=RuntimeError("CLIP_TEMPLATE_UNAVAILABLE"))
     ).run(ClipProposalSubmitInput(), _ctx())
-    status = ClipProposalStatusSkill(store=store).run(  # type: ignore[arg-type]
+    status = ClipProposalStatusSkill(store=store).run(
         ClipProposalStatusInput(job_id=submitted.job_id), _ctx()
     )
     assert status.status == "failed"
@@ -560,7 +537,7 @@ def test_status_returns_the_result_for_the_owner() -> None:
     submitted = _submit_skill(store, analyzer=_StubAnalyzer()).run(
         ClipProposalSubmitInput(client_name="〇〇製作所"), _ctx()
     )
-    status = ClipProposalStatusSkill(store=store).run(  # type: ignore[arg-type]
+    status = ClipProposalStatusSkill(store=store).run(
         ClipProposalStatusInput(job_id=submitted.job_id), _ctx()
     )
     assert status.status == "done"
@@ -576,7 +553,7 @@ def test_status_hides_even_the_existence_of_someone_elses_job(
         ClipProposalSubmitInput(), _ctx()
     )
     monkeypatch.setenv("CLIP_PROPOSAL_USERS", f"{_ME},{_OTHER}")
-    status = ClipProposalStatusSkill(store=store).run(  # type: ignore[arg-type]
+    status = ClipProposalStatusSkill(store=store).run(
         ClipProposalStatusInput(job_id=submitted.job_id), _ctx(email=_OTHER)
     )
     assert status.status == "not_found"
@@ -593,7 +570,7 @@ def test_status_without_a_job_id_never_reaches_someone_elses_job() -> None:
         lookups.append(fingerprint)
         return None
 
-    status = ClipProposalStatusSkill(store=store, recent_lookup=lookup).run(  # type: ignore[arg-type]
+    status = ClipProposalStatusSkill(store=store, recent_lookup=lookup).run(
         ClipProposalStatusInput(), _ctx()
     )
     assert lookups == [requester_fingerprint(_ME)]
@@ -632,9 +609,7 @@ def test_submit_refuses_when_the_flag_is_not_set(monkeypatch: pytest.MonkeyPatch
 def test_status_refuses_when_the_flag_is_not_set(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("USE_CLIP_PROPOSAL_TOOLS", raising=False)
     with pytest.raises(PermissionError):
-        ClipProposalStatusSkill(store=_MemoryStore()).run(  # type: ignore[arg-type]
-            ClipProposalStatusInput(), _ctx()
-        )
+        ClipProposalStatusSkill(store=_MemoryStore()).run(ClipProposalStatusInput(), _ctx())
 
 
 def test_the_flag_gate_runs_before_identity(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1033,7 +1008,12 @@ def test_a_dead_store_does_not_wedge_the_slot_on_the_failure_path() -> None:
 
     class _DeadStore(_MemoryStore):
         def mark_failed(
-            self, job_id: str, error_code: str, *, expected_statuses: tuple[str, ...] = ()
+            self,
+            job_id: str,
+            error_code: str,
+            *,
+            expected_statuses: tuple[str, ...] = (),
+            **kwargs: Any,
         ) -> bool:
             raise RuntimeError("db down")
 
@@ -1047,3 +1027,53 @@ def test_a_dead_store_does_not_wedge_the_slot_on_the_failure_path() -> None:
     )
     skill.run(ClipProposalSubmitInput(file_id="F1"), _ctx())
     assert slots.snapshot() == (0, 0)
+
+
+def test_common_notice_uploads_the_saved_clip_once_to_the_verified_requester(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from pathlib import Path
+
+    from teamagent.adapters.slack_client import SlackClient
+    from teamagent.mcp_gateway import async_job_notify
+    from teamagent.skills._shared.long_jobs import ORIGIN_KEY, Origin
+
+    store = _MemoryStore()
+    monkeypatch.setenv("USE_LONG_JOB_NOTIFY", "1")
+    monkeypatch.setattr(async_job_notify, "ProposalJobStore", lambda: store)
+    uploads: list[str] = []
+
+    class Slack:
+        async def upload_file(
+            self, channel: str, path: str, request_id: str, **kwargs: Any
+        ) -> bool:
+            assert next(iter(store.rows.values()))["status"] == "done"
+            assert Path(path).read_bytes() == b"fake pptx"
+            uploads.append(channel)
+            return True
+
+    monkeypatch.setattr(SlackClient, "from_env", lambda: Slack())
+    skill = _submit_skill(store, analyzer=_StubAnalyzer())
+
+    def build(analysis: Any, out_dir: str, request_id: str) -> str:
+        path = Path(out_dir) / "clip.pptx"
+        path.write_bytes(b"fake pptx")
+        return str(path)
+
+    skill._deck_builder = build
+    context = _ctx()
+    destination = Origin("D_ME", "1757000000.000100", "U_ME")
+    context.metadata[ORIGIN_KEY] = destination
+    output = skill.run(ClipProposalSubmitInput(client_name="〇〇製作所"), context)
+    assert destination.pending and uploads == []
+    assert async_job_notify.publish_notice(
+        "完成", origin=destination, job_id=output.job_id, request_id="req"
+    )
+    assert not async_job_notify.publish_notice(
+        "完成",
+        origin=Origin("D_ME", destination.thread_ts, "U_ME"),
+        job_id=output.job_id,
+        request_id="req",
+    )
+    assert uploads == ["D_ME"]
+    assert json.loads(store.rows[output.job_id]["result_json"])["slack_delivered"] is True

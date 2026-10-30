@@ -46,6 +46,7 @@ _PROGRESS_MESSAGES: dict[str, str] = {
     "proposal_draft": "📝 提案を作成しています…",
     "proposal_deck": "📝 提案資料を作成しています…",
     "run_agent": "⏳ 調べています…",
+    "ad_label_check": "🏷️ タイアップ表示と #PR 表記を確認しています（1〜3 分ほどかかります）…",
 }
 
 

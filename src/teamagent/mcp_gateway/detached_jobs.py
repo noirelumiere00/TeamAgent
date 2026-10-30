@@ -21,6 +21,7 @@ VIDEO_ALGORITHM_DETACH_AFTER_S（5〜240秒）、VIDEO_ALGORITHM_MAX_BACKGROUND�
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import re
 import threading
@@ -35,12 +36,25 @@ import structlog
 
 from teamagent.mcp_gateway.allowlist import email_allowed
 from teamagent.skills._shared.slack_blocks import RichMessage, render_or_none
-from teamagent.skills._shared.slack_mrkdwn import markdown_bold_to_mrkdwn
+from teamagent.skills._shared.slack_mrkdwn import markdown_bold_to_mrkdwn, scrub_outbound_reply
 
 logger = structlog.get_logger(__name__)
 
-# 切り離しの対象ツール（いまは動画分析だけ）。
-DETACHABLE_TOOLS = frozenset({"video_algorithm"})
+# 受付だけ返しても結果を失わないよう、既存の登録簿・通知台帳を共有する。
+DETACHABLE_TOOLS = frozenset(
+    {
+        "video_algorithm",
+        "web_research",
+        "x_voice_search",
+        "x_needs_mining",
+        "search_surface_check_video",
+    }
+)
+
+
+def detached_job_id(tool: str, request_id: str) -> str:
+    return f"va_{request_id}" if tool == "video_algorithm" else f"lj_{request_id}"
+
 
 ENABLED_ENV = "USE_VIDEO_ALGORITHM_DETACH"
 AFTER_ENV = "VIDEO_ALGORITHM_DETACH_AFTER_S"
@@ -323,9 +337,13 @@ _REPORT_PUBLISH_FAILED_LINE = (
 )
 
 
-def completion_text(output: Any, query: str) -> str:
+def completion_text(output: Any, query: str, *, tool: str = "video_algorithm") -> str:
     """完了投稿の本文。Slack API へ直接出すので `**語**` を mrkdwn の `*語*` に直す。"""
     summary = getattr(output, "slack_summary", "")
+    if tool != "video_algorithm":
+        return markdown_bold_to_mrkdwn(
+            summary or getattr(output, "message", "") or "作業が終了しました。"
+        )
     if not isinstance(summary, str) or not summary.strip():
         summary = f"🔎 「{query}」の動画分析が完了しました。"
     if not getattr(output, "report_url", None):
@@ -400,6 +418,7 @@ async def _post_once(
     request_id: str,
     timeout_s: int,
     rich: RichMessage | None = None,
+    permanent_urls: dict[str, str] | None = None,
 ) -> bool:
     """1 回投稿する。``rich`` があれば Block Kit（text は描画側でエスケープ済みの通知文）。
 
@@ -409,10 +428,26 @@ async def _post_once(
     slack = _slack_client(timeout_s)
     extra: dict[str, Any] = {}
     if rich is not None:
-        body = rich.text
-        extra["blocks"] = rich.blocks
+        body = scrub_outbound_reply(rich.text, permanent_urls)
+        # 変更があれば全文を持つ通知文に戻し、blocks 側の表示からも漏らさない。
+        visible = [rich.text]
+
+        def collect(value: Any) -> None:
+            if isinstance(value, dict):
+                for key, item in value.items():
+                    if key == "text" and isinstance(item, str):
+                        visible.append(item)
+                    elif isinstance(item, (dict, list)):
+                        collect(item)
+            elif isinstance(value, list):
+                for item in value:
+                    collect(item)
+
+        collect(rich.blocks)
+        if all(scrub_outbound_reply(value, permanent_urls) == value for value in visible):
+            extra["blocks"] = rich.blocks
     else:
-        body = slack_escape(text)
+        body = slack_escape(scrub_outbound_reply(text, permanent_urls))
     result = await asyncio.wait_for(
         slack.post_message(
             channel=destination.channel_id,
@@ -471,12 +506,14 @@ def post_to_origin_status(
     request_id: str,
     fallback_user_id: str | None = None,
     rich: RichMessage | None = None,
+    permanent_urls: dict[str, str] | None = None,
 ) -> str:
     """``post_to_origin`` と同じ投稿。結果を ``posted`` / ``uncertain`` / ``failed`` で返す。
 
     ``uncertain`` はタイムアウト（Slack 側で届いている可能性がある）。呼び出し元が「届いたかも
     しれないので同じ文を別経路で出し直さない」判断に使う（``direct_summary``）。
     """
+    text = scrub_outbound_reply(text, permanent_urls)
     for attempt in range(1, _POST_ATTEMPTS + 1):
         # Block Kit は 1 回目だけ。2 回目は今までどおりの文字だけの投稿。
         use_rich = rich if attempt == 1 else None
@@ -488,6 +525,7 @@ def post_to_origin_status(
                     request_id=request_id,
                     timeout_s=_POST_TIMEOUT_S,
                     rich=use_rich,
+                    permanent_urls=permanent_urls,
                 )
             ):
                 logger.info(
@@ -716,14 +754,17 @@ class DetachedJob:
 
     def interrupted_notice(self) -> str:
         """このジョブの中断文（登録時に指定が無ければ動画分析の中断文）。"""
-        return self.interrupted_message or interrupted_text(self.query)
+        return self.interrupted_message or (
+            interrupted_text(self.query)
+            if self.tool == "video_algorithm"
+            else "システム更新で作業が中断されました。もう一度ご依頼ください。"
+        )
 
     def post_interrupted_in_background(self) -> None:
         """終了処理中に打ち切られた（返す相手が居ない）ときに、中断文を別 thread で投稿する。"""
         thread = threading.Thread(
-            target=post_to_origin,
-            args=(self.interrupted_notice(), self.destination),
-            kwargs={"request_id": self.request_id},
+            target=_notify_interrupted_job,
+            args=(self,),
             name=f"{self.tool}-detach-interrupt-{self.request_id}",
             daemon=True,
         )
@@ -780,6 +821,7 @@ class DetachedJobRegistry:
     def has_request(self, request_id: str) -> bool:
         """同じプロセス内で実行・順番待ちが続いている証拠（再起動との区別用）。"""
         with self._cond:
+            self._sweep_stale_locked()
             return any(job.request_id == request_id for job in self._jobs.values())
 
     def get(self, key: str) -> DetachedJob | None:
@@ -803,6 +845,12 @@ class DetachedJobRegistry:
             del self._running[job]
             if self._jobs.get(job.key) is job:
                 del self._jobs[job.key]
+            threading.Thread(
+                target=_notify_interrupted_job,
+                args=(job,),
+                kwargs={"timeout": True},
+                daemon=True,
+            ).start()
             logger.warning(
                 "video_algorithm_detach_stale_swept",
                 request_id=job.request_id,
@@ -927,6 +975,41 @@ def _register_liveness_probe() -> None:
 _register_liveness_probe()
 
 
+def _notify_interrupted_job(job: DetachedJob, *, timeout: bool = False) -> bool:
+    from teamagent.adapters.proposal_job_store import ProposalJobStore
+    from teamagent.mcp_gateway.async_job_notify import publish_notice
+    from teamagent.skills._shared.long_jobs import Origin, enabled
+
+    # 登録簿の lock 内では job の lock を取らない（detach と逆順になる）。
+    if timeout and not job.mark_interrupted():
+        return False
+    message = (
+        "作業の制限時間に達しました。完了は確認できていません。"
+        if timeout
+        else job.interrupted_notice()
+    )
+    if enabled() and job.tool in DETACHABLE_TOOLS:
+        job_id = detached_job_id(job.tool, job.request_id)
+        store = ProposalJobStore()
+        row = store.get_job(job_id)
+        summary = json.loads(row.get("request_summary") or "{}") if row else {}
+        store.mark_failed(
+            job_id, "JOB_TIMEOUT" if timeout else "MCP_RESTARTED", error_summary=message
+        )
+        return publish_notice(
+            message,
+            origin=Origin(
+                job.destination.channel_id,
+                job.destination.thread_ts,
+                str(summary.get("user_id") or ""),
+            ),
+            request_id=job.request_id,
+            job_id=job_id,
+            completed=False,
+        )
+    return post_to_origin(message, job.destination, request_id=job.request_id)
+
+
 async def notify_interrupted(
     *,
     budget_s: float = DEFAULT_INTERRUPT_BUDGET_S,
@@ -949,37 +1032,7 @@ async def notify_interrupted(
 
     async def _one(job: DetachedJob) -> None:
         try:
-            handled = False
-            if job.tool == "video_algorithm":
-                from teamagent.adapters.proposal_job_store import ProposalJobStore
-                from teamagent.skills._shared.long_jobs import Origin
-                from teamagent.skills._shared.long_jobs import enabled as notify_enabled
-
-                if notify_enabled():
-                    from teamagent.mcp_gateway.async_job_notify import publish_notice
-
-                    ProposalJobStore().mark_failed(
-                        f"va_{job.request_id}",
-                        "MCP_RESTARTED",
-                        error_summary="システム更新で動画分析が中断されました。",
-                    )
-                    # 登録簿の宛先も検証済み claim 由来。復旧監視と同じ終端の錠を使う。
-                    ok = await asyncio.to_thread(
-                        publish_notice,
-                        job.interrupted_notice(),
-                        origin=Origin(job.destination.channel_id, job.destination.thread_ts, ""),
-                        request_id=job.request_id,
-                        job_id=f"va_{job.request_id}",
-                        completed=False,
-                    )
-                    handled = True
-            if not handled:
-                ok = await _post_once(
-                    job.interrupted_notice(),
-                    job.destination,
-                    request_id=job.request_id,
-                    timeout_s=_INTERRUPT_POST_TIMEOUT_S,
-                )
+            ok = await asyncio.to_thread(_notify_interrupted_job, job)
             logger.info(
                 "video_algorithm_detach_interrupt_notified", request_id=job.request_id, ok=ok
             )

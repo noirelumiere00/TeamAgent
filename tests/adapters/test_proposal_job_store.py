@@ -85,7 +85,10 @@ class _FakeDynamo:
         ]
         if expected_statuses and status not in expected_statuses:
             return False
-        if "#status = :running" in condition and status != values[":running"]:
+        if ":queued" in condition and "#status = :running" in condition:
+            if status not in (values[":queued"], values[":running"]):
+                return False
+        elif "#status = :running" in condition and status != values[":running"]:
             return False
 
         updated_at_name = names.get("#updated_at", "updated_at")
@@ -341,3 +344,56 @@ def test_configured_ddb_failure_never_falls_back_to_memory() -> None:
     with pytest.raises(RuntimeError, match="ddb unavailable"):
         store.create_job("pb_ddb_down", {"request_id": "outage"})
     assert memory == {}
+
+
+@pytest.mark.parametrize("dynamo", [False, True])
+@pytest.mark.parametrize("status", ["queued", "running"])
+def test_fail_stale_uses_heartbeat_cas_and_does_not_change_terminal_rows(
+    dynamo: bool, status: str
+) -> None:
+    now = [datetime(2026, 1, 1, tzinfo=UTC)]
+    store = ProposalJobStore(
+        table_name="jobs" if dynamo else "",
+        memory={},
+        dynamodb_client=_FakeDynamo() if dynamo else None,
+        clock=lambda: now[0],
+    )
+    store.create_job("clp_stale", {})
+    if status == "running":
+        store.mark_running("clp_stale")
+    old = store.get_job("clp_stale")
+    assert old is not None
+    now[0] += timedelta(seconds=181)
+    # 期限判定と失敗遷移の間で健全な worker が心拍を更新した場合は奪わない。
+    assert store.heartbeat("clp_stale", include_queued=True)
+    fresh = store.fail_stale("clp_stale", old, 180)
+    assert fresh["status"] == status
+    now[0] += timedelta(seconds=181)
+    failed = store.fail_stale("clp_stale", fresh, 180)
+    assert failed["status"] == "failed" and failed["error_code"] == "MCP_RESTARTED"
+    assert store.fail_stale("clp_stale", failed, 180) == failed
+    assert not store.mark_done("clp_stale", "{}")
+
+
+def test_x_worker_orphan_is_terminalized_using_the_same_store_cas(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from types import SimpleNamespace
+
+    from teamagent.adapters.x_task_store import XTaskStore
+
+    monkeypatch.setenv("X_JOBS_TABLE", "jobs")
+    ddb = _FakeDynamo()
+    ledger = ProposalJobStore(
+        table_name="jobs", dynamodb_client=ddb, clock=lambda: datetime(2000, 1, 1, tzinfo=UTC)
+    )
+    ledger.create_job("xb_orphan", {})
+    ledger.mark_running("xb_orphan")
+    ddb.items["xb_orphan"]["requested_by"] = {"S": "owner@example.com"}
+    store = XTaskStore()
+    monkeypatch.setattr(store, "_session", lambda: SimpleNamespace(client=lambda *a, **kw: ddb))
+    row = store.get_status("xb_orphan")
+    assert row is not None and row["status"] == "failed"
+    assert row["requested_by"] == "owner@example.com"
+    assert row["error_code"] == "MCP_RESTARTED"
+    assert ledger.get_job("xb_orphan")["status"] == "failed"  # type: ignore[index]
