@@ -66,6 +66,7 @@ from teamagent.connect_diagnostics import (
     mask_email,
     now_jst,
 )
+from teamagent.connect_web.library import library_target, register_library_routes
 from teamagent.dashboard.auth import (
     Verifier,
     authenticate_id_token,
@@ -663,12 +664,14 @@ def _resolve_app_html() -> dict[str, Any]:
 def _safe_next(raw: str | None) -> str:
     """ログイン後の戻り先を検証（オープンリダイレクト防止）。
 
-    既知の内部ページ（``/app`` / ``/search`` / ``/admin`` / 履歴の 2 画面）のみ許可し、
+    既知の内部ページと検証済みの ``/library`` 配下のみ許可し、
     それ以外は既定 ``/app``。
     ＝ログイン後は原則 Obsidian 風 UI(/app) に着地する（旧 /search UI は明示遷移時のみ）。
     外部 URL・``//host``・スキーム付き等は一切通さない（ホワイトリスト方式）。
     """
     candidate = (raw or "").strip()
+    if library_target(candidate) is not None:
+        return candidate
     if candidate in {"/app", "/search", "/admin", "/app/history", "/admin/history"}:
         return candidate
     if candidate == "/search/graph/focus":
@@ -3885,6 +3888,14 @@ def create_app(
                     pg = PgVectorClient.from_env()
                     admin_state["pg"] = pg
         return pg
+
+    register_library_routes(
+        app,
+        authenticate=_search_email,
+        admins=_admin_emails,
+        get_pg=_get_admin_pg,
+        render=_admin_html,
+    )
 
     @app.get("/healthz")
     def healthz() -> JSONResponse:

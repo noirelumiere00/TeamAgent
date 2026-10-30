@@ -2084,3 +2084,15 @@ def test_ingest_task_has_video_library_accounts_sheet_env() -> None:
         in ingest
     )
     assert ingest.count('name = "VIDEO_LIBRARY_ACCOUNTS_SHEET_ID"') == 1
+
+
+@pytest.mark.parametrize(
+    "filename,task", [("ingest_schedule.tf", "ingest"), ("connect_web.tf", "connect_web")]
+)
+def test_video_library_bucket_env_uses_existing_media_bucket(filename: str, task: str) -> None:
+    block = _block(TF_ROOT / filename, "aws_ecs_task_definition", task)
+    assert block.count('name = "VIDEO_LIBRARY_S3_BUCKET"') == 1
+    assert (
+        '{ name = "VIDEO_LIBRARY_S3_BUCKET", value = aws_s3_bucket.media_jobs[0].bucket }' in block
+    )
+    assert "local.tk_enabled == 1 ? [" in block

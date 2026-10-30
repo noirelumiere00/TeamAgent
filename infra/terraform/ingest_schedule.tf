@@ -27,7 +27,7 @@ variable "fargate_ingest_cpu" {
   # infra/docker/runtime-consumers.json の memory 契約とスモークテストが
   # この既定値に固定されているため、ここを動かすと契約テストが赤くなる。
   # 2026-08-06 の高速化では live を cpu=4096/memory=8192 へ CLI で引き上げた。
-  default     = 1024
+  default = 1024
 }
 
 variable "fargate_ingest_memory" {
@@ -125,6 +125,14 @@ resource "aws_iam_role_policy" "ecs_execution_ingest_secrets" {
 # --- タスクロール: RDS connect + Bedrock(embedding) + KMS Decrypt ---
 data "aws_iam_policy_document" "ingest_task" {
   count = var.enable_ingest_schedule ? 1 : 0
+  dynamic "statement" {
+    for_each = local.tk_enabled == 1 ? [1] : []
+    content {
+      sid       = "VideoLibraryThumbnails"
+      actions   = ["s3:PutObject", "s3:GetObject"]
+      resources = ["${aws_s3_bucket.media_jobs[0].arn}/video-library/thumbs/*"]
+    }
+  }
   statement {
     sid       = "KmsDecryptForOauthTokens"
     actions   = ["kms:Decrypt"]
@@ -256,7 +264,9 @@ resource "aws_ecs_task_definition" "ingest" {
       #    ここではなく CLI 側の task definition で設定する（terraform の既定 cpu と
       #    live が異なるため、ここで導出すると誤った値が焼かれる）。
       { name = "USE_INCREMENTAL_SYNC", value = "1" },
-      ], var.enable_scrape_tools ? [
+      ], local.tk_enabled == 1 ? [
+      { name = "VIDEO_LIBRARY_S3_BUCKET", value = aws_s3_bucket.media_jobs[0].bucket },
+      ] : [], var.enable_scrape_tools ? [
       { name = "VERTEX_SA_PATH", value = "/tmp/vertex-sa.json" },
       { name = "GEMINI_USE_VERTEX", value = "true" },
       { name = "GEMINI_VERTEX_PROJECT", value = var.gemini_vertex_project },

@@ -64,7 +64,7 @@ jobs:
           pip install --no-deps -e .
           pip install \
             pydantic structlog psycopg pgvector \
-            boto3 slack-sdk slack-bolt aiohttp httpx \
+            boto3 botocore slack-sdk slack-bolt aiohttp httpx \
             anthropic \
             'mcp>=1.28.1,<2' \
             fastapi uvicorn \

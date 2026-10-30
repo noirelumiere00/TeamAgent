@@ -256,6 +256,14 @@ resource "aws_iam_role_policy" "ecs_execution_connect_web_secrets" {
 # プロセス内で実行するため Bedrock 権限を追加する（旧コメントの「Bedrock は不要」は P4 で失効）。
 data "aws_iam_policy_document" "connect_web_task" {
   count = var.enable_connect_web ? 1 : 0
+  dynamic "statement" {
+    for_each = local.tk_enabled == 1 ? [1] : []
+    content {
+      sid       = "VideoLibraryThumbnails"
+      actions   = ["s3:GetObject"]
+      resources = ["${aws_s3_bucket.media_jobs[0].arn}/video-library/thumbs/*"]
+    }
+  }
   statement {
     sid       = "HmacStateRuntime"
     actions   = ["dynamodb:GetItem", "dynamodb:UpdateItem"]
@@ -542,7 +550,9 @@ resource "aws_ecs_task_definition" "connect_web" {
       { name = "USE_QUERY_PLANNER", value = "false" },
       # ナレッジフィルタ UI（種別/期間などの絞り込み）。
       { name = "USE_KNOWLEDGE_FILTERS", value = "true" },
-    ], local.report_link_hmac_environment, local.connect_web_hmac_runtime_environment)
+      ], local.tk_enabled == 1 ? [
+      { name = "VIDEO_LIBRARY_S3_BUCKET", value = aws_s3_bucket.media_jobs[0].bucket },
+    ] : [], local.report_link_hmac_environment, local.connect_web_hmac_runtime_environment)
     secrets = concat([
       { name = "OAUTH_STATE_SECRET", valueFrom = data.aws_secretsmanager_secret.connect_oauth_state[0].arn },
       { name = "CONNECT_GOOGLE_CLIENT_SECRET", valueFrom = data.aws_secretsmanager_secret.connect_google_client_secret[0].arn },
