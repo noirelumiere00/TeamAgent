@@ -304,7 +304,7 @@ def test_tool_dictionary_tracks_source_names_and_soul_fixed_dictionary() -> None
     assert required <= actual, f"洗浄辞書へ追加が必要: {sorted(required - actual)}"
 
 
-def test_reply_payload_sending_scrubs_text_only_and_logs_counts_without_body() -> None:
+def test_reply_payload_sending_scrubs_display_text_and_logs_counts_without_body() -> None:
     """既存 probe の本番形状の event/ctx をそのまま通して結合を確かめる。"""
     completed = subprocess.run(
         ["node", str(CALLER_PROBE)],
@@ -319,7 +319,7 @@ def test_reply_payload_sending_scrubs_text_only_and_logs_counts_without_body() -
     original = scenario["input"]
     result = scenario["result"]
     assert result["payload"] == {
-        **original,
+        **{key: value for key, value in original.items() if key != "blocks"},
         "text": (
             f"確認します。資料: {OMITTED_LINK} "
             "（http://aicheck.newstv.co.jp/app ）への貼り付け。 "
@@ -327,7 +327,7 @@ def test_reply_payload_sending_scrubs_text_only_and_logs_counts_without_body() -
         ),
     }
     assert scenario["inputUnchanged"] is True
-    assert scenario["blocksSameReference"] is True
+    assert scenario["blocksSameReference"] is False
     assert scenario["unchangedResult"] is None
     assert scenario["unchangedLogs"] == []
     # 既存 makePlugin の logger は warn のみ。info の洗浄ログは console 側で必ず捕捉する。

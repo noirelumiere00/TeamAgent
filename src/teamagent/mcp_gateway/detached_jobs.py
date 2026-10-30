@@ -36,7 +36,7 @@ import structlog
 
 from teamagent.mcp_gateway.allowlist import email_allowed
 from teamagent.skills._shared.slack_blocks import RichMessage, render_or_none
-from teamagent.skills._shared.slack_mrkdwn import markdown_bold_to_mrkdwn
+from teamagent.skills._shared.slack_mrkdwn import markdown_bold_to_mrkdwn, scrub_outbound_reply
 
 logger = structlog.get_logger(__name__)
 
@@ -418,6 +418,7 @@ async def _post_once(
     request_id: str,
     timeout_s: int,
     rich: RichMessage | None = None,
+    permanent_urls: dict[str, str] | None = None,
 ) -> bool:
     """1 回投稿する。``rich`` があれば Block Kit（text は描画側でエスケープ済みの通知文）。
 
@@ -427,10 +428,26 @@ async def _post_once(
     slack = _slack_client(timeout_s)
     extra: dict[str, Any] = {}
     if rich is not None:
-        body = rich.text
-        extra["blocks"] = rich.blocks
+        body = scrub_outbound_reply(rich.text, permanent_urls)
+        # 変更があれば全文を持つ通知文に戻し、blocks 側の表示からも漏らさない。
+        visible = [rich.text]
+
+        def collect(value: Any) -> None:
+            if isinstance(value, dict):
+                for key, item in value.items():
+                    if key == "text" and isinstance(item, str):
+                        visible.append(item)
+                    elif isinstance(item, (dict, list)):
+                        collect(item)
+            elif isinstance(value, list):
+                for item in value:
+                    collect(item)
+
+        collect(rich.blocks)
+        if all(scrub_outbound_reply(value, permanent_urls) == value for value in visible):
+            extra["blocks"] = rich.blocks
     else:
-        body = slack_escape(text)
+        body = slack_escape(scrub_outbound_reply(text, permanent_urls))
     result = await asyncio.wait_for(
         slack.post_message(
             channel=destination.channel_id,
@@ -489,12 +506,14 @@ def post_to_origin_status(
     request_id: str,
     fallback_user_id: str | None = None,
     rich: RichMessage | None = None,
+    permanent_urls: dict[str, str] | None = None,
 ) -> str:
     """``post_to_origin`` と同じ投稿。結果を ``posted`` / ``uncertain`` / ``failed`` で返す。
 
     ``uncertain`` はタイムアウト（Slack 側で届いている可能性がある）。呼び出し元が「届いたかも
     しれないので同じ文を別経路で出し直さない」判断に使う（``direct_summary``）。
     """
+    text = scrub_outbound_reply(text, permanent_urls)
     for attempt in range(1, _POST_ATTEMPTS + 1):
         # Block Kit は 1 回目だけ。2 回目は今までどおりの文字だけの投稿。
         use_rich = rich if attempt == 1 else None
@@ -506,6 +525,7 @@ def post_to_origin_status(
                     request_id=request_id,
                     timeout_s=_POST_TIMEOUT_S,
                     rich=use_rich,
+                    permanent_urls=permanent_urls,
                 )
             ):
                 logger.info(
