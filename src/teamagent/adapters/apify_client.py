@@ -143,12 +143,7 @@ def ad_label_platform(url: str) -> str | None:
         port = parsed.port
     except ValueError:
         return None
-    if (
-        parsed.scheme != "https"
-        or parsed.username
-        or parsed.password
-        or port not in (None, 443)
-    ):
+    if parsed.scheme != "https" or parsed.username or parsed.password or port not in (None, 443):
         return None
     for platform, roots in _AD_LABEL_HOSTS.items():
         if any(host == root or host.endswith("." + root) for root in roots):
@@ -188,7 +183,8 @@ def _parse_ad_label_item(platform: str, input_url: str, item: dict[str, Any]) ->
         partners: list[str] = []
         text = str(item.get("text") or "")
     elif platform == "instagram":
-        # paidPartnership（posts 結果のみ）。isSponsored は 2025-12 から常に false の非推奨項目なので見ない。
+        # paidPartnership（posts 結果のみ）。isSponsored は 2025-12 から常に false の
+        # 非推奨項目なので見ない。
         label = _ad_label_flag(item, "paidPartnership")
         sponsors = item.get("sponsors")
         partners = [

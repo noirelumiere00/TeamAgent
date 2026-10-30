@@ -12,7 +12,10 @@ MAX_URLS = 20
 class AdLabelCheckInput(BaseModel):
     urls: list[str] = Field(
         min_length=1,
-        description=f"貼られた投稿URL（TikTok/Instagram/YouTube 混在可・改行区切りのまま可・最大{MAX_URLS}件）",
+        description=(
+            "貼られた投稿URL（TikTok/Instagram/YouTube 混在可・改行区切りのまま可・"
+            f"最大{MAX_URLS}件）"
+        ),
     )
 
     @field_validator("urls")

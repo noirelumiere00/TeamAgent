@@ -104,7 +104,9 @@ def test_mixed_urls_are_grouped_by_platform_with_labels_and_tags() -> None:
     out = _run(AdLabelCheckSkill(apify=fake), [pasted])
 
     # 媒体ごとに 1 run・ダウンロード系は止める。
-    assert sorted(a for a, _ in fake.calls) == sorted([ACTOR_TIKTOK_VIDEO, ACTOR_IG_POSTS, ACTOR_YT_VIDEOS])
+    assert sorted(a for a, _ in fake.calls) == sorted(
+        [ACTOR_TIKTOK_VIDEO, ACTOR_IG_POSTS, ACTOR_YT_VIDEOS]
+    )
     tt_input = dict(fake.calls)[ACTOR_TIKTOK_VIDEO]
     assert tt_input["postURLs"] == [TT, TT_PLAIN] and tt_input["shouldDownloadVideos"] is False
     assert dict(fake.calls)[ACTOR_IG_POSTS]["resultsType"] == "posts"

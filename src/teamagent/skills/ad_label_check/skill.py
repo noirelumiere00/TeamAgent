@@ -57,8 +57,10 @@ def find_disclosures(text: str, hashtags: tuple[str, ...] | list[str] = ()) -> l
         if _norm_tag(tag) in DISCLOSURE_TAGS:
             found.append("#" + unicodedata.normalize("NFKC", tag).lstrip("#"))
     found += [f"【{m}】" for m in _BRACKET_RE.findall(unicodedata.normalize("NFKC", text))]
-    seen: set[str] = set()
-    return [t for t in found if not (t.lower() in seen or seen.add(t.lower()))]
+    unique: dict[str, str] = {}
+    for tag in found:
+        unique.setdefault(tag.lower(), tag)
+    return list(unique.values())
 
 
 def _line(r: AdLabelResult) -> str:
@@ -67,7 +69,11 @@ def _line(r: AdLabelResult) -> str:
     label = {True: "ラベルOK", False: "ラベルなし", None: "ラベル取れず"}[r.label]
     if r.partners:
         label += "（" + "・".join(f"@{p}" for p in r.partners[:3]) + "）"
-    tags = f"ハッシュタグ{'・'.join(r.disclosure_tags[:3])} OK" if r.disclosure_tags else "ハッシュタグなし"
+    tags = (
+        f"ハッシュタグ{'・'.join(r.disclosure_tags[:3])} OK"
+        if r.disclosure_tags
+        else "ハッシュタグなし"
+    )
     return f"{r.url}　{label}　{tags}" + ("　⚠️要確認" if r.needs_review else "")
 
 
