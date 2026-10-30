@@ -218,6 +218,15 @@ def slack_hit(item: Any, index: int = 0) -> Any:
             "file_names": list(item.original_file_names or item.hit.file_names),
             "slack_file_ids": item.hit.file_ids,
             "explicit_drive_urls": item.explicit_drive_urls,
+            **(
+                {
+                    "case_state_evidence": item.hit.case_state_evidence.model_dump(mode="json"),
+                    "case_state_external_id": item.hit.case_state_evidence.source_ref.external_id,
+                    "occurred_at": item.hit.posted_on,
+                }
+                if item.hit.case_state_evidence is not None
+                else {}
+            ),
             **({REFERENCE_KEY: item.hit.reference} if item.hit.reference else {}),
         },
     )

@@ -31,6 +31,7 @@ from typing import TYPE_CHECKING, Any, Protocol
 import structlog
 
 from teamagent.identity import shared_company_domains_from_env
+from teamagent.ingest import case_state_evidence
 from teamagent.ingest.boilerplate import mark_boilerplate
 from teamagent.ingest.content_hash import (
     INGEST_CONTENT_HASH_KEY,
@@ -313,6 +314,11 @@ def _differential_pipeline_config(*, classify: bool, contextualize: bool = False
         "classify": classify,
         "contextualize": contextualize,
         "embedder_backend": resolve_embedder_backend(),
+        **(
+            {"case_state_evidence": case_state_evidence.input_version()}
+            if case_state_evidence.configured()
+            else {}
+        ),
     }
 
 
@@ -436,6 +442,7 @@ def _ingest_campaign_aggregate_tab(
         ]
         docs_n += 1
         chunks_n += len(chunks)
+        doc = case_state_evidence.attach(doc, chunks)
         if not dry_run:
             repository.upsert_document_with_chunks(doc, chunks, request_id=request_id)
     accounts_n = 0
@@ -465,6 +472,7 @@ def _ingest_campaign_aggregate_tab(
             docs_n += 1
             accounts_n += 1
             chunks_n += len(chunks)
+            doc = case_state_evidence.attach(doc, chunks)
             if not dry_run:
                 repository.upsert_document_with_chunks(doc, chunks, request_id=request_id)
     # 件数のみ（広告主名・案件名・アカウント名・本文は載せない）。
@@ -838,6 +846,10 @@ def _should_skip_unchanged_gdrive_file(
 ) -> bool:
     """保存済みMD5と一致するbinary fileは重い処理へ入る前に除外する。"""
     if not _envflag("USE_UNCHANGED_SKIP", "true"):
+        return False
+
+    if case_state_evidence.configured():
+        # shortcut: 段階公開中は Drive の MD5 skip を止める。全社展開時に版照合へ移す。
         return False
 
     current_checksum = getattr(f, "md5_checksum", None)
@@ -1821,6 +1833,12 @@ def _ingest_slack_channel(
             if derived_client_name:
                 doc_metadata["client_name"] = derived_client_name
 
+        if case_state_evidence.enabled(owner_email):
+            messages = {m.ts: m for m in [parent, *replies]}
+            doc_metadata["case_state_reports"] = case_state_evidence.message_reports(
+                spec.channel_id, external_id, [messages[ts] for ts in sorted(messages)]
+            )
+
         # 差分取り込み: 分類（Bedrock）より前に、upsert 入力すべての正規化ハッシュを
         # 計算し、保存済みと一致したら分類・embedding・upsert を丸ごとスキップする。
         # doc_metadata はこの時点で cls_* 合流前＝「入力 metadata」そのもの。
@@ -1908,6 +1926,7 @@ def _ingest_slack_channel(
             )
         docs_n += 1
         chunks_n += len(chunks)
+        doc = case_state_evidence.attach(doc, chunks)
         if not dry_run:
             repository.upsert_document_with_chunks(doc, chunks, request_id=request_id)
 
@@ -3530,6 +3549,7 @@ def _process_one_gdrive_file(
         },
         modified_at=f.modified_time,
     )
+    doc = case_state_evidence.attach(doc, chunks)
     if not dry_run:
         if lease_heartbeat is not None:
             lease_heartbeat(True)
@@ -4212,6 +4232,7 @@ def _ingest_shared_drives_crawl(
                     },
                     modified_at=f.modified_time,
                 )
+                doc = case_state_evidence.attach(doc, chunks)
                 if not dry_run:
                     # §2 ガード: 本文版を title_only 版で上書きしない（退行を塞ぐ）。
                     wrote = _guarded_upsert(
@@ -4564,6 +4585,14 @@ def _ingest_gsheet(
                 if fb_metadata or knowledge_metadata or case_doc_metadata
                 else None
             )
+            if case_state_evidence.enabled(owner_email) and fb_metadata:
+                fb_doc_metadata["case_state_form_submitted_at"] = _gsheet_row_modified_at(
+                    {
+                        k: v
+                        for k, v in row_fields.items()
+                        if _normalize_form_label(k) == "タイムスタンプ"
+                    }
+                )
 
             # ナレッジ共有シート行(フォーム回答)の本文/タイトル正規化:
             if knowledge_metadata:
@@ -4723,6 +4752,7 @@ def _ingest_gsheet(
             ]
             docs_n += 1
             chunks_n += len(chunks)
+            doc = case_state_evidence.attach(doc, chunks)
             if not dry_run:
                 repository.upsert_document_with_chunks(doc, chunks, request_id=request_id)
 
@@ -5093,6 +5123,7 @@ def _ingest_case_deck(
             metadata=metadata,
             modified_at=getattr(f, "modified_time", None),
         )
+        doc = case_state_evidence.attach(doc, chunks)
         if not dry_run:
             repository.upsert_document_with_chunks(doc, chunks, request_id=request_id)
         docs_n += 1

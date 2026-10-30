@@ -2,15 +2,21 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import os
 import re
 import unicodedata
+from calendar import monthrange
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from typing import Any
 
+from pydantic import ValidationError
+
 from teamagent.adapters.pgvector_client import SearchHit
+from teamagent.case_state import CaseStateEvidence, SourceRef, source_url
 from teamagent.skills.search.dates import extract_title_date
 from teamagent.skills.search.schema import DocumentReference
 
@@ -98,13 +104,127 @@ class TimelineStatus:
     text: str
     sections: tuple[str, ...]
     source: SearchHit
+    evidence: CaseStateEvidence | None = None
+    evidence_sources: tuple[CaseStateEvidence, ...] = ()
 
     @property
     def line(self) -> str:
         return f"{self.label}: {self.text}"
 
 
-def resolve_statuses(hits: Sequence[SearchHit]) -> tuple[TimelineStatus, ...]:
+def case_state_of(hit: SearchHit) -> CaseStateEvidence:
+    """旧行・不正な束は unknown。正式性は分類値や呼び出し側の表示から作らない。"""
+    meta = hit.metadata or {}
+    try:
+        bundle = CaseStateEvidence.model_validate_json(json.dumps(meta.get("case_state_evidence")))
+        ref = bundle.source_ref
+        if (
+            ref.external_id != meta.get("case_state_external_id")
+            or ref.source_type != meta.get("source_type")
+            or ref.url != source_url(meta.get("source_uri"))
+        ):
+            raise ValueError("case state source mismatch")
+    except (ValidationError, TypeError, ValueError):
+        ref = SourceRef(
+            source_type=str(meta.get("source_type") or "unknown"),
+            external_id=str(
+                meta.get("case_state_external_id")
+                or meta.get("document_id")
+                or meta.get("source_uri")
+                or hit.chunk_id
+            ),
+            locator=f"chunk:{hit.chunk_id}",
+            url=source_url(meta.get("source_uri")),
+            content_sha256=hashlib.sha256(hit.content.encode()).hexdigest(),
+        )
+        bundle = CaseStateEvidence(
+            subject_ref=f"source:{ref.source_type}:{ref.external_id}:{ref.locator}",
+            source_ref=ref,
+            document_kind=str(meta.get("cls_doc_type") or "unknown"),
+        )
+    return bundle.model_copy(
+        update={"state": "unknown", "authority": "unverified", "resolution": "unknown"}
+    )
+
+
+def _resolve_case_states(hits: Sequence[SearchHit]) -> tuple[TimelineStatus, ...]:
+    grouped: dict[str, dict[str, tuple[SearchHit, CaseStateEvidence]]] = {}
+    for hit in hits:
+        bundle = case_state_of(hit)
+        # 同じ文書の複数チャンクを集計し直さない。順位も認定には使わない。
+        key = bundle.source_ref.model_dump_json()
+        group = grouped.setdefault(bundle.subject_ref, {})
+        if key not in group or (hit.chunk_id, hit.content) < (
+            group[key][0].chunk_id,
+            group[key][0].content,
+        ):
+            group[key] = (hit, bundle)
+    out = []
+    today = datetime.now(JST).date().isoformat()
+    labels = {
+        "proposed": "提案",
+        "won": "受注",
+        "in_progress": "進行中",
+        "completed": "完了",
+        "lost": "失注",
+        "cancelled": "中止",
+    }
+    for subject in sorted(grouped):
+        rows = [grouped[subject][key] for key in sorted(grouped[subject])]
+        official = [
+            (record, hit, bundle)
+            for hit, bundle in rows
+            for record in bundle.records
+            if record.authority == "official"
+            and record.state != "unknown"
+            and record.state_as_of
+            and record.state_as_of <= today
+        ]
+        hit, evidence = rows[0]
+        text = "正式状態は不明（正本未確認）"
+        if official:
+            # 月と日は区間で比較し、最新区間と重なる食い違いも競合として残す。
+            def end(value: str) -> str:
+                if len(value) == 7:
+                    year, month = map(int, value.split("-"))
+                    return f"{value}-{monthrange(year, month)[1]}"
+                return value
+
+            latest = max(
+                official,
+                key=lambda item: (
+                    end(item[0].state_as_of or ""),
+                    item[2].source_ref.model_dump_json(),
+                ),
+            )
+            record, hit, evidence = latest
+            start = (record.state_as_of or "") + (
+                "-01" if record.state_as_of_precision == "month" else ""
+            )
+            states = {r.state for r, _, _ in official if end(r.state_as_of or "") >= start}
+            if len(states) > 1:
+                evidence = evidence.model_copy(update={"resolution": "conflict"})
+                text = "正式状態は不明（根拠が競合）"
+            else:
+                evidence = evidence.model_copy(
+                    update={
+                        "state": record.state,
+                        "authority": "official",
+                        "resolution": "resolved",
+                    }
+                )
+                text = f"{record.state_as_of} 時点の正式状態: {labels[record.state]}"
+        meta = hit.metadata or {}
+        label = str(meta.get("title") or subject)
+        out.append(TimelineStatus(label, text, (), hit, evidence, tuple(b for _, b in rows)))
+    return tuple(out)
+
+
+def resolve_statuses(
+    hits: Sequence[SearchHit], *, case_state: bool = False
+) -> tuple[TimelineStatus, ...]:
+    if case_state:
+        return _resolve_case_states(hits)
     grouped: dict[tuple[str, str], list[SearchHit]] = {}
     for hit in hits:
         grouped.setdefault(identity(hit), []).append(hit)

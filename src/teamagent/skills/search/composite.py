@@ -215,7 +215,7 @@ def _clip_file_names(names: tuple[str, ...]) -> list[str]:
     return out
 
 
-def _to_item(match: Any, *, drive_first: bool = False) -> SlackItem:
+def _to_item(match: Any, *, drive_first: bool = False, case_state: bool = False) -> SlackItem:
     from teamagent.skills._shared.slack_context import _neutralize
     from teamagent.skills.search.drive_first import drive_urls
     from teamagent.skills.slack_search.render import (
@@ -238,6 +238,28 @@ def _to_item(match: Any, *, drive_first: bool = False) -> SlackItem:
     )
     if drive_first:
         hit.file_ids = list(getattr(match, "file_ids", ()) or ())
+    if case_state:
+        import hashlib
+
+        from teamagent.case_state import CaseStateEvidence, SourceRef, StateRecord
+        from teamagent.ingest.case_state_evidence import message_reports
+
+        external_id = f"{match.channel_id}:{match.ts}"
+        reports = message_reports(match.channel_id, external_id, [match])
+        ref = SourceRef(
+            source_type="slack",
+            external_id=external_id,
+            locator=f"message:{match.ts}",
+            url=hit.permalink or None,
+            excerpt=hit.excerpt,
+            content_sha256=hashlib.sha256(match.text.encode()).hexdigest(),
+        )
+        hit.case_state_evidence = CaseStateEvidence(
+            subject_ref=f"source:slack:{external_id}",
+            source_ref=ref,
+            document_kind="営業報告" if reports else "Slack投稿",
+            records=tuple(StateRecord.model_validate({**r, "source_ref": ref}) for r in reports),
+        )
     return SlackItem(
         hit=hit,
         text=_neutralize(match.text, per_msg=LLM_TEXT_CHARS),
@@ -409,7 +431,12 @@ def _lookup_slack(
     from teamagent.skills.search.drive_first import enabled as drive_first_enabled
 
     drive_first = drive_first_enabled(metadata)
-    items = tuple(_to_item(m, drive_first=drive_first) for m in shown[:limit])
+    from teamagent.case_state import enabled as case_state_enabled
+
+    items = tuple(
+        _to_item(m, drive_first=drive_first, case_state=case_state_enabled(requester))
+        for m in shown[:limit]
+    )
     return SlackLookup(status="ok", reason="ok", items=items, hidden_count=hidden_count)
 
 
