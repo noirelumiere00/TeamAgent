@@ -158,6 +158,23 @@ def test_rollout_gate_blocks_before_any_apify_run(monkeypatch: pytest.MonkeyPatc
     assert fake.calls == [] and "段階公開中" in out.slack_summary
 
 
+def test_input_upgrades_slack_http_and_schemeless_links_to_https() -> None:
+    # Slack は「tiktok.com/@a/video/1」と貼られた URL を <http://…|表示名> で届ける（2026-10-30 本番の DM）。
+    inp = AdLabelCheckInput(
+        urls=[
+            "<http://tiktok.com/@trend/video/7699768122319949076|tiktok.com/@trend/video/7699768122319949076>",
+            "instagram.com/p/De1ETJtGXpD",
+            "http://youtube.com/shorts/hzfcNYdR1JM",
+        ]
+    )
+    assert inp.urls == [
+        "https://tiktok.com/@trend/video/7699768122319949076",
+        "https://instagram.com/p/De1ETJtGXpD",
+        "https://youtube.com/shorts/hzfcNYdR1JM",
+    ]
+    assert [ad_label_platform(u) for u in inp.urls] == ["tiktok", "instagram", "youtube"]
+
+
 def test_input_splits_lines_dedupes_and_caps() -> None:
     urls = [f"{TT}\n{TT}\n{IG}"] + [f"https://youtu.be/{i:011d}" for i in range(30)]
     inp = AdLabelCheckInput(urls=urls)

@@ -13,6 +13,9 @@ test('adLabelUrlCount: 投稿 URL だけ（Slack の <url|label> 形・確認の
   assert.equal(adLabelUrlCount('https://vt.tiktok.com/ZSabc/ PRチェック'), 1);
   assert.equal(adLabelUrlCount(`<@U0AICO123> ${TT}`), 1);
   assert.equal(adLabelUrlCount(`@Aico ${YT}`), 1);
+  // 2026-10-30 本番の DM: スキーム無しで貼られ、Slack が http の <url|表示名> にする形の両方。
+  assert.equal(adLabelUrlCount('tiktok.com/@trend/video/7699768122319949076\ninstagram.com/p/De1ETJtGXpD\nyoutube.com/shorts/hzfcNYdR1JM'), 3);
+  assert.equal(adLabelUrlCount('<http://tiktok.com/@trend/video/7699768122319949076|tiktok.com/@trend/video/7699768122319949076>'), 1);
 });
 
 test('adLabelUrlCount: 依頼語・他サイト・URL なし・21 件以上は 0（video_analysis 等の領分を奪わない）', () => {

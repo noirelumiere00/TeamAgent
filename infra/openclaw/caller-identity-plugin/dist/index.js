@@ -527,7 +527,9 @@ export function classifyVideoUrl(text) {
 
 // 投稿 URL だけの発話（ad_label_check）。SOUL に常設せず、該当した回だけ指示を差し込む。
 // URL 以外に残してよいのは確認を頼む短い語だけ（「この動画を分析して」等は video_analysis の領分）。
-const AD_LABEL_URL_RE = /<?(https?:\/\/[^\s<>|]+)(?:\|[^>\n]*)?>?/giu;
+// スキーム無し（「tiktok.com/@a/video/1」）でも 3 媒体のドメインなら拾う。他サイトの URL は本文に残り REST で弾く。
+const AD_LABEL_URL_RE =
+  /<?((?:https?:\/\/)?(?:[\w-]+\.)*(?:tiktok\.com|instagram\.com|youtube\.com|youtu\.be)\/[^\s<>|]+)(?:\|[^>\n]*)?>?/giu;
 const AD_LABEL_REST_RE =
   /^[\s、。,.・!！?？]*(?:(?:タイアップ|PR|ＰＲ|ステマ|広告|ラベル|表記|表示|確認|チェック|して|ください|お願い(?:します)?|を|の|と|や)[\s、。,.・!！?？]*)*$/iu;
 const AD_LABEL_MAX_URLS = 20;
@@ -545,7 +547,8 @@ export function adLabelUrlCount(text) {
   // チャンネルでは `<@U…> URL` / `@Aico URL` の形で届く。メンションは依頼の中身ではないので除く。
   const rest = head.replace(AD_LABEL_URL_RE, " ").replace(/<[@!][^<>\s]{1,64}>|@Aico/giu, " ");
   if (!AD_LABEL_REST_RE.test(rest)) return 0;
-  return urls.every(url => VIDEO_URL_RULES.some(([, rule]) => rule.test(url))) ? urls.length : 0;
+  const withScheme = url => (/^https?:\/\//iu.test(url) ? url : `https://${url}`);
+  return urls.every(url => VIDEO_URL_RULES.some(([, rule]) => rule.test(withScheme(url)))) ? urls.length : 0;
 }
 
 // 本文に分析・切り出しの依頼語があるか（真偽だけ）。

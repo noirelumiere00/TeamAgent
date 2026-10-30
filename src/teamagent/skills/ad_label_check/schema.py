@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import re
+
 from pydantic import BaseModel, Field, field_validator
 
 MAX_URLS = 20
@@ -17,8 +19,21 @@ class AdLabelCheckInput(BaseModel):
     @classmethod
     def _split_lines(cls, v: list[str]) -> list[str]:
         # 改行区切りの貼り付けが 1 要素で届いても 1 URL ずつに分ける（順序保持・重複除去）。
-        urls = [u for raw in v for u in str(raw).split() if u.strip()]
+        urls = [_canonical(u) for raw in v for u in str(raw).split() if u.strip()]
         return list(dict.fromkeys(urls))[:MAX_URLS]
+
+
+def _canonical(url: str) -> str:
+    """Slack の <url|表示名> 形を外し、スキーム無し・http を https へ揃える。
+
+    Slack は「tiktok.com/@a/video/1」のように貼られた URL を http:// のリンクにして届ける。
+    """
+    url = url.strip().strip("<>").split("|", 1)[0]
+    if url.lower().startswith("http://"):
+        return "https://" + url[len("http://") :]
+    if not url.lower().startswith("https://") and re.match(r"(?:[\w-]+\.)+[a-z]{2,}/", url, re.I):
+        return "https://" + url
+    return url
 
 
 class AdLabelResult(BaseModel):
