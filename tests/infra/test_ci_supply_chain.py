@@ -3,9 +3,55 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+import yaml
+
 ROOT = Path(__file__).resolve().parents[2]
 WORKFLOWS = ROOT / ".github" / "workflows"
 FULL_COMMIT_SHA = re.compile(r"^[0-9a-f]{40}$")
+
+
+def test_python315_pytest_is_non_blocking_and_checks_all_three_locked_shards() -> None:
+    jobs = yaml.safe_load((WORKFLOWS / "ci.yml").read_text())["jobs"]
+    experimental = jobs["python315-pytest"]
+    stable = jobs["lockfile-pytest"]
+    assert experimental["continue-on-error"] is True
+    assert experimental["strategy"]["matrix"]["shard"] == [1, 2, 3]
+    assert experimental["services"] == stable["services"]
+    assert experimental["env"] == stable["env"]
+    setup = next(
+        s for s in experimental["steps"] if s.get("uses", "").startswith("actions/setup-python@")
+    )
+    assert setup["with"]["python-version"] == "3.15"
+    install = next(
+        s["run"]
+        for s in experimental["steps"]
+        if s.get("name") == "Install dependencies from uv.lock"
+    )
+    assert "uv export --frozen" in install
+    assert "pip install --no-deps --require-hashes" in install
+    assert "pip install --no-deps -e ." in install
+    assert "--extra dev --extra mcp --extra media" in install
+    run = next(
+        s["run"]
+        for s in experimental["steps"]
+        if s.get("name") == "Pytest (duration-balanced shard)"
+    )
+    assert "--ci-shards=3 --ci-shard=${{ matrix.shard }}" in run
+    upload = experimental["steps"][-1]
+    assert upload["with"]["name"] == "pytest-lock-3.15-shard-${{ matrix.shard }}"
+    summary = jobs["pytest-summary"]
+    assert "python315-pytest" in summary["needs"]
+    check = next(
+        s
+        for s in summary["steps"]
+        if s.get("name") == "Verify experimental Python 3.15 shard inventory"
+    )
+    assert check["continue-on-error"] is True
+    assert "pytest-lock-3.15-shard-*/manifest.json" in check["run"]
+    gate = summary["steps"][-1]["run"]
+    assert "python315-pytest" not in gate
+    assert "needs.lint-and-test.result" in gate and "needs.lockfile-pytest.result" in gate
+    assert "continue-on-error" not in stable
 
 
 def test_third_party_actions_are_pinned_to_full_commit_shas() -> None:
