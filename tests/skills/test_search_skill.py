@@ -93,8 +93,15 @@ def test_search_happy_path(fake_bedrock: MagicMock, fake_pgvector: MagicMock) ->
     assert out.total_cost_usd == pytest.approx(0.0018)
 
 
-def test_search_zero_hits_skips_bedrock(fake_bedrock: MagicMock, fake_pgvector: MagicMock) -> None:
+@pytest.mark.parametrize("recovery_enabled", [False, True])
+def test_search_zero_hits_skips_bedrock(
+    monkeypatch: pytest.MonkeyPatch,
+    fake_bedrock: MagicMock,
+    fake_pgvector: MagicMock,
+    recovery_enabled: bool,
+) -> None:
     """ヒット 0 件のとき Bedrock を呼ばずスキップする。"""
+    monkeypatch.setenv("SEARCH_NOT_FOUND_RECOVERY", str(int(recovery_enabled)))
     fake_pgvector.search_similar.return_value = []
 
     skill = SearchSkill(
@@ -109,7 +116,13 @@ def test_search_zero_hits_skips_bedrock(fake_bedrock: MagicMock, fake_pgvector: 
 
     assert out.hits == []
     assert out.total_cost_usd == 0.0
-    assert "見つかりません" in out.answer
+    assert not out.found
+    if recovery_enabled:
+        # 匿名ではSlack未確認のため、不在の断定ではなく検索未完了を返す。
+        assert "検索が完了せず確認できませんでした" in out.answer
+        assert "探した範囲" in out.answer
+    else:
+        assert "見つかりません" in out.answer
     fake_bedrock.converse.assert_not_called()
 
 
@@ -953,14 +966,19 @@ def test_summary_max_tokens_default_unchanged(
 # -----------------------------------------------------------
 # min_relevance（反ハルシネーション閾値, Sprint 5）
 # -----------------------------------------------------------
+@pytest.mark.parametrize("recovery_enabled", [False, True])
 def test_min_relevance_drops_hits_below_threshold(
-    fake_bedrock: MagicMock, fake_pgvector_new_schema: MagicMock
+    monkeypatch: pytest.MonkeyPatch,
+    fake_bedrock: MagicMock,
+    fake_pgvector_new_schema: MagicMock,
+    recovery_enabled: bool,
 ) -> None:
     """min_relevance を超えない hit は落とされ、空なら 0 件になる。
 
-    fixture の hit は score=0.92。閾値 0.95 で全件落ち → hits 0 件 →
-    Bot は「資料に記載がありません」相当を返す (expect_zero 救済の中核)。
+    fixture の hit は score=0.92。閾値0.95・fallback無効なので共通救済ONでも
+    閾値未満の候補を復活させず、最終0件なら要約を呼ばない。
     """
+    monkeypatch.setenv("SEARCH_NOT_FOUND_RECOVERY", str(int(recovery_enabled)))
     skill = SearchSkill(
         bedrock=fake_bedrock,
         pgvector=fake_pgvector_new_schema,
@@ -970,6 +988,35 @@ def test_min_relevance_drops_hits_below_threshold(
     )
     out = skill.run(input=SearchInput(query="東芝の半導体事業"), ctx=SkillContext())
     assert len(out.hits) == 0
+    assert not out.found and out.total_cost_usd == 0.0
+    fake_bedrock.converse.assert_not_called()
+
+
+def test_search_zero_after_recovery_thresholds_skips_bedrock(
+    monkeypatch: pytest.MonkeyPatch,
+    fake_bedrock: MagicMock,
+    fake_pgvector_new_schema: MagicMock,
+) -> None:
+    """緩和が有効でもfallback未満の候補は落とし、最終0件なら要約を呼ばない。"""
+    monkeypatch.setenv("SEARCH_NOT_FOUND_RECOVERY", "1")
+    fake_pgvector_new_schema.search_similar_new_schema.return_value = [
+        SearchHit(chunk_id=1, content="資料本文", score=0.01, metadata={"title": "資料"})
+    ]
+    skill = SearchSkill(
+        bedrock=fake_bedrock,
+        pgvector=fake_pgvector_new_schema,
+        embedder=FakeEmbedder(),
+        use_new_schema=True,
+        min_relevance=0.4,
+        min_relevance_fallback=0.05,
+        drive_pool_floor=0,
+        campaign_pool_floor=0,
+        deal_pool_floor=0,
+    )
+    out = skill.run(SearchInput(query="資料を探して"), SkillContext())
+    assert fake_pgvector_new_schema.search_similar_new_schema.call_count == 3
+    assert out.hits == [] and not out.found and out.total_cost_usd == 0.0
+    fake_bedrock.converse.assert_not_called()
 
 
 def test_min_relevance_keeps_hits_above_threshold(

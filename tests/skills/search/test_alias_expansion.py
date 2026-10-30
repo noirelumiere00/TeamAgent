@@ -102,8 +102,8 @@ def test_unconfirmed_terms_are_not_guessed(query: str) -> None:
     skill, b, _ = _search(lambda *_: [])
     out = skill.run(SearchInput(query=query), SkillContext(metadata={}))
     assert not out.found
-    assert out.answer.endswith(f"探した範囲: 金庫を『{query}』で検索")
-    assert len(skill._embedder.values) == 1
+    assert out.answer.endswith(f"金庫を『{query}』で検索")
+    assert list(skill._embedder.values.values()) == [query]
     b.converse.assert_not_called()
 
 
@@ -211,6 +211,7 @@ def test_success_does_not_retry_and_fast_path_has_empty_answer() -> None:
 def test_kill_switches_restore_single_search_and_no_footer(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("SEARCH_ALIAS_EXPANSION", "false")
     monkeypatch.setenv("SEARCH_SCOPE_FOOTER", "false")
+    monkeypatch.setenv("SEARCH_NOT_FOUND_RECOVERY", "0")
     skill, b, _ = _search(lambda *_: [])
     out = skill.run(SearchInput(query="インペックスの資料"), SkillContext(metadata={}))
     assert not out.found and len(skill._embedder.values) == 1
@@ -328,7 +329,7 @@ def test_retry_logging_does_not_include_query_body_or_error_message() -> None:
     encoded = json.dumps(logs, ensure_ascii=False)
     assert "PRIVATE_BODY_PERSON" not in encoded and "インペックス" not in encoded
     events = [entry for entry in logs if entry["event"] == "search_alias_retry"]
-    assert len(events) == 1
+    assert len(events) == 3
     assert set(events[0]) == {
         "event",
         "log_level",

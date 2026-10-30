@@ -263,7 +263,7 @@ def test_pg_failure_is_failed_not_zero(exc: Exception) -> None:
     skill, pg = make()
     pg.connection.side_effect = exc
     out = run(skill)
-    assert not out.found
+    assert out.found and out.slack_hits  # 金庫が失敗しても取得済みのSlack根拠は残す。
     assert "金庫 ✗" in out.answer and "金庫 0件" not in out.answer
 
 
@@ -561,7 +561,7 @@ def test_rls_identity_and_peak_connections_at_most_three(monkeypatch: pytest.Mon
     pg.search_similar_new_schema.side_effect = search
     try:
         out = run(skill, meta={**META, "user_groups": ["sales"], "user_role": "member"})
-        assert not out.found and 2 <= peak <= 3
+        assert out.found and out.slack_hits and 2 <= peak <= 3
     finally:
         release.set()
 
@@ -722,10 +722,8 @@ def test_iter4_zero_matching_cases_never_fill_with_unrelated_results(
         lambda *a, **kw: ExpansionResult(("別の事例",), "食品", (unrelated,), "ok", 1, 0.0),
     )
     out = run(skill, query=f"{target}の事例を教えて")
-    assert (
-        out.answer
-        == f"{target}の事例は見つかりませんでした（探した範囲: 社内資料・施策実績・Slack）。"
-    )
+    assert out.answer.startswith(f"{target}の事例は見つかりませんでした")
+    assert f"金庫を『{target}の事例を教えて』で検索" in out.answer
     assert out.found is False
     skill._summarize.assert_not_called()
 
@@ -963,10 +961,10 @@ def test_list_fast_off_is_byte_identical(monkeypatch: pytest.MonkeyPatch, flag: 
 def test_list_fast_not_found_is_byte_identical(monkeypatch: pytest.MonkeyPatch) -> None:
     summary = _bedrock()
     monkeypatch.setattr(fanout, "build_summary_client", lambda: summary)
-    baseline, _ = make([])
+    baseline, _ = make([], client=_slack_client([]))
     expected = run(baseline, query="伊藤ハムの資料を一覧で").model_dump_json()
     monkeypatch.setenv("SEARCH_FANOUT_LIST_FAST", "1")
-    skill, _ = make([])
+    skill, _ = make([], client=_slack_client([]))
     out = run(skill, query="伊藤ハムの資料を一覧で")
     assert out.model_dump_json() == expected
     assert not out.found and out.answer.startswith(NOT_FOUND_HEAD)

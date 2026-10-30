@@ -351,9 +351,8 @@ def test_only_mismatched_industry_is_not_found() -> None:
     skill = _skill(pg)
     out = _run(skill)
     assert out.found is False
-    assert (
-        out.answer == "飲料の事例は見つかりませんでした（探した範囲: 社内資料・施策実績・Slack）。"
-    )
+    assert "飲料の事例の有無は検索が完了せず確認できませんでした" in out.answer
+    assert "探した範囲" in out.answer and "飲料メーカーの施策事例" in out.answer
     skill._bedrock.converse.assert_not_called()  # type: ignore[attr-defined]
 
 
@@ -374,9 +373,8 @@ def test_campaign_files_kill_switch_keeps_case_target_guard(
     out = _run(skill)
     assert pg.drive_calls == []
     assert all("related_files" not in h for h in out.model_dump()["hits"])
-    assert (
-        out.answer == "飲料の事例は見つかりませんでした（探した範囲: 社内資料・施策実績・Slack）。"
-    )
+    assert "飲料の事例の有無は検索が完了せず確認できませんでした" in out.answer
+    assert "探した範囲" in out.answer
     assert out.found is False
     skill._bedrock.converse.assert_not_called()  # type: ignore[attr-defined]
 
@@ -971,9 +969,8 @@ def test_no_industry_case_is_a_short_deterministic_answer() -> None:
         answer="金融関連の施策実績は見つかりませんでした。食品Aの事例です。銀行で検索してと言ってもらえれば探せます。",
     )
     out = _run(skill, query="金融の事例を教えて")
-    assert (
-        out.answer == "金融の事例は見つかりませんでした（探した範囲: 社内資料・施策実績・Slack）。"
-    )
+    assert "金融の事例の有無は検索が完了せず確認できませんでした" in out.answer
+    assert "金融の事例を教えて" in out.answer
     assert out.found is False
     skill._bedrock.converse.assert_not_called()  # type: ignore[attr-defined]
 

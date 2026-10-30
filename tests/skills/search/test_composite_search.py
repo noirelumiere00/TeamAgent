@@ -476,8 +476,8 @@ def test_vault_empty_slack_only_says_so() -> None:
         SearchInput(query="東芝の半導体事業の提案について"),
         SkillContext(metadata=dict(MCP, channel_id="D1")),
     )
-    assert out.found is False and out.slack_status == "ok"
-    assert out.answer.startswith(f"{NOT_FOUND_HEAD}。")
+    assert out.found is True and out.slack_status == "ok"
+    assert not out.answer.startswith(NOT_FOUND_HEAD)
     assert "Slack の投稿にあります" in out.answer
     msg = _user_message(b)
     assert "（金庫に該当する資料はありません）" in msg
@@ -490,8 +490,9 @@ def test_both_empty_no_llm_call() -> None:
     skill, _ = _skill(b, _pg([]), client=_slack_client([]))
     out = skill.run(SearchInput(query="x"), SkillContext(metadata=dict(MCP, channel_id="D1")))
     assert out.found is False and out.slack_status == "ok" and out.slack_hits == []
-    assert out.answer.split("\n\n探した範囲:", 1)[0] == f"{NOT_FOUND_HEAD}。"
-    assert out.answer.endswith("探した範囲: 金庫を『x』で検索・Slack も確認")
+    assert out.answer.startswith(NOT_FOUND_HEAD)
+    assert out.answer.endswith("金庫を『x』で検索")
+    assert "Slack 0件" in out.answer
     b.converse.assert_not_called()
 
 
@@ -499,10 +500,9 @@ def test_vault_weak_and_slack_failed_is_not_found_and_cannot_search() -> None:
     b = _bedrock(scores=[0.1])
     skill, _ = _skill(b, _pg([_vault_hit()]), client=_slack_client(error="ratelimited"))
     out = skill.run(SearchInput(query="x"), SkillContext(metadata=dict(MCP, channel_id="D1")))
-    assert out.found is False
-    assert out.answer.startswith(NOT_FOUND_HEAD)
-    assert out.answer.split("\n\n探した範囲:", 1)[0].endswith(STATUS_NOTES["error"])
-    assert out.answer.endswith("・Slack は確認できませんでした")
+    assert out.found is True and out.hits[0].is_low_confidence
+    assert out.direct_answer_kind != "not_found"
+    assert "Slack ✗" in out.answer and out.slack_status == "error"
 
 
 # ── 並行実行（逐次なら必ず赤）──────────────────────────────────────────────

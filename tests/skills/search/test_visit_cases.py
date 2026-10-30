@@ -90,7 +90,8 @@ def test_unknown_visit_company_uses_category_cases_only(
         assert out.answer.count("• 利用シーンを紹介。") == 3
         assert pg.list_case_studies.call_args.kwargs.get("industry") == "食品"
     else:
-        assert out.answer == "乳製品 の事例は見つかりませんでした。"
+        assert out.answer.startswith("乳製品 の事例は見つかりませんでした。")
+        assert "探した範囲" in out.answer and "乳製品系商品" in out.answer
         assert not out.displayed_refs
     skill._summarize.assert_not_called()
 
