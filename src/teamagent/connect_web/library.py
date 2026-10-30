@@ -158,12 +158,14 @@ _METRIC_SELECT = ", ".join(f"m.{column}" for column in METRIC_COLUMNS)
 def search_videos(conn: Any, params: Mapping[str, str], *, admin: bool) -> dict[str, Any]:
     where, values, page, order = _where(params, admin)
     count = conn.execute(
-        f"SELECT count(*) AS n FROM vl_videos_effective v WHERE {where}", values
+        # 固定の句と許可リストの並び順だけを連結し、利用者の値は全て %s で渡す
+        f"SELECT count(*) AS n FROM vl_videos_effective v WHERE {where}",  # nosec B608
+        values,
     ).fetchone()["n"]
+    # 同上: 列名・JOIN・句・並び順はコード内の固定値で、利用者の値は %s で渡す
+    list_sql = f"SELECT v.*, {_METRIC_SELECT}, m.captured_on FROM vl_videos_effective v {_METRICS_JOIN} WHERE {where} ORDER BY {order} DESC NULLS LAST, v.platform, v.video_id LIMIT %s OFFSET %s"  # noqa: E501  # nosec B608
     rows = conn.execute(
-        f"""SELECT v.*, {_METRIC_SELECT}, m.captured_on FROM vl_videos_effective v
-            {_METRICS_JOIN} WHERE {where}
-            ORDER BY {order} DESC NULLS LAST, v.platform, v.video_id LIMIT %s OFFSET %s""",
+        list_sql,
         [*values, PAGE_SIZE, (page - 1) * PAGE_SIZE],
     ).fetchall()
     for row in rows:
@@ -424,10 +426,10 @@ def register_library_routes(
             )
 
     def video(conn: Any, platform: str, video_id: str, email: str) -> Any:
+        # 列名と JOIN はコード内の固定値。識別子と権限は %s で渡す
+        detail_sql = f"SELECT v.*, {_METRIC_SELECT}, m.captured_on FROM vl_videos_effective v {_METRICS_JOIN} WHERE v.platform=%s AND v.video_id=%s AND (%s OR NOT v.is_private)"  # noqa: E501  # nosec B608
         row = conn.execute(
-            f"""SELECT v.*, {_METRIC_SELECT}, m.captured_on FROM vl_videos_effective v
-                {_METRICS_JOIN}
-                WHERE v.platform=%s AND v.video_id=%s AND (%s OR NOT v.is_private)""",
+            detail_sql,
             (platform, video_id, is_admin(email)),
         ).fetchone()
         if row is None:
