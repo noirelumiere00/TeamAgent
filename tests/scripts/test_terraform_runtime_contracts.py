@@ -2075,3 +2075,12 @@ def test_migration_to_file_emits_the_migration_object_not_a_boolean() -> None:
         '  \' "$MIGRATION_FILE" > "$output" ||'
     ) in guard
     assert '    ) and\n    .migrations[$id]\n  \' "$MIGRATION_FILE"' not in guard
+
+
+def test_ingest_task_has_video_library_accounts_sheet_env() -> None:
+    ingest = _block(TF_ROOT / "ingest_schedule.tf", "aws_ecs_task_definition", "ingest")
+    assert (
+        '{ name = "VIDEO_LIBRARY_ACCOUNTS_SHEET_ID", value = "1Zv-RsxkjwET8OrAMpxVPmfTHLpDPxyni7_HutEGeEwk" }'
+        in ingest
+    )
+    assert ingest.count('name = "VIDEO_LIBRARY_ACCOUNTS_SHEET_ID"') == 1

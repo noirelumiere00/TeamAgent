@@ -227,6 +227,7 @@ resource "aws_ecs_task_definition" "ingest" {
       # MCP task-def（fargate.tf）と同変数を ingest task にも渡し、会社メンバーへ横共有する（Codex #215-3）。
       { name = "TEAMAGENT_SHARED_COMPANY_DOMAINS", value = var.shared_company_domains },
       { name = "STRUCTLOG_FORMAT", value = "json" },
+      { name = "VIDEO_LIBRARY_ACCOUNTS_SHEET_ID", value = "1Zv-RsxkjwET8OrAMpxVPmfTHLpDPxyni7_HutEGeEwk" },
       # §知識ベース（2026-06-22）: Drive 取り込み時に Bedrock で資料を自動分類
       # （案件/業界/種別/フェーズ→documents.metadata）。ingest_task は bedrock:InvokeModel 保持済。
       { name = "USE_DOC_CLASSIFY", value = "true" },

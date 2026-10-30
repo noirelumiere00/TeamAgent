@@ -944,3 +944,83 @@ def test_organic_category_exists_in_migration_and_dry_run_catalog() -> None:
     ).read_text()
     assert "('organic', 'オーガニック', 50)" in source
     assert CATEGORY_NAMES["organic"] == "オーガニック"
+
+
+@pytest.mark.parametrize("stage", ["metadata", "first_tab", "second_tab"])
+def test_accounts_ledger_failure_warns_and_continues_without_ledger(
+    source_env: None,
+    monkeypatch: pytest.MonkeyPatch,
+    stage: str,
+) -> None:
+    monkeypatch.setenv("VIDEO_LIBRARY_ACCOUNTS_SHEET_ID", "accounts")
+    sheets = FakeSheets()
+    get_metadata, get_rows = sheets.get_sheet_metadata, sheets.get_tab_rows
+
+    def metadata(sheet_id: str, request_id: str) -> SheetMetadata:
+        if sheet_id == "accounts" and stage == "metadata":
+            raise RuntimeError("private ledger details")
+        return get_metadata(sheet_id, request_id)
+
+    def rows(sheet_id: str, tab_name: str, request_id: str) -> TabRows:
+        failed_tab = "ベクトルメディア" if stage == "first_tab" else "オフショア込み"
+        if sheet_id == "accounts" and tab_name == failed_tab:
+            raise RuntimeError("private ledger details")
+        return get_rows(sheet_id, tab_name, request_id)
+
+    monkeypatch.setattr(sheets, "get_sheet_metadata", metadata)
+    monkeypatch.setattr(sheets, "get_tab_rows", rows)
+    builder = MagicMock(wraps=sync.build_batch)
+    monkeypatch.setattr(sync, "build_batch", builder)
+    result = sync.read_batch(sheets, request_id="test", now=NOW)  # type: ignore[arg-type]
+    assert result.warnings["accounts_ledger_unavailable"] == 1
+    assert result.accounts == []
+    assert "accounts_unconfigured" not in result.warnings
+    assert len(result.videos) == len(result.metrics) == 1
+    assert result.videos[0].business_category == "organic"
+    assert builder.call_args.kwargs["account_ledger"] is None
+
+
+@pytest.mark.parametrize("failed_tab", ["名前変更済み", "全体Raw"])
+def test_required_sheet_failure_still_fails_sync(
+    source_env: None,
+    monkeypatch: pytest.MonkeyPatch,
+    failed_tab: str,
+) -> None:
+    sheets = FakeSheets()
+    original = sheets.get_tab_rows
+
+    def get_rows(sheet_id: str, tab_name: str, request_id: str) -> TabRows:
+        if tab_name == failed_tab:
+            raise RuntimeError("required sheet unavailable")
+        return original(sheet_id, tab_name, request_id)
+
+    monkeypatch.setattr(sheets, "get_tab_rows", get_rows)
+    with pytest.raises(RuntimeError, match="required sheet unavailable"):
+        sync.read_batch(sheets, request_id="test", now=NOW)  # type: ignore[arg-type]
+
+
+def test_cli_expands_oauth_json_and_passes_sources_path(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    import os
+
+    for name in ("GOOGLE_CLIENT_ID", "GOOGLE_CLIENT_SECRET", "GOOGLE_OAUTH_REFRESH_TOKEN"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv(
+        "GOOGLE_OAUTH_JSON",
+        json.dumps({"client_id": "id", "client_secret": "secret", "refresh_token": "token"}),
+    )
+
+    def sheets_from_env() -> FakeSheets:
+        assert os.environ["GOOGLE_CLIENT_ID"] == "id"
+        assert os.environ["GOOGLE_CLIENT_SECRET"] == "secret"
+        assert os.environ["GOOGLE_OAUTH_REFRESH_TOKEN"] == "token"
+        return FakeSheets()
+
+    monkeypatch.setattr(sync.GSheetsClient, "from_env", sheets_from_env)
+    reader = MagicMock(return_value=SyncBatch())
+    monkeypatch.setattr(sync, "read_batch", reader)
+    path = tmp_path / "resolved.yaml"
+    assert sync.main(["--dry-run"], sources_path=path) == 0
+    assert reader.call_args.kwargs["sources_path"] == path

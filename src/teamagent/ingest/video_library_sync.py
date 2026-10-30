@@ -12,6 +12,7 @@ from pathlib import Path
 
 import structlog
 
+from teamagent.adapters.google_oauth_env import expand_google_oauth_json
 from teamagent.adapters.gsheets_client import GSheetsClient, TabRows
 from teamagent.adapters.pgvector_client import PgVectorClient
 from teamagent.ingest.campaign_aggregate import POST_DATE_TAB_NAME
@@ -56,31 +57,37 @@ def read_batch(
         master = sheets.get_tab_rows(source.sheet_id, MASTER_TAB, request_id)
     ledger = None
     missing_account_tabs = 0
+    ledger_unavailable = False
     ledger_id = os.environ.get("VIDEO_LIBRARY_ACCOUNTS_SHEET_ID", "").strip()
     if ledger_id:
-        ledger_metadata = sheets.get_sheet_metadata(ledger_id, request_id)
-        available_tabs = {tab.title for tab in ledger_metadata.tabs}
-        tables = []
-        for name in ACCOUNTS_TABS:
-            if name not in available_tabs:
-                missing_account_tabs += 1
-                continue
-            tables.append(sheets.get_tab_rows(ledger_id, name, request_id))
-        headers = tuple(
-            dict.fromkeys(header.strip() for table in tables for header in table.headers)
-        )
-        rows = []
-        for table in tables:
-            for row in table.rows:
-                cells = dict(zip((header.strip() for header in table.headers), row, strict=False))
-                rows.append(tuple(cells.get(header, "") for header in headers))
-        ledger = TabRows(
-            sheet_id=ledger_id,
-            tab_name=" / ".join(table.tab_name for table in tables),
-            headers=headers,
-            rows=tuple(rows),
-            row_count=len(rows),
-        )
+        try:
+            ledger_metadata = sheets.get_sheet_metadata(ledger_id, request_id)
+            available_tabs = {tab.title for tab in ledger_metadata.tabs}
+            tables = []
+            for name in ACCOUNTS_TABS:
+                if name not in available_tabs:
+                    missing_account_tabs += 1
+                    continue
+                tables.append(sheets.get_tab_rows(ledger_id, name, request_id))
+            headers = tuple(
+                dict.fromkeys(header.strip() for table in tables for header in table.headers)
+            )
+            rows = []
+            for table in tables:
+                for row in table.rows:
+                    cells = dict(
+                        zip((header.strip() for header in table.headers), row, strict=False)
+                    )
+                    rows.append(tuple(cells.get(header, "") for header in headers))
+            ledger = TabRows(
+                sheet_id=ledger_id,
+                tab_name=" / ".join(table.tab_name for table in tables),
+                headers=headers,
+                rows=tuple(rows),
+                row_count=len(rows),
+            )
+        except Exception:
+            ledger_unavailable = True
     batch = build_batch(
         database,
         raw,
@@ -91,10 +98,15 @@ def read_batch(
     )
     if missing_account_tabs:
         batch.warnings["accounts_tab_missing"] = missing_account_tabs
+    if ledger_unavailable:
+        # An unavailable ledger must not erase account labels saved by a previous run.
+        batch.accounts.clear()
+        batch.warnings.pop("accounts_unconfigured", None)
+        batch.warnings["accounts_ledger_unavailable"] = 1
     return batch
 
 
-def main(argv: list[str] | None = None) -> int:
+def main(argv: list[str] | None = None, *, sources_path: Path = SOURCES_PATH) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--dry-run", action="store_true", help="Read sheets and print counts without DB access"
@@ -111,6 +123,7 @@ def main(argv: list[str] | None = None) -> int:
     batch = None
     with structlog.contextvars.bound_contextvars(request_id=request_id, skill="video_library_sync"):
         try:
+            expand_google_oauth_json()
             if not args.dry_run:
                 pg = PgVectorClient.from_env()
                 repository = VideoLibraryRepository(pg)
@@ -119,6 +132,7 @@ def main(argv: list[str] | None = None) -> int:
                 GSheetsClient.from_env(),
                 request_id=request_id,
                 now=started_at,
+                sources_path=sources_path,
                 business_categories=categories,
             )
             for reason, count in batch.warnings.items():
