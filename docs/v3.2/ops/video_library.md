@@ -152,3 +152,56 @@
 | Origin: nullを許す | `test_admin_forms_require_origin_and_save_as_admin` |
 
 完全な検証出力は `/tmp/video-library-review-pytest.log`、`/tmp/video-library-review-restored.log`、`/tmp/video-library-review-mypy.log`、`/tmp/video-library-review-imports.log`。破壊確認の結果は `/tmp/video-library-review-mutations.json`、各失敗全文は `/tmp/video-library-review-mutation-*.log`。push・PR作成はしていない。
+
+## 事例カタログ UI（2026-10）
+
+上記の旧一覧・灰色の仮表示を更新し、入口を事例カタログに変更した。API `/library/api/videos` の返却形式は維持する。
+
+| ページ | URL | 主な操作 |
+| --- | --- | --- |
+| 事例カタログ | `/library` | 検索、区分・PR・業種・目的、合計再生／新着／本数順、ばらした再生上位動画 |
+| 事例詳細 | `/library/c?advertiser=…&campaign=…` | 全動画、成果、事例まとめ／URLだけコピー |
+| 動画一覧 | `/library/videos` | 絞り込み、再生／保存率順、選択URLコピー |
+| 動画詳細 | `/library/v/{platform}/{video_id}` | クリック再生、数値、投稿文、事例リンク、構成とタグ |
+| 案件管理 | `/library/admin/campaigns` | 既存の設定・権限・Origin検証を維持 |
+| アカウント管理 | `/library/admin/accounts` | 既存の登録と権限を維持 |
+
+集計は `vl_videos_effective` と各動画の最新 `vl_metrics` を GROUP BY する1クエリ。代表画像はサムネありを優先し、その中で最大再生を選ぶ。合計に必要な値が欠損した場合は「算出不可」。カタログの平均保存率は有効な各動画の保存率の単純平均、事例詳細の保存率は合計保存÷合計再生。上位動画は案件・アカウント別順位で候補を確保してから再生順にばらす。異なる隣接動画を確保できない場合は12本未満になる。
+
+構成の読み出し契約は `vl_video_analysis.kind='structure'`、`version='v1'`、最新 `analyzed_at`。payload は次の形を `library_analysis.AnalysisPayload` で検証する。
+
+```json
+{
+  "segments": [
+    {"start": 0.0, "end": 1.8, "role": "hook", "telop": "知ってた？", "speech": "…", "visual": "商品を見せる"}
+  ],
+  "tags": {"hook_type": ["question"], "presentation": ["demo"], "topic": ["problem"], "format": ["interview"], "pain": ["準備に時間がかかる"], "cta": ["save"]},
+  "standards": {"cuts_first_3s": true, "loop": true, "telop_safe": true}
+}
+```
+
+区間は昇順・重複なし・有限の秒数で、終了が開始より後。表示名・説明は `TAG_DESCRIPTIONS` に集約。区間の幅は秒数に比例し、クリックまたはフォーカスでテロップ・発話・映像を開く。分析タグは分類別に表示し、対応する動画一覧へリンクする。分析なし・不正payloadでは明確に「見本」「近日公開」を表示し、見本のタグリンクは無効。見本は表示専用で本番DBには保存しない。区分・業種・目的のタグも動画一覧へリンクする。
+
+変更ファイルは `library.py`、新規 `library_assets.py`／`library_analysis.py`、`test_library.py`／`test_library_js.py`、新規 `test_library_catalog.py`／`test_library_catalog_postgres.py` と本書。app.py、migration、認証方式は変更していない。
+
+検証はメモリ消費を抑えて library 関連4ファイルに限定し、118 passed / 3 skipped。主要な追加テスト:
+
+- `test_catalog_case_links_copy_and_all_videos`
+- `test_catalog_navigation_and_security`
+- `test_catalog_industry_chips_and_card_tag_labels`
+- `test_diversify_never_repeats_campaign_or_account_and_does_not_mutate`
+- `test_analysis_contract_grouped_tags_timeline_and_escaping`
+- `test_analysis_invalid_or_absent_shows_disabled_example`
+- `test_tag_search_is_parameterized_and_latest_version_only`
+- `test_detail_has_clickable_player_and_only_supported_analysis`
+- `test_campaign_group_by_latest_totals_average_and_representative`（実DB・未実施）
+- `test_campaign_filters_privacy_and_sort`（実DB・未実施）
+- `test_analysis_tag_filter_executes_on_latest_supported_payload`（実DB・未実施）
+
+mypy strict、CI固定版ruff 0.15.15のcheck／format、import-linterの2契約も検証。ローカルvenvに不足する依存を補うため、mypyは既存の依存導入済みPythonを `--python-executable /tmp/ci-fast-repro-venv/bin/python` で参照した。ログは `/tmp/library-v2-final-pytest.log`、`/tmp/library-v2-mypy-final.log`、`/tmp/library-v2-ruff-final.log`、`/tmp/library-v2-format-final.log`、`/tmp/library-v2-import-linter.log`。
+
+次の9箇所を一時的に壊し、対象テストが失敗することを確認して復元した: 案件／アカウントのばらし、コピー文の再生数、サムネ準備中の表示、HTMLエスケープ、iframeの先行破棄、選択済みURLだけのコピー、見本タグの無効化、タイムラインの秒数比、非公開除外。結果は `/tmp/library-v2-mutations.json`、失敗全文は `/tmp/library-v2-mutation-*.log`。
+
+スクリーンショットは fake DB で実ルートのレスポンスを生成し、ローカルHTMLをChromeで表示。画像は撮影専用の見本。`/tmp/library-v2-screenshots/` に `catalog`／`case`／`videos`／`detail`／`analysis`／`admin`／`accounts` のそれぞれ `-1440.png` と `-375.png` を保存した（CSS幅、DPR 2）。画面を目視し、広告指標の詰まり、CTAタグの配色、縦型サムネの比率、アカウント登録の入力欄配置を修正した。分析見本は区間をクリックして内容が開くことも確認。撮影用ブラウザウインドウは終了後に閉じた。
+
+未実施: 実DB3テストは `TEAMAGENT_TEST_DB_DSN` 未設定でスキップ。使い捨てPostgreSQLの起動もサンドボックスの共有メモリ制限で失敗（`/tmp/library-v2-initdb.log`）。実TikTok再生・本番S3との疎通、本番データ・デプロイは未検証。768／1024pxはCSS分岐の確認のみで実画面撮影は未実施。push・PRは実施していない。
