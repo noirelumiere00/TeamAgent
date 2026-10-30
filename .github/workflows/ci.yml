@@ -123,6 +123,18 @@ jobs:
         if: matrix.shard == 1
         run: mypy src/teamagent
 
+      - name: Set up Node for the pinned proposal kit
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "24"
+
+      - name: Install the Git-free pinned proposal kit
+        run: |
+          kit="$(mktemp -d "$RUNNER_TEMP/concrete-kit.XXXXXX")"
+          tar -xzf tools/first_visit/tiktok-skills-kit-25eccd8.tar.gz -C "$kit"
+          npm ci --prefix "$kit/tiktok-deck" --ignore-scripts --no-audit --no-fund
+          echo "FIRST_VISIT_CONCRETE_KIT_PATH=$kit" >> "$GITHUB_ENV"
+
       - name: Install TikTok scraper Node dependencies
         run: npm ci --prefix tools/tiktok_scraper --no-audit --no-fund
 
@@ -233,6 +245,18 @@ jobs:
               )
               conn.execute("GRANT teamagent_app TO postgres")
           PY
+
+      - name: Set up Node for the pinned proposal kit
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "24"
+
+      - name: Install the Git-free pinned proposal kit
+        run: |
+          kit="$(mktemp -d "$RUNNER_TEMP/concrete-kit.XXXXXX")"
+          tar -xzf tools/first_visit/tiktok-skills-kit-25eccd8.tar.gz -C "$kit"
+          npm ci --prefix "$kit/tiktok-deck" --ignore-scripts --no-audit --no-fund
+          echo "FIRST_VISIT_CONCRETE_KIT_PATH=$kit" >> "$GITHUB_ENV"
 
       - name: Install TikTok scraper Node dependencies
         run: npm ci --prefix tools/tiktok_scraper --no-audit --no-fund

@@ -14,9 +14,10 @@ import sys
 from collections.abc import Mapping, Sequence
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 from urllib.parse import urlparse
 
+from teamagent.skills.first_visit.kit import archive_kit_problems
 from teamagent.skills.omiyage_report.metrics import AxisData, PostRecord
 from teamagent.skills.omiyage_report.schema import OmiyageReportSubmitInput
 
@@ -400,7 +401,8 @@ def _kit_problems(kit_path: Path) -> list[str]:
 _GATE_SCRIPT = r"""
 import json, sys
 from pathlib import Path
-root, kit = map(Path, sys.argv[1:])
+root, kit = map(Path, sys.argv[1:3])
+part = sys.argv[3]
 sys.path.insert(0, str(kit / "tiktok-deck/tools"))
 from research_input_gate import InputGateError, validate_research_inputs
 from label_posts import axes_of
@@ -425,7 +427,7 @@ try:
     result = validate_research_inputs(
         case_dir=root, run_dir=root, cfg=cfg, raw=raw, labels=labels,
         synthesis=read("authored/synthesis.json"), selection_path=root / "selection.json",
-        reviews_dir=reviews, explicit_reviews=reviews is not None, part="first",
+        reviews_dir=reviews, explicit_reviews=reviews is not None, part=part,
         review_spec=json.loads(spec_path.read_text(encoding="utf-8")),
     )
     print(json.dumps({"problems": [], "quality_contract": result["quality_contract"]}))
@@ -441,9 +443,17 @@ def missing_inputs(
     *,
     kit_path: Path,
     kit_python: Path | None = None,
+    part: Literal["first", "concrete"] = "first",
+    kit_archive: Path | None = None,
 ) -> list[str]:
     """List missing decisions/evidence, then run the actual pinned kit gate read-only."""
-    problems = _kit_problems(kit_path)
+    if part not in {"first", "concrete"}:
+        return ["part: first または concrete が必要です"]
+    problems = (
+        _kit_problems(kit_path)
+        if kit_archive is None
+        else archive_kit_problems(kit_path, kit_archive)
+    )
     try:
         if root.is_symlink() or any(p.is_symlink() for p in root.rglob("*")):
             return [*problems, "manifest: 案件内のシンボリックリンクは使用できません"]
@@ -601,11 +611,13 @@ def missing_inputs(
             result = subprocess.run(
                 [
                     str(kit_python or sys.executable),
+                    "-I",
                     "-B",
                     "-c",
                     _GATE_SCRIPT,
                     str(root.resolve()),
                     str(kit_path.resolve()),
+                    part,
                 ],
                 capture_output=True,
                 text=True,
@@ -657,10 +669,14 @@ def seal_inputs(
     *,
     kit_path: Path,
     kit_python: Path | None = None,
+    part: Literal["first", "concrete"] = "first",
+    kit_archive: Path | None = None,
 ) -> dict[str, Any]:
     """Seal complete evidence only. No renderer is invoked by this module."""
     manifest = _manifest(root)
-    problems = missing_inputs(root, kit_path=kit_path, kit_python=kit_python)
+    problems = missing_inputs(
+        root, kit_path=kit_path, kit_python=kit_python, part=part, kit_archive=kit_archive
+    )
     if problems:
         raise IncompleteInputsError(problems)
     if manifest != _manifest(root):
@@ -675,6 +691,8 @@ def verify_manifest(
     *,
     kit_path: Path,
     kit_python: Path | None = None,
+    part: Literal["first", "concrete"] = "first",
+    kit_archive: Path | None = None,
 ) -> list[str]:
     """Verify exact file membership, bytes and pin before a future generation step."""
     try:
@@ -682,7 +700,9 @@ def verify_manifest(
             return ["manifest: ファイル一覧・SHA-256・サイズ・版が一致しません"]
     except (OSError, ValueError) as exc:
         return [f"manifest: {exc}"]
-    problems = missing_inputs(root, kit_path=kit_path, kit_python=kit_python)
+    problems = missing_inputs(
+        root, kit_path=kit_path, kit_python=kit_python, part=part, kit_archive=kit_archive
+    )
     try:
         if _read(root / "manifest.json") != _manifest(root):
             problems.append("manifest: 検査中に入力ファイルが変更されました")

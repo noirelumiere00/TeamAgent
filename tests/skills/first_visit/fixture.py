@@ -183,3 +183,128 @@ def make_fixture(root: Path, inputs: Mapping[str, Any], kit_path: Path) -> Path:
     fingerprints["_vocab"] = hashlib.sha256(vocab.read_bytes()).hexdigest()
     write_json(root / "first_visit.json", {"inputs_sha256": fingerprints})
     return root
+
+
+def make_concrete_fixture(root: Path, inputs: Mapping[str, Any], kit_path: Path) -> Path:
+    """Add three authored scripts and classified, invented product reviews."""
+    make_fixture(root, inputs, kit_path)
+
+    def read(relative: str) -> Any:
+        return json.loads((root / relative).read_text(encoding="utf-8"))
+
+    cfg = read("case.json")
+    for index, brand in enumerate(cfg["brands"]):
+        brand.update(match=brand["name"], review_key=f"fiction_{index}")
+    cfg["research"].update(
+        review_collect=True, review_spec="review_spec.json", review_sites=["rakuten"]
+    )
+    write_json(root / "case.json", cfg)
+    write_json(
+        root / "review_spec.json",
+        {
+            "product_noun": "合成手順キット",
+            "effects": {"clarity": "手順の分かりやすさ"},
+            "unsatisfied": {"size": "箱の大きさ"},
+            "purchase": {"guide": "説明を見て購入"},
+            "scene": {"home": "自宅で使用"},
+        },
+    )
+    reviews = []
+    products = []
+    for index, brand in enumerate(cfg["brands"]):
+        body = "説明を見て購入。自宅で手順が分かりやすかった。箱は大きい。"
+        row = {
+            "site": "rakuten",
+            "review_id": f"invented_review_{index}",
+            "product_id": f"invented_product_{index}",
+            "product_name": "合成手順キット",
+            "title": "合成口コミ",
+            "body": body,
+            "rating_5": 4,
+            "posted_at": "2026-10-14",
+            "url": f"https://example.invalid/review/{index}",
+        }
+        reviews.append(row)
+        products.append(
+            {
+                "site": row["site"],
+                "product_id": row["product_id"],
+                "product_name": row["product_name"],
+                "brand": brand["name"],
+                "url": f"https://example.invalid/product/{index}",
+                "status": "OK",
+                "site_total": 1,
+                "fetched": 1,
+            }
+        )
+        label = {
+            **row,
+            "effects": ["clarity"],
+            "satisfied": ["clarity"],
+            "unsatisfied": ["size"],
+            "purchase": ["guide"],
+            "scene": ["home"],
+            "quote": body,
+            "brand_trust": False,
+            "beginner": False,
+            "gift_or_pr": False,
+        }
+        for directory, record in [("labels", label), ("by_brand", row)]:
+            path = root / "reviews" / directory / f"{brand['review_key']}.jsonl"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps(record, ensure_ascii=False) + "\n", encoding="utf-8")
+    write_json(root / "reviews/acquire_log.json", {"products": products})
+    (root / "reviews/reviews.jsonl").write_text(
+        "".join(json.dumps(row, ensure_ascii=False) + "\n" for row in reviews), encoding="utf-8"
+    )
+    synthesis = read("authored/synthesis.json")
+    synthesis["hooks"].append(dict(synthesis["hooks"][0], part=4))
+    synthesis["scripts"] = [
+        {
+            "headline": f"合成台本{index + 1}",
+            "sub": "架空商品の手順を見せる",
+            "basis": "合成5コマを順に提示する。",
+            "specs": [["形式", "縦型"], ["音声", "発話なし"]],
+            "rows": [
+                ["0〜4秒", "箱を置く", "合成手順", "発話なし", "手順を知らせる"],
+                ["4〜8秒", "手順を示す", "順に並べる", "発話なし", "流れを見せる"],
+            ],
+        }
+        for index in range(3)
+    ]
+    write_json(root / "authored/synthesis.json", synthesis)
+    fv = read("first_visit.json")
+    fv.update(
+        project={
+            "cover_title": "合成手順キットの使い方",
+            "client": "合成アルファ",
+            "client_short": "合成A",
+            "query": "手順",
+            "footer": "合成案件・動作検証用",
+        },
+        pages={
+            "now": {
+                "headline": "合成検索の現状",
+                "sub": "架空の入力1本を確認する",
+                "cards": [
+                    {
+                        "rank": 1,
+                        "video_id": VID,
+                        "cover": f"assets/covers/{VID}.jpg",
+                        "url": inputs["selection.json"][0]["url"],
+                        "views_label": "120",
+                        "caption": "合成手順を並べた例",
+                    }
+                ],
+                "caption": "合成データの表示順",
+            },
+            "next": {
+                "headline": "手順を順に見せる",
+                "sub": "架空商品の検証用提案",
+                "items": [{"title": "合成手順", "body": "箱から手順を順に示す。"}],
+            },
+        },
+        appendix={"premise": [["用途", "架空の会社と商品による動作検証。"]]},
+    )
+    write_json(root / "first_visit.json", fv)
+    return root
