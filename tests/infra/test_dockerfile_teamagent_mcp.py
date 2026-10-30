@@ -228,6 +228,8 @@ def test_core_dockerignore_is_deny_by_default_and_excludes_sensitive_state() -> 
         "!infra/codebuild/teamagent_runtime_contract.json",
         "!infra/docker/replace_core_ca_bundle.py",
         "!infra/docker/core-ca-bundle.lock.json",
+        "!infra/docker/core-pip-wheel.lock.json",
+        "!infra/docker/vendor/py3-pip-wheel-26.2.2-r1.apk",
         "!infra/docker/vendor/ca-certificates-bundle-20260909-r3.apk",
     ):
         assert allowed in text
@@ -254,3 +256,44 @@ def test_core_lock_has_no_bundled_agent_or_media_runtime_dependencies() -> None:
     assert 'name = "claude-agent-sdk"' not in lock
     assert '"playwright==1.60.0"' in pyproject
     assert '"yt-dlp==2026.8.19"' in pyproject
+
+
+def test_core_pip_wheel_is_pinned_and_verified_in_both_stages() -> None:
+    import json
+
+    digest = "3481499c46ac5ae2b7e10ee50ff80f5c4c0e55501e0d096c8c06437f51283c93"
+    lock = ROOT / "infra/docker/core-pip-wheel.lock.json"
+    apk = ROOT / "infra/docker/vendor/py3-pip-wheel-26.2.2-r1.apk"
+    assert hashlib.sha256(apk.read_bytes()).hexdigest() == digest
+    assert hashlib.sha256(lock.read_bytes()).hexdigest() == (
+        "14834d16f1cd38c73f5ac9a301068fc3f8fdb08028d7637599ab180daf5adbf5"
+    )
+    assert (
+        f"{hashlib.sha256(lock.read_bytes()).hexdigest()} /tmp/core-ca/pip-wheel.lock.json | sha256sum -c -"
+        in TEXT
+    )
+    assert f"ARG PIP_WHEEL_APK_SHA256={digest}" in TEXT
+    assert "ARG PIP_WHEEL_VERSION=26.2.2-r1" in TEXT
+    builder, final = _stage("builder", "final"), _stage("final")
+    for path in (lock, apk):
+        assert f"COPY {path.relative_to(ROOT)} " in builder
+    assert '--apk-sha256 "$PIP_WHEEL_APK_SHA256" --version "$PIP_WHEEL_VERSION"' in builder
+    assert f'"--apk-sha256", "{digest}"' in final
+    assert '"--version", "26.2.2-r1"' in final
+    assert (
+        "COPY --from=builder /tmp/core-ca/root/usr/share/python-wheels/pip-26.2.2-py3-none-any.whl "
+        in final
+    )
+    assert (
+        "COPY --from=builder /tmp/core-ca/root/var/lib/db/sbom/py3-pip-wheel-26.2.2-r1.spdx.json "
+        in final
+    )
+    contract = json.loads(
+        (ROOT / "infra/codebuild/teamagent_core_media_release_contract.json").read_text()
+    )
+    core = next(subject for subject in contract["subjects"] if subject["name"] == "core")
+    for arg, expected in (("PIP_WHEEL_APK_SHA256", digest), ("PIP_WHEEL_VERSION", "26.2.2-r1")):
+        assertion = next(item for item in core["source_assertions"] if item["build_arg"] == arg)
+        assert assertion["value"] == expected
+        assert f'{assertion["oci_label"]}="${arg}"' in final
+        assert all(use in builder for use in assertion["dockerfile_uses"])

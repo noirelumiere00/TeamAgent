@@ -377,8 +377,8 @@
     "scope_paths": [
       "infra/codebuild/teamagent_core_media_release_contract.json"
     ],
-    "reason": "human gate 2026-10-30（小俣さん指示・発射前検査で ffmpeg 8.1.2-r3 の上流欠落を検出。8.1.3-r0 の実測 SHA・lock・release 契約・世代・凍結を更新。AWS 書き込み・CodeBuild 起動・S3 公開・commit・push は行わない）",
-    "gate": "human gate 2026-10-30（小俣さん指示・発射前検査で ffmpeg 8.1.2-r3 の上流欠落を検出。8.1.3-r0 の実測 SHA・lock・release 契約・世代・凍結を更新。AWS 書き込み・CodeBuild 起動・S3 公開・commit・push は行わない）",
+    "reason": "human gate 2026-10-30（小俣さん指示・r85 段4 core HIGH CVE-2026-114613 対応。py3-pip-wheel を Wolfi 公式 26.2.2-r1 の実物 SHA・APKINDEX で固定し、release 契約・世代・凍結を更新。AWS 書き込み・CodeBuild 起動・S3 公開・commit・push は行わない）",
+    "gate": "human gate 2026-10-30（小俣さん指示・r85 段4 core HIGH CVE-2026-114613 対応。py3-pip-wheel を Wolfi 公式 26.2.2-r1 の実物 SHA・APKINDEX で固定し、release 契約・世代・凍結を更新。AWS 書き込み・CodeBuild 起動・S3 公開・commit・push は行わない）",
     "folded_2026_08_28": {
       "decision": "裁定③（relock せず相乗り）を打ち切り、本 PR で unlock を畳む。Human Gate ⑤ を 2026-08-28 にユーザーが通した。",
       "why_now": "①本 PR は frozen surface を 1 path も変更していない（assert-frozen-surface --base origin/dev --head HEAD が「frozen surface 無変更（監視対象 21 path）」を返す実測）。∴ この unlock は本 PR には不要。②active のままだと test_unlock_is_inactive_and_empty_by_default が落ち、CI が 1 failed / 7,474 passed で恒常的に赤になる（3.11 / 3.13 / 3.14 すべてで実測）。本物の失敗と見分けがつかなくなる。③裁定③の rationale「いま relock すると同じ宣言を立て直す往復が発生する」は成立しない。retention_ruling_2026_08_27.landmine_partial_scope のとおり、相乗り PR は scope_paths を自分の変更集合へ絞り込まねばならず、**どのみち書き直しが必須**だから。",
@@ -637,6 +637,14 @@
       ],
       "reason": "human gate 2026-10-29（小俣さん 10-29 指示・r83 段 4 の source evidence key 誤検知（S3 VersionId に「..」）を区切り単位の検査へ。PR まで・マージと便は別途 OK）",
       "gate": "human gate 2026-10-29（小俣さん 10-29 指示・r83 段 4 の source evidence key 誤検知（S3 VersionId に「..」）を区切り単位の検査へ。PR まで・マージと便は別途 OK）"
+    },
+    "previous_scope_20261030_pipwheel": {
+      "active": true,
+      "scope_paths": [
+        "infra/codebuild/teamagent_core_media_release_contract.json"
+      ],
+      "reason": "human gate 2026-10-30（小俣さん指示・発射前検査で ffmpeg 8.1.2-r3 の上流欠落を検出。8.1.3-r0 の実測 SHA・lock・release 契約・世代・凍結を更新。AWS 書き込み・CodeBuild 起動・S3 公開・commit・push は行わない）",
+      "gate": "human gate 2026-10-30（小俣さん指示・発射前検査で ffmpeg 8.1.2-r3 の上流欠落を検出。8.1.3-r0 の実測 SHA・lock・release 契約・世代・凍結を更新。AWS 書き込み・CodeBuild 起動・S3 公開・commit・push は行わない）"
     }
   },
   "production_deployment_freeze": {

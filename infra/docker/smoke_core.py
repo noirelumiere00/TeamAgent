@@ -18,6 +18,7 @@ from pathlib import Path
 EXPECTED_BAKED_APP_HTML_SHA256 = "716ac25a96516efd6443277c903102d514f3f86729f8706baea41ee48f0ecdeb"
 EXPECTED_E5_REVISION = "3d7cfbdacd47fdda877c5cd8a79fbcc4f2a574f3"
 EXPECTED_PYTHON_SHA256 = "775bf454e5816503fe56f81c9b9e0d3f03790694bdce576cbbefd60971fc88ca"
+EXPECTED_PIP_WHEEL_SHA256 = "3a2bc00388f5e48504cf087d93ab2d7675e19b7c818ab79e82f8e137fc3328a8"
 
 
 def _sha256(path: Path) -> str:
@@ -107,6 +108,17 @@ def _assert_e5_encode() -> None:
     assert 0.999 <= norm <= 1.001, norm
 
 
+def _assert_pip_wheel(root: Path = Path("/")) -> None:
+    records = (root / "usr/lib/apk/db/installed").read_text().split("\n\n")
+    pip = [record for record in records if "P:py3-pip-wheel" in record.splitlines()]
+    assert len(pip) == 1 and "V:26.2.2-r1" in pip[0].splitlines()
+    wheels = list((root / "usr/share/python-wheels").glob("pip-*.whl"))
+    assert [path.name for path in wheels] == ["pip-26.2.2-py3-none-any.whl"]
+    assert _sha256(wheels[0]) == EXPECTED_PIP_WHEEL_SHA256
+    sboms = list((root / "var/lib/db/sbom").glob("py3-pip-wheel-*.spdx.json"))
+    assert [path.name for path in sboms] == ["py3-pip-wheel-26.2.2-r1.spdx.json"]
+
+
 def _assert_repeated_temp_cleanup() -> None:
     jobs = Path(os.environ["MEDIA_JOB_TMP_ROOT"])
     jobs.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -131,6 +143,7 @@ def main() -> None:
     _assert_read_only_root()
     _assert_runtime_directories()
     _assert_content_boundary()
+    _assert_pip_wheel()
     _assert_repeated_temp_cleanup()
     _assert_e5_encode()
     _assert_repeated_temp_cleanup()

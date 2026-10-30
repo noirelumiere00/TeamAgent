@@ -22,6 +22,9 @@ ARG BROTLI_DEC_APK_SHA256=a5a25fb6a8238af95af1c21f039ecb4cb1a32fadd040ac276d7353
 ARG BROTLI_ENC_APK_SHA256=d15c3aaa157a5fa281768fe5e69ae3da9357d3e58668ca47aa7bf2c3442d09b8
 ARG CA_CERTIFICATES_BUNDLE_VERSION=20260909-r3
 ARG CA_CERTIFICATES_BUNDLE_APK_SHA256=4f57ebd7dc21d78ecce228f397d0a4ee46b5cfc777ac5f292821d41a97bfd896
+# CVE-2026-114613: retain the Python ensurepip wheel with the fixed Wolfi payload.
+ARG PIP_WHEEL_VERSION=26.2.2-r1
+ARG PIP_WHEEL_APK_SHA256=3481499c46ac5ae2b7e10ee50ff80f5c4c0e55501e0d096c8c06437f51283c93
 ARG BAKED_APP_HTML_SHA256=716ac25a96516efd6443277c903102d514f3f86729f8706baea41ee48f0ecdeb
 ARG APP_HTML_SOURCE=s3
 ARG APP_HTML_SHA256=fd62e56e51d3cee25c3d3a87085048fae08ce3babc82480411c61df36e467e28
@@ -54,6 +57,8 @@ ARG BROTLI_DEC_APK_SHA256
 ARG BROTLI_ENC_APK_SHA256
 ARG CA_CERTIFICATES_BUNDLE_VERSION
 ARG CA_CERTIFICATES_BUNDLE_APK_SHA256
+ARG PIP_WHEEL_VERSION
+ARG PIP_WHEEL_APK_SHA256
 ARG BAKED_APP_HTML_SHA256
 ARG APP_HTML_SOURCE
 ARG APP_HTML_SHA256
@@ -89,7 +94,7 @@ assert parsed_receipt['subject'] == 'core'; \
 assert parsed_receipt['values'] == expected_values; \
 assert all(os.environ[entry['build_arg']] == entry['value'] for entry in entries)"
 
-# Keep Python 3.14; replace only Brotli and CA payloads in the exact runtime base.
+# Keep Python 3.14; replace only Brotli, CA and pip-wheel payloads in the exact runtime base.
 COPY --from=runtime-base / /tmp/core-ca/root/
 COPY infra/docker/vendor/libbrotlicommon1-1.2.1-r0.apk /tmp/core-brotli/
 COPY infra/docker/vendor/libbrotlidec1-1.2.1-r0.apk /tmp/core-brotli/
@@ -105,14 +110,19 @@ RUN set -eu; \
       /tmp/core-brotli/libbrotlienc1-${BROTLI_PACKAGE_VERSION}.apk
 COPY infra/docker/vendor/ca-certificates-bundle-20260909-r3.apk /tmp/core-ca/bundle.apk
 COPY infra/docker/core-ca-bundle.lock.json /tmp/core-ca/lock.json
+COPY infra/docker/vendor/py3-pip-wheel-26.2.2-r1.apk /tmp/core-ca/pip-wheel.apk
+COPY infra/docker/core-pip-wheel.lock.json /tmp/core-ca/pip-wheel.lock.json
 COPY infra/docker/replace_core_ca_bundle.py /tmp/core-ca/replace_core_ca_bundle.py
 RUN set -eu; \
     printf '%s  %s\n' 0533366dfd74a1df3c01286ed6bbdff9c6977b03b62a360c755a131168c3d3a1 /tmp/core-ca/lock.json | sha256sum -c -; \
+    printf '%s  %s\n' 14834d16f1cd38c73f5ac9a301068fc3f8fdb08028d7637599ab180daf5adbf5 /tmp/core-ca/pip-wheel.lock.json | sha256sum -c -; \
     python /tmp/core-ca/replace_core_ca_bundle.py prepare \
       --root /tmp/core-ca/root --base-db /tmp/core-ca/base-installed \
       --apk /tmp/core-ca/bundle.apk --lock /tmp/core-ca/lock.json \
       --apk-sha256 "$CA_CERTIFICATES_BUNDLE_APK_SHA256" \
-      --version "$CA_CERTIFICATES_BUNDLE_VERSION"
+      --version "$CA_CERTIFICATES_BUNDLE_VERSION" \
+      --apk /tmp/core-ca/pip-wheel.apk --lock /tmp/core-ca/pip-wheel.lock.json \
+      --apk-sha256 "$PIP_WHEEL_APK_SHA256" --version "$PIP_WHEEL_VERSION"
 
 ENV UV_COMPILE_BYTECODE=1 \
     UV_LINK_MODE=copy \
@@ -266,6 +276,8 @@ ARG BROTLI_DEC_APK_SHA256
 ARG BROTLI_ENC_APK_SHA256
 ARG CA_CERTIFICATES_BUNDLE_VERSION
 ARG CA_CERTIFICATES_BUNDLE_APK_SHA256
+ARG PIP_WHEEL_VERSION
+ARG PIP_WHEEL_APK_SHA256
 ARG RUNTIME_CONTRACT_SHA256
 ARG RUNTIME_RECEIPT_B64
 ARG RUNTIME_RECEIPT_SHA256
@@ -274,6 +286,8 @@ COPY --from=builder /tmp/core-ca/root/usr/lib/libbrotli*.so.1* /usr/lib/
 COPY --from=builder /tmp/core-ca/root/var/lib/db/sbom/libbrotli*-1.2.1-r0.spdx.json /var/lib/db/sbom/
 COPY --from=builder /tmp/core-ca/root/etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
 COPY --from=builder /tmp/core-ca/root/var/lib/db/sbom/ca-certificates-bundle-20260909-r3.spdx.json /var/lib/db/sbom/ca-certificates-bundle-20260909-r3.spdx.json
+COPY --from=builder /tmp/core-ca/root/usr/share/python-wheels/pip-26.2.2-py3-none-any.whl /usr/share/python-wheels/
+COPY --from=builder /tmp/core-ca/root/var/lib/db/sbom/py3-pip-wheel-26.2.2-r1.spdx.json /var/lib/db/sbom/
 COPY --from=builder /tmp/core-ca/root/usr/lib/apk/db/installed /usr/lib/apk/db/installed
 # Remove the old library payload/SBOM and prove the new libraries load on glibc.
 RUN ["/usr/bin/python3.14", "-c", "from pathlib import Path; import ctypes; [Path('/usr/lib/libbrotli'+part+'.so.1.2.0').unlink() for part in ('common','dec','enc')]; [Path('/var/lib/db/sbom/libbrotli'+part+'1-1.2.0-r5.spdx.json').unlink() for part in ('common','dec','enc')]; assert ctypes.CDLL('libbrotlidec.so.1').BrotliDecoderVersion() == 0x1002001; assert ctypes.CDLL('libbrotlienc.so.1').BrotliEncoderVersion() == 0x1002001"]
@@ -282,7 +296,12 @@ RUN ["/usr/bin/python3.14", "-c", "from pathlib import Path; import ctypes; [Pat
 RUN --mount=type=bind,from=builder,source=/tmp/core-ca,target=/tmp/core-ca \
     ["/usr/bin/python3.14", "-B", "/tmp/core-ca/replace_core_ca_bundle.py", "finalize", \
      "--root", "/", "--base-db", "/tmp/core-ca/base-installed", \
-     "--apk", "/tmp/core-ca/bundle.apk", "--lock", "/tmp/core-ca/lock.json"]
+     "--apk", "/tmp/core-ca/bundle.apk", "--lock", "/tmp/core-ca/lock.json", \
+     "--apk-sha256", "4f57ebd7dc21d78ecce228f397d0a4ee46b5cfc777ac5f292821d41a97bfd896", \
+     "--version", "20260909-r3", \
+     "--apk", "/tmp/core-ca/pip-wheel.apk", "--lock", "/tmp/core-ca/pip-wheel.lock.json", \
+     "--apk-sha256", "3481499c46ac5ae2b7e10ee50ff80f5c4c0e55501e0d096c8c06437f51283c93", \
+     "--version", "26.2.2-r1"]
 
 COPY --from=builder /runtime-etc/passwd /etc/passwd
 COPY --from=builder /runtime-etc/group /etc/group
@@ -331,6 +350,8 @@ LABEL org.opencontainers.image.revision="$GIT_COMMIT" \
       io.teamagent.contract.brotli-common-apk-sha256="$BROTLI_COMMON_APK_SHA256" \
       io.teamagent.contract.brotli-dec-apk-sha256="$BROTLI_DEC_APK_SHA256" \
       io.teamagent.contract.brotli-enc-apk-sha256="$BROTLI_ENC_APK_SHA256" \
+      io.teamagent.contract.pip-wheel-version="$PIP_WHEEL_VERSION" \
+      io.teamagent.contract.pip-wheel-apk-sha256="$PIP_WHEEL_APK_SHA256" \
       io.teamagent.contract.python-version="$PYTHON_VERSION" \
       io.teamagent.contract.python-binary-sha256="$PYTHON_BINARY_SHA256" \
       io.teamagent.contract.python-builder-arm64-digest="$PYTHON_BUILDER_ARM64_DIGEST" \
