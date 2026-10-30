@@ -50,7 +50,11 @@
         // §D: 外側ループ=Haiku4.5（ツール判断＋最終整形＝速い/安い）。重い合成は MCP 境界内(L2)に任せる。
         // §O: 公式は provider/model 記法（amazon-bedrock/ プレフィックス必須）。
         // §P: ID は list-inference-profiles の実測値で確定（2026-06-11・account 718959508629/東京）。
-        model: "amazon-bedrock/jp.anthropic.claude-haiku-4-5-20251001-v1:0",
+        // 2026.7.1 AgentModelSchema: agent 個別の fallbacks で障害時だけ Sonnet へ（東京の JP profile）。
+        model: {
+          primary: "amazon-bedrock/jp.anthropic.claude-haiku-4-5-20251001-v1:0",
+          fallbacks: ["amazon-bedrock/jp.anthropic.claude-sonnet-4-6"],
+        },
         identity: { name: "Aico", emoji: "🧭" },
         // §S: skipBootstrap は agents.list[] に無い（agents.defaults 専用）ため削除。
         // レビュー済み SOUL.md/HEARTBEAT.md は entrypoint が workspace に seed 済み。

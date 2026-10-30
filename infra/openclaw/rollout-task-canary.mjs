@@ -230,6 +230,18 @@ async function verifyBedrock(modelId) {
   return { modelId, credentialSource, request: "Converse", passed: true };
 }
 
+export function readPrimaryBedrockModel(config) {
+  const model = config.agents?.list?.find((agent) => agent.default === true)?.model?.primary;
+  if (
+    typeof model !== "string" ||
+    !model.startsWith("amazon-bedrock/") ||
+    model.length <= "amazon-bedrock/".length
+  ) {
+    throw new Error("default Bedrock model is not pinned in the runtime config");
+  }
+  return model.slice("amazon-bedrock/".length);
+}
+
 async function run() {
   if (
     process.argv.length !== 6 ||
@@ -267,17 +279,10 @@ async function run() {
   }
   const bearer = process.env.TEAMAGENT_MCP_BEARER;
   if (!bearer) throw new Error("TEAMAGENT_MCP_BEARER is unavailable");
-  const model = config.agents?.list?.find((agent) => agent.default === true)?.model;
-  if (
-    typeof model !== "string" ||
-    !model.startsWith("amazon-bedrock/") ||
-    model.length <= "amazon-bedrock/".length
-  ) {
-    throw new Error("default Bedrock model is not pinned in the runtime config");
-  }
+  const model = readPrimaryBedrockModel(config);
 
   const mcp = await verifyMcp(expectedToolNames, bearer);
-  const bedrock = await verifyBedrock(model.slice("amazon-bedrock/".length));
+  const bedrock = await verifyBedrock(model);
   process.stdout.write(
     `${JSON.stringify({
       event: "openclaw_rollout_task_canary",
