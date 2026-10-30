@@ -2,8 +2,8 @@
   "schema_version": 3,
   "kind": "teamagent.core-media-release-contract",
   "release": {
-    "ready": true,
-    "blocked_reason": ""
+    "ready": false,
+    "blocked_reason": "media APK bundle has not been published; pin the S3 VersionId in media-apk-source.json before release"
   },
   "bundle": {
     "scan_gate": {
@@ -173,12 +173,30 @@
       ],
       "source_assertions": [
         {
+          "key": "artifact.apk-checksums.sha256",
+          "value": "822743dcbb6aafa65c595c9f0d628364124fcfe5e5f18459a74e3e8570a801b4",
+          "build_arg": "MEDIA_APK_CHECKSUMS_SHA256",
+          "oci_label": "io.teamagent.contract.apk-checksums-sha256",
+          "dockerfile_uses": [
+            "printf '%s  %s\\n' \"$MEDIA_APK_CHECKSUMS_SHA256\" /tmp/media-apk-sha256.lock | sha256sum -c -"
+          ]
+        },
+        {
           "key": "artifact.apk-lock.sha256",
           "value": "7d31efa3083417efb959d7229502294343e185b629fe288ccc55359da6e826a0",
           "build_arg": "MEDIA_APK_LOCK_SHA256",
           "oci_label": "io.teamagent.contract.apk-lock-sha256",
           "dockerfile_uses": [
             "printf '%s  %s\\n' \"$MEDIA_APK_LOCK_SHA256\" /tmp/media-apk.lock | sha256sum -c -"
+          ]
+        },
+        {
+          "key": "artifact.apk-source.sha256",
+          "value": "88a44bf28caf36719c699a40b5ab9951c598c84fde693bd9984659004d1d3fcc",
+          "build_arg": "MEDIA_APK_SOURCE_SHA256",
+          "oci_label": "io.teamagent.contract.apk-source-sha256",
+          "dockerfile_uses": [
+            "printf '%s  %s\\n' \"$MEDIA_APK_SOURCE_SHA256\" /tmp/media-apk-source.json | sha256sum -c -"
           ]
         },
         {

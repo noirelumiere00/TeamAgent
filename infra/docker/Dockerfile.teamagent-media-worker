@@ -65,8 +65,9 @@ FROM ghcr.io/astral-sh/uv:latest@${UV_ARM64_DIGEST} AS uv
 FROM 718959508629.dkr.ecr.ap-northeast-1.amazonaws.com/teamagent-mirror/chromium-headless:150-alpine@${CHROMIUM_BASE_ARM64_DIGEST} AS runtime-packages
 USER 0
 
-ARG ALPINE_EDGE_REPOSITORY=https://dl-cdn.alpinelinux.org/alpine/edge
-ARG ALPINE_STABLE_REPOSITORY=https://dl-cdn.alpinelinux.org/alpine/v3.24
+ARG MEDIA_APK_LOCK_SHA256=7d31efa3083417efb959d7229502294343e185b629fe288ccc55359da6e826a0
+ARG MEDIA_APK_CHECKSUMS_SHA256=822743dcbb6aafa65c595c9f0d628364124fcfe5e5f18459a74e3e8570a801b4
+ARG MEDIA_APK_SOURCE_SHA256=88a44bf28caf36719c699a40b5ab9951c598c84fde693bd9984659004d1d3fcc
 ARG CHROMIUM_PACKAGE_VERSION=150.0.7871.114-r0
 ARG CHROMIUM_VERSION=150.0.7871.114
 ARG CHROMIUM_BINARY_SHA256=13eaa3cbe73f39b5feafcd767db0771c4f25d626a3927ba216ac43cde3abaf79
@@ -124,22 +125,30 @@ ARG PCRE2_PACKAGE_VERSION=10.49-r0
 # r74c: base-bundled brotli-libs needs an explicit upgrade for CVE-2026-111497.
 ARG BROTLI_PACKAGE_VERSION=1.2.1-r0
 
-RUN --mount=type=cache,id=teamagent-media-apk-arm64-v3,target=/var/cache/apk,sharing=locked \
-    --mount=type=secret,id=teamagent_ca,required=false \
+COPY infra/docker/media-apk.lock /tmp/media-apk.lock
+COPY infra/docker/media-apk-source.json /tmp/media-apk-source.json
+COPY infra/docker/media-apk-sha256.lock /tmp/media-apk-sha256.lock
+RUN --network=none --mount=type=bind,from=media_apks,source=/,target=/media-apks \
     set -eu; \
-    cat /etc/ssl/certs/ca-certificates.crt > /tmp/teamagent-build-ca.pem; \
-    if [ -f /run/secrets/teamagent_ca ]; then \
-      cat /run/secrets/teamagent_ca >> /tmp/teamagent-build-ca.pem; \
-    fi; \
-    printf '%s/main\n%s/community\n%s/main\n%s/community\n' \
-      "$ALPINE_EDGE_REPOSITORY" "$ALPINE_EDGE_REPOSITORY" \
-      "$ALPINE_STABLE_REPOSITORY" "$ALPINE_STABLE_REPOSITORY" \
-      > /tmp/teamagent-apk-repositories; \
-    SSL_CERT_FILE=/tmp/teamagent-build-ca.pem apk \
-      --cache-dir /var/cache/apk \
-      --cache-max-age 1440 \
-      --repositories-file /tmp/teamagent-apk-repositories \
+    printf '%s  %s\n' "$MEDIA_APK_LOCK_SHA256" /tmp/media-apk.lock | sha256sum -c -; \
+    printf '%s  %s\n' "$MEDIA_APK_SOURCE_SHA256" /tmp/media-apk-source.json | sha256sum -c -; \
+    printf '%s  %s\n' "$MEDIA_APK_CHECKSUMS_SHA256" /tmp/media-apk-sha256.lock | sha256sum -c -; \
+    cmp /tmp/media-apk.lock /media-apks/inventory.lock; \
+    cmp /tmp/media-apk-sha256.lock /media-apks/SHA256SUMS; \
+    apk list --installed | awk '{print $1}' | LC_ALL=C sort > /tmp/base-apk.lock; \
+    awk 'FNR==NR {base[$0]; next} !($0 in base) {print "apks/" $0 ".apk"}' \
+      /tmp/base-apk.lock /tmp/media-apk.lock > /tmp/additional-apks; \
+    awk '{print $2}' /tmp/media-apk-sha256.lock | cmp - /tmp/additional-apks; \
+    (cd /media-apks && sha256sum -c /tmp/media-apk-sha256.lock); \
+    (cd /media-apks && LC_ALL=C; export LC_ALL; \
+      for apk_file in apks/*.apk; do sha256sum "$apk_file"; done) \
+      | cmp - /tmp/media-apk-sha256.lock; \
+    for apk_file in /media-apks/apks/*.apk; do \
+      apk --no-network verify "$apk_file"; \
+    done; \
+    apk --no-cache --no-network --repositories-file /dev/null \
       add \
+      /media-apks/apks/*.apk \
       "brotli-libs=$BROTLI_PACKAGE_VERSION" \
       "ca-certificates=$CA_CERTIFICATES_PACKAGE_VERSION" \
       "ffmpeg=$FFMPEG_PACKAGE_VERSION" \
@@ -177,14 +186,16 @@ RUN --mount=type=cache,id=teamagent-media-apk-arm64-v3,target=/var/cache/apk,sha
     printf '%s  %s\n' "$CHROMIUM_BINARY_SHA256" /usr/lib/chromium/chromium | sha256sum -c -; \
     test -s /lib/apk/db/installed; \
     install -d -m 0755 /usr/share/teamagent/provenance; \
-    cp /tmp/teamagent-apk-repositories \
-      /usr/share/teamagent/provenance/apk-repositories.txt; \
+    cp /tmp/media-apk-source.json /tmp/media-apk-sha256.lock /media-apks/manifest.json \
+      /usr/share/teamagent/provenance/; \
     apk list --installed | awk '{print $1}' | LC_ALL=C sort \
       > /usr/share/teamagent/provenance/apk-installed.lock; \
+    cmp /tmp/media-apk.lock /usr/share/teamagent/provenance/apk-installed.lock; \
     sha256sum /usr/bin/python3 /usr/bin/node /usr/bin/ffmpeg \
       /usr/lib/chromium/chromium \
       > /usr/share/teamagent/provenance/runtime-binaries.sha256; \
-    rm -f /tmp/teamagent-build-ca.pem /tmp/teamagent-apk-repositories; \
+    rm /tmp/media-apk.lock /tmp/media-apk-source.json /tmp/media-apk-sha256.lock \
+      /tmp/base-apk.lock /tmp/additional-apks; \
     addgroup -g 10001 teamagent; \
     adduser -D -H -h /tmp/teamagent/home -u 10001 -G teamagent teamagent; \
     chmod 1777 /tmp
@@ -329,6 +340,8 @@ ARG YTDLP_REMOVED_EXTRACTOR_SET_SHA256=ea414688b508a2a77bf006e5928536603a51e7ab3
 ARG YTDLP_SANITIZED_TREE_SHA256=47c027c33b5750234293613987caf3e63ca93823c785580d334c1d29ee733f8f
 ARG YTDLP_SANITIZER_SHA256=4e7464710094be2eb6205fdc1ea207cfe62b99db1b34f9d31691e9a606bcb5db
 ARG MEDIA_APK_LOCK_SHA256=7d31efa3083417efb959d7229502294343e185b629fe288ccc55359da6e826a0
+ARG MEDIA_APK_CHECKSUMS_SHA256=822743dcbb6aafa65c595c9f0d628364124fcfe5e5f18459a74e3e8570a801b4
+ARG MEDIA_APK_SOURCE_SHA256=88a44bf28caf36719c699a40b5ab9951c598c84fde693bd9984659004d1d3fcc
 ARG TIKTOK_PACKAGE_JSON_SHA256=6b7328c05e81a9508371cd5bbf24735d3d21a6d6e43d3e8ba66c47459acebf48
 ARG TIKTOK_PACKAGE_LOCK_SHA256=66eb17e9aa0b4293c022887a17934b171da1268a049b5f35273089daff165a28
 ARG TIKTOK_SCRAPER_SHA256=46e24c03e810eea6b397e32a5fdbab3d9bf3e91df6617f49d9d5c7c2aa1e438f
@@ -492,6 +505,8 @@ LABEL org.opencontainers.image.revision="$GIT_COMMIT" \
       io.teamagent.contract.yt-dlp-removed-extractor-set-sha256="$YTDLP_REMOVED_EXTRACTOR_SET_SHA256" \
       io.teamagent.contract.yt-dlp-sanitized-tree-sha256="$YTDLP_SANITIZED_TREE_SHA256" \
       io.teamagent.contract.apk-lock-sha256="$MEDIA_APK_LOCK_SHA256" \
+      io.teamagent.contract.apk-source-sha256="$MEDIA_APK_SOURCE_SHA256" \
+      io.teamagent.contract.apk-checksums-sha256="$MEDIA_APK_CHECKSUMS_SHA256" \
       io.teamagent.contract.tiktok-package-json-sha256="$TIKTOK_PACKAGE_JSON_SHA256" \
       io.teamagent.contract.tiktok-package-lock-sha256="$TIKTOK_PACKAGE_LOCK_SHA256" \
       io.teamagent.contract.tiktok-scraper-sha256="$TIKTOK_SCRAPER_SHA256" \

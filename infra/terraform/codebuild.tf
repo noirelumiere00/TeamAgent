@@ -415,14 +415,15 @@ data "aws_iam_policy_document" "codebuild" {
       "${aws_s3_bucket.raw_files.arn}/codebuild/baked-fallback/connect-web-app.html",
       "${aws_s3_bucket.image_release_evidence.arn}/source-declarations/mcp/*",
       "${aws_s3_bucket.image_release_evidence.arn}/source-contexts/mcp/*",
+      "${aws_s3_bucket.image_release_evidence.arn}/media-apks/*",
       # builder buildspec は inline 上限(25,600字)超過のため content-addressed S3 参照
       "${aws_s3_bucket.image_release_evidence.arn}/codebuild-buildspecs/teamagent-dev-image-builder/*",
     ]
   }
   statement {
     # Docker Hub 429対策: chromiumベースはdigest保存ミラー(teamagent-mirror/)から取得
-    sid     = "PullChromiumBaseMirror"
-    actions = ["ecr:BatchGetImage", "ecr:GetDownloadUrlForLayer", "ecr:BatchCheckLayerAvailability"]
+    sid       = "PullChromiumBaseMirror"
+    actions   = ["ecr:BatchGetImage", "ecr:GetDownloadUrlForLayer", "ecr:BatchCheckLayerAvailability"]
     resources = ["arn:aws:ecr:ap-northeast-1:718959508629:repository/teamagent-mirror/chromium-headless"]
   }
   statement {

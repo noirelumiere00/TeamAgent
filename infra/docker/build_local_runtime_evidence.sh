@@ -153,6 +153,11 @@ APP_PROVENANCE_SHA256=$(
       "$TRACKED_SOURCE_DIR/infra/codebuild/teamagent_core_media_release_contract.json" \
     --deploy-log "$TRACKED_SOURCE_DIR/infra/deploy_log.md"
 )
+python3 "$TRACKED_SOURCE_DIR/infra/docker/vendor_media_apks.py" fetch \
+  --source "$TRACKED_SOURCE_DIR/infra/docker/media-apk-source.json" \
+  --lock "$TRACKED_SOURCE_DIR/infra/docker/media-apk.lock" \
+  --checksums "$TRACKED_SOURCE_DIR/infra/docker/media-apk-sha256.lock" \
+  --output "$EVIDENCE_DIR/media-apks"
 set --
 if test -n "$CA_FILE"; then
   test -f "$CA_FILE"
@@ -189,6 +194,7 @@ docker buildx build \
   "$@" \
   --platform linux/arm64 \
   --file infra/docker/Dockerfile.teamagent-media-worker \
+  --build-context "media_apks=$EVIDENCE_DIR/media-apks" \
   --build-arg "GIT_COMMIT=$HEAD" \
   --build-arg "GIT_BRANCH=$BRANCH" \
   --build-arg "BUILD_CONTEXT_SHA256=$BUILD_CONTEXT_SHA256" \

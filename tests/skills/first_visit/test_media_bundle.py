@@ -116,7 +116,7 @@ def test_media_adds_no_apk_and_keeps_fixed_inputs_in_the_build_context() -> None
         docker.index("FROM 718959508629") : docker.index("FROM runtime-packages AS python-deps")
     ]
     assert hashlib.sha256(packages.encode()).hexdigest() == (
-        "7d4caedbd1d14f9f89999bb8e9f88bf9e0a43093b21d38ee61830fd4dde148fe"
+        "0042562b7785ba1ef0f03273db2e5265d1d488433664f7e79e749bb4b6dd23b1"
     )
     assert "COPY tools/first_visit/kit.lock.json" in docker
     assert "COPY tools/first_visit/tiktok-skills-kit-25eccd8.tar.gz" in docker

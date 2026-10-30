@@ -375,10 +375,11 @@
   "unlock": {
     "active": true,
     "scope_paths": [
-      "infra/codebuild/teamagent_core_media_release_contract.json"
+      "infra/codebuild/teamagent_core_media_release_contract.json",
+      "infra/terraform/codebuild.tf"
     ],
-    "reason": "human gate 2026-10-29（小俣さん 10-29『できるだけ早く』・sales25 の動画長の許容と媒体不足の partial）",
-    "gate": "human gate 2026-10-29（小俣さん 10-29『できるだけ早く』・sales25 の動画長の許容と媒体不足の partial）",
+    "reason": "【media APK の自前保管】最新 origin/dev の pin を維持し、240件中base同版181件を除く追加59個の署名付き APK を S3 bundle から offline install する入力・IAM・契約と世代を整合させる。未公開の間は release を停止する。",
+    "gate": "human gate 2026-10-30（小俣さん: origin/dev を取り込み、最新 lock のローカル import と検証まで準備。AWS 書き込み・commit・push は禁止）",
     "folded_2026_08_28": {
       "decision": "裁定③（relock せず相乗り）を打ち切り、本 PR で unlock を畳む。Human Gate ⑤ を 2026-08-28 にユーザーが通した。",
       "why_now": "①本 PR は frozen surface を 1 path も変更していない（assert-frozen-surface --base origin/dev --head HEAD が「frozen surface 無変更（監視対象 21 path）」を返す実測）。∴ この unlock は本 PR には不要。②active のままだと test_unlock_is_inactive_and_empty_by_default が落ち、CI が 1 failed / 7,474 passed で恒常的に赤になる（3.11 / 3.13 / 3.14 すべてで実測）。本物の失敗と見分けがつかなくなる。③裁定③の rationale「いま relock すると同じ宣言を立て直す往復が発生する」は成立しない。retention_ruling_2026_08_27.landmine_partial_scope のとおり、相乗り PR は scope_paths を自分の変更集合へ絞り込まねばならず、**どのみち書き直しが必須**だから。",
@@ -621,6 +622,14 @@
       ],
       "reason": "human gate 2026-10-29（小俣さん 10-29『できるだけ早く』・Alpine 上流で nodejs の再ビルド。r82 の段 3 で検出）",
       "gate": "human gate 2026-10-29（小俣さん 10-29『できるだけ早く』・Alpine 上流で nodejs の再ビルド。r82 の段 3 で検出）"
+    },
+    "previous_scope_20261030_vendor_apk": {
+      "active": true,
+      "scope_paths": [
+        "infra/codebuild/teamagent_core_media_release_contract.json"
+      ],
+      "reason": "human gate 2026-10-29（小俣さん 10-29『できるだけ早く』・sales25 の動画長の許容と媒体不足の partial）",
+      "gate": "human gate 2026-10-29（小俣さん 10-29『できるだけ早く』・sales25 の動画長の許容と媒体不足の partial）"
     }
   },
   "production_deployment_freeze": {

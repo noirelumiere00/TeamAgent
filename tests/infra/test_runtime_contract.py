@@ -328,6 +328,11 @@ def test_local_evidence_build_cannot_push_and_requires_exact_clean_head() -> Non
         assert f'--build-arg "{argument}=${argument}"' in BUILD
     assert "--file infra/docker/Dockerfile.teamagent-mcp" in BUILD
     assert "--file infra/docker/Dockerfile.teamagent-media-worker" in BUILD
+    assert 'python3 "$TRACKED_SOURCE_DIR/infra/docker/vendor_media_apks.py" fetch' in BUILD
+    assert '--source "$TRACKED_SOURCE_DIR/infra/docker/media-apk-source.json"' in BUILD
+    assert '--checksums "$TRACKED_SOURCE_DIR/infra/docker/media-apk-sha256.lock"' in BUILD
+    assert '--build-context "media_apks=$EVIDENCE_DIR/media-apks"' in BUILD
+    assert BUILD.index("vendor_media_apks.py") < BUILD.index("docker buildx build")
     assert BUILD.count('- <"$EVIDENCE_DIR/build-context.tar"') == 2
     assert BUILD.count("sha256sum \"$EVIDENCE_DIR/build-context.tar\" | cut -d' ' -f1") >= 2
     assert "source-tracked-trivy-secret.json" in BUILD

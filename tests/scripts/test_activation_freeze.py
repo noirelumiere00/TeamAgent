@@ -142,14 +142,14 @@ def test_pending_v2_is_an_enforcing_state() -> None:
 
 
 def test_frozen_surface_is_derived_from_the_manifest_not_a_handwritten_list() -> None:
-    """18 generation inputs は manifest から読む（手書きリストの陳腐化を防ぐ）。"""
+    """19 generation inputs は manifest から読む（手書きリストの陳腐化を防ぐ）。"""
     doc = load_freeze(FREEZE)
     surface = frozen_paths(ROOT, doc, "HEAD")
     manifest = json.loads(
         (ROOT / "infra/deploy/buildspec_generation_inputs.json").read_text(encoding="utf-8")
     )
     assert set(manifest["inputs"]) <= surface
-    assert len(manifest["inputs"]) == 18
+    assert len(manifest["inputs"]) == 19
     assert set(doc["frozen_change_surface"]["additional_publisher_paths"]) <= surface
 
 
@@ -208,18 +208,27 @@ def test_unrelated_changes_still_pass(base: str, head: str, reason: str) -> None
 
 
 def test_unlock_matches_the_committed_declaration() -> None:
-    """sales25 キット pin へ追随し、scope と退避した宣言を完全一致で封印する。"""
+    """media APK 自前保管の scope と dev の直前宣言を封印する。"""
     unlock = _freeze_doc()["unlock"]
     assert unlock["active"] is True
-    assert unlock["scope_paths"] == ["infra/codebuild/teamagent_core_media_release_contract.json"]
+    assert unlock["scope_paths"] == [
+        "infra/codebuild/teamagent_core_media_release_contract.json",
+        "infra/terraform/codebuild.tf",
+    ]
     assert (
         unlock["reason"]
-        == "human gate 2026-10-29（小俣さん 10-29『できるだけ早く』・sales25 の動画長の許容と媒体不足の partial）"
+        == "【media APK の自前保管】最新 origin/dev の pin を維持し、240件中base同版181件を除く追加59個の署名付き APK を S3 bundle から offline install する入力・IAM・契約と世代を整合させる。未公開の間は release を停止する。"
     )
     assert (
         unlock["gate"]
-        == "human gate 2026-10-29（小俣さん 10-29『できるだけ早く』・sales25 の動画長の許容と媒体不足の partial）"
+        == "human gate 2026-10-30（小俣さん: origin/dev を取り込み、最新 lock のローカル import と検証まで準備。AWS 書き込み・commit・push は禁止）"
     )
+    assert unlock["previous_scope_20261030_vendor_apk"] == {
+        "active": True,
+        "scope_paths": ["infra/codebuild/teamagent_core_media_release_contract.json"],
+        "reason": "human gate 2026-10-29（小俣さん 10-29『できるだけ早く』・sales25 の動画長の許容と媒体不足の partial）",
+        "gate": "human gate 2026-10-29（小俣さん 10-29『できるだけ早く』・sales25 の動画長の許容と媒体不足の partial）",
+    }
     assert unlock["previous_scope_20261026_sales25"] == {
         "active": True,
         "scope_paths": ["infra/codebuild/teamagent_core_media_release_contract.json"],

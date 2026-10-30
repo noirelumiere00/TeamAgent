@@ -143,6 +143,6 @@ def test_shim_tag_surface_does_not_intersect_the_frozen_generation_inputs() -> N
     # タグ名が現れること自体を禁止する（コメントでも記述でも）。
     tagged_files = set(_tag_counts(include_prose=True))
 
-    assert len(frozen_inputs) == 18
+    assert len(frozen_inputs) == 19
     assert "infra/codebuild/release_evidence.py" in frozen_inputs
     assert tagged_files.isdisjoint(frozen_inputs)
