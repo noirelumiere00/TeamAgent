@@ -1,4 +1,4 @@
-"""Actual migration/upsert/RLS checks; runs only with explicit TEAMAGENT_DB_DSN.
+"""Actual migration/upsert/RLS checks; runs only with explicit TEAMAGENT_TEST_DB_DSN.
 
 Each test uses a disposable schema in a rolled-back transaction, never public tables.
 """
@@ -24,9 +24,9 @@ from teamagent.ingest.video_library_repository import VideoLibraryRepository
 
 NOW = datetime(2026, 10, 29, tzinfo=UTC)
 
-_DSN = os.environ.get("TEAMAGENT_DB_DSN")
+_DSN = os.environ.get("TEAMAGENT_TEST_DB_DSN")
 _MIGRATION = Path(__file__).resolve().parents[2] / "infra/migrations/0035_video_library.sql"
-pytestmark = pytest.mark.skipif(not _DSN, reason="Actual DB validation requires TEAMAGENT_DB_DSN")
+pytestmark = pytest.mark.skipif(not _DSN, reason="Actual DB validation requires TEAMAGENT_TEST_DB_DSN")
 
 
 class TransactionPg:

@@ -10,6 +10,8 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
+import structlog
+import structlog.testing
 
 from teamagent.adapters.gsheets_client import SheetMetadata, SheetTab, TabRows
 from teamagent.ingest import campaign_aggregate as ca
@@ -397,6 +399,12 @@ class FakeSheets:
         }[tab_name]
 
 
+@pytest.fixture(autouse=True)
+def _keep_global_logging(monkeypatch: pytest.MonkeyPatch) -> None:
+    # main() のログ設定はプロセス全体に効くので、テストでは呼ばせない（他テストのログ捕捉を壊さない）
+    monkeypatch.setattr(sync, "configure_logging", lambda **_: False)
+
+
 @pytest.fixture
 def source_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("SHORT_VIDEO_DB_SHEET_ID", "sheet")
@@ -437,8 +445,10 @@ def test_cli_dry_run_is_json_and_never_opens_db(
         pytest.fail("dry-run opened DB")
 
     monkeypatch.setattr(sync.PgVectorClient, "from_env", forbidden)
-    assert sync.main(["--dry-run"]) == 0
-    logs = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
+    with structlog.testing.capture_logs(
+        processors=[structlog.contextvars.merge_contextvars]
+    ) as logs:
+        assert sync.main(["--dry-run"]) == 0
     summary = next(log for log in logs if log["event"] == "video_library_complete")
     assert summary["rows_read"] == summary["unique_videos"] == 1
     assert summary["categories"] == {"organic": 1}
@@ -457,8 +467,9 @@ def test_cli_commit_and_error_logs_never_expose_cells(
     assert sync.main([]) == 0
     assert repository.save.call_count == 1 and pg.close.call_count == 1
     repository.save.side_effect = ValueError("secret client name and private caption")
-    assert sync.main([]) == 1
-    logs = capsys.readouterr().out
+    with structlog.testing.capture_logs() as captured:
+        assert sync.main([]) == 1
+    logs = json.dumps(captured, ensure_ascii=False) + capsys.readouterr().out
     assert "secret client" not in logs and "private caption" not in logs
     assert repository.record_failure.call_args.kwargs["error"] == "ValueError"
 

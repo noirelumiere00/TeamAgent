@@ -100,8 +100,9 @@ def main(argv: list[str] | None = None) -> int:
         "--dry-run", action="store_true", help="Read sheets and print counts without DB access"
     )
     args = parser.parse_args(argv)
-    os.environ["STRUCTLOG_FORMAT"] = "json"
-    configure_logging(force=True)
+    # 他の実行口と同じく JSON 化はタスク定義の STRUCTLOG_FORMAT に任せ、強制再設定しない
+    # （force=True は cache 済みロガーを差し替え、同一プロセスの他処理のログを壊す）
+    configure_logging()
     request_id = f"vl-{uuid.uuid4().hex}"
     started_at = datetime.now(JST)
     started = time.perf_counter()
