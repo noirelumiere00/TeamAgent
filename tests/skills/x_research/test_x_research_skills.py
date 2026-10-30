@@ -922,3 +922,25 @@ def test_publish_html_short_url_and_fallback(monkeypatch) -> None:
         lambda path, **kw: PublishedObject(url=presigned, bucket=bucket, key="custom/x.html"),
     )
     assert run() == presigned
+
+
+@pytest.mark.parametrize(
+    "results, expected",
+    [(None, "unknown"), ({"daily_counts": [{"date": "2026-07-01", "count": -1}]}, "incomplete")],
+)
+def test_buzz_does_not_claim_completion_for_missing_results_or_days(
+    results: Any, expected: str
+) -> None:
+    store = _FakeStore(
+        status={
+            "status": "done",
+            "requested_by": "a@vectorinc.co.jp",
+            "report_url": "https://example.test/report",
+        }
+    )
+    store.results = results
+    output = XBuzzMeasureStatusSkill(store=store).run(  # type: ignore[arg-type]
+        XBuzzMeasureStatusInput(job_id="xb_1"), _ctx()
+    )
+    assert output.status == expected
+    assert "完了しました" not in output.message

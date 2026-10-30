@@ -330,6 +330,9 @@ class MediaCaseSearchSkill(BaseSkill[MediaCaseInput, MediaCaseOutput]):
         summary = json.loads(job.get("request_summary") or "{}") if job else {}
         if not job or summary.get("kind") != "media_case" or summary.get("owner") != _owner(ctx):
             return "failed", "この取り込みの状態は参照できません。"
+        from teamagent.skills.proposal_builder.skill import _configured_stale_seconds
+
+        job = self.jobs.fail_stale(job_id, job, _configured_stale_seconds())
         status = str(job["status"])
         if status in {"queued", "running"}:
             self._start(job_id)
@@ -346,6 +349,16 @@ class MediaCaseSearchSkill(BaseSkill[MediaCaseInput, MediaCaseOutput]):
         )
 
     def _worker(self, job_id: str) -> None:
+        stop = threading.Event()
+
+        def heartbeat() -> None:
+            while not stop.wait(30):
+                try:
+                    if not self.jobs.heartbeat(job_id):
+                        return
+                except Exception as exc:
+                    logger.warning("media_case_heartbeat_failed", error=type(exc).__name__)
+
         try:
             with self.store.worker_lock() as alive:
                 if alive is None:
@@ -359,6 +372,8 @@ class MediaCaseSearchSkill(BaseSkill[MediaCaseInput, MediaCaseOutput]):
                 if not shared_company_domains_from_env():
                     raise ValueError("company sharing scope unavailable")
                 self.jobs.mark_running(job_id)
+                self.jobs.heartbeat(job_id)
+                threading.Thread(target=heartbeat, daemon=True).start()
                 apify = self._apify or ApifyClient.from_env(ledger=CostGuard.from_env())
                 distiller = self._distiller or CaseDistiller.from_env(CostGuard.from_env())
                 pending = [
@@ -388,6 +403,7 @@ class MediaCaseSearchSkill(BaseSkill[MediaCaseInput, MediaCaseOutput]):
             logger.warning("media_case_ingest_stopped", error=type(exc).__name__, job_id=job_id)
             self.jobs.mark_failed(job_id, "MEDIA_CASE_STOPPED", error_summary=reason)
         finally:
+            stop.set()
             with self._active_lock:
                 self._active.discard(job_id)
 

@@ -836,7 +836,11 @@ async def test_result_is_delivered_after_gemini_rate_limits(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, slack: _FakeSlack, quota: list[int]
 ) -> None:
     import teamagent.adapters.retry as retry
+    from teamagent.skills.video_algorithm import frames, thumbnails
 
+    # ダミー動画では実 ffmpeg の再試行を待たず、Gemini の429回復と通知だけを検証する。
+    monkeypatch.setattr(frames, "extract_frames", lambda *a, **k: [])
+    monkeypatch.setattr(thumbnails, "fetch_cover", lambda *a, **k: None)
     monkeypatch.setattr(retry.random, "uniform", lambda a, b: 0.0)  # 待ちは下限 0.5 秒だけ
     monkeypatch.setattr(detached_jobs, "load_policy", lambda: _policy())
     genai = _FakeGenAI(rate_limited_times=2)
@@ -1151,3 +1155,38 @@ def test_main_runs_the_detach_aware_server(monkeypatch: pytest.MonkeyPatch) -> N
     monkeypatch.setenv("TEAMAGENT_MCP_BEARER", "x" * 32)
     module.main()
     assert ran == [module._DetachAwareServer]
+
+
+@pytest.mark.parametrize("tool", ["web_research", "x_voice_search", "x_needs_mining"])
+async def test_long_research_uses_existing_detach_and_sends_the_real_result_once(
+    monkeypatch: pytest.MonkeyPatch, slack: _FakeSlack, usage: list[dict[str, Any]], tool: str
+) -> None:
+    from teamagent.mcp_gateway import async_job_notify
+
+    monkeypatch.setenv("USE_LONG_JOB_NOTIFY", "1")
+    monkeypatch.setenv("PROPOSAL_JOBS_TABLE", "")
+    watched: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        async_job_notify, "schedule_completion_notice", lambda **kw: watched.append(kw)
+    )
+    monkeypatch.setattr(detached_jobs, "load_policy", lambda: _policy())
+    skill = _GateSkill()
+    skill.summary = "調査結果です。https://example.invalid/research"
+    spec = ToolSpec(tool, "fake research", _GateSkill, factory=lambda: skill)
+    response = await dispatch_tool(
+        {tool: spec},
+        tool,
+        {"query": "遅い調査"},
+        identity_resolver=_resolver_for(ME),
+        caller_claim_verifier=_Verifier(_claim()),  # type: ignore[arg-type]
+    )
+    receipt = json.loads(response[0].text)
+    assert "結果をこの会話にお届けします" in receipt["message"]
+    assert "動画分析" not in receipt["message"]
+    assert slack.posts == []
+    skill.release.set()
+    await _eventually(lambda: len(slack.posts) == 1 and len(usage) == 1)
+    assert slack.posts[0]["channel"] == DM
+    assert "https://example.invalid/research" in slack.posts[0]["text"]
+    assert skill.cleanups == 1 and skill.runs == 1
+    assert len(watched) == 1 and watched[0]["poll"]()[0] == "done"
