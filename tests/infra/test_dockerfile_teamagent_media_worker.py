@@ -281,6 +281,7 @@ def test_media_image_copies_only_worker_media_code_and_no_core_secrets_stack() -
         "deck_qa.py",
         "operations.py",
         "proposal_cleanup.py",
+        "proposal_quality.py",
         "proposal_bu2.py",
         "proposal_template.py",
         "proposal_dates.py",

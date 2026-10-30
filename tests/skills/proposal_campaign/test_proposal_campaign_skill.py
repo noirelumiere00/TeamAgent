@@ -169,7 +169,8 @@ def test_pptx_render_integration(
     from pptx.util import Emu, Inches
 
     from teamagent.skills.proposal_deck.contract import LENGTH_RULES, VALID_IDS, ComposerOutput
-    from teamagent.skills.proposal_deck.renderer import _SLOT_SIZE_EMU, _SLOT_TOP_EMU
+
+    slot_size, slot_top = 609905, 5454720
 
     # 合成テンプレ（95枠テキスト + 既知スロット2個）
     tpl = tmp_path / "tpl.pptx"
@@ -184,13 +185,14 @@ def test_pptx_render_integration(
             tf.add_paragraph().text = f"｛{pid}：l{pid}｝"
     assert slide is not None
     for k in range(2):
-        slide.shapes.add_shape(
+        slot = slide.shapes.add_shape(
             MSO_SHAPE.RECTANGLE,
-            Emu(914400 + k * (_SLOT_SIZE_EMU + 50000)),
-            Emu(_SLOT_TOP_EMU),
-            Emu(_SLOT_SIZE_EMU),
-            Emu(_SLOT_SIZE_EMU),
+            Emu(914400 + k * (slot_size + 50000)),
+            Emu(slot_top),
+            Emu(slot_size),
+            Emu(slot_size),
         )
+        slot.text = "ここに画像"
     prs.save(str(tpl))
 
     # 95枠 ComposerOutput JSON

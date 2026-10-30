@@ -107,6 +107,20 @@ def proposal_bu1_slide_ids(presentation: Any) -> set[int]:
     }
 
 
+def proposal_excluded_slide_ids(
+    *,
+    emme_slide_ids: set[int],
+    bu2_slide_ids: set[int],
+    bu1_slide_ids: set[int] | None,
+    business_unit: str,
+    product_sector: str,
+) -> set[int]:
+    excluded = set(bu2_slide_ids) if business_unit == "BU2" else set(bu1_slide_ids or ())
+    if product_sector.strip() and not _BEAUTY_SECTOR.search(product_sector):
+        excluded.update(emme_slide_ids)
+    return excluded
+
+
 def finalize_proposal_content(
     presentation: Any,
     samples: dict[int, set[str]],
@@ -130,11 +144,15 @@ def finalize_proposal_content(
         undated_schedule_text,
     )
 
-    excluded = set(bu2_slide_ids) if business_unit == "BU2" else set(bu1_slide_ids or ())
+    excluded = proposal_excluded_slide_ids(
+        emme_slide_ids=emme_slide_ids,
+        bu2_slide_ids=bu2_slide_ids,
+        bu1_slide_ids=bu1_slide_ids,
+        business_unit=business_unit,
+        product_sector=product_sector,
+    )
     emme = [slide for slide in presentation.slides if slide.slide_id in emme_slide_ids]
-    if product_sector.strip() and not _BEAUTY_SECTOR.search(product_sector):
-        excluded.update(emme_slide_ids)
-    elif emme and not product_sector.strip():
+    if emme and not product_sector.strip():
         append_review_note(emme[0], "警告: 媒体選択 要確認（業種未指定のためEMMEを保持）")
 
     # 入力FMTの契約検査後に除外する。残るslide_id・装飾・座標は維持する。
@@ -251,7 +269,7 @@ def prepare_proposal_content(
     auxiliary: dict[str, str],
     source_notes: dict[str, str] | None = None,
 ) -> tuple[dict[int, str], dict[str, str]]:
-    """不足理由をノートへ保存して本文を空欄化し、未使用ヒアリング枠を除去する。"""
+    """条件欄は相談表示、他の不足欄は空欄化し、理由はノートへ残す。未使用枠だけ除去する。"""
     values = {key: value.translate(_SAFE_SYMBOLS) for key, value in placeholders.items()}
     aux_values = {key: value.translate(_SAFE_SYMBOLS) for key, value in auxiliary.items()}
     unused_hearing = {
@@ -280,7 +298,7 @@ def prepare_proposal_content(
             frame.text = (existing + "\n\n" if existing else "") + (
                 "入力条件・補足（自動生成）\n" + "\n".join(sources)
             )
-        for key in aux_keys & BU2_AUXILIARY_KEYS:
+        for key in aux_keys:
             if key not in unused_hearing and not aux_values.get(key, "").strip():
                 aux_values[key] = "要確認（データ未検出）"
         reviews = [
@@ -305,7 +323,7 @@ def prepare_proposal_content(
                 if (
                     key in BU2_AUXILIARY_KEYS
                     and key.startswith("PB-BU2-HEARING-")
-                    and (key in unused_hearing or "要確認" in aux_values.get(key, ""))
+                    and key in unused_hearing
                 ):
                     element = shape._element
                     element.getparent().remove(element)
@@ -326,8 +344,11 @@ def prepare_proposal_content(
         {key: "" if "要確認" in value else value for key, value in values.items()},
         {
             key: (
-                "\n".join(line for line in value.splitlines() if "要確認" not in line)
-                if key == "PB-BU2-ESTIMATE-NOTES"
+                "\n".join(
+                    "条件未指定・要相談" if "要確認" in line else line
+                    for line in value.splitlines()
+                )
+                if key in BU2_AUXILIARY_KEYS
                 else ""
                 if "要確認" in value
                 else value

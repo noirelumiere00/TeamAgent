@@ -1,6 +1,7 @@
 """検査失敗でも生成済み PPTX を配信へ渡せる。"""
 
 from pathlib import Path
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -19,16 +20,23 @@ def test_scan_failure_does_not_stop_run(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, failure: bool
 ) -> None:
     template = tmp_path / "template.pptx"
-    template_texts = [[] for _ in range(83)]
+    template_texts: list[list[str]] = [[] for _ in range(83)]
     template_texts[2] = ["要確認（テンプレの説明）"]
     template.write_bytes(_deck(template_texts))
-    texts = [[] for _ in range(83)]
+    texts: list[list[str]] = [[] for _ in range(83)]
     texts[2] = ["要確認（テンプレの説明）"]
     texts[6] = ["要確認"]
     texts[62] = ["要確認"]
     body = _deck(texts)
 
-    def render(_composer, _template, out_path, *, request_id):
+    def render(
+        _composer: Any,
+        _template: Path,
+        out_path: Path,
+        *,
+        request_id: str,
+        metadata: dict[str, Any],
+    ) -> Path:
         out_path.parent.mkdir(parents=True, exist_ok=True)
         out_path.write_bytes(body)
         return out_path
@@ -41,7 +49,7 @@ def test_scan_failure_does_not_stop_run(
     if failure:
         from teamagent.skills._shared import deck_review
 
-        def fail(_data):
+        def fail(_data: bytes) -> Any:
             raise office_extract.OfficePayloadError(
                 "unsafe_content_volume", mime_type=office_extract.PPTX_MIME, actual_bytes=123
             )

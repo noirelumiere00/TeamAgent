@@ -4,7 +4,7 @@ import base64
 import hashlib
 import io
 import json
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from datetime import UTC, datetime
 from typing import Any
 
@@ -473,7 +473,7 @@ class _GuardClient(MediaJobClient):
         body: bytes,
         content_type: str,
         deadline_epoch_s: int,
-        ttl_s: int = 3600,
+        ttl_s: int | None = None,
         max_bytes: int = 128 * 1024 * 1024,
     ) -> S3ObjectRef:
         del name, content_type, deadline_epoch_s, ttl_s
@@ -537,8 +537,9 @@ class _SearchClient(MediaJobClient):
         request: MediaJobRequest,
         *,
         timeout_s: int = 180,
+        capture_result: Callable[[MediaJobResult], None] | None = None,
     ) -> tuple[Mapping[str, bytes], Mapping[str, Any]]:
-        del timeout_s
+        del timeout_s, capture_result
         self.request = request
         payload = {
             "posts": [
@@ -900,3 +901,22 @@ def test_download_rejects_output_whose_metadata_names_another_attempt() -> None:
     )
     with pytest.raises(MediaJobError, match="MEDIA_ARTIFACT_INTEGRITY_FAILED"):
         client.download(_worker_output_ref(body), deadline_epoch_s=130)
+
+
+def test_proposal_metadata_reaches_caller(monkeypatch: pytest.MonkeyPatch) -> None:
+    client = MediaJobClient(queue_url="queue", table="jobs", bucket=_BUCKET)
+    worker_metadata = {"qa_error": "RuntimeError", "field_issues": ["required_image_missing:1:2"]}
+    monkeypatch.setattr(
+        client, "_run_staged", lambda **kwargs: ({"proposal.pptx": b"pptx"}, worker_metadata)
+    )
+    metadata: dict[str, Any] = {}
+    assert (
+        client.render_proposal_pptx(
+            b"template",
+            b"{}",
+            request_fingerprint="metadata",
+            metadata=metadata,
+        )
+        == b"pptx"
+    )
+    assert metadata == worker_metadata

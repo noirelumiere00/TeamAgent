@@ -28,7 +28,17 @@ from teamagent.media.proposal_cleanup import (
     proposal_bu1_slide_ids,
     proposal_bu2_slide_ids,
     proposal_emme_slide_ids,
+    proposal_excluded_slide_ids,
     proposal_template_samples,
+)
+from teamagent.media.proposal_quality import (
+    deck_qa as _deck_qa,
+)
+from teamagent.media.proposal_quality import (
+    expected_proposal_slides,
+    inspect_proposal,
+    proposal_field_results,
+    proposal_field_spec,
 )
 from teamagent.media.proposal_template import (
     BASE_AUXILIARY_KEYS,
@@ -68,32 +78,6 @@ def _path(root: Path, value: Any, *, output: bool = False) -> Path:
     if output and path.exists():
         raise MediaOperationError("MEDIA_RENDER_PATH_INVALID", "renderer output already exists")
     return path
-
-
-# 結果の metadata は 32KB・NaN 不可（contracts.MediaJobResult）。検査の結果で依頼全体を
-# 失敗させないよう、要約はこの大きさに収め、収まらなければ件数だけを返す。
-_DECK_QA_MAX_BYTES = 8 * 1024
-
-
-def _deck_qa(path: Path, *, expected_slides: int) -> dict[str, Any]:
-    try:
-        from teamagent.media.deck_qa import inspect_pptx
-
-        summary = inspect_pptx(path, expected_slides=expected_slides).summary()
-    except Exception as exc:
-        # 例外の文は長さも中身も制御できないので型名だけ。
-        return {"qa_error": type(exc).__name__[:80]}
-    try:
-        encoded = json.dumps(summary, ensure_ascii=False, allow_nan=False)
-    except (TypeError, ValueError):
-        encoded = None
-    if encoded is None or len(encoded.encode("utf-8")) > _DECK_QA_MAX_BYTES:
-        summary = {
-            "error_count": int(summary.get("error_count", 0)),
-            "warn_count": int(summary.get("warn_count", 0)),
-            "top_findings_dropped": True,
-        }
-    return {"deck_qa": summary}
 
 
 def _slides(root: Path, manifest: dict[str, Any]) -> dict[str, Any]:
@@ -341,14 +325,25 @@ def _proposal(root: Path, manifest: dict[str, Any]) -> dict[str, Any]:
             "composer template profile is invalid",
         )
 
+    field_spec = proposal_field_spec(presentation, template_profile=profile)
     placeholders, auxiliary = prepare_proposal_content(
         presentation, placeholders, auxiliary, source_notes
     )
     for text_frame in _iter_text_frames(presentation):
         _replace_placeholders(text_frame, placeholders)
         _replace_proposal_special_tokens(text_frame, auxiliary, posting_start_date)
-    slots = _iter_proposal_image_slots(presentation)
-    injected = 0
+    excluded = proposal_excluded_slide_ids(
+        emme_slide_ids=emme_slide_ids,
+        bu2_slide_ids=bu2_slide_ids,
+        bu1_slide_ids=bu1_slide_ids,
+        business_unit=business_unit,
+        product_sector=product_sector,
+    )
+    slots = (
+        (slide, shape)
+        for slide, shape in _iter_proposal_image_slots(presentation)
+        if slide.slide_id not in excluded
+    )
     ordered: list[tuple[int, int, Path]] = []
     for value in evidence:
         entry = _exact(value, {"placeholder_id", "rank", "path"}, "evidence entry")
@@ -380,7 +375,6 @@ def _proposal(root: Path, manifest: dict[str, Any]) -> dict[str, Any]:
             )
             picture.left = Emu(int(shape.left) + (int(shape.width) - picture.width) // 2)
             picture.top = Emu(int(shape.top) + (int(shape.height) - picture.height) // 2)
-        injected += 1
     finalize_proposal_content(
         presentation,
         samples,
@@ -411,12 +405,25 @@ def _proposal(root: Path, manifest: dict[str, Any]) -> dict[str, Any]:
         raise MediaOperationError("MEDIA_PPTX_UNFILLED", "unfilled placeholders remain")
 
     presentation.save(str(destination))
-    qa = _deck_qa(destination, expected_slides=len(presentation.slides))
+    qa = inspect_proposal(
+        destination,
+        expected_slides=(
+            expected_proposal_slides(business_unit, product_sector)
+            if profile == _PROPOSAL_BUILDER_PROFILE
+            else len(presentation.slides)
+        ),
+    )
     return {
         **qa,
+        **proposal_field_results(
+            presentation,
+            field_spec,
+            auxiliary,
+            source_notes,
+            requested_images=len(evidence),
+        ),
         "filled": len(placeholders),
         "skipped": len(skipped),
-        "evidence_images": injected,
         "remaining_placeholders": len(remaining),
         "remaining_special_placeholders": len(remaining_special),
         "remaining_legacy_artifacts": len(remaining_legacy),

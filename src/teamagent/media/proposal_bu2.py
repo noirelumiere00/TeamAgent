@@ -292,9 +292,9 @@ def bu2_auxiliary_values(data: Mapping[str, Any] | BU2Content) -> dict[str, str]
         values[f"PB-BU2-HEARING-{index + 1}"] = (
             f"{index + 1}. {content.hearing_items[index]}"
             if index < len(content.hearing_items)
+            else _missing("ヒアリング事項（4〜6項目）")
+            if not content.hearing_items and index == 0
             else ""
-            if len(content.hearing_items) >= 4
-            else _missing(f"ヒアリング事項 {index + 1}（4〜6項目）")
         )
     return values
 
@@ -309,13 +309,12 @@ def bu2_source_notes(data: Mapping[str, Any] | BU2Content) -> dict[str, str]:
         )
         for plan in content.plans
     }
-    if len(content.hearing_items) >= 4:
-        notes.update(
-            {
-                f"PB-BU2-HEARING-{index + 1}": (
-                    f"入力{len(content.hearing_items)}件のため{index + 1}番枠未使用"
-                )
-                for index in range(len(content.hearing_items), 6)
-            }
-        )
+    notes.update(
+        {
+            f"PB-BU2-HEARING-{index + 1}": (
+                f"入力{len(content.hearing_items)}件のため{index + 1}番枠未使用"
+            )
+            for index in range(max(1, len(content.hearing_items)), 6)
+        }
+    )
     return notes

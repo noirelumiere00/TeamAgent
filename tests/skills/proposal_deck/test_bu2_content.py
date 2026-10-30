@@ -2,6 +2,7 @@
 
 import json
 from decimal import Decimal
+from typing import Any
 
 import pytest
 from pydantic import ValidationError
@@ -13,7 +14,7 @@ from teamagent.skills.proposal_deck.skill import ProposalDeckSkill
 from tests.skills.proposal_deck.test_evidence_input import _full_composer_json
 
 
-def bu2_payload() -> dict:
+def bu2_payload() -> dict[str, Any]:
     return {
         "plans": [
             {
@@ -68,7 +69,7 @@ def test_bu2_decimal_money_and_reach_use_explicit_assumptions() -> None:
 
 def test_missing_data_is_review_text_not_invented_financial_terms() -> None:
     values = bu2_auxiliary_values({})
-    assert all("要確認" in value for value in values.values())
+    assert all("要確認" in value for value in values.values() if value)
     assert "10%" not in values["PB-BU2-ESTIMATE-NOTES"]
     assert values["PB-BU2-ESTIMATE-NOTES"].splitlines()[-1] == "※税・管理費別"
     assert "4回" not in values["PB-BU2-SIM-CONTACTS"]
@@ -131,7 +132,7 @@ def test_simulation_has_no_standard_assumptions(field: str) -> None:
         {"hearing_items": ["長" * 81] * 4},
     ],
 )
-def test_bu2_input_bounds(patch: dict) -> None:
+def test_bu2_input_bounds(patch: dict[str, Any]) -> None:
     with pytest.raises(ValidationError):
         BU2Content.model_validate(patch)
 
@@ -216,3 +217,14 @@ def test_hearing_slots_keep_numbers_with_text_and_leave_unused_slots_empty(item_
             assert value == f"{index}. 確認項目{index}"
         else:
             assert value == ""
+
+
+def test_zero_hearing_uses_only_first_slot_and_notes_the_unused_five() -> None:
+    from teamagent.media.proposal_bu2 import bu2_source_notes
+
+    values = bu2_auxiliary_values({})
+    assert "要確認" in values["PB-BU2-HEARING-1"]
+    assert all(values[f"PB-BU2-HEARING-{i}"] == "" for i in range(2, 7))
+    notes = bu2_source_notes({})
+    assert "PB-BU2-HEARING-1" not in notes
+    assert notes["PB-BU2-HEARING-6"] == "入力0件のため6番枠未使用"

@@ -1523,20 +1523,9 @@ def _replace_placeholders(text_frame: Any, placeholders: dict[int, str]) -> None
 
 
 def _iter_proposal_image_slots(presentation: Any) -> Iterator[tuple[Any, Any]]:
-    for slide in presentation.slides:
-        candidates: list[Any] = []
-        for shape in slide.shapes:
-            if getattr(shape, "shape_type", None) in (6, 13):
-                continue
-            try:
-                width = int(shape.width)
-                top = int(shape.top)
-            except (TypeError, ValueError):
-                continue
-            if abs(width - 609905) <= 80000 and abs(top - 5454720) <= 80000:
-                candidates.append(shape)
-        for shape in sorted(candidates, key=lambda item: int(item.left)):
-            yield slide, shape
+    from teamagent.media.proposal_quality import iter_proposal_image_slots
+
+    yield from iter_proposal_image_slots(presentation)
 
 
 def _inject_proposal_evidence(

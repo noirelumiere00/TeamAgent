@@ -19,6 +19,13 @@ from datetime import date, timedelta
 from pathlib import Path
 from typing import Any
 
+from teamagent.media.proposal_quality import (
+    expected_proposal_slides,
+    inspect_proposal,
+    iter_proposal_image_slots,
+    proposal_field_results,
+    proposal_field_spec,
+)
 from teamagent.media.proposal_template import BU2_AUXILIARY_KEYS, template_auxiliary_keys
 from teamagent.skills.proposal_deck.contract import (
     PROPOSAL_BUILDER_REQUIRED_AUXILIARY,
@@ -41,14 +48,6 @@ _PROPOSAL_BUILDER_REQUIRED_DATE_OFFSETS = frozenset(range(-56, 22, 7))
 
 # python-pptx の GROUP shape type 値（MSO_SHAPE_TYPE.GROUP == 6）。
 _GROUP_SHAPE_TYPE = 6
-
-# template_v2.pptx の {58-92} マトリクス最下段サムネ空枠（EMU・1inch=914400）。
-# 0.67"角(=609905)・y≈5.98"(=5454720)。座標一致の許容誤差 ±80000 EMU。
-# NOTE: テンプレ固有値。別テンプレ採用時はスロット仕様の拡張が必要（座標未一致なら静かに skip）。
-_PICTURE_SHAPE_TYPE = 13  # MSO_SHAPE_TYPE.PICTURE（既存スロット除外用）
-_SLOT_TOP_EMU = 5454720
-_SLOT_SIZE_EMU = 609905
-_COORD_TOL_EMU = 80000
 
 
 class UnfilledPlaceholderError(RuntimeError):
@@ -334,36 +333,8 @@ def _resolve_evidence_image_bytes(img: EvidenceImage) -> bytes | None:
 
 
 def _iter_image_slots(prs: Any) -> Iterator[tuple[Any, Any]]:
-    """全 slide から「空サムネ枠」候補を (slide, shape) で yield（group 再帰）。
-
-    座標(top≈_SLOT_TOP_EMU)・サイズ(width≈_SLOT_SIZE_EMU)が許容誤差内の shape を
-    候補とし、PICTURE は除外。slide ごとに left 昇順で返す。
-    """
-
-    def walk(shapes: Any) -> Iterator[Any]:
-        for shape in shapes:
-            if getattr(shape, "shape_type", None) == _GROUP_SHAPE_TYPE:
-                yield from walk(shape.shapes)
-                continue
-            yield shape
-
-    for slide in prs.slides:
-        candidates: list[Any] = []
-        for shape in walk(slide.shapes):
-            if getattr(shape, "shape_type", None) == _PICTURE_SHAPE_TYPE:
-                continue
-            try:
-                w = int(shape.width)
-                t = int(shape.top)
-            except (TypeError, ValueError):
-                continue
-            if (
-                abs(w - _SLOT_SIZE_EMU) <= _COORD_TOL_EMU
-                and abs(t - _SLOT_TOP_EMU) <= _COORD_TOL_EMU
-            ):
-                candidates.append(shape)
-        for shape in sorted(candidates, key=lambda s: int(s.left)):
-            yield slide, shape
+    """workerと同じ、画像ラベルで特定した貼り先を使う。"""
+    yield from iter_proposal_image_slots(prs)
 
 
 def _add_picture_fit(slide: Any, img_bytes: bytes, shape: Any) -> None:
@@ -379,15 +350,15 @@ def _add_picture_fit(slide: Any, img_bytes: bytes, shape: Any) -> None:
         pic.top = Emu(top + (box_h - pic.height) // 2)
 
 
-def _inject_evidence_images(prs: Any, evidence_images: dict[int, list[EvidenceImage]]) -> int:
+def _inject_evidence_images(
+    slots: Iterator[tuple[Any, Any]], evidence_images: dict[int, list[EvidenceImage]]
+) -> int:
     """evidence_images を placeholder_id 昇順→rank 昇順で空枠へ順に add_picture。
 
     image_path を解決できない画像はスキップ。空枠が尽きたら以降は捨てる
     （pptx はテキスト主役・graceful by design）。注入した枚数を返す。
     add_picture が画像形式を認識できない（壊れたファイル等）場合もスキップする。
     """
-    from PIL import UnidentifiedImageError  # python-pptx は Pillow backend
-
     ordered: list[EvidenceImage] = []
     for pid in sorted(evidence_images):
         for img in sorted(evidence_images[pid], key=lambda e: e.rank):
@@ -395,19 +366,18 @@ def _inject_evidence_images(prs: Any, evidence_images: dict[int, list[EvidenceIm
     if not ordered:
         return 0
 
-    slots = _iter_image_slots(prs)
     injected = 0
     for img in ordered:
-        data = _resolve_evidence_image_bytes(img)
-        if data is None:
-            continue
         try:
             slide, shape = next(slots)
         except StopIteration:
             break
+        data = _resolve_evidence_image_bytes(img)
+        if data is None:
+            continue
         try:
             _add_picture_fit(slide, data, shape)
-        except UnidentifiedImageError:
+        except Exception:
             continue
         injected += 1
     return injected
@@ -428,6 +398,7 @@ def render_pptx(
     agency_route: bool = True,
     business_unit: str = "BU2",
     source_notes: dict[str, str] | None = None,
+    metadata: dict[str, Any] | None = None,
 ) -> Path:
     """テンプレ pptx を読み、placeholder を全置換して out_path に保存。
 
@@ -442,6 +413,7 @@ def render_pptx(
         proposal_bu1_slide_ids,
         proposal_bu2_slide_ids,
         proposal_emme_slide_ids,
+        proposal_excluded_slide_ids,
         proposal_template_samples,
     )
 
@@ -495,6 +467,7 @@ def render_pptx(
                 "integrated template D-56 through D+21 schedule markers are incomplete"
             )
 
+    field_spec = proposal_field_spec(prs, template_profile=template_profile)
     placeholders, auxiliary_placeholders = prepare_proposal_content(
         prs, placeholders, auxiliary_placeholders or {}, source_notes
     )
@@ -505,8 +478,21 @@ def render_pptx(
     _replace_schedule_dates(prs, posting_start_date)
     _replace_template_version(prs, template_profile)
 
+    excluded = proposal_excluded_slide_ids(
+        emme_slide_ids=emme_slide_ids,
+        bu2_slide_ids=bu2_slide_ids,
+        bu1_slide_ids=bu1_slide_ids,
+        business_unit=business_unit,
+        product_sector=product_sector,
+    )
     if evidence_images:
-        _inject_evidence_images(prs, evidence_images)
+        slots = (
+            (slide, shape)
+            for slide, shape in _iter_image_slots(prs)
+            if slide.slide_id not in excluded
+        )
+        _inject_evidence_images(slots, evidence_images)
+    requested_images = sum(len(images) for images in (evidence_images or {}).values())
 
     finalize_proposal_content(
         prs,
@@ -545,6 +531,26 @@ def render_pptx(
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
     prs.save(str(out_path))
+    if metadata is not None:
+        metadata.update(
+            inspect_proposal(
+                out_path,
+                expected_slides=(
+                    expected_proposal_slides(business_unit, product_sector)
+                    if template_profile == PROPOSAL_BUILDER_TEMPLATE_PROFILE
+                    else len(prs.slides)
+                ),
+            )
+        )
+        metadata.update(
+            proposal_field_results(
+                prs,
+                field_spec,
+                auxiliary_placeholders,
+                source_notes,
+                requested_images=requested_images,
+            )
+        )
     return out_path
 
 
@@ -605,6 +611,7 @@ def render_deck(
     *,
     fail_if_missing: bool = True,
     enable_images: bool = False,
+    metadata: dict[str, Any] | None = None,
 ) -> Path:
     """ComposerOutput を pptx に流し込み、ファイルパスを返す。
 
@@ -631,6 +638,7 @@ def render_deck(
         agency_route=composer_out.agency_route,
         business_unit=composer_out.business_unit,
         source_notes=bu2_source_notes(composer_out),
+        metadata=metadata,
     )
 
 

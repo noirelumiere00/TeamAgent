@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
@@ -126,6 +127,7 @@ def test_local_render_enables_existing_image_injector(
         output: Path,
         *,
         enable_images: bool,
+        metadata: dict[str, Any] | None = None,
     ) -> Path:
         calls.update(
             composer=composer,
@@ -181,6 +183,7 @@ def test_worker_render_stages_evidence_bytes(
             *,
             request_fingerprint: str,
             evidence_images: list[tuple[int, int, bytes, str]],
+            metadata: dict[str, Any] | None = None,
         ) -> bytes:
             captured.update(
                 template=template,
@@ -188,6 +191,8 @@ def test_worker_render_stages_evidence_bytes(
                 request_fingerprint=request_fingerprint,
                 evidence_images=evidence_images,
             )
+            if metadata is not None:
+                metadata.update({"qa_error": "RuntimeError", "field_issues": []})
             return b"rendered-pptx"
 
     monkeypatch.setattr("teamagent.adapters.media_job.MediaJobClient", WorkerMediaClient)
@@ -201,13 +206,16 @@ def test_worker_render_stages_evidence_bytes(
     image = _image(58, str(image_path))
     composer = ComposerOutput.model_construct(placeholders={}, evidence_images={58: [image]})
 
+    metadata: dict[str, Any] = {}
     output = ProposalDeckSkill._render_pptx(
         composer,
         template,
         tmp_path / "output.pptx",
         request_id="worker-evidence",
+        metadata=metadata,
     )
 
     assert output.read_bytes() == b"rendered-pptx"
+    assert metadata == {"qa_error": "RuntimeError", "field_issues": []}
     assert captured["request_fingerprint"] == "worker-evidence:proposal-pptx"
     assert captured["evidence_images"] == [(58, 1, image_bytes, "image/png")]

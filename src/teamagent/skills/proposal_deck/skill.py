@@ -13,6 +13,7 @@ converse は tool を使わず、モデルに JSON のみを
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
 import os
 import re
@@ -28,6 +29,7 @@ from pydantic import BaseModel, ValidationError
 
 from teamagent.adapters.bedrock_client import BedrockClient, _estimate_cost
 from teamagent.media.proposal_bu2 import BU2_INPUT_FIELDS
+from teamagent.media.proposal_quality import expected_proposal_slides, update_proposal_image_results
 from teamagent.prompts.loader import load_prompt
 from teamagent.skills._shared.deck_review import quality_warnings, review_slides
 from teamagent.skills.base import BaseSkill, SkillContext, register
@@ -194,21 +196,39 @@ class ProposalDeckSkill(BaseSkill[ProposalDeckInput, ProposalDeckOutput]):
                 self._temporary_output_dirs.add(out_dir)
         try:
             out_path = out_dir / f"{ctx.request_id}_{safe}.pptx"
+            render_metadata: dict[str, Any] = {}
             rendered = self._render_pptx(
                 composer_out,
                 template,
                 out_path,
                 request_id=ctx.request_id,
+                metadata=render_metadata,
             )
 
+            rendered_bytes = Path(rendered).read_bytes()
+            if render_metadata.get("output_sha256") != hashlib.sha256(
+                rendered_bytes
+            ).hexdigest() or (
+                input.template_profile == "proposal-builder-v1"
+                and render_metadata.get("expected_slides")
+                != expected_proposal_slides(input.business_unit, input.product_sector)
+            ):
+                render_metadata["qa_error"] = "inspection_identity_mismatch"
+            requested_images = sum(len(images) for images in composer_out.evidence_images.values())
+            renderer_requests = render_metadata.get("requested_evidence_images", 0)
+            if isinstance(render_metadata.get("image_slots"), list):
+                update_proposal_image_results(render_metadata, requested_images=requested_images)
+            elif isinstance(renderer_requests, int) and requested_images > renderer_requests:
+                render_metadata.setdefault("field_issues", []).append("pptx_fields_unavailable")
             try:
-                rendered_bytes = Path(rendered).read_bytes()
                 review = review_slides(rendered_bytes, template.read_bytes())
                 quality = quality_warnings(rendered_bytes)
             except Exception as exc:
                 review = None
                 quality = []
                 log.warning("proposal_deck_review_scan_failed", error_type=type(exc).__name__)
+
+            quality.extend(render_metadata.get("field_warnings", []))
 
             pptx_url = self._publish_if_enabled(
                 str(rendered),
@@ -245,6 +265,7 @@ class ProposalDeckSkill(BaseSkill[ProposalDeckInput, ProposalDeckOutput]):
                 length_warnings=length_warnings,
                 quality_warnings=quality,
                 review_slides=review,
+                render_metadata=render_metadata,
                 total_cost_usd=cost_usd,
             )
         except Exception:
@@ -276,6 +297,7 @@ class ProposalDeckSkill(BaseSkill[ProposalDeckInput, ProposalDeckOutput]):
         out_path: Path,
         *,
         request_id: str,
+        metadata: dict[str, Any] | None = None,
     ) -> Path:
         """media job設定時はworkerへ委譲し、ローカル開発だけ従来rendererを使う。"""
         from teamagent.adapters.media_job import MediaJobClient
@@ -289,6 +311,7 @@ class ProposalDeckSkill(BaseSkill[ProposalDeckInput, ProposalDeckOutput]):
                 template,
                 out_path,
                 enable_images=bool(render_out.evidence_images),
+                metadata=metadata,
             )
         MediaJobClient.require_configured()
         staged_images: list[tuple[int, int, bytes, str]] = []
@@ -330,6 +353,7 @@ class ProposalDeckSkill(BaseSkill[ProposalDeckInput, ProposalDeckOutput]):
             render_out.model_dump_json().encode("utf-8"),
             request_fingerprint=f"{request_id}:proposal-pptx",
             evidence_images=staged_images,
+            metadata=metadata,
         )
         out_path.parent.mkdir(parents=True, exist_ok=True)
         out_path.write_bytes(pptx)

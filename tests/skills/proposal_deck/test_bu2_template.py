@@ -26,7 +26,7 @@ from tests.skills.proposal_deck.test_proposal_deck_skill import _full_composer_j
 
 @pytest.mark.parametrize("backend", ["local", "worker"])
 @pytest.mark.parametrize("unit,expected", [("BU1", 83), ("BU2", 72)])
-def test_extension_pages_are_bu2_only_and_missing_values_go_to_notes(
+def test_extension_pages_are_bu2_only_and_missing_values_stay_visible(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, backend: str, unit: str, expected: int
 ) -> None:
     path = tmp_path / "template.pptx"
@@ -34,14 +34,12 @@ def test_extension_pages_are_bu2_only_and_missing_values_go_to_notes(
     _pin_template(monkeypatch, path, 86)
     before = path.read_bytes()
     output = _render(tmp_path, backend, business_unit=unit)
-    prs = Presentation(output)
+    prs = Presentation(str(output))
     assert len(prs.slides) == expected
     if unit == "BU2":
         for slide in list(prs.slides)[-3:]:
             assert all(
-                shape.text.strip() in {"", "※税・管理費別"}
-                for shape in slide.shapes
-                if shape.has_text_frame
+                "条件未指定・要相談" in shape.text for shape in slide.shapes if shape.has_text_frame
             )
             assert "要確認" in slide.notes_slide.notes_text_frame.text
             assert "PB-BU2-" in slide.notes_slide.notes_text_frame.text
@@ -117,7 +115,7 @@ def test_pinned_extension_still_requires_its_exact_inventory(
 ) -> None:
     path = tmp_path / "template.pptx"
     _template(path)
-    prs = Presentation(path)
+    prs = Presentation(str(path))
     if damage == "auxiliary":
         prs.slides[-1].shapes[0].text = "{{PB-UNKNOWN}}"
     elif damage == "numeric":
@@ -134,7 +132,7 @@ def test_pinned_extension_still_requires_its_exact_inventory(
         slide = prs.slides._sldIdLst[-1]
         prs.part.drop_rel(slide.rId)
         prs.slides._sldIdLst.remove(slide)
-    prs.save(path)
+    prs.save(str(path))
     _pin_template(monkeypatch, path, 86)
     with pytest.raises(
         (UnfilledPlaceholderError, MediaOperationError, ProposalAssetProvisionError)
@@ -186,7 +184,7 @@ def test_structured_values_and_source_notes_match_in_both_renderers(
     )
     contents = []
     for backend in ("local", "worker"):
-        added = list(Presentation(tmp_path / f"{backend}.pptx").slides)[-3:]
+        added = list(Presentation(str(tmp_path / f"{backend}.pptx")).slides)[-3:]
         text = "\n".join(shape.text for slide in added for shape in slide.shapes)
         notes = "\n".join(slide.notes_slide.notes_text_frame.text for slide in added)
         contents.append((text.replace("\v", "\n"), notes))
@@ -250,13 +248,13 @@ def test_ungrounded_bu2_values_are_blank_with_review_notes_in_both_renderers(
     )
     contents = []
     for backend in ("local", "worker"):
-        added = list(Presentation(tmp_path / f"{backend}.pptx").slides)[-3:]
+        added = list(Presentation(str(tmp_path / f"{backend}.pptx")).slides)[-3:]
         text = "\n".join(shape.text for slide in added[:2] for shape in slide.shapes)
         notes = "\n".join(slide.notes_slide.notes_text_frame.text for slide in added[:2])
         contents.append((text.replace("\v", "\n"), notes))
-        assert all(not shape.text.strip() for shape in added[1].shapes)
+        assert all("条件未指定・要相談" in shape.text for shape in added[1].shapes)
         assert all(
-            not shape.text.strip() or shape.text.startswith("※ネット表記")
+            "条件未指定・要相談" in shape.text or shape.text.startswith("※ネット表記")
             for shape in added[0].shapes
         )
         for slide in added[:2]:
@@ -299,7 +297,7 @@ def test_unused_hearing_shape_is_removed_after_its_note_is_saved(reason: str | N
     frame.text = "{{PB-BU2-HEARING-6}}"
     notes = {"PB-BU2-HEARING-6": reason} if reason else {}
     prepare_proposal_content(prs, {}, {"PB-BU2-HEARING-6": ""}, notes)
-    assert len(slide.shapes) == 1
+    assert len(slide.shapes) == (1 if reason else 2)
     assert slide.shapes[0]._element.xml == before
     assert ("要確認" in slide.notes_slide.notes_text_frame.text) is (reason is None)
     assert (reason or "PB-BU2-HEARING-6") in slide.notes_slide.notes_text_frame.text
