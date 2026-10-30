@@ -23,7 +23,7 @@ from teamagent.observability.logging_config import configure_logging
 
 logger = structlog.get_logger(__name__)
 MAX_IMAGE_BYTES = 5 * 1024 * 1024
-# TikTok は短い UA（"Mozilla/5.0" だけ）に 1.4KB の空ページを返し、カバーの JSON が無い（2026-10-30 実測）
+# 短い UA（"Mozilla/5.0" だけ）だと TikTok は JSON の無い空ページを返す（2026-10-30 実測）
 PAGE_USER_AGENT = (
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/124.0 Safari/537.36"
