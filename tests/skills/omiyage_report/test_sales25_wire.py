@@ -7,6 +7,7 @@ import io
 import json
 import tempfile
 import zipfile
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 from xml.etree import ElementTree
@@ -300,6 +301,67 @@ def test_all_media_unavailable_keeps_numbers_without_inventing_observations() ->
         assert all("未確認" in slide["elements"][0]["observation"] for slide in reviews["slides"])
 
 
+@pytest.mark.parametrize(
+    "method_name,batch_size,mismatch",
+    [
+        ("analyze_image_bytes", "1", False),
+        ("analyze_images_bytes", "4", False),
+        ("compare_image_bytes", "4", False),
+        ("compare_image_bytes", "4", True),
+    ],
+)
+def test_malformed_post_answer_delivers_partial_but_identity_mismatch_still_stops(
+    monkeypatch: pytest.MonkeyPatch, method_name: str, batch_size: str, mismatch: bool
+) -> None:
+    monkeypatch.setenv("OMIYAGE_SALES25_IMAGE_BATCH_SIZE", batch_size)
+    store = ProposalJobStore(table_name="", memory={})
+    client = Transport()
+    approved = model()
+    method = getattr(approved, method_name)
+    original = method.side_effect
+
+    def answer(*args: Any, **kwargs: Any) -> Any:
+        good = original(*args, **kwargs) if original else method.return_value
+        if args[-1].startswith("sales25-9000000001-"):
+            return (
+                reply({"match": False, "basis": "別の合成図形。"})
+                if mismatch
+                else replace(good, text='["not", "an", "object"]')
+            )
+        return good
+
+    method.side_effect = answer
+    accepted = build(
+        store, sales25_stages=production_stages(Wire(client, lambda: approved, store=store))
+    ).run(request(), ctx())
+    saved = result(store, accepted.job_id)
+    ids = [
+        c.args[-1] for c in method.call_args_list if c.args[-1].startswith("sales25-9000000001-")
+    ]
+    if mismatch:
+        assert saved.checkpoints["media"].status == "incomplete"
+        assert saved.final_pptx_ref is None
+        assert len(ids) == 1
+        return
+    assert ids == [ids[0], ids[0] + "-again"]
+    assert saved.status == "partial" and saved.delivery_status == "pending", saved.model_dump_json(
+        indent=2
+    )
+    assert saved.checkpoints["media"].status == "partial"
+    assert saved.checkpoints["media"].reason == "media_missing"
+    assert saved.checkpoints["media"].actual == 29
+    assert saved.checkpoints["analysis"].reason == "media_missing"
+    analysis_ref = S3ObjectRef.model_validate(saved.checkpoints["analysis"].refs[0]["object"])
+    with zipfile.ZipFile(io.BytesIO(client.download(analysis_ref))) as archive:
+        reviews = json.loads(archive.read("top5-analysis.json"))
+        assert "9000000001" not in reviews["posts"]
+        assert set(reviews["media_missing"]) == {"9000000001"}
+        assert "モデルの応答" in reviews["media_missing"]["9000000001"]["reason"]
+    assert saved.final_pptx_ref is not None
+    deck = client.objects[saved.final_pptx_ref.key, saved.final_pptx_ref.version_id]
+    assert len(Presentation(io.BytesIO(deck)).slides) == 25
+
+
 @pytest.mark.parametrize("omakase_request", [False, True])
 def test_real_stages_deliver_25_pages_with_partial_and_restore(
     monkeypatch: pytest.MonkeyPatch,
@@ -338,7 +400,9 @@ def test_real_stages_deliver_25_pages_with_partial_and_restore(
     assert "100本目標→12本取得" in text
     assert "数え方" in text
     if omakase_request:
-        case = json.loads(store.get_job(accepted.job_id)["request_summary"])["case"]
+        row = store.get_job(accepted.job_id)
+        assert row is not None
+        case = json.loads(row["request_summary"])["case"]
         disclosure = omakase.note(case)
         assert disclosure in accepted.message
         with zipfile.ZipFile(io.BytesIO(deck)) as archive:

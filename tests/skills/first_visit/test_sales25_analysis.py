@@ -569,6 +569,29 @@ def test_batch_requires_every_image_in_order(run: Path, invalid: str) -> None:
         analysis._review(run, post, manifest, files, model, batch_size=4)
 
 
+@pytest.mark.parametrize("batch_size", [1, 4])
+def test_bare_list_answer_with_echoed_inputs_is_read_without_asking_again(
+    run: Path, batch_size: int
+) -> None:
+    # 10-30 本番の形: {"observations": ...} で包まず、入力の sec / photo_index も写して返す
+    post = analysis.selected_posts(run, OWNER)[0]
+    manifest, files = analysis.validate_media(analysis.media_operation(post), package(post))
+    model = fake_model()
+    point = {**json.loads(model.analyze_image_bytes.return_value.text), "sec": 0.0}
+    model.analyze_image_bytes.return_value = reply({**point, "photo_index": 1})
+
+    def images(images: list[tuple[bytes, str]], *args: Any) -> GeminiResponse:
+        values = [{"index": i, **point, "photo_index": i + 1} for i in range(len(images))]
+        return replace(reply({}), text=json.dumps(values, ensure_ascii=False))
+
+    model.analyze_images_bytes.side_effect = images
+    result = analysis._review(run, post, manifest, files, model, batch_size=batch_size)
+    assert result["status"] == "complete"
+    method = model.analyze_images_bytes if batch_size == 4 else model.analyze_image_bytes
+    assert method.call_args_list
+    assert all(not call.args[-1].endswith("-again") for call in method.call_args_list)
+
+
 def test_large_images_are_split_without_dropping_frames(
     run: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -582,40 +605,127 @@ def test_large_images_are_split_without_dropping_frames(
     model.analyze_image_bytes.assert_called_once()
 
 
-@pytest.mark.parametrize("shape", ["fenced", "one_item_list"])
-def test_single_image_answer_tolerates_fence_and_one_item_list(run: Path, shape: str) -> None:
-    # 10-29 本番: 画像 1 枚の判定が JSON の object でなく、資料全体が「JSON object required」で止まった。
+@pytest.mark.parametrize("path", ["single", "batch", "cover", "audio", "silent_video", "elements"])
+@pytest.mark.parametrize(
+    "shape,broken_every_time",
+    [
+        ("fenced", False),
+        ("one_item_list", False),
+        ("broken", False),
+        ("broken", True),
+        ("broken_fenced", False),
+        ("broken_fenced", True),
+        ("fields", False),
+        ("fields", True),
+    ],
+)
+def test_model_answers_retry_and_keep_existing_failure_handling(
+    run: Path, path: str, shape: str, broken_every_time: bool
+) -> None:
     post = analysis.selected_posts(run, OWNER)[0]
     manifest, files = analysis.validate_media(analysis.media_operation(post), package(post))
     model = fake_model()
     point = json.loads(model.analyze_image_bytes.return_value.text)
-    text = json.dumps(point if shape == "fenced" else [point], ensure_ascii=False)
-    if shape == "fenced":
-        text = "```json\n" + text + "\n```"
-    model.analyze_image_bytes.return_value = replace(reply(point), text=text)
-    review = analysis._review(run, post, manifest, files, model)
-    assert review["evidence"]["product"]["photo_index"] == 1
-
-
-@pytest.mark.parametrize("broken_every_time", [False, True])
-def test_malformed_image_answer_is_reasked_under_a_new_id(
-    run: Path, broken_every_time: bool
-) -> None:
-    # 答えは request id でキャッシュされるので、同じ id では同じ壊れた答えが返る（本番の失敗の形）。
-    post = analysis.selected_posts(run, OWNER)[0]
-    manifest, files = analysis.validate_media(analysis.media_operation(post), package(post))
-    model = fake_model()
-    good = model.analyze_image_bytes.return_value
-
-    def cached(body: bytes, mime: str, prompt: str, request_id: str) -> GeminiResponse:
-        if broken_every_time or not request_id.endswith("-again"):
-            return replace(good, text='["not", "an", "object"]')
-        return good
-
-    model.analyze_image_bytes.side_effect = cached
-    if broken_every_time:
-        with pytest.raises(ValueError, match="JSON object required"):
-            analysis._review(run, post, manifest, files, model)
+    methods = {
+        "single": model.analyze_image_bytes,
+        "batch": model.analyze_images_bytes,
+        "cover": model.compare_image_bytes,
+        "audio": model.analyze_audio_bytes,
+        "silent_video": model.analyze_video_bytes,
+        "elements": model.generate_text,
+    }
+    method = methods[path]
+    if path == "batch":
+        good = reply({"observations": [{"index": i, **point} for i in range(3)]})
+    elif path == "elements":
+        good = model.generate_text.side_effect(
+            "evidence:\n" + json.dumps({"rankings": [post["id"]]}), "fixture"
+        )
+    elif path == "silent_video":
+        data = json.loads(model.analyze_audio_bytes.return_value.text)
+        data["status"] = "silent"
+        good = reply(data)
+        manifest.update(media_type="video", audio_status="absent")
+        manifest["assets"] = [{"kind": "video", "path": "original.mp4", "sha256": "0" * 64}]
+        files["original.mp4"] = b"anonymous-silent-video"
     else:
-        analysis._review(run, post, manifest, files, model)
-        assert any(c.args[3].endswith("-again") for c in model.analyze_image_bytes.call_args_list)
+        good = method.return_value
+    data = json.loads(good.text)
+    if shape == "fields":
+        if path == "single":
+            data["product_visible"] = "yes"
+        elif path == "batch":
+            data["observations"][0]["product_visible"] = "yes"
+        elif path == "cover":
+            data["match"] = "yes"
+        elif path in {"audio", "silent_video"}:
+            data["segments"] = {}
+        else:
+            data["elements"][0]["refs"] = []
+    malformed = {
+        "fenced": "```json\n" + good.text + "\n```",
+        "one_item_list": json.dumps([json.loads(good.text)]),
+        "fields": json.dumps(data),
+        "broken": '["not", "an", "object"]',
+        "broken_fenced": '```json\n["not", "an", "object"]\n```',
+    }[shape]
+
+    def cached(*args: Any, **kwargs: Any) -> GeminiResponse:
+        request_id = args[-1]
+        return (
+            good
+            if request_id.endswith("-again") and not broken_every_time
+            else replace(good, text=malformed)
+        )
+
+    method.side_effect = cached
+
+    def invoke() -> Any:
+        if path == "silent_video":
+            return analysis._audio_review(post["id"], "media/", manifest, files, model)
+        if path == "elements":
+            return analysis._slides(run, {post["id"]: {"evidence": {}}}, model)
+        return analysis._review(
+            run, post, manifest, files, model, batch_size=4 if path == "batch" else 1
+        )
+
+    if broken_every_time and path not in {"audio", "silent_video"}:
+        with pytest.raises(analysis.ModelResponseError):
+            invoke()
+    else:
+        result = invoke()
+        if path in {"audio", "silent_video"}:
+            audio = result if path == "silent_video" else result["audio"]
+            assert audio["status"] == (
+                "unmeasured"
+                if broken_every_time
+                else "silent"
+                if path == "silent_video"
+                else "listened"
+            )
+            if broken_every_time:
+                assert audio["error_type"] == "ModelResponseError"
+        elif path == "elements":
+            assert result[0]["elements"] == json.loads(good.text)["elements"]
+        else:
+            assert result["status"] == "complete"
+    ids = [call.args[-1] for call in method.call_args_list]
+    if shape in {"fenced", "one_item_list"}:
+        assert ids and all(not rid.endswith("-again") for rid in ids)
+    else:
+        assert ids and ids[1::2] == [rid + "-again" for rid in ids[::2]]
+        if broken_every_time:
+            assert len(ids) == 2
+
+
+@pytest.mark.parametrize("shape", ["fenced", "one_item_list"])
+def test_media_manifest_still_requires_strict_json(run: Path, shape: str) -> None:
+    post = analysis.selected_posts(run, OWNER)[0]
+    artifacts = package(post)
+    body = artifacts["media-manifest.json"]
+    artifacts["media-manifest.json"] = (
+        b"```json\n" + body + b"\n```" if shape == "fenced" else b"[" + body + b"]"
+    )
+    with pytest.raises(ValueError):
+        analysis.validate_media(analysis.media_operation(post), artifacts)
+    assert not (run / "media").exists()
