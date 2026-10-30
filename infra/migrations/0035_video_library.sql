@@ -1,6 +1,6 @@
 -- P1 video library. Additive and forward-only; no existing tables change.
 -- Shared internal catalog: teamagent_app reads, only admin-GUC ingest writes.
--- is_private is publication metadata, not a company-internal access restriction.
+-- Human-managed settings belong in P3 vl_campaign_settings; ingest stores only source data.
 CREATE TABLE IF NOT EXISTS vl_business_categories (
     code TEXT PRIMARY KEY,
     display_name TEXT NOT NULL,
@@ -24,11 +24,6 @@ CREATE TABLE IF NOT EXISTS vl_accounts (
 CREATE TABLE IF NOT EXISTS vl_campaigns (
     advertiser TEXT NOT NULL,
     campaign TEXT NOT NULL,
-    business_category TEXT REFERENCES vl_business_categories(code),
-    industry TEXT,
-    purpose TEXT,
-    is_private BOOLEAN NOT NULL DEFAULT false,
-    report_drive_file_id TEXT,
     PRIMARY KEY (advertiser, campaign)
 );
 
@@ -47,10 +42,8 @@ CREATE TABLE IF NOT EXISTS vl_videos (
     hashtags TEXT[] NOT NULL DEFAULT '{}',
     advertiser TEXT,
     campaign TEXT,
-    business_category TEXT REFERENCES vl_business_categories(code),
     origin TEXT NOT NULL DEFAULT 'own' CHECK (origin IN ('own', 'external')),
     is_pr BOOLEAN NOT NULL DEFAULT false,
-    is_private BOOLEAN NOT NULL DEFAULT false,
     thumbnail_s3_key TEXT,
     video_s3_key TEXT,
     first_ingested_at TIMESTAMPTZ NOT NULL DEFAULT now(),

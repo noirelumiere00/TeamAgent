@@ -71,18 +71,14 @@ def seed_batch() -> SyncBatch:
     return SyncBatch(
         rows_read=1,
         accounts=[Account(platform="tiktok", handle="test", operator_label="NewsTV")],
-        campaigns=[
-            Campaign(advertiser="test", campaign="test", business_category="tto", is_private=True)
-        ],
+        campaigns=[Campaign(advertiser="test", campaign="test")],
         videos=[
             Video(
                 platform="tiktok",
                 video_id="1",
                 url="https://www.tiktok.com/@test/video/1",
-                business_category="tto",
                 caption="#PR",
                 is_pr=True,
-                is_private=True,
             )
         ],
         metrics=[
@@ -98,7 +94,9 @@ def test_postgres_idempotence_and_daily_snapshot_overwrite(
 ) -> None:
     conn, repository = db
     batch = seed_batch()
-    assert repository.business_categories()["organic"] == "オーガニック"
+    assert conn.execute(
+        "SELECT display_name FROM vl_business_categories WHERE code='organic'"
+    ).fetchone() == {"display_name": "オーガニック"}
     assert repository.save(batch, request_id="first", started_at=NOW) == 1
     assert conn.execute("SELECT operator_label FROM vl_accounts").fetchone() == {
         "operator_label": "NewsTV",
@@ -148,10 +146,32 @@ def test_postgres_rls_internal_read_and_admin_write(db: tuple[Any, VideoLibraryR
         )
     with pytest.raises(psycopg.errors.InsufficientPrivilege), conn.transaction():
         conn.execute("DELETE FROM vl_videos")
-    assert conn.execute("UPDATE vl_videos SET is_private=false").rowcount == 0
+    assert conn.execute("UPDATE vl_videos SET caption='changed'").rowcount == 0
     conn.execute("SELECT set_config('app.user_role', 'admin', true)")
     conn.execute("INSERT INTO vl_business_categories VALUES ('new_category', '追加区分', 50)")
-    assert repository.business_categories()["new_category"] == "追加区分"
-    conn.execute("UPDATE vl_videos SET business_category='new_category'")
-    with pytest.raises(psycopg.errors.ForeignKeyViolation), conn.transaction():
-        conn.execute("UPDATE vl_videos SET business_category='does-not-exist'")
+    assert conn.execute(
+        "SELECT display_name FROM vl_business_categories WHERE code='new_category'"
+    ).fetchone() == {"display_name": "追加区分"}
+
+
+def test_postgres_ingest_tables_exclude_human_settings(
+    db: tuple[Any, VideoLibraryRepository],
+) -> None:
+    conn, repository = db
+    columns = conn.execute(
+        """SELECT table_name, column_name FROM information_schema.columns
+           WHERE table_schema=current_schema() AND table_name IN ('vl_videos', 'vl_campaigns')"""
+    ).fetchall()
+    video_columns = {row["column_name"] for row in columns if row["table_name"] == "vl_videos"}
+    campaign_columns = {
+        row["column_name"] for row in columns if row["table_name"] == "vl_campaigns"
+    }
+    assert not {"business_category", "is_private"} & video_columns
+    assert campaign_columns == {"advertiser", "campaign"}
+    batch = seed_batch()
+    assert repository.save(batch, request_id="first", started_at=NOW) == 1
+    assert conn.execute("SELECT * FROM vl_campaigns").fetchall() == [
+        {"advertiser": "test", "campaign": "test"}
+    ]
+    assert repository.save(batch, request_id="second", started_at=NOW) == 0
+    assert conn.execute("SELECT is_pr FROM vl_videos").fetchone() == {"is_pr": True}

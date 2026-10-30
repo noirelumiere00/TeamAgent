@@ -5,7 +5,6 @@ from __future__ import annotations
 import re
 import unicodedata
 from collections import Counter
-from collections.abc import Mapping
 from datetime import UTC, date, datetime
 from typing import Literal
 from urllib.parse import urlsplit
@@ -15,17 +14,7 @@ from pydantic import BaseModel, Field
 from teamagent.adapters.gsheets_client import TabRows
 from teamagent.ingest import campaign_aggregate as ca
 
-CATEGORY_NAMES = {
-    "media": "メディア",
-    "tto": "TTO",
-    "kirinuki": "切り抜き",
-    "other": "その他",
-    "organic": "オーガニック",
-}
-# P3 で Web の設定テーブルに置き換える予定（タブは作らない運用）。
-MASTER_TAB = "案件マスタ"
 ACCOUNTS_TABS = ("ベクトルメディア", "オフショア込み")
-MASTER_COLUMNS = (ca.ADVERTISER_COL, ca.CAMPAIGN_COL, "事業区分", "業種", "目的", "非公開")
 Platform = Literal["tiktok", "instagram", "youtube"]
 ACCOUNT_COLUMNS: tuple[tuple[Platform, str], ...] = (
     ("tiktok", "TT"),
@@ -86,10 +75,8 @@ class Video(BaseModel):
     hashtags: list[str] = Field(default_factory=list)
     advertiser: str | None = None
     campaign: str | None = None
-    business_category: str | None = None
     origin: Literal["own", "external"] = "own"
     is_pr: bool = False
-    is_private: bool = False
 
 
 class Metrics(BaseModel):
@@ -133,10 +120,6 @@ class Metrics(BaseModel):
 class Campaign(BaseModel):
     advertiser: str
     campaign: str
-    business_category: str | None = None
-    industry: str | None = None
-    purpose: str | None = None
-    is_private: bool = False
 
 
 class Account(BaseModel):
@@ -160,7 +143,9 @@ class SyncBatch(BaseModel):
         return {
             "rows_read": self.rows_read,
             "unique_videos": len(self.videos),
-            "categories": dict(Counter(v.business_category or "unset" for v in self.videos)),
+            "categories": dict(
+                Counter(resolve_business_category(is_pr=v.is_pr) or "unset" for v in self.videos)
+            ),
             "pr_videos": sum(v.is_pr for v in self.videos),
             "skipped": self.skipped,
             "warnings": self.warnings,
@@ -171,6 +156,11 @@ class DerivedRates(BaseModel):
     save_rate: float | None
     engagement_rate: float | None
     is_reference: bool
+
+
+def resolve_business_category(*, is_pr: bool, campaign_category: str | None = None) -> str | None:
+    """P3 の設定とビューでも使う規則。P1 は案件種別未設定の集計だけに使い、DB には保存しない。"""
+    return campaign_category if is_pr else "organic"
 
 
 def derived_rates(
@@ -284,50 +274,6 @@ def _accounts(tab: TabRows | None, warnings: Counter[str]) -> list[Account]:
     return list(found.values())
 
 
-def _campaigns(
-    tab: TabRows | None,
-    warnings: Counter[str],
-    business_categories: Mapping[str, str],
-) -> dict[tuple[str, str], Campaign]:
-    if tab is None:
-        warnings["campaign_master_missing"] += 1
-        return {}
-    missing = set(MASTER_COLUMNS) - set(tab.headers)
-    if missing:
-        warnings["campaign_master_columns_missing"] += len(missing)
-    if not {ca.ADVERTISER_COL, ca.CAMPAIGN_COL}.issubset(tab.headers):
-        return {}
-    campaigns: dict[tuple[str, str], Campaign] = {}
-    for row in _rows(tab):
-        advertiser, campaign = _text(row.get(ca.ADVERTISER_COL)), _text(row.get(ca.CAMPAIGN_COL))
-        if advertiser is None or campaign is None:
-            continue
-        category = _text(row.get("事業区分"))
-        category = {name: code for code, name in business_categories.items()}.get(
-            category or "", category
-        )
-        if category is not None and category not in business_categories:
-            category = None
-            warnings["unknown_business_category"] += 1
-        privacy = _boolean(row.get("非公開"))
-        if privacy is None and not ca.is_missing(row.get("非公開")):
-            # An unrecognised privacy flag must not accidentally expose a campaign later.
-            privacy = True
-            warnings["invalid_privacy_flag"] += 1
-        campaigns.setdefault(
-            (advertiser, campaign),
-            Campaign(
-                advertiser=advertiser,
-                campaign=campaign,
-                business_category=category,
-                industry=_text(row.get("業種")),
-                purpose=_text(row.get("目的")),
-                is_private=bool(privacy),
-            ),
-        )
-    return campaigns
-
-
 def _timestamp(value: object) -> datetime | None:
     text = _text(value)
     if text is None:
@@ -344,13 +290,11 @@ def build_batch(
     raw: TabRows,
     *,
     captured_on: date,
-    campaign_master: TabRows | None = None,
     account_ledger: TabRows | None = None,
-    business_categories: Mapping[str, str] = CATEGORY_NAMES,
 ) -> SyncBatch:
     """First valid sheet row wins per (platform, video_id); rows are never summed.
 
-    Master and ledger duplicates also keep the first row. Raw metadata uses the
+    Ledger duplicates also keep the first row. Raw metadata uses the
     first exact URL match, as the existing aggregate's date join does.
     """
     if not {ca.URL_COL, ca.ADVERTISER_COL, ca.CAMPAIGN_COL}.issubset(database.headers):
@@ -359,7 +303,7 @@ def build_batch(
     skipped: Counter[str] = Counter()
     accounts = _accounts(account_ledger, warnings)
     by_handle = {(a.platform, a.handle): a for a in accounts}
-    campaigns = _campaigns(campaign_master, warnings, business_categories)
+    campaigns: dict[tuple[str, str], Campaign] = {}
     raw_index: dict[str, dict[str, str]] = {}
     for url, row in ca.iter_raw_url_rows(raw.headers, raw.rows):
         raw_index.setdefault(url, row)
@@ -410,10 +354,7 @@ def build_batch(
             _text(row.get(ca.ADVERTISER_COL)),
             _text(row.get(ca.CAMPAIGN_COL)),
         )
-        campaign = (
-            campaigns.get((advertiser, campaign_name)) if advertiser and campaign_name else None
-        )
-        if advertiser and campaign_name and campaign is None:
+        if advertiser and campaign_name:
             campaigns[(advertiser, campaign_name)] = Campaign(
                 advertiser=advertiser, campaign=campaign_name
             )
@@ -424,12 +365,8 @@ def build_batch(
             )
         )
         is_pr = any(tag.casefold() == "pr" for tag in hashtags)
-        if is_pr:
-            category = campaign.business_category if campaign else None
-        else:
-            category = "organic"
-            if advertiser is not None:
-                warnings["advertiser_without_pr"] += 1
+        if not is_pr and advertiser is not None:
+            warnings["advertiser_without_pr"] += 1
         metadata = raw_index.get(url, {})
         batch.videos.append(
             Video(
@@ -448,9 +385,7 @@ def build_batch(
                 hashtags=hashtags,
                 advertiser=advertiser,
                 campaign=campaign_name,
-                business_category=category,
                 is_pr=is_pr,
-                is_private=campaign.is_private if campaign else False,
             )
         )
         values = {field: ca.to_number(row.get(column)) for field, column in METRIC_COLUMNS.items()}

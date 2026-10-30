@@ -6,7 +6,6 @@ import argparse
 import os
 import time
 import uuid
-from collections.abc import Mapping
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -19,8 +18,6 @@ from teamagent.ingest.campaign_aggregate import POST_DATE_TAB_NAME
 from teamagent.ingest.loader import load_ingest_sources
 from teamagent.ingest.video_library import (
     ACCOUNTS_TABS,
-    CATEGORY_NAMES,
-    MASTER_TAB,
     SyncBatch,
     build_batch,
 )
@@ -39,7 +36,6 @@ def read_batch(
     request_id: str,
     now: datetime,
     sources_path: Path = SOURCES_PATH,
-    business_categories: Mapping[str, str] = CATEGORY_NAMES,
 ) -> SyncBatch:
     sources = load_ingest_sources(sources_path)
     source = next((s for s in sources.gsheets if s.sheet_id_env == "SHORT_VIDEO_DB_SHEET_ID"), None)
@@ -52,9 +48,6 @@ def read_batch(
     database = sheets.get_tab_rows(source.sheet_id, tab.title, request_id)
     # Raw is required: an API failure must not erase previously imported metadata.
     raw = sheets.get_tab_rows(source.sheet_id, POST_DATE_TAB_NAME, request_id)
-    master = None
-    if any(t.title == MASTER_TAB for t in metadata.tabs):
-        master = sheets.get_tab_rows(source.sheet_id, MASTER_TAB, request_id)
     ledger = None
     missing_account_tabs = 0
     ledger_unavailable = False
@@ -92,9 +85,7 @@ def read_batch(
         database,
         raw,
         captured_on=now.astimezone(JST).date(),
-        campaign_master=master,
         account_ledger=ledger,
-        business_categories=business_categories,
     )
     if missing_account_tabs:
         batch.warnings["accounts_tab_missing"] = missing_account_tabs
@@ -127,13 +118,11 @@ def main(argv: list[str] | None = None, *, sources_path: Path = SOURCES_PATH) ->
             if not args.dry_run:
                 pg = PgVectorClient.from_env()
                 repository = VideoLibraryRepository(pg)
-            categories = repository.business_categories() if repository else CATEGORY_NAMES
             batch = read_batch(
                 GSheetsClient.from_env(),
                 request_id=request_id,
                 now=started_at,
                 sources_path=sources_path,
-                business_categories=categories,
             )
             for reason, count in batch.warnings.items():
                 logger.warning("video_library_unset", reason=reason, count=count)

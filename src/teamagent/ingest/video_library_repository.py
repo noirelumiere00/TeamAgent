@@ -22,23 +22,31 @@ def _upsert(
     values = record.model_dump()
     columns = list(values)
     changed = [c for c in columns if c not in keys]
-    assignments: list[sql.Composable] = [
-        sql.SQL("{} = EXCLUDED.{}").format(sql.Identifier(c), sql.Identifier(c)) for c in changed
-    ]
-    if table == "vl_videos":
-        assignments.append(sql.SQL("updated_at = now()"))
+    action: sql.Composable = sql.SQL("DO NOTHING")
+    if changed:
+        assignments: list[sql.Composable] = [
+            sql.SQL("{} = EXCLUDED.{}").format(sql.Identifier(c), sql.Identifier(c))
+            for c in changed
+        ]
+        if table == "vl_videos":
+            assignments.append(sql.SQL("updated_at = now()"))
+        action = sql.SQL("""
+            DO UPDATE SET {assignments}
+            WHERE ({old}) IS DISTINCT FROM ({new})
+        """).format(
+            assignments=sql.SQL(", ").join(assignments),
+            old=sql.SQL(", ").join(sql.Identifier(table, c) for c in changed),
+            new=sql.SQL(", ").join(sql.Identifier("excluded", c) for c in changed),
+        )
     query = sql.SQL("""
         INSERT INTO {table} ({columns}) VALUES ({values})
-        ON CONFLICT ({keys}) DO UPDATE SET {assignments}
-        WHERE ({old}) IS DISTINCT FROM ({new})
+        ON CONFLICT ({keys}) {action}
     """).format(
         table=sql.Identifier(table),
         columns=sql.SQL(", ").join(map(sql.Identifier, columns)),
         values=sql.SQL(", ").join(sql.Placeholder() for _ in columns),
         keys=sql.SQL(", ").join(map(sql.Identifier, keys)),
-        assignments=sql.SQL(", ").join(assignments),
-        old=sql.SQL(", ").join(sql.Identifier(table, c) for c in changed),
-        new=sql.SQL(", ").join(sql.Identifier("excluded", c) for c in changed),
+        action=action,
     )
     return conn.execute(query, list(values.values())).rowcount
 
@@ -46,20 +54,6 @@ def _upsert(
 class VideoLibraryRepository:
     def __init__(self, pg: PgVectorClient) -> None:
         self.pg = pg
-
-    def business_categories(self) -> dict[str, str]:
-        with self.pg.connection(
-            app_role="teamagent_app",
-            user_email=None,
-            user_role="admin",
-            application_name="teamagent-video-library-sync",
-        ) as conn:
-            return {
-                row["code"]: row["display_name"]
-                for row in conn.execute(
-                    "SELECT code, display_name FROM vl_business_categories"
-                ).fetchall()
-            }
 
     def save(self, batch: SyncBatch, *, request_id: str, started_at: datetime) -> int:
         """One transaction; unchanged rows (including video timestamps) are untouched."""
