@@ -49,17 +49,20 @@ locals {
   openclaw_bedrock_profile_arn = (
     "arn:aws:bedrock:${var.aws_region}:${local.account_id}:inference-profile/${var.openclaw_model_id}"
   )
-  # OpenClawだけを5.5へ移行する。MCPのモデル権限は変えず、4.5は戻し用に保持する。
+  # 5.5移行用の権限を保持し、外側ループの障害時fallbackに東京のSonnet JP profileを許可する。
   openclaw_bedrock_profile_arns = distinct([
     local.openclaw_bedrock_profile_arn,
     "arn:aws:bedrock:${var.aws_region}:${local.account_id}:inference-profile/jp.anthropic.claude-haiku-4-5-20251001-v1:0",
     "arn:aws:bedrock:${var.aws_region}:${local.account_id}:inference-profile/jp.anthropic.claude-haiku-5-5",
+    "arn:aws:bedrock:${var.aws_region}:${local.account_id}:inference-profile/jp.anthropic.claude-sonnet-4-6",
   ])
   openclaw_bedrock_backing_model_arns = [
     "arn:aws:bedrock:ap-northeast-1::foundation-model/anthropic.claude-haiku-4-5-20251001-v1:0",
     "arn:aws:bedrock:ap-northeast-3::foundation-model/anthropic.claude-haiku-4-5-20251001-v1:0",
     "arn:aws:bedrock:ap-northeast-1::foundation-model/anthropic.claude-haiku-5-5",
     "arn:aws:bedrock:ap-northeast-3::foundation-model/anthropic.claude-haiku-5-5",
+    "arn:aws:bedrock:ap-northeast-1::foundation-model/anthropic.claude-sonnet-4-6",
+    "arn:aws:bedrock:ap-northeast-3::foundation-model/anthropic.claude-sonnet-4-6",
   ]
   # Every MCP-family consumer receives only the two model profiles injected
   # into its environment and their fixed JP backing models. Repository-wide or

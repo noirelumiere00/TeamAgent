@@ -518,6 +518,58 @@ def test_config_loads_only_reviewed_plugins_and_not_browser() -> None:
     assert "browser" not in config["tools"]
 
 
+def test_outer_loop_model_fallback_is_pinned() -> None:
+    config = _load_reviewed_json5(CONFIG)
+    provider = config["models"]["providers"]["amazon-bedrock"]
+    assert provider["baseUrl"] == "https://bedrock-runtime.ap-northeast-1.amazonaws.com"
+    assert provider["auth"] == "aws-sdk"
+    assert [model["id"] for model in provider["models"]] == [
+        "jp.anthropic.claude-haiku-4-5-20251001-v1:0",
+        "jp.anthropic.claude-sonnet-4-6",
+    ]
+    assert "model" not in config["agents"]["defaults"]
+    assert [
+        (agent["id"], agent["default"], agent["model"]) for agent in config["agents"]["list"]
+    ] == [
+        (
+            "teamagent",
+            True,
+            {
+                "primary": "amazon-bedrock/jp.anthropic.claude-haiku-4-5-20251001-v1:0",
+                "fallbacks": ["amazon-bedrock/jp.anthropic.claude-sonnet-4-6"],
+            },
+        ),
+    ]
+
+
+def test_rollout_canary_uses_only_primary_with_model_fallback_config() -> None:
+    completed = subprocess.run(
+        [
+            "node",
+            "--input-type=module",
+            "-e",
+            """
+import assert from "node:assert/strict";
+import fs from "node:fs";
+import { readPrimaryBedrockModel } from "./infra/openclaw/rollout-task-canary.mjs";
+const config = JSON.parse(fs.readFileSync(0, "utf8"));
+assert.equal(readPrimaryBedrockModel(config), "jp.anthropic.claude-haiku-4-5-20251001-v1:0");
+for (const primary of [undefined, "", "amazon-bedrock/", "other/model"]) {
+  config.agents.list[0].model.primary = primary;
+  assert.throws(() => readPrimaryBedrockModel(config), /default Bedrock model is not pinned/);
+}
+""",
+        ],
+        input=json.dumps(_load_reviewed_json5(CONFIG)),
+        cwd=ROOT,
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert completed.returncode == 0, completed.stderr
+
+
 def test_dm_context_overflow_guards_are_pinned() -> None:
     """2026-09-29 石田さんの DM の context overflow 対策（段1）の値を固定する。
 

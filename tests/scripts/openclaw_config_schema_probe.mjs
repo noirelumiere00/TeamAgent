@@ -46,6 +46,18 @@ const mutated = (mutate) => {
 
 // 対照: schema が「値まで」検査していることを毎回示す（全部が拒否されるべき）。
 const controls = {
+  model_fallbacks_not_array: verdict(
+    OpenClawSchema,
+    mutated((c) => {
+      c.agents.list[0].model.fallbacks = "amazon-bedrock/jp.anthropic.claude-sonnet-4-6";
+    }),
+  ),
+  model_unknown_key: verdict(
+    OpenClawSchema,
+    mutated((c) => {
+      c.agents.list[0].model.fallback = c.agents.list[0].model.fallbacks;
+    }),
+  ),
   dm_history_limit_negative: verdict(
     SlackConfigSchema,
     mutated((c) => {

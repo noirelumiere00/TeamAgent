@@ -13,6 +13,25 @@ are not complete. A local PASS is therefore not production authorization.
 
 ## Runtime contract
 
+The outer loop keeps Haiku 4.5 as `agents.list[0].model.primary` and uses only
+`amazon-bedrock/jp.anthropic.claude-sonnet-4-6` as its fallback. Both inference
+profiles use the same account and Tokyo endpoint; IAM permits only their JP
+backing models (Tokyo/Osaka), alongside the existing Haiku 5.5 migration grant.
+No global/US profile is added. Healthy sessions keep the existing Haiku cost.
+After failover, OpenClaw keeps the session on Sonnet until a primary recovery
+probe succeeds (every five minutes), or `/new` / `/reset` clears the override.
+Sonnet charges therefore also cover turns during that recovery interval.
+
+Local schema/behavior evidence: `openclaw@2026.7.1` npm archive, matching
+`plugins-lock.json`; `dist/zod-schema.agent-runtime-C02vY4RT.js`
+(`AgentModelSchema`, `AgentEntrySchema`) accepts `{ primary, fallbacks }`.
+The shipped `docs/concepts/model-failover.md` specifies that agent-level models
+need their own `fallbacks`. `dist/errors-XbAR6hS3.js` classifies HTTP 503 as
+timeout/overloaded and 429 as rate_limit; `dist/model-fallback-CvSRhgYr.js`
+advances the configured candidate chain on these transient failures.
+Run the optional schema probe with `OPENCLAW_DIST_DIR` pointing to that
+archive's `package/dist`; it also rejects malformed fallback fields.
+
 The final image has no shell, package manager, browser executable, Playwright,
 Codex CLI, `jiti`, TypeScript/tsx compiler, Vite/Vitest, build compiler, or
 test/fixture/type/source-map payload. `prune-runtime.mjs` computes the package
