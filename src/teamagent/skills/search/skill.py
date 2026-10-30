@@ -30,6 +30,7 @@ from pydantic import BaseModel
 from teamagent.adapters.bedrock_client import BedrockClient
 from teamagent.adapters.embeddings_client import Embedder
 from teamagent.adapters.pgvector_client import PgVectorClient, SearchHit
+from teamagent.case_state import enabled as case_state_enabled
 from teamagent.ingest.industry_taxonomy import normalize_industry
 from teamagent.prompts.loader import load_prompt
 from teamagent.skills._shared.deai_text import strip_ai_decoration
@@ -1132,6 +1133,11 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
             search_hits.append(
                 SearchHitOut(
                     chunk_id=h.chunk_id,
+                    case_state_evidence=(
+                        timeline_status.resolve_statuses([h], case_state=True)[0].evidence
+                        if case_state_enabled(ctx.metadata.get("user_email"))
+                        else None
+                    ),
                     reference=ref,
                     content=h.content,
                     score=h.score,

@@ -13,6 +13,8 @@ from pydantic import (
     model_validator,
 )
 
+from teamagent.case_state import CaseStateEvidence
+
 
 class SearchInput(BaseModel):
     """検索 Skill の入力。"""
@@ -204,6 +206,11 @@ class SearchHitOut(BaseModel):
         default=None,
         description="案件フェーズ（ヒアリング/提案/受注 等。営業 FB の構造化メタ）",
     )
+    case_state_evidence: CaseStateEvidence | None = Field(
+        default=None,
+        description="状態・日付・出典・投稿観測の根拠束。正式正本なしは unknown（不明）",
+        exclude_if=lambda v: v is None,
+    )
     bant_score: str | None = Field(
         default=None,
         description="BANT 評価（A/B/C 等。営業 FB の構造化メタ）",
@@ -328,6 +335,10 @@ class SlackHitOut(BaseModel):
     file_names: list[str] = Field(default_factory=list, description="添付ファイル名（あれば）")
     file_ids: list[str] = Field(default_factory=list, exclude=True)
     reference: DocumentReference | None = None
+    case_state_evidence: CaseStateEvidence | None = Field(
+        default=None,
+        exclude_if=lambda v: v is None,
+    )
 
     @model_serializer(mode="wrap")
     def _omit_reference(self, handler: SerializerFunctionWrapHandler) -> dict[str, Any]:

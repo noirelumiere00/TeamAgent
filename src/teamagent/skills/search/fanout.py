@@ -19,6 +19,7 @@ import structlog
 from teamagent.adapters.bedrock_client import BedrockClient
 from teamagent.adapters.pgvector_client import SearchHit
 from teamagent.adapters.retry import RetryPolicy
+from teamagent.case_state import enabled as case_state_enabled
 from teamagent.mcp_gateway.allowlist import email_allowed
 from teamagent.skills.base import SkillContext
 from teamagent.skills.search import compact, drive_first, timeline_status, visit_cases
@@ -263,6 +264,15 @@ def _case_rows(result: SourceResult[Any], *, drive_mode: bool = False) -> list[d
             "case_external_use": r.external_use,
             "case_industry": r.industry,
             "updated_at": r.updated_at,
+            **(
+                {
+                    "case_state_evidence": r.case_state_evidence,
+                    "case_state_external_id": r.case_state_external_id,
+                    "source_type": r.source_type,
+                }
+                if r.case_state_evidence is not None
+                else {}
+            ),
             **(
                 {
                     "document_id": r.document_id,
@@ -1089,7 +1099,9 @@ def run_fanout(skill: Any, input: SearchInput, ctx: SkillContext) -> SearchOutpu
         direct_answer_kind=direct_kind,
         hits=[]
         if drive_case_listing and input.include_answer
-        else _output_hits(skill, hits, file_urls),
+        else _output_hits(
+            skill, hits, file_urls, case_state=case_state_enabled(ctx.metadata.get("user_email"))
+        ),
         displayed_refs=displayed_refs,
         found=found,
         total_cost_usd=summary_cost + expanded.cost_usd + vault_cost,
@@ -1118,7 +1130,7 @@ def run_fanout(skill: Any, input: SearchInput, ctx: SkillContext) -> SearchOutpu
 
 
 def _output_hits(
-    skill: Any, hits: list[SearchHit], file_urls: dict[str, str]
+    skill: Any, hits: list[SearchHit], file_urls: dict[str, str], *, case_state: bool = False
 ) -> list[SearchHitOut]:
     """通常のリンク・配信情報を保ち、本文だけ 200 字へ抑える。"""
     search_hits: list[SearchHitOut] = []
@@ -1143,6 +1155,11 @@ def _output_hits(
         search_hits.append(
             SearchHitOut(
                 chunk_id=h.chunk_id,
+                case_state_evidence=(
+                    timeline_status.resolve_statuses([h], case_state=True)[0].evidence
+                    if case_state
+                    else None
+                ),
                 reference=ref,
                 content=h.content[:200],
                 score=h.score,

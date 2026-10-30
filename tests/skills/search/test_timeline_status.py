@@ -181,3 +181,30 @@ def test_karte_projection_keeps_campaign_identity_and_public_shape() -> None:
     assert rows[0].metadata["campaign"] == "500万視聴トライアル"
     assert rows[0].metadata["occurred_at"] == "2026-09-01"
     assert timeline.resolve_statuses([hit(), *rows])[0].text.startswith("2026-09-01 時点では終了")
+
+
+@pytest.mark.parametrize(
+    "metadata",
+    [
+        {"is_sales_fb": False, "cls_doc_type": "提案書", "cls_phase": "受注"},
+        {"deal_phase": "提案", "topic": "案件決定"},
+        {"deal_phase": "受注"},
+        {"deal_phase": "未受注", "cls_phase": "受注"},
+    ],
+)
+def test_case_state_never_promotes_proposal_or_report_to_official(
+    metadata: dict[str, Any],
+) -> None:
+    status = timeline.resolve_statuses([hit(**metadata)], case_state=True)[0]
+    assert status.evidence is not None
+    assert status.evidence.state == "unknown"
+    assert status.evidence.resolution == "unknown"
+    assert "正式状態は不明" in status.text
+    assert "実施済み" not in status.text
+
+
+def test_case_state_posts_do_not_complete_or_merge_a_new_proposal() -> None:
+    statuses = timeline.resolve_statuses([campaign(), hit(3, deal_phase="提案")], case_state=True)
+    assert len(statuses) == 2
+    assert all(s.evidence is not None and s.evidence.state == "unknown" for s in statuses)
+    assert all("実施済み" not in s.text for s in statuses)

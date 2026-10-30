@@ -584,6 +584,9 @@ class CaseRow:
     in_main: bool
     document_id: str | None = None
     drive_file_id: str | None = None
+    case_state_evidence: dict[str, Any] | None = None
+    case_state_external_id: str | None = None
+    source_type: str | None = None
 
 
 def case_client_name(query_client: str | None) -> str | None:
@@ -640,6 +643,11 @@ def _to_case_row(row: Mapping[str, Any], *, stage: int, main: set[tuple[str, str
         in_main=(uri, title) in main,
         document_id=_text(row, "document_id") or None,
         drive_file_id=_text(row, "drive_file_id") or None,
+        case_state_evidence=(
+            row["case_state_evidence"] if isinstance(row.get("case_state_evidence"), dict) else None
+        ),
+        case_state_external_id=_text(row, "case_state_external_id") or None,
+        source_type=_text(row, "case_state_source_type") or None,
     )
 
 

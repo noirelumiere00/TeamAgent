@@ -61,6 +61,17 @@ def _industry_metadata(row: dict[str, Any]) -> dict[str, Any]:
     return {key: row[key] for key in _INDUSTRY_METADATA_KEYS if row.get(key)}
 
 
+def _case_state_columns() -> str:
+    if not any(
+        s.strip() for s in os.environ.get("CASE_STATE_EVIDENCE_ALLOWED_EMAILS", "").split(",")
+    ):
+        return ""
+    return (
+        ", d.metadata->'case_state_evidence' AS case_state_evidence, "
+        "d.external_id AS case_state_external_id, d.source_type::text AS case_state_source_type"
+    )
+
+
 def _timeline_columns() -> str:
     if os.environ.get("SEARCH_TIMELINE_STATUS", "").strip().lower() not in {
         "1",
@@ -68,10 +79,11 @@ def _timeline_columns() -> str:
         "yes",
         "on",
     }:
-        return ""
+        return _case_state_columns()
     return (
         ", d.metadata AS timeline_metadata, "
         "to_char(d.modified_at AT TIME ZONE INTERVAL '+09:00', 'YYYY-MM-DD') AS timeline_date"
+        + _case_state_columns()
     )
 
 
@@ -81,6 +93,14 @@ def _timeline_metadata(row: dict[str, Any]) -> dict[str, Any]:
     meta = dict(row.get("timeline_metadata") or {})
     if row.get("timeline_date"):
         meta["updated_at"] = str(row["timeline_date"])
+    if _case_state_columns():
+        meta.update(
+            {
+                key: row[key]
+                for key in ("case_state_evidence", "case_state_external_id")
+                if row.get(key) is not None
+            }
+        )
     return meta
 
 
@@ -1209,7 +1229,7 @@ class PgVectorClient:
         limit = max(1, min(30 if soft_industry else 5, int(limit)))
         base = f"""
             SELECT
-{self._CASE_COLUMNS}
+{self._CASE_COLUMNS}{_case_state_columns()}
             FROM documents d
             WHERE d.metadata->>'case_corpus' = 'true'
         """  # nosec B608 - 列リストは定数、条件は全てバインド
@@ -1696,6 +1716,7 @@ class PgVectorClient:
             meta: dict[str, Any] = {
                 k: v for k, v in dict(r.get("doc_metadata") or {}).items() if isinstance(k, str)
             }
+            meta.update(_timeline_metadata(r))
             meta.update(
                 {
                     "source_uri": r.get("source_uri"),
