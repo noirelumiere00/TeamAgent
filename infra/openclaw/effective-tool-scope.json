@@ -301,6 +301,13 @@
       "enabledBy": { "kind": "envAllTrue", "names": ["USE_TIKTOK_COMMENT_TOOLS"] }
     },
     {
+      "name": "ad_label_check",
+      "effect": "external-read-scrape-analysis",
+      "terraformGate": "enable_x_research",
+      "defaultEnabledByTerraform": false,
+      "enabledBy": { "kind": "envAllTrue", "names": ["USE_AD_LABEL_CHECK_TOOL"] }
+    },
+    {
       "name": "slack_summary",
       "effect": "slack-thread-channel-read-analysis",
       "terraformGate": "use_slack_summary_tool",

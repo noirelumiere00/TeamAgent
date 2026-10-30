@@ -51,6 +51,9 @@ ACTOR_IG_HASHTAG = "apify~instagram-hashtag-scraper"
 ACTOR_TIKTOK_COMMENTS = "clockworks~tiktok-comments-scraper"
 # TikTok 投稿URL → mp4 実体（video download add-on）。tiktok_acquire の mcp 側フォールバック専用。
 ACTOR_TIKTOK_VIDEO = "clockworks~tiktok-scraper"
+# 投稿URL → タイアップ表示（ad_label_check）。TikTok は ACTOR_TIKTOK_VIDEO を流用する。
+ACTOR_IG_POSTS = "apify~instagram-scraper"
+ACTOR_YT_VIDEOS = "streamers~youtube-scraper"
 
 # 概算単価（USD/結果1件）。課金の一次情報は Apify 側。台帳記帳と表示用の概算に使う。
 # 出典: x-reaction-research SKILL.md ＋ SNS検索スクレイパー検証レポート(2026-07-10)実測。
@@ -65,6 +68,9 @@ _ACTOR_PRICE_PER_ITEM: dict[str, float] = {
     # result 0.003 + video download add-on 0.001（BRONZE）。
     # 2026-09-02 パイロット実測: mp4 実体 5/5・68秒・$0.004/本。
     ACTOR_TIKTOK_VIDEO: 0.004,
+    # 2026-10-30 ストア表示の Free 単価（$2.70/1,000 結果・$4/1,000 動画）。
+    ACTOR_IG_POSTS: 0.0027,
+    ACTOR_YT_VIDEOS: 0.004,
 }
 
 # Key-Value store の id / record key の形（REST パスへ埋めるため fail-close で検査する）。
@@ -114,6 +120,134 @@ def tiktok_post_url_allowed(url: str) -> bool:
     ):
         return False
     return host == "tiktok.com" or host.endswith(".tiktok.com")
+
+
+# ad_label_check が受け付ける媒体と host（canonical HTTPS のみ・Apify へ出す前に fail-close）。
+_AD_LABEL_HOSTS: dict[str, tuple[str, ...]] = {
+    "tiktok": ("tiktok.com",),
+    "instagram": ("instagram.com",),
+    "youtube": ("youtube.com", "youtu.be"),
+}
+_AD_LABEL_ID_RES: dict[str, re.Pattern[str]] = {
+    "tiktok": re.compile(r"/(?:video|photo)/(\d+)"),
+    "instagram": re.compile(r"/(?:p|reel|reels|tv)/([A-Za-z0-9_-]+)"),
+    "youtube": re.compile(r"(?:[?&]v=|youtu\.be/|/shorts/|/live/|/embed/)([A-Za-z0-9_-]{11})"),
+}
+
+
+def ad_label_platform(url: str) -> str | None:
+    """投稿 URL の媒体（tiktok | instagram | youtube）。対象外・不正な URL は None。"""
+    parsed = urlsplit(str(url).strip())
+    host = (parsed.hostname or "").rstrip(".").lower()
+    try:
+        port = parsed.port
+    except ValueError:
+        return None
+    if (
+        parsed.scheme != "https"
+        or parsed.username
+        or parsed.password
+        or port not in (None, 443)
+    ):
+        return None
+    for platform, roots in _AD_LABEL_HOSTS.items():
+        if any(host == root or host.endswith("." + root) for root in roots):
+            return platform
+    return None
+
+
+def _ad_label_post_id(platform: str, url: str) -> str:
+    m = _AD_LABEL_ID_RES[platform].search(url)
+    return m.group(1) if m else ""
+
+
+@dataclass(frozen=True)
+class AdLabelPost:
+    """投稿1件のタイアップ表示。label: True=表示あり / False=表示なし / None=取れなかった。"""
+
+    input_url: str
+    found: bool
+    label: bool | None = None
+    partners: tuple[str, ...] = ()
+    text: str = ""
+    hashtags: tuple[str, ...] = ()
+
+
+def _ad_label_flag(item: dict[str, Any], *keys: str) -> bool | None:
+    """いずれかのキーが True なら True、全て bool の False なら False、項目自体が無ければ None。"""
+    values = [item[k] for k in keys if isinstance(item.get(k), bool)]
+    if not values:
+        return None
+    return any(values)
+
+
+def _parse_ad_label_item(platform: str, input_url: str, item: dict[str, Any]) -> AdLabelPost:
+    if platform == "tiktok":
+        # isSponsored = 「有料パートナーシップ」（actor 更新履歴 2024-09-30）・isAd = 広告投稿。
+        label = _ad_label_flag(item, "isSponsored", "isAd")
+        partners: list[str] = []
+        text = str(item.get("text") or "")
+    elif platform == "instagram":
+        # paidPartnership（posts 結果のみ）。isSponsored は 2025-12 から常に false の非推奨項目なので見ない。
+        label = _ad_label_flag(item, "paidPartnership")
+        sponsors = item.get("sponsors")
+        partners = [
+            str(sp.get("username"))
+            for sp in (sponsors if isinstance(sponsors, list) else [])
+            if isinstance(sp, dict) and sp.get("username")
+        ]
+        text = str(item.get("caption") or "")
+    else:
+        # isPaidContent は「プロモーションを含みます」表示（paidContentOverlay）の有無（更新履歴
+        # 2025-12-08）。dataset 定義の説明文「視聴に支払いが要るか」は誤記なので従わない。
+        label = _ad_label_flag(item, "isPaidContent")
+        partners = []
+        text = "\n".join(str(item.get(k) or "") for k in ("title", "text")).strip()
+    raw_tags = item.get("hashtags")
+    tags = [
+        str(t.get("name") if isinstance(t, dict) else t).strip()
+        for t in (raw_tags if isinstance(raw_tags, list) else [])
+    ]
+    return AdLabelPost(
+        input_url=input_url,
+        found=True,
+        label=label,
+        partners=tuple(partners),
+        text=text[:4000],
+        hashtags=tuple(t for t in tags if t and t != "None"),
+    )
+
+
+def _match_ad_label_items(
+    platform: str, urls: list[str], items: list[dict[str, Any]]
+) -> dict[str, dict[str, Any]]:
+    """要求 URL → dataset item。入力 URL 欄 → 投稿 ID の順で突合し、残りが 1:1 ならそれを充てる。"""
+    usable = [it for it in items if isinstance(it, dict) and not it.get("error")]
+    keys_of: list[set[str]] = []
+    for it in usable:
+        keys = {
+            str(it.get(k)).strip()
+            for k in ("inputUrl", "input", "submittedVideoUrl", "url", "webVideoUrl")
+            if it.get(k)
+        }
+        keys |= {_ad_label_post_id(platform, k) for k in list(keys)} - {""}
+        keys |= {str(it.get(k)) for k in ("id", "shortCode") if it.get(k)}
+        keys_of.append(keys)
+    matched: dict[str, dict[str, Any]] = {}
+    taken: set[int] = set()
+    for url in urls:
+        wanted = {url, _ad_label_post_id(platform, url)} - {""}
+        for i, keys in enumerate(keys_of):
+            if i not in taken and wanted & keys:
+                matched[url] = usable[i]
+                taken.add(i)
+                break
+    rest_urls = [u for u in urls if u not in matched]
+    rest_items = [usable[i] for i in range(len(usable)) if i not in taken]
+    # 短縮 URL（vt.tiktok.com 等）は ID を持たない。残りが 1 件同士なら同一投稿とみなす。
+    if len(rest_urls) == 1 and len(rest_items) == 1:
+        matched[rest_urls[0]] = rest_items[0]
+    return matched
 
 
 def _tiktok_video_id(url: str) -> str:
@@ -1028,6 +1162,60 @@ class ApifyClient:
                 posts.append(p)
         return posts[: limit * 2], res.estimated_cost_usd
 
+    # ---- 型付き入口: タイアップ表示（ad_label_check） ------------------------
+
+    def ad_label_posts(
+        self,
+        platform: str,
+        urls: list[str],
+        *,
+        deadline_s: int = _DEFAULT_DEADLINE_S,
+        request_id: str = "apify",
+        user_email: str = "",
+    ) -> tuple[list[AdLabelPost], float]:
+        """1 媒体分の投稿 URL をまとめて 1 run で取得し、URL ごとのタイアップ表示を返す。
+
+        URL は ``ad_label_platform`` が同じ媒体と判定したものだけ受け付ける（それ以外は
+        APIFY_URL_NOT_ALLOWED で fail-close・run は起動しない）。取れなかった URL は
+        found=False で返す（「表示なし」と区別する）。
+        """
+        wanted = list(dict.fromkeys(str(u).strip() for u in urls if str(u).strip()))
+        if not wanted:
+            return [], 0.0
+        if any(ad_label_platform(u) != platform for u in wanted):
+            raise ApifyError(f"APIFY_URL_NOT_ALLOWED: {platform} の HTTPS URL 以外は渡せません")
+        if platform == "tiktok":
+            actor_id = ACTOR_TIKTOK_VIDEO
+            run_input: dict[str, Any] = {
+                "postURLs": wanted,
+                "shouldDownloadVideos": False,
+                "shouldDownloadCovers": False,
+                "shouldDownloadSubtitles": False,
+                "shouldDownloadSlideshowImages": False,
+            }
+        elif platform == "instagram":
+            actor_id = ACTOR_IG_POSTS
+            run_input = {"directUrls": wanted, "resultsType": "posts", "resultsLimit": 1}
+        else:
+            actor_id = ACTOR_YT_VIDEOS
+            run_input = {"startUrls": [{"url": u} for u in wanted], "maxResults": 1}
+        res = self.run_actor_sync(
+            actor_id,
+            run_input,
+            max_items=len(wanted),
+            deadline_s=deadline_s,
+            request_id=request_id,
+            user_email=user_email,
+        )
+        matched = _match_ad_label_items(platform, wanted, res.items)
+        posts = [
+            _parse_ad_label_item(platform, url, matched[url])
+            if url in matched
+            else AdLabelPost(input_url=url, found=False)
+            for url in wanted
+        ]
+        return posts, res.estimated_cost_usd
+
     # ---- 型付き入口: TikTok コメント（フォールバック用） ----------------------
 
     def tiktok_comments(
@@ -1346,6 +1534,7 @@ class ApifyClient:
 
 __all__ = [
     "ACTOR_IG_HASHTAG",
+    "ACTOR_IG_POSTS",
     "ACTOR_IG_SEARCH",
     "ACTOR_TIKTOK_COMMENTS",
     "ACTOR_TIKTOK_VIDEO",
@@ -1353,11 +1542,14 @@ __all__ = [
     "ACTOR_X_SEARCH",
     "ACTOR_X_SEARCH_FALLBACK",
     "ACTOR_X_VERIFY",
+    "ACTOR_YT_VIDEOS",
+    "AdLabelPost",
     "ApifyClient",
     "ApifyError",
     "ApifyRunResult",
     "IgPost",
     "TikTokVideoBytes",
     "XPost",
+    "ad_label_platform",
     "tiktok_post_url_allowed",
 ]

@@ -1969,7 +1969,7 @@ def test_effective_tool_scope_matches_config_and_deployment_gates() -> None:
     excluded = config["mcp"]["servers"]["teamagent"]["toolFilter"]["exclude"]
     inventory_names = [tool["name"] for tool in scope["tools"]]
     assert scope["schemaVersion"] == 2
-    assert len(inventory_names) == len(set(inventory_names)) == 43  # 10-28 media_case_search を追加
+    assert len(inventory_names) == len(set(inventory_names)) == 44  # 10-30 ad_label_check を追加
     assert set(inventory_names) == set(included)
     assert {
         "chitchat",

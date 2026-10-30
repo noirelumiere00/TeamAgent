@@ -928,6 +928,8 @@ resource "aws_ecs_task_definition" "mcp" {
       # USE_MAIL_LINK_TOOL の #491 と同じ扱い＝ツール定義の固定トークンを減らす）。guard の env 照合は
       # 文字列の完全一致なので live の表記 "false" のまま焼く（"0" にしない）。
       { name = "USE_TIKTOK_COMMENT_TOOLS", value = "false" },
+      # 投稿URLのタイアップ表示＋#PR 表記チェック（ad_label_check・2026-10-30）。
+      { name = "USE_AD_LABEL_CHECK_TOOL", value = "1" },
       # Part4 X投稿者の界隈マルチラベル分類。既定 false=bio送信も分類も表示もしない（完全no-op）。
       # 分類品質を実データ(apidojo の bio 取得率含む)で検証してから true にする。
       { name = "USE_KAIWAI_CLASSIFY", value = var.enable_kaiwai_classify ? "1" : "0" },
@@ -948,6 +950,7 @@ resource "aws_ecs_task_definition" "mcp" {
       { name = "X_RESEARCH_ALLOWED_EMAILS", value = var.pr_research_allowed_emails },
       { name = "SEARCH_SURFACE_ALLOWED_EMAILS", value = var.pr_research_allowed_emails },
       { name = "COMMENT_MINING_ALLOWED_EMAILS", value = var.pr_research_allowed_emails },
+      { name = "AD_LABEL_CHECK_ALLOWED_EMAILS", value = var.pr_research_allowed_emails },
       ] : [], var.enable_scrape_tools ? [
       # §M: video_algorithm が VSEO レポートを発行する非公開S3 bucket（presigned URL を出力に載せる）。
       { name = "VSEO_REPORT_BUCKET", value = aws_s3_bucket.raw_files.id },

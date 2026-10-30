@@ -61,6 +61,7 @@ const SLACK_INTERACTION_VALUE_ELLIPSIS = "…";
 // 静的一覧はない。skills/**/*.py の name: ClassVar[str] を機械抽出し、ゲートの予約ツールも
 // 含めた集合をここへ固定する（追加漏れは source と照合する契約テストで検知）。実行時 I/O はない。
 export const OUTBOUND_TOOL_NAMES = Object.freeze([
+  "ad_label_check",
   "answer_feedback_record",
   "attachment_assist",
   "calendar_event",

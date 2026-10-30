@@ -846,6 +846,14 @@ def build_production_tools() -> list[ToolSpec]:
             )
         )
 
+    # 投稿URLのタイアップ表示＋#PR 表記チェック（TT/IG/YT・Apify）。既定 OFF（USE_AD_LABEL_CHECK_TOOL=1）。
+    if _envflag("USE_AD_LABEL_CHECK_TOOL"):
+        from teamagent.skills.ad_label_check.skill import AdLabelCheckSkill
+
+        specs.append(
+            ToolSpec(AdLabelCheckSkill.name, AdLabelCheckSkill.description, AdLabelCheckSkill)
+        )
+
     return specs
 
 
