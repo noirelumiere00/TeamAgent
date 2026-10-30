@@ -25,7 +25,7 @@
 - `src/teamagent/connect_web/library.py`: 検索SQL、画面、API、管理POST、認証ゲート、サムネ配信
 - `src/teamagent/connect_web/app.py`: 既存認証・管理者・DB・HTML応答の受け渡しと戻り先検証
 - `scripts/run_ingest_fargate.py`: ingest成功後に同期→サムネ、個別の失敗を終了コードに波及させない（dry-run時サムネなし）
-- `infra/terraform/ingest_schedule.tf`: 既存media_jobs内の対象prefixへのPutObject/GetObjectとバケットenv
+- `infra/terraform/ingest_schedule.tf`: 常設の raw_files バケットの `video-library/thumbs/` prefix への PutObject/GetObject とバケット env（media_jobs は media 機能 OFF の本番に存在しないため使わない）
 - `infra/terraform/connect_web.tf`: 同prefixへのGetObjectとバケットenv
 - `.github/workflows/ci.yml`: 新規直接importのbotocoreを依存リストに明示
 - `tests/connect_web/test_library.py`: 認証・管理者・戻り先・CSP・エスケープ・検索・キャッシュ・管理編集
@@ -41,7 +41,7 @@
 
 1. `CONNECT_ADMIN_EMAILS` と `CONNECT_SEARCH_ALLOWED_EMAILS` が本番で明示され、利用する全社員と管理者の設定が正しいことを確認する。既存の個人fallbackに頼らない。
 2. 通常のmigration手順（`scripts/migrate.py`）で0035→0036を適用する。0036は追加のみ。同期は設定テーブルを上書きしない。
-3. 既存のguarded image／Terraformの手順に従う（`infra/terraform/README.md`）。新しいAWSリソースは作らない。`media_jobs` が有効な構成で、ingestとconnect_web双方の `VIDEO_LIBRARY_S3_BUCKET` とprefix権限が入ることをplanで確認する。ガード対象ファイルはコミット済みである必要がある。
+3. 既存のguarded image／Terraformの手順に従う（`infra/terraform/README.md`）。新しいAWSリソースは作らない。ingestとconnect_web双方の `VIDEO_LIBRARY_S3_BUCKET` とprefix権限が入ることをplanで確認する。ガード対象ファイルはコミット済みである必要がある。
 4. 既存の `scripts/aws/run_ingest_task.sh` 経路で同期とサムネを動かす。taskdefの直接登録やapplyはしない。この変更は既存ingestのスケジュール式を変更しないため、運用上必要な同期頻度も確認する。
 5. 初回埋めの単独実行口は、同じ環境変数・DB権限・バケット権限の環境で `python -m teamagent.ingest.video_library_thumbs --limit 300`。既定上限は `VIDEO_LIBRARY_THUMB_LIMIT=300`、1件間隔は1秒、429は即終了、連続失敗5件で終了。NULLのTikTokだけを対象にし、欠損投稿が後続を塞がないよう順序はランダム。未成功分は次回へ残る。初回全件を1回で取得しない。
 6. 実ヘッダ付きのconnect_webで、一般利用者／管理者の一覧・期間検索・カーソル再生→離脱・URLコピー・詳細・案件編集→即反映・非公開・アカウント登録・サムネキャッシュを確認する。TikTokからの本当の再生とS3への取得を含む。

@@ -2089,10 +2089,9 @@ def test_ingest_task_has_video_library_accounts_sheet_env() -> None:
 @pytest.mark.parametrize(
     "filename,task", [("ingest_schedule.tf", "ingest"), ("connect_web.tf", "connect_web")]
 )
-def test_video_library_bucket_env_uses_existing_media_bucket(filename: str, task: str) -> None:
+def test_video_library_bucket_env_uses_raw_files_bucket(filename: str, task: str) -> None:
+    # media_jobs は media 機能 OFF の本番に存在しないため、常設の raw_files を使う
     block = _block(TF_ROOT / filename, "aws_ecs_task_definition", task)
     assert block.count('name = "VIDEO_LIBRARY_S3_BUCKET"') == 1
-    assert (
-        '{ name = "VIDEO_LIBRARY_S3_BUCKET", value = aws_s3_bucket.media_jobs[0].bucket }' in block
-    )
-    assert "local.tk_enabled == 1 ? [" in block
+    assert '{ name = "VIDEO_LIBRARY_S3_BUCKET", value = aws_s3_bucket.raw_files.bucket }' in block
+    assert "media_jobs" not in block
