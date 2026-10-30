@@ -58,6 +58,9 @@ METRIC_COLUMNS = {
     "ad_comments": "コメント",
     "ad_saves": "有料のお気に入り",
 }
+RATE_METRICS = frozenset(
+    field for field in METRIC_COLUMNS if field == "ad_ctr" or field.startswith("ad_rate_")
+)
 
 
 class Video(BaseModel):
@@ -389,6 +392,13 @@ def build_batch(
             )
         )
         values = {field: ca.to_number(row.get(column)) for field, column in METRIC_COLUMNS.items()}
+        for field, value in values.items():
+            if value is not None and value < 0:
+                values[field] = None
+                warnings["negative_metric"] += 1
+            elif field in RATE_METRICS and value is not None and value > 1:
+                values[field] = None
+                warnings["invalid_rate"] += 1
         batch.metrics.append(
             Metrics(platform=platform, video_id=video_id, captured_on=captured_on, **values)
         )

@@ -18,6 +18,7 @@ from teamagent.ingest import campaign_aggregate as ca
 from teamagent.ingest import video_library_sync as sync
 from teamagent.ingest.video_library import (
     METRIC_COLUMNS,
+    RATE_METRICS,
     Account,
     Campaign,
     Metrics,
@@ -937,3 +938,45 @@ def test_cli_expands_oauth_json_and_passes_sources_path(
     path = tmp_path / "resolved.yaml"
     assert sync.main(["--dry-run"], sources_path=path) == 0
     assert reader.call_args.kwargs["sources_path"] == path
+
+
+@pytest.mark.parametrize("field", METRIC_COLUMNS)
+def test_negative_metrics_become_missing_and_warn(field: str) -> None:
+    result = batch([video_row(**{METRIC_COLUMNS[field]: "-1"})])
+    assert getattr(result.metrics[0], field) is None
+    assert result.warnings["negative_metric"] == 1
+
+
+@pytest.mark.parametrize("field", sorted(RATE_METRICS))
+@pytest.mark.parametrize("value", ["1.01", "101%"])
+def test_rates_above_one_become_missing_and_warn(field: str, value: str) -> None:
+    result = batch([video_row(**{METRIC_COLUMNS[field]: value})])
+    assert getattr(result.metrics[0], field) is None
+    assert result.warnings["invalid_rate"] == 1
+
+
+@pytest.mark.parametrize("field", sorted(RATE_METRICS))
+@pytest.mark.parametrize("value", ["0", "1"])
+def test_rate_boundaries_are_preserved(field: str, value: str) -> None:
+    result = batch([video_row(**{METRIC_COLUMNS[field]: value})])
+    assert getattr(result.metrics[0], field) == float(value)
+    assert "negative_metric" not in result.warnings and "invalid_rate" not in result.warnings
+
+
+def test_negative_metric_warning_counts_cells_without_mixing_families() -> None:
+    result = batch(
+        [
+            video_row(
+                **{
+                    "オーガニック再生数": "-37560",
+                    "オーガニック保存": "-5",
+                    ca.PLAYS_COL: "17,800",
+                    ca.SAVES_COL: "178",
+                }
+            )
+        ]
+    )
+    metrics = result.metrics[0]
+    assert metrics.organic_plays is None and metrics.organic_saves is None
+    assert metrics.total_plays == 17800 and metrics.total_saves == 178
+    assert result.warnings["negative_metric"] == 2

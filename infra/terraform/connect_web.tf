@@ -256,6 +256,13 @@ resource "aws_iam_role_policy" "ecs_execution_connect_web_secrets" {
 # プロセス内で実行するため Bedrock 権限を追加する（旧コメントの「Bedrock は不要」は P4 で失効）。
 data "aws_iam_policy_document" "connect_web_task" {
   count = var.enable_connect_web ? 1 : 0
+  # 動画ライブラリのサムネ（/library/thumb）。raw_files は常設で SSE-S3、video-library/ は期限削除の対象外。
+  # media_jobs は media 機能が OFF だと作られない（本番に実在しない）ので使わない。
+  statement {
+    sid       = "VideoLibraryThumbnails"
+    actions   = ["s3:GetObject"]
+    resources = ["${aws_s3_bucket.raw_files.arn}/video-library/thumbs/*"]
+  }
   statement {
     sid       = "HmacStateRuntime"
     actions   = ["dynamodb:GetItem", "dynamodb:UpdateItem"]
@@ -542,6 +549,7 @@ resource "aws_ecs_task_definition" "connect_web" {
       { name = "USE_QUERY_PLANNER", value = "false" },
       # ナレッジフィルタ UI（種別/期間などの絞り込み）。
       { name = "USE_KNOWLEDGE_FILTERS", value = "true" },
+      { name = "VIDEO_LIBRARY_S3_BUCKET", value = aws_s3_bucket.raw_files.bucket },
     ], local.report_link_hmac_environment, local.connect_web_hmac_runtime_environment)
     secrets = concat([
       { name = "OAUTH_STATE_SECRET", valueFrom = data.aws_secretsmanager_secret.connect_oauth_state[0].arn },
