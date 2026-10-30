@@ -58,6 +58,10 @@ from teamagent.skills._shared.client_name_guard import (
     safe_client_name,
     to_gmail_phrase,
 )
+from teamagent.skills._shared.google_connection import (
+    google_connection_guard,
+    record_google_failure,
+)
 from teamagent.skills._shared.inbox_triage import (
     DEFAULT_LIMIT,
     InboxMailMeta,
@@ -281,6 +285,9 @@ class MailFollowupSkill(BaseSkill[MailFollowupInput, MailFollowupOutput]):
         # 経過日数の基準時刻。テストの決定性のため注入可能（未指定は実行時の now）。
         self._now_ms = now_ms
 
+    @google_connection_guard(
+        lambda input: MailFollowupOutput(client_name=input.client_name, scanned_count=0)
+    )
     def run(self, input: MailFollowupInput, ctx: SkillContext) -> MailFollowupOutput:
         log = ctx.bind_logger(self.name)
         # G7: 監査ログに本文・件名・生 email・client_name の値そのものは出さない。
@@ -351,6 +358,7 @@ class MailFollowupSkill(BaseSkill[MailFollowupInput, MailFollowupOutput]):
         try:
             refs, retried_with = self._search(gmail, verdict, input, ctx, log)
         except Exception as e:
+            record_google_failure(e)
             return self._api_failure(e, log=log, client_display=display_name, inbox=inbox_masked)
         # Gmail quota が 10 units/threads.get のため、API 呼び出しより先にスレッド重複を除く。
         unique_refs = _dedupe_refs_by_thread(refs)
@@ -367,6 +375,7 @@ class MailFollowupSkill(BaseSkill[MailFollowupInput, MailFollowupOutput]):
                 gmail, unique_refs, requester, input, ctx, now_ms=now_ms, exclude_bulk=exclude_bulk
             )
         except Exception as e:
+            record_google_failure(e)
             return self._api_failure(e, log=log, client_display=display_name, inbox=inbox_masked)
 
         log.info(
@@ -504,6 +513,7 @@ class MailFollowupSkill(BaseSkill[MailFollowupInput, MailFollowupOutput]):
                 limit=TRIAGE_SCAN_DEFAULT,
             )
         except Exception as e:
+            record_google_failure(e)
             return self._api_failure(e, log=log, client_display="", inbox=inbox_masked)
         # 直前に本人へ見せた一覧として覚える（選択側の再走査を省く＝threads.get を倍にしない）。
         remember_scan(requester, scan)

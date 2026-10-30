@@ -35,6 +35,11 @@ from pydantic import BaseModel
 
 from teamagent.adapters.gcalendar_client import DuplicateEventError, GCalendarClient
 from teamagent.adapters.oauth_token_store import TokenStore
+from teamagent.skills._shared.google_connection import (
+    google_connection_guard,
+    needs_reconnect,
+    record_google_failure,
+)
 from teamagent.skills._shared.user_context import USER_CONTEXT_RULE
 from teamagent.skills.base import BaseSkill, SkillContext, register
 from teamagent.skills.calendar_event.schema import CalendarEventInput, CalendarEventOutput
@@ -137,6 +142,7 @@ class CalendarEventSkill(BaseSkill[CalendarEventInput, CalendarEventOutput]):
         # 自由文経路の日付レンジ判定で使う「今」（calendar_freebusy と同じ注入口）。
         self._now_factory = now_factory or (lambda: _dt.datetime.now(tz=_JST))
 
+    @google_connection_guard(lambda input: CalendarEventOutput())
     def run(self, input: CalendarEventInput, ctx: SkillContext) -> CalendarEventOutput:
         log = ctx.bind_logger(self.name)
 
@@ -183,12 +189,13 @@ class CalendarEventSkill(BaseSkill[CalendarEventInput, CalendarEventOutput]):
             log.warning("calendar_event_bad_datetime", err=type(e).__name__)
             return CalendarEventOutput(error="expired", message=_ERR_MSG["expired"])
         except Exception as e:
+            record_google_failure(e)
             name = type(e).__name__
             # googleapiclient HttpError 403: 権限系（insufficient scope 等）のみ再連携案内。
             # Calendar API は rate limit 系（rateLimitExceeded 等）も 403 を返すため、
             # reason で判別しないとバースト時に全員へ誤った再認可誘導をする（レビュー F4）。
             status = getattr(getattr(e, "resp", None), "status", None)
-            if str(status) == "403":
+            if str(status) == "403" and needs_reconnect(e):
                 reason = (
                     f"{getattr(e, 'reason', '') or ''} {getattr(e, 'error_details', '') or ''}"
                 ).lower()

@@ -91,6 +91,17 @@ class InternalRef(BaseModel):
 class MailInternalContextOutput(BaseModel):
     """メール×社内ナレッジ横断の結果。生メール本文・生件名・生 From は一切含まない。"""
 
+    error: str = Field(
+        default="",
+        exclude_if=lambda value: not value,
+        description="連携失敗の共通案内。message はそのまま本人へ返す",
+    )
+    message: str = Field(
+        default="",
+        exclude_if=lambda value: not value,
+        description="連携失敗の共通案内。message はそのまま本人へ返す",
+    )
+
     client_name: str
     mail_signal: MailSignal
     internal_refs: list[InternalRef] = Field(default_factory=list)

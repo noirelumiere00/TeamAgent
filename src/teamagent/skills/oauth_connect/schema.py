@@ -21,6 +21,12 @@ class OAuthConnectInput(BaseModel):
 class OAuthConnectOutput(BaseModel):
     """oauth_connect の出力。未連携サービスの認可 URL と案内文を返す。"""
 
+    error: str = Field(
+        default="",
+        exclude_if=lambda value: not value,
+        description="連携失敗の共通案内。message はそのまま本人へ返す",
+    )
+
     url: str | None = Field(
         default=None,
         description=(

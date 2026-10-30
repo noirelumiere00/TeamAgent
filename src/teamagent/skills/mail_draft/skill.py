@@ -34,6 +34,7 @@ from pydantic import BaseModel
 
 from teamagent.adapters.gmail_client import GmailClient
 from teamagent.adapters.oauth_token_store import TokenStore
+from teamagent.skills._shared.google_connection import google_connection_guard
 from teamagent.skills._shared.inbox_triage import (
     DEFAULT_LIMIT,
     InboxMailMeta,
@@ -192,6 +193,7 @@ class MailDraftSkill(BaseSkill[MailDraftInput, MailDraftOutput]):
         self._reply = reply
         self._now_ms = now_ms
 
+    @google_connection_guard(lambda input: MailDraftOutput())
     def run(self, input: MailDraftInput, ctx: SkillContext) -> MailDraftOutput:
         log = ctx.bind_logger(self.name)
 

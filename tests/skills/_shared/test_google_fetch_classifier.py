@@ -8,8 +8,8 @@
 
 固定する仕様（本人の再連携で直るものだけを拾う）:
   invalid_grant → token_expired ／ refresh token 空 → token_expired
-  403 + スコープ不足 → scope_missing
-  invalid_client・admin_policy_enforced・unauthorized_client・その他の 403・401・5xx・
+  401 → token_expired ／ invalid_scope・403 + スコープ不足 → scope_missing
+  invalid_client・admin_policy_enforced・unauthorized_client・その他の 403・5xx・
   タイムアウト・通信断・secret 欠落 → temporary（全員へ「再連携して」と出す事故を防ぐ）
 """
 
@@ -122,12 +122,20 @@ def test_403_legacy_insufficient_permissions_is_scope_missing() -> None:
     assert classify_google_fetch_failure(exc) == FETCH_SCOPE_MISSING
 
 
+def test_invalid_scope_is_scope_missing() -> None:
+    assert classify_google_fetch_failure(refresh_error("invalid_scope")) == FETCH_SCOPE_MISSING
+
+
+def test_401_is_token_expired() -> None:
+    assert classify_google_fetch_failure(http_error(401, reason="authError")) == FETCH_TOKEN_EXPIRED
+
+
 # ── temporary（再連携に誘導しない）─────────────────────────────────────────
 
 
 @pytest.mark.parametrize(
     "error",
-    ["invalid_client", "admin_policy_enforced", "unauthorized_client", "invalid_scope", ""],
+    ["invalid_client", "admin_policy_enforced", "unauthorized_client", ""],
 )
 def test_other_refresh_errors_are_temporary(error: str) -> None:
     """secret 不正・管理者のアプリ制限は RefreshError でも本人の再連携では直らない。"""
@@ -149,7 +157,6 @@ def test_invalid_client_is_what_the_loose_classifier_gets_wrong() -> None:
         (403, "rateLimitExceeded"),
         (403, "domainPolicy"),
         (403, "accessNotConfigured"),
-        (401, "authError"),
         (429, "rateLimitExceeded"),
         (500, "backendError"),
         (503, "backendError"),

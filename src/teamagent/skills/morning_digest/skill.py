@@ -40,6 +40,11 @@ from teamagent.adapters.gmail_client import (
 )
 from teamagent.adapters.oauth_token_store import TokenStore
 from teamagent.observability import scrub_value
+from teamagent.skills._shared.google_connection import (
+    GoogleConnectionError,
+    google_connection_guard,
+    record_google_failure,
+)
 from teamagent.skills._shared.grapheme_cut import truncate_graphemes
 from teamagent.skills._shared.mail_compose import (
     build_cc,
@@ -381,6 +386,7 @@ class MorningDigestSkill(BaseSkill[MorningDigestInput, MorningDigestOutput]):
             )
             return None
 
+    @google_connection_guard(lambda input: MorningDigestOutput(user_email_masked=""))
     def run(self, input: MorningDigestInput, ctx: SkillContext) -> MorningDigestOutput:
         log = ctx.bind_logger(self.name)
 
@@ -433,6 +439,7 @@ class MorningDigestSkill(BaseSkill[MorningDigestInput, MorningDigestOutput]):
         except PermissionError:
             raise
         except Exception as exc:
+            record_google_failure(exc)
             logger.warning(
                 "morning_digest_mail_failed", request_id=ctx.request_id, err=type(exc).__name__
             )
@@ -449,6 +456,7 @@ class MorningDigestSkill(BaseSkill[MorningDigestInput, MorningDigestOutput]):
             out.calendar_events = self._collect_calendar(token, input, ctx)
             out.calendar_fetch = FETCH_OK
         except Exception as exc:
+            record_google_failure(exc)
             logger.warning(
                 "morning_digest_calendar_failed", request_id=ctx.request_id, err=type(exc).__name__
             )
@@ -515,6 +523,7 @@ class MorningDigestSkill(BaseSkill[MorningDigestInput, MorningDigestOutput]):
                 out.drafts_created = drafts_count
                 total_cost += draft_cost
         except Exception as exc:
+            record_google_failure(exc)
             logger.warning(
                 "morning_digest_draft_failed", request_id=ctx.request_id, err=type(exc).__name__
             )
@@ -566,7 +575,7 @@ class MorningDigestSkill(BaseSkill[MorningDigestInput, MorningDigestOutput]):
             raise PermissionError("TokenStore が未設定です（本 Skill は本人連携前提）")
         token = self._token_store.get(requester)
         if token is None:
-            raise PermissionError(
+            raise GoogleConnectionError(
                 "メール連携が未完了です（Slack で『連携』と話しかけて Google を許可してください）"
             )
         return token
@@ -637,7 +646,8 @@ class MorningDigestSkill(BaseSkill[MorningDigestInput, MorningDigestOutput]):
             tid = getattr(ref, "thread_id", "") or getattr(ref, "id", "")
             try:
                 thread = gmail.get_thread(tid, ctx.request_id) if tid else []
-            except Exception:
+            except Exception as exc:
+                record_google_failure(exc)
                 thread = []
             # F0: スレッド全体を読めたときだけ True。代表 1 通への縮退は False
             # （後段の根拠にしない）。
@@ -646,7 +656,8 @@ class MorningDigestSkill(BaseSkill[MorningDigestInput, MorningDigestOutput]):
                 try:
                     anchor = gmail.get_message(getattr(ref, "id", ""), ctx.request_id)
                     thread = [anchor]
-                except Exception:
+                except Exception as exc:
+                    record_google_failure(exc)
                     # 1 通も読めなかった。従来どおり黙って飛ばすが、数だけは数える
                     # （全部読めなかった朝を「新着なし」と書かないため）。
                     if stats is not None:
@@ -1194,7 +1205,8 @@ class MorningDigestSkill(BaseSkill[MorningDigestInput, MorningDigestOutput]):
                 for d in gmail_rw.list_drafts(ctx.request_id):
                     if getattr(d, "thread_id", None):
                         existing_threads.add(str(d.thread_id))
-            except Exception:
+            except Exception as exc:
+                record_google_failure(exc)
                 logger.warning("morning_digest_list_drafts_failed", request_id=ctx.request_id)
 
         cost = 0.0
@@ -1266,7 +1278,8 @@ class MorningDigestSkill(BaseSkill[MorningDigestInput, MorningDigestOutput]):
                 in_reply_to_message_id=msg.headers.get("Message-ID"),
             )
             return (True, cost)
-        except Exception:
+        except Exception as exc:
+            record_google_failure(exc)
             logger.warning("morning_digest_draft_create_failed", request_id=ctx.request_id)
             return (False, cost)
 
@@ -1283,7 +1296,8 @@ class MorningDigestSkill(BaseSkill[MorningDigestInput, MorningDigestOutput]):
                 for d in gmail.list_drafts(ctx.request_id)
                 if getattr(d, "thread_id", None)
             }
-        except Exception:
+        except Exception as exc:
+            record_google_failure(exc)
             logger.warning("morning_digest_list_drafts_failed", request_id=ctx.request_id)
             return
         for i, item in enumerate(digest_items):
@@ -1323,7 +1337,8 @@ class MorningDigestSkill(BaseSkill[MorningDigestInput, MorningDigestOutput]):
             return out
         try:
             gmail_rw = self._gmail_for(token, readonly=False)
-        except Exception:
+        except Exception as exc:
+            record_google_failure(exc)
             out["error"] = "reauth_needed"  # gmail.modify 未認可など
             return out
         # 冪等性: 既に下書き有りならスキップ（二重作成しない）。
@@ -1333,11 +1348,13 @@ class MorningDigestSkill(BaseSkill[MorningDigestInput, MorningDigestOutput]):
                     if str(getattr(d, "thread_id", "") or "") == thread_id:
                         out["already"] = True
                         return out
-            except Exception:
+            except Exception as exc:
+                record_google_failure(exc)
                 logger.warning("morning_digest_list_drafts_failed", request_id=ctx.request_id)
         try:
             thread = gmail_rw.get_thread(thread_id, ctx.request_id)
-        except Exception:
+        except Exception as exc:
+            record_google_failure(exc)
             out["error"] = "thread_error"
             return out
         if not thread:
@@ -1366,7 +1383,8 @@ class MorningDigestSkill(BaseSkill[MorningDigestInput, MorningDigestOutput]):
             return ""
         try:
             messages = gmail.get_thread(thread_id, ctx.request_id)
-        except Exception:
+        except Exception as exc:
+            record_google_failure(exc)
             return ""
         return build_thread_history(
             messages, exclude_id=getattr(msg, "id", None), requester=requester

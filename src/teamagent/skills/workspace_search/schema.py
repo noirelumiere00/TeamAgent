@@ -31,6 +31,17 @@ class WorkspaceHit(BaseModel):
 class WorkspaceSearchOutput(BaseModel):
     """本人 Workspace 検索の結果。生データは含まない。"""
 
+    error: str = Field(
+        default="",
+        exclude_if=lambda value: not value,
+        description="連携失敗の共通案内。message はそのまま本人へ返す",
+    )
+    message: str = Field(
+        default="",
+        exclude_if=lambda value: not value,
+        description="連携失敗の共通案内。message はそのまま本人へ返す",
+    )
+
     service: str
     hits: list[WorkspaceHit] = Field(default_factory=list)
     count: int = Field(ge=0)

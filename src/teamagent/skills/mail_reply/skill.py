@@ -46,6 +46,11 @@ from teamagent.skills._shared.client_name_guard import (
     guard_message,
     safe_client_name,
 )
+from teamagent.skills._shared.google_connection import (
+    GoogleConnectionError,
+    google_connection_guard,
+    record_google_failure,
+)
 from teamagent.skills._shared.mail_compose import (
     build_cc,
     build_thread_history,
@@ -221,6 +226,9 @@ class MailReplySkill(BaseSkill[MailReplyInput, MailReplyOutput]):
         # 候補走査の上限（スレッドに束ねる前のメール件数。metadata 取得 = 1 通 1 HTTP）。
         self._search_max = env_int("MAIL_REPLY_SEARCH_MAX", 20)
 
+    @google_connection_guard(
+        lambda input: MailReplyOutput(client_name=input.client_name, created=False)
+    )
     def run(self, input: MailReplyInput, ctx: SkillContext) -> MailReplyOutput:
         log = ctx.bind_logger(self.name)
         log.info(
@@ -382,7 +390,7 @@ class MailReplySkill(BaseSkill[MailReplyInput, MailReplyOutput]):
             raise PermissionError("TokenStore が未設定です（本 Skill は本人連携前提）")
         token = self._token_store.get(requester)
         if token is None:
-            raise PermissionError("下書き作成には" + CONNECT_SUFFIX)
+            raise GoogleConnectionError("下書き作成には" + CONNECT_SUFFIX)
         try:
             # readonly=False = gmail.modify。drafts.create を使う（send/delete は denylist 封鎖）。
             return GmailClient.from_user_token(token, readonly=False)
@@ -414,6 +422,7 @@ class MailReplySkill(BaseSkill[MailReplyInput, MailReplyOutput]):
             log.info("mail_reply_discard_refused", reason="not_owned", draft_hash=digest)
             return ("", _DISCARD_NOT_OWNED)
         except Exception as e:
+            record_google_failure(e)
             log.warning("mail_reply_discard_failed", exc=type(e).__name__, draft_hash=digest)
             return ("", _DISCARD_FAILED)
         log.info("mail_reply_discard_done", draft_hash=digest)
@@ -607,7 +616,8 @@ class MailReplySkill(BaseSkill[MailReplyInput, MailReplyOutput]):
             return None
         try:
             messages = list(get_thread(thread_id, ctx.request_id))
-        except Exception:
+        except Exception as exc:
+            record_google_failure(exc)
             return None
         if not messages:
             return None
@@ -642,6 +652,7 @@ class MailReplySkill(BaseSkill[MailReplyInput, MailReplyOutput]):
                 in_reply_to_message_id=in_reply_to,
             )
         except Exception as e:
+            record_google_failure(e)
             # 例: readonly のみで connect 済み → gmail.modify 不足で 403。再連携に寄せる。
             logger.warning("mail_reply_create_draft_failed", request_id=request_id)
             raise PermissionError(
@@ -664,7 +675,8 @@ class MailReplySkill(BaseSkill[MailReplyInput, MailReplyOutput]):
             return ""
         try:
             messages = gmail.get_thread(thread_id, ctx.request_id)
-        except Exception:
+        except Exception as exc:
+            record_google_failure(exc)
             return ""
         return build_thread_history(
             messages,
