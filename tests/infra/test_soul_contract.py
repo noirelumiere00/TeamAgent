@@ -1071,6 +1071,16 @@ def test_guess_first_and_retry_before_saying_missing(soul: str) -> None:
     assert "利用者に検索や確認を頼まない" in soul
 
 
+def test_conversation_continuity_precedes_clarification(soul: str) -> None:
+    reference = soul.split("**【最上位規約・照応スコープ】**", 1)[1].split("\n\n", 1)[0]
+    for phrase in ("直前3往復", "企業・案件・チャンネル", "直前のAicoの提案", "最初の1案", "1問"):
+        assert phrase in reference
+    missing = soul.split("2. 足りない入力", 1)[1].split("\n3.", 1)[0]
+    assert "履歴・添付の読取結果で補えるなら引数を埋めて再実行" in missing
+    assert "費用・権限・副作用の確認は省略しない" in missing
+    assert "タブ名は先に読み取る" in soul
+
+
 # ── 決まった節の転記（2026-10-09 r51 の DM 実機で、📊 の 5 本がモデルの要約で上位 3 本に縮んだ） ──
 @pytest.mark.parametrize(
     "phrase",
