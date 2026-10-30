@@ -13,7 +13,7 @@
 | `/library/api/videos` | 一覧と同じ検索、最新スナップショット、P1の率計算のJSON |
 | `/library/thumb/{platform}/{video_id}` | 認証付きS3画像配信、privateキャッシュとETag |
 
-動画の有効値は `vl_videos_effective` から読み、設定変更が次のリクエストで効く。一般利用者は非公開動画を一覧・詳細・サムネで閲覧できず、管理者は確認できる。再生・保存率・ENG率の一覧／並べ替えは**オーガニック**を使い、総計で補完しない。最新の指標が欠損なら算出不可のまま。5,000再生未満の率は参考値とする。
+動画の有効値は `vl_videos_effective` から読み、設定変更が次のリクエストで効く。一般利用者は非公開動画を一覧・詳細・サムネで閲覧できず、管理者は確認できる。再生・保存率・ENG率の一覧／並べ替えとAPIの `rates` は**総計**を使う。オーガニック再生は値がある場合に併記する。最新の指標が欠損なら算出不可のまま。5,000再生未満の率は参考値とする。
 
 検索は投稿文・ハッシュタグ・アカウント名／ハンドル・広告主・案件名。期間は固定UTC+9の暦日で、終了日を含む。管理POSTは既存 `/admin/analyze` と同じ完全一致のOrigin検証を行う。HTMLはエスケープし、nonce付きの自前JS/CSSを使う。TikTokのiframe許可はlibraryのHTMLレスポンスだけに加える。
 
@@ -48,7 +48,7 @@
 
 サムネはTikTokの埋め込みJSONのzoomCover[480]、なければcover。JPEGのマジックバイトと最大5MiBを確認し、許可されたTikTok CDNのHTTPS URLだけを取得する。HTTPリダイレクトは追わない。外部URL・投稿文・例外本文を集計ログへ出さない。保存先は `video-library/thumbs/{platform}/{video_id}.jpg`。`media-jobs/` の期限付き成果物とは別で、既存の自動削除対象に入らない。
 
-## 検証結果
+## 初回P3の検証結果
 
 - 依存環境: 指定の `uv sync --extra dev --extra mcp --extra media` 相当を既存キャッシュの作業用コピーでオフライン同期。ネットワーク経由の同期はPyPIのDNS解決失敗。`import-linter` は同じキャッシュから追加した（CIの既存依存）。
 - `mypy --strict src`: 516ファイル成功。
@@ -106,3 +106,49 @@
 | ingestのPutObjectを除去 | `test_library_thumbnail_iam` |
 
 未実施: `TEAMAGENT_TEST_DB_DSN` は未設定で実DBテストはスキップ。DB接続を伴う検証とビュー規則の実DB破壊確認はレビュー側で実施する。ブラウザ実画面は、サンドボックスがlocalhostのbindとChromiumの起動を拒否したため未確認。TestClientの実レスポンスヘッダとNodeの配信JS検証は実施したが、実ブラウザ・本番TikTok・S3疎通の代替とはしていない。本番データ2,811本の件数確認・migration適用・取得ジョブ実行・デプロイ・push・PR作成は実施していない。
+
+
+## 実データレビュー後の修正
+
+- `/library` とその配下だけ `Referrer-Policy: same-origin`。通常HTMLフォームのOrigin検証を維持し、`Origin: null` は403。他ページは `no-referrer` のまま。
+- 同期時に負の指標をNoneへ変換し、セルごとに `negative_metric` を数える。広告の率・CTRは1超もNoneにして `invalid_rate` を数える。元のシート列名は変更しない。既にDBにある負の値は**次回同期が必要**で、過去のスナップショットを一括書換えする処理は加えていない。
+- 件数は整数・3桁区切り、広告の率は小数1桁の%、コストは円、平均視聴時間は小数2桁の秒。広告の反応数ラベルを有料いいね／有料シェア／有料コメント／有料保存に変更。
+- 一覧は総計再生を主表示し、オーガニックは値がある場合のみ併記。保存率・並べ替え・APIも総計に統一。
+- サムネキーがない動画はimg自体を出さない。画像の読み込み失敗時はJSでimgを除去し灰色の枠だけを残す。CSPに反するinline onerrorは使わない。
+- 案件の種別からorganicを除外し、POSTでも拒否する。PRなし動画の自動判定は維持。
+- 案件設定の上部には、案件一覧が空でも `#PR ありで案件の無い動画: N本` を表示する。
+
+レビュー側のUA修正コミット `e3aa64b2` と整形コミット `d263062e` は保持。サムネ取得モジュール・そのUAテスト・Terraform・migrationは今回変更していない。
+
+回帰テスト:
+
+| 修正 | 主なテスト |
+| --- | --- |
+| Referrer PolicyとOrigin拒否 | `test_library_referrer_policy_is_same_origin_only` / `test_admin_forms_require_origin_and_save_as_admin` |
+| 負の値・率の範囲・件数集計 | `test_negative_metrics_become_missing_and_warn` / `test_rates_above_one_become_missing_and_warn` / `test_rate_boundaries_are_preserved` / `test_negative_metric_warning_counts_cells_without_mixing_families` |
+| 単位・有料指標ラベル | `test_metric_display_units` / `test_detail_uses_formatted_metrics_and_paid_labels` |
+| 総計を主表示・率も総計 | `test_card_uses_total_plays_and_save_rate` / `test_search_api_matches_listing_and_hides_s3_keys` |
+| サムネ欠損・失敗 | `test_missing_thumbnail_has_only_gray_frame` / `test_single_player_disposal_and_checked_urls_clipboard`（配信JSで画像失敗も検証） |
+| organic拒否 | `test_admin_pages_escape_and_count_orphan_pr` / `test_campaign_rejects_organic_even_if_category_exists` |
+| 案件なしPR件数 | `test_orphan_pr_count_is_visible_without_campaign_rows` |
+
+再検証: 関連pytest **1,556 passed / 23 skipped**（connect_web全体、ingest全体、該当scripts／infra契約、no-IANA）。`mypy --strict src` は516ファイル成功、ruff check／formatとimport-linterの2契約も成功。実DBは `TEAMAGENT_TEST_DB_DSN` 未設定のため未実施。Chromiumでの再確認・実データ再同期・本番反映は実施していない。
+
+破壊確認は次の12件を一時的に改変し、対応テストの失敗を確認して復元した。
+
+| 壊した箇所 | 検出したテスト |
+| --- | --- |
+| libraryのReferrer Policyをno-referrerへ戻す | `test_library_referrer_policy_is_same_origin_only` |
+| 負の値を許す | `test_negative_metrics_become_missing_and_warn` |
+| 広告率の上限を2まで許す | `test_rates_above_one_become_missing_and_warn` |
+| 件数をfloatのまま表示 | `test_metric_display_units` |
+| 保存率をオーガニックに戻す | `test_card_uses_total_plays_and_save_rate` |
+| 主表示の再生をオーガニックに戻す | 同上 |
+| サムネキーがなくてもimgを出す | `test_missing_thumbnail_has_only_gray_frame` |
+| 画像失敗のイベントでimgを除去しない | `test_single_player_disposal_and_checked_urls_clipboard` |
+| 案件種別にorganicを表示 | `test_admin_pages_escape_and_count_orphan_pr` |
+| organicのPOSTを許す | `test_campaign_rejects_organic_even_if_category_exists` |
+| 案件なしPRの件数表示を除去 | `test_orphan_pr_count_is_visible_without_campaign_rows` |
+| Origin: nullを許す | `test_admin_forms_require_origin_and_save_as_admin` |
+
+完全な検証出力は `/tmp/video-library-review-pytest.log`、`/tmp/video-library-review-restored.log`、`/tmp/video-library-review-mypy.log`、`/tmp/video-library-review-imports.log`。破壊確認の結果は `/tmp/video-library-review-mutations.json`、各失敗全文は `/tmp/video-library-review-mutation-*.log`。push・PR作成はしていない。

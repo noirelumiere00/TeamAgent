@@ -224,6 +224,9 @@ class _SecurityHeadersMiddleware:
                     # Route-specific policy may be stricter (for example /r already sets no-store).
                     if name not in headers:
                         headers[name] = value
+                if scope["path"] == "/library" or scope["path"].startswith("/library/"):
+                    # HTML forms need a non-null Origin for the library's CSRF check.
+                    headers["Referrer-Policy"] = "same-origin"
             await send(message)
 
         await self.app(scope, receive, _send)

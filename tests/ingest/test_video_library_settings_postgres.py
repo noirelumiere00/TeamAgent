@@ -114,17 +114,17 @@ def test_search_uses_latest_snapshot_and_settings_immediately(db: tuple[Any, Any
     conn, repository = db
     prepare(conn, repository)
     conn.execute(
-        "UPDATE vl_metrics SET organic_plays=4000, organic_saves=40, organic_likes=10, organic_comments=2, organic_shares=3"
+        "UPDATE vl_metrics SET organic_plays=4000, organic_saves=40, organic_likes=10, organic_comments=2, organic_shares=3, total_plays=17800, total_saves=178"
     )
     conn.execute(
-        "INSERT INTO vl_metrics (platform,video_id,captured_on,organic_plays,organic_saves) VALUES ('tiktok','1','2026-10-30',10000,200)"
+        "INSERT INTO vl_metrics (platform,video_id,captured_on,organic_plays,organic_saves,total_plays,total_saves) VALUES ('tiktok','1','2026-10-30',10000,200,20000,600)"
     )
     for sort in ("new", "plays", "saves", "eng"):
         data = search_videos(conn, {"sort": sort}, admin=False)
         assert data["total"] == 1
         assert data["videos"][0]["organic_plays"] == 10000
         assert data["videos"][0]["rates"] == {
-            "save_rate": 0.02,
+            "save_rate": 0.03,
             "engagement_rate": None,
             "is_reference": False,
         }

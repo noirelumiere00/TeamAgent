@@ -15,7 +15,12 @@ from fastapi.encoders import jsonable_encoder
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 
 from teamagent.adapters.video_library_storage import VideoLibraryStorage
-from teamagent.ingest.video_library import METRIC_COLUMNS, derived_rates, video_identity
+from teamagent.ingest.video_library import (
+    METRIC_COLUMNS,
+    RATE_METRICS,
+    derived_rates,
+    video_identity,
+)
 
 JST = timezone(timedelta(hours=9))
 PAGE_SIZE = 50
@@ -56,7 +61,7 @@ def post_url(row: Mapping[str, Any]) -> str | None:
     return url if identity and identity[:2] == (row["platform"], row["video_id"]) else None
 
 
-def _rates(row: Mapping[str, Any], family: str = "organic") -> dict[str, Any]:
+def _rates(row: Mapping[str, Any], family: str = "total") -> dict[str, Any]:
     return derived_rates(
         **{
             name: row.get(f"{family}_{name}")
@@ -69,6 +74,18 @@ def _rate(value: float | None, reference: bool) -> str:
     if value is None:
         return "算出不可"
     return f"{value:.2%}" + ("（参考値）" if reference else "")
+
+
+def _metric(value: float | None, column: str = "") -> str:
+    if value is None:
+        return "算出不可"
+    if column in RATE_METRICS:
+        return f"{value:.1%}"
+    if column == "ad_cost":
+        return f"¥{value:,.0f}"
+    if column == "ad_average_watch_seconds":
+        return f"{value:.2f}秒"
+    return f"{value:,.0f}"
 
 
 def _day(value: Any) -> str:
@@ -118,11 +135,11 @@ def _where(params: Mapping[str, str], admin: bool) -> tuple[str, list[Any], int,
         raise HTTPException(400, "ページが不正です") from None
     orders = {
         "new": "v.posted_at",
-        "plays": "m.organic_plays",
-        "saves": "CASE WHEN m.organic_plays > 0 THEN m.organic_saves / m.organic_plays END",
+        "plays": "m.total_plays",
+        "saves": "CASE WHEN m.total_plays > 0 THEN m.total_saves / m.total_plays END",
         "eng": (
-            "CASE WHEN m.organic_plays > 0 THEN (m.organic_likes + m.organic_saves + "
-            "m.organic_comments + m.organic_shares) / m.organic_plays END"
+            "CASE WHEN m.total_plays > 0 THEN (m.total_likes + m.total_saves + "
+            "m.total_comments + m.total_shares) / m.total_plays END"
         ),
     }
     sort = params.get("sort", "new")
@@ -152,7 +169,7 @@ def search_videos(conn: Any, params: Mapping[str, str], *, admin: bool) -> dict[
     for row in rows:
         row["rates"] = _rates(row)
         row["post_url"] = post_url(row)
-        row.pop("thumbnail_s3_key", None)
+        row["has_thumbnail"] = bool(row.pop("thumbnail_s3_key", None))
         row.pop("video_s3_key", None)
     return {"videos": rows, "total": count, "page": page, "page_size": PAGE_SIZE}
 
@@ -172,6 +189,10 @@ table{border-collapse:collapse;width:100%}
 th,td{text-align:left;padding:8px;border-bottom:1px solid #46536d}pre{white-space:pre-wrap}
 """
 _SCRIPT = """
+document.querySelectorAll('.preview img').forEach(img=>{
+ img.addEventListener('error',()=>img.remove());
+ if(img.complete&&img.naturalWidth===0)img.remove();
+});
 let active=null;
 function clearPlayer(){if(active){active.remove();active=null;}}
 document.querySelectorAll('.preview[data-player]').forEach(card=>{
@@ -250,7 +271,11 @@ def _listing(data: dict[str, Any], params: Mapping[str, str], categories: list[A
         [("new", "新しい順"), ("plays", "再生順"), ("saves", "保存率順"), ("eng", "ENG率順")],
         params.get("sort", "new"),
     )
-    filters += "<button>絞り込み</button></form><p>再生・率はオーガニックの最新数値です。</p>"
+    filters += (
+        "<button>絞り込み</button></form>"
+        "<p>再生・保存率・ENG率と並び順は総計の最新数値です。"
+        "オーガニック再生は値がある場合に併記します。</p>"
+    )
     cards = []
     labels = {r["code"]: r["display_name"] for r in categories}
     for row in data["videos"]:
@@ -262,22 +287,28 @@ def _listing(data: dict[str, Any], params: Mapping[str, str], categories: list[A
             if platform == "tiktok" and vid.isdigit() and url
             else ""
         )
-        cover = f'<img loading="lazy" src="/library/thumb/{path}" alt="サムネイル">'
+        cover = (
+            f'<img loading="lazy" src="/library/thumb/{path}" alt="">'
+            if row["has_thumbnail"]
+            else ""
+        )
         preview = (
             f'<a class="preview" href="{_e(url)}" target="_blank" '
-            f'rel="noopener noreferrer"{player}>{cover}</a>'
+            f'rel="noopener noreferrer" aria-label="投稿を開く"{player}>{cover}</a>'
             if url
             else f'<div class="preview">{cover}</div>'
         )
         rates = row["rates"]
         checkbox = f'<label><input type="checkbox" data-url="{_e(url)}">選択</label>' if url else ""
         account = _e(row.get("account_name") or row.get("account_handle"))
-        plays = row.get("organic_plays")
+        plays = _metric(row.get("total_plays"))
+        if row.get("organic_plays") is not None:
+            plays += f"（オーガニック {_metric(row['organic_plays'])}）"
         category = _e(labels.get(row.get("business_category"), "未設定"))
         flags = ("PR " if row["is_pr"] else "") + ("非公開" if row["is_private"] else "")
         cards.append(
             f"<article>{preview}{checkbox}<p>{account} · {_day(row.get('posted_at'))}</p>"
-            f"<p>再生 {_e(plays if plays is not None else '算出不可')} · "
+            f"<p>再生 {plays} · "
             f"保存率 {_rate(rates['save_rate'], rates['is_reference'])}</p>"
             f"<p>{category} {flags}</p>"
             f'<a href="/library/v/{path}">詳細</a></article>'
@@ -430,10 +461,13 @@ def register_library_routes(
             for column in METRIC_COLUMNS:
                 if column.startswith(family + "_"):
                     value = row.get(column)
-                    body += (
-                        f"<tr><th>{_e(METRIC_COLUMNS[column])}</th>"
-                        f"<td>{_e(value if value is not None else '算出不可')}</td></tr>"
-                    )
+                    metric_label = {
+                        "ad_likes": "有料いいね",
+                        "ad_shares": "有料シェア",
+                        "ad_comments": "有料コメント",
+                        "ad_saves": "有料保存",
+                    }.get(column, METRIC_COLUMNS[column])
+                    body += f"<tr><th>{_e(metric_label)}</th><td>{_metric(value, column)}</td></tr>"
             body += "</table>"
             if family != "ad":
                 rates = _rates(row, family)
@@ -488,7 +522,7 @@ def register_library_routes(
                 "SELECT count(*) AS n FROM vl_videos_effective WHERE is_pr AND "
                 "(advertiser IS NULL OR campaign IS NULL OR advertiser='' OR campaign='')"
             ).fetchone()["n"]
-        body = f"<p>PRあり・案件なし: {missing}本</p>"
+        body = f"<p>#PR ありで案件の無い動画: {missing}本</p>"
         for row in rows:
             body += (
                 '<section><form method="post"><h2>'
@@ -505,7 +539,14 @@ def register_library_routes(
                 "<label>種別 "
                 + _select(
                     "business_category",
-                    [("", "未設定"), *[(r["code"], r["display_name"]) for r in categories]],
+                    [
+                        ("", "未設定"),
+                        *[
+                            (r["code"], r["display_name"])
+                            for r in categories
+                            if r["code"] != "organic"
+                        ],
+                    ],
                     row["business_category"],
                 )
                 + "</label>"
@@ -556,6 +597,8 @@ def register_library_routes(
         if not advertiser or not campaign or any(len(v) > 500 for v in form.values()):
             raise HTTPException(400)
         category = form.get("business_category") or None
+        if category == "organic":
+            raise HTTPException(400, "オーガニックはPRなし動画の自動判定です")
         if form.get("is_private", "") not in {"", "1"}:
             raise HTTPException(400)
         with connection(email) as conn:

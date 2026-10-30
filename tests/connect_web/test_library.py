@@ -41,7 +41,8 @@ class Pg:
             "organic_likes": None,
             "organic_comments": 2,
             "organic_shares": 3,
-            "total_plays": 99999,
+            "total_plays": 17800,
+            "total_saves": 178,
             "thumbnail_s3_key": "video-library/thumbs/tiktok/123.jpg",
             "video_s3_key": "secret-key",
         }
@@ -60,7 +61,10 @@ class Pg:
             result.fetchone.return_value = self.row.copy()
             result.fetchall.return_value = [self.row.copy()]
         elif "SELECT * FROM vl_business_categories" in query:
-            result.fetchall.return_value = [{"code": "media", "display_name": "メディア"}]
+            result.fetchall.return_value = [
+                {"code": "media", "display_name": "メディア"},
+                {"code": "organic", "display_name": "オーガニック"},
+            ]
         elif "FROM vl_campaigns c" in query:
             result.fetchall.return_value = [self.row.copy()]
         elif "SELECT * FROM vl_account_settings" in query:
@@ -167,7 +171,7 @@ def test_listing_csp_escaping_copy_and_single_player(setup: tuple[TestClient, Pg
     assert (
         'data-player="https://www.tiktok.com/player/v1/123?autoplay=1&amp;muted=1' in response.text
     )
-    assert "参考値" in response.text
+    assert "再生 17,800（オーガニック 4,000）" in response.text
     assert pg.sessions[0]["app_role"] == "teamagent_app"
     assert not any("FROM vl_videos " in query for query, _ in pg.calls)
 
@@ -178,7 +182,7 @@ def test_detail_metrics_are_separate_and_caption_escaped(setup: tuple[TestClient
     assert response.status_code == 200
     assert "<img src=x onerror" not in response.text
     assert "&lt;img src=x onerror" in response.text
-    for text in ("オーガニック", "総計", "広告", "近日公開", "算出不可", "参考値", "99999"):
+    for text in ("オーガニック", "総計", "広告", "近日公開", "算出不可", "参考値", "17,800"):
         assert text in response.text
 
 
@@ -202,8 +206,10 @@ def test_search_api_matches_listing_and_hides_s3_keys(
     payload = response.json()
     assert payload["page_size"] == 50
     row = payload["videos"][0]
-    assert row["rates"] == {"save_rate": 0.01, "engagement_rate": None, "is_reference": True}
+    assert row["rates"] == {"save_rate": 0.01, "engagement_rate": None, "is_reference": False}
     assert "thumbnail_s3_key" not in row and "video_s3_key" not in row
+    assert row["has_thumbnail"] is True
+    assert "m.total_plays" in pg.calls[1][0] and "m.total_saves" in pg.calls[1][0]
     api_calls = pg.calls.copy()
     client.get("/library", params=query, cookies=_auth_cookie())
     assert pg.calls[len(api_calls) : len(api_calls) + 2] == api_calls[:2]
@@ -285,6 +291,10 @@ def test_admin_forms_require_origin_and_save_as_admin(
         ).status_code
         == 403
     )
+    assert (
+        client.post(url, data=form, cookies=_auth_cookie(), headers={"Origin": "null"}).status_code
+        == 403
+    )
     assert not pg.calls
     response = client.post(
         url,
@@ -306,7 +316,9 @@ def test_admin_forms_require_origin_and_save_as_admin(
 def test_admin_pages_escape_and_count_orphan_pr(setup: tuple[TestClient, Pg]) -> None:
     client, _ = setup
     response = client.get("/library/admin/campaigns", cookies=_auth_cookie())
-    assert "PRあり・案件なし: 1本" in response.text
+    assert "#PR ありで案件の無い動画: 1本" in response.text
+    assert response.text.index("#PR ありで案件の無い動画:") < response.text.index("<section>")
+    assert 'value="organic"' not in response.text
     assert 'value="media" selected' in response.text
     response = client.get("/library/admin/accounts", cookies=_auth_cookie())
     assert "&lt;script&gt;bad" in response.text and "&lt;b&gt;note" in response.text
@@ -334,3 +346,123 @@ def test_copy_excludes_untrusted_url(setup: tuple[TestClient, Pg]) -> None:
     response = client.get("/library", cookies=_auth_cookie())
     assert 'data-url="javascript:' not in response.text
     assert 'data-player="' not in response.text
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/library",
+        "/library/v/tiktok/123",
+        "/library/admin/campaigns",
+        "/library/admin/accounts",
+        "/library/api/videos",
+    ],
+)
+def test_library_referrer_policy_is_same_origin_only(
+    setup: tuple[TestClient, Pg], path: str
+) -> None:
+    client, _ = setup
+    assert client.get(path, cookies=_auth_cookie()).headers["referrer-policy"] == "same-origin"
+    for other in ("/search/login", "/search", "/library-other"):
+        assert client.get(other, cookies=_auth_cookie()).headers["referrer-policy"] == "no-referrer"
+
+
+@pytest.mark.parametrize(
+    "field,value,expected",
+    [
+        ("organic_plays", 17800.0, "17,800"),
+        ("total_likes", 0.0, "0"),
+        *[(field, 0.685, "68.5%") for field in library.RATE_METRICS],
+        ("ad_cost", 1185.0, "¥1,185"),
+        ("ad_average_watch_seconds", 9.05, "9.05秒"),
+        *[(field, None, "算出不可") for field in library.METRIC_COLUMNS],
+    ],
+)
+def test_metric_display_units(field: str, value: float | None, expected: str) -> None:
+    assert library._metric(value, field) == expected
+
+
+def test_detail_uses_formatted_metrics_and_paid_labels(setup: tuple[TestClient, Pg]) -> None:
+    client, pg = setup
+    pg.row.update(
+        ad_rate_2s=0.685,
+        ad_ctr=0.012,
+        ad_cost=1185.0,
+        ad_average_watch_seconds=9.05,
+        ad_likes=1234.0,
+        ad_shares=12.0,
+        ad_comments=3.0,
+        ad_saves=45.0,
+    )
+    response = client.get("/library/v/tiktok/123", cookies=_auth_cookie())
+    for label, value in (
+        ("2秒視聴率", "68.5%"),
+        (library.METRIC_COLUMNS["ad_ctr"], "1.2%"),
+        (library.METRIC_COLUMNS["ad_cost"], "¥1,185"),
+        (library.METRIC_COLUMNS["ad_average_watch_seconds"], "9.05秒"),
+        ("有料いいね", "1,234"),
+        ("有料シェア", "12"),
+        ("有料コメント", "3"),
+        ("有料保存", "45"),
+    ):
+        assert f"<th>{label}</th><td>{value}</td>" in response.text
+    assert "有料のお気に入り" not in response.text
+
+
+@pytest.mark.parametrize("organic", [5535.0, None])
+def test_card_uses_total_plays_and_save_rate(
+    setup: tuple[TestClient, Pg], organic: float | None
+) -> None:
+    client, pg = setup
+    pg.row.update(organic_plays=organic, total_plays=17800.0, total_saves=356.0)
+    response = client.get("/library", cookies=_auth_cookie())
+    expected = "再生 17,800" + ("（オーガニック 5,535）" if organic is not None else "")
+    assert expected + " · 保存率 2.00%" in response.text
+    assert "再生・保存率・ENG率と並び順は総計の最新数値" in response.text
+    if organic is None:
+        assert "（オーガニック " not in response.text
+    assert "17,800.0" not in response.text
+
+
+@pytest.mark.parametrize("present", [False, True])
+def test_missing_thumbnail_has_only_gray_frame(setup: tuple[TestClient, Pg], present: bool) -> None:
+    client, pg = setup
+    pg.row["thumbnail_s3_key"] = "video-library/thumbs/tiktok/123.jpg" if present else None
+    response = client.get("/library", cookies=_auth_cookie())
+    assert ('<img loading="lazy"' in response.text) is present
+    assert 'alt="サムネイル"' not in response.text
+    assert 'class="preview"' in response.text
+    assert 'aria-label="投稿を開く"' in response.text
+    assert ('src="/library/thumb/tiktok/123"' in response.text) is present
+
+
+def test_campaign_rejects_organic_even_if_category_exists(setup: tuple[TestClient, Pg]) -> None:
+    client, pg = setup
+    response = client.post(
+        "/library/admin/campaigns",
+        data={"advertiser": "a", "campaign": "b", "business_category": "organic"},
+        cookies=_auth_cookie(),
+        headers={"Origin": "http://testserver"},
+    )
+    assert response.status_code == 400
+    assert not any("INSERT" in query for query, _ in pg.calls)
+
+
+@pytest.mark.parametrize("count", [0, 389])
+def test_orphan_pr_count_is_visible_without_campaign_rows(
+    setup: tuple[TestClient, Pg], count: int
+) -> None:
+    client, pg = setup
+    original = pg.execute
+
+    def execute(query: str, params: Any = None) -> MagicMock:
+        result = original(query, params)
+        if "FROM vl_campaigns c" in query:
+            result.fetchall.return_value = []
+        if "count(*)" in query:
+            result.fetchone.return_value = {"n": count}
+        return result
+
+    pg.execute = execute  # type: ignore[method-assign]
+    response = client.get("/library/admin/campaigns", cookies=_auth_cookie())
+    assert f"#PR ありで案件の無い動画: {count}本" in response.text

@@ -20,6 +20,10 @@ function element(){return {events:{},children:[],dataset:{},
  remove(){this.parent.children=this.parent.children.filter(child=>child!==this);}};}
 const cards=[element(),element()];
 cards.forEach((card,i)=>card.dataset.player='https://www.tiktok.com/player/v1/'+i+'?autoplay=1&muted=1');
+const imageBox=element(), pendingImage=element(), failedImage=element(), loadedImage=element();
+[pendingImage,failedImage,loadedImage].forEach(img=>imageBox.appendChild(img));
+pendingImage.complete=false;failedImage.complete=true;failedImage.naturalWidth=0;
+loadedImage.complete=true;loadedImage.naturalWidth=480;
 const copyButton=element(), status=element(), doc=element(), win=element();
 const checks=[{checked:true,dataset:{url:'https://www.tiktok.com/@sample/video/1'}},
  {checked:false,dataset:{url:'https://www.tiktok.com/@sample/video/2'}},
@@ -28,6 +32,7 @@ let copied=null;
 global.document=Object.assign(doc,{
  querySelectorAll(selector){
   if(selector==='.preview[data-player]')return cards;
+  if(selector==='.preview img')return [pendingImage,failedImage,loadedImage];
   assert.equal(selector,'input[data-url]:checked');return checks.filter(c=>c.checked);
  },
  createElement(tag){assert.equal(tag,'iframe');return element();},
@@ -37,6 +42,8 @@ global.window=win;
 Object.defineProperty(global,'navigator',{value:{clipboard:{async writeText(text){copied=text;}}}});
 __SCRIPT__
 (async()=>{
+ assert.deepEqual(imageBox.children,[pendingImage,loadedImage]);
+ pendingImage.events.error();assert.deepEqual(imageBox.children,[loadedImage]);
  cards[0].events.mouseenter();assert.equal(cards[0].children.length,1);
  assert.equal(cards[0].children[0].src,cards[0].dataset.player);
  assert.equal(cards[0].children[0].allow,'autoplay; encrypted-media');
