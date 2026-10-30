@@ -73,7 +73,7 @@ def _failed(output: BaseModel) -> bool:
     )
 
 
-def reconnect_message(ctx: SkillContext, *, url: str | None = None) -> str:
+def reconnect_message(ctx: SkillContext) -> str:
     from teamagent.adapters.google_oauth_flow import OAuthConsentFlow, consume_state_once
     from teamagent.hmac_durable_state import HMAC_STATE_SCOPE_ENV, HMAC_STATE_TABLE_ENV
     from teamagent.skills.oauth_connect.skill import (
@@ -104,13 +104,12 @@ def reconnect_message(ctx: SkillContext, *, url: str | None = None) -> str:
         if already_sent:
             return ""
         try:
-            if url is None:
-                url, state = OAuthConsentFlow(
-                    redirect_uri=os.environ.get("OAUTH_REDIRECT_URI", "").strip()
-                ).authorization_url(email)
-                base = _start_link_base()
-                if start_links_enabled() and base:
-                    url = google_start_link(base, state)
+            url, state = OAuthConsentFlow(
+                redirect_uri=os.environ.get("OAUTH_REDIRECT_URI", "").strip()
+            ).authorization_url(email)
+            base = _start_link_base()
+            if start_links_enabled() and base:
+                url = google_start_link(base, state)
         except Exception as exc:
             ctx.bind_logger("google_connection").warning(
                 "google_reconnect_link_failed", error=type(exc).__name__
@@ -168,19 +167,15 @@ def google_connection_guard(
                     output = empty_output(input)
                 pending = ctx.metadata.pop("_google_connection_failed", False)
                 call.failed |= _failed(output) or pending
-                url = getattr(output, "url", None) if self.name == "oauth_connect" else None
-                call.failed |= bool(url)
                 if parent is not None and call.failed:
                     raise GoogleConnectionError("Google connection required")
                 if not call.failed:
                     return output
-                message = reconnect_message(ctx, url=url)
+                message = reconnect_message(ctx)
                 updates: dict[str, Any] = {"error": "reauth_needed", "message": message}
                 for field in ("summary", "answer", "note"):
                     if field in type(output).model_fields:
                         updates[field] = message
-                if self.name == "oauth_connect":
-                    updates.update(url=url if message else None, slack_url=None)
                 return output.model_copy(update=updates)
             finally:
                 _CALL.reset(token)

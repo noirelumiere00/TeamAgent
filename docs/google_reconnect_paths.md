@@ -3,6 +3,8 @@
 `USE_OAUTH_START_LINKS=1` のとき、`skills/_shared/google_connection.py` のガードで
 本人の Google 連携失敗を同じ一行の `message` にする。既存の出力型と成功時の処理は保つ。
 Google の再連携中に Slack の別の連携リンクを重ねて要求しない。
+リンクを発行する `oauth_connect` 自体はガード対象外とし、明示的な連携依頼には
+未連携の Google と Slack の両方のリンクを返す。
 
 | 検知・伝播する場所 | 未連携 | 失効・権限不足 |
 | --- | --- | --- |

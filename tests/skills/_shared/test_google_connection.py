@@ -70,7 +70,7 @@ def setup(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("USE_OAUTH_START_LINKS", "1")
     monkeypatch.setenv("CONNECT_BASE_URL", "https://connect.example.com")
     monkeypatch.setenv("OAUTH_REDIRECT_URI", "https://connect.example.com/oauth2/callback")
-    monkeypatch.setenv("MAIL_ACTION_HMAC_SECRET", "test-google-connection-secret-" + "x" * 32)
+    monkeypatch.setenv("MAIL_ACTION_HMAC_SECRET", "test-key" * 4)
     monkeypatch.delenv("SLACK_OAUTH_REDIRECT_URI", raising=False)
     monkeypatch.setattr(
         "teamagent.adapters.google_oauth_flow.OAuthConsentFlow.authorization_url",
@@ -248,7 +248,9 @@ def test_identity_failure_is_not_reconnect() -> None:
 @pytest.mark.parametrize(
     "kind", ["missing", "saved_scope", "invalid_grant", "invalid_scope", "401"]
 )
-def test_oauth_connect_same_guidance(monkeypatch: pytest.MonkeyPatch, kind: str) -> None:
+def test_oauth_connect_does_not_suppress_requested_link(
+    monkeypatch: pytest.MonkeyPatch, kind: str
+) -> None:
     from teamagent.skills.oauth_connect.schema import OAuthConnectInput
     from teamagent.skills.oauth_connect.skill import OAuthConnectSkill
 
@@ -266,12 +268,15 @@ def test_oauth_connect_same_guidance(monkeypatch: pytest.MonkeyPatch, kind: str)
             headers={},
         )
 
-    output = OAuthConnectSkill(google_store=tokens, google_liveness_request=request).run(
-        OAuthConnectInput(), ctx()
-    )
-    assert output.message == MESSAGE
-    assert output.url == LINK
-    assert output.slack_url is None
+    skill = OAuthConnectSkill(google_store=tokens, google_liveness_request=request)
+    context = ctx()
+    for _ in range(2):
+        output = skill.run(OAuthConnectInput(), context)
+        assert output.url == LINK
+        assert LINK in output.message
+        assert output.slack_url is None
+    assert not connection._NOTICES
+    assert "_google_notice_key" not in context.metadata
 
 
 def test_durable_notice_claim_across_process_cache_resets(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -304,7 +309,7 @@ def test_parallel_tools_only_one_notice() -> None:
 
 def test_link_failure_has_no_diagnostics_or_user_work(monkeypatch: pytest.MonkeyPatch) -> None:
     def broken(*args: Any, **kwargs: Any) -> Any:
-        raise ValueError("secret=private-scope-401")
+        raise ValueError("scope=401; secret=test-token")
 
     monkeypatch.setattr(
         "teamagent.adapters.google_oauth_flow.OAuthConsentFlow.authorization_url", broken

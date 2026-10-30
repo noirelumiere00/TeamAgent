@@ -59,7 +59,6 @@ from pydantic import BaseModel
 from teamagent.adapters.google_oauth_flow import WORKSPACE_SCOPES, OAuthConsentFlow
 from teamagent.adapters.slack_oauth_flow import SLACK_USER_SCOPES, SlackOAuthConsentFlow
 from teamagent.connect_diagnostics import ConnectDiag, format_user_message, mask_email, now_jst
-from teamagent.skills._shared.google_connection import google_connection_guard
 from teamagent.skills.base import BaseSkill, SkillContext, register
 from teamagent.skills.oauth_connect.schema import OAuthConnectInput, OAuthConnectOutput
 
@@ -347,7 +346,6 @@ class OAuthConnectSkill(BaseSkill[OAuthConnectInput, OAuthConnectOutput]):
             log.warning("oauth_connect_conn_check_failed", kind="slack", error=type(e).__name__)
             return False, False, False
 
-    @google_connection_guard(lambda input: OAuthConnectOutput(user_email_masked="", message=""))
     def run(self, _input: OAuthConnectInput, ctx: SkillContext) -> OAuthConnectOutput:
         log = ctx.bind_logger(self.name)
 
