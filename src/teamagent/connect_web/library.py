@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import html
+import json
 import os
 import re
 from collections.abc import Callable, Mapping
@@ -15,6 +16,14 @@ from fastapi.encoders import jsonable_encoder
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 
 from teamagent.adapters.video_library_storage import VideoLibraryStorage
+from teamagent.connect_web.library_analysis import (
+    ANALYSIS_KIND,
+    ANALYSIS_VERSION,
+    TAG_GROUPS,
+    render_analysis,
+)
+from teamagent.connect_web.library_assets import SCRIPT as _SCRIPT
+from teamagent.connect_web.library_assets import STYLE as _STYLE
 from teamagent.ingest.video_library import (
     METRIC_COLUMNS,
     RATE_METRICS,
@@ -100,7 +109,8 @@ def _where(params: Mapping[str, str], admin: bool) -> tuple[str, list[Any], int,
         raise HTTPException(400, "検索語が長すぎます")
     if query:
         clauses.append("""concat_ws(' ', v.caption, array_to_string(v.hashtags, ' '),
-            v.account_name, v.account_handle, v.advertiser, v.campaign) ILIKE %s""")
+            v.account_name, v.account_handle, v.advertiser, v.campaign,
+            v.industry, v.purpose) ILIKE %s""")
         values.append("%" + query + "%")
     category = params.get("category", "")
     if category == "unset":
@@ -127,6 +137,23 @@ def _where(params: Mapping[str, str], admin: bool) -> tuple[str, list[Any], int,
     if params.get("account"):
         clauses.append("(v.account_handle = %s OR v.account_name = %s)")
         values.extend([params["account"], params["account"]])
+    for field in ("advertiser", "campaign", "industry", "purpose"):
+        if params.get(field):
+            if len(params[field]) > 500:
+                raise HTTPException(400, "絞り込みが長すぎます")
+            clauses.append(f"v.{field} = %s")
+            values.append(params[field])
+    if params.get("unassigned") == "yes":
+        clauses.append("(COALESCE(v.advertiser, '')='' OR COALESCE(v.campaign, '')='')")
+    group, tag = params.get("tag_group", ""), params.get("tag", "")
+    if group or tag:
+        if group not in {*TAG_GROUPS, "standards"} or not tag or len(tag) > 200:
+            raise HTTPException(400, "タグ指定が不正です")
+        needle = {"standards": {tag: True}} if group == "standards" else {"tags": {group: [tag]}}
+        clauses.append("""(SELECT a.payload FROM vl_video_analysis a
+            WHERE a.platform=v.platform AND a.video_id=v.video_id
+            AND a.kind=%s AND a.version=%s ORDER BY a.analyzed_at DESC LIMIT 1) @> %s::jsonb""")
+        values.extend([ANALYSIS_KIND, ANALYSIS_VERSION, json.dumps(needle)])
     try:
         page = int(params.get("page", "1"))
         if not 1 <= page <= 1_000_000:
@@ -176,53 +203,25 @@ def search_videos(conn: Any, params: Mapping[str, str], *, admin: bool) -> dict[
     return {"videos": rows, "total": count, "page": page, "page_size": PAGE_SIZE}
 
 
-_STYLE = """
-body{margin:0;background:#0f1420;color:#e8edf7;font-family:system-ui,sans-serif}
-main{max-width:1200px;margin:auto;padding:24px}a{color:#8cb5ff}nav,form{margin-bottom:20px}
-input,select,button,textarea{font:inherit;background:#1a2233;color:inherit;border:1px solid #46536d;
-padding:8px;border-radius:5px;margin:4px}button{cursor:pointer}label{display:inline-block}
-.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(210px,1fr));gap:16px}
-article,section{background:#1a2233;border:1px solid #283450;padding:12px;border-radius:10px}
-.preview{display:block;position:relative;aspect-ratio:9/16;background:#394252}
-.preview img,.preview iframe{position:absolute;inset:0;width:100%;height:100%;
-object-fit:cover;border:0}
-.preview iframe{pointer-events:none}p{overflow-wrap:anywhere}
-table{border-collapse:collapse;width:100%}
-th,td{text-align:left;padding:8px;border-bottom:1px solid #46536d}pre{white-space:pre-wrap}
-"""
-_SCRIPT = """
-document.querySelectorAll('.preview img').forEach(img=>{
- img.addEventListener('error',()=>img.remove());
- if(img.complete&&img.naturalWidth===0)img.remove();
-});
-let active=null;
-function clearPlayer(){if(active){active.remove();active=null;}}
-document.querySelectorAll('.preview[data-player]').forEach(card=>{
- card.addEventListener('mouseenter',()=>{clearPlayer();active=document.createElement('iframe');
- active.src=card.dataset.player;active.title='TikTok プレビュー';
- active.allow='autoplay; encrypted-media';card.appendChild(active);});
- card.addEventListener('mouseleave',clearPlayer);
-});
-window.addEventListener('blur',clearPlayer);
-document.addEventListener('visibilitychange',()=>{if(document.hidden)clearPlayer();});
-const copy=document.getElementById('copy');
-if(copy)copy.addEventListener('click',async()=>{
- const urls=[...document.querySelectorAll('input[data-url]:checked')].map(el=>el.dataset.url);
- try{await navigator.clipboard.writeText(urls.join('\\n'));
- document.getElementById('copy-status').textContent=urls.length+'件コピーしました';}
- catch(e){document.getElementById('copy-status').textContent='コピーできませんでした';}
-});
-"""
-
-
-def _page(title: str, body: str) -> str:
+def _page(title: str, body: str, *, admin: bool = False, current: str = "cases") -> str:
+    links = [("cases", "/library", "事例"), ("videos", "/library/videos", "動画一覧")]
+    if admin:
+        links.append(("admin", "/library/admin/campaigns", "管理"))
+    nav = "".join(
+        f'<a href="{url}"' + (' aria-current="page"' if key == current else "") + f">{label}</a>"
+        for key, url, label in links
+    )
     return (
         '<!doctype html><html lang="ja"><head><meta charset="utf-8">'
         '<meta name="viewport" content="width=device-width,initial-scale=1">'
-        f"<title>{_e(title)}</title><style>{_STYLE}</style></head><body><main>"
-        '<nav><a href="/search">資料検索</a> · <a href="/library">動画ライブラリ</a> · '
-        '<a href="/library/admin/campaigns">案件設定</a> · '
-        '<a href="/library/admin/accounts">アカウント登録</a></nav>'
+        f"<title>{_e(title)} | 動画ライブラリ</title><style>{_STYLE}</style></head><body>"
+        '<header><div class="header-inner"><a class="brand" href="/library">'
+        '<svg width="25" height="25" viewBox="0 0 24 24" fill="none" aria-hidden="true">'
+        '<rect x="2" y="2" width="20" height="20" rx="5" stroke="currentColor" stroke-width="2"/>'
+        '<path d="m10 7 7 5-7 5V7Z" fill="currentColor"/></svg>動画ライブラリ</a>'
+        f'<nav aria-label="メインナビゲーション">{nav}</nav></div></header><main>'
+        f'<p class="eyebrow">VIDEO LIBRARY / '
+        f"{'CASES' if current == 'cases' else 'VIDEOS' if current == 'videos' else 'MANAGE'}</p>"
         f"<h1>{_e(title)}</h1>{body}</main><script>{_SCRIPT}</script></body></html>"
     )
 
@@ -242,95 +241,406 @@ def _select(name: str, options: list[tuple[str, str]], value: str | None = "") -
 
 
 def _listing(data: dict[str, Any], params: Mapping[str, str], categories: list[Any]) -> str:
-    filters = (
-        '<form method="get"><label>検索 <input name="q" value="'
-        + _e(params.get("q", ""))
-        + '"></label>'
-    )
-    filters += _select(
-        "category",
-        [
-            ("", "全区分"),
-            ("unset", "未設定"),
-            *[(r["code"], r["display_name"]) for r in categories],
-        ],
-        params.get("category", ""),
-    )
-    filters += _select(
-        "pr", [("", "PRすべて"), ("yes", "PRあり"), ("no", "PRなし")], params.get("pr", "")
-    )
-    filters += "".join(
-        f'<label>{label} <input type="{kind}" name="{name}" '
-        f'value="{_e(params.get(name, ""))}"></label>'
-        for name, label, kind in (
-            ("from", "開始", "date"),
-            ("to", "終了", "date"),
-            ("account", "アカウント", "text"),
-        )
-    )
-    filters += _select(
-        "sort",
-        [("new", "新しい順"), ("plays", "再生順"), ("saves", "保存率順"), ("eng", "ENG率順")],
-        params.get("sort", "new"),
-    )
+    filters = _filters(params, categories, catalog=False)
     filters += (
-        "<button>絞り込み</button></form>"
-        "<p>再生・保存率・ENG率と並び順は総計の最新数値です。"
+        "<p class=muted>再生・保存率・ENG率と並び順は総計の最新数値です。"
         "オーガニック再生は値がある場合に併記します。</p>"
     )
-    cards = []
-    labels = {r["code"]: r["display_name"] for r in categories}
-    for row in data["videos"]:
-        platform, vid = row["platform"], row["video_id"]
-        path = f"{quote(platform, safe='')}/{quote(vid, safe='')}"
-        url = row["post_url"]
-        player = (
-            f' data-player="https://www.tiktok.com/player/v1/{_e(vid)}?autoplay=1&amp;muted=1&amp;controls=0&amp;loop=1"'
-            if platform == "tiktok" and vid.isdigit() and url
-            else ""
-        )
-        cover = (
-            f'<img loading="lazy" src="/library/thumb/{path}" alt="">'
-            if row["has_thumbnail"]
-            else ""
-        )
-        preview = (
-            f'<a class="preview" href="{_e(url)}" target="_blank" '
-            f'rel="noopener noreferrer" aria-label="投稿を開く"{player}>{cover}</a>'
-            if url
-            else f'<div class="preview">{cover}</div>'
-        )
-        rates = row["rates"]
-        checkbox = f'<label><input type="checkbox" data-url="{_e(url)}">選択</label>' if url else ""
-        account = _e(row.get("account_name") or row.get("account_handle"))
-        plays = _metric(row.get("total_plays"))
-        if row.get("organic_plays") is not None:
-            plays += f"（オーガニック {_metric(row['organic_plays'])}）"
-        category = _e(labels.get(row.get("business_category"), "未設定"))
-        flags = ("PR " if row["is_pr"] else "") + ("非公開" if row["is_private"] else "")
-        cards.append(
-            f"<article>{preview}{checkbox}<p>{account} · {_day(row.get('posted_at'))}</p>"
-            f"<p>再生 {plays} · "
-            f"保存率 {_rate(rates['save_rate'], rates['is_reference'])}</p>"
-            f"<p>{category} {flags}</p>"
-            f'<a href="/library/v/{path}">詳細</a></article>'
-        )
+    cards = [_video_card(row, selectable=True) for row in data["videos"]]
     pagination = []
     for page, label in ((data["page"] - 1, "前へ"), (data["page"] + 1, "次へ")):
         if page >= 1 and (page - 1) * PAGE_SIZE < data["total"]:
             pagination.append(
-                f'<a href="/library?{_e(urlencode({**params, "page": page}))}">{label}</a>'
+                f'<a href="/library/videos?{_e(urlencode({**params, "page": page}))}">{label}</a>'
             )
     return (
         filters
-        + f"<p>{data['total']}件 · {data['page']}ページ</p>"
+        + f"<p>{data['total']:,}件 · {data['page']:,}ページ</p>"
         + '<button id="copy" type="button">選択したURLをコピー</button>'
-        + '<p id="copy-status" role="status"></p><div class="grid">'
+        + '<p id="copy-status" role="status"></p><h2 class="sr-only">検索結果の動画</h2>'
+        + '<div class="grid video-grid">'
         + "".join(cards)
         + "</div><p>"
         + " · ".join(pagination)
         + "</p>"
     )
+
+
+CATEGORY_LABELS = {
+    "media": "メディア",
+    "tto": "TTO",
+    "kirinuki": "切り抜き",
+    "other": "その他",
+    "organic": "オーガニック",
+}
+
+
+def _campaign_url(row: Mapping[str, Any]) -> str:
+    return "/library/c?" + urlencode({key: row[key] for key in ("advertiser", "campaign")})
+
+
+def _badge(code: str | None) -> str:
+    return (
+        f'<a class="badge" data-category="{_e(code)}" '
+        f'href="/library/videos?{_e(urlencode({"category": code or "unset"}))}">'
+        f"{_e(CATEGORY_LABELS.get(code or '', '未設定'))}</a>"
+    )
+
+
+def _row_tags(row: Mapping[str, Any]) -> str:
+    body = (
+        '<div class="tag-groups"><div class="tag-group"><h3>区分</h3>'
+        + _badge(row.get("business_category"))
+        + "</div>"
+    )
+    for field, label in (("industry", "業種"), ("purpose", "目的")):
+        value = row.get(field)
+        tag = (
+            f'<a class="tag" href="/library/videos?{_e(urlencode({field: value}))}">{_e(value)}</a>'
+            if value
+            else '<span class="tag">未設定</span>'
+        )
+        body += f'<div class="tag-group"><h3>{label}</h3>{tag}</div>'
+    return body + "</div>"
+
+
+def _cover(row: Mapping[str, Any]) -> str:
+    account = str(
+        row.get("account_name") or row.get("account_handle") or row.get("advertiser") or "V"
+    )
+    body = (
+        f'<span class="placeholder" '
+        f'data-category="{_e(row.get("business_category"))}"><strong>'
+        f"{_e(account[0].upper())}</strong>"
+        f'<span class="placeholder-account" title="{_e(account)}">{_e(account)}</span>'
+        "<small>サムネ準備中</small></span>"
+    )
+    if row.get("has_thumbnail") or row.get("thumbnail_s3_key"):
+        path = "/".join(quote(str(row[key]), safe="") for key in ("platform", "video_id"))
+        body += (
+            f'<img loading="lazy" src="/library/thumb/{path}" alt="{_e(account)}の動画サムネイル">'
+        )
+    return body
+
+
+def _preview(row: Mapping[str, Any], *, detail: bool = False) -> str:
+    url = post_url(row)
+    vid = str(row["video_id"])
+    player = (
+        f' data-player="https://www.tiktok.com/player/v1/{_e(vid)}?autoplay=1'
+        f'&amp;muted=1&amp;controls={1 if detail else 0}&amp;loop=1"'
+        if row["platform"] == "tiktok" and vid.isdigit() and url
+        else ""
+    )
+    cover = _cover(row)
+    if detail:
+        button = (
+            '<button class="play-overlay" type="button" data-play="detail-player">'
+            '<span class="primary button">動画を再生</span></button>'
+            if player
+            else ""
+        )
+        return (
+            f'<div class="preview detail-player" id="detail-player"{player}>{cover}{button}</div>'
+        )
+    if url:
+        return (
+            f'<a class="preview" href="{_e(url)}" target="_blank" rel="noopener '
+            f'noreferrer" aria-label="投稿を開く"{player}>{cover}</a>'
+        )
+    return f'<div class="preview">{cover}</div>'
+
+
+def _video_card(row: Mapping[str, Any], *, selectable: bool = False) -> str:
+    path = "/".join(quote(str(row[key]), safe="") for key in ("platform", "video_id"))
+    url = post_url(row)
+    checkbox = (
+        f'<label><input type="checkbox" data-url="{_e(url)}">選択</label>'
+        if selectable and url
+        else ""
+    )
+    rates = _rates(row)
+    plays = _metric(row.get("total_plays"))
+    if row.get("organic_plays") is not None:
+        plays += f"（オーガニック {_metric(row['organic_plays'])}）"
+    tags = (
+        '<div class="card-tag"><span class="filter-label">区分</span>'
+        + _badge(row.get("business_category"))
+        + "</div>"
+    )
+    for field, label in (("industry", "業種"), ("purpose", "目的")):
+        if row.get(field):
+            tags += (
+                f'<div class="card-tag"><span class="filter-label">{label}</span>'
+                f'<a class="badge" href="/library/videos?{_e(urlencode({field: row[field]}))}">'
+                f"{_e(row[field])}</a></div>"
+            )
+    account = row.get("account_name") or row.get("account_handle") or ""
+    metadata = []
+    if isinstance(row.get("posted_at"), datetime):
+        metadata.append(_day(row["posted_at"]))
+    if row.get("is_pr"):
+        metadata.append("PR")
+    if row.get("is_private"):
+        metadata.append("非公開")
+    period = f'<p class="period">{" · ".join(metadata)}</p>' if metadata else ""
+    return (
+        f'<article class="card">{_preview(row)}<div class="card-body"><div '
+        f'class="card-tags">{tags}</div>'
+        f'<h3><a class="account-name" title="{_e(account)}" href="/library/v/{path}">'
+        f"{_e(account)}</a>"
+        f"</h3>"
+        f'<p class="card-stats">再生 {plays} · 保存率 '
+        f"{_rate(rates['save_rate'], rates['is_reference'])}</p>"
+        f"{period}"
+        f'<div class="actions"><a href="/library/v/{path}">詳細を見る</a>'
+        f"{checkbox}</div></div></article>"
+    )
+
+
+def _filters(
+    params: Mapping[str, str],
+    categories: list[Any],
+    *,
+    catalog: bool,
+    cases: list[Any] | None = None,
+) -> str:
+    base = "/library" if catalog else "/library/videos"
+    body = (
+        f'<form method="get" action="{base}" class="filters"><div '
+        f'class="search-row"><label><span class="sr-only">事例・動画を検索</span>'
+        f'<input type="search" name="q" value="{_e(params.get("q", ""))}" '
+        f'placeholder="案件名・業種・目的・キーワードで探す"></label><button class="primary">'
+        f"検索</button></div>"
+    )
+    for key in (
+        "all",
+        "category",
+        "pr",
+        "advertiser",
+        "campaign",
+        "unassigned",
+        "tag_group",
+        "tag",
+    ):
+        if params.get(key):
+            body += f'<input type="hidden" name="{key}" value="{_e(params[key])}">'
+    for field, options in (
+        (
+            "category",
+            [
+                ("", "すべて"),
+                *[(r["code"], r["display_name"]) for r in categories],
+                ("unset", "未設定"),
+            ],
+        ),
+        ("pr", [("", "PRすべて"), ("yes", "PRあり"), ("no", "PRなし")]),
+    ):
+        if field == "pr":
+            body += '<details class="advanced-filters"><summary>詳しく絞り込む</summary><div>'
+        body += (
+            '<div class="chips" role="group" aria-label="'
+            + ("区分" if field == "category" else "PRの有無")
+            + '"><span class="filter-label">'
+            + ("区分" if field == "category" else "PR")
+            + "</span>"
+        )
+        for value, label in options:
+            href = base + "?" + urlencode({**params, field: value, "page": 1})
+            selected = ' aria-current="true"' if params.get(field, "") == value else ""
+            body += f'<a class="chip" href="{_e(href)}"{selected}>{_e(label)}</a>'
+        body += "</div>"
+    body += '<div class="filter-row">'
+    for field, label in (("industry", "業種"), ("purpose", "目的")):
+        choices = sorted({str(row[field]) for row in cases or [] if row.get(field)})
+        if catalog and choices:
+            body += (
+                f'<div class="chips" role="group" aria-label="{label}"><span '
+                f'class="filter-label">{label}</span>'
+            )
+            for value in choices:
+                href = base + "?" + urlencode({**params, field: value, "page": 1})
+                selected = ' aria-current="true"' if params.get(field) == value else ""
+                body += f'<a class="chip" href="{_e(href)}"{selected}>{_e(value)}</a>'
+            body += "</div>"
+        body += (
+            f'<label>{label}<input name="{field}" '
+            f'value="{_e(params.get(field, ""))}" placeholder="{label}名で絞り込み">'
+            f"</label>"
+            if not catalog or not choices
+            else f'<input type="hidden" name="{field}" value="{_e(params.get(field, ""))}">'
+        )
+    if not catalog:
+        for field, label, kind in (
+            ("from", "開始", "date"),
+            ("to", "終了", "date"),
+            ("account", "アカウント", "text"),
+        ):
+            body += (
+                f'<label>{label}<input type="{kind}" name="{field}" '
+                f'value="{_e(params.get(field, ""))}"></label>'
+            )
+    sorts = (
+        [("plays", "合計再生の多い順"), ("new", "新着順"), ("count", "本数の多い順")]
+        if catalog
+        else [("new", "新しい順"), ("plays", "再生順"), ("saves", "保存率順"), ("eng", "ENG率順")]
+    )
+    body += _select("sort", sorts, params.get("sort", "plays" if catalog else "new"))
+    body += '<button type="submit">適用</button>'
+    body += (
+        f'<a href="{base}">条件をクリア</a></div><div class="filter-row"><button '
+        f'type="button" disabled>構成・フックで探す（近日公開）</button>'
+    )
+    if params.get("tag"):
+        body += (
+            f'<span class="badge">'
+            f"{_e(TAG_GROUPS.get(params.get('tag_group', ''), '制作基準'))}: "
+            f"{_e(params['tag'])}</span>"
+        )
+    if params.get("industry") or params.get("purpose"):
+        body += (
+            f'<span class="badge">{_e(params.get("industry", ""))} '
+            f"{_e(params.get('purpose', ''))}</span>"
+        )
+    return body + "</div></div></details></form>"
+
+
+def search_campaigns(conn: Any, params: Mapping[str, str], *, admin: bool) -> list[Any]:
+    """One GROUP BY over latest snapshots; unknown totals stay unknown."""
+    orders = {"plays": "total_plays", "new": "last_posted", "count": "video_count"}
+    sort = params.get("sort", "plays")
+    if sort not in orders:
+        raise HTTPException(400, "並び順が不正です")
+    where, values, _, _ = _where({**params, "sort": "plays"}, admin)
+    totals = ", ".join(
+        f"CASE WHEN count(m.total_{field})=count(*) THEN sum(m.total_{field}) END AS total_{field}"
+        for field in ("plays", "saves", "likes", "comments", "shares")
+    )
+    # All interpolated fragments are fixed SQL/allowlisted orders; values remain parameters.
+    sql = f"""SELECT v.advertiser, v.campaign, count(*) AS video_count,
+        min(v.posted_at) AS first_posted, max(v.posted_at) AS last_posted,
+        array_agg(DISTINCT v.business_category) AS categories,
+        max(v.industry) AS industry, max(v.purpose) AS purpose, {totals},
+        avg(CASE WHEN m.total_plays > 0
+            THEN m.total_saves / m.total_plays END) AS average_save_rate,
+        (array_agg(jsonb_build_object('platform',v.platform,'video_id',v.video_id,
+            'account_name',v.account_name,'account_handle',v.account_handle,
+            'business_category',v.business_category,
+            'has_thumbnail',NULLIF(v.thumbnail_s3_key,'') IS NOT NULL)
+            ORDER BY (NULLIF(v.thumbnail_s3_key,'') IS NOT NULL) DESC,
+            m.total_plays DESC NULLS LAST, v.platform, v.video_id))[1] AS representative
+        FROM vl_videos_effective v {_METRICS_JOIN} WHERE {where}
+        AND COALESCE(v.advertiser,'')<>'' AND COALESCE(v.campaign,'')<>''
+        GROUP BY v.advertiser, v.campaign
+        ORDER BY {orders[sort]} DESC NULLS LAST, v.advertiser, v.campaign"""  # nosec B608
+    return list(conn.execute(sql, values).fetchall())
+
+
+def diversify(rows: list[Any], limit: int = 12) -> list[Any]:
+    """Keep ranking order where possible; omit repeats if no distinct neighbour exists."""
+    remaining = list(rows)
+    result: list[Any] = []
+    while remaining and len(result) < limit:
+
+        def compatible(row: Mapping[str, Any]) -> bool:
+            if not result:
+                return True
+            previous = result[-1]
+            same_campaign = bool(row.get("advertiser") and row.get("campaign")) and (
+                row.get("advertiser"),
+                row.get("campaign"),
+            ) == (previous.get("advertiser"), previous.get("campaign"))
+            account = row.get("account_handle") or row.get("account_name")
+            same_account = bool(account) and (row["platform"], account) == (
+                previous["platform"],
+                previous.get("account_handle") or previous.get("account_name"),
+            )
+            return not same_campaign and not same_account
+
+        index = next((i for i, row in enumerate(remaining) if compatible(row)), None)
+        if index is None:
+            break
+        result.append(remaining.pop(index))
+    return result
+
+
+def featured_videos(conn: Any, params: Mapping[str, str], *, admin: bool) -> list[Any]:
+    where, values, _, _ = _where({**params, "sort": "plays"}, admin)
+    # Rank each campaign/account before the bound, so a posting burst cannot fill the pool.
+    sql = f"""WITH ranked AS (
+        SELECT v.*, {_METRIC_SELECT},
+        row_number() OVER (PARTITION BY COALESCE(NULLIF(v.advertiser,''),v.platform),
+            COALESCE(NULLIF(v.campaign,''),v.video_id)
+            ORDER BY m.total_plays DESC NULLS LAST, v.video_id) AS campaign_rank,
+        row_number() OVER (PARTITION BY v.platform,
+            COALESCE(v.account_handle,v.account_name,v.video_id)
+            ORDER BY m.total_plays DESC NULLS LAST, v.video_id) AS account_rank
+        FROM vl_videos_effective v {_METRICS_JOIN} WHERE {where})
+        SELECT * FROM ranked ORDER BY greatest(campaign_rank,account_rank),
+        total_plays DESC NULLS LAST, platform, video_id LIMIT 240"""  # nosec B608
+    rows = list(conn.execute(sql, values).fetchall())
+    rows.sort(
+        key=lambda row: (row.get("total_plays") is not None, row.get("total_plays") or 0),
+        reverse=True,
+    )
+    return diversify(rows)
+
+
+def _campaign_card(row: Mapping[str, Any]) -> str:
+    url = _e(_campaign_url(row))
+    tags = "".join(_badge(code) for code in row["categories"])
+    return (
+        f'<article class="card"><a class="preview" href="{url}" '
+        f'aria-label="{_e(row["campaign"])}の事例を見る">'
+        + _cover(row["representative"])
+        + f'<span class="cover-note">{row["video_count"]:,}本の動画</span></a>'
+        '<div class="card-body">'
+        + f'<div class="chips">{tags}</div><p class="muted">{_e(row["advertiser"])}</p>'
+        + f'<h3><a href="{url}">{_e(row["campaign"])}</a></h3>'
+        + f'<p class="card-stats">合計再生 <strong>{_metric(row["total_plays"])}</strong><br>'
+        f"平均保存率 {_rate(row['average_save_rate'], False)}</p>"
+        + f'<p class="period">{_day(row["first_posted"])} — {_day(row["last_posted"])}</p>'
+        "</div></article>"
+    )
+
+
+def _campaign_stats(row: Mapping[str, Any]) -> str:
+    rates = _rates(row)
+    items = [
+        ("合計再生", _metric(row["total_plays"])),
+        ("合計保存", _metric(row["total_saves"])),
+        ("保存率", _rate(rates["save_rate"], rates["is_reference"])),
+        ("ENG率", _rate(rates["engagement_rate"], rates["is_reference"])),
+    ]
+    return (
+        '<dl class="stats">'
+        + "".join(f"<div><dt>{label}</dt><dd>{value}</dd></div>" for label, value in items)
+        + "</dl>"
+    )
+
+
+def campaign_copy_text(row: Mapping[str, Any], videos: list[Any]) -> str:
+    rates = _rates(row)
+    lines = [
+        f"事例: {row['advertiser']} / {row['campaign']}",
+        f"期間: {_day(row['first_posted'])} 〜 {_day(row['last_posted'])}",
+        f"動画: {row['video_count']:,}本",
+        f"合計再生: {_metric(row['total_plays'])}",
+        f"合計保存: {_metric(row['total_saves'])}",
+        f"合計いいね: {_metric(row.get('total_likes'))}",
+        f"合計コメント: {_metric(row.get('total_comments'))}",
+        f"合計シェア: {_metric(row.get('total_shares'))}",
+        f"保存率: {_rate(rates['save_rate'], rates['is_reference'])}",
+        f"ENG率: {_rate(rates['engagement_rate'], rates['is_reference'])}",
+        "数値は各動画の最新の総計。保存率=合計保存÷合計再生。ENG率=(いいね+保存+コメント+シェア)÷合計再生。欠損を含む合計は算出不可。",
+        "",
+        "動画一覧:",
+    ]
+    for video in videos:
+        url = post_url(video)
+        if url:
+            lines.append(f"{url} | 再生 {_metric(video.get('total_plays'))}")
+    return "\n".join(lines)
 
 
 def parse_handle(raw: str) -> str:
@@ -399,8 +709,8 @@ def register_library_routes(
             raise HTTPException(403)
         return email
 
-    def page(title: str, body: str) -> HTMLResponse:
-        response = render(_page(title, body))
+    def page(title: str, body: str, email: str, current: str = "cases") -> HTMLResponse:
+        response = render(_page(title, body, admin=is_admin(email), current=current))
         response.headers["Content-Security-Policy"] = response.headers[
             "Content-Security-Policy"
         ].replace(
@@ -410,13 +720,142 @@ def register_library_routes(
         return response
 
     @router.get("")
+    def catalog(request: Request, email: str = Depends(identity)) -> HTMLResponse:
+        with connection(email) as conn:
+            cases = search_campaigns(conn, request.query_params, admin=is_admin(email))
+            videos = featured_videos(conn, request.query_params, admin=is_admin(email))
+            categories = conn.execute(
+                "SELECT * FROM vl_business_categories ORDER BY sort_order"
+            ).fetchall()
+        body = (
+            '<p class="intro muted">提案に合う事例を、ここから。'
+            "業種や目的で探して、動画と成果をまとめて持ち出せます。</p>"
+        )
+        body += _filters(request.query_params, categories, catalog=True, cases=cases)
+        body += (
+            f'<div class="section-heading"><h2>事例</h2><p class="muted">'
+            f"{len(cases):,}件の事例</p></div>"
+        )
+        body += (
+            '<p class="muted">平均保存率は、再生が1以上で保存数がある動画の'
+            "保存率の単純平均です。</p>"
+        )
+        show_all = request.query_params.get("all") == "1" or any(
+            request.query_params.get(key, "").strip()
+            for key in (
+                "q",
+                "category",
+                "pr",
+                "industry",
+                "purpose",
+                "advertiser",
+                "campaign",
+                "account",
+                "from",
+                "to",
+                "unassigned",
+                "tag_group",
+                "tag",
+            )
+        )
+        visible_cases = cases if show_all else cases[:12]
+        body += (
+            '<div class="grid campaign-grid">'
+            + "".join(_campaign_card(row) for row in visible_cases)
+            + "</div>"
+            if cases
+            else '<p class="empty">条件に合う事例がありません。'
+            "検索語や絞り込み条件を変えてみてください。</p>"
+        )
+        if len(visible_cases) < len(cases):
+            all_url = "/library?" + urlencode({**request.query_params, "all": "1"})
+            body += (
+                f'<p class="catalog-more"><a class="button" href="{_e(all_url)}">'
+                f"すべての事例を見る（{len(cases):,}件）</a></p>"
+            )
+        body += (
+            '<div class="section-heading"><h2>よく伸びた動画</h2><a '
+            'href="/library/videos?sort=plays">動画一覧で見る</a></div><p '
+            'class="muted">再生上位から、案件とアカウントが続かないようにピックアップ。</p>'
+        )
+        body += (
+            '<div class="grid video-grid">' + "".join(_video_card(row) for row in videos) + "</div>"
+            if videos
+            else '<p class="empty">条件に合う動画がありません。</p>'
+        )
+        organic_url = "/library/videos?" + urlencode(
+            {
+                **request.query_params,
+                "category": "organic",
+                "unassigned": "yes",
+                "sort": "plays",
+                "page": 1,
+            }
+        )
+        body += (
+            f'<div class="section-heading"><h2>オーガニック投稿</h2></div><p '
+            f'class="muted">案件に紐づかない投稿も、アカウントやキーワードで探せます。</p>'
+            f'<a class="button" '
+            f'href="{_e(organic_url)}">オーガニック投稿を見る</a>'
+        )
+        return page("提案につながる、動画の事例。", body, email)
+
+    @router.get("/c")
+    def campaign_detail(request: Request, email: str = Depends(identity)) -> HTMLResponse:
+        params = {key: request.query_params.get(key, "") for key in ("advertiser", "campaign")}
+        if not all(params.values()):
+            raise HTTPException(400, "広告主と案件を指定してください")
+        with connection(email) as conn:
+            cases = search_campaigns(conn, params, admin=is_admin(email))
+            if not cases:
+                raise HTTPException(404)
+            where, values, _, _ = _where(params, is_admin(email))
+            # An entire case is needed for both the video grid and one-click copy.
+            sql = f"SELECT v.*, {_METRIC_SELECT} FROM vl_videos_effective v {_METRICS_JOIN} WHERE {where} ORDER BY m.total_plays DESC NULLS LAST, v.platform, v.video_id"  # noqa: E501  # nosec B608
+            videos = list(conn.execute(sql, values).fetchall())
+        case = cases[0]
+        body = (
+            f'<p><a href="/library">事例一覧</a> / {_e(case["advertiser"])}</p><div class="chips">'
+            + "".join(_badge(code) for code in case["categories"])
+            + "</div>"
+        )
+        body += (
+            f'<p class="muted">{_day(case["first_posted"])} — '
+            f"{_day(case['last_posted'])} · {case['video_count']:,}本</p>"
+        )
+        for field, label in (("industry", "業種"), ("purpose", "目的")):
+            if case.get(field):
+                body += f"<p>{label}: {_e(case[field])}</p>"
+        body += _campaign_stats(case)
+        body += (
+            '<p class="muted">'
+            "各動画の最新の総計。保存率＝合計保存÷合計再生、ENG率＝（いいね＋保存＋コメント＋シェア）÷合計再生。欠損を含む合計は算出不可。</p>"
+        )
+        body += (
+            '<div class="actions"><button type="button" class="cta" '
+            'data-copy="campaign-copy">この事例をコピー</button><button type="button" '
+            'data-copy="campaign-urls">URLだけコピー</button></div><p '
+            'id="copy-status" role="status"></p>'
+        )
+        body += f'<pre id="campaign-copy" hidden>{_e(campaign_copy_text(case, videos))}</pre>'
+        urls = "\n".join(url for row in videos if (url := post_url(row)))
+        body += (
+            f'<pre id="campaign-urls" hidden>{_e(urls)}</pre><div '
+            f'class="section-heading"><h2>この事例の動画</h2><p>再生の多い順</p></div>'
+        )
+        body += (
+            '<div class="grid video-grid">' + "".join(_video_card(row) for row in videos) + "</div>"
+        )
+        return page(str(case["campaign"]), body, email)
+
+    @router.get("/videos")
     def listing(request: Request, email: str = Depends(identity)) -> Response:
         with connection(email) as conn:
             data = search_videos(conn, request.query_params, admin=is_admin(email))
             categories = conn.execute(
                 "SELECT * FROM vl_business_categories ORDER BY sort_order"
             ).fetchall()
-        return page("動画ライブラリ", _listing(data, request.query_params, categories))
+        return page("動画一覧", _listing(data, request.query_params, categories), email, "videos")
 
     @router.get("/api/videos")
     def api(request: Request, email: str = Depends(identity)) -> JSONResponse:
@@ -445,48 +884,75 @@ def register_library_routes(
                 "WHERE platform=%s AND video_id=%s ORDER BY analyzed_at DESC",
                 (platform, video_id),
             ).fetchall()
-        body = (
-            f"<p>{_e(row.get('account_name'))} · {_day(row.get('posted_at'))}</p>"
-            f"<pre>{_e(row.get('caption'))}</pre><p>広告主 {_e(row.get('advertiser'))} · "
-            f"案件 {_e(row.get('campaign'))} · "
-            f"区分 {_e(row.get('business_category') or '未設定')}</p>"
-        )
+        body = '<div class="detail-layout"><div>' + _preview(row, detail=True)
         url = post_url(row)
         if url:
             body += (
-                f'<p><a href="{_e(url)}" target="_blank" '
-                'rel="noopener noreferrer">投稿を開く</a></p>'
+                f'<p><a href="{_e(url)}" target="_blank" rel="noopener noreferrer">'
+                f"TikTokで開く</a></p>"
             )
-        body += f"<p>数値取得日: {_e(row.get('captured_on') or '不明')}</p>"
+        account = row.get("account_name") or row.get("account_handle") or ""
+        body += (
+            f'<div class="detail-meta"><h2 class="account-name" title="{_e(account)}">'
+            f"{_e(account)}</h2>"
+        )
+        if isinstance(row.get("posted_at"), datetime):
+            body += f'<p class="posted-date muted">{_day(row["posted_at"])}</p>'
+        body += _row_tags(row)
+        if str(row.get("caption") or "").strip():
+            body += "<h3>投稿文</h3><pre>" + _e(row["caption"]) + "</pre>"
+        if row.get("advertiser") and row.get("campaign"):
+            body += (
+                f'<p><a href="{_e(_campaign_url(row))}">{_e(row["advertiser"])} / '
+                f"{_e(row['campaign'])} の事例を見る</a></p>"
+            )
+        body += (
+            '</div></div><div><p class="muted">数値取得日: '
+            + _e(row.get("captured_on") or "不明")
+            + '</p><div class="metric-groups">'
+        )
         for family, label in (("organic", "オーガニック"), ("total", "総計"), ("ad", "広告")):
-            body += f"<h2>{label}</h2><table>"
+            if family == "ad":
+                body += (
+                    '<details class="metric-group paid"><summary><h2>広告</h2><span>'
+                    f"コスト {_metric(row.get('ad_cost'), 'ad_cost')} · "
+                    f"再生 {_metric(row.get('ad_views'))} · "
+                    f"CTR {_metric(row.get('ad_ctr'), 'ad_ctr')}"
+                    "</span>詳細指標を開く</summary><table>"
+                )
+            else:
+                body += f'<section class="metric-group"><h2>{label}</h2><table>'
             for column in METRIC_COLUMNS:
                 if column.startswith(family + "_"):
-                    value = row.get(column)
                     metric_label = {
                         "ad_likes": "有料いいね",
                         "ad_shares": "有料シェア",
                         "ad_comments": "有料コメント",
                         "ad_saves": "有料保存",
                     }.get(column, METRIC_COLUMNS[column])
-                    body += f"<tr><th>{_e(metric_label)}</th><td>{_metric(value, column)}</td></tr>"
+                    body += (
+                        f"<tr><th>{_e(metric_label)}</th><td>"
+                        f"{_metric(row.get(column), column)}</td></tr>"
+                    )
             body += "</table>"
             if family != "ad":
                 rates = _rates(row, family)
                 body += (
-                    f"<p>保存率 {_rate(rates['save_rate'], rates['is_reference'])} · "
-                    f"ENG率 {_rate(rates['engagement_rate'], rates['is_reference'])}</p>"
+                    f"<p>保存率 {_rate(rates['save_rate'], rates['is_reference'])} · ENG率 "
+                    f"{_rate(rates['engagement_rate'], rates['is_reference'])}</p>"
                 )
-        body += (
-            "<section><h2>構成</h2>"
-            + (
-                "".join(f"<pre>{_e(a['payload'])}</pre>" for a in analyses)
-                if analyses
-                else "<p>近日公開</p>"
-            )
-            + "</section>"
+            body += "</details>" if family == "ad" else "</section>"
+        body += "</div></div></div>"
+        payload = next(
+            (
+                a["payload"]
+                for a in analyses
+                if a["kind"] == ANALYSIS_KIND and a["version"] == ANALYSIS_VERSION
+            ),
+            None,
         )
-        return page("動画詳細", body)
+        body += render_analysis(payload)
+        return page("動画詳細", body, email, "videos")
 
     @router.get("/thumb/{platform}/{video_id}")
     def thumbnail(
@@ -563,7 +1029,12 @@ def register_library_routes(
                 + (" checked" if row["is_private"] else "")
                 + ">非公開</label><button>保存</button></form></section>"
             )
-        return page("案件設定", body)
+        return page(
+            "案件設定",
+            '<p><a href="/library/admin/accounts">アカウント登録へ</a></p>' + body,
+            email,
+            "admin",
+        )
 
     async def form_data(request: Request) -> dict[str, str]:
         # Same exact-origin check as /admin/analyze, also for URL-encoded admin forms.
@@ -643,11 +1114,11 @@ def register_library_routes(
                 "SELECT * FROM vl_account_settings ORDER BY platform, handle"
             ).fetchall()
         body = (
-            '<p>登録のみ。自動取得は近日公開です。</p><form method="post">'
+            '<p>登録のみ。自動取得は近日公開です。</p><form method="post" class="account-form">'
             '<label>TikTok URL / ハンドル<input name="handle" required maxlength="300"></label>'
             '<label>表示名<input name="display_name" maxlength="100"></label>'
             '<label>メモ<input name="note" maxlength="1000"></label><button>登録</button></form>'
-            "<table><tr><th>アカウント</th><th>表示名</th><th>メモ</th></tr>"
+            '<table class="account-table"><tr><th>アカウント</th><th>表示名</th><th>メモ</th></tr>'
         )
         body += (
             "".join(
@@ -657,7 +1128,12 @@ def register_library_routes(
             )
             + "</table>"
         )
-        return page("アカウント登録", body)
+        return page(
+            "アカウント登録",
+            '<p><a href="/library/admin/campaigns">案件設定へ</a></p>' + body,
+            email,
+            "admin",
+        )
 
     @router.post("/admin/accounts")
     async def save_account(

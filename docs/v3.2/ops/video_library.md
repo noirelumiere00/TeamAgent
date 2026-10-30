@@ -152,3 +152,81 @@
 | Origin: nullを許す | `test_admin_forms_require_origin_and_save_as_admin` |
 
 完全な検証出力は `/tmp/video-library-review-pytest.log`、`/tmp/video-library-review-restored.log`、`/tmp/video-library-review-mypy.log`、`/tmp/video-library-review-imports.log`。破壊確認の結果は `/tmp/video-library-review-mutations.json`、各失敗全文は `/tmp/video-library-review-mutation-*.log`。push・PR作成はしていない。
+
+## 事例カタログ UI（2026-10）
+
+上記の旧一覧・灰色の仮表示を更新し、入口を事例カタログに変更した。API `/library/api/videos` の返却形式は維持する。
+
+| ページ | URL | 主な操作 |
+| --- | --- | --- |
+| 事例カタログ | `/library` | 検索、区分・PR・業種・目的、合計再生／新着／本数順、ばらした再生上位動画 |
+| 事例詳細 | `/library/c?advertiser=…&campaign=…` | 全動画、成果、事例まとめ／URLだけコピー |
+| 動画一覧 | `/library/videos` | 絞り込み、再生／保存率順、選択URLコピー |
+| 動画詳細 | `/library/v/{platform}/{video_id}` | クリック再生、数値、投稿文、事例リンク、構成とタグ |
+| 案件管理 | `/library/admin/campaigns` | 既存の設定・権限・Origin検証を維持 |
+| アカウント管理 | `/library/admin/accounts` | 既存の登録と権限を維持 |
+
+集計は `vl_videos_effective` と各動画の最新 `vl_metrics` を GROUP BY する1クエリ。代表画像はサムネありを優先し、その中で最大再生を選ぶ。合計に必要な値が欠損した場合は「算出不可」。カタログの平均保存率は有効な各動画の保存率の単純平均、事例詳細の保存率は合計保存÷合計再生。上位動画は案件・アカウント別順位で候補を確保してから再生順にばらす。異なる隣接動画を確保できない場合は12本未満になる。
+
+構成の読み出し契約は `vl_video_analysis.kind='structure'`、`version='v1'`、最新 `analyzed_at`。payload は次の形を `library_analysis.AnalysisPayload` で検証する。
+
+```json
+{
+  "segments": [
+    {"start": 0.0, "end": 1.8, "role": "hook", "telop": "知ってた？", "speech": "…", "visual": "商品を見せる"}
+  ],
+  "tags": {"hook_type": ["question"], "presentation": ["demo"], "topic": ["problem"], "format": ["interview"], "pain": ["準備に時間がかかる"], "cta": ["save"]},
+  "standards": {"cuts_first_3s": true, "loop": true, "telop_safe": true}
+}
+```
+
+区間は昇順・重複なし・有限の秒数で、終了が開始より後。表示名・説明は `TAG_DESCRIPTIONS` に集約。区間の幅は秒数に比例し、クリックまたはフォーカスでテロップ・発話・映像を開く。分析タグは分類別に表示し、対応する動画一覧へリンクする。分析なし・不正payloadでは明確に「見本」「近日公開」を表示し、見本のタグリンクは無効。見本は表示専用で本番DBには保存しない。区分・業種・目的のタグも動画一覧へリンクする。
+
+変更ファイルは `library.py`、新規 `library_assets.py`／`library_analysis.py`、`test_library.py`／`test_library_js.py`、新規 `test_library_catalog.py`／`test_library_catalog_postgres.py` と本書。app.py、migration、認証方式は変更していない。
+
+検証はメモリ消費を抑えて library 関連4ファイルに限定し、118 passed / 3 skipped。主要な追加テスト:
+
+- `test_catalog_case_links_copy_and_all_videos`
+- `test_catalog_navigation_and_security`
+- `test_catalog_industry_chips_and_card_tag_labels`
+- `test_diversify_never_repeats_campaign_or_account_and_does_not_mutate`
+- `test_analysis_contract_grouped_tags_timeline_and_escaping`
+- `test_analysis_invalid_or_absent_shows_disabled_example`
+- `test_tag_search_is_parameterized_and_latest_version_only`
+- `test_detail_has_clickable_player_and_only_supported_analysis`
+- `test_campaign_group_by_latest_totals_average_and_representative`（実DB・未実施）
+- `test_campaign_filters_privacy_and_sort`（実DB・未実施）
+- `test_analysis_tag_filter_executes_on_latest_supported_payload`（実DB・未実施）
+
+mypy strict、CI固定版ruff 0.15.15のcheck／format、import-linterの2契約も検証。ローカルvenvに不足する依存を補うため、mypyは既存の依存導入済みPythonを `--python-executable /tmp/ci-fast-repro-venv/bin/python` で参照した。ログは `/tmp/library-v2-final-pytest.log`、`/tmp/library-v2-mypy-final.log`、`/tmp/library-v2-ruff-final.log`、`/tmp/library-v2-format-final.log`、`/tmp/library-v2-import-linter.log`。
+
+次の9箇所を一時的に壊し、対象テストが失敗することを確認して復元した: 案件／アカウントのばらし、コピー文の再生数、サムネ準備中の表示、HTMLエスケープ、iframeの先行破棄、選択済みURLだけのコピー、見本タグの無効化、タイムラインの秒数比、非公開除外。結果は `/tmp/library-v2-mutations.json`、失敗全文は `/tmp/library-v2-mutation-*.log`。
+
+スクリーンショットは fake DB で実ルートのレスポンスを生成し、ローカルHTMLをChromeで表示。画像は撮影専用の見本。`/tmp/library-v2-screenshots/` に `catalog`／`case`／`videos`／`detail`／`analysis`／`admin`／`accounts` のそれぞれ `-1440.png` と `-375.png` を保存した（CSS幅、DPR 2）。画面を目視し、広告指標の詰まり、CTAタグの配色、縦型サムネの比率、アカウント登録の入力欄配置を修正した。分析見本は区間をクリックして内容が開くことも確認。撮影用ブラウザウインドウは終了後に閉じた。
+
+未実施: 実DB3テストは `TEAMAGENT_TEST_DB_DSN` 未設定でスキップ。使い捨てPostgreSQLの起動もサンドボックスの共有メモリ制限で失敗（`/tmp/library-v2-initdb.log`）。実TikTok再生・本番S3との疎通、本番データ・デプロイは未検証。768／1024pxはCSS分岐の確認のみで実画面撮影は未実施。push・PRは実施していない。
+
+## 55事例・大量投稿のレビュー修正（2026-10-30）
+
+既定の `/library` は事例12件と「すべての事例を見る（件数）」を表示する。`/library?all=1`、検索・絞り込み時は該当事例を全件表示。並び替えだけの場合は12件を維持する。事例サムネは4:5、動画サムネは9:16。375pxでも事例は2列に収める。
+
+サムネ無しは控えめな頭文字とアカウント名を表示し、動画詳細では上部に配置して中央の再生ボタンと重ねない。アカウント名は1行省略と全文のtitle属性、投稿日欠損は非表示、空の投稿文は見出しごと省略する。768px未満では検索と区分だけを常時表示し、その他の条件を「詳しく絞り込む」にまとめる。デスクトップでは条件を展開する。
+
+変更ファイル: `src/teamagent/connect_web/library.py`、`src/teamagent/connect_web/library_assets.py`、`tests/connect_web/test_library_catalog_review.py`、`tests/connect_web/test_library_js.py`、本書。ページURLは前節のまま、全件表示の `/library?all=1` のみ追加。
+
+`LargeCatalogPg` は55事例・2,800動画、サムネ無し2,040本（約73%）、長いアカウント名、日付・投稿文欠損を再現する。関係するpytest 5ファイルは **126 passed / 3 skipped**。mypy strictは524ファイル、CI版ruff 0.15.15 check／formatは成功、import-linterは2契約とも成功。テストからログ設定は変更していない。
+
+| 修正 | 回帰テスト | 一時的に壊して失敗を確認した箇所 |
+| --- | --- | --- |
+| 既定12件・全件表示 | `test_catalog_limits_default_but_all_and_filters_show_every_match` | 12件の制限を除去 |
+| 事例の4:5比率 | `test_case_cover_is_compact_but_video_stays_portrait` | 事例を9:16へ戻す |
+| 控えめな仮表示・再生ボタンとの分離 | `test_placeholder_is_quiet_and_clear_of_detail_play_button` | 頭文字を64pxに戻す／詳細の仮表示を中央へ戻す（2件） |
+| アカウント名の省略・title | `test_account_names_are_single_line_with_escaped_full_title` | 折り返しを有効化 |
+| 空の日付・投稿文を非表示 | `test_absent_date_and_caption_do_not_render_empty_metadata` | 日付／投稿文の条件を常時表示へ変更（2件） |
+| モバイルの条件開閉 | `test_mobile_filters_keep_search_category_outside_disclosure` / `test_single_player_disposal_and_checked_urls_clipboard` | 幅に関係なく条件を開く |
+
+8件すべて失敗検出後に復元。結果は `/tmp/library-review-mutations.json`、失敗全文は `/tmp/library-review-mutation-*.log`。最終検証ログは `/tmp/library-review-pytest-final.log`、`/tmp/library-review-mypy.log`、`/tmp/library-review-ruff-check-final.log`、`/tmp/library-review-ruff-format.log`、`/tmp/library-review-imports.log`。
+
+今回のスクリーンショットは未取得。実ルートをfake DBで生成した `/tmp/library-review-preview/{catalog,all,case,videos,detail}.html` で撮影を準備したが、Chromeの共有操作が別作業の `/tmp/nsp-visual/after-400.html` と競合し、1440／375pxの撮影は完了していない。Safariは操作許可なし、独立ブラウザ接続も利用不可。撮影用Chromeはいったん終了し、その後に開いたゲストウインドウは別作業に切り替わったため終了操作を控えた。
+
+未実施: 上記の画面撮影、実DB3テスト（DSN未設定）、実TikTok再生・本番S3との疎通、本番データ確認・デプロイ。コミットも未完了: `git add` が `/Users/s-komata/dev/teamagent/.git/worktrees/teamagent-vl-ui/index.lock` の書き込みを `Operation not permitted` で拒否された。変更は作業ツリーに保持。push・PRは実施していない。
