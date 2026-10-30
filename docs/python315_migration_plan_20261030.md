@@ -342,3 +342,64 @@ forced rollback drill が必要なリリース条件では [runbook](runbooks/fo
 - `pytest` / アプリ実行 / CI / Docker build / smoke / scanner。ローカル `python3` には pytest がなく、今回の文書のみの変更のため依存導入はしていない。
 - AWS の実稼働版、CodeBuild/S3 公開状況、Terraform state、最新 scan、ECR 例外の実運用状態、rollback/drill。いずれも今回の禁止事項に従い未照合。
 - 対応 wheel と Alpine 3.15、世代再導出手段・公開/adopt 経路がクリティカルパス。これらの確認が済むまでは 11-20 全体投入を確定しない。
+
+## 6. 段1の実装記録（2026-10-30）
+
+本節は上記の取得なし調査に続く実装結果。`uv.lock`、CI、CI の回帰テスト、本節を変更した。アプリのコード、`pyproject.toml` の最低対応 Python、media の APK / Dockerfile / 世代・契約は変更していない。commit / push、AWS 実行、`.env` / secrets の読み取りは行っていない。
+
+### 依存更新
+
+PyPI の JSON メタデータと更新後の lock の実ファイル名を照合した。以下の「両 Linux」は通常 CPython 3.15 に適合する `cp315-cp315` または `cp3N-abi3`（N ≤ 15）の **manylinux aarch64 / x86_64 両方**を意味する。Alpine / musllinux の実動作確認ではない。
+
+| §2.1 の対象 | 更新前 → 更新後 | 確認結果・例外 |
+|---|---|---|
+| cffi | 2.0.0 → 2.1.1 | 両 Linux |
+| httptools | 0.8.0 → 0.9.0 | 両 Linux |
+| jiter | 0.15.0 → 0.18.0 | 両 Linux |
+| librt | 0.11.0 → 0.16.0 | 両 Linux |
+| lxml | 6.1.1 → 6.1.3 | 両 Linux |
+| markupsafe | 3.0.3 → 3.0.4 | 両 Linux |
+| numpy | 2.4.6 → 2.5.4（Python ≥3.15 のみ） | 両 Linux。3.14 以下は 2.4.6 を維持 |
+| psycopg-binary | 3.3.4 → 3.3.6 | 両 Linux。親の psycopg も 3.3.6 に揃えた |
+| pydantic-core | 2.46.4 → 2.50.2 | 両 Linux。親の pydantic も 2.13.4 → 2.14.2 |
+| pywin32 | build 311 → 312 | Windows 専用。cp315 の win32 / win_amd64 / win_arm64 wheel を確認。Linux wheel は対象外 |
+| pyyaml | **6.0.3 を維持** | [PyPI](https://pypi.org/pypi/PyYAML/json) の最新安定版も 6.0.3。cp315 / abi3 / py3-none の互換 wheel がなく、版更新で解消できない。sdist はあるが 3.15 でのビルドは未検証 |
+| regex | 2026.5.9 → 2026.9.29 | 両 Linux |
+| scikit-learn | 1.9.0 → 1.9.1 | 両 Linux |
+| scipy | 1.17.1 → 1.18.1（Python ≥3.15 のみ） | 両 Linux。3.14 以下は 1.17.1 を維持 |
+| torch（PyPI） | 2.13.0 → 2.15.0（非 Linux / Python ≥3.15 のみ） | 非 Linux 用の cp315 macOS arm64 / Windows x86_64 wheel を確認。Linux は既存の CPU index 2.13.0+cpu を維持し、その cp315 両 Linux wheel を確認 |
+| uvloop | 0.22.1 → 0.23.0 | 両 Linux |
+
+必要な推移依存も `typing-extensions 4.15.0 → 4.16.0`、`typing-inspection 0.4.2 → 0.4.4` に更新した。メジャー更新はない。pywin32 の数字は build 番号、regex は日付版。
+
+NumPy 2.5 の型定義は Python 3.12 以降の構文を使い、lock 内の mypy 2.1.0 と既存の `python_version = "3.11"` の組では解析エラーになる。このため NumPy / SciPy は 3.15 の解決だけ新版へ分岐し、最低対応版の静的検査と 3.14 以下の数値計算依存を維持した。別の隔離環境では最新 mypy 2.4.1 + NumPy 2.5.4 の最小 import 型検査が同じ Python 3.11 設定で成功し、既存 latest-dependency CI に追加の NumPy 制約は加えていない。torch も既存の 3.14 以下と Linux CPU 版を維持し、本番 Dockerfile が参照する wheel URL / SHA が lock から消えないことを確認した。media 専用の yt-dlp / curl-cffi / Playwright / python-pptx / Pillow / WeasyPrint の版と wheel / sdist は更新前と一致する。
+
+再解決には `uv lock --upgrade-package '<name><次のメジャー>'` を対象名ごとに指定し、親の psycopg / pydantic も指定した。その後、既存経路を維持する分岐を以下で解決した（どちらも lock を生成する一時制約で、project の恒久的な版制約は追加していない）。
+
+```sh
+uv lock \
+  --upgrade-package "numpy==2.4.6; python_version < '3.15'" \
+  --upgrade-package "numpy==2.5.4; python_version >= '3.15'" \
+  --upgrade-package "scipy==1.17.1; python_version < '3.15'" \
+  --upgrade-package "scipy==1.18.1; python_version >= '3.15'"
+uv lock \
+  --upgrade-package "torch==2.15.0; sys_platform != 'linux' and python_version >= '3.15'" \
+  --upgrade-package "torch==2.13.0; sys_platform == 'linux' or python_version < '3.15'"
+```
+
+### CI と検証
+
+`.github/workflows/ci.yml` に `python315-pytest` を追加した。既存 lockfile ジョブと同じ PostgreSQL / Terraform / Node / ffmpeg 準備、`uv export --frozen --extra dev --extra mcp --extra media`、`pip --no-deps --require-hashes` と editable 導入を使い、既存の duration-balanced 3 shard を実行する。ジョブ全体を `continue-on-error: true` とし、summary は完了を待って 3.15 の manifest 全件照合だけを別の `continue-on-error` step で行う。既存の 3.14 coverage と 3.11 / 3.13 / 3.14 の必須ゲートは維持した。追加した回帰テストは、この非必須性、frozen 導入、3 shard、artifact / summary の接続を確認する。
+
+- 手元: CPython 3.14.7、uv 0.11.14。3.15 interpreter は未インストールのため、3.15 の pytest / mypy は未実行。GitHub Actions の実行も commit / push 禁止のため未実施。
+- `uv lock --check` と `uv export --frozen --no-emit-project --extra dev --extra mcp --extra media` は成功。
+- lock 内の対象 wheel をスクリプトで照合し、PyYAML 以外の Linux 対象 13 件は両アーキテクチャの互換 wheel を確認。pywin32 は Windows、PyPI torch は非 Linux として別判定した。
+- export した依存に対し `uv pip install --python-version 3.15 --python-platform <aarch64|x86_64>-manylinux_2_28 --only-binary :all: --no-deps --dry-run` を実行。両方とも **PyYAML 6.0.3 の wheel 不足で失敗**。PyYAML だけを除いた同じ dry-run は両方成功した。これはインストール / import / アプリ実行の成功ではない。
+- 3.14 の `ruff check src/ tests/ scripts/`、`ruff format --check src/ tests/ scripts/` は成功。`mypy src/teamagent` は **507 source files、問題なし**。
+- CI 設定と既存 core / media Dockerfile 契約の関連 pytest は **38 passed**。
+- 最初の全件完走は **121 failed / 16,199 passed / 439 skipped**。119 件は、検証用に加えた `AWS_CONFIG_FILE=/dev/null` / `AWS_SHARED_CREDENTIALS_FILE=/dev/null` が既存 guard の環境変数拒否仕様に衝突したことによる手順上の失敗。残る 2 件は rollback 試験の 30 秒 timeout。完全な出力は `/private/tmp/teamagent-py315-survey/pytest314-final.log` に保存した。
+- ローカルで継承された `C.UTF-8` は bash に大量の locale 警告を出したため、再検査では `LC_ALL=C LANG=C` とした。上記 AWS 設定ファイル変数は渡さず、資格情報の環境変数も引き継がない。AWS 操作の試験は既存の fake command を使用する。locale 修正後も並列実行の timeout は残り、locale だけで解決したとはしていない。
+- この再検査は指定の `uv run --python 3.14 --extra dev --extra mcp --extra media pytest -q -n auto` に、配分粒度と診断出力だけの `PYTEST_ADDOPTS='--maxschedchunk=1 --durations=20'` を加えて実行した。**8 failed / 8,133 passed / 352 skipped、41 分45秒、約50%で中断**。全失敗は未変更の `test_forced_rollback_drill.py`（3 件、30 秒）と `test_terraform_runtime_guard.py`（5 件、120 秒）の `subprocess.TimeoutExpired`。除外や timeout 緩和はしていない。完全な出力は `/private/tmp/teamagent-py315-survey/pytest314-verified.log` に保存した。
+- timeout した 8 件を、同じ更新済み依存・正常な locale で単独再検査し、**8 passed in 485.49s**。完全な出力は `/private/tmp/teamagent-py315-survey/pytest-timeout-check.log` に保存した。最長ケースは 116.84 秒で 120 秒制限に近く、並列負荷による実行時間の影響が考えられるが、依存更新との因果関係までは断定していない。**3.14 の全体成功条件は未達**であり、「3.14 の既存挙動をすべて検証済み」とはしない。単独成功と並列全体成功は区別する。全体を通せる実行環境で、通常配分の指定コマンドを再検証する必要がある。
+
+残る停止要因は、3.14 全体 pytest の timeout と全件成功未確認、PyYAML の 3.15 wheel 不足（更新先なし）、実際の 3.15 frozen install / pytest 未確認、本番 arm64 core と embeddings の実 image 検証、および未着手の media APK / Dockerfile / 世代更新。3.15 の lint / typecheck まで広げる場合は、NumPy 2.5 の型定義と mypy の最低版設定の整合も別途必要。今回の変更だけでは段1の検証完了や本番移行完了とはしない。
