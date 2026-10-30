@@ -367,6 +367,9 @@
             // カタログ⑤: コメント欄マイニング（chromium一次→Apify縮退・Bedrock分類）。
             // USE_TIKTOK_COMMENT_TOOLS=1 が必要。
             "tiktok_comment_mining",
+            // 投稿URLのタイアップ表示＋#PR 表記チェック（TT/IG/YT・Apify）。
+            // USE_AD_LABEL_CHECK_TOOL=1 が必要。段階公開は AD_LABEL_CHECK_ALLOWED_EMAILS。
+            "ad_label_check",
           ],
           // 未レビューの重操作・確定系を明示除外（許可する副作用は上のincludeで個別列挙）。
           // ※ L2 run_agent（MCP: USE_AGENT_ORCHESTRATOR=1 で露出する適応オーケストレーター）は
