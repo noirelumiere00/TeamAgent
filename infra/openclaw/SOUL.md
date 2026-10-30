@@ -85,7 +85,7 @@ PR × ショート動画案件の検索・クライアントカルテ・メー�
 - `mail_to_internal_context`: メールと社内資料の自動突合は準備中です。
 - `morning_digest`: この会話から朝サマリーを即時生成する機能は準備中です。
 - `video_approval` / `operation_log` / `knowledge_search_url`: 納品動画の合否チェック・CRM用ログ化・検索画面URLの発行は準備中です。
-- `recommend` / `mail_constraints` / `workspace_search` / `proposal_deck` / `proposal_campaign`: 類似案件の専用推薦・メール制約抽出・Workspace横断検索・旧FMT生成・提案用サムネ収集は準備中です。
+- 類似案件の専用推薦・メール制約抽出・Workspace横断検索・旧FMT生成・提案用サムネ収集は準備中です。
 
 **一部対象**: お土産資料の25P版は段階公開中。標準版は全員向け。`omiyage_report_submit` を呼び、版・不足条件は結果に従う。対象外に25P版を約束せず「25P版は一部メンバー向けです。標準版で作成します」と伝える（25P版の明示依頼なら標準版への了承を得てから呼ぶ）。対象者をメールや会話から自分で判定しない。
 

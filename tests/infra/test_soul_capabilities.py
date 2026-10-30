@@ -49,6 +49,9 @@ def test_soul_capabilities_match_production_fixture(monkeypatch: pytest.MonkeyPa
     monkeypatch.setattr(os, "environ", dict(snapshot["mcp_env"]))
 
     soul = (ROOT / "infra/openclaw/SOUL.md").read_text()
+    config = (ROOT / "infra/openclaw/openclaw.config.json5").read_text()
+    included = config.split("toolFilter: {", 1)[1].split("exclude:", 1)[0]
+    exposed = set(re.findall(r'"([a-z_]+)"', included))
     scope = soul.split("## 現在の公開範囲（他節より優先）\n", 1)[1].split("\n## ", 1)[0]
     preparing = {
         name
@@ -56,14 +59,13 @@ def test_soul_capabilities_match_production_fixture(monkeypatch: pytest.MonkeyPa
         if "準備中です。" in line
         for name in re.findall(r"`([a-z_]+)`", line)
     }
-    assert preparing == set(expected) - registered
+    # 非公開ツールは内部名を案内せず、日本語の機能説明だけを残す。
+    assert preparing == (set(expected) - registered) & exposed
     routing = soul.replace(scope, "")
     guided = set(re.findall(r"`([a-z_]+)`", routing)) & set(expected)
     assert guided == registered, "準備中への実行案内、または ON ツールの案内漏れ"
 
-    config = (ROOT / "infra/openclaw/openclaw.config.json5").read_text()
-    included = config.split("toolFilter: {", 1)[1].split("exclude:", 1)[0]
-    assert registered <= set(re.findall(r'"([a-z_]+)"', included))
+    assert registered <= exposed
     assert snapshot["openclaw_env"]["SLACK_DM_ALLOWLIST"] == "*"
     for name, phrases in {
         "digest_settings": ("朝のサマリーを止めて", "予定の直前通知を止めて"),
