@@ -1,5 +1,7 @@
 """Campaign totals include every member, independent of the top-k retrieval score."""
 
+from typing import Any
+
 import pytest
 
 from teamagent.skills.media_case_search.campaigns import aggregate_cases, render_hits
@@ -7,7 +9,13 @@ from teamagent.skills.media_case_search.schema import MediaCaseInput
 from teamagent.skills.media_case_search.skill import query_filters
 
 
-def post(number, *, brand="楽天トラベル", campaign="リリースキャンペーン × TikTok GO", tags=None):
+def post(
+    number: int,
+    *,
+    brand: str | None = "楽天トラベル",
+    campaign: str | None = "リリースキャンペーン × TikTok GO",
+    tags: list[str] | None = None,
+) -> dict[str, Any]:
     return {
         "post_id": str(number),
         "score": 0.8 if number == 0 else 0.1,
@@ -45,7 +53,7 @@ def post(number, *, brand="楽天トラベル", campaign="リリースキャン�
     }
 
 
-def test_61_posts_one_campaign_across_five_accounts_code_computes_all_metrics():
+def test_61_posts_one_campaign_across_five_accounts_code_computes_all_metrics() -> None:
     rows = [
         post(i, campaign="リリースキャンペーン" if i % 2 else "リリースキャンペーン × TikTok GO")
         for i in range(61)
@@ -66,7 +74,7 @@ def test_61_posts_one_campaign_across_five_accounts_code_computes_all_metrics():
     assert message.count("**") == 2 and rows[0]["post_url"] in message
 
 
-def test_same_brand_and_campaign_without_tag_merge_but_generic_labels_do_not():
+def test_same_brand_and_campaign_without_tag_merge_but_generic_labels_do_not() -> None:
     assert len(aggregate_cases([post(0, tags=[]), post(1, tags=[])])) == 1
     assert (
         len(
@@ -90,7 +98,7 @@ def test_same_brand_and_campaign_without_tag_merge_but_generic_labels_do_not():
     assert len(aggregate_cases([post(0, tags=[]), post(1, brand="別会社", tags=[])])) == 2
 
 
-def test_specific_hashtag_merges_missing_known_and_different_brands_with_exact_totals():
+def test_specific_hashtag_merges_missing_known_and_different_brands_with_exact_totals() -> None:
     rows = [
         post(0, brand=None, campaign="tiktokgo", tags=["#PR", "#tiktokgo"]),
         post(1, brand="TikTokGO", campaign=None, tags=["＃ＴｉｋＴｏｋＧＯ"]),
@@ -111,7 +119,7 @@ def test_specific_hashtag_merges_missing_known_and_different_brands_with_exact_t
     assert "〔いちばん伸びた投稿〕" + rows[2]["post_url"] in message
 
 
-def test_rakuten_campaign_and_tiktok_go_stays_separate_without_splitting_facilities():
+def test_rakuten_campaign_and_tiktok_go_stays_separate_without_splitting_facilities() -> None:
     rakuten = [post(i, tags=["#TikTokGO", "#楽天トラベルリリースキャンペーン"]) for i in range(5)]
     stays = [
         post(
@@ -137,11 +145,84 @@ def test_rakuten_campaign_and_tiktok_go_stays_separate_without_splitting_facilit
         assert group["save_count"] == sum(row["metrics"]["collectCount"] for row in rows)
 
 
+@pytest.mark.parametrize("reverse", [False, True])
+def test_56_stays_absorb_same_brand_fragment_and_recompute_rendered_metrics(reverse: bool) -> None:
+    rows = [post(i, brand="TikTok GO", campaign="tiktokgo", tags=["#tiktokgo"]) for i in range(56)]
+    rows[3]["items"][0]["brand"] = None  # 本番の 56 本にはブランド不明の投稿も混ざる
+    for row in rows:
+        row.update(posted_on="2025-10-01", metrics={"playCount": 1, "collectCount": 1})
+    rows[-1]["posted_on"] = "2026-06-01"
+    fragment = post(
+        56, brand="ＴｉｋＴｏｋＧＯ", campaign="ホテル", tags=["#ホテルCP", "＃ＴｉｋＴｏｋＧＯ"]
+    )
+    fragment.update(posted_on="2026-03-01", metrics={"playCount": 100, "collectCount": 2})
+    rows.append(fragment)
+    if reverse:
+        rows.reverse()
+    groups = aggregate_cases([*rows, fragment])
+    assert len(groups) == 1
+    assert groups[0]["post_count"] == 57 and groups[0]["account_count"] == 5
+    assert groups[0]["play_count"] == 156 and groups[0]["save_count"] == 58
+    assert groups[0]["top"] == fragment
+    _, filters = query_filters(MediaCaseInput(query="国内旅行 CP"))
+    message = render_hits(rows, filters)
+    assert "**TikTok GO の宿泊紹介（2025年10月〜2026年6月）**" in message
+    assert "5 アカウントで 57 本" in message
+    assert "156再生・保存 58件。最大は100再生" in message
+    assert "〔いちばん伸びた投稿〕" + fragment["post_url"] in message
+    assert message.count("**") == 2
+
+
+@pytest.mark.parametrize("size", [1, 2, 3])
+@pytest.mark.parametrize("brand", ["TikTokGO", "楽天トラベル", None, "ブランド未特定", "不明"])
+def test_fragment_absorption_requires_same_known_brand_and_at_most_two_posts(
+    size: int, brand: str | None
+) -> None:
+    main = [post(i, brand="TikTok GO", campaign=None, tags=["#tiktokgo"]) for i in range(4)]
+    fragments = [
+        post(i + 4, brand=brand, campaign="ホテル", tags=["#ホテルCP", "#tiktokgo"])
+        for i in range(size)
+    ]
+    groups = aggregate_cases([*main, *fragments, fragments[0]])
+    if brand == "TikTokGO" and size <= 2:
+        assert len(groups) == 1 and groups[0]["post_count"] == 4 + size
+    else:
+        assert {frozenset(g["posts"]) for g in groups} == {
+            frozenset(p["post_id"] for p in rows) for rows in (main, fragments)
+        }
+
+
+@pytest.mark.parametrize("reverse", [False, True])
+def test_fragment_uses_largest_direct_identity_without_bridging_or_merging_unmatched(
+    reverse: bool,
+) -> None:
+    main = [post(i, brand="TikTok GO", campaign=None, tags=["#tiktokgo"]) for i in range(4)]
+    other = [post(i + 4, brand="TikTok GO", campaign=None, tags=["#別施策CP"]) for i in range(3)]
+    fragments = [
+        post(i + 7, brand="TikTok GO", campaign=None, tags=["#ホテルCP", "#tiktokgo", "#別施策CP"])
+        for i in range(2)
+    ]
+    unmatched = post(9, brand="TikTok GO", campaign=None, tags=["#aaaCP", "#ホテルCP"])
+    rows = [*main, *other, *fragments, unmatched]
+    if reverse:
+        rows.reverse()
+    groups = aggregate_cases(rows)
+    assert {frozenset(g["posts"]) for g in groups} == {
+        frozenset(p["post_id"] for p in [*main, *fragments]),
+        frozenset(p["post_id"] for p in other),
+        frozenset({"9"}),
+    }
+    message = render_hits([*main, {**fragments[0], "posted_on": "2026-08-01"}], {})
+    assert "2025年9月〜2026年8月" in message
+
+
 @pytest.mark.parametrize(
     "name", ["新春キャンペーン", "SpringCampaign", "ＳｐｒｉｎｇＣＡＭＰＡＩＧＮ", "春ＣＰ", "春cp"]
 )
 @pytest.mark.parametrize("source", ["tag", "campaign"])
-def test_explicit_campaign_takes_priority_over_more_frequent_shared_tag(name, source):
+def test_explicit_campaign_takes_priority_over_more_frequent_shared_tag(
+    name: str, source: str
+) -> None:
     rows = [post(i, campaign=None, tags=["#TikTokGO"]) for i in range(3)]
     for row in rows[:2]:
         item = row["items"][0]
@@ -156,7 +237,7 @@ def test_explicit_campaign_takes_priority_over_more_frequent_shared_tag(name, so
     }
 
 
-def test_shared_tags_require_multiple_accounts_and_count_unique_posts():
+def test_shared_tags_require_multiple_accounts_and_count_unique_posts() -> None:
     rows = [
         post(0, campaign=None, tags=["#施設名", "#TikTokGO", "＃ＴｉｋＴｏｋＧＯ"]),
         post(1, campaign=None, tags=["#施設名", "#TikTokGO"]),
@@ -174,7 +255,7 @@ def test_shared_tags_require_multiple_accounts_and_count_unique_posts():
     assert len(aggregate_cases(rows)) == 4
 
 
-def test_multiple_items_in_one_post_choose_one_campaign_without_bridging():
+def test_multiple_items_in_one_post_choose_one_campaign_without_bridging() -> None:
     rows = [post(0), post(1), post(2, tags=["#別キャンペーン"])]
     rows[0]["items"].append(rows[2]["items"][0])
     groups = aggregate_cases(rows)
@@ -188,7 +269,7 @@ def test_multiple_items_in_one_post_choose_one_campaign_without_bridging():
 
 @pytest.mark.parametrize("tag", ["#旅行", "＃ＰＲ", "#お出かけ", "#ホテル", "#おすすめ"])
 @pytest.mark.parametrize("brand", [None, "旅行社"])
-def test_generic_hashtags_alone_do_not_merge_posts(tag, brand):
+def test_generic_hashtags_alone_do_not_merge_posts(tag: str, brand: str | None) -> None:
     assert (
         len(aggregate_cases([post(i, brand=brand, campaign=None, tags=[tag]) for i in range(2)]))
         == 2
@@ -196,7 +277,7 @@ def test_generic_hashtags_alone_do_not_merge_posts(tag, brand):
 
 
 @pytest.mark.parametrize("brand", [None, "ブランド未特定", "不明"])
-def test_missing_brand_uses_readable_campaign_tag_without_unknown_label(brand):
+def test_missing_brand_uses_readable_campaign_tag_without_unknown_label(brand: str | None) -> None:
     message = render_hits(
         [post(0, brand=brand, campaign="宿泊紹介", tags=["#PR", "#tiktokgo"])], {}
     )
@@ -204,7 +285,7 @@ def test_missing_brand_uses_readable_campaign_tag_without_unknown_label(brand):
     assert "未特定" not in message and "不明" not in message
 
 
-def test_brand_from_later_member_and_top_three_facilities_or_products():
+def test_brand_from_later_member_and_top_three_facilities_or_products() -> None:
     rows = [post(i, brand=None, campaign=None) for i in range(7)]
     rows[1]["items"][0]["brand"] = "楽天トラベル"
     rows[1]["items"][0]["campaign"] = "リリースキャンペーン"
@@ -221,7 +302,7 @@ def test_brand_from_later_member_and_top_three_facilities_or_products():
     assert "（人気ホテル、施設0、施設1 など4商品）" in render_hits(rows, {})
 
 
-def test_max_three_campaigns_plus_one_related_line_and_no_invented_metrics():
+def test_max_three_campaigns_plus_one_related_line_and_no_invented_metrics() -> None:
     rows = [post(0, brand=f"会社{i}", campaign=f"固有施策{i}", tags=[]) for i in range(5)]
     for i, row in enumerate(rows):
         row["post_id"] = str(i)
