@@ -14,12 +14,14 @@ import sys
 from collections.abc import Mapping, Sequence
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 from urllib.parse import urlparse
 
 from teamagent.skills.first_visit.kit import archive_kit_problems
-from teamagent.skills.omiyage_report.metrics import AxisData, PostRecord
-from teamagent.skills.omiyage_report.schema import OmiyageReportSubmitInput
+
+if TYPE_CHECKING:
+    from teamagent.skills.omiyage_report.metrics import AxisData, PostRecord
+    from teamagent.skills.omiyage_report.schema import OmiyageReportSubmitInput
 
 CONTRACT_VERSION = 1
 KIT_VERSION = "2026.10.14.1"

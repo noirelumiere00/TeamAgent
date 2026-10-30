@@ -253,3 +253,38 @@ def test_pptx_only_synthetic_smoke(
     assert {
         p.relative_to(inputs): p.read_bytes() for p in inputs.rglob("*") if p.is_file()
     } == original
+
+
+def test_concrete_runtime_retains_verified_archive_and_minimal_sources() -> None:
+    docker = (ROOT / "infra/docker/Dockerfile.teamagent-media-worker").read_text()
+    ignore = (ROOT / "infra/docker/Dockerfile.teamagent-media-worker.dockerignore").read_text()
+    release = json.loads(
+        (ROOT / "infra/codebuild/teamagent_core_media_release_contract.json").read_text()
+    )
+    media = next(subject for subject in release["subjects"] if subject["name"] == "media")
+    for key, arg, name in (
+        ("first-visit-kit-lock", "FIRST_VISIT_KIT_LOCK_SHA256", "kit.lock.json"),
+        ("first-visit-kit-archive", "FIRST_VISIT_KIT_ARCHIVE_SHA256", BUNDLE.name),
+    ):
+        digest = hashlib.sha256((ROOT / "tools/first_visit" / name).read_bytes()).hexdigest()
+        assertion = next(
+            a for a in media["source_assertions"] if a["key"] == f"artifact.{key}.sha256"
+        )
+        assert assertion["value"] == digest and assertion["build_arg"] == arg
+        assert f"ARG {arg}={digest}" in docker
+        assert all(use in docker for use in assertion["dockerfile_uses"])
+        assert f'{assertion["oci_label"]}="${arg}"' in docker
+        assert f"/app/tools/first_visit/{name}" in docker
+    assert "rm -f /tmp/teamagent-build-ca.pem /tmp/first-visit-kit.tar.gz" not in docker
+    assert "COPY --from=js-deps /tmp/first-visit-kit.tar.gz /app/tools/first_visit/" in docker
+    assert "COPY --from=js-deps /tmp/first-visit-kit.lock.json /app/tools/first_visit/" in docker
+    assert "['archive_sha256']" in docker
+    for relative in (
+        "src/teamagent/media/concrete_runner.py",
+        "src/teamagent/skills/first_visit/concrete.py",
+        "src/teamagent/skills/first_visit/contract.py",
+        "src/teamagent/skills/first_visit/kit.py",
+    ):
+        assert f"  {relative} " in docker and f"!{relative}\n" in ignore
+    assert "src/teamagent/skills/omiyage_report" not in docker
+    assert "assert not archive_kit_problems(Path('/app/tools/tiktok-skills-kit'))" in docker

@@ -473,6 +473,22 @@ def main() -> int:
 
             spec = _exact(manifest, {"kind", "source", "owner_id"}, "sales25 renderer manifest")
             metadata = render_sales25(root, _path(root, spec["source"]), spec["owner_id"])
+        elif kind == "concrete_pptx":
+            from teamagent.media.concrete_runner import render_concrete
+
+            spec = _exact(
+                manifest,
+                {"kind", "source", "owner_id", "request_id", "kit_path", "timeout"},
+                "concrete renderer manifest",
+            )
+            metadata = render_concrete(
+                root,
+                _path(root, spec["source"]),
+                owner_id=spec["owner_id"],
+                request_id=spec["request_id"],
+                kit_path=Path(spec["kit_path"]),
+                timeout=spec["timeout"],
+            )
         elif kind == "pdf":
             metadata = _pdf(root, manifest)
         else:

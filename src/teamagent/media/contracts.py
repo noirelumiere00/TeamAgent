@@ -369,6 +369,26 @@ class Sales25PptxOperation(_StrictModel):
         return self
 
 
+class ConcretePptxOperation(_StrictModel):
+    """A sealed concrete case, bound to one trusted owner and request."""
+
+    kind: Literal["concrete_pptx"]
+    source: S3ObjectRef
+    owner_id: str = Field(min_length=1, max_length=200)
+    request_id: str = Field(min_length=1, max_length=200)
+
+    @model_validator(mode="after")
+    def _zip_source(self) -> ConcretePptxOperation:
+        if not self.owner_id.strip() or not self.request_id.strip():
+            raise ValueError("concrete owner_id/request_id must be nonblank")
+        if (
+            self.source.content_type != "application/zip"
+            or not 0 < self.source.size <= MAX_INPUT_BYTES
+        ):
+            raise ValueError("concrete source must be a bounded ZIP")
+        return self
+
+
 class PdfOperation(_StrictModel):
     kind: Literal["pdf"]
     html: S3ObjectRef
@@ -384,6 +404,7 @@ MediaOperation = Annotated[
     | SlidesOperation
     | ProposalPptxOperation
     | Sales25PptxOperation
+    | ConcretePptxOperation
     | PdfOperation,
     Field(discriminator="kind"),
 ]
@@ -636,6 +657,7 @@ __all__ = [
     "TIKTOK_N_PER_KW_MAX",
     "TIKTOK_SALES25_N_PER_KW_MAX",
     "AcquireOperation",
+    "ConcretePptxOperation",
     "FrameOperation",
     "MediaArtifact",
     "MediaJobRequest",

@@ -9,6 +9,7 @@ import shutil
 import subprocess
 import sys
 import sysconfig
+import tarfile
 from pathlib import Path
 
 import pytest
@@ -597,6 +598,10 @@ def test_sales25_media_copy_imports_without_core_packages(tmp_path: Path) -> Non
     shutil.copyfile(
         ROOT / "tools/first_visit/sales25.lock.json", app / "tools/first_visit/sales25.lock.json"
     )
+    for name in ("kit.lock.json", "tiktok-skills-kit-25eccd8.tar.gz"):
+        shutil.copyfile(ROOT / "tools/first_visit" / name, app / "tools/first_visit" / name)
+    with tarfile.open(app / "tools/first_visit/tiktok-skills-kit-25eccd8.tar.gz") as archive:
+        archive.extractall(app / "tools/tiktok-skills-kit", filter="data")
     program = """
 import importlib.abc
 import sys
@@ -605,16 +610,19 @@ app = Path(sys.argv[1])
 sys.path[:0] = [str(app / 'src'), sys.argv[2]]
 class NoCore(importlib.abc.MetaPathFinder):
     def find_spec(self, fullname, path=None, target=None):
-        blocked = ('teamagent.adapters', 'teamagent.mcp_gateway', 'boto3', 'botocore', 'slack_sdk')
+        blocked = ('teamagent.adapters', 'teamagent.mcp_gateway', 'teamagent.skills.omiyage_report', 'structlog', 'boto3', 'botocore', 'slack_sdk')
         if fullname.startswith(blocked):
             raise ImportError('core dependency in roleless media: ' + fullname)
 sys.meta_path.insert(0, NoCore())
-from teamagent.media import sales25_runner, render_child, tool_worker
-from teamagent.skills.first_visit import sales25_authoring, sales25_contract
-for module in (sales25_runner, render_child, tool_worker, sales25_authoring, sales25_contract):
+from teamagent.media import sales25_runner, concrete_runner, render_child, tool_worker
+from teamagent.skills.first_visit import sales25_authoring, sales25_contract, concrete, kit
+for module in (sales25_runner, concrete_runner, render_child, tool_worker,
+               sales25_authoring, sales25_contract, concrete, kit):
     assert Path(module.__file__).is_relative_to(app), module.__file__
 assert sales25_contract.BUNDLE == app / 'tools/first_visit/sales25'
 sales25_contract.verify_bundle()
+assert kit.ARCHIVE == app / 'tools/first_visit/tiktok-skills-kit-25eccd8.tar.gz'
+assert not kit.archive_kit_problems(app / 'tools/tiktok-skills-kit')
 """
     result = subprocess.run(
         [sys.executable, "-I", "-S", "-c", program, str(app), sysconfig.get_path("purelib")],

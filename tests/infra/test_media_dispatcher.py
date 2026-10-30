@@ -1924,3 +1924,52 @@ def test_sales25_pptx_exact_transport_and_owner_bounds(monkeypatch: pytest.Monke
             Sales25PptxOperation.model_validate(invalid)
         with pytest.raises(ValueError):
             module._validate_operation(invalid)
+
+
+def test_concrete_pptx_exact_transport_and_identity_bounds(monkeypatch: pytest.MonkeyPatch) -> None:
+    from teamagent.media.contracts import ConcretePptxOperation
+
+    module = _load_handler(monkeypatch, ddb=_Dynamo(), ecs=_Ecs())
+    source = _staged_ref("input.zip").model_copy(update={"content_type": "application/zip"})
+    operation = ConcretePptxOperation(
+        kind="concrete_pptx", source=source, owner_id="T_TEST\x1fU_SELF", request_id="synthetic"
+    )
+    request = make_job_request(
+        operation=operation,
+        output_bucket="teamagent-media",
+        request_fingerprint="concrete-pptx",
+        job_id="mj_0123456789abcdef01234567",
+        now_epoch_s=1_000,
+        timeout_s=480,
+    )
+    spec = json.loads(request.to_json_bytes())
+    module._validate_operation(spec["operation"])
+    assert module._operation_s3_refs(spec["operation"]) == [source.model_dump(mode="json")]
+    assert tool_contracts._input_refs(request) == (source,)
+    slots = module._operation_output_slots(spec, {"attempt_version": 1, "attempt_id": _ATTEMPT_ID})
+    assert [(s["name"], s["key"], s["max_bytes"]) for s in slots] == list(
+        tool_contracts._output_slots(request, _ATTEMPT_ID, 1)
+    )
+    assert module._required_output_names(spec) == {"concrete-result.json"}
+    assert module._allowed_content_types(spec, "concrete.pptx") == {
+        "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+    }
+    for owner in ("", " ", "\t\n", "a" * 201):
+        invalid = {**spec["operation"], "owner_id": owner}
+        with pytest.raises(ValueError):
+            ConcretePptxOperation.model_validate(invalid)
+        with pytest.raises(ValueError):
+            module._validate_operation(invalid)
+    for changes in ({"content_type": "text/html"}, {"size": 0}, {"size": 128 * 1024 * 1024 + 1}):
+        invalid = {**spec["operation"], "source": {**spec["operation"]["source"], **changes}}
+        with pytest.raises(ValueError):
+            ConcretePptxOperation.model_validate(invalid)
+        with pytest.raises(ValueError):
+            module._validate_operation(invalid)
+
+    for request_id in ("", " ", "a" * 201):
+        invalid = {**spec["operation"], "request_id": request_id}
+        with pytest.raises(ValueError):
+            ConcretePptxOperation.model_validate(invalid)
+        with pytest.raises(ValueError):
+            module._validate_operation(invalid)

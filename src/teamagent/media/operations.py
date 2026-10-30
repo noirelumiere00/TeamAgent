@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import io
 import json
 import logging
@@ -23,6 +24,7 @@ from urllib.parse import urlsplit
 
 from teamagent.media.contracts import (
     AcquireOperation,
+    ConcretePptxOperation,
     FrameOperation,
     MediaOperation,
     PdfOperation,
@@ -49,6 +51,8 @@ from teamagent.media.tiktok_capture import _sales25_source_ok
 logger = logging.getLogger(__name__)
 
 ObjectLoader = Callable[[S3ObjectRef, Path], Path]
+_CONCRETE_KIT_PATH = Path("/app/tools/tiktok-skills-kit")
+_CONCRETE_CLI_TIMEOUT_S = 120.0
 _FFMPEG_TIMEOUT_S = 180
 _FFMPEG_PROTOCOL_WHITELIST = "file,pipe"
 _FFMPEG_PROTOCOL_BLACKLIST = "http,https,tcp,tls,udp,rtp,ftp,gopher,sftp,ssh"
@@ -1647,6 +1651,45 @@ def _sales25_pptx(
     )
 
 
+def _concrete_pptx(
+    operation: ConcretePptxOperation,
+    workdir: Path,
+    load: ObjectLoader,
+    budget: DeadlineBudget,
+) -> OperationOutput:
+    source = load(operation.source, workdir / "concrete-input.zip")
+    if (
+        source.stat().st_size != operation.source.size
+        or hashlib.sha256(source.read_bytes()).hexdigest() != operation.source.sha256
+    ):
+        raise MediaOperationError("MEDIA_CONCRETE_INPUT_INVALID", "concrete ZIP integrity mismatch")
+    metadata = _renderer_json(
+        {
+            "kind": "concrete_pptx",
+            "source": source.name,
+            "owner_id": operation.owner_id,
+            "request_id": operation.request_id,
+            "kit_path": str(_CONCRETE_KIT_PATH),
+            "timeout": min(_CONCRETE_CLI_TIMEOUT_S, _remaining(budget) / 4),
+        },
+        workdir=workdir,
+        budget=budget,
+    )
+    names = {"concrete-result.json": "application/json"}
+    if (workdir / "concrete-preflight.json").is_file():
+        names["concrete-preflight.json"] = "application/json"
+    if metadata.get("status") == "build_verified":
+        names["concrete.pptx"] = (
+            "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+        )
+    if any(not (workdir / name).is_file() for name in names):
+        raise MediaOperationError("MEDIA_CONCRETE_ARTIFACT_MISSING", "concrete artifacts missing")
+    return OperationOutput(
+        tuple(ProducedArtifact(name, workdir / name, mime) for name, mime in names.items()),
+        metadata,
+    )
+
+
 def _pdf(
     operation: PdfOperation,
     workdir: Path,
@@ -1707,6 +1750,8 @@ def execute_operation(
         output = _proposal_pptx(operation, workdir, load_object, budget)
     elif isinstance(operation, Sales25PptxOperation):
         output = _sales25_pptx(operation, workdir, load_object, budget)
+    elif isinstance(operation, ConcretePptxOperation):
+        output = _concrete_pptx(operation, workdir, load_object, budget)
     elif isinstance(operation, PdfOperation):
         output = _pdf(operation, workdir, load_object, budget)
     else:
