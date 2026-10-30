@@ -31,6 +31,14 @@ Core:
   [`replace_core_ca_bundle.py`](./replace_core_ca_bundle.py) がAPKのSHA、証明書とSBOMの実byte、
   runtimeのAPK installed dbの対象recordとfile checksumを検証し、他packageのrecordが
   byte単位で不変であることをbuild中に強制する。SSL環境変数とcertifiの設定は据え置く。
+- Wolfi `py3-pip-wheel` `26.2.1-r2` は CVE-2026-114613 対応として
+  [`core-pip-wheel.lock.json`](./core-pip-wheel.lock.json) の公式 APK `26.2.2-r1` に差し替える。
+  APK SHA-256 は `3481499c46ac5ae2b7e10ee50ff80f5c4c0e55501e0d096c8c06437f51283c93`。
+  CA と同じ検証器で APKINDEX / .PKGINFO / datahash / wheel・SBOM / installed DB を照合し、
+  旧 wheel と旧 SBOM を削除する。対象外の package record は byte 単位で不変。
+  core の起動スクリプト・src に pip の直接利用はなく、依存導入は builder の uv が担う。
+  ただしベース Python の ensurepip と APK 依存を保つため、削除より固定 APK の差し替えを選ぶ。
+  release 契約は版と APK SHA を OCI label に束縛する（runtime receipt は据え置き）。
 - uv child `sha256:9941e2d8e06ff884d328905091eac0a6bc1e40e5ce12e6dd0de4ef4ee26baac4`,
   uv `0.11.29`, binary SHA-256
   `f32f61ced7feb20342032cdac4d0825cebbda61911554f5de5231ec72821812e`

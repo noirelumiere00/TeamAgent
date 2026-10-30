@@ -122,6 +122,24 @@
             "/tmp/core-brotli/libbrotlidec1-${BROTLI_PACKAGE_VERSION}.apk",
             "/tmp/core-brotli/libbrotlienc1-${BROTLI_PACKAGE_VERSION}.apk"
           ]
+        },
+        {
+          "key": "artifact.pip-wheel-apk-sha256",
+          "value": "3481499c46ac5ae2b7e10ee50ff80f5c4c0e55501e0d096c8c06437f51283c93",
+          "build_arg": "PIP_WHEEL_APK_SHA256",
+          "oci_label": "io.teamagent.contract.pip-wheel-apk-sha256",
+          "dockerfile_uses": [
+            "--apk-sha256 \"$PIP_WHEEL_APK_SHA256\""
+          ]
+        },
+        {
+          "key": "package.pip-wheel.version",
+          "value": "26.2.2-r1",
+          "build_arg": "PIP_WHEEL_VERSION",
+          "oci_label": "io.teamagent.contract.pip-wheel-version",
+          "dockerfile_uses": [
+            "--version \"$PIP_WHEEL_VERSION\""
+          ]
         }
       ]
     },

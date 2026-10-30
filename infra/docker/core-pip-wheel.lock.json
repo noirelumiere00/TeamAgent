@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "url": "https://packages.wolfi.dev/os/aarch64/py3-pip-wheel-26.2.2-r1.apk",
+  "archive": "py3-pip-wheel-26.2.2-r1.apk",
+  "archive_sha256": "3481499c46ac5ae2b7e10ee50ff80f5c4c0e55501e0d096c8c06437f51283c93",
+  "base_version": "26.2.1-r2",
+  "apkindex": {
+    "C": "Q10aXNXUAtQg0vMdeGc1Y4491/1ZM=",
+    "P": "py3-pip-wheel",
+    "V": "26.2.2-r1",
+    "A": "aarch64",
+    "S": "1838069",
+    "I": "1871105",
+    "T": "wheel of pip",
+    "L": "MIT",
+    "o": "py3-pip",
+    "m": "wolfi",
+    "t": "1793267275",
+    "c": "e862be5a8c277cd23bb5c97ef21eae7ccda8e6ab",
+    "k": "10"
+  }
+}
