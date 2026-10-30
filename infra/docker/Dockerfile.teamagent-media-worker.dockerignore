@@ -6,6 +6,7 @@
 !src/teamagent/media/
 !src/teamagent/media/__init__.py
 !src/teamagent/media/contracts.py
+!src/teamagent/media/concrete_runner.py
 !src/teamagent/media/deadline.py
 !src/teamagent/media/deck_qa.py
 !src/teamagent/media/operations.py
@@ -19,6 +20,9 @@
 !src/teamagent/skills/
 !src/teamagent/skills/first_visit/
 !src/teamagent/skills/first_visit/__init__.py
+!src/teamagent/skills/first_visit/concrete.py
+!src/teamagent/skills/first_visit/contract.py
+!src/teamagent/skills/first_visit/kit.py
 !src/teamagent/skills/first_visit/sales25.py
 !src/teamagent/skills/first_visit/sales25_contract.py
 !src/teamagent/skills/first_visit/sales25_authoring.py

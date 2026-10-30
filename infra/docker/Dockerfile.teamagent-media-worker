@@ -55,7 +55,7 @@ RUN --mount=type=cache,id=teamagent-media-npm-arm64,target=/root/.npm,sharing=lo
     printf '%s  %s\n' 3bb73fbaf5a467786e5ff8c99fe0c8fa7788068ff7e0a1e37621708b8de98798 package-lock.json | sha256sum -c -; \
     npm ci --omit=dev --ignore-scripts --no-audit --no-fund; \
     test "$(node -p "require('pptxgenjs/package.json').version")" = "3.12.0"; \
-    rm -f /tmp/teamagent-build-ca.pem /tmp/first-visit-kit.tar.gz
+    rm -f /tmp/teamagent-build-ca.pem
 
 FROM ghcr.io/astral-sh/uv:latest@${UV_ARM64_DIGEST} AS uv
 
@@ -353,6 +353,8 @@ COPY --from=js-deps --chown=10001:10001 /deps/node_modules/ \
 COPY --from=js-deps --chown=10001:10001 /deps/first-visit-kit/ /app/tools/tiktok-skills-kit/
 COPY --from=js-deps /tmp/first-visit-kit.lock.json \
   /usr/share/teamagent/provenance/first-visit-kit.lock.json
+COPY --from=js-deps /tmp/first-visit-kit.lock.json /app/tools/first_visit/kit.lock.json
+COPY --from=js-deps /tmp/first-visit-kit.tar.gz /app/tools/first_visit/tiktok-skills-kit-25eccd8.tar.gz
 COPY --chown=10001:10001 tools/tiktok_scraper/search.mjs \
   /app/tools/tiktok_scraper/search.mjs
 COPY --chown=10001:10001 tools/tiktok_scraper/dns_pinned_proxy.mjs \
@@ -389,6 +391,7 @@ LABEL io.teamagent.contract.sales25-kit-lock-sha256="$SALES25_KIT_LOCK_SHA256" \
 COPY --chown=10001:10001 \
   src/teamagent/media/__init__.py \
   src/teamagent/media/contracts.py \
+  src/teamagent/media/concrete_runner.py \
   src/teamagent/media/deadline.py \
   src/teamagent/media/deck_qa.py \
   src/teamagent/media/operations.py \
@@ -408,6 +411,9 @@ COPY --chown=10001:10001 \
 
 COPY --chown=10001:10001 \
   src/teamagent/skills/first_visit/__init__.py \
+  src/teamagent/skills/first_visit/concrete.py \
+  src/teamagent/skills/first_visit/contract.py \
+  src/teamagent/skills/first_visit/kit.py \
   src/teamagent/skills/first_visit/sales25.py \
   src/teamagent/skills/first_visit/sales25_contract.py \
   src/teamagent/skills/first_visit/sales25_authoring.py \
@@ -426,7 +432,7 @@ RUN set -eu; \
       > /usr/share/teamagent/provenance/uv-arm64.digest; \
     printf '%s\n' "https://github.com/akornatskyy/chromium-headless@04c509a36888b548fa1e88ff30258135ba5a7882" \
       > /usr/share/teamagent/provenance/chromium-base-source.txt; \
-    PYTHONPATH=/app/src /app/.venv/bin/python -c "import importlib.metadata as m, importlib.util as u; assert m.version('playwright') == '$PLAYWRIGHT_VERSION'; assert m.version('yt-dlp') == '$YTDLP_VERSION'; blocked=('boto3','botocore','s3transfer','psycopg','sqlalchemy','slack_sdk','google_auth_oauthlib','mcp','sentence_transformers'); assert all(u.find_spec(name) is None for name in blocked); import teamagent.media.contracts, teamagent.media.operations, teamagent.media.tool_contracts, teamagent.media.tool_worker, teamagent.media.sales25_runner; from teamagent.skills.first_visit.sales25_contract import verify_bundle; verify_bundle()"; \
+    PYTHONPATH=/app/src /app/.venv/bin/python -c "import importlib.metadata as m, importlib.util as u; assert m.version('playwright') == '$PLAYWRIGHT_VERSION'; assert m.version('yt-dlp') == '$YTDLP_VERSION'; blocked=('boto3','botocore','s3transfer','psycopg','sqlalchemy','slack_sdk','google_auth_oauthlib','mcp','sentence_transformers'); assert all(u.find_spec(name) is None for name in blocked); import teamagent.media.contracts, teamagent.media.operations, teamagent.media.tool_contracts, teamagent.media.tool_worker, teamagent.media.sales25_runner, teamagent.media.concrete_runner; from teamagent.skills.first_visit.sales25_contract import verify_bundle; verify_bundle(); from pathlib import Path; from teamagent.skills.first_visit.kit import archive_kit_problems; assert not archive_kit_problems(Path('/app/tools/tiktok-skills-kit'))"; \
     test ! -e /app/src/teamagent/media/worker.py; \
     test "$(node -p "require('/app/tools/tiktok_scraper/node_modules/playwright-core/package.json').version")" = "$PLAYWRIGHT_VERSION"; \
     test ! -e /app/src/teamagent/mcp_gateway; \

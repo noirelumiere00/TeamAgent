@@ -26,6 +26,7 @@ from teamagent.media.contracts import (
     MAX_PROPOSAL_PPTX_BYTES,
     TIKTOK_N_PER_KW_MAX,
     AcquireOperation,
+    ConcretePptxOperation,
     FrameOperation,
     MediaJobRequest,
     MediaJobResult,
@@ -1533,6 +1534,90 @@ class MediaJobClient:
                 raise ValueError("sales25 QA identity differs")
         except (KeyError, TypeError, ValueError) as exc:
             raise MediaJobError("MEDIA_SALES25_QA_INVALID") from exc
+        return {"files": artifacts, "artifacts": references, "media_job_id": job_id}
+
+    def render_concrete_pptx(
+        self,
+        bundle: bytes,
+        *,
+        owner_id: str,
+        request_id: str,
+        request_fingerprint: str,
+        timeout_s: int = 480,
+    ) -> dict[str, Any]:
+        """Render one bounded owner snapshot, retaining immutable result references."""
+        if not isinstance(owner_id, str) or not owner_id.strip() or len(owner_id) > 200:
+            raise ValueError("concrete owner_id is required")
+        if not isinstance(request_id, str) or not request_id.strip() or len(request_id) > 200:
+            raise ValueError("concrete request_id is required")
+        if not 0 < len(bundle) <= MAX_INPUT_BYTES:
+            raise ValueError("concrete ZIP exceeds input bound")
+        identity = hashlib.sha256(json.dumps([owner_id, request_id]).encode()).hexdigest()
+        fingerprint = f"{request_fingerprint}:concrete-pptx:{identity}"
+        job_id = self._job_id(fingerprint)
+        references: list[dict[str, Any]] = []
+
+        def operation_factory(deadline_epoch_s: int) -> MediaOperation:
+            source = self.find_staged(
+                job_id=job_id, name="concrete-input.zip", deadline_epoch_s=deadline_epoch_s
+            )
+            if source is None:
+                source = self.stage_bytes(
+                    job_id=job_id,
+                    name="concrete-input.zip",
+                    body=bundle,
+                    content_type="application/zip",
+                    deadline_epoch_s=deadline_epoch_s,
+                )
+            elif (
+                source.sha256 != hashlib.sha256(bundle).hexdigest()
+                or source.size != len(bundle)
+                or source.content_type != "application/zip"
+            ):
+                raise MediaJobError("MEDIA_CONCRETE_INPUT_CONFLICT")
+            return ConcretePptxOperation(
+                kind="concrete_pptx", source=source, owner_id=owner_id, request_id=request_id
+            )
+
+        def capture_result(result: MediaJobResult) -> None:
+            references.extend(artifact.model_dump(mode="json") for artifact in result.artifacts)
+
+        artifacts, _metadata = self._run_staged(
+            job_id=job_id,
+            request_fingerprint=fingerprint,
+            timeout_s=timeout_s,
+            operation_factory=operation_factory,
+            capture_result=capture_result,
+        )
+        if "concrete-result.json" not in artifacts:
+            raise MediaJobError("MEDIA_CONCRETE_ARTIFACT_MISSING")
+        try:
+            qa = json.loads(artifacts["concrete-result.json"])
+            if (
+                qa["owner_id"] != owner_id
+                or qa["request_id"] != request_id
+                or qa["input_sha256"] != hashlib.sha256(bundle).hexdigest()
+                or qa["status"] not in {"build_verified", "incomplete", "failed"}
+                or not set(artifacts)
+                <= {"concrete.pptx", "concrete-result.json", "concrete-preflight.json"}
+            ):
+                raise ValueError("concrete result identity differs")
+            if qa["status"] == "build_verified":
+                report = json.loads(artifacts["concrete-preflight.json"])
+                if (
+                    not isinstance(report["counts"], dict)
+                    or qa["pptx_path"] != "concrete.pptx"
+                    or qa["pptx_sha256"] != hashlib.sha256(artifacts["concrete.pptx"]).hexdigest()
+                    or report["pptx_sha256"] != qa["pptx_sha256"]
+                    or report["pages"] != qa["slide_count"]
+                    or report["counts"].get("致命的", 0) != 0
+                    or report["counts"].get("重大", 0) != 0
+                ):
+                    raise ValueError("concrete verified artifact differs")
+            elif "concrete.pptx" in artifacts or qa["pptx_path"] is not None:
+                raise ValueError("unverified concrete PPTX cannot be returned")
+        except (KeyError, TypeError, ValueError) as exc:
+            raise MediaJobError("MEDIA_CONCRETE_RESULT_INVALID") from exc
         return {"files": artifacts, "artifacts": references, "media_job_id": job_id}
 
     def render_proposal_pptx(

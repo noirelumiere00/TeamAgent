@@ -482,6 +482,14 @@ def _output_slots(
                 ("sales25-qa.zip", "sales25-qa.zip", 16 * 1024 * 1024),
             )
         )
+    elif kind == "concrete_pptx":
+        slots.extend(
+            (
+                ("concrete.pptx", "concrete.pptx", MAX_OUTPUT_BYTES),
+                ("concrete-preflight.json", "concrete-preflight.json", 1024 * 1024),
+                ("concrete-result.json", "concrete-result.json", 1024 * 1024),
+            )
+        )
     elif kind == "pdf":
         slots.append(("document.pdf", "document.pdf", MAX_OUTPUT_BYTES))
     else:

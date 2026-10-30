@@ -253,3 +253,28 @@ def test_pptx_only_synthetic_smoke(
     assert {
         p.relative_to(inputs): p.read_bytes() for p in inputs.rglob("*") if p.is_file()
     } == original
+
+
+def test_concrete_runtime_retains_verified_archive_and_minimal_sources() -> None:
+    docker = (ROOT / "infra/docker/Dockerfile.teamagent-media-worker").read_text()
+    ignore = (ROOT / "infra/docker/Dockerfile.teamagent-media-worker.dockerignore").read_text()
+    # The js-deps stage pins both digests before the runtime stage copies the same bytes.
+    for tmp, name in (
+        ("/tmp/first-visit-kit.lock.json", "kit.lock.json"),
+        ("/tmp/first-visit-kit.tar.gz", BUNDLE.name),
+    ):
+        digest = hashlib.sha256((ROOT / "tools/first_visit" / name).read_bytes()).hexdigest()
+        assert f"printf '%s  %s\\n' {digest} {tmp} | sha256sum -c -" in docker
+        assert f"/app/tools/first_visit/{name}" in docker
+    assert "rm -f /tmp/teamagent-build-ca.pem /tmp/first-visit-kit.tar.gz" not in docker
+    assert "COPY --from=js-deps /tmp/first-visit-kit.tar.gz /app/tools/first_visit/" in docker
+    assert "COPY --from=js-deps /tmp/first-visit-kit.lock.json /app/tools/first_visit/" in docker
+    for relative in (
+        "src/teamagent/media/concrete_runner.py",
+        "src/teamagent/skills/first_visit/concrete.py",
+        "src/teamagent/skills/first_visit/contract.py",
+        "src/teamagent/skills/first_visit/kit.py",
+    ):
+        assert f"  {relative} " in docker and f"!{relative}\n" in ignore
+    assert "src/teamagent/skills/omiyage_report" not in docker
+    assert "assert not archive_kit_problems(Path('/app/tools/tiktok-skills-kit'))" in docker
