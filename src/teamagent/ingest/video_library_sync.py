@@ -27,7 +27,24 @@ from teamagent.observability.logging_config import configure_logging
 logger = structlog.get_logger(__name__)
 # 本番イメージに tzdata が無いので IANA 名は使わず固定 +9 時間で日本時間を表す
 JST = timezone(timedelta(hours=9))
-SOURCES_PATH = Path(__file__).resolve().parents[3] / "data" / "ingest_sources.yaml"
+
+
+def _default_sources_path() -> Path:
+    """ingest_sources.yaml の既定パス。
+
+    本番 image は no-editable install で、このファイルは site-packages にあるため
+    ``parents[3]`` はリポジトリ直下にならない（2026-10-30 本番の単独実行で FileNotFoundError）。
+    リポジトリの位置、作業ディレクトリ（image は WORKDIR /app に data/ を焼く）の順に探す。
+    """
+    candidates = [Path(__file__).resolve().parents[3], Path.cwd()]
+    for base in candidates:
+        path = base / "data" / "ingest_sources.yaml"
+        if path.is_file():
+            return path
+    return candidates[-1] / "data" / "ingest_sources.yaml"
+
+
+SOURCES_PATH = _default_sources_path()
 
 
 def read_batch(
