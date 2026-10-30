@@ -36,6 +36,7 @@ from teamagent.case_state import enabled as case_state_enabled
 from teamagent.ingest.industry_taxonomy import normalize_industry
 from teamagent.prompts.loader import load_prompt
 from teamagent.skills._shared.deai_text import strip_ai_decoration
+from teamagent.skills._shared.google_connection import google_connection_guard
 from teamagent.skills._shared.next_step import (
     DELIVER_SUGGESTION,
     append_suggestion,
@@ -587,6 +588,7 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
         )
         return self._retrieve(embedding, retrieval_input, ctx)
 
+    @google_connection_guard(lambda input: SearchOutput(answer="", total_cost_usd=0))
     def run(self, input: SearchInput, ctx: SkillContext) -> SearchOutput:
         """全経路の不在回答を、検索を広げてから確定する。"""
         if not self._not_found_recovery:

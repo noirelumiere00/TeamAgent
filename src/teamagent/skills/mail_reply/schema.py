@@ -102,6 +102,12 @@ class ReplyThreadCandidate(BaseModel):
 class MailReplyOutput(BaseModel):
     """返信ドラフト結果。送信はしない（Gmail 下書き保存のみ）。"""
 
+    message: str = Field(
+        default="",
+        exclude_if=lambda value: not value,
+        description="連携失敗の共通案内。message はそのまま本人へ返す",
+    )
+
     client_name: str
     created: bool = Field(description="Gmail 下書きを作成できたか")
     to_display: str = Field(

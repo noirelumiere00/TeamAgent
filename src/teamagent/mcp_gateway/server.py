@@ -1179,6 +1179,9 @@ async def dispatch_tool(
     # LEGACY の raw["slack_user_id"] は未検証なので不採用。metadata 契約は変えない。
     usage_user_id = verified_caller.slack_user_id if verified_caller is not None else None
 
+    if verified_caller is not None:
+        metadata["_google_connection_session"] = getattr(verified_caller, "session_sha256", "")
+
     skill_args = {k: v for k, v in arguments.items() if k != USER_CONTEXT_KEY}
 
     # ── 決定論分岐: 「連携」依頼は LLM の tool 選択を待たず oauth_connect へ寄せる ──
@@ -1565,6 +1568,13 @@ async def dispatch_tool(
                 )
             if output is None:
                 output = await asyncio.to_thread(skill.run, skill_input, ctx)
+            if ctx.metadata.pop("_google_connection_failed", False):
+                from teamagent.skills._shared.google_connection import reconnect_message
+
+                message = await asyncio.to_thread(reconnect_message, ctx)
+                output = output.model_copy(
+                    update={"error": "reauth_needed", "message": message, "answer": message}
+                )
         _elapsed_ms = int((time.perf_counter() - _started) * 1000)
     except detached_jobs.DetachInterruptedError:
         # 順番待ちのまま終了処理に入った（skill.run は走っていない＝usage も quota も無し）。
@@ -1631,7 +1641,7 @@ async def dispatch_tool(
     # source_uri は model_dump から外れる内部項目なので、dump 前の出力オブジェクトから取る。
     usage_metadata = source_usage_metadata(name, output)
     followup_available = None
-    if name == SEARCH_TOOL_NAME:
+    if name == SEARCH_TOOL_NAME and getattr(output, "error", "") != "reauth_needed":
         followup_available = await asyncio.to_thread(
             document_followup.remember,
             skill,
@@ -1679,6 +1689,24 @@ async def dispatch_tool(
         skill_args=skill_args,
         metadata=usage_metadata,
     )
+    if isinstance(data, dict) and data.get("error") == "reauth_needed":
+        from teamagent.skills.oauth_connect.skill import start_links_enabled
+
+        if start_links_enabled():
+            message = data.get("message", "")
+            return [
+                TextContent(
+                    type="text",
+                    text=json.dumps(
+                        {
+                            "error": "reauth_needed",
+                            "message": message,
+                            "guidance_suppressed": not bool(message),
+                        },
+                        ensure_ascii=False,
+                    ),
+                )
+            ]
     # ── 直接投稿（USE_DIRECT_SUMMARY_POST 既定OFF＝素通り・mcp_gateway/direct_summary.py）──
     # 対象なら slack_summary を mcp が依頼元の DM へ直接出し、Aico には「投稿済み」だけを返す
     # （Aico に文面を組み直させない・URL を落とさせない）。届かなければ今までどおり返す。

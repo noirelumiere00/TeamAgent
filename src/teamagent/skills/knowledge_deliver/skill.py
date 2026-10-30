@@ -36,6 +36,7 @@ from teamagent.skills._shared.drive_slack_delivery import (
     prepare_drive_files,
     safe_filename,
 )
+from teamagent.skills._shared.google_connection import google_connection_guard
 from teamagent.skills._shared.private_surface import is_private_surface
 from teamagent.skills._shared.user_context import USER_CONTEXT_RULE
 from teamagent.skills.base import BaseSkill, SkillContext, register
@@ -222,6 +223,7 @@ class KnowledgeDeliverSkill(BaseSkill[KnowledgeDeliverInput, KnowledgeDeliverOut
         self._slack = slack
         self._gdrive = gdrive
 
+    @google_connection_guard(lambda input: KnowledgeDeliverOutput(answer=""))
     def run(self, input: KnowledgeDeliverInput, ctx: SkillContext) -> KnowledgeDeliverOutput:
         log = ctx.bind_logger(self.name)
         compact = ctx.metadata.get("_search_compact_answer") is True

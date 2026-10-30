@@ -80,6 +80,12 @@ class KnowledgeDeliveryReceipt(BaseModel):
 class KnowledgeDeliverOutput(BaseModel):
     """knowledge_deliver の出力（実ファイルは依頼者 DM に直接添付済）。"""
 
+    error: str = Field(
+        default="", exclude_if=lambda value: not value, description="連携失敗の共通コード"
+    )
+    message: str = Field(
+        default="", exclude_if=lambda value: not value, description="本人へそのまま返す連携の案内"
+    )
     answer: str = Field(description="該当資料の要約（引用付き）")
     references: list[KnowledgeRef] = Field(default_factory=list, description="ヒットした資料一覧")
     delivered_count: int = Field(default=0, description="DM に添付できたファイル数")

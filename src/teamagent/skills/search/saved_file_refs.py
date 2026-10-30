@@ -7,6 +7,8 @@ from typing import TYPE_CHECKING, Any
 
 import structlog
 
+from teamagent.skills._shared.google_connection import record_google_failure
+
 if TYPE_CHECKING:
     from teamagent.adapters.file_record_lookup import SavedFileRecord
     from teamagent.skills.base import SkillContext
@@ -47,6 +49,7 @@ def resolve_saved_files(
             store = _build_token_store()
         token = store.get(ctx.metadata["user_email"])
         if token is None:
+            record_google_failure(ctx=ctx)
             return empty
         sheet = GSheetsClient.from_user_token(token, write=False)
         records = sheet.lookup_saved_file_records(
@@ -63,6 +66,7 @@ def resolve_saved_files(
         )
         drive = GDriveClient.from_user_token(token, readonly=True)
     except Exception as exc:
+        record_google_failure(exc, ctx)
         logger.warning(
             "saved_file_record_lookup_failed", request_id=ctx.request_id, error=type(exc).__name__
         )
@@ -98,6 +102,7 @@ def resolve_saved_files(
                     }
                 )
             except Exception as exc:
+                record_google_failure(exc, ctx)
                 logger.warning(
                     "saved_file_destination_unverified",
                     request_id=ctx.request_id,

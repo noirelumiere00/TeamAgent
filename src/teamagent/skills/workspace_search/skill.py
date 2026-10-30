@@ -16,6 +16,10 @@ from pydantic import BaseModel
 
 from teamagent.adapters.oauth_token_store import TokenStore
 from teamagent.observability import scrub_value
+from teamagent.skills._shared.google_connection import (
+    GoogleConnectionError,
+    google_connection_guard,
+)
 from teamagent.skills._shared.mail_connection import CONNECT_SUFFIX
 from teamagent.skills.base import BaseSkill, SkillContext, register
 from teamagent.skills.workspace_search.schema import (
@@ -55,6 +59,7 @@ class WorkspaceSearchSkill(BaseSkill[WorkspaceSearchInput, WorkspaceSearchOutput
     def __init__(self, token_store: TokenStore | None = None) -> None:
         self._token_store = token_store
 
+    @google_connection_guard(lambda input: WorkspaceSearchOutput(service=input.service, count=0))
     def run(self, input: WorkspaceSearchInput, ctx: SkillContext) -> WorkspaceSearchOutput:
         log = ctx.bind_logger(self.name)
         log.info("workspace_search_start", service=input.service)
@@ -71,7 +76,7 @@ class WorkspaceSearchSkill(BaseSkill[WorkspaceSearchInput, WorkspaceSearchOutput
             raise PermissionError("TokenStore が未設定です（workspace_search は連携前提）")
         token = self._token_store.get(requester)
         if token is None:
-            raise PermissionError("Workspace が未連携です。利用には" + CONNECT_SUFFIX)
+            raise GoogleConnectionError("Workspace が未連携です。利用には" + CONNECT_SUFFIX)
 
         if input.service == "calendar":
             from teamagent.adapters.gcalendar_client import GCalendarClient

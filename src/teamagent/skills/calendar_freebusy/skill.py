@@ -30,6 +30,7 @@ from pydantic import BaseModel
 
 from teamagent.adapters.gcalendar_client import GCalendarClient
 from teamagent.adapters.oauth_token_store import TokenStore
+from teamagent.skills._shared.google_connection import google_connection_guard
 from teamagent.skills._shared.mail_connection import (
     FETCH_SCOPE_MISSING,
     FETCH_TOKEN_EXPIRED,
@@ -144,6 +145,7 @@ class CalendarFreeBusySkill(BaseSkill[CalendarFreeBusyInput, CalendarFreeBusyOut
         # テストで「今」を固定するための注入口（既定は実時刻）。
         self._now_factory = now_factory or (lambda: _dt.datetime.now(tz=_JST))
 
+    @google_connection_guard(lambda input: CalendarFreeBusyOutput())
     def run(self, input: CalendarFreeBusyInput, ctx: SkillContext) -> CalendarFreeBusyOutput:
         log = ctx.bind_logger(self.name)
 
