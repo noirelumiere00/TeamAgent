@@ -1726,6 +1726,19 @@ class OmiyageReportStatusSkill(BaseSkill[OmiyageReportStatusInput, OmiyageReport
                         self._thread_launcher(resume, f"sales25-resume-{input.job_id}")
                     except Exception:
                         admission.release()
+                        self._store.mark_failed(
+                            input.job_id,
+                            "MCP_RESTARTED",
+                            expected_statuses=(row["status"],),
+                            **self._timestamp_cas_args(row),
+                        )
+                else:
+                    return OmiyageReportStatusOutput(
+                        job_id=input.job_id,
+                        status="queued",
+                        retry_after_seconds=self._retry_after_seconds,
+                        message="作業は中断しており、再開の順番待ちです。現在は作成していません。",
+                    )
                 row = self._store.get_job(input.job_id) or row
             return self._sales25.status(input.job_id, row, ctx)
 

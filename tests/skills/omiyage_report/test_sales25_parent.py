@@ -805,3 +805,33 @@ def test_depth_setting_is_the_target_for_shortfall(monkeypatch: pytest.MonkeyPat
     accepted = build(short, Pipeline(actual=37)).run(request(), ctx())
     lines = "\n".join(result(short, accepted.job_id).summary_lines)
     assert "50本目標→37本取得" in lines and "100本" not in lines
+
+
+@pytest.mark.parametrize("launch_fails", [False, True])
+def test_orphan_status_does_not_claim_running_when_resume_cannot_start(
+    monkeypatch: pytest.MonkeyPatch, launch_fails: bool
+) -> None:
+    import teamagent.skills.omiyage_report.skill as module
+
+    now = [datetime(2026, 10, 23, tzinfo=UTC)]
+    store = ProposalJobStore(table_name="", memory={}, clock=lambda: now[0])
+    pending: list[Callable[[], None]] = []
+    accepted = build(
+        store, Pipeline(), thread_launcher=lambda target, name: pending.append(target)
+    ).run(request(), ctx())
+    store.mark_running(accepted.job_id)
+    now[0] += timedelta(minutes=10)
+    admission = JobAdmission(1)
+    if not launch_fails:
+        assert admission.try_acquire(eta_minutes=180)
+    monkeypatch.setattr(module, "_ADMISSION", admission)
+
+    def launch(target: Callable[[], None], name: str) -> None:
+        raise RuntimeError("thread unavailable")
+
+    output = OmiyageReportStatusSkill(
+        store=store, clock=lambda: now[0], thread_launcher=launch
+    ).run(OmiyageReportStatusInput(job_id=accepted.job_id), ctx())
+    assert output.status == ("failed" if launch_fails else "queued")
+    if not launch_fails:
+        assert "現在は作成していません" in output.message
