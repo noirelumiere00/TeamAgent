@@ -525,6 +525,27 @@ export function classifyVideoUrl(text) {
   return first?.kind ?? null;
 }
 
+// 投稿 URL だけの発話（ad_label_check）。SOUL に常設せず、該当した回だけ指示を差し込む。
+// URL 以外に残してよいのは確認を頼む短い語だけ（「この動画を分析して」等は video_analysis の領分）。
+const AD_LABEL_URL_RE = /<?(https?:\/\/[^\s<>|]+)(?:\|[^>\n]*)?>?/giu;
+const AD_LABEL_REST_RE =
+  /^[\s、。,.・!！?？]*(?:(?:タイアップ|PR|ＰＲ|ステマ|広告|ラベル|表記|表示|確認|チェック|して|ください|お願い(?:します)?|を|の|と|や)[\s、。,.・!！?？]*)*$/iu;
+const AD_LABEL_MAX_URLS = 20;
+export const AD_LABEL_ROUTE_CONTEXT =
+  "この発話は TikTok / Instagram / YouTube の投稿 URL だけです。`ad_label_check` が使えるなら、" +
+  "urls に URL をすべてそのまま渡し、戻り値の slack_summary を「TT」「IG」「YT」の並びのまま返してください" +
+  "（要約し直さない）。使えないときは通常どおり答えてください。";
+
+// 本文が投稿 URL（VIDEO_URL_RULES の 3 媒体）だけなら URL 数、そうでなければ 0。
+export function adLabelUrlCount(text) {
+  if (typeof text !== "string") return 0;
+  const head = text.slice(0, VIDEO_URL_SCAN_LIMIT);
+  const urls = [...head.matchAll(AD_LABEL_URL_RE)].map(m => m[1]);
+  if (urls.length === 0 || urls.length > AD_LABEL_MAX_URLS) return 0;
+  if (!AD_LABEL_REST_RE.test(head.replace(AD_LABEL_URL_RE, " "))) return 0;
+  return urls.every(url => VIDEO_URL_RULES.some(([, rule]) => rule.test(url))) ? urls.length : 0;
+}
+
 // 本文に分析・切り出しの依頼語があるか（真偽だけ）。
 export function hasVideoRequestIntent(text) {
   return typeof text === "string" && VIDEO_REQUEST_RE.test(text.slice(0, VIDEO_URL_SCAN_LIMIT));
@@ -3855,6 +3876,7 @@ export function createCallerIdentityPlugin({
           existing.videoUrlKind = ingress.videoUrlKind;
           existing.videoRequestIntent = ingress.videoRequestIntent === true;
         }
+        if (ingress.adLabelUrlCount && !existing.adLabelUrlCount) existing.adLabelUrlCount = ingress.adLabelUrlCount;
         if (ingress.searchRequired) existing.searchRequired = ingress.searchRequired;
         if (ingress.videoAnalysisQuerySlots?.length) existing.videoAnalysisQuerySlots = ingress.videoAnalysisQuerySlots;
         if (existing.requestText === undefined) existing.requestText = ingress.requestText;
@@ -4014,6 +4036,7 @@ export function createCallerIdentityPlugin({
       connectShape,
       videoUrlKind,
       videoRequestIntent,
+      adLabelUrlCount: adLabelUrlCount(event?.content),
       videoAnalysisQuerySlots: explicitVideoQuerySlots(event?.content),
       searchRequired: legacySearchRequirement(event?.content),
       hasMedia,
@@ -4036,6 +4059,7 @@ export function createCallerIdentityPlugin({
       ingress.videoUrlKind = existing.videoUrlKind;
       ingress.videoRequestIntent = existing.videoRequestIntent === true;
     }
+    if (existing?.adLabelUrlCount && !ingress.adLabelUrlCount) ingress.adLabelUrlCount = existing.adLabelUrlCount;
     if (existing?.searchRequired && !ingress.searchRequired) ingress.searchRequired = existing.searchRequired;
     if (ingress.requestText === undefined) ingress.requestText = existing?.requestText;
     if (ingress.aicoUsageQuestion === undefined) ingress.aicoUsageQuestion = existing?.aicoUsageQuestion;
@@ -7810,7 +7834,13 @@ export function createCallerIdentityPlugin({
         const routed = await prepareInboundRoute(event, ctx, api.logger);
         if (inboundRouterMode === "enforce" && !routed) await restoreDocumentFollowup(event, ctx);
         const memo = await injectPersonalMemory(event, ctx, api.logger);
-        if (routed) return {...memo, ...restore, appendContext: [restore?.appendContext, routed.appendContext].filter(Boolean).join("\n\n")};
+        const adLabel = ingressByRun.get(canonicalInvocationId(ctx?.runId))?.adLabelUrlCount
+          ? AD_LABEL_ROUTE_CONTEXT : undefined;
+        if (adLabel) emitPluginLog(api.logger, "info", "ad label route outcome=context_appended");
+        if (routed || adLabel) {
+          return {...memo, ...restore,
+            appendContext: [restore?.appendContext, routed?.appendContext, adLabel].filter(Boolean).join("\n\n")};
+        }
         if (restore === undefined) return memo;
         return memo === undefined ? restore : { ...memo, ...restore };
       });

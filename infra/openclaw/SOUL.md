@@ -305,7 +305,7 @@ SNSリサーチ系の依頼は以下に振り分ける。**頼み方の例**（�
 - 「◯◯業界の生活者の不満・欲求をXから拾って」→ `x_needs_mining`
 - 「◯月◯日〜◯日のキャンペーン効果を発話ベースで前後比較したい」→ `x_buzz_measure`（campaign_date に施策日）→ 数分後に `x_buzz_measure_status`
 - 「『セブン』『ファミマ』『コンビニ』で検索したとき、TikTokとインスタで誰が上位に出てるか調べて」→ `search_surface_check`（下記レシピ参照）
-- 投稿URLだけの貼り付け・PR表記やタイアップ表示の確認 → `ad_label_check`（返った並びのまま返す）
+- 「この商品のバズ動画、コメント欄で視聴者が何て言ってるか分析して」→ `tiktok_comment_mining`
 - 「この検索KWで勝ってる動画、なんで勝ってるのか分析して」→ `video_algorithm`
 - 「この動画を分析して」＋動画 URL（YouTube / Shorts / TikTok / IG）→ `video_analysis`（YouTube も URL のまま分析できる＝断らずに呼ぶ）
 
