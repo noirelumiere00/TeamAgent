@@ -18,6 +18,8 @@ from pathlib import Path
 
 import structlog
 
+# 絵文字の除去はレポートの PowerPoint（_deck）と共用（strip_display_symbols はここからも import できる）。
+from teamagent.skills._deck.text import strip_display_symbols as strip_display_symbols
 from teamagent.skills.omiyage_report.fmt.contract import (
     AData,
     BData,
@@ -40,22 +42,7 @@ from teamagent.skills.omiyage_report.fmt.spec import FmtDeckSpec
 
 logger = structlog.get_logger(__name__)
 
-# 絵文字・装飾記号の除去（矢印・約物は残す）。元データは改変しない=表示時のみ。
-_EMOJI = re.compile(
-    "["
-    "\U0001f000-\U0001faff"  # 絵文字ブロック全般
-    "\U00002600-\U000027bf"  # Misc Symbols / Dingbats
-    "\U0001f1e6-\U0001f1ff"  # Regional indicators
-    "⬀-⯿"  # ⭐ 等
-    "︎️‍⃣"  # VS15/16・ZWJ・囲み keycap
-    "]+"
-)
-
 _NUMERIC_CELL = re.compile(r"^[0-9,.%+\-/KMkm万億件本位回人]+$")
-
-
-def strip_display_symbols(text: str) -> str:
-    return _EMOJI.sub("", text)
 
 
 def shorten_url(url: str, *, max_len: int = 42) -> str:
