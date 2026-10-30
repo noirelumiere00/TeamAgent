@@ -24,7 +24,6 @@ from teamagent.adapters.apify_client import ApifyClient, ApifyRunResult
 from teamagent.adapters.apify_media_cases import ApifyCaseAssets
 from teamagent.adapters.cost_guard import CostGuard, CostLimitExceededError
 from teamagent.adapters.embeddings_client import build_embedder_from_env
-from teamagent.adapters.gemini_client import GeminiClient
 from teamagent.adapters.pgvector_client import PgVectorClient
 from teamagent.adapters.proposal_job_store import ProposalJobStore
 from teamagent.identity import shared_company_domains_from_env
@@ -361,9 +360,7 @@ class MediaCaseSearchSkill(BaseSkill[MediaCaseInput, MediaCaseOutput]):
                     raise ValueError("company sharing scope unavailable")
                 self.jobs.mark_running(job_id)
                 apify = self._apify or ApifyClient.from_env(ledger=CostGuard.from_env())
-                distiller = self._distiller or CaseDistiller(
-                    GeminiClient.from_env(), CostGuard.from_env()
-                )
+                distiller = self._distiller or CaseDistiller.from_env(CostGuard.from_env())
                 pending = [
                     handle
                     for handle in accounts()
@@ -447,9 +444,7 @@ class MediaCaseSearchSkill(BaseSkill[MediaCaseInput, MediaCaseOutput]):
             if alive is None:
                 raise RuntimeError("another media ingestion is active")
             apify = self._apify or ApifyClient.from_env(ledger=CostGuard.from_env())
-            distiller = self._distiller or CaseDistiller(
-                GeminiClient.from_env(), CostGuard.from_env()
-            )
+            distiller = self._distiller or CaseDistiller.from_env(CostGuard.from_env())
             pending = [
                 h
                 for h in accounts()
