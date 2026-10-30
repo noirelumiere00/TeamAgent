@@ -50,14 +50,14 @@ def test_submit_to_generation_preserves_optional_date(
     monkeypatch.setenv("PROPOSAL_RESEARCH_AUTO", "1")
     template = tmp_path / "template.pptx"
     _template(template)
-    prs = Presentation(template)
+    prs = Presentation(str(template))
     prs.slides[4].shapes.add_textbox(
         0, 0, Inches(9), Inches(1)
     ).text = "配信期間: {{PB-DATE:-56:%Y年%m月%d日}}～{{PB-DATE:21:%Y年%m月%d日}}"
     prs.slides[4].shapes.add_textbox(
         0, Inches(1), Inches(9), Inches(1)
     ).text = "投稿月: {{PB-MONTH}}"
-    prs.save(template)
+    prs.save(str(template))
     _pin_template(monkeypatch, template)
     monkeypatch.setenv("PROPOSAL_BUILDER_TEMPLATE_PATH", str(template))
     output = tmp_path / "output.pptx"
@@ -70,11 +70,12 @@ def test_submit_to_generation_preserves_optional_date(
         def run(self, input: ProposalDeckInput, ctx: SkillContext) -> ProposalDeckOutput:
             # 調査本文の生成は対象外。95枠の不足契約を通し、日付メタデータは実経路で渡す。
             data = {
-                "placeholders": {},
+                "placeholders": {1: "投稿開始 2050/12/31"},
                 "skipped_placeholders": [
-                    {"id": pid, "reason": "要確認（データ未検出）"} for pid in sorted(VALID_IDS)
+                    {"id": pid, "reason": "要確認（データ未検出）"}
+                    for pid in sorted(VALID_IDS - {1})
                 ],
-                "posting_start_date": "2050-12-31",
+                "posting_start_date": "未定" if backend == "local" else "",
                 "auxiliary_placeholders": {"PB-MONTH": "2050年12月"},
             }
             composer = ProposalDeckSkill._finalize_composer(data, input)
@@ -96,7 +97,11 @@ def test_submit_to_generation_preserves_optional_date(
             return super().run(input, ctx).model_copy(update={"pptx_path": str(output)})
 
     deck = RenderingDeck()
-    builder = ProposalBuilderSkill(search=object(), deck=deck, account_db_path="unused.xlsx")
+    builder = ProposalBuilderSkill(
+        search=object(),
+        deck=deck,  # type: ignore[arg-type]
+        account_db_path="unused.xlsx",
+    )
     memory: dict[str, dict[str, Any]] = {}
     store = ProposalJobStore(table_name="", memory=memory)
     request = ProposalBuilderSubmitInput.model_validate(
@@ -131,7 +136,7 @@ def test_submit_to_generation_preserves_optional_date(
         "posting_start_date"
     ] == date_input.get("posting_start_date")
     assert deck.inputs[0].proposal_date == date(2026, 10, 22)
-    generated = Presentation(output)
+    generated = Presentation(str(output))
     assert len(generated.slides) == 68
     texts = [
         shape.text for slide in generated.slides for shape in slide.shapes if shape.has_text_frame
@@ -151,7 +156,9 @@ def test_submit_to_generation_preserves_optional_date(
         )
         assert month == "投稿月: 2027年01月"
     combined = "\n".join(texts)
-    assert "2050" not in combined
+    if request.posting_start_date is None:
+        assert "2050" not in combined
+        assert "投稿開始 未定" in combined
     assert "2026年10月22日" in combined
     assert "4週間" in combined
     assert "{{PB-" not in combined

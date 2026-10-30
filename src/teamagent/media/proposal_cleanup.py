@@ -118,11 +118,17 @@ def finalize_proposal_content(
     product_sector: str = "",
     proposal_date: date | None = None,
     posting_start_date: date | None = None,
+    specified_periods: tuple[str, ...] = (),
     agency_route: bool = True,
 ) -> None:
     """出荷前に本文を清掃し、業種選択・日付・見本・文字数をノートへ記録する。"""
     from teamagent.media.operations import _set_text_keeping_format
-    from teamagent.media.proposal_dates import proposal_today, schedule_warnings
+    from teamagent.media.proposal_dates import (
+        is_schedule_heading,
+        proposal_today,
+        schedule_warnings,
+        undated_schedule_text,
+    )
 
     excluded = set(bu2_slide_ids) if business_unit == "BU2" else set(bu1_slide_ids or ())
     emme = [slide for slide in presentation.slides if slide.slide_id in emme_slide_ids]
@@ -138,7 +144,40 @@ def finalize_proposal_content(
             presentation.slides._sldIdLst.remove(slide_id)
 
     for slide in presentation.slides:
-        for frame in _text_frames(slide.shapes):
+        frames = list(_text_frames(slide.shapes))
+        schedule_label = next(
+            (
+                frame.text
+                for frame in frames
+                if not hasattr(frame._parent, "_tc") and is_schedule_heading(frame.text)
+            ),
+            "",
+        )
+        for frame in frames:
+            if posting_start_date is None:
+                field_label = schedule_label
+                cell = getattr(frame._parent, "_tc", None)
+                if cell is not None:
+                    row = cell.getparent()
+                    column = row.xpath("./a:tc").index(cell)
+                    header = row.getparent().xpath("./a:tr")[0].xpath("./a:tc")[column]
+                    field_label += " " + " ".join(
+                        node.text or ""
+                        for part in (header, row[0])
+                        for node in part.xpath(".//a:t")
+                    )
+                # 本文の run には生の改行が入ることがある（事例一覧など）。段落区切りと混ぜない。
+                originals = [p.text.replace("\n", "\v") for p in frame.paragraphs]
+                replaced = undated_schedule_text(
+                    "\n".join(originals),
+                    field_label=field_label,
+                    specified_periods=specified_periods,
+                )
+                for paragraph, original, text in zip(
+                    frame.paragraphs, originals, replaced.split("\n"), strict=True
+                ):
+                    if text != original:
+                        _set_text_keeping_format([paragraph], text, 0)
             text = "".join(p.text for p in frame.paragraphs)
             if not text:
                 continue
