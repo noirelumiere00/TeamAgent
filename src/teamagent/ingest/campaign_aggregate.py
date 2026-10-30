@@ -18,11 +18,12 @@
 from __future__ import annotations
 
 import hashlib
+import math
 import re
 import statistics
 import unicodedata
 from collections import Counter
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Iterator, Sequence
 from dataclasses import dataclass
 
 ADVERTISER_COL = "広告主名"
@@ -73,8 +74,8 @@ def is_missing(value: object) -> bool:
 
 
 def to_number(value: object) -> float | None:
-    """``1,125`` / ``0.12%`` / ``1125.0`` を数値にする。数値でなければ None。"""
-    text = _clean(value).replace(",", "").replace("％", "%")
+    """``1,125`` / ``0.12%`` / ``¥0`` / ``1125.0`` を数値にする。数値でなければ None。"""
+    text = _clean(value).replace(",", "").replace("％", "%").removeprefix("¥").removeprefix("￥")
     if not text or text.lower() in MISSING_VALUES:
         return None
     percent = text.endswith("%")
@@ -83,6 +84,8 @@ def to_number(value: object) -> float | None:
     try:
         number = float(text)
     except ValueError:
+        return None
+    if not math.isfinite(number):
         return None
     return number / 100.0 if percent else number
 
@@ -215,20 +218,34 @@ class AccountAggregate(_VideoStats):
         return sum(1 for v in self.videos if v.advertiser and v.campaign)
 
 
+def iter_raw_url_rows(
+    headers: Sequence[str], rows: Iterable[Sequence[object]]
+) -> Iterator[tuple[str, dict[str, str]]]:
+    """全体Raw の URL 結合を集計・ライブラリで共有する（完全一致・入力順）。"""
+    idx = _index(headers)
+    if POST_DATE_URL_COL not in idx:
+        return
+    for row in rows:
+        url = _cell(row, idx, POST_DATE_URL_COL)
+        if url:
+            yield url, {column: _cell(row, idx, column) for column in idx}
+
+
+def normalize_post_date(value: object) -> str:
+    """全体Raw の日付区切り（空白・ハイフン・スラッシュ）を ISO 形式にそろえる。"""
+    return re.sub(
+        r"^(\d{4})[ /-](\d{2})[ /-](\d{2})(?=T|\s|$)", r"\1-\2-\3", _clean(value), count=1
+    )
+
+
 def build_post_date_index(
     headers: Sequence[str], rows: Iterable[Sequence[object]]
 ) -> dict[str, str]:
     """「全体Raw」タブから 動画URL → 投稿日（YYYY-MM-DD）の索引を作る。列が無ければ空。"""
-    idx = _index(headers)
-    iu = idx.get(POST_DATE_URL_COL)
-    it = idx.get(POST_DATE_COL)
-    if iu is None or it is None:
-        return {}
     out: dict[str, str] = {}
-    for row in rows:
-        url = _clean(row[iu]) if iu < len(row) else ""
-        day = _clean(row[it])[:10] if it < len(row) else ""
-        if url and _DATE_RE.match(day):
+    for url, row in iter_raw_url_rows(headers, rows):
+        day = normalize_post_date(row.get(POST_DATE_COL, ""))[:10]
+        if _DATE_RE.match(day):
             out.setdefault(url, day)
     return out
 
@@ -576,5 +593,7 @@ __all__ = [
     "format_account_document",
     "format_campaign_document",
     "is_missing",
+    "iter_raw_url_rows",
+    "normalize_post_date",
     "to_number",
 ]

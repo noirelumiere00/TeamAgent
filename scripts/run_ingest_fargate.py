@@ -8,17 +8,19 @@ Fargate では task definition の ``secrets[].valueFrom`` で SM secret を直�
 
 env 注入は task definition 側で完結するので、本スクリプトは shell も load_secrets.sh も呼ばない（=
 Fargate の中で 1 プロセスで完結）。
+動画ライブラリ同期の頻度は ingest と同じ平日 18:00 JST。土日も要るなら専用スケジュールに分ける（同期モジュールはそのまま使える）。
 """
 
 from __future__ import annotations
 
 import hashlib
-import json
 import os
 import sys
 from pathlib import Path
 
 import structlog
+
+from teamagent.adapters.google_oauth_env import expand_google_oauth_json
 
 logger = structlog.get_logger(__name__)
 
@@ -110,29 +112,6 @@ def _resolve_sources_yaml() -> str | None:
     return _S3_YAML_LOCAL
 
 
-def _expand_google_oauth_json() -> None:
-    """``GOOGLE_OAUTH_JSON`` を 3 つの env に展開する（既に個別 env があれば上書きしない）。"""
-    raw = os.environ.get("GOOGLE_OAUTH_JSON", "").strip()
-    if not raw:
-        return
-    try:
-        payload = json.loads(raw)
-    except json.JSONDecodeError as exc:
-        print(
-            f"[run_ingest_fargate] WARN: GOOGLE_OAUTH_JSON の JSON parse 失敗: {exc}",
-            file=sys.stderr,
-        )
-        return
-    for key, env_name in (
-        ("client_id", "GOOGLE_CLIENT_ID"),
-        ("client_secret", "GOOGLE_CLIENT_SECRET"),
-        ("refresh_token", "GOOGLE_OAUTH_REFRESH_TOKEN"),
-    ):
-        value = payload.get(key)
-        if value and not os.environ.get(env_name):
-            os.environ[env_name] = str(value)
-
-
 def _materialize_vertex_sa() -> None:
     """``VERTEX_SA_JSON`` env をファイル化して ADC に渡す（EC2 load_secrets.sh と同方式）。"""
     raw = os.environ.get("VERTEX_SA_JSON", "").strip()
@@ -147,7 +126,7 @@ def _materialize_vertex_sa() -> None:
 
 
 def main() -> int:
-    _expand_google_oauth_json()
+    expand_google_oauth_json()
     _materialize_vertex_sa()
 
     # 引数は ENV で渡す（task definition env で上書き可・既定は EC2 run_ingest.sh と同一）。
@@ -177,7 +156,23 @@ def main() -> int:
     # サブモジュールの main() を呼ぶか、runpy で起動する。シンプルに runpy で。
     import runpy
 
-    runpy.run_path("scripts/ingest_sources.py", run_name="__main__")
+    try:
+        runpy.run_path("scripts/ingest_sources.py", run_name="__main__")
+    except SystemExit as exc:
+        if exc.code not in (None, 0):
+            raise
+
+    try:
+        from teamagent.ingest.video_library_sync import main as sync_video_library
+
+        code = sync_video_library(
+            ["--dry-run"] if dry_run else [],
+            sources_path=Path(yaml_override) if yaml_override else _BAKED_YAML,
+        )
+        if code:
+            logger.error("video_library_failed", exit_code=code)
+    except (Exception, SystemExit) as exc:
+        logger.error("video_library_failed", error=type(exc).__name__)
     print("[run_ingest_fargate] done", flush=True)
     return 0
 

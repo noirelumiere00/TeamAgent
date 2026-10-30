@@ -476,3 +476,16 @@ def test_iter2_saves_average_uses_observed_values_only() -> None:
     ]
     agg = aggregate_campaigns(HEADERS, rows)[0]
     assert "保存 平均 50、" in format_campaign_document(agg)
+
+
+@pytest.mark.parametrize(
+    "timestamp",
+    ["2025 11 01T11:00:00.000Z", "2025/11/01T11:00:00.000Z", "2025-11-01T11:00:00.000Z"],
+)
+def test_post_dates_normalize_space_and_slash_separators(timestamp: str) -> None:
+    dates = build_post_date_index(
+        RAW_HEADERS, (("acct_a", "…", "1125", timestamp, "https://t/v/1"),)
+    )
+    assert dates == {"https://t/v/1": "2025-11-01"}
+    earth = aggregate_campaigns(HEADERS, ROWS, dates)[0]
+    assert earth.period == ("2025-11-01", "2025-11-01")
