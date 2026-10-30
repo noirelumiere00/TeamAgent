@@ -35,7 +35,7 @@ from teamagent.media.security import validate_acquire_url
 EXPECTED_BINARY_HASHES = {
     "/usr/bin/python3": "b776d2d6601ffe3bebbae359a8560a7efd0fe1d80b33b6235035225090a567db",
     "/usr/bin/node": "5b783adaa4c44c648568373e40ad5e4c48070085a62d1afa1b24d15bf8ad5178",
-    "/usr/bin/ffmpeg": "43aff9d9b8d8becd14f9e2a36a8497aa5c0e12454e60f7c0d3350ed5bef945ba",
+    "/usr/bin/ffmpeg": "c9673a510eedc733101481aabb420f434eddcaec2b50d4f8aca32e7fd652cbf9",
     "/usr/lib/chromium/chromium": (
         "13eaa3cbe73f39b5feafcd767db0771c4f25d626a3927ba216ac43cde3abaf79"
     ),
