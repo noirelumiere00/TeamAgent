@@ -205,7 +205,7 @@ def test_rescue_triggers_even_when_only_new_flags_on(monkeypatch: pytest.MonkeyP
     pg = _pgvector([])
     _skill(pg).run(input=SearchInput(query="出光興産", top_k=5), ctx=SkillContext())
     calls = pg.search_similar_new_schema.call_args_list
-    assert len(calls) == 2  # 初回（フィルタ無し→fail-open 再検索なし）+ rescue
+    assert len(calls) == 6  # 初回＋共通救済2段、それぞれ exclusion_rescue も実行。
     assert _flags(calls[0]) == (True, False)
     assert _flags(calls[1]) == (False, False)
 

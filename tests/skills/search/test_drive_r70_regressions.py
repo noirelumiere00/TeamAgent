@@ -13,7 +13,7 @@ from teamagent.skills.search.composite import SlackItem, SlackLookup
 from teamagent.skills.search.expand import ExpansionResult
 from teamagent.skills.search.fanout_sources import SourceResult
 from teamagent.skills.search.schema import SearchInput, SlackHitOut
-from tests.skills.search.test_drive_only_case_list import EMPTY, POST, QUERY, _case
+from tests.skills.search.test_drive_only_case_list import POST, QUERY, _case
 from tests.skills.search.test_fanout import META, make
 
 
@@ -157,9 +157,12 @@ def test_structured_cases_survive_threshold_and_bind_only_matching_drive_files(
         assert len(out.displayed_refs) == out.answer.count("|資料を見る>") == 2
         assert "架空会社甲 春の実演" in out.answer and "架空会社乙 実施事例" in out.answer
         assert "架空会社丙" not in out.answer and "REPORT1/" not in out.answer
+        assert "slack.com" not in out.answer
     else:
-        assert not out.found and out.answer == EMPTY and out.displayed_refs == []
-    assert "slack.com" not in out.answer and "spreadsheets" not in out.answer
+        assert out.found and "資料URL未確認" in out.answer
+        assert not any(ref.drive_file_id for ref in out.displayed_refs)
+        assert "会話の記録" in out.answer
+    assert "spreadsheets" not in out.answer
     skill._summarize.assert_not_called()
 
 

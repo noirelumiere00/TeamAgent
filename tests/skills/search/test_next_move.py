@@ -221,7 +221,8 @@ def test_run_not_found_everywhere_carries_web_research(monkeypatch: pytest.Monke
         SkillContext(metadata={TWO_STAGE_CTX_KEY: True, "user_email": ME, "channel_id": "D1"}),
     )
     assert out.found is False and out.slack_status == "ok"
-    assert out.suggested_next == WEB_NEXT
+    assert out.suggested_next is None
+    assert "探した範囲" in out.answer
     assert out.answer.count("？") <= 1  # 本文に提案を重ねない（次の一手は結果の欄に 1 個）
 
 

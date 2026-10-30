@@ -22,6 +22,8 @@ import threading
 import time
 from concurrent.futures import Future, ThreadPoolExecutor, wait
 from concurrent.futures import TimeoutError as FutureTimeoutError
+from copy import copy
+from dataclasses import replace
 from typing import Any, ClassVar
 
 import structlog
@@ -285,6 +287,8 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
         self._bedrock = bedrock or BedrockClient.from_env()
         self._pgvector = pgvector or PgVectorClient.from_env()
         self._embedder = embedder
+        self._embedding_cache: dict[str, list[float]] | None = None
+        self._embedding_lock = threading.Lock()
         # 二段返し（USE_SEARCH_TWO_STAGE・既定 OFF）の後追い投稿に使う Slack クライアント。
         # 既定 None＝必要になった時に SlackClient.from_env() を遅延生成する
         # （knowledge_deliver と同じ流儀。フラグ OFF のときは一切生成しない）。
@@ -511,6 +515,7 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
         #   gold set の実ヒット最低値。確信の高いヒットを語の表記ゆれで落とさない）。0 以下で無効。
         # 金庫のRLS・読み取りソースは同じ。検索語を広げるだけなので既定ON。
         self._alias_expansion = self._envflag("SEARCH_ALIAS_EXPANSION", default="true")
+        self._not_found_recovery = self._envflag("SEARCH_NOT_FOUND_RECOVERY", default="true")
         self._scope_footer = self._envflag("SEARCH_SCOPE_FOOTER", default="true")
         retry_timeout = self._envfloat("SEARCH_ALIAS_TIMEOUT_S", 8.0)
         self._alias_timeout_s = (
@@ -583,6 +588,99 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
         return self._retrieve(embedding, retrieval_input, ctx)
 
     def run(self, input: SearchInput, ctx: SkillContext) -> SearchOutput:
+        """全経路の不在回答を、検索を広げてから確定する。"""
+        if not self._not_found_recovery:
+            return self._run_once(input, ctx)
+        request = copy(self)
+        request._embedding_cache = {}
+        request._embedding_lock = threading.Lock()
+        return request._run_with_recovery(input, ctx)
+
+    def _run_with_recovery(self, input: SearchInput, ctx: SkillContext) -> SearchOutput:
+        output = self._run_once(input, ctx)
+        if output.found or not input.include_answer or output.case_state_answer is not None:
+            return output
+        if output.slack_hits:
+            # 従来の found は金庫だけを指すが、Slack の根拠があれば不在ではない。
+            answer = output.answer
+            if answer.startswith("金庫に該当する資料は見つかりませんでした"):
+                answer = answer.partition("\n\n")[2]
+            return output.model_copy(update={"found": True, "answer": answer})
+
+        from teamagent.skills.search.fanout import run_fanout
+
+        # 常駐インスタンスの設定を変えず、同じ本人・RLS・明示フィルタで再検索する。
+        recovery = copy(self)
+        visit = visit_cases.parse(input.query) if drive_first.enabled(ctx.metadata) else None
+        if visit:
+            input = input.model_copy(update={"filter_client": visit.company})
+        if drive_first.enabled(ctx.metadata) and input.filter_doc_type == "事例":
+            input = input.model_copy(update={"filter_doc_type": None})
+        trace: dict[str, Any] = {
+            "queries": [],
+            "complete": False,
+            "scope": "",
+            "strict": self._min_relevance,
+            "previous_sources": {row["lane"]: row for row in output.sources or []},
+        }
+        retry_ctx = replace(ctx, metadata={**ctx.metadata, "_search_recovery": trace})
+        total_cost = output.total_cost_usd
+        floor = self._min_relevance_fallback or 0.05
+        for threshold in dict.fromkeys((max(floor, self._not_found_threshold), floor)):
+            recovery._min_relevance = min(self._min_relevance, threshold)
+            recovery._min_relevance_fallback = 0.0
+            recovery._not_found_threshold = min(self._not_found_threshold, threshold)
+            output = run_fanout(recovery, input, retry_ctx)
+            output = output.model_copy(
+                update={
+                    "sources": [
+                        trace["previous_sources"].get(row["lane"], row)
+                        if row["lane"] == "expand" or row["status"] == "skipped"
+                        else row
+                        for row in output.sources or []
+                    ]
+                }
+            )
+            total_cost += output.total_cost_usd
+            if output.found or output.slack_hits:
+                return output.model_copy(update={"found": True, "total_cost_usd": total_cost})
+
+        if trace.get("hidden"):
+            return output.model_copy(
+                update={
+                    "answer": (
+                        "Slackの非公開の場所に一致がありますが、この会話では内容を表示できません。"
+                    ),
+                    "direct_answer": None,
+                    "direct_answer_kind": None,
+                    "suggested_next": None,
+                    "total_cost_usd": total_cost,
+                }
+            )
+        target = case_query_target(input.query, input.filter_industry)
+        answer = build_scoped_not_found_answer(
+            target, scope="金庫・Slack・カルテ・事例", complete=trace["complete"]
+        )
+        if visit:
+            answer = output.answer
+        words = scope_footer(trace["queries"] or [input.query], slack=None)
+        answer += "\n" + trace["scope"] + "／" + words.split(": ", 1)[1]
+        kind: SearchDirectAnswerKind | None = (
+            "not_found"
+            if trace["complete"] and self._direct_answer_allowed(ctx, "not_found")
+            else None
+        )
+        return output.model_copy(
+            update={
+                "answer": answer,
+                "direct_answer": answer if kind else None,
+                "direct_answer_kind": kind,
+                "suggested_next": None,
+                "total_cost_usd": total_cost,
+            }
+        )
+
+    def _run_once(self, input: SearchInput, ctx: SkillContext) -> SearchOutput:
         """検索 Skill のメインフロー。"""
         drive_mode = drive_first.enabled(ctx.metadata) or (
             self._direct_answer_allowed(ctx, "case_cards") and is_case_list(input.query)
@@ -1621,7 +1719,13 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
                 "embedder が注入されていません。"
                 "LocalE5Embedder または BedrockTitanEmbedder を __init__ で渡してください"
             )
-        return self._embedder.embed(text)
+        if self._embedding_cache is None:
+            return self._embedder.embed(text)
+        # 同じ語の並行要求も1回にまとめる。キャッシュはこのrunのコピーだけが持つ。
+        with self._embedding_lock:
+            if text not in self._embedding_cache:
+                self._embedding_cache[text] = self._embedder.embed(text)
+            return self._embedding_cache[text]
 
     def _pool_search(
         self,
@@ -2200,6 +2304,10 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
                     hits = drive_first.scope_hits(input.query, hits, input.filter_doc_type)
                 if fanout_probe is not None:
                     fanout_probe["candidates"] = list(hits)
+                if recovery := ctx.metadata.get("_search_recovery"):
+                    for hit in hits:
+                        if hit.score < recovery["strict"]:
+                            hit.metadata["is_low_confidence"] = True
                 # Sprint 5: 反ハルシネーション閾値。relevance < 閾値の hit を落とす。
                 # Rerank 後の relevance score に対して適用 (drive-match の固定 score=1.0
                 # より前に評価し、弱い根拠しか無いクエリでは drive-match も発火させない)。
