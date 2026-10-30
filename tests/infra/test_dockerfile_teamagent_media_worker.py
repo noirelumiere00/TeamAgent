@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -17,6 +18,8 @@ ROOT = Path(__file__).resolve().parents[2]
 DOCKERFILE = ROOT / "infra/docker/Dockerfile.teamagent-media-worker"
 DOCKERIGNORE = ROOT / "infra/docker/Dockerfile.teamagent-media-worker.dockerignore"
 APK_LOCK = ROOT / "infra/docker/media-apk.lock"
+APK_SOURCE = ROOT / "infra/docker/media-apk-source.json"
+APK_CHECKSUMS = ROOT / "infra/docker/media-apk-sha256.lock"
 SANITIZER = ROOT / "infra/docker/sanitize_ytdlp.py"
 PACKAGE = ROOT / "tools/tiktok_scraper/package.json"
 PACKAGE_LOCK = ROOT / "tools/tiktok_scraper/package-lock.json"
@@ -132,13 +135,147 @@ def test_apk_inventory_is_exact_and_hash_pinned() -> None:
     assert _sha256(APK_LOCK) == APK_LOCK_SHA256
     assert f"ARG MEDIA_APK_LOCK_SHA256={APK_LOCK_SHA256}" in TEXT
     assert "cmp /tmp/media-apk.lock /tmp/actual-apk.lock" in TEXT
+    assert "cmp /tmp/media-apk.lock /usr/share/teamagent/provenance/apk-installed.lock" in TEXT
     assert 'io.teamagent.contract.apk-lock-sha256="$MEDIA_APK_LOCK_SHA256"' in TEXT
-    # v2: 2026-08-31 に apk キャッシュ汚染を実測（nodejs 24.18.1-r0 の /usr/bin/node が
-    # 上流 apk の実測 sha（pin と一致）と異なるバイトで 2 連続供給された）。id を回して
-    # 汚染エントリを切り離した。再発時はさらに v3 へ回す（中身の修正ではなく隔離が正解）。
-    assert "--mount=type=cache,id=teamagent-media-apk-arm64-v3,target=/var/cache/apk" in TEXT
-    assert "https://dl-cdn.alpinelinux.org/alpine/edge" in TEXT
-    assert "https://dl-cdn.alpinelinux.org/alpine/v3.24" in TEXT
+    assert "RUN --network=none --mount=type=bind,from=media_apks" in TEXT
+    assert "cmp /tmp/media-apk.lock /media-apks/inventory.lock" in TEXT
+    assert "cmp /tmp/media-apk-sha256.lock /media-apks/SHA256SUMS" in TEXT
+    assert "sha256sum -c /tmp/media-apk-sha256.lock" in TEXT
+    assert 'apk --no-network verify "$apk_file"' in TEXT
+    assert "apk --no-cache --no-network --repositories-file /dev/null" in TEXT
+    assert "      /media-apks/apks/*.apk \\\n" in TEXT
+    assert "--allow-untrusted" not in TEXT
+    assert "dl-cdn.alpinelinux.org" not in TEXT
+    assert "target=/var/cache/apk" not in TEXT
+
+
+@pytest.mark.parametrize(
+    ("argument", "path"),
+    [
+        ("MEDIA_APK_SOURCE_SHA256", APK_SOURCE),
+        ("MEDIA_APK_CHECKSUMS_SHA256", APK_CHECKSUMS),
+    ],
+)
+def test_vendor_apk_inputs_match_the_release_contract(argument: str, path: Path) -> None:
+    contract = json.loads(
+        (ROOT / "infra/codebuild/teamagent_core_media_release_contract.json").read_text()
+    )
+    media = next(subject for subject in contract["subjects"] if subject["name"] == "media")
+    assertion = next(item for item in media["source_assertions"] if item["build_arg"] == argument)
+    assert assertion["value"] == _sha256(path)
+    assert TEXT.count(f"ARG {argument}={_sha256(path)}") == 2
+    assert all(use in TEXT for use in assertion["dockerfile_uses"])
+    assert f'{assertion["oci_label"]}="${argument}"' in TEXT
+    assert f"!{path.relative_to(ROOT)}\n" in DOCKERIGNORE.read_text()
+
+
+def test_vendor_apk_source_matches_the_pinned_inventory_and_trust_image() -> None:
+    source = json.loads(APK_SOURCE.read_text())
+    assert source["architecture"] == "aarch64"
+    assert source["inventory_sha256"] == _sha256(APK_LOCK)
+    assert source["schema_version"] == 2
+    base = source["base_inventory"]
+    assert len(base) == 196 and base == sorted(set(base))
+    additional = [entry for entry in APK_LOCK.read_text().splitlines() if entry not in base]
+    assert len(additional) == 59
+    unavailable_names = {
+        "alpine-release",
+        "apk-tools",
+        "libapk",
+        "bubblewrap",
+        "ca-certificates-bundle",
+        "chromium",
+        "chromium-angle",
+        "chromium-common",
+        "chromium-swiftshader",
+        "cups-libs",
+        "ffmpeg-libavformat",
+        "libopenmpt",
+        "libpng",
+        "libseccomp",
+        "llvm22-libs",
+        "mesa",
+        "mesa-dri-gallium",
+        "mesa-egl",
+        "mesa-gbm",
+        "mesa-gles",
+        "pipewire-libs",
+        "sqlite-libs",
+        "xz-libs",
+    }
+    unavailable = [
+        row
+        for row in APK_LOCK.read_text().splitlines()
+        if row.rsplit("-", 2)[0] in unavailable_names
+    ]
+    assert len(unavailable) == 23 and set(unavailable) <= set(base)
+    assert source["verification_image"] == (
+        "718959508629.dkr.ecr.ap-northeast-1.amazonaws.com/teamagent-mirror/"
+        f"chromium-headless:150-alpine@sha256:{CHROMIUM_BASE_DIGEST}"
+    )
+    lines = APK_CHECKSUMS.read_text().splitlines()
+    if source["bundle"] is None:
+        assert lines and all(line.startswith("#") for line in lines)
+    else:
+        assert len(lines) == 59
+        filenames = []
+        for line in lines:
+            match = re.fullmatch(r"[0-9a-f]{64}  (apks/[^/]+\.apk)", line)
+            assert match is not None, line
+            filenames.append(match[1])
+        assert filenames == [f"apks/{entry}.apk" for entry in additional]
+
+
+@pytest.mark.parametrize("tamper", ["none", "corrupt", "extra", "missing-upgrade", "base-apk"])
+def test_dockerfile_rejects_changed_or_extra_apks_before_install(
+    tmp_path: Path, tamper: str
+) -> None:
+    apk_dir = tmp_path / "bundle/apks"
+    apk_dir.mkdir(parents=True)
+    package = apk_dir / "fixture-1-r0.apk"
+    package.write_bytes(b"fixed archive")
+    inventory = tmp_path / "media-apk.lock"
+    inventory.write_text("base-1-r0\nfixture-1-r0\nupgrade-2-r0\n")
+    source = tmp_path / "media-apk-source.json"
+    source.write_text("{}\n")
+    checksums = tmp_path / "media-apk-sha256.lock"
+    upgrade = apk_dir / "upgrade-2-r0.apk"
+    upgrade.write_bytes(b"upgrade archive")
+    if tamper == "missing-upgrade":
+        upgrade.unlink()
+    elif tamper == "base-apk":
+        (apk_dir / "base-1-r0.apk").write_bytes(b"already installed")
+    checksums.write_text(
+        "".join(f"{_sha256(p)}  apks/{p.name}\n" for p in sorted(apk_dir.glob("*.apk")))
+    )
+    binary = tmp_path / "bin"
+    binary.mkdir()
+    apk_command = binary / "apk"
+    apk_command.write_text("#!/bin/sh\nprintf '%s\\n' base-1-r0 upgrade-1-r0\n")
+    apk_command.chmod(0o755)
+    shutil.copyfile(checksums, apk_dir.parent / "SHA256SUMS")
+    shutil.copyfile(inventory, apk_dir.parent / "inventory.lock")
+    if tamper == "corrupt":
+        package.write_bytes(b"changed archive")
+    elif tamper == "extra":
+        (apk_dir / "unlisted-1-r0.apk").write_bytes(b"unlisted archive")
+    start = TEXT.index("    set -eu;", TEXT.index("RUN --network=none"))
+    end = TEXT.index("    for apk_file in /media-apks/apks/*.apk", start)
+    check = TEXT[start:end].replace("\\\n", "")
+    check = check.replace("/media-apks", str(apk_dir.parent)).replace("/tmp/", f"{tmp_path}/")
+    result = subprocess.run(
+        ["/bin/sh", "-c", check],
+        env={
+            "PATH": f"{binary}:{os.environ.get('PATH', '')}",
+            "MEDIA_APK_LOCK_SHA256": _sha256(inventory),
+            "MEDIA_APK_SOURCE_SHA256": _sha256(source),
+            "MEDIA_APK_CHECKSUMS_SHA256": _sha256(checksums),
+        },
+        capture_output=True,
+        text=True,
+        timeout=5,
+    )
+    assert (result.returncode == 0) is (tamper == "none"), result.stdout + result.stderr
 
 
 def test_base_bundled_cve_packages_are_pinned_to_the_fixed_versions() -> None:
@@ -519,6 +656,8 @@ def test_media_dockerignore_is_deny_by_default() -> None:
         "!src/teamagent/media/sales25_media.py",
         "!tools/tiktok_scraper/package-lock.json",
         "!infra/docker/media-apk.lock",
+        "!infra/docker/media-apk-source.json",
+        "!infra/docker/media-apk-sha256.lock",
     ):
         assert allowed in text
     assert "!src/teamagent/media/**" not in text

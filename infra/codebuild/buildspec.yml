@@ -457,6 +457,11 @@ phases:
           --contract \
             "$CONTEXT_VERIFY_DIR/infra/codebuild/teamagent_core_media_release_contract.json" \
           --repo-root "$CONTEXT_VERIFY_DIR"
+        python3 "$CONTEXT_VERIFY_DIR/infra/docker/vendor_media_apks.py" fetch \
+          --source "$CONTEXT_VERIFY_DIR/infra/docker/media-apk-source.json" \
+          --lock "$CONTEXT_VERIFY_DIR/infra/docker/media-apk.lock" \
+          --checksums "$CONTEXT_VERIFY_DIR/infra/docker/media-apk-sha256.lock" \
+          --output /tmp/teamagent-media-apks
         readonly BUILD_CONTEXT_TAR BUILD_CONTEXT_SHA256 CONTEXT_VERIFY_DIR
         export BUILD_CONTEXT_SHA256
 
@@ -581,6 +586,7 @@ phases:
           --builder teamagent-mcp-builder \
           --platform linux/arm64 \
           --file infra/docker/Dockerfile.teamagent-media-worker \
+          --build-context media_apks=/tmp/teamagent-media-apks \
           --target final \
           --build-arg "GIT_COMMIT=$GIT_COMMIT" \
           --build-arg "GIT_BRANCH=$GIT_BRANCH" \

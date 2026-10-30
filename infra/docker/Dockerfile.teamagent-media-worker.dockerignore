@@ -57,6 +57,8 @@
 !infra/docker/
 !infra/docker/sanitize_ytdlp.py
 !infra/docker/media-apk.lock
+!infra/docker/media-apk-source.json
+!infra/docker/media-apk-sha256.lock
 **/.env
 **/.env.*
 **/*.pem

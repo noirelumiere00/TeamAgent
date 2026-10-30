@@ -65,7 +65,7 @@ build inputにしてはならない。
   `28ea06cf04cf5d0774ea3e9635cb7dfcfcc2985e49160521cee412431cf38bba`
 
 Image buildはローカルfallbackのbyte hashを検証し、別のOCI labels/provenance filesへ上記S3
-artifact contractを記録する。ローカルbuildはS3を取得・更新しない。
+artifact contractを記録する。ローカルbuildはapp.htmlのS3取得・更新をしない。
 
 Media:
 
@@ -78,6 +78,18 @@ Media:
 - Python package `3.14.5-r2`, Node package `24.18.0-r0`, ffmpeg package `8.1.2-r0`
 - Python/JavaScript Playwrightはともにexact `1.60.0`
 - `media-apk.lock` をactual installed inventoryとbyte compareし、`/lib/apk/db/installed` を保持
+- 全240件の最終 inventory のうち、固定baseに同じ名前・版で入っていない59 APKだけを
+  既存のimage-release-evidence S3 bucketの`media-apks/`配下に保存する。残る181件はbase由来。
+  source schema v2 の`base_inventory`は固定digestの実APK DB全196件を記録する。
+  `media-apk-source.json`が固定するVersionId・bundle SHAと、`media-apk-sha256.lock`の
+  各APK SHAを`vendor_media_apks.py fetch`で検証し、BuildKitの`media_apks` named contextへ渡す。
+  import/publishは署名と同時に実base inventoryを検証する。ローカルevidence buildも同じ
+  read-only取得を行う。`bundle: null`または未公開の`version_id: null`は必ず失敗する。
+- APK段はネットワークを切り、追跡済みSHA一覧との一致・各APKのSHA再計算・固定baseの
+  `/etc/apk/keys`による署名検証後、`apk --no-network --repositories-file /dev/null add`で導入する。
+  導入前の実base inventoryとlockとの差分をSHA一覧のファイル名と照合し、導入後も全240件を
+  lockとcmpする。base由来も版が固定され、別版への更新分は必ず保管対象になる。
+  上流索引はlock更新時の取り込みだけに用いる。APK実物はmountだけで、最終imageへ同梱しない。
 - upstream Chromium imageのfilesystemを`scratch`最終stageへbyte copyし、親imageの
   writable `VOLUME /data` metadataを継承しない。最終imageの`Config.Volumes`は`/tmp`だけとする
 - yt-dlp `2026.6.9` はwheel/sdist/sanitizer/source-tree hashをOCI labelへ記録する。

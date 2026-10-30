@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -154,6 +155,30 @@ def test_core_and_media_builds_pass_every_required_provenance_binding() -> None:
         )
 
 
+def test_vendor_media_apks_are_verified_before_build_and_mounted_only_into_media() -> None:
+    body = BUILDSPEC.read_text(encoding="utf-8")
+    verified = body.index(
+        'python3 "$CONTEXT_VERIFY_DIR/infra/codebuild/source_provenance.py" verify-source'
+    )
+    fetched = body.index('python3 "$CONTEXT_VERIFY_DIR/infra/docker/vendor_media_apks.py" fetch')
+    core = body.index("docker buildx build")
+    media = body.index("docker buildx build", core + 1)
+    assert verified < fetched < core < media
+    assert '--source "$CONTEXT_VERIFY_DIR/infra/docker/media-apk-source.json"' in body
+    assert '--lock "$CONTEXT_VERIFY_DIR/infra/docker/media-apk.lock"' in body
+    assert '--checksums "$CONTEXT_VERIFY_DIR/infra/docker/media-apk-sha256.lock"' in body
+    assert "--build-context media_apks=/tmp/teamagent-media-apks" not in body[core:media]
+    assert "--build-context media_apks=/tmp/teamagent-media-apks" in body[media:]
+    terraform = TERRAFORM.read_text(encoding="utf-8")
+    source_reads = re.search(r'sid\s*=\s*"S3Source"(.*?)\n  }', terraform, re.DOTALL)
+    assert source_reads is not None
+    assert '"${aws_s3_bucket.image_release_evidence.arn}/media-apks/*"' in source_reads[1]
+    assert (
+        'actions = ["s3:GetObject", "s3:GetObjectRetention", "s3:GetObjectVersion"]'
+        in source_reads[1]
+    )
+
+
 def test_post_build_uses_bundle_context_binding_and_core_receipt_verifier() -> None:
     body = BUILDSPEC.read_text(encoding="utf-8")
 
@@ -213,8 +238,13 @@ def test_outer_contract_pin_tracks_the_inner_contract_bytes() -> None:
     outer = json.loads(RELEASE_CONTRACT.read_text(encoding="utf-8"))
     inner_sha256 = hashlib.sha256(ACTIVE_CONTRACT.read_bytes()).hexdigest()
     assert outer["source_runtime_contract"]["sha256"] == inner_sha256
-    assert outer["release"]["ready"] is True
-    assert outer["release"]["blocked_reason"] == ""
+    source = json.loads((ROOT / "infra/docker/media-apk-source.json").read_text())
+    published = source["bundle"] is not None and source["bundle"]["version_id"] is not None
+    assert outer["release"]["ready"] is published
+    if published:
+        assert outer["release"]["blocked_reason"] == ""
+    else:
+        assert "media APK bundle has not been published" in outer["release"]["blocked_reason"]
 
 
 def test_provenance_inputs_have_no_unknown_or_implicit_defaults() -> None:
