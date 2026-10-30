@@ -372,7 +372,8 @@ def test_library_referrer_policy_is_same_origin_only(
     [
         ("organic_plays", 17800.0, "17,800"),
         ("total_likes", 0.0, "0"),
-        *[(field, 0.685, "68.5%") for field in library.RATE_METRICS],
+        # sorted: frozenset の順はプロセスごとに変わり、xdist の worker 間で収集がずれる
+        *[(field, 0.685, "68.5%") for field in sorted(library.RATE_METRICS)],
         ("ad_cost", 1185.0, "¥1,185"),
         ("ad_average_watch_seconds", 9.05, "9.05秒"),
         *[(field, None, "算出不可") for field in library.METRIC_COLUMNS],
