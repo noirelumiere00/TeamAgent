@@ -4,7 +4,7 @@
 python-pptx（renderer）。teamagent_consulting で AWS Bedrock 実走まで実証した Composer を
 本番 Skill 化したもの。研究素材（過去事例/Slack/Mail/Web）は Agent が他 Skill で集めて渡す。
 
-文字数違反は該当枠だけ最大2回・追加0.10 USD/デッキの範囲で再生成し、残りは要確認文にする。
+文字数違反は該当枠だけmax_repair回・追加0.10 USD/デッキの範囲で再生成し、残りは本文を切り詰める。
 他の契約違反はエラー文を次ターンに渡して self-repair（最大 input.max_repair 回）。
 converse は tool を使わず、モデルに JSON のみを
 出力させて parse する（コードフェンス/前後文は _extract_json が許容）。
@@ -54,6 +54,12 @@ _SAFE_NAME = re.compile(r"[^\w\-]+", re.UNICODE)
 _MAX_RENDER_EVIDENCE = 20
 _LENGTH_REPAIR_BUDGET_USD = 0.10
 _LENGTH_REPAIR_MAX_TOKENS = 2048
+
+
+def _fit_label(text: str, limit: int) -> str:
+    """案名・見出しは文の途中で切らず、先頭の「…」が収まればそれだけを使う。"""
+    quoted = re.search(r"「[^」]+」", text)
+    return quoted.group() if quoted and len(quoted.group()) <= limit else text[:limit]
 
 
 def _envflag(name: str) -> bool:
@@ -514,7 +520,7 @@ class ProposalDeckSkill(BaseSkill[ProposalDeckInput, ProposalDeckOutput]):
         *,
         spent: float,
     ) -> tuple[float, list[str]]:
-        """正常な枠・出典を保持し、初回込み3回で収まらない枠だけ既定文にする。"""
+        """正常な枠・出典を保持し、再生成で収まらない枠は元の本文を切り詰める。"""
         try:
             ComposerOutput.model_validate(data)
         except ValidationError as exc:
@@ -528,7 +534,7 @@ class ProposalDeckSkill(BaseSkill[ProposalDeckInput, ProposalDeckOutput]):
 
         original = invalid.copy()
         cost = 0.0
-        for _ in range(min(input.max_repair, 2)):
+        for _ in range(input.max_repair):
             if not invalid:
                 break
             prompt = (
@@ -547,7 +553,7 @@ class ProposalDeckSkill(BaseSkill[ProposalDeckInput, ProposalDeckOutput]):
                 len(prompt.encode("utf-8")) + 1024,
                 _LENGTH_REPAIR_MAX_TOKENS,
             )
-            # 未知の料金モデルでは有料修復せず、上限内の既定文へ進む。
+            # 未知の料金モデルでは有料修復せず、元の本文を上限で切り詰める。
             if reserve <= 0 or spent + cost + reserve > _LENGTH_REPAIR_BUDGET_USD:
                 break
             try:
@@ -580,14 +586,26 @@ class ProposalDeckSkill(BaseSkill[ProposalDeckInput, ProposalDeckOutput]):
 
         for pid in invalid:
             lo, hi = LENGTH_RULES[pid]
-            data["placeholders"][str(pid)] = "要確認（文字数調整）"[:hi].ljust(lo, "　")
-            data.get("citations_per_placeholder", {}).pop(str(pid), None)
-        return cost, [
+            text = original[pid]
+            if pid == 47:
+                candidates = [
+                    part.strip()
+                    for part in re.split(r"[／\n]+", text)
+                    if part.strip() and not part.strip().startswith("【")
+                ]
+                if len(candidates) >= 3:
+                    text = "／".join(_fit_label(part, (hi - 2) // 3) for part in candidates[:3])
+            elif pid in (7, 9, 11):
+                text = _fit_label(text, hi)
+            data["placeholders"][str(pid)] = text[:hi].ljust(lo, "　")
+        warnings = [
             f"文字数調整 {{{pid}}}: {len(original[pid])}字 → "
             f"{len(data['placeholders'][str(pid)])}字（上限{LENGTH_RULES[pid][1]}字、"
-            + ("要確認の既定文に置換）" if pid in invalid else "再生成で修正）")
+            + ("本文を上限で切り詰め）" if pid in invalid else "再生成で修正）")
             for pid in sorted(original)
         ]
+        data["placeholder_warnings"] = dict(zip(sorted(original), warnings, strict=True))
+        return cost, warnings
 
     def _compose(
         self, input: ProposalDeckInput, ctx: SkillContext
@@ -616,6 +634,7 @@ class ProposalDeckSkill(BaseSkill[ProposalDeckInput, ProposalDeckOutput]):
                 # 不正な model-supplied path/key で repair を浪費させない。
                 if isinstance(data, dict):
                     data["evidence_images"] = input.evidence_images
+                    data.pop("placeholder_warnings", None)
                     data.update(input.model_dump(include=set(BU2_INPUT_FIELDS)))
                     # {48}〜{55} は {47} に統合済みの非対象 ID。モデルが律儀に skipped へ
                     # 列挙すると contract で弾かれ repair を 1 回浪費するので、検証前に落とす
@@ -704,6 +723,12 @@ class ProposalDeckSkill(BaseSkill[ProposalDeckInput, ProposalDeckOutput]):
                 "evidence_images": input.evidence_images,
             }
         composer_out = ComposerOutput.model_validate(data)
+        if input.template_profile == "proposal-builder-v1":
+            candidates = re.split(r"[／\n]+", composer_out.placeholders.get(47, ""))
+            if len({text.strip() for text in candidates if text.strip()}) < 3:
+                raise ProvenanceValidationError(
+                    ["{47} PRワード他候補は3案以上を必須とし、短い案名を『／』で区切る"]
+                )
         forced_skips = set(input.forced_skipped_ids)
         placeholders = {
             placeholder_id: text

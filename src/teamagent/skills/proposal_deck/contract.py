@@ -3,7 +3,7 @@
 teamagent_consulting で凍結した「FMT v2 / 95 placeholder（{1}–{103}、欠番 {48}–{55}）」契約を
 本番 proposal_deck Skill 用に移植。`ComposerOutput` が renderer の入力契約。
 
-- {48}〜{55} は独立セルでなく {47} に PR ワード 9 案をまとめて投入する設計のため欠番。
+- {48}〜{55} は独立セルでなく {47} に PR ワード別案をまとめて投入する設計のため欠番。
 - LENGTH_RULES は Bedrock Sonnet 4.6 実走で字数下振れが判明したため運用緩和済み（運用で調整可）。
 - 文字数違反は全件を集約して 1 つの ValueError にする
   （self-repair が 1 ラウンドで全修正できるよう）。
@@ -29,6 +29,10 @@ PROPOSAL_BUILDER_REQUIRED_AUXILIARY: Final[frozenset[str]] = BASE_AUXILIARY_KEYS
 
 LENGTH_RULES: Final[dict[int, tuple[int, int]]] = {
     # 「程度」表記の下限は運用緩和（日本語はモデルが字数を下振れしやすい）.
+    7: (1, 20),  # 元18頁の1行見出し（10pt・幅233pt）
+    9: (1, 20),
+    11: (1, 20),
+    47: (1, 60),  # 元47頁の1行枠。別案3案を「／」で横並びにする。
     2: (50, 140),  # 目的（100 文字程度）
     3: (50, 140),  # 課題（100 文字程度）
     13: (50, 140),  # SNS 戦略概要（100 文字程度）
@@ -73,13 +77,11 @@ LENGTH_RULES: Final[dict[int, tuple[int, int]]] = {
     92: (1, 18),
 }
 
-# 旧訴求リストのうち53枚目の「N文字程度」以外は従来の上限80を維持。
-# テンプレ実文では60/77/84/89=具体的シーン、70=界隈B、71=界隈言語、
-# 82=ターゲット属性。65/72も具体的シーン、83は興味関心だが従来規則なし。
-# 字数指定の23枠は上の明示規則に分離（旧Slide 40/30〜50文字の前提は不適用）。
-_PITCH_MESSAGE_IDS: Final[frozenset[int]] = frozenset({60, 70, 71, 77, 82, 84, 89})
-for _pid in _PITCH_MESSAGE_IDS:
-    LENGTH_RULES.setdefault(_pid, (1, 80))
+# 元53頁の訴求軸（シーン）は7pt・約115×32ptで2行、界隈名等は10pt。
+for _pid in (60, 65, 72, 77, 84, 89):
+    LENGTH_RULES[_pid] = (1, 28)
+for _pid in (58, 59, 70, 71, 82, 83):
+    LENGTH_RULES[_pid] = (1, 18)
 
 
 class SkippedPlaceholder(BaseModel):
@@ -154,6 +156,7 @@ class ComposerOutput(BU2Content):
     """
 
     placeholders: dict[int, str] = Field(default_factory=dict)
+    placeholder_warnings: dict[int, str] = Field(default_factory=dict)
     citations_per_placeholder: dict[int, list[str]] = Field(default_factory=dict)
     skipped_placeholders: list[SkippedPlaceholder] = Field(default_factory=list)
     # フィーダ（TikTok 等）が後付けする証拠画像メタ。95 枠 text 被覆とは直交（既定空＝後方互換）。

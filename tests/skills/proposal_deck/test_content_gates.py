@@ -1,7 +1,6 @@
 """出荷前ゲートは local/worker で同じ本文・ノートを作る。"""
 
 import json
-from datetime import date
 from pathlib import Path
 from typing import Any
 
@@ -129,11 +128,14 @@ def test_estimate_margin_only_for_agency(tmp_path: Path, backend: str, agency: b
 
 @pytest.mark.parametrize("backend", ["local", "worker"])
 def test_long_body_warns_without_counting_notes(tmp_path: Path, backend: str) -> None:
-    _template(tmp_path, [["長" * 501], ["短" * 500]])
+    _template(tmp_path, [["{96}"], ["短" * 500]])
     source = Presentation(str(tmp_path / "template.pptx"))
     source.slides[1].notes_slide.notes_text_frame.text = "ノート" * 500
     source.save(str(tmp_path / "template.pptx"))
-    rendered, _ = _render(tmp_path, backend, proposal_date=date(2026, 10, 22))
+    # The helper's two model values are unrelated to this long-body case.
+    from tests.skills.proposal_deck.test_template_cleanup import _render as render
+
+    rendered: Any = render(backend, tmp_path, {96: "長" * 501})
     assert rendered.slides[0].shapes[0].text == "長" * 501
     assert "警告: 本文500字超過" in rendered.slides[0].notes_slide.notes_text_frame.text
     assert rendered.slides[1].notes_slide.notes_text_frame.text == "ノート" * 500

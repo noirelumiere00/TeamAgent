@@ -136,3 +136,26 @@ def test_builder_filters_sync_and_background_inputs(
     assert result.simulation.understanding_rate == (
         request.simulation.understanding_rate if request_text else None
     )
+
+
+@pytest.mark.parametrize("client", [None, "クライアント", "指定宛名"])
+@pytest.mark.parametrize("confidential", [False, True])
+def test_client_falls_back_to_research_brand_and_keeps_confidentiality(
+    monkeypatch: pytest.MonkeyPatch, client: str | None, confidential: bool
+) -> None:
+    _configure_builder_test(monkeypatch, media_configured=False)
+    deck = _CapturingDeck()
+    builder = ProposalBuilderSkill(search=object(), deck=deck, account_db_path="unused.xlsx")  # type: ignore[arg-type]
+    brand = "合成ブランド"
+    kwargs = {"client_name": client} if client else {}
+    builder.run(
+        _input(_research(brand=brand), confidential_product_name=confidential, **kwargs),
+        SkillContext(),
+    )
+    actual = deck.inputs[0].auxiliary_placeholders["PB-CLIENT-NAME"]
+    if client == "指定宛名":
+        assert actual == client
+    elif confidential:
+        assert actual and brand not in actual and actual != "クライアント"
+    else:
+        assert actual == brand

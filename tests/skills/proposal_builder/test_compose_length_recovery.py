@@ -45,10 +45,10 @@ def test_two_oversized_slots_complete_and_are_listed(
     state = ProposalBuilderStatusSkill(store=store).run(ProposalBuilderStatusInput(job_id=job), ctx)
     assert state.status == "done"
     assert state.proposal_status == "ready"
-    assert bedrock.converse.call_count == 3
+    assert bedrock.converse.call_count == 5  # max_repair=4 の局所修復後に切り詰める
     for pid in (87, 90):
         assert 1 <= len(captured[pid]) <= 18
-        assert "要確認" in captured[pid]
+        assert "要確認" not in captured[pid]
         assert any(f"{{{pid}}}" in warning for warning in state.warnings)
         assert f"{{{pid}}}" in _format_proposal_completion(state)
     assert {str(pid): text for pid, text in captured.items() if pid not in (87, 90)} == {

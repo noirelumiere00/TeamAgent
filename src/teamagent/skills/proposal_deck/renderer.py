@@ -637,7 +637,13 @@ def render_deck(
         proposal_date=composer_out.proposal_date,
         agency_route=composer_out.agency_route,
         business_unit=composer_out.business_unit,
-        source_notes=bu2_source_notes(composer_out),
+        source_notes={
+            **bu2_source_notes(composer_out),
+            **{
+                str(pid): "警告: " + warning
+                for pid, warning in composer_out.placeholder_warnings.items()
+            },
+        },
         metadata=metadata,
     )
 

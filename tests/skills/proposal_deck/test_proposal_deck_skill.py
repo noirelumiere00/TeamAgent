@@ -31,6 +31,7 @@ def _full_composer_json() -> str:
             placeholders[pid] = "サ" * ((lo + hi) // 2)
         else:
             placeholders[pid] = f"値-{pid}"
+    placeholders[47] = "朝の余白／夜のご褒美／手軽な習慣"
     return ComposerOutput(placeholders=placeholders).model_dump_json()
 
 
@@ -479,7 +480,7 @@ def test_rendered_deck_returns_length_adjustment_list(tmp_path: Path) -> None:
         for slide in Presentation(out.pptx_path).slides
         if slide.has_notes_slide
     )
-    assert notes.count("要確認（文字数調整）") == 2
+    assert notes.count("本文を上限で切り詰め") == 2
     assert out.review_slides == [1, 2, 3]
     assert all("本文500字超過" in warning for warning in out.quality_warnings)
     assert len(out.quality_warnings) == 2

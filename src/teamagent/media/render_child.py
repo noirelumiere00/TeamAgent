@@ -245,6 +245,12 @@ def _proposal(root: Path, manifest: dict[str, Any]) -> dict[str, Any]:
         }
         auxiliary.update(bu2_auxiliary_values(raw))
         source_notes = bu2_source_notes(raw)
+        source_notes.update(
+            {
+                str(pid): "警告: " + str(warning)
+                for pid, warning in raw.get("placeholder_warnings", {}).items()
+            }
+        )
         profile = str(raw.get("template_profile", "base"))
         raw_start_date = raw.get("posting_start_date")
         if raw_start_date is not None and not isinstance(raw_start_date, str):
