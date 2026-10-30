@@ -173,6 +173,9 @@ def finalize_proposal_content(
             "",
         )
         for frame in frames:
+            if re.match(r"^【PRワード\s*他候補】", frame.text):
+                text = re.sub(r"^(【PRワード\s*他候補】)\s*", r"\1\n", frame.text)
+                _set_text_keeping_format(list(frame.paragraphs), text.replace("\v", "\n"), 0)
             for paragraph in frame.paragraphs:
                 text = paragraph.text
                 replaced = text
@@ -270,6 +273,30 @@ def _text_frames(shapes: Any) -> Iterator[Any]:
             yield shape.text_frame
 
 
+def _layout_pr_candidates(slide: Any) -> None:
+    from pptx.enum.text import MSO_AUTO_SIZE
+    from pptx.util import Pt
+
+    fields = {
+        int(match.group(1)): shape
+        for shape in slide.shapes
+        if getattr(shape, "has_text_frame", False)
+        for match in _NUMERIC.finditer(shape.text)
+        if int(match.group(1)) in {47, 56}
+    }
+    if set(fields) != {47, 56} or fields[47] is fields[56]:
+        return
+    choices, background = fields[47], fields[56]
+    top = choices.top + choices.height - Pt(80)
+    if background.top >= top - Pt(12):
+        return
+    # 元47頁: 見出し＋5案を10ptで6行。下端を保ち、16ptの背景本文とは12pt空ける。
+    choices.top, choices.height = top, Pt(80)
+    background.height = top - Pt(12) - background.top
+    for shape in (choices, background):
+        shape.text_frame.auto_size = MSO_AUTO_SIZE.NONE
+
+
 def prepare_proposal_content(
     presentation: Any,
     placeholders: dict[int, str],
@@ -283,9 +310,9 @@ def prepare_proposal_content(
         values[1] = _TITLE_SUFFIX.sub("", values[1].strip()).strip() or aux_values.get(
             "PB-PRODUCT-NAME", aux_values.get("PB-CLIENT-NAME", "")
         )
-    for pid in (7, 9, 11, 47):
+    for pid in (7, 9, 11, 56):
         if pid in values:
-            values[pid] = re.sub(r"\s*[\r\n\v]+\s*", "／" if pid == 47 else " ", values[pid])
+            values[pid] = re.sub(r"\s*[\r\n\v]+\s*", " ", values[pid])
     unused_hearing = {
         key
         for key, value in aux_values.items()
@@ -295,6 +322,7 @@ def prepare_proposal_content(
         and key in (source_notes or {})
     }
     for slide in presentation.slides:
+        _layout_pr_candidates(slide)
         # 統合FMTの roundRect に範囲外の角丸値があり、表示系によって形が崩れる。
         for guide in slide._element.xpath(_ROUND_RECT_ADJ):
             match = re.fullmatch(r"val (-?\d+)", guide.get("fmla", ""))

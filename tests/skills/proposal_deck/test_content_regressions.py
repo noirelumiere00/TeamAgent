@@ -101,7 +101,10 @@ def test_integrated_pr_candidates_require_three_and_retry() -> None:
     data["skipped_placeholders"] = [{"id": 47, "reason": "要確認（データ未検出）"}]
     repaired = {
         **data,
-        "placeholders": {**data["placeholders"], "47": "朝の余白／夜のご褒美／手軽な習慣"},
+        "placeholders": {
+            **data["placeholders"],
+            "47": "「朝の余白」— 朝の気持ちに寄り添う。\n「夜のご褒美」— 夜の習慣に結びつく。\n「手軽な習慣」— 続ける気持ちを後押しする。",
+        },
         "skipped_placeholders": [],
     }
     bedrock = MagicMock(model_id="jp.anthropic.claude-sonnet-4-6")
@@ -145,14 +148,14 @@ def test_narrow_fields_do_not_keep_model_line_breaks(tmp_path: Path, backend: st
             7: "朝の\n余白",
             9: "夜の\nご褒美",
             11: "手軽な\n習慣",
-            47: "朝の余白\n夜のご褒美\n手軽な習慣",
+            47: "「朝の余白」— 朝の気持ちに寄り添う。\n「夜のご褒美」— 夜の習慣に結びつく。\n「手軽な習慣」— 続ける気持ちを後押しする。",
         },
     )
-    assert [shape.text for shape in rendered.slides[0].shapes] == [
+    assert [shape.text.replace("\v", "\n") for shape in rendered.slides[0].shapes] == [
         "朝の 余白",
         "夜の ご褒美",
         "手軽な 習慣",
-        "朝の余白／夜のご褒美／手軽な習慣",
+        "「朝の余白」— 朝の気持ちに寄り添う。\n「夜のご褒美」— 夜の習慣に結びつく。\n「手軽な習慣」— 続ける気持ちを後押しする。",
     ]
 
 

@@ -30,6 +30,7 @@ from pydantic import BaseModel, ValidationError
 from teamagent.adapters.bedrock_client import BedrockClient, _estimate_cost
 from teamagent.media.proposal_bu2 import BU2_INPUT_FIELDS
 from teamagent.media.proposal_quality import expected_proposal_slides, update_proposal_image_results
+from teamagent.media.proposal_template import PR_CANDIDATE_LINE_CHARS, PR_CANDIDATE_MAX_LINES
 from teamagent.prompts.loader import load_prompt
 from teamagent.skills._shared.deck_review import quality_warnings, review_slides
 from teamagent.skills.base import BaseSkill, SkillContext, register
@@ -39,6 +40,7 @@ from teamagent.skills.proposal_deck.contract import (
     ComposerOutput,
     PlaceholderLengthError,
     SkippedPlaceholder,
+    pr_candidates_within_length,
 )
 from teamagent.skills.proposal_deck.provenance import (
     ProvenanceValidationError,
@@ -60,6 +62,25 @@ def _fit_label(text: str, limit: int) -> str:
     """案名・見出しは文の途中で切らず、先頭の「…」が収まればそれだけを使う。"""
     quoted = re.search(r"「[^」]+」", text)
     return quoted.group() if quoted and len(quoted.group()) <= limit else text[:limit]
+
+
+def _fit_pr_candidates(text: str) -> str:
+    lines = []
+    for line in text.splitlines():
+        match = re.search(r"「([^」\r\n]+)」\s*[—―–-]+\s*([^—―–\-\s][^\r\n]*)", line)
+        if match is None:
+            continue
+        name, reason = match.groups()
+        if len(name) > 20:
+            name = name[:19] + "…"
+        prefix = f"「{name}」— "
+        limit = PR_CANDIDATE_LINE_CHARS - len(prefix)
+        reason = reason.strip()
+        if len(reason) > limit:
+            reason = reason[: limit - 1] + "…"
+        lines.append(prefix + reason)
+    # 理由が無い案を作らず、形式不足は通常の再生成へ戻す。
+    return "\n".join(lines[:PR_CANDIDATE_MAX_LINES]) if len(lines) >= 3 else text
 
 
 def _envflag(name: str) -> bool:
@@ -547,6 +568,11 @@ class ProposalDeckSkill(BaseSkill[ProposalDeckInput, ProposalDeckOutput]):
                     for pid, text in invalid.items()
                 )
             )
+            if 47 in invalid:
+                prompt += (
+                    "\n{47}は3〜5案、1案1行で『「案名」— 理由1文』。"
+                    "各行80字以内（案名・記号・理由を含む）、全体404字以内。理由を省略しない。"
+                )
             # UTF-8バイト数＋通信枠を入力tokenの保守的上限とし、出力上限も予約する。
             reserve = _estimate_cost(
                 self._bedrock.model_id,
@@ -580,7 +606,7 @@ class ProposalDeckSkill(BaseSkill[ProposalDeckInput, ProposalDeckOutput]):
                     continue
                 invalid[pid] = text
                 lo, hi = LENGTH_RULES[pid]
-                if lo <= len(text) <= hi:
+                if lo <= len(text) <= hi and (pid != 47 or pr_candidates_within_length(text)):
                     data["placeholders"][str(pid)] = text
                     del invalid[pid]
 
@@ -588,19 +614,14 @@ class ProposalDeckSkill(BaseSkill[ProposalDeckInput, ProposalDeckOutput]):
             lo, hi = LENGTH_RULES[pid]
             text = original[pid]
             if pid == 47:
-                candidates = [
-                    part.strip()
-                    for part in re.split(r"[／\n]+", text)
-                    if part.strip() and not part.strip().startswith("【")
-                ]
-                if len(candidates) >= 3:
-                    text = "／".join(_fit_label(part, (hi - 2) // 3) for part in candidates[:3])
+                text = _fit_pr_candidates(text)
             elif pid in (7, 9, 11):
                 text = _fit_label(text, hi)
             data["placeholders"][str(pid)] = text[:hi].ljust(lo, "　")
         warnings = [
             f"文字数調整 {{{pid}}}: {len(original[pid])}字 → "
             f"{len(data['placeholders'][str(pid)])}字（上限{LENGTH_RULES[pid][1]}字、"
+            + ("各行80字・最大5行、" if pid == 47 else "")
             + ("本文を上限で切り詰め）" if pid in invalid else "再生成で修正）")
             for pid in sorted(original)
         ]
@@ -724,11 +745,16 @@ class ProposalDeckSkill(BaseSkill[ProposalDeckInput, ProposalDeckOutput]):
             }
         composer_out = ComposerOutput.model_validate(data)
         if input.template_profile == "proposal-builder-v1":
-            candidates = re.split(r"[／\n]+", composer_out.placeholders.get(47, ""))
-            if len({text.strip() for text in candidates if text.strip()}) < 3:
+            candidates = composer_out.placeholders.get(47, "").splitlines()
+            matches = [re.fullmatch(r"(「[^」\r\n]+」)— (\S[^\r\n]*)", line) for line in candidates]
+            if not 3 <= len(candidates) <= PR_CANDIDATE_MAX_LINES or any(
+                m is None for m in matches
+            ):
                 raise ProvenanceValidationError(
-                    ["{47} PRワード他候補は3案以上を必須とし、短い案名を『／』で区切る"]
+                    ["{47} PRワード他候補は3〜5案必須。1案1行『「案名」— 理由1文』、各行80字以内"]
                 )
+            if len({m.group(1) for m in matches if m is not None}) != len(candidates):
+                raise ProvenanceValidationError(["{47} 他候補の案名を重複させない"])
         forced_skips = set(input.forced_skipped_ids)
         placeholders = {
             placeholder_id: text

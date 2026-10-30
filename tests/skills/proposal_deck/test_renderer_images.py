@@ -48,6 +48,9 @@ def _full_placeholders() -> dict[int, str]:
             ph[pid] = "サ" * ((lo + hi) // 2)
         else:
             ph[pid] = f"値-{pid}"
+    ph[47] = (
+        "「朝の余白」— 朝の気持ちに寄り添う。\n「夜のご褒美」— 夜の習慣に結びつく。\n「手軽な習慣」— 続ける気持ちを後押しする。"
+    )
     return ph
 
 

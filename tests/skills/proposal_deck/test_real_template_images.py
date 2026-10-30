@@ -179,7 +179,7 @@ def test_real_template_content_after_length_fallback(
     fields.update(
         {
             "1": "合成商材 PR×ショート動画施策ご提案書",
-            "47": "朝の余白／夜のご褒美／手軽な習慣",
+            "47": "「朝の余白」— 朝の気持ちに寄り添う。\n「夜のご褒美」— 夜の習慣に結びつく。\n「手軽な習慣」— 続ける気持ちを後押しする。",
             "64": "あ" * 31,
         }
     )
@@ -256,3 +256,84 @@ def test_real_template_content_after_length_fallback(
             in pink[0]
             for sid in (297, 299, 300)
         )
+
+
+@pytest.mark.parametrize("backend", ["local", "worker"])
+@pytest.mark.parametrize("unit,sector", [("BU1", "美容"), ("BU2", "食品")])
+def test_real_template_five_candidates_with_reasons_fit_without_background_overlap(
+    real_template: Path, tmp_path: Path, backend: str, unit: str, sector: str
+) -> None:
+    import math
+
+    from teamagent.media.deck_qa import NS, inspect_pptx
+
+    composer_path = _ARTIFACTS / f"20261022_BU2FMT/composer_{unit}_{sector}.json"
+    if not composer_path.is_file():
+        pytest.skip("合成composerのローカルコピーがない")
+    data = json.loads(composer_path.read_text())
+    prefixes = [f"「合成案{chr(0xFF21 + index)}」— " for index in range(5)]
+    candidates = "\n".join(prefix + "理" * (80 - len(prefix)) for prefix in prefixes)
+    assert all(len(line) == 80 for line in candidates.splitlines())
+    data["placeholders"].update({"47": candidates, "56": "背" * 450})
+    data["skipped_placeholders"] = [
+        item for item in data["skipped_placeholders"] if item["id"] not in {47, 56}
+    ]
+    output = tmp_path / "output.pptx"
+    if backend == "local":
+        render_deck(ComposerOutput.model_validate(data), real_template, output)
+    else:
+        shutil.copyfile(real_template, tmp_path / "template.pptx")
+        (tmp_path / "composer.json").write_text(json.dumps(data))
+        _proposal(
+            tmp_path,
+            {
+                "kind": "proposal_pptx",
+                "template": "template.pptx",
+                "composer": "composer.json",
+                "output": "output.pptx",
+                "fail_if_missing": True,
+                "evidence": [],
+            },
+        )
+    prs = Presentation(str(output))
+    number, slide = next((i, page) for i, page in enumerate(prs.slides, 1) if page.slide_id == 302)
+    fields = {shape.shape_id: shape for shape in slide.shapes}
+    choices, background = fields[2], fields[4]
+    assert len(prs.slides) == (83 if unit == "BU1" else 68)
+    assert choices.height.pt == pytest.approx(80)
+    assert choices.top.pt == pytest.approx(428.0024, abs=0.001)
+    assert background.text.replace("\n", "").replace("\v", "") == "背" * 450
+    assert background.top + background.height <= choices.top - 12 * 12700
+    lines = choices.text.replace("\v", "\n").splitlines()
+    assert len(lines) == 6 and lines[1:] == candidates.splitlines()
+    # localにもPowerPointの実改行(a:br)を残す。a:t中の改行だけには頼らない。
+    assert len(choices._element.findall(".//a:br", NS)) == 5
+    for shape, size in ((choices, 10), (background, 16)):
+        frame = shape.text_frame
+        # Keynoteで600字が重なった実測を反映。全ての字を1em、16pt本文は行送り1.5倍で見積もる。
+        columns = math.floor(
+            (shape.width - frame.margin_left - frame.margin_right) / (size * 12700)
+        )
+        line_count = sum(
+            max(1, math.ceil(len(line) / columns))
+            for paragraph in frame.paragraphs
+            for line in paragraph.text.replace("\v", "\n").split("\n")
+        )
+        leading = 1.5 if size == 16 else 1.2
+        needed = frame.margin_top + frame.margin_bottom + line_count * size * 12700 * leading
+        assert needed <= shape.height
+        if size == 16:
+            assert shape.top + needed < choices.top
+        assert all(
+            run.font.size.pt == size
+            for p in shape.text_frame.paragraphs
+            for run in p.runs
+            if run.text
+        )
+    assert not [
+        f
+        for f in inspect_pptx(output).findings
+        if f.slide == number
+        and f.shape in {choices.name, background.name}
+        and f.kind in {"text_overflow", "text_autofit_collision"}
+    ]

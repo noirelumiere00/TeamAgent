@@ -80,7 +80,8 @@ def test_other_slide53_rules_are_preserved() -> None:
         assert LENGTH_RULES[pid] == (1, 18)
     for pid in (7, 9, 11):
         assert LENGTH_RULES[pid] == (1, 20)
-    assert LENGTH_RULES[47] == (1, 60)
+    assert LENGTH_RULES[47] == (1, 404)
+    assert LENGTH_RULES[56] == (250, 450)
 
 
 def _response(placeholders: dict[int, str], *, skipped_id: int | None = None) -> ConverseResponse:
