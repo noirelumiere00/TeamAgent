@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from contextlib import contextmanager
+from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock
 
@@ -202,3 +203,11 @@ def test_non_image_response_is_not_saved() -> None:
         counts = thumbs.fill_thumbnails(Pg(1), storage, client, limit=1)
     assert counts == {"attempted": 1, "ValueError": 1}
     storage.put.assert_not_called()
+
+
+def test_page_user_agent_is_a_full_browser_string() -> None:
+    # 短い UA だと TikTok は JSON の無い空ページを返す（実測）。完全なブラウザ UA を送ること
+    from teamagent.ingest import video_library_thumbs as thumbs
+
+    assert "Chrome/" in thumbs.PAGE_USER_AGENT and "AppleWebKit" in thumbs.PAGE_USER_AGENT
+    assert '"User-Agent": PAGE_USER_AGENT' in Path(thumbs.__file__).read_text()

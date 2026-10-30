@@ -23,6 +23,11 @@ from teamagent.observability.logging_config import configure_logging
 
 logger = structlog.get_logger(__name__)
 MAX_IMAGE_BYTES = 5 * 1024 * 1024
+# TikTok は短い UA（"Mozilla/5.0" だけ）に 1.4KB の空ページを返し、カバーの JSON が無い（2026-10-30 実測）
+PAGE_USER_AGENT = (
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/124.0 Safari/537.36"
+)
 
 
 class _HydrationParser(HTMLParser):
@@ -177,7 +182,7 @@ def main(argv: list[str] | None = None) -> int:
         try:
             pg = PgVectorClient.from_env()
             with httpx.Client(
-                timeout=20, follow_redirects=False, headers={"User-Agent": "Mozilla/5.0"}
+                timeout=20, follow_redirects=False, headers={"User-Agent": PAGE_USER_AGENT}
             ) as client:
                 fill_thumbnails(pg, VideoLibraryStorage(), client, limit=args.limit)
             return 0
