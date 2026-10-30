@@ -847,6 +847,33 @@ def test_verified_receipt_requires_exact_actual_image_evidence() -> None:
     )
 
 
+def test_receipt_accepts_source_evidence_key_with_double_dot_in_version_id() -> None:
+    receipt = _receipt()
+    key = f"source-declarations/mcp/{COMMIT}/{'7' * 64}/SpZS..kiY._.SRJ.Y7gEtn6uqt0jBlu7.json"
+    receipt["source_evidence"]["key"] = key
+    receipt["source_evidence"]["signature_key"] = f"{key}.sig"
+
+    EVIDENCE.validate_release_receipt(receipt, now=NOW)
+
+
+@pytest.mark.parametrize(
+    "key",
+    [
+        f"source-declarations/mcp/{COMMIT}/../source.json",
+        f"/source-declarations/mcp/{COMMIT}/source.json",
+        f"source-declarations/mcp/{COMMIT}//source.json",
+        f"source-declarations/mcp/{COMMIT}/./source.json",
+    ],
+)
+def test_receipt_rejects_source_evidence_key_with_invalid_segment(key: str) -> None:
+    receipt = _receipt()
+    receipt["source_evidence"]["key"] = key
+    receipt["source_evidence"]["signature_key"] = f"{key}.sig"
+
+    with pytest.raises(EVIDENCE.EvidenceError, match="source evidence key is not allowlisted"):
+        EVIDENCE.validate_release_receipt(receipt, now=NOW)
+
+
 def test_mcp_receipt_v3_requires_approval_while_non_mcp_v2_remains_legacy() -> None:
     receipt = _receipt()
     assert receipt["schema_version"] == 3
