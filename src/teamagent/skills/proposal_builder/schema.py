@@ -361,7 +361,7 @@ class ProposalBuilderInput(_StrictModel, BU2Content):
         default="クライアント",
         min_length=1,
         max_length=200,
-        description="統合FMTの宛名。未指定時は汎用表記「クライアント」。",
+        description="統合FMTの宛名。未指定時は調査で確定したブランド名を使用。",
     )
     category_term: str = Field(
         default="",

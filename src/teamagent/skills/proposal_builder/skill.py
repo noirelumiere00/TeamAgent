@@ -1117,7 +1117,11 @@ class ProposalBuilderSkill(BaseSkill[ProposalBuilderInput, ProposalBuilderOutput
                 safe_target_persona,
                 research.brand,
             )
-        safe_client_name = input.client_name
+        safe_client_name = (
+            (research.brand or input.client_name)
+            if input.client_name == "クライアント"
+            else input.client_name
+        )
         if input.confidential_product_name:
             safe_client_name = _redact_confidential_text(
                 safe_client_name,

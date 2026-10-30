@@ -45,8 +45,9 @@ _DIRECTION_SUFFIX = (
     r"(?:\s*(?:増加|減少|上昇|低下|向上|悪化|伸長|縮小|"
     r"プラス|マイナス|アップ|ダウン|増|減))?"
 )
+# 「もう一度」「二度と」は数量ではない。十一度などの温度は検出する。
 _QUANTITATIVE_CLAIM = re.compile(
-    rf"(?<![第0-9０-９,.，．]){_DIRECTION_PREFIX}{_RANGE_NUMBER}\s*"
+    rf"(?<![第0-9０-９,.，．])(?!(?<=もう)一度|二度と){_DIRECTION_PREFIX}{_RANGE_NUMBER}\s*"
     r"(?:"
     r"[%％]|倍|割|ポイント|pt|"
     r"(?:千|万|億|兆)?(?:"

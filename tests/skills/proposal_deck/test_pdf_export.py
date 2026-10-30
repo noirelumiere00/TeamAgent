@@ -39,6 +39,9 @@ def _full_composer_json() -> str:
             placeholders[pid] = "サ" * ((lo + hi) // 2)
         else:
             placeholders[pid] = f"値-{pid}"
+    placeholders[47] = (
+        "「朝の余白」— 朝の気持ちに寄り添う。\n「夜のご褒美」— 夜の習慣に結びつく。\n「手軽な習慣」— 続ける気持ちを後押しする。"
+    )
     return ComposerOutput(placeholders=placeholders).model_dump_json()
 
 

@@ -3,6 +3,10 @@
 import hashlib
 from pathlib import Path
 
+# 元47頁はKeynote実描画で88字が右端ぎりぎりだったため、80字に抑える。
+PR_CANDIDATE_LINE_CHARS = 80
+PR_CANDIDATE_MAX_LINES = 5
+
 BASE_AUXILIARY_KEYS = frozenset(
     {
         "PB-ACCOUNTS",

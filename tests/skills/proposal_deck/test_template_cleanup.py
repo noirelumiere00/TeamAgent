@@ -125,7 +125,7 @@ def test_pr_candidate_numbers_and_missing_glyph_marker_use_safe_characters(
     )
 
     assert rendered.slides[0].shapes[0].text == (
-        "【PRワード 他候補】1時短 2満足 9ご褒美 x USP×本音・背景 ✅"
+        "【PRワード 他候補】\v1時短 2満足 9ご褒美 x USP×本音・背景 ✅"
     )
     assert rendered.slides[0].shapes[1].text == "3毎日のごちそう"
     assert rendered.slides[0].shapes[0].text_frame.paragraphs[0].runs[0].font.name == "Yu Gothic UI"

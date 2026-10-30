@@ -74,10 +74,14 @@ def test_all_23_violations_are_reported_together() -> None:
 
 
 def test_other_slide53_rules_are_preserved() -> None:
-    for pid in (60, 70, 71, 77, 82, 84, 89):
-        assert LENGTH_RULES[pid] == (1, 80)
-    for pid in (58, 59, 65, 72, 83):
-        assert pid not in LENGTH_RULES
+    for pid in (60, 65, 72, 77, 84, 89):
+        assert LENGTH_RULES[pid] == (1, 28)
+    for pid in (58, 59, 70, 71, 82, 83):
+        assert LENGTH_RULES[pid] == (1, 18)
+    for pid in (7, 9, 11):
+        assert LENGTH_RULES[pid] == (1, 20)
+    assert LENGTH_RULES[47] == (1, 404)
+    assert LENGTH_RULES[56] == (250, 450)
 
 
 def _response(placeholders: dict[int, str], *, skipped_id: int | None = None) -> ConverseResponse:
@@ -131,7 +135,7 @@ def test_self_repair_only_changes_bad_slots_and_receives_limits() -> None:
     assert len(warnings) == 2 and all("再生成で修正" in line for line in warnings)
 
 
-@pytest.mark.parametrize("max_repair,expected_calls", [(0, 1), (1, 2), (2, 3), (8, 3)])
+@pytest.mark.parametrize("max_repair,expected_calls", [(0, 1), (1, 2), (2, 3), (4, 5)])
 def test_exhausted_length_repair_completes_with_safe_text(
     max_repair: int, expected_calls: int
 ) -> None:
@@ -146,8 +150,9 @@ def test_exhausted_length_repair_completes_with_safe_text(
         SkillContext(),
     )
     assert bedrock.converse.call_count == expected_calls
-    assert output.placeholders[64] == "要確認（文字数調整）"
-    assert len(warnings) == 1 and "{64}" in warnings[0] and "要確認" in warnings[0]
+    assert output.placeholders[64] == "あ" * 30
+    assert output.placeholder_warnings[64] == warnings[0]
+    assert len(warnings) == 1 and "{64}" in warnings[0] and "切り詰め" in warnings[0]
     assert cost == pytest.approx(0.01 * expected_calls)
 
 
@@ -167,7 +172,7 @@ def test_repair_cost_is_reserved_before_each_call(
     )
     assert bedrock.converse.call_count == calls
     assert cost == pytest.approx(0.01 * calls)
-    assert output.placeholders[87] == "要確認（文字数調整）"
+    assert output.placeholders[87] == "あ" * 18
     assert len(warnings) == 1
 
 
@@ -186,7 +191,7 @@ def test_malformed_patch_falls_back_without_losing_valid_slots(reply: str) -> No
         ProposalDeckInput(product_name="テスト", goal="認知", target_persona="成人", max_repair=1),
         SkillContext(),
     )
-    assert output.placeholders == {**placeholders, 87: "要確認（文字数調整）"}
+    assert output.placeholders == {**placeholders, 87: "あ" * 18}
 
 
 @pytest.mark.parametrize("model", ["unknown-model", "jp.anthropic.claude-sonnet-4-6"])
@@ -200,8 +205,7 @@ def test_unknown_price_or_repair_outage_uses_safe_text(model: str) -> None:
     )
     assert bedrock.converse.call_count == (1 if model == "unknown-model" else 2)
     assert cost == pytest.approx(0.01)
-    assert len(output.placeholders[2]) == 50
-    assert "要確認" in output.placeholders[2]
+    assert output.placeholders[2] == "あ" * 140
 
 
 @pytest.mark.parametrize("replacement", ["10万人", "PRIVATE-BRAND"])
@@ -272,4 +276,29 @@ def test_budget_is_shared_across_other_contract_retries(monkeypatch: pytest.Monk
     )
     assert bedrock.converse.call_count == 3  # 全体2回 + 予算内の局所修復1回
     assert cost == pytest.approx(0.03)
-    assert output.placeholders[87] == "要確認（文字数調整）"
+    assert output.placeholders[87] == "あ" * 18
+
+
+def test_clipped_body_keeps_its_original_citation() -> None:
+    url = "https://example.com/evidence"
+    placeholders = _placeholders()
+    original = "口コミ10万件を参考にする利用場面" + "あ" * 10
+    placeholders[87] = original
+    data = {
+        "placeholders": {str(pid): text for pid, text in placeholders.items()},
+        "citations_per_placeholder": {"87": [url]},
+    }
+    request = ProposalDeckInput(
+        product_name="合成商材",
+        goal="認知",
+        target_persona="成人",
+        max_repair=0,
+        enforce_provenance=True,
+        urls=[url],
+        quantitative_evidence={"10万件": [url]},
+    )
+    skill = ProposalDeckSkill(bedrock=MagicMock(model_id="unknown-model"))
+    skill._repair_lengths(data, request, SkillContext(), spent=0)
+    output = skill._finalize_composer(data, request)
+    assert output.placeholders[87] == original[:18]
+    assert output.citations_per_placeholder[87] == [url]

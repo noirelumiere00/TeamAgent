@@ -70,10 +70,13 @@ def test_submit_to_generation_preserves_optional_date(
         def run(self, input: ProposalDeckInput, ctx: SkillContext) -> ProposalDeckOutput:
             # 調査本文の生成は対象外。95枠の不足契約を通し、日付メタデータは実経路で渡す。
             data = {
-                "placeholders": {1: "投稿開始 2050/12/31"},
+                "placeholders": {
+                    1: "投稿開始 2050/12/31",
+                    47: "「朝の余白」— 朝の気持ちに寄り添う。\n「夜のご褒美」— 夜の習慣に結びつく。\n「手軽な習慣」— 続ける気持ちを後押しする。",
+                },
                 "skipped_placeholders": [
                     {"id": pid, "reason": "要確認（データ未検出）"}
-                    for pid in sorted(VALID_IDS - {1})
+                    for pid in sorted(VALID_IDS - {1, 47})
                 ],
                 "posting_start_date": "未定" if backend == "local" else "",
                 "auxiliary_placeholders": {"PB-MONTH": "2050年12月"},

@@ -3,7 +3,7 @@
 teamagent_consulting で凍結した「FMT v2 / 95 placeholder（{1}–{103}、欠番 {48}–{55}）」契約を
 本番 proposal_deck Skill 用に移植。`ComposerOutput` が renderer の入力契約。
 
-- {48}〜{55} は独立セルでなく {47} に PR ワード 9 案をまとめて投入する設計のため欠番。
+- {48}〜{55} は独立セルでなく {47} に PR ワード別案をまとめて投入する設計のため欠番。
 - LENGTH_RULES は Bedrock Sonnet 4.6 実走で字数下振れが判明したため運用緩和済み（運用で調整可）。
 - 文字数違反は全件を集約して 1 つの ValueError にする
   （self-repair が 1 ラウンドで全修正できるよう）。
@@ -19,7 +19,11 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 
 from teamagent.media.proposal_bu2 import BU2Content
 from teamagent.media.proposal_dates import proposal_today
-from teamagent.media.proposal_template import BASE_AUXILIARY_KEYS
+from teamagent.media.proposal_template import (
+    BASE_AUXILIARY_KEYS,
+    PR_CANDIDATE_LINE_CHARS,
+    PR_CANDIDATE_MAX_LINES,
+)
 
 _MISSING_IDS: Final[frozenset[int]] = frozenset({48, 49, 50, 51, 52, 53, 54, 55})
 VALID_IDS: Final[frozenset[int]] = frozenset(range(1, 104)) - _MISSING_IDS
@@ -29,12 +33,16 @@ PROPOSAL_BUILDER_REQUIRED_AUXILIARY: Final[frozenset[str]] = BASE_AUXILIARY_KEYS
 
 LENGTH_RULES: Final[dict[int, tuple[int, int]]] = {
     # 「程度」表記の下限は運用緩和（日本語はモデルが字数を下振れしやすい）.
+    7: (1, 20),  # 元18頁の1行見出し（10pt・幅233pt）
+    9: (1, 20),
+    11: (1, 20),
+    47: (1, PR_CANDIDATE_MAX_LINES * (PR_CANDIDATE_LINE_CHARS + 1) - 1),
     2: (50, 140),  # 目的（100 文字程度）
     3: (50, 140),  # 課題（100 文字程度）
     13: (50, 140),  # SNS 戦略概要（100 文字程度）
     18: (180, 420),  # 強みまとめ（300 文字程度）
     28: (15, 45),  # 社会的潮流サマリ（30 文字程度）
-    56: (300, 700),  # PR ワード背景（500 文字程度）
+    56: (250, 450),  # Keynote実描画で600字が他候補と重なったため450字に抑える。
     57: (50, 140),  # 戦略方針（100 文字程度）
     # 統合 FMT 53枚目（sha256
     # 62d39a2b76e0dedc6cdaae8de5cd224b80c5b93ddbb3beb2f01add67c27f0490）。
@@ -73,13 +81,18 @@ LENGTH_RULES: Final[dict[int, tuple[int, int]]] = {
     92: (1, 18),
 }
 
-# 旧訴求リストのうち53枚目の「N文字程度」以外は従来の上限80を維持。
-# テンプレ実文では60/77/84/89=具体的シーン、70=界隈B、71=界隈言語、
-# 82=ターゲット属性。65/72も具体的シーン、83は興味関心だが従来規則なし。
-# 字数指定の23枠は上の明示規則に分離（旧Slide 40/30〜50文字の前提は不適用）。
-_PITCH_MESSAGE_IDS: Final[frozenset[int]] = frozenset({60, 70, 71, 77, 82, 84, 89})
-for _pid in _PITCH_MESSAGE_IDS:
-    LENGTH_RULES.setdefault(_pid, (1, 80))
+# 元53頁の訴求軸（シーン）は7pt・約115×32ptで2行、界隈名等は10pt。
+for _pid in (60, 65, 72, 77, 84, 89):
+    LENGTH_RULES[_pid] = (1, 28)
+for _pid in (58, 59, 70, 71, 82, 83):
+    LENGTH_RULES[_pid] = (1, 18)
+
+
+def pr_candidates_within_length(text: str) -> bool:
+    lines = text.splitlines()
+    return len(lines) <= PR_CANDIDATE_MAX_LINES and all(
+        len(line) <= PR_CANDIDATE_LINE_CHARS for line in lines
+    )
 
 
 class SkippedPlaceholder(BaseModel):
@@ -141,6 +154,11 @@ class PlaceholderLengthError(ValueError):
         super().__init__(
             "; ".join(
                 f"{{{pid}}} length {len(text)} out of {list(LENGTH_RULES[pid])}"
+                + (
+                    f"; each line <= {PR_CANDIDATE_LINE_CHARS} chars, at most 5 lines"
+                    if pid == 47
+                    else ""
+                )
                 for pid, text in texts.items()
             )
         )
@@ -154,6 +172,7 @@ class ComposerOutput(BU2Content):
     """
 
     placeholders: dict[int, str] = Field(default_factory=dict)
+    placeholder_warnings: dict[int, str] = Field(default_factory=dict)
     citations_per_placeholder: dict[int, list[str]] = Field(default_factory=dict)
     skipped_placeholders: list[SkippedPlaceholder] = Field(default_factory=list)
     # フィーダ（TikTok 等）が後付けする証拠画像メタ。95 枠 text 被覆とは直交（既定空＝後方互換）。
@@ -246,7 +265,9 @@ class ComposerOutput(BU2Content):
         for pid, (lo, hi) in LENGTH_RULES.items():
             if pid in self.placeholders:
                 n = len(self.placeholders[pid])
-                if not (lo <= n <= hi):
+                if not (lo <= n <= hi) or (
+                    pid == 47 and not pr_candidates_within_length(self.placeholders[pid])
+                ):
                     length_errors[pid] = self.placeholders[pid]
         if length_errors:
             raise PlaceholderLengthError(length_errors)
@@ -266,4 +287,5 @@ __all__ = [
     "EvidenceImage",
     "PlaceholderLengthError",
     "SkippedPlaceholder",
+    "pr_candidates_within_length",
 ]

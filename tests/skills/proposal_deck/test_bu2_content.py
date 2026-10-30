@@ -187,7 +187,8 @@ def test_bu2_inputs_survive_length_repair_and_forced_skip() -> None:
     bedrock = MagicMock()
     bedrock.converse.return_value = _resp(json.dumps(data))
     composer, _, warnings = ProposalDeckSkill(bedrock=bedrock)._compose(request, SkillContext())
-    assert warnings and "文字数調整" in composer.placeholders[61]
+    assert warnings and composer.placeholders[61] == "長" * 18
+    assert "切り詰め" in warnings[0]
     assert 41 not in composer.placeholders
     assert any(item.id == 41 for item in composer.skipped_placeholders)
     assert composer.plans == request.plans

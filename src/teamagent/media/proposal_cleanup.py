@@ -28,6 +28,7 @@ _UNFINISHED = re.compile(
 )
 _BEAUTY_SECTOR = re.compile(r"美容|化粧品|コスメ|ヘルスケア|beauty|cosmetic|health\s*care", re.I)
 _MARGIN = re.compile(r"[^。\n]*貴社マージンを乗せて[^。\n]*[。]?")
+_TITLE_SUFFIX = re.compile(r"(?:\s*(?:PR\s*[×xＸ]\s*ショート動画施策|ご提案書))+$", re.I)
 _EMME_TITLE = re.compile(r"^｜(?:(?:美容|ライフスタイル)メディア[：:]EMME|EMMEコンテンツイメージ)")
 
 
@@ -172,6 +173,19 @@ def finalize_proposal_content(
             "",
         )
         for frame in frames:
+            if re.match(r"^【PRワード\s*他候補】", frame.text):
+                text = re.sub(r"^(【PRワード\s*他候補】)\s*", r"\1\n", frame.text)
+                _set_text_keeping_format(list(frame.paragraphs), text.replace("\v", "\n"), 0)
+            for paragraph in frame.paragraphs:
+                text = paragraph.text
+                replaced = text
+                for label in ("構成案 提出 → FIX", "マスター動画初稿・投稿文 提出"):
+                    replaced = replaced.replace(
+                        label + "（要確認）", label + "（クライアント確認）"
+                    )
+                replaced = replaced.replace("「○○おすすめ5選」", "「おすすめまとめ」")
+                if replaced != text:
+                    _set_text_keeping_format([paragraph], replaced, 0)
             if posting_start_date is None:
                 field_label = schedule_label
                 cell = getattr(frame._parent, "_tc", None)
@@ -213,10 +227,6 @@ def finalize_proposal_content(
             original = samples.get(slide.slide_id, set())
             if any(_normalize(t) in original for t in [text, *(p.text for p in frame.paragraphs)]):
                 append_review_note(slide, f"警告: FMT見本未上書き 要確認: {text[:80]}")
-
-        count = sum(len(re.sub(r"\s", "", text)) for text in _shape_texts(slide.shapes))
-        if count > 500:
-            append_review_note(slide, f"警告: 本文500字超過 要確認（{count}字）")
 
     for number, reason in schedule_warnings(
         presentation, proposal_date or proposal_today(), posting_start_date=posting_start_date
@@ -263,6 +273,30 @@ def _text_frames(shapes: Any) -> Iterator[Any]:
             yield shape.text_frame
 
 
+def _layout_pr_candidates(slide: Any) -> None:
+    from pptx.enum.text import MSO_AUTO_SIZE
+    from pptx.util import Pt
+
+    fields = {
+        int(match.group(1)): shape
+        for shape in slide.shapes
+        if getattr(shape, "has_text_frame", False)
+        for match in _NUMERIC.finditer(shape.text)
+        if int(match.group(1)) in {47, 56}
+    }
+    if set(fields) != {47, 56} or fields[47] is fields[56]:
+        return
+    choices, background = fields[47], fields[56]
+    top = choices.top + choices.height - Pt(80)
+    if background.top >= top - Pt(12):
+        return
+    # 元47頁: 見出し＋5案を10ptで6行。下端を保ち、16ptの背景本文とは12pt空ける。
+    choices.top, choices.height = top, Pt(80)
+    background.height = top - Pt(12) - background.top
+    for shape in (choices, background):
+        shape.text_frame.auto_size = MSO_AUTO_SIZE.NONE
+
+
 def prepare_proposal_content(
     presentation: Any,
     placeholders: dict[int, str],
@@ -272,6 +306,13 @@ def prepare_proposal_content(
     """条件欄は相談表示、他の不足欄は空欄化し、理由はノートへ残す。未使用枠だけ除去する。"""
     values = {key: value.translate(_SAFE_SYMBOLS) for key, value in placeholders.items()}
     aux_values = {key: value.translate(_SAFE_SYMBOLS) for key, value in auxiliary.items()}
+    if 1 in values:
+        values[1] = _TITLE_SUFFIX.sub("", values[1].strip()).strip() or aux_values.get(
+            "PB-PRODUCT-NAME", aux_values.get("PB-CLIENT-NAME", "")
+        )
+    for pid in (7, 9, 11, 56):
+        if pid in values:
+            values[pid] = re.sub(r"\s*[\r\n\v]+\s*", " ", values[pid])
     unused_hearing = {
         key
         for key, value in aux_values.items()
@@ -281,6 +322,7 @@ def prepare_proposal_content(
         and key in (source_notes or {})
     }
     for slide in presentation.slides:
+        _layout_pr_candidates(slide)
         # 統合FMTの roundRect に範囲外の角丸値があり、表示系によって形が崩れる。
         for guide in slide._element.xpath(_ROUND_RECT_ADJ):
             match = re.fullmatch(r"val (-?\d+)", guide.get("fmla", ""))
@@ -298,6 +340,17 @@ def prepare_proposal_content(
             frame.text = (existing + "\n\n" if existing else "") + (
                 "入力条件・補足（自動生成）\n" + "\n".join(sources)
             )
+        count = sum(
+            len(re.sub(r"\s", "", values.get(int(match.group(1)), "")))
+            for match in _NUMERIC.finditer(combined)
+            if "要確認" not in values.get(int(match.group(1)), "")
+        ) + sum(
+            len(re.sub(r"\s", "", aux_values.get(key, "")))
+            for key in aux_keys & {"PB-ACCOUNTS", "PB-CASES"}
+            if "要確認" not in aux_values.get(key, "")
+        )
+        if count > 500:
+            append_review_note(slide, f"警告: 本文500字超過 要確認（{count}字）")
         for key in aux_keys:
             if key not in unused_hearing and not aux_values.get(key, "").strip():
                 aux_values[key] = "要確認（データ未検出）"
@@ -312,6 +365,11 @@ def prepare_proposal_content(
             if "要確認" in aux_values[key]
         )
         reviews.extend(reason for reason in sources if "要確認" in reason)
+        reviews.extend(
+            f"{reason}（要確認）"
+            for key, reason in sorted((source_notes or {}).items())
+            if key.isdecimal() and int(key) in numeric_ids
+        )
         if reviews:
             append_review_note(slide, "\n".join(reviews))
         for shape in list(slide.shapes):

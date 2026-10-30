@@ -127,7 +127,7 @@ class ProposalDeckInput(BU2Content):
         default=4,
         ge=0,
         le=8,
-        description="自己修復回数（文字数は最大2回・追加0.10 USD/デッキ）",
+        description="自己修復回数（文字数の局所修復もこの回数まで・追加0.10 USD/デッキ）",
     )
     emit_pdf: bool = Field(
         default=False,
@@ -284,7 +284,7 @@ class ProposalDeckOutput(BaseModel):
     coverage_ratio: float = Field(ge=0.0, le=1.0, description="埋め率（filled / 95）")
     skipped_ids: list[int] = Field(default_factory=list, description="要確認の placeholder ID")
     length_warnings: list[str] = Field(
-        default_factory=list, description="文字数の局所修復・要確認置換を行った枠の一覧"
+        default_factory=list, description="文字数の局所修復・本文切り詰めを行った枠の一覧"
     )
     quality_warnings: list[str] = Field(
         default_factory=list,

@@ -141,6 +141,19 @@ def proposal_field_results(
     if condition_pages:
         pages = "・".join(str(page) for page in sorted(condition_pages))
         warnings.append(f"要対応: 条件未指定・要相談（{pages}枚目）")
+    pink_pages: dict[int, int] = {}
+    for number, slide in slides.values():
+        count = sum(
+            bool(shape._element.xpath('./p:spPr/a:solidFill/a:srgbClr[@val="FF3399"]'))
+            for shape in _shapes(slide.shapes)
+        )
+        if count:
+            pink_pages[number] = count
+    if pink_pages:
+        pages = "・".join(str(page) for page in sorted(pink_pages))
+        warnings.append(
+            f"要対応: 画像の仮枠が残っています {sum(pink_pages.values())} 枠（{pages}枚目）"
+        )
     result = {
         "field_issues": sorted(set(issues)),
         "field_warnings": warnings,
@@ -160,7 +173,11 @@ def update_proposal_image_results(metadata: dict[str, Any], *, requested_images:
         for issue in metadata["field_issues"]
         if not issue.startswith("image_insertion_failed:")
     ]
-    warnings = [w for w in metadata["field_warnings"] if not w.startswith("要対応: 画像")]
+    warnings = [
+        w
+        for w in metadata["field_warnings"]
+        if not w.startswith(("要対応: 画像未挿入", "要対応: 画像 "))
+    ]
     missing_images = sum(max(field["expected"] - field["inserted"], 0) for field in images)
     if missing_images:
         pages = "・".join(
