@@ -175,7 +175,7 @@ def deliver(
         destination,
         request_id=request_id,
         rich=rich,
-        **({"permanent_urls": permanent_urls} if permanent_urls else {}),
+        permanent_urls=permanent_urls,
     )
     logger.info(
         "direct_summary_posted", request_id=request_id, status=status, blocks=rich is not None
