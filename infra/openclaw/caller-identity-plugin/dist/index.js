@@ -542,7 +542,9 @@ export function adLabelUrlCount(text) {
   const head = text.slice(0, VIDEO_URL_SCAN_LIMIT);
   const urls = [...head.matchAll(AD_LABEL_URL_RE)].map(m => m[1]);
   if (urls.length === 0 || urls.length > AD_LABEL_MAX_URLS) return 0;
-  if (!AD_LABEL_REST_RE.test(head.replace(AD_LABEL_URL_RE, " "))) return 0;
+  // チャンネルでは `<@U…> URL` / `@Aico URL` の形で届く。メンションは依頼の中身ではないので除く。
+  const rest = head.replace(AD_LABEL_URL_RE, " ").replace(/<[@!][^<>\s]{1,64}>|@Aico/giu, " ");
+  if (!AD_LABEL_REST_RE.test(rest)) return 0;
   return urls.every(url => VIDEO_URL_RULES.some(([, rule]) => rule.test(url))) ? urls.length : 0;
 }
 

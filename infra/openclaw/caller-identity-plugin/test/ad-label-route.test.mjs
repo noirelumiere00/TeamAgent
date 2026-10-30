@@ -11,6 +11,8 @@ test('adLabelUrlCount: 投稿 URL だけ（Slack の <url|label> 形・確認の
   assert.equal(adLabelUrlCount(`<${TT}>\n<${IG}|${IG}>`), 2);
   assert.equal(adLabelUrlCount(`タイアップ確認お願いします\n${TT}`), 1);
   assert.equal(adLabelUrlCount('https://vt.tiktok.com/ZSabc/ PRチェック'), 1);
+  assert.equal(adLabelUrlCount(`<@U0AICO123> ${TT}`), 1);
+  assert.equal(adLabelUrlCount(`@Aico ${YT}`), 1);
 });
 
 test('adLabelUrlCount: 依頼語・他サイト・URL なし・21 件以上は 0（video_analysis 等の領分を奪わない）', () => {
