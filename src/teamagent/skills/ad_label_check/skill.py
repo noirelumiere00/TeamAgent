@@ -62,27 +62,40 @@ def find_disclosures(text: str, hashtags: tuple[str, ...] | list[str] = ()) -> l
     return list(unique.values())
 
 
-def _line(r: AdLabelResult) -> str:
-    # 貼られた順に「URL　ラベル有無　ハッシュタグ有無」だけを出す。
-    # 問題のある行にだけ ⚠️ を付ける（11-02 要望）。
-    if r.platform == "unsupported":
-        return f"{r.url}　対象外（TikTok・Instagram・YouTube の投稿URLではありません）"
-    if not r.found:
-        return f"{r.url}　⚠️取得できず（削除・非公開・URL違いの可能性）"
-    label = {True: "ラベルあり", False: "ラベルなし", None: "ラベル取れず"}[r.label]
-    tags = "ハッシュタグあり" if r.disclosure_tags else "ハッシュタグなし"
-    return f"{r.url}　{label}　{tags}" + ("　⚠️要確認" if r.needs_review else "")
+def _summary(results: list[AdLabelResult]) -> str:
+    """問題ごとに件数と URL（貼られた順）を並べる（11-02 要望）。両方に当たる URL は両方に出す。"""
+    checked = [r for r in results if r.platform != "unsupported" and r.found]
+    groups = [
+        ("ラベルなし", [r for r in checked if r.label is False]),
+        # 項目自体が返らなかったものは「なし」と数えない（誤った安心を与えないため）。
+        ("ラベル取れず", [r for r in checked if r.label is None]),
+        ("ハッシュタグなし", [r for r in checked if not r.disclosure_tags]),
+        ("⚠️取得できず", [r for r in results if r.platform != "unsupported" and not r.found]),
+        ("対象外", [r for r in results if r.platform == "unsupported"]),
+    ]
+    blocks = [
+        f"{title} {len(rows)}件\n" + "\n".join(r.url for r in rows)
+        for title, rows in groups
+        if rows
+    ]
+    if not blocks:
+        return f"{len(checked)}件すべてラベルあり・ハッシュタグあり"
+    label_ok = sum(r.label is True for r in checked)
+    tag_ok = sum(bool(r.disclosure_tags) for r in checked)
+    head = f"確認 {len(checked)}件（ラベルあり {label_ok}件・ハッシュタグあり {tag_ok}件）"
+    return "\n\n".join([head, *blocks])
 
 
 @register
 class AdLabelCheckSkill(BaseSkill[AdLabelCheckInput, AdLabelCheckOutput]):
-    """投稿URLを貼るだけで、各媒体のタイアップ表示と #PR 等の表記を貼られた順に返す。"""
+    """投稿URLを貼るだけで、タイアップ表示と #PR 等の表記を確かめ、問題ごとに件数と URL を返す。"""
 
     name: ClassVar[str] = "ad_label_check"
     description: ClassVar[str] = (
         "TikTok/Instagram/YouTube の投稿URL（改行区切り・混在可・最大20件）を受け取り、各媒体の"
         "タイアップ表示（有料パートナーシップ・タイアップ投稿・プロモーションを含みます）の有無と、"
-        "キャプションの #PR #ad #タイアップ 等の表記の有無を、貼られた順に1行ずつ返す。"
+        "キャプションの #PR #ad #タイアップ 等の表記の有無を確かめ、"
+        "ラベルなし・ハッシュタグなしの件数と URL を返す。"
         "ステマ表記チェック・広告表示の確認・PR表記の確認に使う。再生数などの効果測定は対象外。"
     )
     input_schema: ClassVar[type[BaseModel]] = AdLabelCheckInput
@@ -167,7 +180,7 @@ class AdLabelCheckSkill(BaseSkill[AdLabelCheckInput, AdLabelCheckOutput]):
         return out
 
     def _slack_summary(self, out: AdLabelCheckOutput) -> str:
-        summary = "\n".join(_line(r) for r in out.results)
+        summary = _summary(out.results)
         if out.warnings:
             summary += "\n\n⚠️ " + " / ".join(out.warnings)
         return summary
