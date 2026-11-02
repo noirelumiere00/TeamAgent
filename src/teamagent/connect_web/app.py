@@ -4076,6 +4076,8 @@ def create_app(
 
     @app.get("/healthz")
     def healthz() -> JSONResponse:
+        if not os.environ.get("CONNECT_APP_HTML_S3_URI", "").strip():
+            return JSONResponse({"ok": True, "knowledge_delivery": "dynamic"})
         # Expose the exact immutable object contract so rollout verification can
         # compare VersionId and all content anchors, not a short observational hash.
         state = _resolve_app_html()
