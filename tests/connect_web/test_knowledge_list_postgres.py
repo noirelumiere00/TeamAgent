@@ -72,7 +72,7 @@ def db() -> Iterator[Any]:
                 );
                 CREATE TABLE chunks (
                     id uuid PRIMARY KEY, document_id uuid REFERENCES documents(id),
-                    chunk_idx int, content text, metadata jsonb
+                    chunk_idx int, content text, metadata jsonb, contextualized text
                 );
                 GRANT SELECT ON documents, chunks TO teamagent_app;
             """)
@@ -118,7 +118,7 @@ def seed(
     )
     for i in range(2):
         conn.execute(
-            "INSERT INTO chunks VALUES (%s,%s,%s,%s,%s)",
+            "INSERT INTO chunks (id, document_id, chunk_idx, content, metadata) VALUES (%s,%s,%s,%s,%s)",
             [uuid.uuid4(), doc_id, i, name + " 本文識別語", Jsonb({})],
         )
     return str(doc_id)
@@ -262,3 +262,145 @@ def test_empty_rls_visible_set_and_project_name_fallback(db: Any) -> None:
         docs, doc_total = pg.list_knowledge_documents(conn)
         assert doc_total == 2  # Unnamed documents remain documents, but create no client.
         assert {row["client_name"] for row in docs} == {"株式会社 Project 様", None}
+
+
+class HttpPg(PgVectorClient):
+    """Use production queries/session injection inside the fixture's rollback transaction."""
+
+    def __init__(self, conn: Any) -> None:
+        super().__init__("fixture")
+        self.conn = conn
+
+    @contextmanager
+    def connection(self, **kwargs: Any) -> Iterator[Any]:
+        assert kwargs["app_role"] == "teamagent_app" and kwargs["user_role"] == "user"
+        PgVectorClient._apply_session(self.conn, **kwargs)
+        yield self.conn
+
+
+def test_detail_http_rls_private_and_missing_are_identical(
+    db: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from fastapi.testclient import TestClient
+
+    from teamagent.connect_web.app import create_app
+    from teamagent.dashboard.auth import make_session
+    from tests.connect_web.test_search_routes import _SECRET, _config
+
+    private = seed(db, "A私有タイトル", owner="a@example.com", extra={"cls_industry": "私有タグ"})
+    shared = seed(db, "会社共有", groups=("example.com",), extra={"cls_industry": "食品"})
+    excluded = [
+        seed(db, "除外重複", groups=("example.com",), extra={"suppressed": "true"}),
+        seed(db, "除外研究", groups=("example.com",), extra={"x_research_tool": "tool"}),
+        seed(db, "除外FB", groups=("example.com",), fb=True),
+    ]
+    db.execute(
+        "UPDATE chunks SET metadata = %s WHERE document_id = %s AND chunk_idx = 0",
+        [Jsonb({"boilerplate": True}), shared],
+    )
+    db.execute(
+        "UPDATE chunks SET content = 'plain text', contextualized = %s WHERE document_id = %s AND chunk_idx = 1",
+        ["文脈本文" + "あ" * 2500, shared],
+    )
+    pg = HttpPg(db)
+    monkeypatch.setattr(PgVectorClient, "from_env", lambda: pg)
+    client = TestClient(create_app(search_config=_config()))
+    cookie_b = {"ta_search_session": make_session("b@example.com", _SECRET, ttl_s=3600)}
+    blocked = client.get(f"/search?view=doc&id={private}", cookies=cookie_b)
+    missing = client.get(f"/search?view=doc&id={uuid.uuid4()}", cookies=cookie_b)
+    assert blocked.status_code == missing.status_code == 404
+    assert blocked.text == missing.text
+    assert "見つからないか、閲覧できません" in blocked.text
+    assert "A私有" not in blocked.text and "私有タグ" not in blocked.text
+    for document_id in excluded:
+        response = client.get(f"/search?view=doc&id={document_id}", cookies=cookie_b)
+        assert response.status_code == 404 and response.text == missing.text
+    visible = client.get(f"/search?view=doc&id={shared}", cookies=cookie_b)
+    assert visible.status_code == 200 and "会社共有" in visible.text
+    state = db.execute(
+        "SELECT current_user AS role, current_setting('app.user_email') AS email, current_setting('app.user_role') AS user_role"
+    ).fetchone()
+    assert state == {"role": "teamagent_app", "email": "b@example.com", "user_role": "user"}
+    detail = pg.get_knowledge_document(db, shared)
+    assert detail["excerpt"] == ("文脈本文" + "あ" * 2500)[:2000]
+    assert detail["industry"] == "食品" and detail["doc_type"] == "提案書"
+    assert detail["modified_at"] == "2026-01-01" and detail["id"] == shared
+    cookie_a = {"ta_search_session": make_session("a@example.com", _SECRET, ttl_s=3600)}
+    response = client.get(f"/search?view=doc&id={private}", cookies=cookie_a)
+    assert response.status_code == 200 and "A私有タイトル" in response.text
+    assert "私有タグ" in response.text and "本文識別語" in response.text
+    # Reusing the exact connection for B must not retain A's visibility.
+    assert client.get(f"/search?view=doc&id={private}", cookies=cookie_b).text == missing.text
+
+
+def test_tags_rls_all_visible_documents_and_shared_counts(db: Any) -> None:
+    seed(
+        db,
+        "A私有",
+        owner="a@example.com",
+        extra={"cls_industry": "Aだけの業界", "cls_doc_type": "Aだけの種類"},
+    )
+    seed(db, "B私有", owner="b@example.com", extra={"cls_industry": "Bだけの業界"})
+    for _ in range(2):
+        seed(db, "共有", groups=("example.com",), extra={"cls_industry": "食品"})
+    seed(db, "A共有タグ私有", owner="a@example.com", extra={"cls_industry": "食品"})
+    for extra in ({"suppressed": "true"}, {"x_research_tool": "tool"}, {"is_sales_fb": "true"}):
+        seed(db, "対象外", groups=("example.com",), extra={"cls_industry": "除外業界", **extra})
+    seed(db, "他人のみ", extra={"cls_industry": "他人のみの業界"})
+    pg = PgVectorClient("fixture")
+    for email, own, other, food_count, total in (
+        ("a@example.com", "A", "B", 3, 4),
+        ("b@example.com", "B", "A", 2, 3),
+    ):
+        with TransactionPg(db).connection(email) as conn:
+            tags = pg.list_knowledge_tags(conn)
+            indexed = {(r["axis"], r["value"]): r["document_count"] for r in tags}
+            assert indexed[("industry", "食品")] == food_count
+            assert indexed[("industry", own + "だけの業界")] == 1
+            assert indexed[("client_name", "共有")] == 2  # two chunks per document, still two docs
+            assert indexed[("source_type", "gdrive")] == total
+            assert other + "だけの" not in repr(tags)
+            assert "除外業界" not in repr(tags) and "他人のみ" not in repr(tags)
+            for row in tags:
+                docs, count = pg.list_knowledge_documents(conn, tag=(row["axis"], row["value"]))
+                assert count == row["document_count"] == len(docs)
+                assert "対象外" not in repr(docs)
+
+
+def test_tag_filtered_rls_totals_paging_exact_values_and_axis_isolation(db: Any) -> None:
+    shared_ids = [
+        seed(db, "共有", groups=("example.com",), extra={"cls_industry": "食品"}) for _ in range(51)
+    ]
+    private = seed(db, "Aのみ", owner="a@example.com", extra={"cls_industry": "食品"})
+    other_axis = seed(
+        db,
+        "別軸",
+        groups=("example.com",),
+        extra={"cls_industry": "別業界", "cls_doc_type": "食品"},
+    )
+    seed(db, "部分一致除外", groups=("example.com",), extra={"cls_industry": "食品加工"})
+    percent = seed(db, "百分率", groups=("example.com",), extra={"cls_industry": "50%_O'Reilly"})
+    for extra in ({"suppressed": "true"}, {"x_research_tool": "tool"}, {"is_sales_fb": "true"}):
+        seed(db, "除外", groups=("example.com",), extra={"cls_industry": "食品", **extra})
+    pg = PgVectorClient("fixture")
+    for email, expected in (("a@example.com", 52), ("b@example.com", 51)):
+        with TransactionPg(db).connection(email) as conn:
+            first, count = pg.list_knowledge_documents(conn, tag=("industry", "食品"))
+            second, total = pg.list_knowledge_documents(conn, tag=("industry", "食品"), offset=50)
+            assert count == total == expected
+            assert len(first) == 50 and len(second) == expected - 50
+            visible_ids = shared_ids + ([private] if email.startswith("a") else [])
+            assert [r["id"] for r in first + second] == sorted(visible_ids)
+            assert pg.list_knowledge_documents(conn, tag=("industry", "食品"), offset=100) == (
+                [],
+                expected,
+            )
+            assert (
+                pg.list_knowledge_documents(conn, tag=("industry", "食品"), offset=50)[0] == second
+            )
+            by_type, count = pg.list_knowledge_documents(conn, tag=("doc_type", "食品"))
+            assert count == 1 and [r["id"] for r in by_type] == [other_axis]
+            exact, count = pg.list_knowledge_documents(conn, tag=("industry", "50%_O'Reilly"))
+            assert count == 1 and [r["id"] for r in exact] == [percent]
+            assert pg.list_knowledge_documents(conn, tag=("industry", "不存在")) == ([], 0)

@@ -29,6 +29,27 @@ from teamagent.client_identity import client_identity_key
 
 logger = structlog.get_logger(__name__)
 
+KNOWLEDGE_TAG_AXES = {
+    "industry": "業界",
+    "doc_type": "資料タイプ",
+    "client_name": "取引先",
+    "source_type": "出典",
+}
+
+# 一覧・詳細・タグの対象と値を揃える。chunks の分割数は資料数に影響させない。
+_KNOWLEDGE_DOCUMENTS_SQL = """
+    SELECT d.id, d.title, d.modified_at, d.source_uri,
+           d.source_type::text AS source_type,
+           NULLIF(btrim(d.metadata->>'cls_industry'), '') AS industry,
+           NULLIF(btrim(d.metadata->>'cls_doc_type'), '') AS doc_type,
+           COALESCE(NULLIF(btrim(d.metadata->>'client_name'), ''),
+                    NULLIF(btrim(d.metadata->>'cls_project'), '')) AS client_name
+    FROM documents d
+    WHERE d.metadata->>'suppressed' IS DISTINCT FROM 'true'
+      AND d.metadata->>'x_research_tool' IS NULL
+      AND d.metadata->>'is_sales_fb' IS DISTINCT FROM 'true'
+"""
+
 
 def normalize_literal_term(text: str) -> str:
     """文字検索用の表記統一。意味の言い換えや業種への拡張はしない。"""
@@ -930,25 +951,21 @@ class PgVectorClient:
         *,
         limit: int = 50,
         offset: int = 0,
+        tag: tuple[str, str] | None = None,
     ) -> tuple[list[dict[str, Any]], int]:
         """RLS 可視の非 FB 資料を UUID 付きで列挙。空ページでも総数を返す。
 
         集計とページは同一 statement の可視集合から求める。表示除外は取引先一覧と共通。
         """
+        if tag is not None and tag[0] not in KNOWLEDGE_TAG_AXES:
+            raise ValueError("invalid knowledge tag axis")
+        # 列は固定列挙値のみ。値は完全一致の placeholder に束縛する。
+        tag_filter = f"WHERE {tag[0]} = %s" if tag is not None else ""
         with conn.cursor() as cur:
             cur.execute(
-                """
-                WITH visible AS (
-                    SELECT d.id, d.title, d.modified_at, d.source_uri,
-                           d.source_type::text AS source_type,
-                           d.metadata->>'cls_doc_type' AS doc_type,
-                           COALESCE(NULLIF(btrim(d.metadata->>'client_name'), ''),
-                                    NULLIF(btrim(d.metadata->>'cls_project'), '')) AS client_name
-                    FROM documents d
-                    WHERE d.metadata->>'suppressed' IS DISTINCT FROM 'true'
-                      AND d.metadata->>'x_research_tool' IS NULL
-                      AND d.metadata->>'is_sales_fb' IS DISTINCT FROM 'true'
-                )
+                f"""
+                WITH candidates AS ({_KNOWLEDGE_DOCUMENTS_SQL}),
+                visible AS (SELECT * FROM candidates {tag_filter})
                 SELECT page.id::text, page.title, page.source_uri, page.source_type,
                        page.doc_type, page.client_name,
                        to_char(page.modified_at AT TIME ZONE 'Asia/Tokyo', 'YYYY-MM-DD')
@@ -961,12 +978,63 @@ class PgVectorClient:
                     LIMIT %s OFFSET %s
                 ) page ON true
                 ORDER BY page.modified_at DESC NULLS LAST, page.id
-                """,
-                [limit, offset],
+                """,  # nosec B608 - SQL は固定定義と列のホワイトリストのみ
+                [*([tag[1]] if tag is not None else []), limit, offset],
             )
             rows = cur.fetchall()
         total = int(rows[0]["total"])
         return [{k: v for k, v in row.items() if k != "total"} for row in rows if row["id"]], total
+
+    def get_knowledge_document(
+        self, conn: psycopg.Connection[dict[str, Any]], document_id: str
+    ) -> dict[str, Any] | None:
+        """RLS 接続で UUID 指定の非 FB 資料を取得。不可視も不存在も None。
+
+        抜粋はグラフ同様 contextualized を優先し、テンプレではない最初の chunk を使う。
+        """
+        with conn.cursor() as cur:
+            cur.execute(
+                f"""
+                WITH visible AS ({_KNOWLEDGE_DOCUMENTS_SQL})
+                SELECT d.id::text, d.title, d.source_uri, d.source_type,
+                       d.industry, d.doc_type, d.client_name,
+                       to_char(d.modified_at AT TIME ZONE 'Asia/Tokyo', 'YYYY-MM-DD')
+                           AS modified_at,
+                       ex.excerpt
+                FROM visible d
+                LEFT JOIN LATERAL (
+                    SELECT left(COALESCE(c.contextualized, c.content), 2000) AS excerpt
+                    FROM chunks c WHERE c.document_id = d.id
+                    ORDER BY (COALESCE((c.metadata->>'boilerplate')::bool, false)
+                              OR COALESCE((c.metadata->>'title_only')::bool, false)),
+                             c.chunk_idx, c.id
+                    LIMIT 1
+                ) ex ON true
+                WHERE d.id = %s::uuid
+                """,  # nosec B608 - 共通 SQL は固定リテラル
+                [document_id],
+            )
+            row = cur.fetchone()
+        return dict(row) if row is not None else None
+
+    def list_knowledge_tags(self, conn: psycopg.Connection[dict[str, Any]]) -> list[dict[str, Any]]:
+        """RLS 可視全資料のタグを軸ごとに数える。chunk JOIN・LIMIT は使わない。"""
+        with conn.cursor() as cur:
+            cur.execute(
+                f"""
+                WITH visible AS ({_KNOWLEDGE_DOCUMENTS_SQL})
+                SELECT tag.axis, tag.value, count(*) AS document_count
+                FROM visible d
+                CROSS JOIN LATERAL (VALUES
+                    ('industry', d.industry), ('doc_type', d.doc_type),
+                    ('client_name', d.client_name), ('source_type', d.source_type)
+                ) tag(axis, value)
+                WHERE tag.value IS NOT NULL AND tag.value <> ''
+                GROUP BY tag.axis, tag.value
+                ORDER BY tag.axis, document_count DESC, tag.value
+                """  # nosec B608 - 共通 SQL は固定リテラル
+            )
+            return [dict(row) for row in cur.fetchall()]
 
     def list_documents_for_graph(
         self,
