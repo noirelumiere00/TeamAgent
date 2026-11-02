@@ -143,7 +143,7 @@ def test_invalid_id_falls_back_to_document_list(
     response = client.get("/search?" + query, cookies=_auth_cookie())
     assert response.status_code == 200 and "<h1>資料一覧</h1>" in response.text
     assert pg.doc_calls == [] and pg.calls == [("docs", 50, 0)]
-    assert _safe_next("/search?" + query) == "/app"
+    assert _safe_next("/search?" + query) == "/"
 
 
 @pytest.mark.parametrize(
@@ -157,7 +157,7 @@ def test_invalid_id_falls_back_to_document_list(
 def test_login_preserves_new_targets(setup: tuple[TestClient, DocsTagsPg], query: str) -> None:
     client, pg = setup
     target = _safe_next("/search?" + query)
-    assert target != "/app"
+    assert target != "/"
     response = client.get("/search?" + query, follow_redirects=False)
     assert response.status_code == 303
     assert parse_qs(urlsplit(response.headers["location"]).query) == {"next": [target]}
@@ -242,7 +242,7 @@ def test_invalid_tag_never_reaches_db(setup: tuple[TestClient, DocsTagsPg], tag:
     target = "/search?" + urlencode({"view": "docs", "tag": tag})
     response = client.get(target, cookies=_auth_cookie())
     assert response.status_code == 200 and 'id="mainList"' in response.text
-    assert _safe_next(target) == "/app" and pg.connections == []
+    assert _safe_next(target) == "/" and pg.connections == []
 
 
 @pytest.mark.parametrize(
@@ -257,7 +257,7 @@ def test_invalid_tag_never_reaches_db(setup: tuple[TestClient, DocsTagsPg], tag:
 )
 def test_query_key_whitelist(setup: tuple[TestClient, DocsTagsPg], query: str) -> None:
     client, pg = setup
-    assert _safe_next("/search?" + query) == "/app"
+    assert _safe_next("/search?" + query) == "/"
     response = client.get("/search?" + query, cookies=_auth_cookie())
     assert response.status_code == 200 and pg.doc_calls == [] and pg.tag_calls == 0
 
@@ -276,7 +276,7 @@ def test_query_key_whitelist(setup: tuple[TestClient, DocsTagsPg], query: str) -
     ],
 )
 def test_safe_next_rejects_external_prefix_and_unsafe_targets(target: str) -> None:
-    assert _safe_next(target) == "/app"
+    assert _safe_next(target) == "/"
 
 
 def test_dynamic_detail_and_tag_text_are_escaped(setup: tuple[TestClient, DocsTagsPg]) -> None:

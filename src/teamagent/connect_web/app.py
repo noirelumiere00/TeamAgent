@@ -689,8 +689,7 @@ def _safe_next(raw: str | None) -> str:
     """ログイン後の戻り先を検証（オープンリダイレクト防止）。
 
     既知の内部ページ・一覧 query と検証済みの ``/library`` 配下のみ許可し、
-    それ以外は既定 ``/app``。
-    ＝ログイン後は原則 Obsidian 風 UI(/app) に着地する（旧 /search UI は明示遷移時のみ）。
+    それ以外は Home（``/``）へ戻す。旧 ``/app`` も転送先への互換入口として許可する。
     外部 URL・``//host``・スキーム付き等は一切通さない（ホワイトリスト方式）。
     """
     candidate = (raw or "").strip()
@@ -708,9 +707,9 @@ def _safe_next(raw: str | None) -> str:
         try:
             ids = parse_document_ids(candidate.removeprefix("/search/graph/focus?seed="))
         except ValueError:
-            return "/app"
+            return "/"
         return "/search/graph/focus?seed=" + ",".join(ids)
-    return "/app"
+    return "/"
 
 
 _SEARCH_COOKIE = "ta_search_session"
@@ -4955,7 +4954,8 @@ def create_app(
             target = "/search?view=docs&page=1"
         email = _search_email(request)
         if email is None:
-            login = "/search/login" + ("?next=" + quote(target, safe="") if target else "")
+            # 戻り先は必ず /search（旧 /app#… の pendingHash は /search のシェルが解決する）。
+            login = "/search/login?next=" + quote(target or "/search", safe="")
             return RedirectResponse(login, status_code=303)
         if query_error is not None:
             content = render_list(
@@ -5033,18 +5033,9 @@ def create_app(
         return HTMLResponse(_shell_page(email, mode="list"))
 
     @app.get("/app")
-    def obsidian_app(request: Request) -> Response:
-        """Obsidian 風 単一 HTML UI（allowlist 認証の内側でのみ配信）。
-
-        ⚠️ 認証必須。単一 HTML のため per-user RLS は掛からない（allowlist を
-        通った全員が同一内容を見る）。埋め込むのは共有可のナレッジのみ。
-        配信内容は _resolve_app_html が S3 オーバーライド→イメージ同梱→準備中の
-        優先順位で初回アクセス時に1回だけ解決する（No-AI 配信は維持）。
-        """
-        email = _search_email(request)
-        if email is None:
-            return RedirectResponse("/search/login?next=%2Fapp", status_code=303)
-        return HTMLResponse(_resolve_app_html()["html"])
+    def obsidian_app() -> Response:
+        """旧入口。認証と fragment の解決は転送先の /search に任せる。"""
+        return RedirectResponse("/search", status_code=303)
 
     @app.get("/r/{rid}")
     def report_redirect(rid: str) -> Response:

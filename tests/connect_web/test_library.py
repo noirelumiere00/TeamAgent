@@ -140,7 +140,7 @@ def test_admin_gate(
 )
 def test_next_rejects_redirect_tricks(target: str) -> None:
     assert library.library_target(target) is None
-    assert _safe_next(target) == "/app"
+    assert _safe_next(target) == "/"
 
 
 def test_login_returns_to_library_with_query(setup: tuple[TestClient, Pg]) -> None:

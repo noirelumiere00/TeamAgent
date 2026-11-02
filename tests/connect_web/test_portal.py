@@ -25,8 +25,7 @@ from tests.connect_web.test_search_routes import (
 
 _PUBLIC_SITES = {
     "動画事例を探す": "/library",
-    "資料・議事録を検索": "/search",
-    "共有ナレッジを一覧": "/app",
+    "資料・ナレッジを探す": "/search",
     "取引先の状況を確認": "/search?view=clients&page=1",
     "自分の会話履歴": "/app/history",
 }
@@ -81,6 +80,8 @@ def test_home_public_sites_and_security_without_external_io(
     assert page.title is not None and page.title.text == "NewsTV Connect"
     assert _paths(page, ".connect-card") == _PUBLIC_PATHS
     assert _paths(page, ".connect-menu a") == _PUBLIC_PATHS
+    assert len(page.select(".connect-card")) == 4
+    assert page.select('a[href="/app"]') == []
     assert page.select_one('.connect-brand[href="/"][aria-current="page"]') is not None
     assert "準備中" not in response.text
     assert page.select("img, link, iframe, script") == []
@@ -99,9 +100,13 @@ def test_home_public_sites_and_security_without_external_io(
     assert _paths(page, ".connect-section-archive .connect-card") == {"/library"}
     assert _paths(page, ".connect-section-knowledge .connect-card") == {
         "/search",
-        "/app",
         "/search?view=clients&page=1",
     }
+    search_card = page.select_one('.connect-card[href="/search"]')
+    assert search_card.select_one("h3").text == "資料・ナレッジを探す"
+    assert search_card.select_one("p").text == (
+        "提案書・議事録を言葉で検索。取引先一覧・資料一覧・タグからもたどれます。"
+    )
     assert _paths(page, ".connect-section-personal .connect-card") == {"/app/history"}
     assert page.select("script") == []
     assert response.headers["cache-control"] == "no-store, max-age=0"
@@ -201,33 +206,40 @@ def test_email_is_escaped(client: TestClient, path: str) -> None:
     ("target", "expected"),
     [
         ("/", "/"),
+        ("/app", "/app"),
         ("/library", "/library"),
         ("/library/cases?category=tto", "/library/cases?category=tto"),
         ("/library/videos", "/library/videos"),
         ("/library/admin/campaigns", "/library/admin/campaigns"),
-        ("/library-evil", "/app"),
-        ("/library/../admin", "/app"),
-        ("/library/%2f%2fevil.example", "/app"),
-        ("/library/%5cevil", "/app"),
-        ("//evil.example", "/app"),
-        ("/\\evil", "/app"),
-        ("/archive-evil", "/app"),
-        ("/?next=//evil.example", "/app"),
-        (None, "/app"),
+        ("/library-evil", "/"),
+        ("/library/../admin", "/"),
+        ("/library/%2f%2fevil.example", "/"),
+        ("/library/%5cevil", "/"),
+        ("//evil.example", "/"),
+        ("/\\evil", "/"),
+        ("/archive-evil", "/"),
+        ("/?next=//evil.example", "/"),
+        (None, "/"),
+        ("", "/"),
+        ("   ", "/"),
     ],
 )
 def test_safe_next(target: str | None, expected: str) -> None:
     assert connect_app._safe_next(target) == expected
 
 
-@pytest.mark.parametrize("target", ["/", "/app"])
-def test_login_return_target_and_default(client: TestClient, target: str) -> None:
+@pytest.mark.parametrize("target", [None, "/", "/app"])
+def test_login_return_target_and_default(client: TestClient, target: str | None) -> None:
     data = {"credential": "ok"}
-    if target == "/":
+    if target is not None:
         data["next"] = target
     response = client.post("/search/auth/verify", data=data)
     assert response.status_code == 303
-    assert response.headers["location"] == target
+    assert response.headers["location"] == (target or "/")
+    if target == "/app":
+        legacy = client.get(response.headers["location"])
+        assert legacy.status_code == 303 and legacy.headers["location"] == "/search"
+        assert client.get(legacy.headers["location"]).status_code == 200
 
 
 @pytest.mark.parametrize("path", ["/search", "/search/graph"])
@@ -260,17 +272,24 @@ def test_library_has_return_link_and_keeps_nonce_csp(client: TestClient) -> None
 
 def test_portal_and_site_routes_resolve(client: TestClient) -> None:
     # 新しい FastAPI は include_router を入れ子で持つため、app.routes の平坦な数え上げに頼らない。
-    for path in ("/", "/search", "/app", "/library", "/library/cases", "/library/videos"):
+    for path in ("/", "/search", "/library", "/library/cases", "/library/videos"):
         assert client.get(path, cookies=_auth_cookie()).status_code == 200, path
     assert 'class="connect-home"' in client.get("/", cookies=_auth_cookie()).text
 
 
-def test_static_app_response_is_unchanged(
-    client: TestClient, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize("authenticated", [False, True])
+@pytest.mark.parametrize("query", ["", "?x=y", "?next=https://evil.example&view=doc&id=secret"])
+def test_legacy_app_redirect_is_unconditional_and_drops_query(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch, authenticated: bool, query: str
 ) -> None:
-    artifact = '<!doctype html><html lang="ja"><body>固定成果物</body></html>'
-    monkeypatch.setattr(connect_app, "_resolve_app_html", lambda: {"html": artifact})
-    response = client.get("/app", cookies=_auth_cookie())
-    assert response.status_code == 200
-    assert response.content == artifact.encode()
+    def unexpected(*args: object, **kwargs: object) -> None:
+        pytest.fail("旧入口は認証・静的成果物取得を呼ばない")
+
+    monkeypatch.setattr(connect_app, "_resolve_app_html", unexpected)
+    monkeypatch.setattr(connect_app, "verify_session", unexpected)
+    response = client.get("/app" + query, cookies=_auth_cookie() if authenticated else {})
+    assert response.status_code == 303
+    assert response.headers["location"] == "/search"
+    assert response.content == b""
+    assert "set-cookie" not in response.headers
     assert "connect-header" not in response.text

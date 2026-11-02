@@ -103,7 +103,8 @@ def test_search_unauthenticated_redirects_to_login() -> None:
     client, _, _ = _build()
     r = client.get("/search", follow_redirects=False)
     assert r.status_code == 303
-    assert r.headers["location"] == "/search/login"
+    # 旧 /app#… の pendingHash を /search のシェルで解決するため、戻り先は必ず /search。
+    assert r.headers["location"] == "/search/login?next=%2Fsearch"
 
 
 def test_search_login_renders_google_button() -> None:
@@ -128,7 +129,7 @@ def test_login_verify_sets_cookie_and_redirects() -> None:
     client, _, _ = _build()
     r = client.post("/search/auth/verify", data={"credential": "tok"}, follow_redirects=False)
     assert r.status_code == 303
-    assert r.headers["location"] == "/app"
+    assert r.headers["location"] == "/"
     assert "ta_search_session" in r.headers.get("set-cookie", "")
 
 

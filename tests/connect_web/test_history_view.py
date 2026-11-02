@@ -196,6 +196,14 @@ def test_slack_failure_after_audit_is_503(client: TestClient) -> None:
 # ── 本人画面 ───────────────────────────────────────────────────────────────
 
 
+def test_legacy_app_redirect_keeps_history_route(client: TestClient) -> None:
+    legacy = client.get("/app", cookies=_cookies(_OTHER), follow_redirects=False)
+    assert legacy.status_code == 303 and legacy.headers["location"] == "/search"
+    page = client.get("/app/history", cookies=_cookies(_OTHER), follow_redirects=False)
+    assert page.status_code == 200
+    assert _Log.events == [("lookup", _OTHER), ("read", (OWN, dh.HISTORY_DAYS_MAX))]
+
+
 def test_self_view_reads_only_the_logged_in_user(client: TestClient) -> None:
     unauth = client.get("/app/history", follow_redirects=False)
     assert unauth.status_code == 303
@@ -252,7 +260,7 @@ def test_only_http_links_become_anchors() -> None:
 def test_safe_next_allows_the_history_pages() -> None:
     assert connect_app._safe_next("/app/history") == "/app/history"
     assert connect_app._safe_next("/admin/history") == "/admin/history"
-    assert connect_app._safe_next("//evil.example/app/history") == "/app"
+    assert connect_app._safe_next("//evil.example/app/history") == "/"
 
 
 @pytest.mark.parametrize(

@@ -172,7 +172,7 @@ def test_resolver_http_validation_auth_rls_failure_and_bookmark_view(
         "//evil.test" + target,
         "/search-evil?view=bookmarks",
     ):
-        assert _safe_next(invalid_target) == "/app"
+        assert _safe_next(invalid_target) == "/"
     response = client.get(target, cookies=_auth_cookie())
     assert response.status_code == 200 and 'id="bookmarkItems"' in response.text
     assert response.text.count("data-knowledge-bookmarks") == 1

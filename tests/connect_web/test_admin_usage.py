@@ -188,7 +188,7 @@ def test_admin_unauthenticated_redirects_to_login_with_safe_next() -> None:
     assert response.status_code == 303
     assert response.headers["location"] == "/search/login?next=/admin"
     assert connect_app._safe_next("/admin") == "/admin"
-    assert connect_app._safe_next("https://example.com/admin") == "/app"
+    assert connect_app._safe_next("https://example.com/admin") == "/"
 
 
 def test_admin_authenticated_non_admin_gets_404(monkeypatch: pytest.MonkeyPatch) -> None:
