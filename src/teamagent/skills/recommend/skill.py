@@ -239,16 +239,12 @@ class RecommendSkill(BaseSkill[RecommendInput, RecommendOutput]):
                 and not any(name.casefold() in text.casefold() for name in companies)
             )
 
+        industry = str(
+            meta.get("cls_industry") or meta.get("case_industry") or meta.get("industry") or ""
+        )
         classified = {
             **meta,
-            "cls_industry": normalize_industry(
-                str(
-                    meta.get("cls_industry")
-                    or meta.get("case_industry")
-                    or meta.get("industry")
-                    or ""
-                )
-            ),
+            "cls_industry": normalize_industry(industry) or industry,
             "cls_solution": meta.get("cls_solution") or meta.get("proposed_menu"),
         }
         values = {
@@ -269,24 +265,35 @@ class RecommendSkill(BaseSkill[RecommendInput, RecommendOutput]):
         common = [
             f"{label}「{_clean(shared_value, 60)}」"
             for key, label in _FEATURES.items()
-            if (shared_value := features.get(key))
+            if key != "cls_industry"
+            and (shared_value := features.get(key))
             and usable(shared_value)
             and (
                 names_overlap(shared_value, values.get(key))
                 or shared_value.casefold() in detail.casefold()
             )
         ]
+        industry = values.pop("cls_industry", "")
         if common:
-            return "似ている点：" + "・".join(common) + "が共通。" + detail
-        if detail:
-            return "似ている点：" + detail
-        if values:
-            return (
-                "似ている点："
-                + "・".join(f"{_FEATURES[k]}「{v}」" for k, v in values.items())
-                + "を扱う提案。"
+            summary = "・".join(common) + "が共通。" + detail
+        elif detail:
+            summary = detail
+        elif values:
+            summary = (
+                "・".join(f"{_FEATURES[k]}「{v}」" for k, v in values.items()) + "を扱う提案。"
             )
-        return "似ている点：業種・施策の共通点は確認できませんでした。"
+            if industry:
+                summary += f"業種「{industry}」。"
+        elif industry:
+            summary = (
+                f"同じ業種（{industry}）の提案。"
+                if names_overlap(features.get("cls_industry"), industry)
+                else f"業種「{industry}」の提案。"
+            ) + "中身の共通点は資料で確認してください。"
+        else:
+            summary = "業種・施策の共通点は確認できませんでした。"
+        # _clean が付ける省略記号も含めて90字以内にする。
+        return _clean("似ている点：" + summary, 89)
 
     @staticmethod
     def _is_proposal(hit: SearchHit) -> bool:
