@@ -56,6 +56,7 @@ class LargeCatalogPg(Pg):
                     "total_plays": sum(v["total_plays"] for v in members),
                     "total_saves": sum(v["total_saves"] for v in members),
                     "categories": [codes[i]],
+                    "primary_category": codes[i],
                     "first_posted": self.row["posted_at"] - timedelta(days=84 - i),
                     "last_posted": self.row["posted_at"] - timedelta(days=54 - i),
                     "representative": next(v.copy() for v in members if v["thumbnail_s3_key"]),

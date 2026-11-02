@@ -47,6 +47,7 @@ def test_home_shelves_thumbnail_priority_recency_and_category_order() -> None:
         row.update(
             campaign=f"事例{i}",
             categories=[code],
+            primary_category=code,
             total_plays=10000 - i,
             last_posted=datetime(2026, 10, 1, tzinfo=UTC) + timedelta(days=i),
         )
@@ -180,3 +181,116 @@ def test_related_video_query_is_scoped_private_safe_and_bounded(
     pg.row.update(advertiser=None, campaign=None)
     client.get("/library/v/tiktok/123", cookies=_auth_cookie())
     assert len(pg.calls) == 2
+
+
+def test_card_labels_hide_unset_and_separate_known_categories() -> None:
+    pg = Pg()
+    row = case_row(pg)
+    row["categories"] = ["organic", None, "media"]
+    soup = BeautifulSoup(library._campaign_card(row), "html.parser")
+    body = soup.select_one(".card-body")
+    assert body.get_text().startswith("ORGANIC · MEDIA")
+    assert "UNCLASSIFIED" not in body.text
+    assert [e["title"] for e in body.select(".category-label")] == ["オーガニック", "メディア"]
+    row["categories"] = [None]
+    assert not BeautifulSoup(library._campaign_card(row), "html.parser").select(".category-label")
+    video = BeautifulSoup(
+        library._video_card({**pg.row, "business_category": None, "is_pr": True}), "html.parser"
+    )
+    assert not video.select(".category-label")
+    assert video.select_one(".period").text == "PR"
+
+
+def test_category_shelves_use_primary_category_once_and_named_headings() -> None:
+    pg = Pg()
+    codes = ["media", "tto", "kirinuki", "organic", "other", None]
+    rows = [
+        {**case_row(pg), "campaign": f"case{i}", "categories": codes, "primary_category": code}
+        for i, code in enumerate(codes)
+    ]
+    soup = BeautifulSoup(library.archive_home(rows, []), "html.parser")
+    sections = soup.select(".category-section")
+    assert [s.h2.contents[0] for s in sections] == [
+        "MEDIA",
+        "TTO",
+        "CLIP",
+        "ORGANIC",
+        "OTHER",
+        "UNCLASSIFIED",
+    ]
+    assert [s.h2.span.text for s in sections] == [
+        "メディア",
+        "TTO",
+        "切り抜き",
+        "オーガニック",
+        "その他",
+        "種別未設定",
+    ]
+    assert [[h.text for h in s.select(".card h3")] for s in sections] == [
+        [f"case{i}"] for i in range(6)
+    ]
+
+
+def test_primary_category_is_counted_in_one_parameterized_aggregate() -> None:
+    pg = Pg()
+    library.search_campaigns(pg, {"q": "' OR true--"}, admin=False)
+    assert len(pg.calls) == 1
+    query, params = pg.calls[0]
+    sql = " ".join(query.split())
+    assert "count(*) OVER ( PARTITION BY v.advertiser, v.campaign, v.business_category)" in sql
+    assert "array_agg(v.business_category ORDER BY v.category_count DESC," in sql
+    assert (
+        "CASE v.business_category WHEN 'media' THEN 0 WHEN 'tto' THEN 1 "
+        "WHEN 'kirinuki' THEN 2 WHEN 'other' THEN 3 WHEN 'organic' THEN 4 "
+        "ELSE 5 END))[1] AS primary_category"
+    ) in sql
+    assert sql.count("FROM vl_videos_effective") == 1
+    assert sql.count("GROUP BY v.advertiser, v.campaign") == 1
+    assert "NOT v.is_private" in sql and "' OR true--" not in sql
+    assert params == ["%' OR true--%"]
+
+
+@pytest.mark.parametrize("count", [1, 3, 4, 5])
+def test_sparse_category_uses_new_list_layout(count: int) -> None:
+    rows = [{**case_row(Pg()), "campaign": str(i)} for i in range(count)]
+    soup = BeautifulSoup(library.archive_home(rows, []), "html.parser")
+    section = soup.select_one(".category-section")
+    grid = section.select_one(".campaign-grid")
+    assert ("new-grid" in grid["class"]) == (count < 4)
+    assert ("grid" in grid["class"]) == (count >= 4)
+    assert len(grid.select(".card")) == min(count, 4)
+
+
+@pytest.mark.parametrize("caption", ["最初の行 <script>\n次の行", "", None, "  \n本文"])
+def test_case_video_titles_use_caption_first_line_or_account(
+    setup: tuple[TestClient, Pg], caption: str | None
+) -> None:
+    from tests.connect_web.test_library_catalog import catalog_pg
+
+    client, pg = setup
+    pg.row.update(caption=caption, campaign="全動画で同じ案件名", account_name="account_full_name")
+    catalog_pg(pg)
+    soup = BeautifulSoup(
+        client.get("/library/c?advertiser=a&campaign=b", cookies=_auth_cookie()).text, "html.parser"
+    )
+    card = soup.select_one(".video-grid .card")
+    expected = (
+        "最初の行 <script>" if caption and caption.startswith("最初") else "account_full_name"
+    )
+    assert card.h3.text == expected
+    assert card.select_one(".card-link")["aria-label"].endswith(expected + "の動画詳細")
+    assert card.select_one("script") is None
+    assert card.select_one(".account-name").text == "account_full_name"
+    assert "2026-10-30" in card.select_one(".meta-source").text
+    assert card.select_one(".meta-plays").text == "1.7万回再生"
+    assert "次の行" not in card.text
+    # Other shelves still identify the campaign.
+    assert BeautifulSoup(library._video_card(pg.row), "html.parser").h3.text == pg.row["campaign"]
+
+
+def test_pickup_shelf_aligns_with_container_and_keeps_focus_inside() -> None:
+    from tests.connect_web.test_library_catalog_review import css_rule
+
+    rule = css_rule(".pickup-grid")
+    assert "margin:0" in rule and "padding:0 0 20px" in rule
+    assert "outline-offset:-3px" in css_rule(".pickup-grid .card-link:focus-visible")

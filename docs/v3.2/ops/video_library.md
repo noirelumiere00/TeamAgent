@@ -292,3 +292,28 @@ DPR 2。トップ・事例一覧・動画詳細は全ページ、事例詳細と
 未実施: 実DB3テスト、実TikTok再生・本番S3との疎通、本番データ確認・デプロイ。768／1024pxはCSS分岐のみで実画面確認未完了。push・PRは実施していない。
 
 コミット未実施: 最後の `git add` が `/Users/s-komata/dev/teamagent/.git/worktrees/teamagent-vl-ui/index.lock` の作成を `Operation not permitted` で拒否した。依頼の許容条件に従い、8ファイルの変更をこのworktreeに保持している。
+
+## 第3版・実データレビュー後の修正（2026-11-02）
+
+対象URLは `/library`（種別・PICK UP）、`/library/c?advertiser=…&campaign=…`（動画タイトル）。カードの未設定ラベル非表示と複数種別の区切りは `/library/cases`／`/library/videos`／動画詳細の関連カードにも共通で適用する。詳細の区分表示と未設定セクションは残す。
+
+事例集計SQLのCTEで広告主×案件×有効種別の本数をウィンドウ集計し、外側の既存GROUP BYで最多種別を `primary_category` として返す。同数ならメディア→TTO→切り抜き→その他→オーガニック→未設定。可視範囲・検索条件を適用した動画を数える。トップは引き続き2クエリ、事例集計は1クエリ。種別セクションでは主な種別だけを使い、PICK UP／NEWとの重複は許容する。4件未満はNEWのリスト表示を再利用。PICK UPの負の余白を打ち消して左右をコンテナに揃え、フォーカスリングを内側に置いた。
+
+変更ファイルは `library.py`、`library_assets.py`、`test_library.py`、`test_library_catalog.py`、`test_library_catalog_review.py`、`test_library_archive.py`、`test_library_catalog_postgres.py`、本書。認証・CSP・CSRF・コピー・分析・既存JSON APIの動画形式は変更なし。
+
+| 修正 | 回帰テスト（test_library_archive.py） | 壊して赤を確認した内容 |
+| --- | --- | --- |
+| 未設定ラベル非表示・複数種別の区切り | `test_card_labels_hide_unset_and_separate_known_categories` | UNCLASSIFIEDを復活／区切りを除去（2件） |
+| 種別ごとの英語見出し | `test_category_shelves_use_primary_category_once_and_named_headings` | CATEGORYへ戻す |
+| 主な種別だけに分類 | 同上、`test_primary_category_is_counted_in_one_parameterized_aggregate` | 全種別に分類／本数の昇降順を逆転／同数時優先順を逆転（3件） |
+| 4件未満はリスト型 | `test_sparse_category_uses_new_list_layout` | 閾値4を1へ変更 |
+| 事例内は投稿文の1行目・欠損時アカウント名 | `test_case_video_titles_use_caption_first_line_or_account` | 事例内用タイトル処理を呼ばない |
+| PICK UP左端揃え | `test_pickup_shelf_aligns_with_container_and_keeps_focus_inside` | 負のmarginを復活 |
+
+計9件の破壊確認がすべて失敗を検出し、復元済み。結果は `/tmp/library-v3-review-mutations.json`、失敗全文は `/tmp/library-v3-review-mutation-*.log`。初回はPythonの同秒・同サイズのbytecodeキャッシュが1件の変更を拾わなかったため、対象の生成キャッシュを消して9件すべて再検証した。
+
+関連pytest6ファイルは **157 passed / 9 skipped**。mypy strictは525ファイル、ruff 0.15.15 check／formatは1,464ファイル、import-linterは2契約成功。ログは `/tmp/library-v3-review-{pytest,mypy,ruff,format,imports}.log`。実SQLの多数決・全6種別の同数時優先順は `test_primary_category_majority_and_tie_priority` を追加したが、実DB接続設定がなく6パターンともスキップ（既存3件も同様）。実行済みのSQL契約テストはクエリ構造・優先順・パラメータ化・1クエリを検証するもので、実DBの返却値の検証とは区別する。
+
+fake 55事例・2,800動画（サムネ無し280本）に種別混在と異なる投稿文を加え、1440／375pxで再撮影・目視した。トップは `/tmp/library-v3-review-screenshots/home-1440.png`、`home-375.png`。事例は `case-1440.png`（上部1,600 CSS px）、`case-375-full.png`（ブラウザの撮影上限により上部8,192 CSS px）。すべてDPR 2。375pxのビューポート撮影はブラウザ側で拡大・切り抜きになるため全体撮影に切り替え、動画タイトルを含む画像を確認した。棚と先頭カードの左端一致は撮影用のレイアウト検査でも確認。撮影用ウィンドウは終了後に閉じた。
+
+未実施: 実DB9テスト、本番データでの再確認、実TikTok／本番S3疎通、768／1024px再撮影、デプロイ。依頼どおりコミット・push・PRはせず、変更を作業ツリーに残す。

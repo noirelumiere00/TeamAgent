@@ -182,7 +182,9 @@ white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.card-body p{margin-bo
 .card-tags{margin-top:10px}.card-select{display:block;font-size:13px;padding:8px 0}
 .pickup-grid,.video-shelf{display:grid;grid-auto-flow:column;overflow-x:auto;gap:24px;
 scroll-snap-type:x proximity;padding:5px 5px 20px;margin:-5px -5px 0;scrollbar-width:thin}
-.pickup-grid{grid-auto-columns:min(36vw,440px)}.pickup-grid .card{scroll-snap-align:start}
+.pickup-grid{grid-auto-columns:min(36vw,440px);margin:0;padding:0 0 20px}
+.pickup-grid .card{scroll-snap-align:start}
+.pickup-grid .card-link:focus-visible{outline-offset:-3px}
 .pickup-grid .card-link{position:relative;border-radius:5px;overflow:hidden}
 .pickup-grid .card-body{position:absolute;bottom:0;left:0;right:0;color:#fff;padding:80px 24px 24px;
 background:linear-gradient(transparent,rgba(8,16,29,.92))}

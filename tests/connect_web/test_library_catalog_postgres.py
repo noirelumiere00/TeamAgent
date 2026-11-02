@@ -97,3 +97,38 @@ def test_analysis_tag_filter_executes_on_latest_supported_payload(db: tuple[Any,
     assert (
         search_videos(conn, {"tag_group": "hook_type", "tag": "other"}, admin=False)["total"] == 0
     )
+
+
+@pytest.mark.parametrize("winner", ["media", "tto", "kirinuki", "other", "organic", None])
+def test_primary_category_majority_and_tie_priority(
+    db: tuple[Any, Any], winner: str | None
+) -> None:
+    conn, repository = db
+    seed(conn, repository)
+    # Shadow only the view in this rollback-only connection to exercise every future mixed category.
+    conn.execute(
+        "CREATE TEMP TABLE vl_videos_effective AS SELECT * FROM vl_videos_effective LIMIT 0"
+    )
+    codes = ["media", "tto", "kirinuki", "other", "organic", None]
+    for i, code in enumerate(codes):
+        conn.execute(
+            """INSERT INTO vl_videos_effective
+            (platform,video_id,advertiser,campaign,business_category,is_private,is_pr)
+            VALUES ('tiktok',%s,'test','mixed',%s,false,true)""",
+            (str(i), code),
+        )
+    # All tied, then remove each winner: proves the complete priority including NULL last.
+    for code in codes:
+        assert search_campaigns(conn, {}, admin=False)[0]["primary_category"] == code
+        conn.execute(
+            "DELETE FROM vl_videos_effective WHERE business_category IS NOT DISTINCT FROM %s",
+            (code,),
+        )
+    for i, code in enumerate([*codes, winner]):
+        conn.execute(
+            """INSERT INTO vl_videos_effective
+            (platform,video_id,advertiser,campaign,business_category,is_private,is_pr)
+            VALUES ('tiktok',%s,'test','mixed',%s,false,true)""",
+            (str(i), code),
+        )
+    assert search_campaigns(conn, {}, admin=False)[0]["primary_category"] == winner

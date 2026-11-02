@@ -293,17 +293,12 @@ def compact_plays(value: float | None) -> str:
 
 
 def _category_label(code: str | None) -> str:
-    english = {
-        "media": "MEDIA",
-        "tto": "TTO",
-        "kirinuki": "CLIP",
-        "other": "OTHER",
-        "organic": "ORGANIC",
-    }
-    label = CATEGORY_LABELS.get(code or "", "種別未設定")
+    if code is None or code not in CATEGORY_LABELS:
+        return ""
+    label = CATEGORY_LABELS[code]
     return (
         f'<span class="category-label" title="{label}" aria-label="{label}">'
-        f"{english.get(code or '', 'UNCLASSIFIED')}</span>"
+        f"{CATEGORY_ENGLISH[code]}</span>"
     )
 
 
@@ -362,6 +357,13 @@ CATEGORY_LABELS = {
     "kirinuki": "切り抜き",
     "other": "その他",
     "organic": "オーガニック",
+}
+CATEGORY_ENGLISH = {
+    "media": "MEDIA",
+    "tto": "TTO",
+    "kirinuki": "CLIP",
+    "other": "OTHER",
+    "organic": "ORGANIC",
 }
 
 
@@ -436,11 +438,17 @@ def _preview(row: Mapping[str, Any], *, detail: bool = False) -> str:
     return f'<span class="preview"{player}>{cover}</span>'
 
 
-def _video_card(row: Mapping[str, Any], *, selectable: bool = False) -> str:
+def _video_card(
+    row: Mapping[str, Any], *, selectable: bool = False, in_campaign: bool = False
+) -> str:
     path = "/".join(quote(str(row[key]), safe="") for key in ("platform", "video_id"))
     url = post_url(row)
     account = str(row.get("account_name") or row.get("account_handle") or "動画")
     title = str(row.get("campaign") or row.get("caption") or account).strip()
+    if in_campaign:
+        caption = str(row.get("caption") or "").splitlines()
+        title = (caption[0].strip() if caption else "") or account
+    category = _category_label(row.get("business_category"))
     metadata = [_day(row["posted_at"])] if isinstance(row.get("posted_at"), datetime) else []
     flags = " · ".join(
         label for field, label in (("is_pr", "PR"), ("is_private", "非公開")) if row.get(field)
@@ -461,8 +469,8 @@ def _video_card(row: Mapping[str, Any], *, selectable: bool = False) -> str:
         f'<article class="card"><a class="card-link" href="/library/v/{path}" '
         f'aria-label="{_e(account)}: {_e(title)}の動画詳細">{_preview(row)}'
         '<div class="card-body">'
-        + _category_label(row.get("business_category"))
-        + (f'<span class="period"> · {flags}</span>' if flags else "")
+        + category
+        + (f'<span class="period">{" · " if category else ""}{flags}</span>' if flags else "")
         + f'<h3>{_e(title)}</h3><p class="card-meta" '
         f'title="合計再生 {_metric(row.get("total_plays"))}">' + '<span class="meta-source">'
         f'<span class="account-name" title="{_e(account)}">{_e(account)}</span>'
@@ -539,9 +547,18 @@ def search_campaigns(conn: Any, params: Mapping[str, str], *, admin: bool) -> li
         for field in ("plays", "saves", "likes", "comments", "shares")
     )
     # All interpolated fragments are fixed SQL/allowlisted orders; values remain parameters.
-    sql = f"""SELECT v.advertiser, v.campaign, count(*) AS video_count,
+    sql = f"""WITH categorized AS (
+        SELECT v.*, count(*) OVER (
+            PARTITION BY v.advertiser, v.campaign, v.business_category) AS category_count
+        FROM vl_videos_effective v WHERE {where}
+        AND COALESCE(v.advertiser,'')<>'' AND COALESCE(v.campaign,'')<>'')
+        SELECT v.advertiser, v.campaign, count(*) AS video_count,
         min(v.posted_at) AS first_posted, max(v.posted_at) AS last_posted,
         array_agg(DISTINCT v.business_category) AS categories,
+        (array_agg(v.business_category ORDER BY v.category_count DESC,
+            CASE v.business_category WHEN 'media' THEN 0 WHEN 'tto' THEN 1
+                WHEN 'kirinuki' THEN 2 WHEN 'other' THEN 3 WHEN 'organic' THEN 4
+                ELSE 5 END))[1] AS primary_category,
         max(v.industry) AS industry, max(v.purpose) AS purpose, {totals},
         avg(CASE WHEN m.total_plays > 0
             THEN m.total_saves / m.total_plays END) AS average_save_rate,
@@ -551,8 +568,7 @@ def search_campaigns(conn: Any, params: Mapping[str, str], *, admin: bool) -> li
             'has_thumbnail',NULLIF(v.thumbnail_s3_key,'') IS NOT NULL)
             ORDER BY (NULLIF(v.thumbnail_s3_key,'') IS NOT NULL) DESC,
             m.total_plays DESC NULLS LAST, v.platform, v.video_id))[1] AS representative
-        FROM vl_videos_effective v {_METRICS_JOIN} WHERE {where}
-        AND COALESCE(v.advertiser,'')<>'' AND COALESCE(v.campaign,'')<>''
+        FROM categorized v {_METRICS_JOIN}
         GROUP BY v.advertiser, v.campaign
         ORDER BY {orders[sort]} DESC NULLS LAST, v.advertiser, v.campaign"""  # nosec B608
     return list(conn.execute(sql, values).fetchall())
@@ -624,7 +640,7 @@ def _campaign_card(row: Mapping[str, Any]) -> str:
         f'aria-label="{_e(row["advertiser"])}: {_e(row["campaign"])}の事例">'
         '<span class="preview">' + _cover(row["representative"]) + "</span>"
         '<div class="card-body">'
-        + " ".join(_category_label(code) for code in row["categories"])
+        + " · ".join(label for code in row["categories"] if (label := _category_label(code)))
         + f'<h3>{_e(row["campaign"])}</h3><p class="card-meta" title="{_e(meta)}">'
         + f'<span class="meta-source">{_e(meta)}</span><span class="meta-plays">'
         + compact_plays(row.get("total_plays"))
@@ -693,7 +709,7 @@ def archive_home(cases: list[Any], videos: list[Any]) -> str:
     body += '<div class="video-grid video-shelf">' + "".join(_video_card(r) for r in videos)
     body += "</div></section>"
     for code in ("media", "tto", "kirinuki", "organic", "other", None):
-        rows = [r for r in ranked if code in r["categories"]][:4]
+        rows = [r for r in ranked if code == r["primary_category"]][:4]
         if not rows:
             continue
         label = CATEGORY_LABELS.get(code or "", "種別未設定")
@@ -701,8 +717,14 @@ def archive_home(cases: list[Any], videos: list[Any]) -> str:
         body += (
             f'<section class="archive-section category-section" data-category="{code or "unset"}">'
         )
-        body += _section_heading("CATEGORY", label, f"{label}の事例から、次のヒントを。", url)
-        body += '<div class="grid campaign-grid">' + "".join(_campaign_card(r) for r in rows)
+        body += _section_heading(
+            CATEGORY_ENGLISH.get(code or "", "UNCLASSIFIED"),
+            label,
+            f"{label}の事例から、次のヒントを。",
+            url,
+        )
+        layout = "new-grid" if len(rows) < 4 else "grid"
+        body += f'<div class="{layout} campaign-grid">' + "".join(_campaign_card(r) for r in rows)
         body += "</div></section>"
     body += '<section class="archive-section archive-entry">' + _section_heading(
         "ARCHIVE", "すべての事例", "業種や目的で絞って、企画に合う事例を探す。", "/library/cases"
@@ -925,7 +947,9 @@ def register_library_routes(
             f'class="section-heading"><h2>この事例の動画</h2><p>再生の多い順</p></div>'
         )
         body += (
-            '<div class="grid video-grid">' + "".join(_video_card(row) for row in videos) + "</div>"
+            '<div class="grid video-grid">'
+            + "".join(_video_card(row, in_campaign=True) for row in videos)
+            + "</div>"
         )
         return page(str(case["campaign"]), body, email, hero=True)
 

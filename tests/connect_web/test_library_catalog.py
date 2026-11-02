@@ -26,6 +26,7 @@ def case_row(pg: Pg) -> dict[str, Any]:
         "first_posted": pg.row["posted_at"],
         "last_posted": pg.row["posted_at"],
         "categories": ["media"],
+        "primary_category": "media",
         "average_save_rate": 0.02,
         "representative": pg.row.copy(),
     }
