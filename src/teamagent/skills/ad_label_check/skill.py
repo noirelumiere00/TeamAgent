@@ -34,7 +34,6 @@ from teamagent.skills.base import BaseSkill, SkillContext, register
 _ALLOWLIST_ENV = "AD_LABEL_CHECK_ALLOWED_EMAILS"
 # OpenClaw の tool timeout(300s) 内に 3 媒体の並列 run を収める。
 _DEADLINE_S = 200
-_SECTIONS = (("tiktok", "TT"), ("instagram", "IG"), ("youtube", "YT"))
 # 広告であることを示すハッシュタグ（NFKC + 小文字で完全一致・#PRADA 等は拾わない）。
 DISCLOSURE_TAGS = frozenset(
     {
@@ -64,28 +63,26 @@ def find_disclosures(text: str, hashtags: tuple[str, ...] | list[str] = ()) -> l
 
 
 def _line(r: AdLabelResult) -> str:
+    # 貼られた順に「URL　ラベル有無　ハッシュタグ有無」だけを出す。
+    # 問題のある行にだけ ⚠️ を付ける（11-02 要望）。
+    if r.platform == "unsupported":
+        return f"{r.url}　対象外（TikTok・Instagram・YouTube の投稿URLではありません）"
     if not r.found:
-        return f"{r.url}　取得できず（削除・非公開・URL違いの可能性）"
-    label = {True: "ラベルOK", False: "ラベルなし", None: "ラベル取れず"}[r.label]
-    if r.partners:
-        label += "（" + "・".join(f"@{p}" for p in r.partners[:3]) + "）"
-    tags = (
-        f"ハッシュタグ{'・'.join(r.disclosure_tags[:3])} OK"
-        if r.disclosure_tags
-        else "ハッシュタグなし"
-    )
+        return f"{r.url}　⚠️取得できず（削除・非公開・URL違いの可能性）"
+    label = {True: "ラベルあり", False: "ラベルなし", None: "ラベル取れず"}[r.label]
+    tags = "ハッシュタグあり" if r.disclosure_tags else "ハッシュタグなし"
     return f"{r.url}　{label}　{tags}" + ("　⚠️要確認" if r.needs_review else "")
 
 
 @register
 class AdLabelCheckSkill(BaseSkill[AdLabelCheckInput, AdLabelCheckOutput]):
-    """投稿URLを貼るだけで、各媒体のタイアップ表示と #PR 等の表記を媒体別に返す。"""
+    """投稿URLを貼るだけで、各媒体のタイアップ表示と #PR 等の表記を貼られた順に返す。"""
 
     name: ClassVar[str] = "ad_label_check"
     description: ClassVar[str] = (
         "TikTok/Instagram/YouTube の投稿URL（改行区切り・混在可・最大20件）を受け取り、各媒体の"
         "タイアップ表示（有料パートナーシップ・タイアップ投稿・プロモーションを含みます）の有無と、"
-        "キャプションの #PR #ad #タイアップ 等の表記を、媒体ごと（TT/IG/YT）に1行ずつ返す。"
+        "キャプションの #PR #ad #タイアップ 等の表記の有無を、貼られた順に1行ずつ返す。"
         "ステマ表記チェック・広告表示の確認・PR表記の確認に使う。再生数などの効果測定は対象外。"
     )
     input_schema: ClassVar[type[BaseModel]] = AdLabelCheckInput
@@ -170,14 +167,7 @@ class AdLabelCheckSkill(BaseSkill[AdLabelCheckInput, AdLabelCheckOutput]):
         return out
 
     def _slack_summary(self, out: AdLabelCheckOutput) -> str:
-        blocks: list[str] = []
-        for platform, head in _SECTIONS:
-            rows = [_line(r) for r in out.results if r.platform == platform]
-            if rows:
-                blocks.append(f"「{head}」\n" + "\n".join(rows))
-        other = [r.url for r in out.results if r.platform == "unsupported"]
-        if other:
-            blocks.append("「対象外」\n" + "\n".join(other))
+        summary = "\n".join(_line(r) for r in out.results)
         if out.warnings:
-            blocks.append("⚠️ " + " / ".join(out.warnings))
-        return "\n\n".join(blocks)
+            summary += "\n\n⚠️ " + " / ".join(out.warnings)
+        return summary
