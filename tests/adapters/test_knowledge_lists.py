@@ -70,3 +70,19 @@ def test_tag_filter_whitelist_and_parameterized_exact_value() -> None:
     cursor.fetchone.return_value = None
     assert pg.get_knowledge_document(conn, "12345678-1234-1234-abcd-123456789abc") is None
     assert cursor.execute.call_args.args[1] == ["12345678-1234-1234-abcd-123456789abc"]
+
+
+def test_operator_values_are_bound_and_like_metacharacters_are_escaped() -> None:
+    conn = MagicMock()
+    cursor = conn.cursor.return_value.__enter__.return_value
+    cursor.fetchall.return_value = [{"id": None, "total": 0}]
+    pg = PgVectorClient("fixture")
+    pg.list_knowledge_documents(conn, q=r"file:50%_売上\案 -tag:秘密", quick="proposal")
+    query, params = cursor.execute.call_args.args
+    assert r"50%_売上\案" not in query and "秘密" not in query and "提案書" not in query
+    assert params == ["提案書", r"%50\%\_売上\\案%", "秘密", "秘密", "秘密", "秘密", 50, 0]
+    assert "FROM chunks" not in query  # metadata/name filters do not load chunk text
+    pg.list_knowledge_documents(conn, q="本文", quick="recent")
+    query, params = cursor.execute.call_args.args
+    assert "FROM chunks" in query and "normalize(COALESCE(excerpt" in query
+    assert params == [30, "%本文%", "%本文%", "%本文%", "%本文%", "%本文%", 50, 0]

@@ -89,6 +89,7 @@ from teamagent.dashboard.auth import (
 from teamagent.dashboard.config import DashboardConfig
 from teamagent.dashboard.insights import AdminPeriod, admin_period, analyze_questions
 from teamagent.dashboard.render import render_admin_page, render_usage_admin
+from teamagent.knowledge_query import QUICK_FILTERS, KnowledgeQueryError, parse_knowledge_query
 
 logger = structlog.get_logger(__name__)
 
@@ -4862,16 +4863,41 @@ def create_app(
     def search_ui(request: Request) -> Response:
         """検索 UI（未認証は /search/login へリダイレクト）。"""
         target = search_list_target("/search?" + request.url.query)
+        query_error = None
+        if target is None and request.query_params.get("view") == "docs":
+            try:
+                parse_knowledge_query(request.query_params.get("q", ""))
+            except KnowledgeQueryError as exc:
+                query_error = str(exc)
+            if (
+                "quick" in request.query_params
+                and request.query_params["quick"] not in QUICK_FILTERS
+            ):
+                query_error = "このクイックフィルタは使えません。"
         if target is None and request.query_params.get("view") == "doc":
             target = "/search?view=docs&page=1"
         email = _search_email(request)
         if email is None:
             login = "/search/login" + ("?next=" + quote(target, safe="") if target else "")
             return RedirectResponse(login, status_code=303)
+        if query_error is not None:
+            content = render_list(
+                "docs",
+                1,
+                [],
+                None,
+                q=request.query_params.get("q", ""),
+                error=query_error,
+            )
+            return HTMLResponse(
+                _shell_page(email, mode="docs", list_content=content), status_code=400
+            )
         if target:
             params = parse_qs(target.split("?", 1)[1])
             view, page = params["view"][0], int(params.get("page", ["1"])[0])
             tag = params.get("tag", [None])[0]
+            q = params.get("q", [""])[0]
+            quick = params.get("quick", [None])[0]
             from teamagent.adapters.pgvector_client import PgVectorClient
 
             rows: list[dict[str, Any]] = []
@@ -4894,7 +4920,11 @@ def create_app(
                             conn, limit=PAGE_SIZE, offset=(page - 1) * PAGE_SIZE
                         )
                     else:
-                        filters = {"tag": parse_tag(tag)} if tag is not None else {}
+                        filters: dict[str, Any] = {"tag": parse_tag(tag)} if tag is not None else {}
+                        if q:
+                            filters["q"] = q
+                        if quick:
+                            filters["quick"] = quick
                         rows, total = pg.list_knowledge_documents(
                             conn, limit=PAGE_SIZE, offset=(page - 1) * PAGE_SIZE, **filters
                         )
@@ -4910,7 +4940,7 @@ def create_app(
             elif view == "tags":
                 content = render_tags(None if failed else rows)
             else:
-                content = render_list(view, page, rows, total, tag=tag)
+                content = render_list(view, page, rows, total, tag=tag, q=q, quick=quick)
             return HTMLResponse(
                 _shell_page(email, mode=view, list_content=content),
                 status_code=status,
