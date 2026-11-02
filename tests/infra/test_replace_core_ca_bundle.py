@@ -191,10 +191,10 @@ def test_refuses_unexpected_base_version_without_changing_db(tmp_path):
     assert db.read_bytes() == old
 
 
-PIP_APK = ROOT / "infra/docker/vendor/py3-pip-wheel-26.2.2-r1.apk"
+PIP_APK = ROOT / "infra/docker/vendor/py3-pip-wheel-26.2.2-r2.apk"
 PIP_LOCK = ROOT / "infra/docker/core-pip-wheel.lock.json"
-PIP_SHA256 = "3481499c46ac5ae2b7e10ee50ff80f5c4c0e55501e0d096c8c06437f51283c93"
-PIP_VERSION = "26.2.2-r1"
+PIP_SHA256 = "6dcca154f23de54db689ec2006bb65c67de74d556f55f8836bf5d438da8b8ee1"
+PIP_VERSION = "26.2.2-r2"
 OLD_WHEEL = "usr/share/python-wheels/pip-26.2.1-py3-none-any.whl"
 OLD_PIP_SBOM = "var/lib/db/sbom/py3-pip-wheel-26.2.1-r2.spdx.json"
 PIP_BEFORE = BEFORE + b"P:py3-pip-wheel\nV:26.2.1-r2\n\n"
@@ -259,7 +259,7 @@ def test_pip_final_verification_fails_closed(tmp_path, change):
     module.prepare(base, packages)
     paths = {
         "wheel": "usr/share/python-wheels/pip-26.2.2-py3-none-any.whl",
-        "sbom": "var/lib/db/sbom/py3-pip-wheel-26.2.2-r1.spdx.json",
+        "sbom": "var/lib/db/sbom/py3-pip-wheel-26.2.2-r2.spdx.json",
         "old-wheel": OLD_WHEEL,
         "old-sbom": OLD_PIP_SBOM,
     }
@@ -320,3 +320,136 @@ def test_pip_rejects_unexpected_base_before_changing_either_package(tmp_path):
         module.prepare(base, _packages(module))
     assert db.read_bytes() == before
     assert (base / CERT).read_bytes() == b"old certificates"
+
+
+def _python_packages(module, dev=False):
+    import json
+
+    packages = [module.load_package(PIP_APK, PIP_LOCK, PIP_SHA256, PIP_VERSION)]
+    for part in ("", "-base", "-runtime", *(("-base-dev", "-dev") if dev else ())):
+        lock = ROOT / f"infra/docker/core-python-3.14{part}.lock.json"
+        data = json.loads(lock.read_bytes())
+        packages.append(
+            module.load_package(
+                ROOT / "infra/docker/vendor" / data["archive"],
+                lock,
+                data["archive_sha256"],
+                data["apkindex"]["V"],
+            )
+        )
+    return packages
+
+
+def _python_base(tmp_path):
+    base = _pip_base(tmp_path)
+    providers = (
+        "ld-linux-aarch64.so.1 libbz2.so.1 libc.so.6 libcrypto.so.4 libexpat.so.1 "
+        "libffi.so.8 libgdbm.so.6 libgdbm_compat.so.4 liblzma.so.5 libm.so.6 "
+        "libmpdec.so.4 libncursesw.so.6 libpanelw.so.6 libreadline.so.8 libsqlite3.so.0 "
+        "libssl.so.4 libtinfo.so.6 libuuid.so.1 libz.so.1 libzstd.so.1"
+    )
+    before = (
+        PIP_BEFORE
+        + (
+            "P:base-libraries\nV:1\np:"
+            + " ".join("so:" + name for name in providers.split())
+            + "\n\nP:python-3.14-base\nV:3.14.8_git20261008-r0\n"
+            "F:usr/bin\nR:python3.14\nF:usr/lib/python3.14\nR:obsolete.py\n"
+            "F:var/lib/db/sbom\nR:python-3.14-base-3.14.8_git20261008-r0.spdx.json\n\n"
+        ).encode()
+    )
+    (base / DB).write_bytes(before)
+    for name in (
+        "usr/bin/python3.14",
+        "usr/lib/python3.14/obsolete.py",
+        "var/lib/db/sbom/python-3.14-base-3.14.8_git20261008-r0.spdx.json",
+    ):
+        path = base / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"old payload")
+    return base, before
+
+
+def test_python_updates_binary_libpython_and_inventory_with_runtime_split(tmp_path):
+    module = _module()
+    base, before = _python_base(tmp_path)
+    packages = _python_packages(module)
+    module.prepare(base, packages)
+    module.verify(base, before, packages)
+    assert hashlib.sha256((base / "usr/bin/python3.14").read_bytes()).hexdigest() == (
+        "81060a4e37f0e6746c7f53468dcd28c200053b4a2bb377a3fe2169edf3f770ac"
+    )
+    assert (base / "usr/bin/python3.14").stat().st_mode & 0o777 == 0o755
+    assert (base / "usr/lib/libpython3.14.so.1.0").read_bytes()[:4] == b"\x7fELF"
+    assert os.readlink(base / "usr/bin/python3") == "python3.14"
+    assert not (base / "usr/lib/python3.14/obsolete.py").exists()
+    assert (base / DB).read_bytes().count(b"V:3.14.10_git20261028-r0\n") == 3
+    # Every unrelated record remains byte-identical, even across the package split.
+    blocks = (base / DB).read_bytes().split(b"\n\n")
+    assert blocks[0:2] == before.split(b"\n\n")[0:2]
+    assert blocks[4] == before.split(b"\n\n")[4]
+    spec = importlib.util.spec_from_file_location("smoke_core", ROOT / "infra/docker/smoke_core.py")
+    smoke = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(smoke)
+    smoke._assert_python_packages(base)
+
+
+@pytest.mark.parametrize(
+    "change", ["base-version", "missing-library", "existing-runtime", "old-dev"]
+)
+def test_python_rejects_base_or_dependency_drift_before_writing(tmp_path, change):
+    module = _module()
+    base, before = _python_base(tmp_path)
+    if change == "base-version":
+        before = before.replace(b"V:3.14.8_git20261008-r0", b"V:3.14.7-r0")
+    elif change == "missing-library":
+        before = before.replace(b"so:libssl.so.4", b"so:libssl.so.3")
+    elif change == "existing-runtime":
+        before += b"P:python-3.14-runtime\nV:3.14.8_git20261021-r3\n\n"
+    else:
+        before += (
+            b"P:python-3.14-dev\nV:3.14.8_git20261008-r0\nD:python-3.14=3.14.8_git20261008-r0\n\n"
+        )
+    (base / DB).write_bytes(before)
+    with pytest.raises(ValueError):
+        module.prepare(base, _python_packages(module))
+    assert (base / DB).read_bytes() == before
+    assert (base / "usr/bin/python3.14").read_bytes() == b"old payload"
+    assert (base / OLD_WHEEL).read_bytes() == b"old payload"
+
+
+@pytest.mark.parametrize("change", ["libpython", "executable-mode", "stale-file", "symlink"])
+def test_python_verification_rejects_payload_drift(tmp_path, change):
+    module = _module()
+    base, before = _python_base(tmp_path)
+    packages = _python_packages(module)
+    module.prepare(base, packages)
+    if change == "libpython":
+        (base / "usr/lib/libpython3.14.so.1.0").write_bytes(b"corrupt")
+    elif change == "executable-mode":
+        (base / "usr/bin/python3.14").chmod(0o644)
+    elif change == "stale-file":
+        (base / "usr/lib/python3.14/obsolete.py").write_bytes(b"old")
+    else:
+        (base / "usr/bin/python3").unlink()
+        (base / "usr/bin/python3").symlink_to("python3.15")
+    with pytest.raises(ValueError):
+        module.verify(base, before, packages)
+
+
+def test_python_development_packages_follow_the_same_version(tmp_path):
+    module = _module()
+    base, before = _python_base(tmp_path)
+    before += (
+        b"P:python-3.14-base-dev\nV:3.14.8_git20261008-r0\n"
+        b"D:python-3.14-base=3.14.8_git20261008-r0\n\n"
+        b"P:python-3.14-dev\nV:3.14.8_git20261008-r0\n"
+        b"D:python-3.14-base-dev=3.14.8_git20261008-r0 python-3.14=3.14.8_git20261008-r0\n\n"
+    )
+    (base / DB).write_bytes(before)
+    packages = _python_packages(module, dev=True)
+    module.prepare(base, packages)
+    module.verify(base, before, packages)
+    assert (base / DB).read_bytes().count(b"V:3.14.10_git20261028-r0\n") == 5
+    assert os.readlink(base / "usr/bin/python3-config") == "python3.14-config"
+    assert os.readlink(base / "usr/lib/libpython3.14.so") == "libpython3.14.so.1.0"

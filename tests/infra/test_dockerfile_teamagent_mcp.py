@@ -18,7 +18,7 @@ TEXT = DOCKERFILE.read_text(encoding="utf-8")
 PYTHON_BUILDER_DIGEST = "2c8414a1ab05655dc3a88e88f4cac4fde9db3342daab7772f1b45f2b937b2fd5"
 PYTHON_RUNTIME_DIGEST = "f9552d99b5fcf870d9cd1d285e0086ae90aa2f0758aeff8d1f80dc9346fb52c5"
 UV_DIGEST = "9941e2d8e06ff884d328905091eac0a6bc1e40e5ce12e6dd0de4ef4ee26baac4"
-PYTHON_BINARY_SHA256 = "775bf454e5816503fe56f81c9b9e0d3f03790694bdce576cbbefd60971fc88ca"
+PYTHON_BINARY_SHA256 = "81060a4e37f0e6746c7f53468dcd28c200053b4a2bb377a3fe2169edf3f770ac"
 UV_BINARY_SHA256 = "f32f61ced7feb20342032cdac4d0825cebbda61911554f5de5231ec72821812e"
 TORCH_WHEEL_SHA256 = "ca021f9eb2f8345c83fa03e3a04587308afb8df71bd472670b3ece00df58621c"
 CA_BUNDLE_APK_SHA256 = "4f57ebd7dc21d78ecce228f397d0a4ee46b5cfc777ac5f292821d41a97bfd896"
@@ -47,7 +47,7 @@ def test_core_uses_exact_arm64_child_digests_and_binary_hashes() -> None:
     assert f"ARG UV_ARM64_DIGEST=sha256:{UV_DIGEST}" in TEXT
     assert f"ARG PYTHON_BINARY_SHA256={PYTHON_BINARY_SHA256}" in TEXT
     assert f"ARG UV_BINARY_SHA256={UV_BINARY_SHA256}" in TEXT
-    assert "ARG PYTHON_VERSION=3.14.8" in TEXT
+    assert "ARG PYTHON_VERSION=3.14.10" in TEXT
     assert "cgr.dev/chainguard/python:latest-dev@${PYTHON_BUILDER_ARM64_DIGEST}" in TEXT
     assert "cgr.dev/chainguard/python:latest@${PYTHON_RUNTIME_ARM64_DIGEST}" in TEXT
     assert "ghcr.io/astral-sh/uv:latest@${UV_ARM64_DIGEST}" in TEXT
@@ -229,7 +229,7 @@ def test_core_dockerignore_is_deny_by_default_and_excludes_sensitive_state() -> 
         "!infra/docker/replace_core_ca_bundle.py",
         "!infra/docker/core-ca-bundle.lock.json",
         "!infra/docker/core-pip-wheel.lock.json",
-        "!infra/docker/vendor/py3-pip-wheel-26.2.2-r1.apk",
+        "!infra/docker/vendor/py3-pip-wheel-26.2.2-r2.apk",
         "!infra/docker/vendor/ca-certificates-bundle-20260909-r3.apk",
     ):
         assert allowed in text
@@ -261,39 +261,67 @@ def test_core_lock_has_no_bundled_agent_or_media_runtime_dependencies() -> None:
 def test_core_pip_wheel_is_pinned_and_verified_in_both_stages() -> None:
     import json
 
-    digest = "3481499c46ac5ae2b7e10ee50ff80f5c4c0e55501e0d096c8c06437f51283c93"
+    digest = "6dcca154f23de54db689ec2006bb65c67de74d556f55f8836bf5d438da8b8ee1"
     lock = ROOT / "infra/docker/core-pip-wheel.lock.json"
-    apk = ROOT / "infra/docker/vendor/py3-pip-wheel-26.2.2-r1.apk"
+    apk = ROOT / "infra/docker/vendor/py3-pip-wheel-26.2.2-r2.apk"
     assert hashlib.sha256(apk.read_bytes()).hexdigest() == digest
     assert hashlib.sha256(lock.read_bytes()).hexdigest() == (
-        "14834d16f1cd38c73f5ac9a301068fc3f8fdb08028d7637599ab180daf5adbf5"
+        "90de1897152e745869e5953cf359cd2ecfd4afb993a4451560f0ac4c617479a0"
     )
     assert (
         f"{hashlib.sha256(lock.read_bytes()).hexdigest()} /tmp/core-ca/pip-wheel.lock.json | sha256sum -c -"
         in TEXT
     )
     assert f"ARG PIP_WHEEL_APK_SHA256={digest}" in TEXT
-    assert "ARG PIP_WHEEL_VERSION=26.2.2-r1" in TEXT
+    assert "ARG PIP_WHEEL_VERSION=26.2.2-r2" in TEXT
     builder, final = _stage("builder", "final"), _stage("final")
     for path in (lock, apk):
         assert f"COPY {path.relative_to(ROOT)} " in builder
     assert '--apk-sha256 "$PIP_WHEEL_APK_SHA256" --version "$PIP_WHEEL_VERSION"' in builder
     assert f'"--apk-sha256", "{digest}"' in final
-    assert '"--version", "26.2.2-r1"' in final
+    assert '"--version", "26.2.2-r2"' in final
     assert (
         "COPY --from=builder /tmp/core-ca/root/usr/share/python-wheels/pip-26.2.2-py3-none-any.whl "
         in final
     )
     assert (
-        "COPY --from=builder /tmp/core-ca/root/var/lib/db/sbom/py3-pip-wheel-26.2.2-r1.spdx.json "
+        "COPY --from=builder /tmp/core-ca/root/var/lib/db/sbom/py3-pip-wheel-26.2.2-r2.spdx.json "
         in final
     )
     contract = json.loads(
         (ROOT / "infra/codebuild/teamagent_core_media_release_contract.json").read_text()
     )
     core = next(subject for subject in contract["subjects"] if subject["name"] == "core")
-    for arg, expected in (("PIP_WHEEL_APK_SHA256", digest), ("PIP_WHEEL_VERSION", "26.2.2-r1")):
+    for arg, expected in (("PIP_WHEEL_APK_SHA256", digest), ("PIP_WHEEL_VERSION", "26.2.2-r2")):
         assertion = next(item for item in core["source_assertions"] if item["build_arg"] == arg)
         assert assertion["value"] == expected
         assert f'{assertion["oci_label"]}="${arg}"' in final
         assert all(use in builder for use in assertion["dockerfile_uses"])
+
+
+def test_python_apks_are_pinned_in_both_builder_and_final_runtime() -> None:
+    import json
+
+    builder, final = _stage("builder", "final"), _stage("final")
+    for part in ("", "-base", "-runtime", "-base-dev", "-dev"):
+        name = "python-3.14" + part
+        lock = ROOT / f"infra/docker/core-{name}.lock.json"
+        data = json.loads(lock.read_bytes())
+        apk = ROOT / "infra/docker/vendor" / data["archive"]
+        assert hashlib.sha256(apk.read_bytes()).hexdigest() == data["archive_sha256"]
+        assert data["apkindex"]["V"] == "3.14.10_git20261028-r0"
+        assert (
+            f"{hashlib.sha256(lock.read_bytes()).hexdigest()} /tmp/core-python/{lock.name} | sha256sum -c -"
+            in builder
+        )
+        for path in (apk, lock):
+            assert f"COPY {path.relative_to(ROOT)} " in builder
+            assert f"!{path.relative_to(ROOT)}" in DOCKERIGNORE.read_text()
+        assert "--root / --base-db /tmp/core-python/builder-installed" in builder
+        if part not in ("-base-dev", "-dev"):
+            assert f'"--apk-sha256", "{data["archive_sha256"]}"' in final
+    assert "COPY --from=builder /tmp/core-ca/root/usr/lib/python3.14/ /usr/lib/python3.14/" in final
+    assert (
+        "COPY --from=builder /tmp/core-ca/root/usr/lib/libpython3.14.so.1.0 /usr/lib/libpython3.14.so.1.0"
+        in final
+    )

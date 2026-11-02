@@ -23,17 +23,17 @@ Core:
   `sha256:2c8414a1ab05655dc3a88e88f4cac4fde9db3342daab7772f1b45f2b937b2fd5`
 - Chainguard Python runtime child:
   `sha256:f9552d99b5fcf870d9cd1d285e0086ae90aa2f0758aeff8d1f80dc9346fb52c5`
-- Python `3.14.8`; `/usr/bin/python3.14` SHA-256
-  `775bf454e5816503fe56f81c9b9e0d3f03790694bdce576cbbefd60971fc88ca`
+- Python `3.14.10`; `/usr/bin/python3.14` SHA-256
+  `81060a4e37f0e6746c7f53468dcd28c200053b4a2bb377a3fe2169edf3f770ac`
 - Wolfi `ca-certificates-bundle` `20260909-r3` は
   [`core-ca-bundle.lock.json`](./core-ca-bundle.lock.json) の取得元・SHA-256で固定した
   公式APKをvendorし、Python 3.14の土台から証明書bundleだけを差し替える。
   [`replace_core_ca_bundle.py`](./replace_core_ca_bundle.py) がAPKのSHA、証明書とSBOMの実byte、
   runtimeのAPK installed dbの対象recordとfile checksumを検証し、他packageのrecordが
   byte単位で不変であることをbuild中に強制する。SSL環境変数とcertifiの設定は据え置く。
-- Wolfi `py3-pip-wheel` `26.2.1-r2` は CVE-2026-114613 対応として
-  [`core-pip-wheel.lock.json`](./core-pip-wheel.lock.json) の公式 APK `26.2.2-r1` に差し替える。
-  APK SHA-256 は `3481499c46ac5ae2b7e10ee50ff80f5c4c0e55501e0d096c8c06437f51283c93`。
+- Wolfi `py3-pip-wheel` `26.2.1-r2` は CVE-2026-114613 / CVE-2026-111943 対応として
+  [`core-pip-wheel.lock.json`](./core-pip-wheel.lock.json) の公式 APK `26.2.2-r2` に差し替える。
+  APK SHA-256 は `6dcca154f23de54db689ec2006bb65c67de74d556f55f8836bf5d438da8b8ee1`。
   CA と同じ検証器で APKINDEX / .PKGINFO / datahash / wheel・SBOM / installed DB を照合し、
   旧 wheel と旧 SBOM を削除する。対象外の package record は byte 単位で不変。
   core の起動スクリプト・src に pip の直接利用はなく、依存導入は builder の uv が担う。
@@ -48,11 +48,17 @@ Core:
 - baked fallback `app.html` SHA-256
   `716ac25a96516efd6443277c903102d514f3f86729f8706baea41ee48f0ecdeb`
 
-2026-10-22の証明書差し替えはCVE-2026-111943への対応である。`python:latest`は3.15へ
-移行し、3.14系で修正版bundleを持つ土台が無いため、上記の固定digestを維持する。
-APK SHAとbundle版はDockerfileのbuilder検査と固定lockで束縛し、署名対象のbuild contextに含める。
-runtime/release契約のreceiptは既存のままとし、source_provenanceとapproval-publisherの世代も維持する。
-TrivyとECR Inspectorの実スキャン結果は通常便で確認する。
+2026-11-02: `python:latest` の arm64 は Python 3.15.1 であるため、上記の3.14系base digestは維持する。
+Wolfi secdbで CVE-2026-115557 / CVE-2026-114583 の修正版を確認した
+`3.14.10_git20261028-r0` の公式APKを固定SHA・APKINDEXの行でvendorする。
+`core-python-3.14*.lock.json` がメタパッケージ・base・runtime・開発用2パッケージを固定し、
+同じ検証器がbuilderとruntimeのPython実体・libpython・stdlib・SBOM・APK DBを更新する。
+新版で分離されたruntimeパッケージは旧DBに存在しないことを必須とし、コマンドsymlinkの所有を移す。
+依存不整合・予期しない旧版は書き込み前に拒否し、旧pyc/SBOMなど新版に無いファイルを除去する。
+対象外のAPK DBレコードはbyte単位で不変。実行中のPython/libpythonはrenameで置換し、実行権限も照合する。
+libpython SHA-256は `5acb30a9c68ceb2985f094c5621f1d62ff8abd4480ea85c7b4ede09e741df0c6`。
+runtime receiptはPython版・binary SHAのみを更新し、release契約は各APK SHA・package版を束縛し、libpythonの実byteはsmokeで照合する。
+TrivyとECR Inspectorの実スキャン結果は通常便でも確認する。
 
 Productionのconnect-webは `CONNECT_APP_HTML_S3_URI` による `source=s3` が正であり、baked
 fallbackとQA済みproduction artifactを同一digestとして扱わない。最終core OCI contractは次を

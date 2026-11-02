@@ -13,7 +13,7 @@
   },
   "source_runtime_contract": {
     "path": "infra/codebuild/teamagent_runtime_contract.json",
-    "sha256": "e4b6780592e12a94b84298338512c1c7f3784fcd857554afafbfaff42681fa63"
+    "sha256": "1134016c15ec3a75de1151c62591dd0d3007331abfc6899c873c2667a79ce719"
   },
   "app_html": {
     "bucket": "teamagent-dev-raw-files",
@@ -81,7 +81,7 @@
         {
           "key": "binary.python.sha256",
           "path": "/usr/bin/python3.14",
-          "sha256": "775bf454e5816503fe56f81c9b9e0d3f03790694bdce576cbbefd60971fc88ca"
+          "sha256": "81060a4e37f0e6746c7f53468dcd28c200053b4a2bb377a3fe2169edf3f770ac"
         }
       ],
       "source_assertions": [
@@ -125,7 +125,7 @@
         },
         {
           "key": "artifact.pip-wheel-apk-sha256",
-          "value": "3481499c46ac5ae2b7e10ee50ff80f5c4c0e55501e0d096c8c06437f51283c93",
+          "value": "6dcca154f23de54db689ec2006bb65c67de74d556f55f8836bf5d438da8b8ee1",
           "build_arg": "PIP_WHEEL_APK_SHA256",
           "oci_label": "io.teamagent.contract.pip-wheel-apk-sha256",
           "dockerfile_uses": [
@@ -133,12 +133,66 @@
           ]
         },
         {
+          "key": "artifact.python-3.14-apk-sha256",
+          "value": "4b7ab3b38d94407380d50293af9e787a8cae399ac6b83f586b064c2601e18178",
+          "build_arg": "PYTHON_META_APK_SHA256",
+          "oci_label": "io.teamagent.contract.python-3.14-apk-sha256",
+          "dockerfile_uses": [
+            "--apk-sha256 \"$PYTHON_META_APK_SHA256\""
+          ]
+        },
+        {
+          "key": "artifact.python-3.14-base-apk-sha256",
+          "value": "b6c799697766e5ba5a8f8f1ace656ac35f8eccb73ccf46fc1f7a4158101e8e4a",
+          "build_arg": "PYTHON_BASE_APK_SHA256",
+          "oci_label": "io.teamagent.contract.python-3.14-base-apk-sha256",
+          "dockerfile_uses": [
+            "--apk-sha256 \"$PYTHON_BASE_APK_SHA256\""
+          ]
+        },
+        {
+          "key": "artifact.python-3.14-base-dev-apk-sha256",
+          "value": "e47fe44b5c84493aea0fc76dd47d0456d19572dfe6fe05124d64d220f45db6d0",
+          "build_arg": "PYTHON_BASE_DEV_APK_SHA256",
+          "oci_label": "io.teamagent.contract.python-3.14-base-dev-apk-sha256",
+          "dockerfile_uses": [
+            "--apk-sha256 \"$PYTHON_BASE_DEV_APK_SHA256\""
+          ]
+        },
+        {
+          "key": "artifact.python-3.14-dev-apk-sha256",
+          "value": "3a77fd24c4083d26e7fce2b5885062083f40f9207f7546143978ce2da646cf2f",
+          "build_arg": "PYTHON_DEV_APK_SHA256",
+          "oci_label": "io.teamagent.contract.python-3.14-dev-apk-sha256",
+          "dockerfile_uses": [
+            "--apk-sha256 \"$PYTHON_DEV_APK_SHA256\""
+          ]
+        },
+        {
+          "key": "artifact.python-3.14-runtime-apk-sha256",
+          "value": "9d2996c75208676b9459b5d022fc1a1ef5e621882353f47989828ab9085446c7",
+          "build_arg": "PYTHON_RUNTIME_APK_SHA256",
+          "oci_label": "io.teamagent.contract.python-3.14-runtime-apk-sha256",
+          "dockerfile_uses": [
+            "--apk-sha256 \"$PYTHON_RUNTIME_APK_SHA256\""
+          ]
+        },
+        {
           "key": "package.pip-wheel.version",
-          "value": "26.2.2-r1",
+          "value": "26.2.2-r2",
           "build_arg": "PIP_WHEEL_VERSION",
           "oci_label": "io.teamagent.contract.pip-wheel-version",
           "dockerfile_uses": [
             "--version \"$PIP_WHEEL_VERSION\""
+          ]
+        },
+        {
+          "key": "package.python.version",
+          "value": "3.14.10_git20261028-r0",
+          "build_arg": "PYTHON_PACKAGE_VERSION",
+          "oci_label": "io.teamagent.contract.python-package-version",
+          "dockerfile_uses": [
+            "--version \"$PYTHON_PACKAGE_VERSION\""
           ]
         }
       ]
