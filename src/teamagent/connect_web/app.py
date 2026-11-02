@@ -67,6 +67,7 @@ from teamagent.connect_diagnostics import (
     now_jst,
 )
 from teamagent.connect_web.library import library_target, register_library_routes
+from teamagent.connect_web.portal import PORTAL_STYLE, render_header, render_home
 from teamagent.dashboard.auth import (
     Verifier,
     authenticate_id_token,
@@ -675,7 +676,7 @@ def _safe_next(raw: str | None) -> str:
     candidate = (raw or "").strip()
     if library_target(candidate) is not None:
         return candidate
-    if candidate in {"/app", "/search", "/admin", "/app/history", "/admin/history"}:
+    if candidate in {"/", "/app", "/search", "/admin", "/app/history", "/admin/history"}:
         return candidate
     if candidate == "/search/graph/focus":
         return candidate
@@ -1574,7 +1575,8 @@ _SHELL_STYLE = (
     "body{margin:0;background:var(--bg-primary);color:var(--text);font-family:-apple-system,"
     "'Hiragino Sans','Noto Sans JP',sans-serif}"
     ".shell{display:grid;grid-template-columns:var(--ribbon-w) var(--side-w) 1fr 0;"
-    "height:100vh;transition:grid-template-columns .14s ease}"
+    "height:calc(100vh - var(--connect-header-height));"
+    "transition:grid-template-columns .14s ease}"
     ".shell.left-closed{grid-template-columns:var(--ribbon-w) 0 1fr 0}"
     ".shell.right-open{grid-template-columns:var(--ribbon-w) var(--side-w) 1fr var(--right-w)}"
     ".shell.left-closed.right-open{grid-template-columns:var(--ribbon-w) 0 1fr var(--right-w)}"
@@ -1629,7 +1631,8 @@ _SHELL_STYLE = (
     "#mainGraph[hidden]{display:none}"
     "#mainGraph main{max-width:none;padding:14px 18px}"
     # シェル内ではグラフを本体いっぱいに広げる（スタンドアロンの 600px を上書き）。
-    "#mainGraph .graphwrap{height:calc(100vh - 150px);min-height:360px}"
+    "#mainGraph .graphwrap{height:calc(100vh - var(--connect-header-height) - 150px);"
+    "min-height:360px}"
     # --- 右プレビューパネル（grid 4列目）---
     ".right{background:var(--bg-elev);border-left:1px solid var(--border);overflow:auto}"
     ".shell:not(.right-open) .right{display:none}"
@@ -3232,7 +3235,7 @@ def _shell_page(email: str, *, mode: str) -> str:
         'stroke-width="2" stroke-linecap="round" stroke-linejoin="round">'
         '<polyline points="15 18 9 12 15 6"></polyline></svg>'
     )
-    style = _ROOT_TOKENS + _SEARCH_STYLE + _GRAPH_STYLE + _SHELL_STYLE + _POWER_STYLE
+    style = _ROOT_TOKENS + _SEARCH_STYLE + _GRAPH_STYLE + _SHELL_STYLE + _POWER_STYLE + PORTAL_STYLE
     head = (
         '<!doctype html><html lang="ja"><head><meta charset="utf-8">'
         '<meta name="viewport" content="width=device-width, initial-scale=1">'
@@ -3280,7 +3283,8 @@ def _shell_page(email: str, *, mode: str) -> str:
         "<script>document.getElementById('ribMail').textContent=" + _js_str(email) + ";</script>"
     )
     body = (
-        '<div id="shell" class="shell">'
+        render_header(email, current_path="/search")
+        + '<div id="shell" class="shell">'
         + ribbon
         + sidebar
         + work
@@ -4745,6 +4749,14 @@ def create_app(
             secure=search_cfg.cookie_secure,
         )
         return resp
+
+    @app.get("/")
+    def portal_home(request: Request) -> Response:
+        """ログイン済みの利用者に、使えるサイトの入口を返す。"""
+        email = _search_email(request)
+        if email is None:
+            return RedirectResponse("/search/login?next=%2F", status_code=303)
+        return HTMLResponse(render_home(email))
 
     @app.get("/search")
     def search_ui(request: Request) -> Response:

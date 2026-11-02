@@ -15,6 +15,7 @@ from fastapi.encoders import jsonable_encoder
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 
 from teamagent.adapters.video_library_storage import VideoLibraryStorage
+from teamagent.connect_web.portal import PORTAL_STYLE, render_header
 from teamagent.ingest.video_library import (
     METRIC_COLUMNS,
     RATE_METRICS,
@@ -215,11 +216,13 @@ if(copy)copy.addEventListener('click',async()=>{
 """
 
 
-def _page(title: str, body: str) -> str:
+def _page(title: str, body: str, email: str) -> str:
     return (
         '<!doctype html><html lang="ja"><head><meta charset="utf-8">'
         '<meta name="viewport" content="width=device-width,initial-scale=1">'
-        f"<title>{_e(title)}</title><style>{_STYLE}</style></head><body><main>"
+        f"<title>{_e(title)}</title><style>{_STYLE}{PORTAL_STYLE}</style></head><body>"
+        + render_header(email, current_path="/library")
+        + "<main>"
         '<nav><a href="/search">資料検索</a> · <a href="/library">動画ライブラリ</a> · '
         '<a href="/library/admin/campaigns">案件設定</a> · '
         '<a href="/library/admin/accounts">アカウント登録</a></nav>'
@@ -399,8 +402,8 @@ def register_library_routes(
             raise HTTPException(403)
         return email
 
-    def page(title: str, body: str) -> HTMLResponse:
-        response = render(_page(title, body))
+    def page(title: str, body: str, email: str) -> HTMLResponse:
+        response = render(_page(title, body, email))
         response.headers["Content-Security-Policy"] = response.headers[
             "Content-Security-Policy"
         ].replace(
@@ -416,7 +419,7 @@ def register_library_routes(
             categories = conn.execute(
                 "SELECT * FROM vl_business_categories ORDER BY sort_order"
             ).fetchall()
-        return page("動画ライブラリ", _listing(data, request.query_params, categories))
+        return page("動画ライブラリ", _listing(data, request.query_params, categories), email)
 
     @router.get("/api/videos")
     def api(request: Request, email: str = Depends(identity)) -> JSONResponse:
@@ -486,7 +489,7 @@ def register_library_routes(
             )
             + "</section>"
         )
-        return page("動画詳細", body)
+        return page("動画詳細", body, email)
 
     @router.get("/thumb/{platform}/{video_id}")
     def thumbnail(
@@ -563,7 +566,7 @@ def register_library_routes(
                 + (" checked" if row["is_private"] else "")
                 + ">非公開</label><button>保存</button></form></section>"
             )
-        return page("案件設定", body)
+        return page("案件設定", body, email)
 
     async def form_data(request: Request) -> dict[str, str]:
         # Same exact-origin check as /admin/analyze, also for URL-encoded admin forms.
@@ -657,7 +660,7 @@ def register_library_routes(
             )
             + "</table>"
         )
-        return page("アカウント登録", body)
+        return page("アカウント登録", body, email)
 
     @router.post("/admin/accounts")
     async def save_account(

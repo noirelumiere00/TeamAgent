@@ -25,6 +25,7 @@ def test_security_headers_cover_html_api_redirect_and_health() -> None:
     client = TestClient(create_app(search_config=_config()), follow_redirects=False)
 
     responses = (
+        client.get("/"),
         client.get("/search/login"),
         client.get("/api/v1/graph"),
         client.get("/app"),
