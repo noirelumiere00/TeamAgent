@@ -1,11 +1,11 @@
 """旧入口の転送と /healthz の exact S3 VersionId 契約（実 S3 0・実 boto3 0）。
 
 boto3 は sys.modules への fake 注入で排除し、次を検証する:
-  - env 未設定 → 従来どおりイメージ同梱（baked）/ 無ければ「準備中」（missing）
+  - URI 未設定・空白 → 静的成果物を解決せず dynamic として正常応答
   - S3 成功 → exact VersionId + full SHA-256 が一致
   - S3 失敗 → hash 検証済み baked fallback のみ許可し healthz は fail-closed
   - 取得はプロセス内で1回だけ（モジュールキャッシュ）
-  - /healthz に app_html_sha256 / app_html_source が載る（既存 ok は維持）
+  - URI 設定時の /healthz に app_html_sha256 / app_html_source が載る
 """
 
 from __future__ import annotations
@@ -136,19 +136,34 @@ def _use_s3_contract(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("CONNECT_APP_HTML_BAKED_SHA256", _sha256(_BAKED_HTML))
 
 
-# ---------------- env 未設定（従来挙動） ----------------
+# ---------------- env 未設定 ----------------
+
+
+@pytest.mark.parametrize("uri", [None, "", " \t\n "])
+def test_healthz_without_s3_uri_skips_static_resolution(
+    monkeypatch: pytest.MonkeyPatch, uri: str | None
+) -> None:
+    if uri is not None:
+        monkeypatch.setenv("CONNECT_APP_HTML_S3_URI", uri)
+
+    def unexpected() -> dict[str, Any]:
+        raise AssertionError("healthz must not resolve static HTML without an S3 URI")
+
+    monkeypatch.setattr(app_module, "_resolve_app_html", unexpected)
+    response = _client().get("/healthz")
+    assert response.status_code == 200
+    assert response.json() == {"ok": True, "knowledge_delivery": "dynamic"}
 
 
 def test_env_unset_resolves_baked_and_redirects(monkeypatch: pytest.MonkeyPatch) -> None:
-    """旧入口は転送し、healthz 向けの同梱成果物の解決は維持する。"""
+    """旧入口は転送し、同梱成果物の直接解決は維持する。"""
     _use_baked(monkeypatch)
     client = _client()
     r = client.get("/app", cookies=_auth_cookie(), follow_redirects=False)
     assert r.status_code == 303 and r.headers["location"] == "/search"
     assert app_module._resolve_app_html()["html"] == _BAKED_HTML
     h = client.get("/healthz").json()
-    assert h["app_html_source"] == "baked"
-    assert h["app_html_sha256"] == _sha256(_BAKED_HTML)
+    assert h == {"ok": True, "knowledge_delivery": "dynamic"}
 
 
 def test_env_unset_without_baked_resolves_missing(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -158,7 +173,10 @@ def test_env_unset_without_baked_resolves_missing(monkeypatch: pytest.MonkeyPatc
     r = client.get("/app", cookies=_auth_cookie(), follow_redirects=False)
     assert r.status_code == 303 and r.headers["location"] == "/search"
     assert "準備中" in app_module._resolve_app_html()["html"]
-    assert client.get("/healthz").json()["app_html_source"] == "missing"
+    assert client.get("/healthz").json() == {
+        "ok": True,
+        "knowledge_delivery": "dynamic",
+    }
 
 
 # ---------------- S3 オーバーライド ----------------
@@ -185,6 +203,7 @@ def test_s3_success_resolves_html_and_sha_matches(monkeypatch: pytest.MonkeyPatc
         )
     ]
     h = client.get("/healthz").json()
+    assert "knowledge_delivery" not in h
     assert h["ok"] is True
     assert h["app_html_source"] == "s3"
     assert h["app_html_contract_ok"] is True
@@ -202,11 +221,11 @@ def test_s3_fetch_happens_only_once(monkeypatch: pytest.MonkeyPatch) -> None:
     _use_s3_contract(monkeypatch)
     s3 = _install_fake_boto3(monkeypatch)
     client = _client()
-    client.get("/healthz")
+    assert "knowledge_delivery" not in client.get("/healthz").json()
     client.get("/app", cookies=_auth_cookie(), follow_redirects=False)
     client.get("/app", cookies=_auth_cookie(), follow_redirects=False)
     assert app_module._resolve_app_html()["html"] == _S3_HTML
-    client.get("/healthz")
+    assert "knowledge_delivery" not in client.get("/healthz").json()
     assert len(s3.calls) == 1
 
 
@@ -222,6 +241,7 @@ def test_s3_failure_uses_only_verified_baked_fallback(
     assert r.status_code == 303 and r.headers["location"] == "/search"
     assert app_module._resolve_app_html()["html"] == _BAKED_HTML
     h = client.get("/healthz").json()
+    assert "knowledge_delivery" not in h
     assert h["ok"] is False
     assert h["app_html_contract_ok"] is False
     assert h["app_html_source"] == "baked-fallback"
@@ -235,6 +255,7 @@ def test_incomplete_contract_fails_closed(monkeypatch: pytest.MonkeyPatch) -> No
     monkeypatch.setenv("CONNECT_APP_HTML_S3_URI", _S3_URI)
     s3 = _install_fake_boto3(monkeypatch)
     health = _client().get("/healthz").json()
+    assert "knowledge_delivery" not in health
     assert s3.calls == []
     assert health["ok"] is False
     assert health["app_html_source"] == "missing"
@@ -252,6 +273,7 @@ def test_noncanonical_s3_location_is_never_read(
     s3 = _install_fake_boto3(monkeypatch)
 
     health = _client().get("/healthz").json()
+    assert "knowledge_delivery" not in health
 
     assert s3.calls == []
     assert health["ok"] is False
@@ -278,6 +300,7 @@ def test_hash_or_returned_version_mismatch_is_rejected(
         version_id=returned_version,
     )
     health = _client().get("/healthz").json()
+    assert "knowledge_delivery" not in health
     assert health["ok"] is False
     assert health["app_html_source"] == "baked-fallback"
     assert health["app_html_s3_version_id"] is None
@@ -287,10 +310,13 @@ def test_hash_or_returned_version_mismatch_is_rejected(
 
 
 def test_healthz_has_full_app_contract_fields(monkeypatch: pytest.MonkeyPatch) -> None:
-    """/healthz exposes the full hash and keeps legacy local mode healthy."""
+    """/healthz exposes the full hash for the configured S3 contract."""
     _use_baked(monkeypatch)
+    _use_s3_contract(monkeypatch)
+    _install_fake_boto3(monkeypatch)
     h = _client().get("/healthz").json()
+    assert "knowledge_delivery" not in h
     assert h["ok"] is True
-    assert h["app_html_source"] in {"s3", "baked", "missing"}
+    assert h["app_html_source"] == "s3"
     assert re.fullmatch(r"[0-9a-f]{64}", h["app_html_sha256"])
     assert h["app_html_sha256_12"] == h["app_html_sha256"][:12]
