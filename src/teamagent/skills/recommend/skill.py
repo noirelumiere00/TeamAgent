@@ -1,49 +1,46 @@
-"""Recommend Skill 本体 (類似案件レコメンド、Phase1)。
-
-新規案件の概要テキストから、過去の類似「提案書 / 議事録 / 営業 FB」をベクトル近傍で
-取得し、3 バケットに振り分けて各上位3件を提示する。Bedrock 要約はしない (近傍提示のみ)。
-
-検索は SearchSkill.retrieve_hits を再利用する (embed / RLS / dedup / 新スキーマ検索 /
-Cohere Rerank などが全部入った gold set top-1 88% パイプライン)。embed も SQL も新規に
-書かない。RLS は ctx.metadata['user_email'] を retrieve_hits に通すだけで既存配線が効く。
-
-3 層分離: Skill 層。retrieval は SearchSkill (Adapter 越し) に委譲し、本 Skill は
-振り分けと整形だけを担う。
-"""
+"""基準案件の特徴で他社の提案書を探し、Drive 原本付きで最大3件返す。"""
 
 from __future__ import annotations
 
+import re
+import unicodedata
+from dataclasses import replace
 from typing import ClassVar
 
-import structlog
 from pydantic import BaseModel
 
 from teamagent.adapters.pgvector_client import SearchHit
 from teamagent.skills.base import BaseSkill, SkillContext, register
-from teamagent.skills.recommend.schema import (
-    RecommendInput,
-    RecommendItem,
-    RecommendOutput,
+from teamagent.skills.recommend.schema import RecommendInput, RecommendItem, RecommendOutput
+from teamagent.skills.search import drive_first
+from teamagent.skills.search.alias_expansion import resolve_topic_client
+from teamagent.skills.search.answer_sections import _clean, entry_from_hit
+from teamagent.skills.search.case_list import _details, _month, _source_text, case_link
+from teamagent.skills.search.client_match import (
+    aliases,
+    hit_is_about_client,
+    names_overlap,
+    normalize_filter_client,
+)
+from teamagent.skills.search.knowledge_query import (
+    document_type,
+    extract_knowledge_filters,
+    extract_query_industry,
 )
 from teamagent.skills.search.skill import SearchSkill
 
-logger = structlog.get_logger(__name__)
-
-# バケット上限 (各カテゴリの提示件数)。
-_PER_BUCKET = 3
-# cls_doc_type の予約語 (ingest/classify.py の _DOC_TYPES と揃える)。
-_DOC_TYPE_PROPOSAL = "提案書"
-_DOC_TYPE_MINUTES = "議事録"
+_FEATURES = {"cls_industry": "業種", "cls_solution": "施策", "cls_target": "対象層"}
 
 
 @register
 class RecommendSkill(BaseSkill[RecommendInput, RecommendOutput]):
-    """新規案件概要から類似の過去提案書/議事録/営業 FB を近傍提示する Skill。"""
+    """類似する他社の提案書を、同一社の過去資料と分けて一覧提示する。"""
 
     name: ClassVar[str] = "recommend"
     description: ClassVar[str] = (
         "似た・類似の・近い・参考になる過去の提案書／資料を探して、という資料推薦の依頼に使う。"
-        "案件概要から過去の提案書/議事録/営業FBを3カテゴリで一覧提示する。"
+        "業種・商材・施策の近い他社の提案書を優先し、原本リンク付きで最大3件を一覧提示する。"
+        "同じ会社の過去資料は補足に分ける。answer をそのまま返す。"
         "例: 伊藤ハムの提案書に似た過去の提案書を探して。"
         "骨子生成はしない。提案（の骨子・たたき台）を作って、という明示依頼は proposal_draft。"
         "迷ったら recommend を優先して資料を見せ、骨子は求められてから。"
@@ -52,80 +49,157 @@ class RecommendSkill(BaseSkill[RecommendInput, RecommendOutput]):
     output_schema: ClassVar[type[BaseModel]] = RecommendOutput
 
     def __init__(self, search: SearchSkill | None = None) -> None:
-        # search は検索基盤の再利用。None なら自前生成 (本番は factory/bot が共有注入＝
-        # embedder 二重ロード回避)。
         self._search = search or SearchSkill()
 
     def run(self, input: RecommendInput, ctx: SkillContext) -> RecommendOutput:
         log = ctx.bind_logger(self.name)
-        log.info("recommend_start", brief_len=len(input.brief), top_k=input.top_k)
-
-        # TODO(Phase2): 案件名寄せ(alias)マップを retrieve の前後に適用するフックをここに挟む
-        # (query の別名展開 / hits の cls_project 正規化)。今回は実装しない。
-
-        # 1. 類似の過去資料を取得 (検索基盤を再利用)。RLS は ctx.metadata['user_email'] を
-        #    retrieve_hits に通すだけで _retrieve が GUC として接続に渡す (新規 SQL なし)。
         hits = self._search.retrieve_hits(
-            input.brief,
-            ctx,
-            top_k=input.top_k,
-            filter_industry=input.industry,
+            input.brief[:1000], ctx, top_k=input.top_k, filter_industry=input.industry
         )
+        vocabulary = [
+            str(h.metadata[key])
+            for h in hits
+            for key in ("client_name", "cls_project")
+            if h.metadata.get(key)
+        ]
+        target = resolve_topic_client(input.brief, vocabulary)
+        source = [h for h in hits if target and self._same_client(h, target[1])]
+        reference = next((h for h in source if self._is_proposal(h)), source[0] if source else None)
+        features = {
+            **(extract_knowledge_filters(input.brief) or {}),
+            "cls_industry": input.industry or extract_query_industry(input.brief) or "",
+        }
+        for key in _FEATURES:
+            if not features.get(key):
+                features[key] = (
+                    str(reference.metadata.get(key) or "")
+                    if reference
+                    else next(
+                        (
+                            str(h.metadata[key])
+                            for h in hits
+                            if h.metadata.get(key) and str(h.metadata[key]) in input.brief
+                        ),
+                        "",
+                    )
+                )
+        features = {k: v for k, v in features.items() if v not in {"", "不明", "その他", "未分類"}}
+        if target:
+            # 通常検索の社名フィルタ・boostを引き継がず、題名・本文・分類で探し直す。
+            names = {
+                name
+                for raw in (target[0], target[1], *aliases(target[1]))
+                for name in (unicodedata.normalize("NFKC", raw), normalize_filter_client(raw))
+                if name
+            }
+            pattern = "|".join(re.escape(n) for n in sorted(names, key=len, reverse=True))
+            source_title = str(reference.metadata.get("title") or "") if reference else ""
+            source_excerpt = reference.content[:400] if reference else ""
+            topic = " ".join((source_title, source_excerpt, input.brief))
+            query = " ".join([*(v for k, v in features.items() if k in _FEATURES), topic])
+            query = re.sub(
+                pattern,
+                " ",
+                unicodedata.normalize("NFKC", query),
+                flags=re.IGNORECASE,
+            )
+            expanded = self._search.retrieve_hits(
+                query[:1000],
+                ctx,
+                top_k=input.top_k,
+                filter_industry=input.industry,
+                prefer_same_client=False,
+            )
+            hits = [*expanded, *hits]
 
-        proposals, minutes, sales_fb = self._bucketize(hits)
-        total = len(proposals) + len(minutes) + len(sales_fb)
-        log.info(
-            "recommend_done",
-            proposals=len(proposals),
-            minutes=len(minutes),
-            sales_fb=len(sales_fb),
-        )
+        candidates = [h for h in hits if self._is_proposal(h)]
+        groups, _, _ = drive_first.annotate(self._search, [candidates], (), ctx)
+        proposals: list[RecommendItem] = []
+        same_client: list[RecommendItem] = []
+        seen_files: set[str] = set()
+        clients: list[str] = []
+        for hit in groups[0]:
+            ref = hit.metadata[drive_first.REFERENCE_KEY]
+            if ref.kind != "drive" or not case_link(ref.url, "資料を見る"):
+                continue
+            if ref.drive_file_id in seen_files:
+                continue
+            seen_files.add(ref.drive_file_id)
+            item = self._to_item(hit, features)
+            if target and self._same_client(hit, target[1]):
+                if not same_client:
+                    same_client.append(item)
+                continue
+            client = item.client_name or item.cls_project or ""
+            if client and any(self._same_client(hit, name) for name in clients):
+                continue
+            if len(proposals) < 3:
+                proposals.append(item)
+                if client:
+                    clients.append(client)
+
+        cards = [
+            f"*{item.title}*（{item.date}）\n• {item.similarity}\n"
+            f"• {case_link(item.source_uri, '資料を見る')}"
+            for item in proposals
+        ]
+        answer = "\n\n".join(cards) or "Drive に原本のある他社の類似提案書は見つかりませんでした。"
+        if same_client:
+            item = same_client[0]
+            answer += (
+                f"\n\n同じ会社の過去資料：{item.title}（{item.date}） "
+                f"{case_link(item.source_uri, '資料を見る')}"
+            )
+        log.info("recommend_done", proposals=len(proposals), same_client=len(same_client))
         return RecommendOutput(
             brief=input.brief,
             similar_proposals=proposals,
-            similar_minutes=minutes,
-            similar_sales_fb=sales_fb,
-            total_count=total,
+            same_client_materials=same_client,
+            total_count=len(proposals),
+            answer=answer,
         )
 
     @staticmethod
-    def _to_item(hit: SearchHit) -> RecommendItem:
+    def _same_client(hit: SearchHit, client: str) -> bool:
+        return bool(hit_is_about_client(hit, client, aliases=aliases(client), use_entities=False))
+
+    @staticmethod
+    def _is_proposal(hit: SearchHit) -> bool:
         meta = hit.metadata or {}
+        return (
+            not meta.get("is_sales_fb")
+            and document_type(
+                str(meta.get("title") or meta.get("file_name") or ""), meta.get("cls_doc_type")
+            )
+            == "提案書"
+        )
+
+    @staticmethod
+    def _to_item(hit: SearchHit, features: dict[str, str]) -> RecommendItem:
+        meta = hit.metadata
+        ref = meta[drive_first.REFERENCE_KEY]
+        entry = entry_from_hit(replace(hit, metadata={**meta, "title": ref.title}), url=ref.url)
+        common = [
+            f"{label}「{_clean(value, 60)}」"
+            for key, label in _FEATURES.items()
+            if (value := features.get(key))
+            and (
+                names_overlap(value, str(meta.get(key) or ""))
+                or value.casefold() in (entry.title + " " + hit.content).casefold()
+            )
+        ]
+        details = _details(hit.content)
+        similarity = (
+            "似ている点：" + "・".join(common) + "が共通。"
+            if common
+            else "参考点：" + (details[0] if details else "類似資料として検索された提案書です。")
+        )
         return RecommendItem(
-            title=meta.get("title"),
-            source_uri=meta.get("source_uri"),
+            title=_clean(_source_text(entry.title), 100),
+            source_uri=ref.url,
             score=hit.score,
             client_name=meta.get("client_name"),
             cls_project=meta.get("cls_project"),
+            date=_month(entry.date),
+            similarity=similarity,
         )
-
-    @classmethod
-    def _bucketize(
-        cls, hits: list[SearchHit]
-    ) -> tuple[list[RecommendItem], list[RecommendItem], list[RecommendItem]]:
-        """hits を 類似提案書 / 類似議事録 / 類似営業FB の 3 バケットへ振り分ける。
-
-        各バケットは元の (retrieve_hits の) スコア順を保ったまま上位 _PER_BUCKET 件で打ち切る。
-        1 hit は最初に該当したバケットにのみ入れる (営業FB を最優先で判定)。
-        """
-        proposals: list[RecommendItem] = []
-        minutes: list[RecommendItem] = []
-        sales_fb: list[RecommendItem] = []
-
-        for hit in hits:
-            meta = hit.metadata or {}
-            # 営業 FB マーカー (_fetch_related_drive_hits が立てる) を最優先で判定。
-            if meta.get("is_sales_fb"):
-                if len(sales_fb) < _PER_BUCKET:
-                    sales_fb.append(cls._to_item(hit))
-                continue
-            doc_type = meta.get("cls_doc_type")
-            if doc_type == _DOC_TYPE_PROPOSAL:
-                if len(proposals) < _PER_BUCKET:
-                    proposals.append(cls._to_item(hit))
-            elif doc_type == _DOC_TYPE_MINUTES:
-                if len(minutes) < _PER_BUCKET:
-                    minutes.append(cls._to_item(hit))
-            # 上記いずれにも該当しない種別 (報告書/価格表/契約/その他/未分類) は提示しない。
-
-        return proposals, minutes, sales_fb
