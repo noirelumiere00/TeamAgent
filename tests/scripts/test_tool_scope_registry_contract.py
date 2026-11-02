@@ -22,9 +22,7 @@ SCOPE = ROOT / "infra/openclaw/effective-tool-scope.json"
 DARK_SKILL_ALLOWLIST = frozenset(
     {
         "chitchat",
-        "recommend",
         "mail_constraints",
-        "workspace_search",
         "proposal_deck",
         "proposal_campaign",
         "proposal_builder",
