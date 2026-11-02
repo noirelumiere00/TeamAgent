@@ -5,6 +5,8 @@ from __future__ import annotations
 import re
 import unicodedata
 from dataclasses import replace
+from itertools import groupby
+from math import isclose
 from typing import ClassVar
 
 from pydantic import BaseModel
@@ -140,7 +142,26 @@ class RecommendSkill(BaseSkill[RecommendInput, RecommendOutput]):
         seen_files: set[tuple[str, str]] = set()
         clients: list[str] = []
         skipped_company = False
-        for hit in sorted(groups[0], key=lambda h: self._material_url(h) is None):
+
+        def category(hit: SearchHit) -> tuple[bool, bool]:
+            return self._material_url(hit) is None, bool(
+                target and self._same_client(hit, target[1])
+            )
+
+        ranked: list[SearchHit] = []
+        ordered = sorted(groups[0], key=lambda h: (*category(h), -h.score))
+        for (_, is_same), group in groupby(ordered, key=category):
+            peers: list[SearchHit] = []
+            for hit in group:
+                # 連鎖で関連度の差が広がらないよう、各組の最高スコアを基準にする。
+                gap = peers[0].score - hit.score if peers else 0.0
+                if not is_same and gap > 0.05 and not isclose(gap, 0.05):
+                    ranked.extend(sorted(peers, key=self._date, reverse=True))
+                    peers = []
+                peers.append(hit)
+            ranked.extend(sorted(peers, key=self._date, reverse=True))
+
+        for hit in ranked:
             ref = hit.metadata[drive_first.REFERENCE_KEY]
             material_key = (
                 ("drive", ref.drive_file_id)
@@ -323,10 +344,16 @@ class RecommendSkill(BaseSkill[RecommendInput, RecommendOutput]):
         return f"資料はナレッジに登録されていません。{contact}"
 
     @staticmethod
-    def _to_item(hit: SearchHit, features: dict[str, str]) -> RecommendItem:
+    def _date(hit: SearchHit) -> str:
         meta = hit.metadata
         ref = meta[drive_first.REFERENCE_KEY]
         entry = entry_from_hit(replace(hit, metadata={**meta, "title": ref.title}), url=ref.url)
+        return entry.date or ""
+
+    @staticmethod
+    def _to_item(hit: SearchHit, features: dict[str, str]) -> RecommendItem:
+        meta = hit.metadata
+        ref = meta[drive_first.REFERENCE_KEY]
         # owner_email は取込アカウントなので担当者の代用にしない。
         contact_key = (
             "submitter"
@@ -347,7 +374,7 @@ class RecommendSkill(BaseSkill[RecommendInput, RecommendOutput]):
             score=hit.score,
             client_name=meta.get("client_name"),
             cls_project=meta.get("cls_project"),
-            date=_month(entry.date),
+            date=_month(RecommendSkill._date(hit)),
             similarity=RecommendSkill._similarity(hit, features),
             contact_name=contact or None,
         )

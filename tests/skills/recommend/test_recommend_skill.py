@@ -85,18 +85,15 @@ def test_sales_fb_with_proposal_classification_includes_unregistered_proposal() 
     assert out.similar_sales_fb == []
 
 
-def test_proposals_capped_at_three_in_retrieval_order() -> None:
-    # スコアを意図的に非単調にして「retrieve_hits の並びをそのまま尊重し再ソートしない」を固定。
-    # （p0=0.5, p1=0.9, p2=0.7 ... なので score 降順に再ソートすれば順序が変わる＝回帰検知できる）
+def test_proposals_capped_at_three_in_score_order() -> None:
     scores = [0.5, 0.9, 0.7, 0.3, 0.6]
     hits = [replace(_proposal(i, f"比較食品{i}"), score=scores[i]) for i in range(5)]
     skill, _ = _make_skill(hits)
 
     out = skill.run(RecommendInput(brief="x"), SkillContext())
 
-    # 5 件中 先頭3件だけ・入力順を保持（score で再ソートしていれば [p1, p2, p0] になる）
-    assert [i.client_name for i in out.similar_proposals] == ["比較食品0", "比較食品1", "比較食品2"]
-    assert [i.score for i in out.similar_proposals] == [0.5, 0.9, 0.7]
+    assert [i.client_name for i in out.similar_proposals] == ["比較食品1", "比較食品2", "比較食品4"]
+    assert [i.score for i in out.similar_proposals] == [0.9, 0.7, 0.6]
     assert out.total_count == 3
 
 
@@ -153,6 +150,84 @@ def _proposal(n: int, client: str, *, uri: str | None = None) -> SearchHit:
     )
     hit.metadata.update(source_type="gdrive", cls_industry="食品", cls_solution="動画広告")
     return hit
+
+
+@pytest.mark.parametrize("new_has_link", [True, False])
+def test_same_client_prefers_latest_date_after_material_link(new_has_link: bool) -> None:
+    old = replace(_proposal(1, "伊藤ハム"), score=0.9)
+    old.metadata["title"] = "伊藤ハム_動画提案_2025年11月.pdf"
+    new = replace(_proposal(2, "伊藤ハム"), score=0.6)
+    new.metadata["title"] = "伊藤ハム_動画提案_2026年5月.pdf"
+    if not new_has_link:
+        new.metadata.pop("source_uri")
+    skill, _ = _make_skill([old, new])
+
+    out = skill.run(RecommendInput(brief="伊藤ハムの提案書に似た過去の提案書"), SkillContext())
+
+    assert len(out.same_client_materials) == 1
+    item = out.same_client_materials[0]
+    assert item.date == ("2026年5月" if new_has_link else "2025年11月")
+    assert item.source_uri == (
+        f"https://drive.google.com/file/d/proposal-{2 if new_has_link else 1}/view"
+    )
+
+
+@pytest.mark.parametrize("date_source", ["title", "file_name", "updated_at"])
+@pytest.mark.parametrize(
+    ("old_score", "new_score", "expected"),
+    [
+        (0.9, 0.9, [2, 1]),
+        (0.9, 0.88, [2, 1]),
+        (0.9, 0.85, [2, 1]),
+        (0.23, 0.18, [2, 1]),
+        (0.9, 0.849, [1, 2]),
+        (0.9, 0.7, [1, 2]),
+    ],
+)
+def test_other_clients_prefer_recency_only_within_score_tolerance(
+    date_source: str, old_score: float, new_score: float, expected: list[int]
+) -> None:
+    old = replace(_proposal(1, "比較食品A"), score=old_score)
+    new = replace(_proposal(2, "比較食品B"), score=new_score)
+    for hit, date in ((old, "2025-11-01"), (new, "2026-05-01")):
+        hit.metadata["title"] = f"{hit.metadata['client_name']}_動画提案.pdf"
+        hit.metadata[date_source] = f"提案_{date}.pdf" if date_source != "updated_at" else date
+    skill, _ = _make_skill([old, new])
+
+    out = skill.run(RecommendInput(brief="食品の動画広告の提案書"), SkillContext())
+
+    assert [item.source_uri for item in out.similar_proposals] == [
+        f"https://drive.google.com/file/d/proposal-{i}/view" for i in expected
+    ]
+
+
+@pytest.mark.parametrize(("dated_score", "expected"), [(0.88, [2, 1]), (0.7, [1, 2])])
+def test_unknown_date_follows_dated_peers_only(dated_score: float, expected: list[int]) -> None:
+    unknown = replace(_proposal(1, "比較食品A"), score=0.9)
+    unknown.metadata["title"] = "比較食品A_動画提案.pdf"
+    dated = replace(_proposal(2, "比較食品B"), score=dated_score)
+    skill, _ = _make_skill([unknown, dated])
+
+    out = skill.run(RecommendInput(brief="食品の動画広告の提案書"), SkillContext())
+
+    assert [item.source_uri for item in out.similar_proposals] == [
+        f"https://drive.google.com/file/d/proposal-{i}/view" for i in expected
+    ]
+    assert next(item for item in out.similar_proposals if item.score == 0.9).date == "日付不明"
+
+
+def test_score_tolerance_does_not_chain_across_more_than_point_zero_five() -> None:
+    hits = [
+        replace(_proposal(i, f"比較食品{i}"), score=score)
+        for i, score in enumerate((0.9, 0.86, 0.82), start=1)
+    ]
+    for hit, month in zip(hits, (3, 4, 5), strict=True):
+        hit.metadata["title"] = f"比較食品{hit.chunk_id}_動画提案_2026年{month}月.pdf"
+    skill, _ = _make_skill(hits)
+
+    out = skill.run(RecommendInput(brief="食品の動画広告の提案書"), SkillContext())
+
+    assert [item.score for item in out.similar_proposals] == [0.86, 0.9, 0.82]
 
 
 def test_similar_proposals_prioritize_other_clients_and_expand_the_query() -> None:
