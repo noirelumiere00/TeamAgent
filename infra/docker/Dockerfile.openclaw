@@ -116,6 +116,7 @@ RUN set -eux; \
 #   @modelcontextprotocol/sdk 1.31.0 -> 1.32.0  CVE-2026-111767（GHSA-22jm-h49p-29qw）・CVE-2026-111768（GHSA-46jr-4wx8-v453）(oc28)
 #     1.32.0 が最小の修正版。依存・engines は 1.31.0 と同一（registry で確認）。
 #   follow-redirects 1.16.0 -> 1.16.1  CVE-2026-111755 / CVE-2026-111756 (oc28)
+#   follow-redirects 1.16.1 -> 1.16.2  CVE-2026-116689 (oc38・11-02)
 #     Slack's axios 1.20.0 accepts ^1.16.0; dependencies and Node >=4.0 are unchanged.
 # 2026-10-26 (oc32): body-parser 2.3.0 -> 2.4.0 (CVE-2026-111181) and
 # zod 4.4.3 -> 4.6.6 (CVE-2023-54404), in both /app and the Slack plugin.
@@ -128,7 +129,7 @@ RUN set -eux; \
     mkdir -p "$patch_dir"; \
     cd "$patch_dir"; \
     npm pack axios@1.20.0 --ignore-scripts --pack-destination "$patch_dir"; \
-    npm pack follow-redirects@1.16.1 --ignore-scripts --pack-destination "$patch_dir"; \
+    npm pack follow-redirects@1.16.2 --ignore-scripts --pack-destination "$patch_dir"; \
     npm pack brace-expansion@5.0.11 --ignore-scripts --pack-destination "$patch_dir"; \
     npm pack fast-uri@3.1.7 --ignore-scripts --pack-destination "$patch_dir"; \
     npm pack ip-address@10.3.1 --ignore-scripts --pack-destination "$patch_dir"; \
@@ -178,7 +179,7 @@ RUN set -eux; \
       /opt/teamagent/plugins/slack/node_modules/proxy-addr \
       /app/node_modules/@modelcontextprotocol/sdk; \
     tar -xzf "$patch_dir/axios-1.20.0.tgz" --strip-components=1 -C /opt/teamagent/plugins/slack/node_modules/axios; \
-    tar -xzf "$patch_dir/follow-redirects-1.16.1.tgz" --strip-components=1 -C /opt/teamagent/plugins/slack/node_modules/follow-redirects; \
+    tar -xzf "$patch_dir/follow-redirects-1.16.2.tgz" --strip-components=1 -C /opt/teamagent/plugins/slack/node_modules/follow-redirects; \
     tar -xzf "$patch_dir/https-proxy-agent-5.0.1.tgz" --strip-components=1 -C /opt/teamagent/plugins/slack/node_modules/https-proxy-agent; \
     tar -xzf "$patch_dir/agent-base-6.0.2.tgz" --strip-components=1 -C /opt/teamagent/plugins/slack/node_modules/agent-base; \
     tar -xzf "$patch_dir/brace-expansion-5.0.11.tgz" --strip-components=1 -C /app/node_modules/brace-expansion; \
@@ -207,7 +208,7 @@ RUN set -eux; \
     tar -xzf "$patch_dir/content-type-2.1.0.tgz" --strip-components=1 -C /opt/teamagent/plugins/slack/node_modules/body-parser/node_modules/content-type; \
     cd /tmp; \
     rm -rf "$patch_dir"; \
-    node -e 'const fs=require("fs");const want={"/app/node_modules/body-parser":"2.4.0","/app/node_modules/zod":"4.6.6","/opt/teamagent/plugins/slack/node_modules/body-parser":"2.4.0","/opt/teamagent/plugins/slack/node_modules/zod":"4.6.6","/app/node_modules/body-parser/node_modules/qs":"6.16.1","/app/node_modules/body-parser/node_modules/iconv-lite":"0.7.3","/app/node_modules/body-parser/node_modules/content-type":"2.1.0","/opt/teamagent/plugins/slack/node_modules/body-parser/node_modules/qs":"6.16.1","/opt/teamagent/plugins/slack/node_modules/body-parser/node_modules/iconv-lite":"0.7.3","/opt/teamagent/plugins/slack/node_modules/body-parser/node_modules/content-type":"2.1.0","/app/node_modules/brace-expansion":"5.0.11","/app/node_modules/fast-uri":"3.1.7","/app/node_modules/ip-address":"10.3.1","/app/node_modules/undici":"8.12.2","/app/node_modules/tar":"7.5.21","/app/node_modules/proxy-addr":"2.0.8","/opt/teamagent/plugins/slack/node_modules/proxy-addr":"2.0.8","/app/node_modules/@modelcontextprotocol/sdk":"1.32.0","/opt/teamagent/plugins/slack/node_modules/agent-base":"6.0.2","/opt/teamagent/plugins/slack/node_modules/axios":"1.20.0","/opt/teamagent/plugins/slack/node_modules/follow-redirects":"1.16.1","/opt/teamagent/plugins/slack/node_modules/https-proxy-agent":"5.0.1"};for(const [dir,v] of Object.entries(want)){const got=JSON.parse(fs.readFileSync(dir+"/package.json")).version;if(got!==v)throw new Error(`vulnerability patch mismatch: ${dir} is ${got}, expected ${v}`)}'; \
+    node -e 'const fs=require("fs");const want={"/app/node_modules/body-parser":"2.4.0","/app/node_modules/zod":"4.6.6","/opt/teamagent/plugins/slack/node_modules/body-parser":"2.4.0","/opt/teamagent/plugins/slack/node_modules/zod":"4.6.6","/app/node_modules/body-parser/node_modules/qs":"6.16.1","/app/node_modules/body-parser/node_modules/iconv-lite":"0.7.3","/app/node_modules/body-parser/node_modules/content-type":"2.1.0","/opt/teamagent/plugins/slack/node_modules/body-parser/node_modules/qs":"6.16.1","/opt/teamagent/plugins/slack/node_modules/body-parser/node_modules/iconv-lite":"0.7.3","/opt/teamagent/plugins/slack/node_modules/body-parser/node_modules/content-type":"2.1.0","/app/node_modules/brace-expansion":"5.0.11","/app/node_modules/fast-uri":"3.1.7","/app/node_modules/ip-address":"10.3.1","/app/node_modules/undici":"8.12.2","/app/node_modules/tar":"7.5.21","/app/node_modules/proxy-addr":"2.0.8","/opt/teamagent/plugins/slack/node_modules/proxy-addr":"2.0.8","/app/node_modules/@modelcontextprotocol/sdk":"1.32.0","/opt/teamagent/plugins/slack/node_modules/agent-base":"6.0.2","/opt/teamagent/plugins/slack/node_modules/axios":"1.20.0","/opt/teamagent/plugins/slack/node_modules/follow-redirects":"1.16.2","/opt/teamagent/plugins/slack/node_modules/https-proxy-agent":"5.0.1"};for(const [dir,v] of Object.entries(want)){const got=JSON.parse(fs.readFileSync(dir+"/package.json")).version;if(got!==v)throw new Error(`vulnerability patch mismatch: ${dir} is ${got}, expected ${v}`)}'; \
     chmod -R a-w /opt/teamagent
 
 # The upstream release contains its complete development workspace. Resolve the

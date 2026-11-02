@@ -417,7 +417,7 @@ def test_dockerfile_uses_exact_arm64_children_and_chainguard_final() -> None:
     [
         (
             "follow-redirects",
-            "1.16.1",
+            "1.16.2",
             "/opt/teamagent/plugins/slack/node_modules/follow-redirects",
         ),
         ("undici", "8.12.2", "/app/node_modules/undici"),
