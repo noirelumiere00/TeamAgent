@@ -84,3 +84,5 @@
 {"id": "vcapture-04", "utterance": "このスレに貼った動画、2:05あたりをサムネ用に切り出して", "expect": "video_capture", "forbid": ["video_analysis"], "arg_rules": {"url": "must_be_absent"}, "note": "R5d 添付動画の言い換え（サムネ用）"}
 {"id": "iter1-campaign-results", "utterance": "サンプル食品のハンバーグ施策の動画ごとの結果と、何が効いたか教えて", "expect": "search", "note": "既知施策の金庫の実績を先に読む。新規動画取得へ流さない", "forbid": ["video_algorithm", "tiktok_acquire"]}
 {"id": "iter1-new-market-videos", "utterance": "TikTok でハンバーグ市場の上位動画を新しく取得して、何が効いたか分析して", "expect": "video_algorithm"}
+{"id": "recommend-similar-proposals", "utterance": "伊藤ハムの提案書に似た過去の提案書を探して", "expect": "recommend", "forbid": ["proposal_draft"], "note": "11/02 実機回帰: 類似過去資料の一覧を求めており、骨子は生成しない"}
+{"id": "proposal-draft-explicit", "utterance": "伊藤ハムの提案の骨子を作って", "expect": "proposal_draft", "forbid": ["recommend"], "note": "骨子作成の明示依頼は資料推薦と分ける"}

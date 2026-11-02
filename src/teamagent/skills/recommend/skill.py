@@ -42,7 +42,11 @@ class RecommendSkill(BaseSkill[RecommendInput, RecommendOutput]):
 
     name: ClassVar[str] = "recommend"
     description: ClassVar[str] = (
-        "新規案件の概要から類似の過去提案書/議事録/営業FBをベクトル近傍で3カテゴリ提示する"
+        "似た・類似の・近い・参考になる過去の提案書／資料を探して、という資料推薦の依頼に使う。"
+        "案件概要から過去の提案書/議事録/営業FBを3カテゴリで一覧提示する。"
+        "例: 伊藤ハムの提案書に似た過去の提案書を探して。"
+        "骨子生成はしない。提案（の骨子・たたき台）を作って、という明示依頼は proposal_draft。"
+        "迷ったら recommend を優先して資料を見せ、骨子は求められてから。"
     )
     input_schema: ClassVar[type[BaseModel]] = RecommendInput
     output_schema: ClassVar[type[BaseModel]] = RecommendOutput
