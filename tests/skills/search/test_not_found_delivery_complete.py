@@ -75,8 +75,10 @@ def test_absent_delivery_case_is_one_sentence_and_logs_final_scope_without_conte
     with capture_logs() as logs:
         out = skill.run(SearchInput(query="宅配の事例"), context())
     assert out.direct_answer_kind == "not_found"
-    scope = "社内資料・施策実績・Slack" if fanout_enabled else "社内資料・施策実績"
-    assert out.direct_answer == f"宅配の事例は見つかりませんでした（探した範囲: {scope}）。"
+    assert out.direct_answer == out.answer
+    assert out.answer.startswith("宅配の事例は見つかりませんでした")
+    assert "金庫を『宅配の事例』で検索" in out.answer
+    assert all(source in out.answer for source in ("Slack", "カルテ", "事例"))
     row = next(r for r in logs if r["event"] == "search_found_decision")
     assert row["reason"] == "case_target_mismatch"
     assert row["complete"] is True and row["found"] is False

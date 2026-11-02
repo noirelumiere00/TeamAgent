@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import hashlib
 import json
 import os
@@ -16,7 +15,13 @@ import structlog
 
 from teamagent.adapters.proposal_job_store import ProposalJobStore
 from teamagent.mcp_gateway import detached_jobs
-from teamagent.skills._shared.long_jobs import _OWNER_KEY, ORIGIN_KEY, Origin, enabled
+from teamagent.skills._shared.long_jobs import (
+    _OWNER_KEY,
+    ORIGIN_KEY,
+    TERMINAL_STATES,
+    Origin,
+    enabled,
+)
 from teamagent.skills._shared.slack_blocks import RichMessage
 from teamagent.skills.base import SkillContext
 
@@ -53,6 +58,8 @@ def publish_notice(
     ).hexdigest()
     store = ProposalJobStore()
     key = f"dedup_notice_{digest}"
+    claimed = False
+    delivery_started = False
 
     def record_primary_failure(*, uncertain: bool = False) -> None:
         try:
@@ -66,12 +73,14 @@ def publish_notice(
         if not store.put_dedup_lock(key, "claimed", expected_target=None):
             if not store.put_dedup_lock(key, "claimed", expected_target=""):
                 return False
+        claimed = True
         if kind == "terminal" and not completed:
             # 組み立てに失敗しても、完了済み調査JSONは依頼者へ届ける。
             origin.discard(keep_failure_uploads=True)
         if kind == "terminal" and origin.pending:
             delivered = False
             try:
+                delivery_started = True
                 delivered = origin.deliver()
                 if origin.primary_expected and not origin.primary_delivered:
                     delivered = False
@@ -147,6 +156,7 @@ def publish_notice(
                         " ".join(notes)
                         or "資料は生成・保存できましたが、Slackへの添付に失敗しました。"
                     )
+        delivery_started = True
         status = detached_jobs.post_to_origin_status(
             message,
             detached_jobs.Destination(origin.channel_id, origin.thread_ts),
@@ -161,8 +171,60 @@ def publish_notice(
             logger.warning("long_job_notice_uncertain", request_id=request_id, job_id=job_id)
         return status == "posted"
     except Exception as exc:
+        if not delivery_started:
+            if claimed:
+                try:
+                    store.put_dedup_lock(key, "", expected_target="claimed")
+                except Exception:
+                    pass
+            origin.release_notice(kind)
         logger.warning("long_job_notice_failed", request_id=request_id, error=type(exc).__name__)
         return False
+
+
+def run_persisted_job(
+    job_id: str, store: ProposalJobStore, run: Callable[[], Any], describe: Callable[[Any], str]
+) -> Any:
+    """切り離した実行の心拍・結果保存を、既存のジョブ台帳で共有する。"""
+    if not store.mark_running(job_id):
+        raise RuntimeError("VIDEO_ALGORITHM_STATE_WRITE_FAILED")
+    heartbeat_stop = threading.Event()
+
+    def heartbeat() -> None:
+        while not heartbeat_stop.wait(30):
+            try:
+                if not store.heartbeat(job_id):
+                    return
+            except Exception as exc:
+                logger.warning("video_job_heartbeat_failed", error=type(exc).__name__)
+
+    heartbeat_thread = threading.Thread(target=heartbeat, daemon=True)
+    try:
+        heartbeat_thread.start()
+        result = run()
+        text = describe(result)
+        failed = bool(getattr(result, "error", None)) or getattr(result, "status", "") in (
+            TERMINAL_STATES - {"done"}
+        )
+        saved = (
+            store.mark_failed(job_id, "LONG_JOB_FAILED", error_summary=text)
+            if failed
+            else store.mark_done(job_id, json.dumps({"message": text}))
+        )
+        if not saved:
+            raise RuntimeError("VIDEO_ALGORITHM_STATE_WRITE_FAILED")
+        return result
+    except Exception as exc:
+        store.mark_failed(
+            job_id,
+            "VIDEO_ALGORITHM_FAILED",
+            error_summary=detached_jobs.user_message_for_error(exc),
+        )
+        raise
+    finally:
+        heartbeat_stop.set()
+        if heartbeat_thread.ident is not None:
+            heartbeat_thread.join(timeout=1)
 
 
 def schedule_completion_notice(
@@ -194,6 +256,7 @@ def schedule_completion_notice(
             "user_id": origin.user_id,
             "request_id": request_id,
             "owner": ctx.metadata.get(_OWNER_KEY, ""),
+            "user_email": ctx.metadata.get("user_email", ""),
             "principal": ctx.metadata.get("_long_job_principal_hash")
             or media_audit_principal_hash(
                 ctx.metadata.get("user_email") or ctx.user_id or "unknown"
@@ -203,7 +266,7 @@ def schedule_completion_notice(
             "updated_at": time.time(),
         }
         try:
-            _change_outbox(lambda entries: {**_drop_expired(entries), key: entry})
+            _change_outbox(lambda entries: {**entries, key: entry})
         except Exception as exc:
             # 台帳に書けなくても依頼そのものは落とさない。見張りはこのプロセスで続け、
             # 再起動後の再開だけを諦める（ジョブの受付を通知の都合で失敗させない）。
@@ -223,6 +286,9 @@ def schedule_completion_notice(
                 request_id=request_id,
                 poll=poll,
                 outbox_key=outbox_key,
+                created_at=float(ctx.metadata.get(_CREATED_AT_KEY) or time.time())
+                if ctx is not None
+                else None,
             )
         finally:
             with _lock:
@@ -246,13 +312,15 @@ def _run_completion_notice(
     request_id: str,
     poll: Callable[[], tuple[str, str]],
     outbox_key: str | None = None,
+    created_at: float | None = None,
 ) -> bool:
     started = _monotonic()
-    deadline = started + _MAX_WATCH_SECONDS
+    elapsed = max(0.0, time.time() - created_at) if created_at is not None else 0.0
+    deadline = started + max(0.0, _MAX_WATCH_SECONDS - elapsed)
     _wait_until_next_poll(deadline, _INITIAL_DELAY_SECONDS)
     last_status = "unknown"
     message = ""
-    while _monotonic() < deadline and not origin.cancelled:
+    while not origin.cancelled:
         if outbox_key:
             try:
 
@@ -284,7 +352,7 @@ def _run_completion_notice(
                     job_id=job_id,
                     kind="progress_" + phase,
                 )
-            if status in {"done", "failed"}:
+            if status in TERMINAL_STATES:
                 publish_notice(
                     message,
                     origin=origin,
@@ -294,7 +362,7 @@ def _run_completion_notice(
                 )
                 if origin.has_notice("terminal"):
                     return True
-        if last_status not in {"done", "failed"} and _monotonic() - started >= _TIMEOUT_SECONDS:
+        if last_status not in TERMINAL_STATES and _monotonic() - started >= _TIMEOUT_SECONDS:
             message = (
                 "お土産資料の作業はまだ完了していません。通常の目安は約45〜60分（暫定）、混雑・長尺時は約90分以上です。引き続き確認し、結果をこの会話にお届けします。"
                 if message.startswith("sales25:") and last_status in {"queued", "running"}
@@ -311,17 +379,19 @@ def _run_completion_notice(
             publish_notice(
                 message, origin=origin, request_id=request_id, job_id=job_id, kind="stalled"
             )
+        if _monotonic() >= deadline:
+            break
         _wait_until_next_poll(deadline, _POLL_INTERVAL_SECONDS)
-    if origin.cancelled or last_status in {"done", "failed"}:
+    if origin.cancelled or last_status in TERMINAL_STATES:
         return False
     publish_notice(
         "作業の見守りを継続できなくなりました。完了は確認できていません。",
         origin=origin,
         request_id=request_id,
         job_id=job_id,
-        kind="interrupted",
+        completed=False,
     )
-    return True
+    return origin.has_notice("terminal")
 
 
 def _wait_until_next_poll(deadline: float, interval_seconds: float) -> None:
@@ -331,35 +401,23 @@ def _wait_until_next_poll(deadline: float, interval_seconds: float) -> None:
 
 
 async def notify_interrupted(*, budget_s: float) -> int:
-    """終了時に監視の中断を知らせる。実行自体の停止は断定しない。"""
+    """監視を止めて台帳に残す。外部 worker の実行は再起動後に確認する。"""
     _recovery_stop.set()
     if not enabled():
         return 0
     with _lock:
         jobs = [
-            job for job in _active.values() if job[0] != "video_algorithm" and not job[2].cancelled
+            job
+            for job in _active.values()
+            if job[0] not in detached_jobs.DETACHABLE_TOOLS and not job[2].cancelled
         ]
     for _, _, target, _ in jobs:
         target.cancelled = True
     if not jobs:
         return 0
 
-    async def one(job: tuple[str, str, Origin, str]) -> None:
-        _, job_id, target, request_id = job
-        await asyncio.to_thread(
-            publish_notice,
-            "システム更新のため結果の確認をいったん止めました。更新後に確認を再開し、結果はこの会話にお届けします。",
-            origin=target,
-            request_id=request_id,
-            job_id=job_id,
-            kind="interrupted",
-        )
+    for _, _, target, _ in jobs:
         target.discard()
-
-    try:
-        await asyncio.wait_for(asyncio.gather(*(one(job) for job in jobs)), timeout=budget_s)
-    except TimeoutError:
-        logger.warning("long_job_interrupt_budget_exceeded", count=len(jobs))
     return len(jobs)
 
 
@@ -370,16 +428,6 @@ def _remove_from_outbox(outbox_key: str, request_id: str) -> None:
         logger.warning(
             "long_job_outbox_cleanup_failed", request_id=request_id, error=type(exc).__name__
         )
-
-
-def _drop_expired(entries: dict[str, Any]) -> dict[str, Any]:
-    """見守りの上限（24 時間）を過ぎた行を捨てる。行が溜まって台帳が満杯になるのを防ぐ。"""
-    limit = time.time() - _MAX_WATCH_SECONDS - 2 * 60 * 60
-    return {
-        k: v
-        for k, v in entries.items()
-        if float(v.get("created_at", v.get("updated_at", 0.0))) >= limit
-    }
 
 
 def _read_outbox(store: ProposalJobStore) -> tuple[str | None, dict[str, Any]]:
@@ -408,16 +456,10 @@ def recover_pending_notices() -> int:
     """固定キー一件だけから未通知ジョブを再開する。Scan・新しい権限は不要。"""
     if not enabled():
         return 0
-    from teamagent.mcp_gateway.server import _build_async_job_poll
+    from teamagent.mcp_gateway.server import _ASYNC_JOB_TOOLS, _build_async_job_poll
     from teamagent.skills.base import ASYNC_JOB_POLL_METADATA_KEY
 
     _, entries = _read_outbox(ProposalJobStore())
-    if len(_drop_expired(entries)) != len(entries):
-        try:
-            _change_outbox(_drop_expired)
-        except Exception as exc:
-            logger.warning("long_job_outbox_expire_failed", error=type(exc).__name__)
-        entries = _drop_expired(entries)
     resumed = 0
     for key, entry in entries.items():
         with _lock:
@@ -427,13 +469,7 @@ def recover_pending_notices() -> int:
         if time.time() - float(entry["updated_at"]) <= 180:
             continue
         tool = entry["tool"]
-        if tool not in {
-            "tiktok_acquire",
-            "omiyage_report_submit",
-            "proposal_builder_submit",
-            "video_algorithm",
-            "media_case_search",
-        }:
+        if tool not in _ASYNC_JOB_TOOLS | detached_jobs.DETACHABLE_TOOLS:
             continue
         target = Origin(entry["channel_id"], entry["thread_ts"], entry["user_id"])
         context = SkillContext(
@@ -442,6 +478,9 @@ def recover_pending_notices() -> int:
                 _OWNER_KEY: entry["owner"],
                 "channel_id": entry["channel_id"],
                 "_long_job_principal_hash": entry["principal"],
+                "user_email": entry.get("user_email", ""),
+                "identity_verified": True,
+                "verified_slack_user_id": entry["user_id"],
                 _CREATED_AT_KEY: entry.get("created_at", entry["updated_at"]),
                 ASYNC_JOB_POLL_METADATA_KEY: True,
                 ORIGIN_KEY: target,
@@ -452,10 +491,10 @@ def recover_pending_notices() -> int:
 
         def poll_all(polls: list[Callable[[], tuple[str, str]]] = polls) -> tuple[str, str]:
             results = [poll() for poll in polls]
-            if any(state not in {"done", "failed"} for state, _ in results):
+            if any(state not in TERMINAL_STATES for state, _ in results):
                 state = "unknown" if any(state == "unknown" for state, _ in results) else "running"
                 return state, ""
-            state = "failed" if any(state == "failed" for state, _ in results) else "done"
+            state = "failed" if any(state != "done" for state, _ in results) else "done"
             return state, "\n\n".join(text for _, text in results)
 
         schedule_completion_notice(

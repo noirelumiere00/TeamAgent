@@ -123,9 +123,8 @@ async def test_gateway_delivers_comparison_or_exact_case_miss(
         assert "https://example.test/1" in metrics and "https://example.test/2" in metrics
     else:
         assert payload["delivery"]["answer_kind"] == "not_found"
-        assert (
-            posted == "宅配の事例は見つかりませんでした（探した範囲: 社内資料・施策実績・Slack）。"
-        )
+        assert posted.startswith("宅配の事例は見つかりませんでした")
+        assert "金庫を『宅配の事例を教えて』で検索" in posted
         skill._bedrock.converse.assert_not_called()
 
 

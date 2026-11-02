@@ -220,7 +220,7 @@ def test_flag_on_zero_hits_keeps_legacy_message(
     out = _skill(fake_bedrock, fake_pgvector, slack).run(
         input=SearchInput(query="該当なし"), ctx=_ctx(channel_id="C1")
     )
-    assert "見つかりません" in out.answer
+    assert "確認できませんでした" in out.answer and "探した範囲" in out.answer
     slack.post_message.assert_not_awaited()
 
 

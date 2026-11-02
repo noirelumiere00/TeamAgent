@@ -70,15 +70,9 @@ def test_delivery_case_with_only_logistics_sends_one_not_found_sentence(
         SearchInput(query="宅配の事例を教えて", filter_industry="運輸・交通"),
         SkillContext(metadata=DIRECT_META),
     )
-    assert (
-        out.direct_answer
-        == out.answer
-        == (
-            "宅配の事例は見つかりませんでした（探した範囲: 社内資料・施策実績"
-            + ("・Slack" if fanout_enabled else "")
-            + "）。"
-        )
-    )
+    assert out.direct_answer == out.answer
+    assert out.answer.startswith("宅配の事例は見つかりませんでした")
+    assert "金庫を『宅配の事例を教えて』で検索" in out.answer
     assert out.direct_answer_kind == "not_found" and not out.found
     summary.assert_not_called()
 
@@ -102,9 +96,8 @@ def test_logistics_case_row_cannot_replace_original_delivery_subject(
         ),
         SkillContext(metadata=DIRECT_META),
     )
-    assert out.direct_answer == (
-        "宅配の事例は見つかりませんでした（探した範囲: 社内資料・施策実績・Slack）。"
-    )
+    assert out.direct_answer and out.direct_answer.startswith("宅配の事例は見つかりませんでした")
+    assert "金庫を『宅配の事例を教えて』で検索" in out.answer
     assert not out.found
 
 

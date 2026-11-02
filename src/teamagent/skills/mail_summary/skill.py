@@ -40,6 +40,7 @@ from teamagent.skills._shared.client_name_guard import (
     safe_client_name,
     to_gmail_phrase,
 )
+from teamagent.skills._shared.google_connection import google_connection_guard
 from teamagent.skills._shared.mail_compose import env_bool, should_skip_mail
 from teamagent.skills._shared.mail_connection import (
     CONNECTION_LIVE,
@@ -145,6 +146,9 @@ class MailSummarySkill(BaseSkill[MailSummaryInput, MailSummaryOutput]):
         self._max_body_chars = max_body_chars
         self._summary_max_tokens = summary_max_tokens
 
+    @google_connection_guard(
+        lambda input: MailSummaryOutput(client_name=input.client_name, scanned_count=0)
+    )
     def run(self, input: MailSummaryInput, ctx: SkillContext) -> MailSummaryOutput:
         log = ctx.bind_logger(self.name)
         # G7: client_name の値そのものはログに出さない（依頼文の断片＝会話内容が漏れるため）。

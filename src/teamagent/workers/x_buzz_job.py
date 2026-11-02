@@ -54,10 +54,14 @@ def _update_status(table: str, job_id: str, status: str, detail: dict[str, Any])
         _ddb().update_item(
             TableName=table,
             Key={"job_id": {"S": job_id}},
-            UpdateExpression="SET #s = :s, detail = :d",
+            UpdateExpression="SET #s = :s, detail = :d, updated_at = :updated",
+            ConditionExpression="#s IN (:queued, :running)",
             ExpressionAttributeNames={"#s": "status"},
             ExpressionAttributeValues={
                 ":s": {"S": status},
+                ":queued": {"S": "queued"},
+                ":running": {"S": "running"},
+                ":updated": {"S": _dt.datetime.now(_dt.UTC).isoformat()},
                 ":d": {"S": json.dumps({"status": status, **detail}, ensure_ascii=False)},
             },
         )

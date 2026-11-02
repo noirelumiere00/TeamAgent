@@ -29,8 +29,11 @@ from pydantic import BaseModel
 
 from teamagent.adapters.bedrock_client import BedrockClient
 from teamagent.adapters.gmail_client import GmailClient, extract_plain_text
+from teamagent.adapters.oauth_token_store import TokenStore
 from teamagent.observability import scrub_value
+from teamagent.skills._shared.google_connection import google_connection_guard
 from teamagent.skills._shared.mail_compose import env_bool, should_skip_mail
+from teamagent.skills._shared.mail_connection import resolve_gmail_for_user
 from teamagent.skills.base import BaseSkill, SkillContext, register
 from teamagent.skills.mail_constraints.schema import (
     CONSTRAINT_KINDS,
@@ -120,6 +123,7 @@ class MailConstraintsSkill(BaseSkill[MailConstraintsInput, MailConstraintsOutput
         gmail: GmailClient | None = None,
         bedrock: BedrockClient | None = None,
         *,
+        token_store: TokenStore | None = None,
         consent_emails: set[str] | None = None,
         consent_store: ConsentStore | None = None,
         max_body_chars: int = 2000,
@@ -129,6 +133,7 @@ class MailConstraintsSkill(BaseSkill[MailConstraintsInput, MailConstraintsOutput
         # gmail/bedrock は遅延構築（テストでは fake を注入）。
         self._gmail = gmail
         self._bedrock = bedrock
+        self._token_store = token_store
         # G2: 同意判定は差し替え可能な ConsentStore。優先順: 明示 store > consent_emails > env。
         if consent_store is not None:
             self._consent_store: ConsentStore = consent_store
@@ -138,6 +143,11 @@ class MailConstraintsSkill(BaseSkill[MailConstraintsInput, MailConstraintsOutput
         self._summary_max_tokens = summary_max_tokens
         self._prompt_version = prompt_version
 
+    @google_connection_guard(
+        lambda input: MailConstraintsOutput(
+            client_name=input.client_name, scanned_count=0, total_cost_usd=0
+        )
+    )
     def run(self, input: MailConstraintsInput, ctx: SkillContext) -> MailConstraintsOutput:
         log = ctx.bind_logger(self.name)
         # G7: 監査ログに本文・件名・生 email は出さない。
@@ -231,6 +241,16 @@ class MailConstraintsSkill(BaseSkill[MailConstraintsInput, MailConstraintsOutput
         """
         if self._gmail is not None:
             return self._gmail
+        from teamagent.skills.oauth_connect.skill import start_links_enabled
+
+        if start_links_enabled():
+            if self._token_store is None:
+                from teamagent.orchestrator.factory import _build_token_store
+
+                self._token_store = _build_token_store()
+            return resolve_gmail_for_user(
+                self._token_store, requester, misconfig_message="メールの設定が見つかりません"
+            )
         # G1: impersonate=requester を束縛（env/LLM でなく呼び出し側が固定）。G4: readonly のみ。
         return GmailClient.from_env(readonly=True, impersonate_user=requester)
 

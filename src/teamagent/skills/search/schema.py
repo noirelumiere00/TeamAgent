@@ -368,6 +368,17 @@ SearchDirectAnswerKind = Literal[
 class SearchOutput(BaseModel):
     """検索 Skill の出力。"""
 
+    error: str = Field(
+        default="",
+        exclude_if=lambda value: not value,
+        description="連携失敗の共通案内。message はそのまま本人へ返す",
+    )
+    message: str = Field(
+        default="",
+        exclude_if=lambda value: not value,
+        description="連携失敗の共通案内。message はそのまま本人へ返す",
+    )
+
     answer: str = Field(description="Claude による要約（引用付き）")
     case_state_answer: str | None = None
     displayed_refs: list[DocumentReference] | None = None

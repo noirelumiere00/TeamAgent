@@ -145,4 +145,4 @@ def test_true_zero_hits_keeps_legacy_message(
     out = skill.run(input=SearchInput(query="該当なし"), ctx=SkillContext())
 
     fake_bedrock.converse.assert_not_called()  # 0 件時は従来から converse しない
-    assert "見つかりません" in out.answer
+    assert "確認できませんでした" in out.answer and "探した範囲" in out.answer

@@ -20,6 +20,7 @@ from teamagent.skills.base import SkillContext
 
 ORIGIN_KEY = "_verified_long_job_origin"
 _OWNER_KEY = "_verified_long_job_owner"
+TERMINAL_STATES = frozenset({"done", "failed", "incomplete", "timeout", "stale", "interrupted"})
 
 
 # 実行中の動画分析がこのプロセスで生きているかを答える口。skills は mcp_gateway / runtime を

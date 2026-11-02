@@ -36,6 +36,10 @@ import structlog
 from pydantic import BaseModel
 
 from teamagent.identity import KEY_IDENTITY_VERIFIED, KEY_USER_EMAIL
+from teamagent.skills._shared.google_connection import (
+    google_connection_guard,
+    record_google_failure,
+)
 from teamagent.skills._shared.private_surface import is_private_surface
 from teamagent.skills._shared.rollout import ROLLOUT_DENIED_MESSAGE, rollout_allowed
 from teamagent.skills.base import BaseSkill, SkillContext, register
@@ -188,6 +192,7 @@ class MeetingPrepSkill(BaseSkill[MeetingPrepInput, MeetingPrepOutput]):
 
     # ---- 本体 ----
 
+    @google_connection_guard(lambda input: MeetingPrepOutput())
     def run(self, input: MeetingPrepInput, ctx: SkillContext) -> MeetingPrepOutput:
         meta = ctx.metadata or {}
         email = str(meta.get(KEY_USER_EMAIL, "") or "")
@@ -202,6 +207,7 @@ class MeetingPrepSkill(BaseSkill[MeetingPrepInput, MeetingPrepOutput]):
         try:
             calendar = self._calendar(email)
         except Exception as exc:
+            record_google_failure(exc)
             logger.warning(
                 "meeting_prep_calendar_failed", request_id=ctx.request_id, error=type(exc).__name__
             )
@@ -359,6 +365,7 @@ class MeetingPrepSkill(BaseSkill[MeetingPrepInput, MeetingPrepOutput]):
         try:
             mail = mail_materials(self._gmail(email), to_gmail_phrase(name), ctx)
         except Exception as exc:
+            record_google_failure(exc)
             logger.warning(
                 "meeting_prep_mail_failed", request_id=ctx.request_id, error=type(exc).__name__
             )

@@ -62,6 +62,17 @@ class MailConstraint(BaseModel):
 class MailConstraintsOutput(BaseModel):
     """制約抽出の結果。生本文は一切含まない。"""
 
+    error: str = Field(
+        default="",
+        exclude_if=lambda value: not value,
+        description="連携失敗の共通案内。message はそのまま本人へ返す",
+    )
+    message: str = Field(
+        default="",
+        exclude_if=lambda value: not value,
+        description="連携失敗の共通案内。message はそのまま本人へ返す",
+    )
+
     client_name: str
     constraints: list[MailConstraint] = Field(default_factory=list)
     summary: str = Field(

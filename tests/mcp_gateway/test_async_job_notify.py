@@ -453,17 +453,15 @@ def test_automatic_video_detach_uses_verified_claim_and_can_be_disabled(
 
 
 @pytest.mark.asyncio
-async def test_shutdown_notifies_the_monitor_interruption_once(
+async def test_shutdown_keeps_external_worker_for_recovery_without_a_second_notice(
     notices: list[dict[str, Any]],
 ) -> None:
     origin = target()
     notify._active["key"] = ("tiktok_acquire", "tk_interrupt", origin, "req-interrupt")
     assert await notify.notify_interrupted(budget_s=1) == 1
     await notify.notify_interrupted(budget_s=1)
-    assert len(notices) == 1
-    assert origin.cancelled
-    assert "確認を再開" in notices[0]["text"]  # 更新後は台帳から見張りを再開する
-    assert "作業が中断" not in notices[0]["text"]
+    assert notices == []
+    assert origin.cancelled  # 更新後は台帳から見張りを再開して終端だけを知らせる
 
 
 @pytest.mark.asyncio
@@ -691,11 +689,20 @@ def _outbox() -> dict[str, Any]:
 
 def _inline_threads(monkeypatch: pytest.MonkeyPatch) -> None:
     class Thread:
-        def __init__(self, *, target: Any, **kwargs: Any) -> None:
+        def __init__(
+            self,
+            *,
+            target: Any,
+            args: tuple[Any, ...] = (),
+            kwargs: dict[str, Any] | None = None,
+            **options: Any,
+        ) -> None:
             self.target = target
+            self.args = args
+            self.kwargs = kwargs or {}
 
         def start(self) -> None:
-            self.target()
+            self.target(*self.args, **self.kwargs)
 
     monkeypatch.setattr(notify.threading, "Thread", Thread)
     monkeypatch.setattr(notify, "_INITIAL_DELAY_SECONDS", 0)
@@ -768,20 +775,30 @@ def test_finished_watch_is_removed_from_outbox_but_shutdown_keeps_it(
     assert list(_outbox()) == ["tiktok_acquire:tk_cut:D12345678:111.222"]
 
 
-def test_expired_outbox_rows_are_dropped_and_not_resumed(
+def test_expired_outbox_is_not_dropped_until_terminal_notice_arrives(
     notices: list[dict[str, Any]], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """見守りの上限を過ぎた行は再開せず台帳から消す（溜まって満杯にならない）。"""
-    built: list[str] = []
-    monkeypatch.setattr(
-        server, "_build_async_job_poll", lambda tool, job_id, context: built.append(job_id)
-    )
+    _inline_threads(monkeypatch)
+    monkeypatch.setattr(server, "_build_async_job_poll", lambda *args: lambda: ("unknown", ""))
     old = notify.time.time() - notify._MAX_WATCH_SECONDS - 3 * 60 * 60
-    notify._change_outbox(
-        lambda entries: {"stale": {"tool": "tiktok_acquire", "created_at": old, "updated_at": old}}
-    )
+    entry = {
+        "tool": "tiktok_acquire",
+        "job_id": "tk_old",
+        "channel_id": "D12345678",
+        "thread_ts": "111.222",
+        "user_id": "U12345678",
+        "request_id": "expired",
+        "owner": "verified",
+        "principal": "a" * 64,
+        "created_at": old,
+        "updated_at": old,
+    }
+    notify._change_outbox(lambda entries: {"tiktok_acquire:tk_old:D12345678:111.222": entry})
+    assert notify.recover_pending_notices() == 1
+    assert len(notices) == 1
+    assert "完了は確認できていません" in notices[0]["text"]
+    assert _outbox() == {}
     assert notify.recover_pending_notices() == 0
-    assert built == [] and notices == [] and _outbox() == {}
 
 
 def test_recovery_keeps_the_original_created_at(
@@ -848,7 +865,7 @@ def test_video_still_question_uses_owner_and_keeps_older_owned_jobs_visible(
 
 
 @pytest.mark.parametrize(
-    ("alive", "expected"), [(None, "running"), (True, "running"), (False, "failed")]
+    ("alive", "expected"), [(None, "unknown"), (True, "running"), (False, "failed")]
 )
 def test_video_status_marks_failed_only_when_liveness_is_known_false(
     notices: list[dict[str, Any]],
@@ -1069,3 +1086,208 @@ def test_sales25_counts_notify_once_per_count_and_finish(
     assert "検索 1/6" in notices[0]["text"]
     assert "分析 1/30" in notices[1]["text"]
     assert "機械検査" in notices[2]["text"]
+
+
+@pytest.mark.parametrize("tool", sorted(server._ASYNC_JOB_TOOLS | detached_jobs.DETACHABLE_TOOLS))
+@pytest.mark.parametrize("state", sorted(long_jobs.TERMINAL_STATES))
+def test_every_job_terminal_state_reaches_only_its_requester_once_after_restart(
+    notices: list[dict[str, Any]], monkeypatch: pytest.MonkeyPatch, tool: str, state: str
+) -> None:
+    _inline_threads(monkeypatch)
+    message = f"{tool} の結果: {state}"
+    monkeypatch.setattr(server, "_build_async_job_poll", lambda *args: lambda: (state, message))
+    context = ctx()
+    context.metadata.update({"user_email": "owner@example.com", ORIGIN_KEY: target()})
+    # 登録時は起動せず、プロセスが失われた状況から同じ永続台帳で再開する。
+    original_schedule = notify.schedule_completion_notice
+    captured: list[dict[str, Any]] = []
+    monkeypatch.setattr(notify, "schedule_completion_notice", lambda **kw: captured.append(kw))
+    if tool in server._ASYNC_JOB_TOOLS:
+        server._schedule_async_job_notice(tool, {"job_id": "job", "status": "queued"}, {}, context)
+        assert len(captured) == 1
+    else:
+        captured.append(
+            dict(
+                tool=tool,
+                job_id="job",
+                origin=target(),
+                request_id="req",
+                poll=server._build_async_job_poll(tool, "job", context),
+                ctx=context,
+            )
+        )
+    monkeypatch.setattr(notify, "schedule_completion_notice", original_schedule)
+    # durable recovery の入力は schedule が書くものそのものを使う。
+    real_run = notify._run_completion_notice
+    monkeypatch.setattr(notify, "_run_completion_notice", lambda **kwargs: False)
+    original_schedule(**captured[0])
+    notify._active.clear()
+    notify._change_outbox(lambda entries: {k: {**v, "updated_at": 0} for k, v in entries.items()})
+    monkeypatch.setattr(notify, "_run_completion_notice", real_run)
+    assert notify.recover_pending_notices() == 1
+    assert len(notices) == 1 and notices[0]["text"] == message
+    assert notices[0]["destination"] == detached_jobs.Destination("D12345678", "111.222")
+    assert notices[0]["fallback_user_id"] == "U12345678"
+    assert notify.recover_pending_notices() == 0
+    original_schedule(**{**captured[0], "origin": target()})
+    assert len(notices) == 1 and _outbox() == {}
+
+
+@pytest.mark.parametrize("tool", sorted(detached_jobs.DETACHABLE_TOOLS))
+@pytest.mark.parametrize("timeout", [False, True])
+def test_detached_restart_or_timeout_and_late_result_share_terminal_lock(
+    notices: list[dict[str, Any]], monkeypatch: pytest.MonkeyPatch, tool: str, timeout: bool
+) -> None:
+    import teamagent.adapters.proposal_job_store as adapter
+
+    store = notify.ProposalJobStore()  # type: ignore[attr-defined]
+    monkeypatch.setattr(adapter, "ProposalJobStore", lambda: store)
+    job_id = detached_jobs.detached_job_id(tool, "req-terminal")
+    store.create_job(job_id, {"kind": tool, "user_id": "U12345678"})
+    store.mark_running(job_id)
+    job = detached_jobs.DetachedJob(
+        registry=detached_jobs.DetachedJobRegistry(),
+        key="key",
+        tool=tool,
+        query="query",
+        request_id="req-terminal",
+        destination=detached_jobs.Destination("D12345678", "111.222"),
+        target=lambda: None,
+        on_detached_done=lambda *args: None,
+    )
+    assert job.detach() == detached_jobs.DETACH_DETACHED
+    assert detached_jobs._notify_interrupted_job(job, timeout=timeout)
+    assert not detached_jobs._notify_interrupted_job(job, timeout=timeout)
+    assert not store.mark_done(job_id, '{"message":"late"}')
+    notify.publish_notice("late", origin=target(), request_id="late", job_id=job_id)
+    assert len(notices) == 1
+    assert store.get_job(job_id)["status"] == "failed"  # type: ignore[index]
+    assert notices[0]["fallback_user_id"] == "U12345678"
+
+
+def test_stale_registry_sweep_sends_failure_even_while_heartbeat_thread_is_alive(
+    notices: list[dict[str, Any]], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from time import monotonic
+
+    import teamagent.adapters.proposal_job_store as adapter
+
+    _inline_threads(monkeypatch)
+    store = notify.ProposalJobStore()  # type: ignore[attr-defined]
+    monkeypatch.setattr(adapter, "ProposalJobStore", lambda: store)
+    store.create_job("va_hung", {"user_id": "U12345678"})
+    store.mark_running("va_hung")
+    reg = detached_jobs.DetachedJobRegistry()
+    job = detached_jobs.DetachedJob(
+        registry=reg,
+        key="hung",
+        tool="video_algorithm",
+        query="query",
+        request_id="hung",
+        destination=detached_jobs.Destination("D12345678", "111.222"),
+        target=lambda: None,
+        on_detached_done=lambda *args: None,
+    )
+    assert job.detach() == detached_jobs.DETACH_DETACHED
+    reg._jobs[job.key] = job
+    reg._running[job] = monotonic() - detached_jobs.STALE_AFTER_S - 1
+    assert reg.has_request("hung") is False
+    assert len(notices) == 1 and "制限時間" in notices[0]["text"]
+    assert reg.has_request("hung") is False
+    assert len(notices) == 1
+
+
+def test_outbox_claim_failure_is_retried_without_losing_the_terminal_notice(
+    notices: list[dict[str, Any]], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = notify.ProposalJobStore()  # type: ignore[attr-defined]
+    put = store.put_dedup_lock
+    calls = [0]
+
+    def flaky(*args: Any, **kwargs: Any) -> bool:
+        calls[0] += 1
+        if calls[0] == 1:
+            raise RuntimeError("temporary ledger outage")
+        return put(*args, **kwargs)
+
+    monkeypatch.setattr(store, "put_dedup_lock", flaky)
+    origin = target()
+    assert not notify.publish_notice("done", origin=origin, job_id="claim", request_id="req")
+    assert not origin.has_notice("terminal")
+    assert notify.publish_notice("done", origin=origin, job_id="claim", request_id="req")
+    assert len(notices) == 1
+
+
+@pytest.mark.parametrize("state", sorted(long_jobs.TERMINAL_STATES))
+def test_persisted_detached_runner_saves_the_real_terminal_state(
+    notices: list[dict[str, Any]], state: str
+) -> None:
+    store = notify.ProposalJobStore()  # type: ignore[attr-defined]
+    store.create_job("lj_result", {})
+    output = SimpleNamespace(status=state)
+    assert (
+        notify.run_persisted_job("lj_result", store, lambda: output, lambda result: state) is output
+    )
+    row = store.get_job("lj_result")
+    assert row is not None and row["status"] == ("done" if state == "done" else "failed")
+    assert notices == []  # 保存を先に済ませ、配信は共通の通知部品だけが行う。
+
+
+def test_persisted_detached_runner_records_timeout_and_does_not_claim_success(
+    notices: list[dict[str, Any]],
+) -> None:
+    store = notify.ProposalJobStore()  # type: ignore[attr-defined]
+    store.create_job("lj_timeout", {})
+
+    def run() -> Any:
+        raise TimeoutError()
+
+    with pytest.raises(TimeoutError):
+        notify.run_persisted_job("lj_timeout", store, run, str)
+    assert store.get_job("lj_timeout")["status"] == "failed"  # type: ignore[index]
+
+
+@pytest.mark.parametrize(
+    "tool,module_name,class_name",
+    [
+        ("tiktok_acquire", "tiktok_acquire", "TikTokAcquireStatusSkill"),
+        ("proposal_builder_submit", "proposal_builder", "ProposalBuilderStatusSkill"),
+        ("omiyage_report_submit", "omiyage_report", "OmiyageReportStatusSkill"),
+        ("clip_proposal_submit", "clip_proposal", "ClipProposalStatusSkill"),
+        ("x_buzz_measure", "x_research", "XBuzzMeasureStatusSkill"),
+        ("video_algorithm", "video_algorithm", "VideoAlgorithmStatusSkill"),
+    ],
+)
+def test_gateway_polls_each_existing_status_skill_with_the_verified_context(
+    monkeypatch: pytest.MonkeyPatch, tool: str, module_name: str, class_name: str
+) -> None:
+    import importlib
+
+    calls: list[SkillContext] = []
+
+    class Status:
+        def run(self, input: Any, context: SkillContext) -> Any:
+            calls.append(context)
+            return SimpleNamespace(
+                status="failed",
+                message="失敗しました。",
+                error_code="TIMEOUT",
+                slack_delivered=False,
+            )
+
+    module = importlib.import_module(f"teamagent.skills.{module_name}.skill")
+    monkeypatch.setattr(module, class_name, Status)
+    context = ctx()
+    context.metadata.update({"user_email": "owner@example.com", ORIGIN_KEY: target()})
+    job_id = (
+        "omy_" + "a" * 32
+        if tool == "omiyage_report_submit"
+        else "clp_" + "a" * 32
+        if tool == "clip_proposal_submit"
+        else "job"
+    )
+    state, text = server._build_async_job_poll(tool, job_id, context)()
+    assert state == "failed" and text
+    assert len(calls) == 1
+    assert calls[0].metadata["user_email"] == "owner@example.com"
+    assert calls[0].metadata["async_job_poll"] is True

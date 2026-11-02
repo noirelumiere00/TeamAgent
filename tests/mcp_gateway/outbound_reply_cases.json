@@ -1,0 +1,208 @@
+[
+  {
+    "id": "exception",
+    "input": "ClientError: An error occurred (AccessDenied) when calling GetObject",
+    "expected": "処理の途中で止まりました。もう一度お試しください。"
+  },
+  {
+    "id": "stack",
+    "input": "TypeError: Cannot read properties of undefined\n    at main (/app/index.js:12:3)\n確認した資料は2件です。",
+    "expected": "処理の途中で止まりました。もう一度お試しください。\n確認した資料は2件です。"
+  },
+  {
+    "id": "python-stack",
+    "input": "Traceback (most recent call last):\n  File \"/app/main.py\", line 2, in main\n    client.run()\nRuntimeError: request failed",
+    "expected": "処理の途中で止まりました。もう一度お試しください。"
+  },
+  {
+    "id": "error-name",
+    "input": "TimeoutError",
+    "expected": "処理の途中で止まりました。もう一度お試しください。"
+  },
+  {
+    "id": "english-system",
+    "input": "Error executing tool search: request failed",
+    "expected": "処理の途中で止まりました。もう一度お試しください。"
+  },
+  {
+    "id": "internal",
+    "input": "attachment_assistで確認します。fanout と vault と MCP と OpenClaw",
+    "expected": "確認します。並列処理 と 社内資料 と 処理 と Aico"
+  },
+  {
+    "id": "safe",
+    "input": "Google search と <@U12345678> <https://example.test/vault/MCP|資料>",
+    "expected": "Google search と <@U12345678> <https://example.test/vault/MCP|資料>"
+  },
+  {
+    "id": "permanent",
+    "input": "<https://drive.google.com/file/d/FILE123/view?X-Amz-Signature=secret|資料を見る>",
+    "expected": "https://drive.google.com/file/d/FILE123/view"
+  },
+  {
+    "id": "original-mapping",
+    "input": "<https://s3.example.test/a?X-Amz-Signature=secret|資料を見る>",
+    "permanent_urls": {
+      "https://s3.example.test/a?X-Amz-Signature=secret": "https://drive.google.com/file/d/ORIGINAL/view"
+    },
+    "expected": "https://drive.google.com/file/d/ORIGINAL/view"
+  },
+  {
+    "id": "signed-bare",
+    "input": "https://s3.example.test/a?X-Amz-Signature=secret",
+    "expected": "（社内リンクは省略しました）"
+  },
+  {
+    "id": "signed-slack",
+    "input": "<https://s3.example.test/a?X-Amz-Signature=secret|資料を見る>",
+    "expected": "（社内リンクは省略しました）"
+  },
+  {
+    "id": "signed-markdown",
+    "input": "[資料を見る](https://s3.example.test/a?X-Amz-Signature=secret)",
+    "expected": "（社内リンクは省略しました）"
+  },
+  {
+    "id": "v2-bare",
+    "input": "https://s3.example.test/a?AWSAccessKeyId=secret&Signature=secret",
+    "expected": "（社内リンクは省略しました）"
+  },
+  {
+    "id": "v2-slack",
+    "input": "<https://s3.example.test/a?AWSAccessKeyId=secret&Signature=secret|資料を見る>",
+    "expected": "（社内リンクは省略しました）"
+  },
+  {
+    "id": "v2-markdown",
+    "input": "[資料を見る](https://s3.example.test/a?AWSAccessKeyId=secret&Signature=secret)",
+    "expected": "（社内リンクは省略しました）"
+  },
+  {
+    "id": "gcs-bare",
+    "input": "https://storage.example.test/a?X-Goog-Signature=secret",
+    "expected": "（社内リンクは省略しました）"
+  },
+  {
+    "id": "gcs-slack",
+    "input": "<https://storage.example.test/a?X-Goog-Signature=secret|資料を見る>",
+    "expected": "（社内リンクは省略しました）"
+  },
+  {
+    "id": "gcs-markdown",
+    "input": "[資料を見る](https://storage.example.test/a?X-Goog-Signature=secret)",
+    "expected": "（社内リンクは省略しました）"
+  },
+  {
+    "id": "azure-bare",
+    "input": "https://storage.example.test/a?sig=secret",
+    "expected": "（社内リンクは省略しました）"
+  },
+  {
+    "id": "azure-slack",
+    "input": "<https://storage.example.test/a?sig=secret|資料を見る>",
+    "expected": "（社内リンクは省略しました）"
+  },
+  {
+    "id": "azure-markdown",
+    "input": "[資料を見る](https://storage.example.test/a?sig=secret)",
+    "expected": "（社内リンクは省略しました）"
+  },
+  {
+    "id": "long-query-bare",
+    "input": "https://example.test/a?q=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "expected": "（社内リンクは省略しました）"
+  },
+  {
+    "id": "long-query-slack",
+    "input": "<https://example.test/a?q=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa|資料を見る>",
+    "expected": "（社内リンクは省略しました）"
+  },
+  {
+    "id": "long-query-markdown",
+    "input": "[資料を見る](https://example.test/a?q=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa)",
+    "expected": "（社内リンクは省略しました）"
+  },
+  {
+    "id": "ellipsis-bare",
+    "input": "https://example.test/a…",
+    "expected": "（社内リンクは省略しました）"
+  },
+  {
+    "id": "ellipsis-slack",
+    "input": "<https://example.test/a…|資料を見る>",
+    "expected": "（社内リンクは省略しました）"
+  },
+  {
+    "id": "ellipsis-markdown",
+    "input": "[資料を見る](https://example.test/a…)",
+    "expected": "（社内リンクは省略しました）"
+  },
+  {
+    "id": "dots-bare",
+    "input": "https://example.test/a...",
+    "expected": "（社内リンクは省略しました）"
+  },
+  {
+    "id": "dots-slack",
+    "input": "<https://example.test/a...|資料を見る>",
+    "expected": "（社内リンクは省略しました）"
+  },
+  {
+    "id": "dots-markdown",
+    "input": "[資料を見る](https://example.test/a...)",
+    "expected": "（社内リンクは省略しました）"
+  },
+  {
+    "id": "encoded-ellipsis-bare",
+    "input": "https://example.test/a%E2%80%A6",
+    "expected": "（社内リンクは省略しました）"
+  },
+  {
+    "id": "encoded-ellipsis-slack",
+    "input": "<https://example.test/a%E2%80%A6|資料を見る>",
+    "expected": "（社内リンクは省略しました）"
+  },
+  {
+    "id": "encoded-ellipsis-markdown",
+    "input": "[資料を見る](https://example.test/a%E2%80%A6)",
+    "expected": "（社内リンクは省略しました）"
+  },
+  {
+    "id": "label-signed",
+    "input": "<https://example.test/doc|https://s3.example.test/a?X-Amz-Signature=secret>",
+    "expected": "<https://example.test/doc|（社内リンクは省略しました）>"
+  },
+  {
+    "id": "markdown-label-broken",
+    "input": "[https://example.test/a…](https://example.test/doc)",
+    "expected": "[（社内リンクは省略しました）](https://example.test/doc)"
+  },
+  {
+    "id": "title-signed",
+    "input": "[資料](https://example.test/doc \"https://s3.example.test/a?X-Amz-Signature=secret\")",
+    "expected": "[資料](https://example.test/doc \"（社内リンクは省略しました）\")"
+  },
+  {
+    "id": "internal-label",
+    "input": "<https://example.test/doc|attachment_assist>",
+    "expected": "<https://example.test/doc|リンク>"
+  },
+  {
+    "id": "original-escaped",
+    "input": "<https://s3.example.test/a?x=1&amp;X-Amz-Signature=secret|資料を見る>",
+    "permanent_urls": {
+      "https://s3.example.test/a?x=1&X-Amz-Signature=secret": "https://drive.google.com/file/d/ORIGINAL/view"
+    },
+    "expected": "https://drive.google.com/file/d/ORIGINAL/view"
+  },
+  {
+    "id": "transport-error",
+    "input": "ReadTimeout: timed out",
+    "expected": "処理の途中で止まりました。もう一度お試しください。"
+  },
+  {
+    "id": "internal-error-code",
+    "input": "MEDIA_ACQUIRE_JOB_FAILED: boom",
+    "expected": "処理の途中で止まりました。もう一度お試しください。"
+  }
+]

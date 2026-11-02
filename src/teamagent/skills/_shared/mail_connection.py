@@ -96,6 +96,14 @@ def classify_gmail_failure(exc: BaseException) -> str:
     ここで例外のまま抜けると MCP 境界で和文 1 本に潰れ、LLM が「連携が未完了かも」と
     創作する余地（P0-3 で塞いだはずの穴）が復活する。
     """
+    from teamagent.skills.oauth_connect.skill import start_links_enabled
+
+    if start_links_enabled():
+        return (
+            "reauth_needed"
+            if classify_google_fetch_failure(exc) in FETCH_NEEDS_RECONNECT
+            else "gmail_api_failed"
+        )
     blob = f"{type(exc).__name__} {exc}".lower()
     if any(marker in blob for marker in _REAUTH_MARKERS):
         return "reauth_needed"
@@ -212,9 +220,14 @@ def classify_google_fetch_failure(exc: BaseException) -> FetchFailure:
     if "MissingRefreshTokenError" in names:
         return FETCH_TOKEN_EXPIRED
     if "RefreshError" in names:
-        return (
-            FETCH_TOKEN_EXPIRED if _refresh_error_code(exc) == "invalid_grant" else FETCH_TEMPORARY
-        )
+        code = _refresh_error_code(exc)
+        if code == "invalid_grant":
+            return FETCH_TOKEN_EXPIRED
+        if code == "invalid_scope":
+            return FETCH_SCOPE_MISSING
+        return FETCH_TEMPORARY
+    if _http_status(exc) == 401:
+        return FETCH_TOKEN_EXPIRED
     if _http_status(exc) == 403:
         blob = _http_error_blob(exc)
         if any(marker in blob for marker in _SCOPE_MISSING_MARKERS):
@@ -282,6 +295,10 @@ def resolve_gmail_for_user(
     try:
         return GmailClient.from_user_token(token, readonly=True)
     except ValueError as e:
+        from teamagent.skills.oauth_connect.skill import start_links_enabled
+
+        if start_links_enabled() and classify_google_fetch_failure(e) not in FETCH_NEEDS_RECONNECT:
+            raise
         # 失効/空 refresh token・GOOGLE_CLIENT_ID 未設定などは「再連携してください」に寄せる。
         raise MailConnectionError("reauth_needed") from e
 

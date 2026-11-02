@@ -738,7 +738,7 @@ def _queries_text(queries: Sequence[str]) -> str:
     return "".join(f"『{label}』" for label in labels)
 
 
-def _lane_text(name: str, status: LaneStatus, *, deal_count: int) -> str:
+def _lane_text(name: str, status: LaneStatus, *, deal_count: int, include_hints: bool) -> str:
     label = _LANE_LABELS[name]
     if status.kind in ("found", "zero"):
         if status.kind == "found":
@@ -759,21 +759,28 @@ def _lane_text(name: str, status: LaneStatus, *, deal_count: int) -> str:
     if status.kind == "failed":
         text = _FAILED_TEXTS.get(status.reason, _FAILED_DEFAULT)
         hint = _FAILED_HINTS.get(status.reason)
-        if hint:
+        if hint and include_hints:
             return f"{label} ✗ {text}（{hint}）"
         note = _NOT_ABSENT_NOTES.get(name)
         return f"{label} ✗ {text}" + (f"（{note}）" if note else "")
     return f"{label} —（{_SKIPPED_TEXTS.get(status.reason, _SKIPPED_DEFAULT)}）"
 
 
-def scope_line(lanes: Mapping[str, LaneStatus], *, deal_count: int = 0) -> str:
+def scope_line(
+    lanes: Mapping[str, LaneStatus], *, deal_count: int = 0, include_hints: bool = True
+) -> str:
     """探した範囲の 1 行（LANE_ORDER の順・渡された探し先だけ）。
 
     記号: ✓＝見つかった・0件＝探して無かった・✗＝探せなかった（理由つき・「無い」とは書かない）・
     —＝条件に合わず使わなかった。``deal_count`` は金庫の ✓ に「うち案件 N件」として添える。
     """
     parts = [
-        _lane_text(name, lanes[name], deal_count=deal_count if name == "vault" else 0)
+        _lane_text(
+            name,
+            lanes[name],
+            deal_count=deal_count if name == "vault" else 0,
+            include_hints=include_hints,
+        )
         for name in LANE_ORDER
         if name in lanes
     ]

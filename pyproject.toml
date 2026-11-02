@@ -142,6 +142,9 @@ explicit = true
 [tool.hatch.build.targets.wheel]
 packages = ["src/teamagent"]
 
+[tool.hatch.build.targets.wheel.force-include]
+"infra/openclaw/caller-identity-plugin/outbound_rules.json" = "teamagent/skills/_shared/outbound_rules.json"
+
 # ============================================================
 # Tooling
 # ============================================================

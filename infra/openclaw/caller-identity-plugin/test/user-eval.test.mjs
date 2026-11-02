@@ -104,7 +104,7 @@ test('unrelated URLs are unchanged', () => {
   const {send} = setup();
   for (const url of ['https://connect.newstv.co.jp/help',
     'https://connect.newstv.co.jp/r/report-token',
-    'https://example.test/oauth/slack?state=eyJhbG…QEpU',
+    'https://example.test/oauth/slack?state=eyJhbGQEpU',
     'https://connect.newstv.co.jp.example.test/connect?state=abc']) {
     for (const render of renders) assert.equal(send(render(url)), render(url));
   }
@@ -286,7 +286,7 @@ test('iter4 removes the last question before Vault and source footers', () => {
     '📎 *資料リンク*\n- [資料](https://docs.google.com/document/d/source/edit)（関連資料）',
     '📎 出典\n- <https://workspace.slack.com/archives/C123/p123456>']) {
     assert.equal(send(`結果をまとめました。\nどの施策について詳しく見ますか？\n\n${suffix}`),
-      `結果をまとめました。\n\n${suffix}`);
+      `結果をまとめました。\n\n${suffix.replace("Aico Vault", "Aico 社内資料")}`);
   }
 });
 
@@ -294,13 +294,13 @@ test('iter4 required input, authorization and code questions survive before foot
   const {send, remember} = setup();
   for (const question of ['メールを送信しますか？', 'Slack を連携しますか？']) {
     const text = `${question}\n${vaultFooter}`;
-    assert.equal(send(text), text);
+    assert.equal(send(text), text.replace("Aico Vault", "Aico 社内資料"));
   }
   const code = `説明。\n\`\`\`\nどの施策を見ますか？\n${vaultFooter}`;
-  assert.equal(send(code), code);
+  assert.equal(send(code), code.replace("Aico Vault", "Aico 社内資料"));
   remember('', {toolName: 'teamagent__search', result: {status: 'needs_input'}});
   const required = `対象を選んでください。何に使いたいですか？\n${vaultFooter}`;
-  assert.equal(send(required), required);
+  assert.equal(send(required), required.replace("Aico Vault", "Aico 社内資料"));
 });
 
 const docSource = 'https://docs.google.com/document/d/video-release/edit';

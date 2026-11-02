@@ -24,7 +24,7 @@ from slack_sdk.errors import SlackApiError
 
 from teamagent.adapters.slack_client import SlackPostResult
 from teamagent.mcp_gateway import detached_jobs, direct_summary, server, surface_video_followup
-from teamagent.skills._shared.slack_mrkdwn import markdown_bold_to_mrkdwn
+from teamagent.skills._shared.slack_mrkdwn import markdown_bold_to_mrkdwn, scrub_outbound_reply
 from teamagent.skills.base import BaseSkill, SkillContext
 from teamagent.skills.search_surface_check import slack_render as surface_render
 from teamagent.skills.search_surface_check.slack_render import (
@@ -90,7 +90,7 @@ def _use(monkeypatch: pytest.MonkeyPatch, fake: _Slack) -> _Slack:
 
 def _as_text(markdown: str) -> str:
     """今の文字だけの投稿（直接投稿の既存経路の最後の処理）。"""
-    return detached_jobs.slack_escape(markdown_bold_to_mrkdwn(markdown))
+    return detached_jobs.slack_escape(scrub_outbound_reply(markdown_bold_to_mrkdwn(markdown)))
 
 
 # ── A: 検索上位チェック 1 段目 ─────────────────────────────────────────
@@ -122,7 +122,7 @@ def test_a_render_failure_falls_back_to_the_text_post(
     )
     assert status == "posted"
     assert slack.posts == [{"channel": DM, "text": _as_text(out.slack_summary), "blocks": None}]
-    assert f"<{shape.A_REPORT}>" in slack.posts[0]["text"]
+    assert slack.posts[0]["text"].endswith("…")  # 長い一覧も回答上限で短縮する
 
 
 def test_a_unlinkable_report_url_falls_back_to_the_text_post(slack: _Slack) -> None:

@@ -37,6 +37,10 @@ from teamagent.skills._shared.client_name_guard import (
     safe_client_name,
     to_gmail_phrase,
 )
+from teamagent.skills._shared.google_connection import (
+    GoogleConnectionError,
+    google_connection_guard,
+)
 from teamagent.skills._shared.mail_compose import env_bool, should_skip_mail
 from teamagent.skills._shared.mail_connection import (
     CONNECT_SUFFIX,
@@ -105,6 +109,11 @@ class MailToInternalContextSkill(BaseSkill[MailInternalContextInput, MailInterna
         self._use_summary = use_summary
         self._summary_max_tokens = summary_max_tokens
 
+    @google_connection_guard(
+        lambda input: MailInternalContextOutput(
+            client_name=input.client_name, mail_signal=MailSignal(recent_count=0)
+        )
+    )
     def run(self, input: MailInternalContextInput, ctx: SkillContext) -> MailInternalContextOutput:
         log = ctx.bind_logger(self.name)
         # G7: 本文・件名・生 email は出さない。
@@ -226,7 +235,7 @@ class MailToInternalContextSkill(BaseSkill[MailInternalContextInput, MailInterna
             raise PermissionError("TokenStore が未設定です（本 Skill は本人連携前提）")
         token = self._token_store.get(requester)
         if token is None:
-            raise PermissionError(NOT_CONNECTED_MESSAGE)
+            raise GoogleConnectionError(NOT_CONNECTED_MESSAGE)
         try:
             return GmailClient.from_user_token(token, readonly=True)
         except ValueError as e:

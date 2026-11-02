@@ -35,7 +35,7 @@ from mcp.types import TextContent
 from teamagent.mcp_gateway import detached_jobs
 from teamagent.mcp_gateway.allowlist import email_allowed
 from teamagent.skills._shared.slack_blocks import RichMessage, render_or_none
-from teamagent.skills._shared.slack_mrkdwn import markdown_bold_to_mrkdwn
+from teamagent.skills._shared.slack_mrkdwn import markdown_bold_to_mrkdwn, outbound_permanent_urls
 
 logger = structlog.get_logger(__name__)
 
@@ -169,8 +169,13 @@ def deliver(
     if not isinstance(summary, str) or not summary.strip():
         return FAILED
     rich = rich_message(data, skill_input=skill_input, request_id=request_id)
+    permanent_urls = outbound_permanent_urls(data)
     status = detached_jobs.post_to_origin_status(
-        markdown_bold_to_mrkdwn(summary), destination, request_id=request_id, rich=rich
+        markdown_bold_to_mrkdwn(summary),
+        destination,
+        request_id=request_id,
+        rich=rich,
+        permanent_urls=permanent_urls,
     )
     logger.info(
         "direct_summary_posted", request_id=request_id, status=status, blocks=rich is not None

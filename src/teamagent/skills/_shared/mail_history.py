@@ -23,6 +23,7 @@ from typing import Any
 
 import structlog
 
+from teamagent.skills._shared.google_connection import record_google_failure
 from teamagent.skills._shared.mail_compose import build_thread_history
 
 logger = structlog.get_logger(__name__)
@@ -76,6 +77,7 @@ def fetch_counterpart_history(
     try:
         refs, _ = gmail.list_messages(query, ctx.request_id, max_results=limit * 3)
     except Exception as e:  # 検索失敗は文脈が減るだけ＝下書きは作る
+        record_google_failure(e)
         logger.warning("counterpart_history_search_failed", error=type(e).__name__)
         return ""
 
@@ -102,6 +104,7 @@ def fetch_counterpart_history(
         try:
             messages.append(gmail.get_message(message_id, ctx.request_id))
         except Exception as e:
+            record_google_failure(e)
             logger.warning("counterpart_history_fetch_failed", error=type(e).__name__)
             continue
     if not messages:

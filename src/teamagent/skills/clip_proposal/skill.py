@@ -605,13 +605,26 @@ class ClipProposalSubmitSkill(BaseSkill[ClipProposalSubmitInput, ClipProposalSub
         log = ctx.bind_logger(self.name)
         # 走行スロットが空くまで待ってから着手する（受付時の「順番が来たら自動で始めます」）。
         # 待っている間 job は queued のまま＝status が「作成中」と嘘をつかない。
-        self._slots.start()
         workdir = ""
+        heartbeat_stop = threading.Event()
+
+        def heartbeat() -> None:
+            while not heartbeat_stop.wait(30):
+                try:
+                    if not self._store.heartbeat(job_id, include_queued=True):
+                        return
+                except Exception:
+                    log.warning("clip_proposal_heartbeat_failed", job_id=job_id)
+
+        heartbeat_thread = threading.Thread(target=heartbeat, daemon=True)
+        heartbeat_thread.start()
+        self._slots.start()
         try:
             # mark_running（DB）と mkdtemp も try の内側に置く。ここで例外が出たとき
             # finally を通らないと **走行スロットが永久に 1 つ減る**。積み重なると
             # すべての依頼が空かないスロットを待ち続けて、mcp 再起動まで止まる。
-            self._store.mark_running(job_id)
+            if not self._store.mark_running(job_id):
+                return
             workdir = tempfile.mkdtemp(prefix="clip-proposal-")
             analysis = self._analyze(input, ctx)
             self._quota.add_cost(analysis.cost_usd)
@@ -660,6 +673,9 @@ class ClipProposalSubmitSkill(BaseSkill[ClipProposalSubmitInput, ClipProposalSub
                 "clip_proposal_failed", job_id=job_id, error_code=code, spent_usd=round(spent, 6)
             )
         finally:
+            heartbeat_stop.set()
+            if heartbeat_thread.ident is not None:
+                heartbeat_thread.join(timeout=1)
             # workdir（原本動画・抽出フレーム・生成 PPTX）は必ず消す。
             if workdir:
                 shutil.rmtree(workdir, ignore_errors=True)
@@ -678,6 +694,24 @@ class ClipProposalSubmitSkill(BaseSkill[ClipProposalSubmitInput, ClipProposalSub
         if self._deliverer is None:
             return False, "none"
         target, channel_id, thread_ts = resolve_delivery_target(ctx.metadata or {})
+        from teamagent.adapters.slack_client import SlackClient
+        from teamagent.skills._shared.long_jobs import origin
+
+        destination = origin(ctx)
+        if destination is not None and destination.deferred:
+            destination.defer(
+                SlackClient.from_env(),
+                path,
+                "切り抜き提案",
+                comment,
+                ctx.request_id,
+                channel_id=channel_id if target == "thread" else None,
+                thread_ts=thread_ts if target == "thread" else None,
+                dm_user_id=str(ctx.metadata.get("verified_slack_user_id") or "")
+                if target == "dm"
+                else None,
+            )
+            return False, target
         delivered = self._deliverer(path, comment, ctx, target, channel_id, thread_ts)
         return bool(delivered), target
 
@@ -710,7 +744,10 @@ class ClipProposalStatusSkill(BaseSkill[ClipProposalStatusInput, ClipProposalSta
     def run(self, input: ClipProposalStatusInput, ctx: SkillContext) -> ClipProposalStatusOutput:
         require_enabled()
         requester = verify_requester(ctx)
-        job_id = input.job_id
+        from teamagent.skills._shared.long_jobs import latest_job
+        from teamagent.skills.proposal_builder.skill import _configured_stale_seconds
+
+        job_id = input.job_id or latest_job(ctx, "clip_proposal_submit")
         if not job_id and self._recent_lookup is not None:
             job_id = self._recent_lookup(requester.fingerprint) or ""
         if not job_id:
@@ -730,6 +767,7 @@ class ClipProposalStatusSkill(BaseSkill[ClipProposalStatusInput, ClipProposalSta
                 message="進行中の切り抜き提案は見つかりませんでした。",
             )
         assert row is not None
+        row = self._store.fail_stale(job_id, row, _configured_stale_seconds())
         status = str(row.get("status") or "queued")
         if status == "done":
             return self._done_output(job_id, row)
@@ -746,7 +784,8 @@ class ClipProposalStatusSkill(BaseSkill[ClipProposalStatusInput, ClipProposalSta
             job_id=job_id,
             status="running" if status == "running" else "queued",
             retry_after_seconds=self._retry_after_seconds,
-            message="作成中です。できたらこのスレッドに資料を添付します。",
+            message=("順番待ちです。" if status == "queued" else "作成中です。")
+            + "できたらこの会話に資料をお届けします。",
         )
 
     @staticmethod

@@ -953,7 +953,13 @@ class XBuzzMeasureStatusSkill(
             )
 
         s3_prefix = str(st.get("s3_prefix") or f"x-research/{input.job_id}/")
-        results = self._store.read_results(s3_prefix) or {}
+        results = self._store.read_results(s3_prefix)
+        if results is None:
+            return XBuzzMeasureStatusOutput(
+                job_id=input.job_id,
+                status="unknown",
+                message="保存済みの取得結果を確認できません。",
+            )
         daily = [d for d in results.get("daily_counts", []) if isinstance(d, dict)]
         top_posts = [
             XPostCard(
@@ -1027,11 +1033,12 @@ class XBuzzMeasureStatusSkill(
         # 注: buzz(keyword)も任意語で cls_project に不適＋非同期の再試行不能問題があるため v1 では
         # 永続化しない（voice/comment のみ）。keyword→取引先の名寄せ・再試行設計後に再導入する。
 
-        total = sum(int(d.get("count", 0) or 0) for d in daily)
+        missing = sum(int(d.get("count", 0)) < 0 for d in daily)
+        total = sum(max(0, int(d.get("count", 0) or 0)) for d in daily)
         report_line = f"\n📄 レポート（7日有効）: {report_url}" if report_url else ""
         return XBuzzMeasureStatusOutput(
             job_id=input.job_id,
-            status="done",
+            status="incomplete" if missing else "done",
             progress=st.get("progress"),
             daily_counts=daily,
             top_posts=top_posts,
@@ -1040,7 +1047,8 @@ class XBuzzMeasureStatusSkill(
             s3_prefix=s3_prefix,
             total_cost_usd=round(total_cost, 4),
             message=(
-                f"完了しました（総発話 {total:,}件・{len(daily)}日分）。"
+                (f"{missing}日分の取得が未完了です。" if missing else "完了しました。")
+                + f"（確認できた総発話 {total:,}件・{len(daily) - missing}日分）。"
                 f"{sanitize_llm_text(spike, max_len=1500)}{report_line}"
             ),
         )

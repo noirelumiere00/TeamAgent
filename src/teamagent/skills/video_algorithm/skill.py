@@ -2346,8 +2346,13 @@ class VideoAlgorithmStatusSkill(BaseSkill[VideoAlgorithmStatusInput, VideoAlgori
                 stale = True
             from teamagent.skills._shared.long_jobs import job_is_alive
 
+            alive = job_is_alive(job_id.removeprefix("va_"))
             # 確かめられない（None）ときは止まったと断定しない（False のときだけ失敗にする）。
-            if stale and job_is_alive(job_id.removeprefix("va_")) is False:
+            if stale and alive is None:
+                return VideoAlgorithmStatusOutput(
+                    job_id=job_id, status="unknown", message="動画分析の実行継続を確認できません。"
+                )
+            if stale and alive is False:
                 store = ProposalJobStore()
                 changed = store.mark_failed(
                     job_id,

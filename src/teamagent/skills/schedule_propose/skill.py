@@ -25,6 +25,10 @@ from pydantic import BaseModel
 
 from teamagent.adapters.gcalendar_client import DuplicateEventError, GCalendarClient
 from teamagent.adapters.oauth_token_store import TokenStore
+from teamagent.skills._shared.google_connection import (
+    google_connection_guard,
+    record_google_failure,
+)
 from teamagent.skills._shared.user_context import USER_CONTEXT_RULE
 from teamagent.skills.base import BaseSkill, SkillContext, register
 from teamagent.skills.morning_digest.draft_token import decode_draft_token
@@ -81,6 +85,7 @@ class ScheduleProposeSkill(BaseSkill[ScheduleProposeInput, ScheduleProposeOutput
         # テストで「今」を固定するための注入口（既定は実時刻）。
         self._now_factory = now_factory or (lambda: _dt.datetime.now(tz=_JST))
 
+    @google_connection_guard(lambda input: ScheduleProposeOutput())
     def run(self, input: ScheduleProposeInput, ctx: SkillContext) -> ScheduleProposeOutput:
         log = ctx.bind_logger(self.name)
 
@@ -108,6 +113,7 @@ class ScheduleProposeSkill(BaseSkill[ScheduleProposeInput, ScheduleProposeOutput
                 time_max=(now + _dt.timedelta(days=9)).isoformat(),
             )
         except Exception as e:
+            record_google_failure(e)
             # API 障害は「空き枠なし」と別事象（偽の事実を断言しない・レビュー F3）。
             log.warning("schedule_propose_freebusy_failed", err=type(e).__name__)
             return ScheduleProposeOutput(
@@ -164,6 +170,7 @@ class ScheduleProposeSkill(BaseSkill[ScheduleProposeInput, ScheduleProposeOutput
                 except DuplicateEventError:
                     holds += 1  # 既存ホールド＝目的は達成済み
                 except Exception as e:  # ホールド失敗で下書き成功を無かったことにしない
+                    record_google_failure(e)
                     log.warning("schedule_propose_hold_failed", err=type(e).__name__)
 
         candidates = format_candidates_ja(slots).replace("\n", " / ")
@@ -173,6 +180,7 @@ class ScheduleProposeSkill(BaseSkill[ScheduleProposeInput, ScheduleProposeOutput
                 f"\nカレンダーに仮予定 {holds} 件を置きました（透明・他の予定を邪魔しません）。"
             )
         else:
+            record_google_failure()
             message += (
                 "\n※ カレンダーへの仮予定は未作成です（再連携でカレンダー書き込みを許可すると"
                 "自動でホールドされます）。"

@@ -1,0 +1,248 @@
+{
+  "source": "2026-10-30 live_config.json: teamagent-dev-mcp:202 / teamagent-dev-openclaw:89. Missing factory flags fixed to false; no secrets or real addresses.",
+  "openclaw_env": {
+    "SLACK_DM_ALLOWLIST": "*"
+  },
+  "mcp_env": {
+    "ATTACHMENT_PERMALINK_ALLOWED_EMAILS": "*",
+    "ATTACHMENT_PERMALINK_ENABLED": "1",
+    "COMMENT_MINING_ALLOWED_EMAILS": "",
+    "MEETING_PREP_ALLOWED_EMAILS": "",
+    "OMIYAGE_SALES25_ALLOWED_EMAILS": "pilot@example.test",
+    "PROPOSAL_BUILDER_ALLOWED_EMAILS": "*",
+    "SEARCH_SURFACE_ALLOWED_EMAILS": "",
+    "USE_ATTACHMENT_TOOLS": "true",
+    "USE_CALENDAR_EVENT_TOOL": "true",
+    "USE_CALENDAR_FREEBUSY_TOOL": "true",
+    "USE_DIGEST_ACK_TOOL": "false",
+    "USE_DIGEST_SETTINGS_TOOL": "true",
+    "USE_FOLLOWUP_TOOL": "true",
+    "USE_KNOWLEDGE_DELIVER": "true",
+    "USE_KNOWLEDGE_SEARCH_URL_TOOL": "false",
+    "USE_MAIL_DRAFT_TOOL": "true",
+    "USE_MAIL_LINK_TOOL": "false",
+    "USE_MAIL_REPLY_TOOL": "true",
+    "USE_MAIL_SUMMARY_TOOL": "true",
+    "USE_MAIL_TOOLS": "false",
+    "USE_MEDIA_CASE_SEARCH": "1",
+    "USE_MEETING_PREP_TOOL": "true",
+    "USE_MORNING_DIGEST_TOOL": "false",
+    "USE_OAUTH_CONNECT_TOOL": "true",
+    "USE_OMIYAGE_REPORT_TOOLS": "1",
+    "USE_OMIYAGE_SALES25": "1",
+    "USE_OPERATION_LOG_TOOLS": "false",
+    "USE_PROPOSAL_BUILDER_TOOLS": "1",
+    "USE_PROPOSAL_CAMPAIGN_TOOLS": "false",
+    "USE_PROPOSAL_DECK_TOOLS": "false",
+    "USE_RECOMMEND_SKILL": "false",
+    "USE_SCHEDULE_PROPOSE_TOOL": "true",
+    "USE_SEARCH_SURFACE_TOOL": "1",
+    "USE_SLACK_SEARCH_TOOL": "true",
+    "USE_SLACK_SUMMARY_TOOL": "true",
+    "USE_TIKTOK_ACQUIRE": "1",
+    "USE_TIKTOK_COMMENT_TOOLS": "false",
+    "USE_TIKTOK_TOOLS": "1",
+    "USE_VIDEO_APPROVAL": "false",
+    "USE_VIDEO_CAPTURE_TOOL": "true",
+    "USE_VIDEO_TOOLS": "1",
+    "USE_WEB_RESEARCH_TOOL": "true",
+    "USE_WORKSPACE_TOOLS": "false",
+    "USE_X_RESEARCH_TOOLS": "1",
+    "WEB_RESEARCH_ALLOWED_EMAILS": "",
+    "X_RESEARCH_ALLOWED_EMAILS": ""
+  },
+  "tools": {
+    "attachment_assist": {
+      "flag": "USE_ATTACHMENT_TOOLS",
+      "availability": "全員"
+    },
+    "calendar_event": {
+      "flag": "USE_CALENDAR_EVENT_TOOL",
+      "availability": "全員"
+    },
+    "calendar_freebusy": {
+      "flag": "USE_CALENDAR_FREEBUSY_TOOL",
+      "availability": "全員"
+    },
+    "clientkarte": {
+      "flag": null,
+      "availability": "全員"
+    },
+    "digest_ack": {
+      "flag": "USE_DIGEST_ACK_TOOL",
+      "availability": "準備中"
+    },
+    "digest_settings": {
+      "flag": "USE_DIGEST_SETTINGS_TOOL",
+      "availability": "全員"
+    },
+    "knowledge_deliver": {
+      "flag": "USE_KNOWLEDGE_DELIVER",
+      "availability": "全員"
+    },
+    "knowledge_search_url": {
+      "flag": "USE_KNOWLEDGE_SEARCH_URL_TOOL",
+      "availability": "準備中"
+    },
+    "mail_constraints": {
+      "flag": "USE_MAIL_TOOLS",
+      "availability": "準備中"
+    },
+    "mail_draft": {
+      "flag": "USE_MAIL_DRAFT_TOOL",
+      "availability": "全員"
+    },
+    "mail_followup": {
+      "flag": "USE_FOLLOWUP_TOOL",
+      "availability": "全員"
+    },
+    "mail_reply": {
+      "flag": "USE_MAIL_REPLY_TOOL",
+      "availability": "全員"
+    },
+    "mail_summary": {
+      "flag": "USE_MAIL_SUMMARY_TOOL",
+      "availability": "全員"
+    },
+    "mail_to_internal_context": {
+      "flag": "USE_MAIL_LINK_TOOL",
+      "availability": "準備中"
+    },
+    "media_case_search": {
+      "flag": "USE_MEDIA_CASE_SEARCH",
+      "availability": "全員"
+    },
+    "meeting_prep": {
+      "flag": "USE_MEETING_PREP_TOOL",
+      "availability": "全員"
+    },
+    "morning_digest": {
+      "flag": "USE_MORNING_DIGEST_TOOL",
+      "availability": "準備中"
+    },
+    "oauth_connect": {
+      "flag": "USE_OAUTH_CONNECT_TOOL",
+      "availability": "全員"
+    },
+    "omiyage_report_status": {
+      "flag": "USE_OMIYAGE_REPORT_TOOLS",
+      "availability": "全員"
+    },
+    "omiyage_report_submit": {
+      "flag": "USE_OMIYAGE_REPORT_TOOLS",
+      "availability": "全員"
+    },
+    "operation_log": {
+      "flag": "USE_OPERATION_LOG_TOOLS",
+      "availability": "準備中"
+    },
+    "proposal_builder_status": {
+      "flag": "USE_PROPOSAL_BUILDER_TOOLS",
+      "availability": "全員"
+    },
+    "proposal_builder_submit": {
+      "flag": "USE_PROPOSAL_BUILDER_TOOLS",
+      "availability": "全員"
+    },
+    "proposal_campaign": {
+      "flag": "USE_PROPOSAL_CAMPAIGN_TOOLS",
+      "availability": "準備中"
+    },
+    "proposal_deck": {
+      "flag": "USE_PROPOSAL_DECK_TOOLS",
+      "availability": "準備中"
+    },
+    "proposal_draft": {
+      "flag": null,
+      "availability": "全員"
+    },
+    "proposal_review": {
+      "flag": null,
+      "availability": "全員"
+    },
+    "recommend": {
+      "flag": "USE_RECOMMEND_SKILL",
+      "availability": "準備中"
+    },
+    "schedule_propose": {
+      "flag": "USE_SCHEDULE_PROPOSE_TOOL",
+      "availability": "全員"
+    },
+    "search": {
+      "flag": null,
+      "availability": "全員"
+    },
+    "search_surface_check": {
+      "flag": "USE_SEARCH_SURFACE_TOOL",
+      "availability": "全員"
+    },
+    "slack_search": {
+      "flag": "USE_SLACK_SEARCH_TOOL",
+      "availability": "全員"
+    },
+    "slack_summary": {
+      "flag": "USE_SLACK_SUMMARY_TOOL",
+      "availability": "全員"
+    },
+    "tiktok_acquire": {
+      "flag": "USE_TIKTOK_ACQUIRE",
+      "availability": "全員"
+    },
+    "tiktok_acquire_status": {
+      "flag": "USE_TIKTOK_ACQUIRE",
+      "availability": "全員"
+    },
+    "tiktok_comment_mining": {
+      "flag": "USE_TIKTOK_COMMENT_TOOLS",
+      "availability": "準備中"
+    },
+    "tiktok_search": {
+      "flag": "USE_TIKTOK_TOOLS",
+      "availability": "全員"
+    },
+    "video_algorithm": {
+      "flag": "USE_VIDEO_TOOLS",
+      "availability": "全員"
+    },
+    "video_algorithm_status": {
+      "flag": "USE_VIDEO_TOOLS",
+      "availability": "全員"
+    },
+    "video_analysis": {
+      "flag": "USE_VIDEO_TOOLS",
+      "availability": "全員"
+    },
+    "video_approval": {
+      "flag": "USE_VIDEO_APPROVAL",
+      "availability": "準備中"
+    },
+    "video_capture": {
+      "flag": "USE_VIDEO_CAPTURE_TOOL",
+      "availability": "全員"
+    },
+    "web_research": {
+      "flag": "USE_WEB_RESEARCH_TOOL",
+      "availability": "全員"
+    },
+    "workspace_search": {
+      "flag": "USE_WORKSPACE_TOOLS",
+      "availability": "準備中"
+    },
+    "x_buzz_measure": {
+      "flag": "USE_X_RESEARCH_TOOLS",
+      "availability": "全員"
+    },
+    "x_buzz_measure_status": {
+      "flag": "USE_X_RESEARCH_TOOLS",
+      "availability": "全員"
+    },
+    "x_needs_mining": {
+      "flag": "USE_X_RESEARCH_TOOLS",
+      "availability": "全員"
+    },
+    "x_voice_search": {
+      "flag": "USE_X_RESEARCH_TOOLS",
+      "availability": "全員"
+    }
+  }
+}

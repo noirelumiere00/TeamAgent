@@ -771,6 +771,9 @@ def test_start_links_on_slack_only_when_google_connected(
 
     assert out.url is None
     assert out.slack_url is not None and out.slack_url.startswith(f"{_BASE}/slack/oauth/start/")
+    detailed = verify_state_detailed(out.slack_url.rsplit("/", 1)[1])
+    assert detailed is not None and detailed.email == "taro@vectorinc.co.jp"
+    assert detailed.bind_tag == expected_bind_tag(_VERIFIED_SLACK_TEAM_ID, _VERIFIED_SLACK_USER_ID)
     assert out.slack_url in out.message
     assert "Slack を連携" in out.message
 

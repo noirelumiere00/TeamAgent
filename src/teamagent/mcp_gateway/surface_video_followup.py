@@ -462,6 +462,7 @@ def _complete(
     cache_key: str | None = None,
     stage1: Any = None,
     skill_input: Any = None,
+    job_origin: Any = None,
 ) -> None:
     """追記の投稿 → 使い回し用に覚える → usage 記録。順番待ちのまま中断したら中断文だけ送る。
 
@@ -496,13 +497,25 @@ def _complete(
             text = str(getattr(result, "slack_text", "") or "")
             rich = followup_rich(result, request_id=request_id)
         if text:
-            delivered = detached_jobs.post_to_origin(
-                markdown_bold_to_mrkdwn(text),
-                destination,
-                request_id=request_id,
-                fallback_user_id=fallback_user_id,
-                rich=rich,
-            )
+            if job_origin is not None:
+                from teamagent.mcp_gateway.async_job_notify import publish_notice
+
+                delivered = publish_notice(
+                    markdown_bold_to_mrkdwn(text),
+                    origin=job_origin,
+                    request_id=request_id,
+                    job_id=detached_jobs.detached_job_id(USAGE_SKILL, request_id),
+                    rich=rich,
+                    completed=error is None,
+                )
+            else:
+                delivered = detached_jobs.post_to_origin(
+                    markdown_bold_to_mrkdwn(text),
+                    destination,
+                    request_id=request_id,
+                    fallback_user_id=fallback_user_id,
+                    rich=rich,
+                )
     if cache_key is not None and error is None and is_reusable(result):
         # 中断文を送った後に完了した分も覚える（もう一度依頼されたら回数を使わずに届けられる）。
         CACHE.put(
@@ -671,6 +684,46 @@ def _maybe_schedule(
         user_id=ctx.user_id,
         metadata=dict(ctx.metadata),
     )
+    from teamagent.adapters.proposal_job_store import ProposalJobStore
+    from teamagent.mcp_gateway.async_job_notify import run_persisted_job, schedule_completion_notice
+    from teamagent.mcp_gateway.server import _build_async_job_poll
+    from teamagent.skills._shared.long_jobs import Origin, enabled, owner_key
+
+    target = (
+        Origin(destination.channel_id, destination.thread_ts, slack_user_id) if enabled() else None
+    )
+    job_id = detached_jobs.detached_job_id(USAGE_SKILL, job_ctx.request_id)
+    store = ProposalJobStore()
+    if target is not None:
+        store.create_job(
+            job_id,
+            {
+                "kind": USAGE_SKILL,
+                "owner": owner_key(job_ctx, USAGE_SKILL),
+                "user_id": slack_user_id,
+            },
+        )
+
+    def run() -> Any:
+        def execute() -> Any:
+            return skill.run_video_followup(output, skill_input, job_ctx, videos=videos)
+
+        def describe(result: Any) -> str:
+            if stage1 is not None:
+                return one_shot_payload(
+                    stage1,
+                    skill_input,
+                    result,
+                    None,
+                    keyword=keyword,
+                    request_id=job_ctx.request_id,
+                )[0]
+            return str(getattr(result, "slack_text", "") or "動画の確認が終了しました。")
+
+        return (
+            run_persisted_job(job_id, store, execute, describe) if target is not None else execute()
+        )
+
     will_wait = registry.active_count() >= shared.max_background
     job, state = registry.start(
         key=followup_key(slack_user_id, keyword),
@@ -680,9 +733,7 @@ def _maybe_schedule(
         query=keyword,
         request_id=job_ctx.request_id,
         destination=destination,
-        target=functools.partial(
-            skill.run_video_followup, output, skill_input, job_ctx, videos=videos
-        ),
+        target=run,
         on_detached_done=functools.partial(
             _complete,
             keyword=keyword,
@@ -697,6 +748,7 @@ def _maybe_schedule(
             cache_key=cache_key,
             stage1=stage1,
             skill_input=skill_input,
+            job_origin=target,
         ),
         interrupted_message=(
             one_shot_interrupted_text(stage1, keyword)
@@ -705,6 +757,8 @@ def _maybe_schedule(
         ),
         priority=detached_jobs.PRIORITY_AUTO,
     )
+    if target is not None and state != "started":
+        store.mark_failed(job_id, "JOB_NOT_STARTED")
     line: str | None
     if state == "duplicate" and job is not None:
         same = job.destination.channel_id == destination.channel_id
@@ -712,6 +766,15 @@ def _maybe_schedule(
     elif state == "busy":
         line = busy_line()
     elif state == "started" and job is not None:
+        if target is not None:
+            schedule_completion_notice(
+                tool=USAGE_SKILL,
+                job_id=job_id,
+                origin=target,
+                request_id=job_ctx.request_id,
+                poll=_build_async_job_poll(USAGE_SKILL, job_id, job_ctx),
+                ctx=job_ctx,
+            )
         detach_state = job.detach()
         if detach_state == detached_jobs.DETACH_INTERRUPTED:
             state, line = "closing", None  # 終了処理中＝届けられない約束はしない

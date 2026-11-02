@@ -664,6 +664,47 @@ class MediaJobClient:
             persisted_status = item.get("status", {}).get("S")
             if persisted_status in ("queued", "running") and result.status != persisted_status:
                 result = result.model_copy(update={"status": persisted_status})
+            if result.status in {"queued", "running"} and item.get("request_json", {}).get("S"):
+                raw_request = item["request_json"]["S"]
+                request = parse_job_request(raw_request)
+                if request.job_id != job_id:
+                    raise MediaJobError("MEDIA_JOB_REQUEST_SCOPE_INVALID")
+                if self._clock() >= request.deadline_epoch_s:
+                    failed = result.model_copy(
+                        update={
+                            "status": "failed",
+                            "error_code": "MEDIA_JOB_DEADLINE_EXCEEDED",
+                            "artifacts": (),
+                        }
+                    )
+                    try:
+                        self._call(
+                            "dynamodb",
+                            deadline_epoch_s,
+                            "update_item",
+                            TableName=self._table,
+                            Key={"job_id": {"S": job_id}},
+                            UpdateExpression="SET #status = :failed, detail = :detail",
+                            ConditionExpression="#status = :previous AND request_json = :request",
+                            ExpressionAttributeNames={"#status": "status"},
+                            ExpressionAttributeValues={
+                                ":failed": {"S": "failed"},
+                                ":previous": {"S": persisted_status},
+                                ":request": {"S": raw_request},
+                                ":detail": {"S": failed.model_dump_json()},
+                            },
+                        )
+                    except Exception as exc:
+                        if getattr(exc, "response", {}).get("Error", {}).get("Code") != (
+                            "ConditionalCheckFailedException"
+                        ):
+                            raise
+                        return self.get_result(
+                            job_id,
+                            deadline_epoch_s=deadline_epoch_s,
+                            expected_audit_principal_hash=expected_audit_principal_hash,
+                        )
+                    return failed
             if result.status == "done":
                 expected_prefix = f"media-jobs/{job_id}/attempts/"
                 if any(

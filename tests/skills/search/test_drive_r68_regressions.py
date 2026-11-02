@@ -75,11 +75,12 @@ def test_case_list_envelope_contains_no_unused_slack_candidates(
     skill._collect_slack_lookup = MagicMock(return_value=SlackLookup("ok", "ok", (item,)))
     out = skill.run(SearchInput(query="食品の事例出して"), SkillContext(metadata=META))
     assert not out.slack_hits
-    assert post not in out.model_dump_json()
-    assert "追加候補会社" not in out.model_dump_json()
-    if not has_drive:
-        assert out.answer == "Drive に資料のある事例は見つかりませんでした。"
-        assert not out.found and out.displayed_refs == []
+    if has_drive:
+        assert post not in out.model_dump_json()
+        assert "追加候補会社" not in out.model_dump_json()
+    else:
+        assert out.found and post in out.answer and "会話の記録" in out.answer
+        assert not any(ref.drive_file_id for ref in out.displayed_refs)
 
 
 @pytest.mark.parametrize("fanout_enabled", [False, True])

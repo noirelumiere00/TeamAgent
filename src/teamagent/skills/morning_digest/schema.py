@@ -301,6 +301,17 @@ class SlackUnreadItem(BaseModel):
 class MorningDigestOutput(BaseModel):
     """1 ユーザー分の朝ダイジェスト結果。生本文・生件名・生 From は含まない。"""
 
+    error: str = Field(
+        default="",
+        exclude_if=lambda value: not value,
+        description="連携失敗の共通案内。message はそのまま本人へ返す",
+    )
+    message: str = Field(
+        default="",
+        exclude_if=lambda value: not value,
+        description="連携失敗の共通案内。message はそのまま本人へ返す",
+    )
+
     user_email_masked: str = Field(description="参照した受信箱（マスク）")
     mail_digest: list[MailDigestItem] = Field(default_factory=list)
     calendar_events: list[CalendarEventItem] = Field(default_factory=list)

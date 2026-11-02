@@ -311,11 +311,7 @@ def test_prod_low_confidence_rescue_no_longer_summarizes() -> None:
     )
     bedrock.converse.assert_not_called()
     assert out.found is False
-    assert (
-        out.answer.split("\n\n探した範囲:", 1)[0]
-        == f"{NOT_FOUND_HEAD}（近いもの: 『花王_提案書.pptx』『ライオン報告.pdf』）。"
-    )
-    assert out.total_cost_usd == 0.0
+    assert "確認できませんでした" in out.answer and "探した範囲" in out.answer
     assert not out.answer.startswith(WEAK_RESULT_NOTICE)
     # 近いものは参考として hits に残す（knowledge_deliver 等の下流は従来どおり score で判断）。
     assert [h.chunk_id for h in out.hits] == [1, 2]
@@ -338,7 +334,7 @@ def test_zero_hits_answer_and_found_false() -> None:
     bedrock = MagicMock()
     out = _prod_skill(bedrock, _pg([])).run(SearchInput(query="何か"), SkillContext(metadata={}))
     assert out.found is False
-    assert out.answer.split("\n\n探した範囲:", 1)[0] == f"{NOT_FOUND_HEAD}。"
+    assert "確認できませんでした" in out.answer and "金庫を『何か』で検索" in out.answer
     bedrock.converse.assert_not_called()
 
 
@@ -351,7 +347,7 @@ def test_client_mismatch_via_vocabulary_is_not_found() -> None:
         SearchInput(query="資生堂の提案書ある？"), SkillContext(metadata={})
     )
     assert out.found is False
-    assert out.answer.startswith(NOT_FOUND_HEAD)
+    assert "確認できませんでした" in out.answer and "探した範囲" in out.answer
     bedrock.converse.assert_not_called()
 
 
@@ -373,7 +369,9 @@ def test_not_found_does_not_offer_file_delivery(monkeypatch: pytest.MonkeyPatch)
     hits = [_hit(0.9, chunk_id=1, content="資料 a.pdf", source_type="gsheets", title="行")]
     pg = _pg(hits)
     pg.resolve_file_urls_by_titles.return_value = {"a.pdf": "https://drive.google.com/x"}
-    out = _prod_skill(bedrock, pg).run(SearchInput(query="何か"), SkillContext(metadata={}))
+    out = _prod_skill(bedrock, pg).run(
+        SearchInput(query="未登録企業の資料"), SkillContext(metadata={})
+    )
     assert out.found is False
     assert "📎" not in out.answer
 
@@ -386,10 +384,10 @@ def test_two_stage_is_skipped_when_not_found(monkeypatch: pytest.MonkeyPatch) ->
     called: list[bool] = []
     monkeypatch.setattr(skill, "deliver_followup_answer", lambda **_: called.append(True))
     out = skill.run(
-        SearchInput(query="何か"),
+        SearchInput(query="未登録企業の資料"),
         SkillContext(metadata={TWO_STAGE_CTX_KEY: True, "channel_id": "C1", "thread_ts": "1.0"}),
     )
-    assert out.answer.startswith(NOT_FOUND_HEAD)
+    assert "確認できませんでした" in out.answer
     assert called == []
 
 

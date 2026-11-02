@@ -21,6 +21,14 @@ from teamagent.skills.first_visit.kit import ARCHIVE, archive_kit_problems
 from .fixture import make_concrete_fixture, write_json
 from .test_conversion import synthetic_inputs
 
+requires_kit_python = pytest.mark.skipif(
+    sys.version_info < (3, 12),
+    reason=(
+        "Pinned kit build_research_json.py uses PEP 701 f-strings (Python >=3.12); "
+        "production uses Python 3.14"
+    ),
+)
+
 
 @pytest.fixture(scope="module")
 def concrete_kit() -> Path:
@@ -48,6 +56,7 @@ def read(root: Path, relative: str) -> Any:
     return json.loads((root / relative).read_text(encoding="utf-8"))
 
 
+@requires_kit_python
 def test_real_concrete_build(concrete_case: Path, concrete_kit: Path) -> None:
     assert contract.missing_inputs(concrete_case, **config(concrete_kit)) == []
     manifest = contract.seal_inputs(concrete_case, **config(concrete_kit))
@@ -137,6 +146,7 @@ def test_invalid_installation_stops_before_cli(
     assert result.status == "failed" and result.cli == []
 
 
+@requires_kit_python
 @pytest.mark.parametrize("stage", ["research", "pptx"])
 def test_actual_cli_failure_stops_pipeline(
     concrete_case: Path, concrete_kit: Path, stage: str
@@ -170,6 +180,7 @@ def test_actual_cli_timeout_stops_pipeline(concrete_case: Path, concrete_kit: Pa
     assert "timed out" in result.cli[0].stderr_summary
 
 
+@requires_kit_python
 def test_preflight_major_is_incomplete(concrete_case: Path, concrete_kit: Path) -> None:
     data = read(concrete_case, "authored/synthesis.json")
     data["summary"]["headline"] = "前回の振り返り"

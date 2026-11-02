@@ -21,6 +21,7 @@ import json
 import os
 import time
 import uuid
+from datetime import UTC, datetime
 from typing import Any
 
 import structlog
@@ -65,6 +66,7 @@ class XTaskStore:
                     "job_id": {"S": spec["job_id"]},
                     "status": {"S": "queued"},
                     "created_at": {"N": str(now)},
+                    "updated_at": {"S": datetime.now(UTC).isoformat()},
                     "ttl": {"N": str(now + _TTL_S)},
                     "requested_by": {"S": str(spec.get("requested_by") or "unknown")},
                     "detail": {
@@ -95,10 +97,22 @@ class XTaskStore:
         try:
             sess = self._session()
             ddb = sess.client("dynamodb", region_name=self._region)
-            resp = ddb.get_item(TableName=self._table, Key={"job_id": {"S": job_id}})
+            resp = ddb.get_item(
+                TableName=self._table, Key={"job_id": {"S": job_id}}, ConsistentRead=True
+            )
             item = resp.get("Item")
             if not item:
                 return None
+            from teamagent.adapters.proposal_job_store import ProposalJobStore
+
+            row = {
+                "status": item.get("status", {}).get("S", "unknown"),
+                **({"updated_at": item["updated_at"].get("S")} if "updated_at" in item else {}),
+            }
+            # 日単位の取得は最大150秒。取得中の健全な worker を奪わない余裕を持たせる。
+            latest = ProposalJobStore(table_name=self._table, dynamodb_client=ddb).fail_stale(
+                job_id, row, 600
+            )
             detail: dict[str, Any] = {}
             try:
                 detail = json.loads(item.get("detail", {}).get("S", "{}"))
@@ -106,10 +120,10 @@ class XTaskStore:
                 detail = {}
             return {
                 "job_id": job_id,
-                "status": item.get("status", {}).get("S", "unknown"),
+                "status": latest.get("status", "unknown"),
                 "requested_by": item.get("requested_by", {}).get("S", ""),
                 "progress": detail.get("progress"),
-                "error_code": detail.get("error_code"),
+                "error_code": latest.get("error_code") or detail.get("error_code"),
                 "s3_prefix": detail.get("s3_prefix"),
                 "total_cost_usd": detail.get("total_cost_usd", 0.0),
                 "report_url": item.get("report_url", {}).get("S") or None,

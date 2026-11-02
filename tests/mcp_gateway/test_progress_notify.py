@@ -166,3 +166,8 @@ async def test_privacy_sensitive_tools_not_in_progress_set() -> None:
     """メール/カルテ等の個人機微ツールは進捗対象に入れない（チャンネル露見の防止）。"""
     for t in ("mail_summary", "mail_draft", "mail_reply", "clientkarte", "morning_digest"):
         assert t not in pn._PROGRESS_MESSAGES
+
+
+def test_ad_label_check_announces_while_fetching() -> None:
+    """3 媒体の取得で 1〜3 分黙ると「届いていない？」と不安になる（10-30 小俣さん）。"""
+    assert "ad_label_check" in pn._PROGRESS_MESSAGES

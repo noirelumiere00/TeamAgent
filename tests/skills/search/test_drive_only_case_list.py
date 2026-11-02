@@ -104,7 +104,7 @@ def test_collects_five_after_filtering_and_top_k(
 
 @pytest.mark.parametrize("fanout_enabled", [False, True])
 @pytest.mark.parametrize("only_slack", [False, True])
-def test_zero_drive_cases_never_falls_back_to_slack(
+def test_zero_drive_cases_checks_slack_before_absence(
     monkeypatch: pytest.MonkeyPatch, fanout_enabled: bool, only_slack: bool
 ) -> None:
     monkeypatch.setenv("USE_SEARCH_FANOUT", str(int(fanout_enabled)))
@@ -112,8 +112,14 @@ def test_zero_drive_cases_never_falls_back_to_slack(
     skill, _ = make(hits)
     skill._summarize = MagicMock(return_value=("Slack の投稿 " + POST, 0.0))
     out = _run(skill)
-    assert out.answer == EMPTY
-    assert out.answer_format == "list" and not out.found and out.displayed_refs == []
+    if only_slack:
+        assert out.found and POST in out.answer and "会話の記録" in out.answer
+        assert not any(ref.drive_file_id for ref in out.displayed_refs)
+    else:
+        assert not out.found and out.displayed_refs == []
+        assert out.answer.startswith("食品の事例は見つかりませんでした")
+        assert QUERY in out.answer
+    assert out.answer_format == "list"
     skill._summarize.assert_not_called()
 
 

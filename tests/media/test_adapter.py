@@ -920,3 +920,60 @@ def test_proposal_metadata_reaches_caller(monkeypatch: pytest.MonkeyPatch) -> No
         == b"pptx"
     )
     assert metadata == worker_metadata
+
+
+@pytest.mark.parametrize("race", [False, True])
+def test_orphan_past_canonical_deadline_fails_without_overwriting_a_concurrent_completion(
+    race: bool,
+) -> None:
+    request = _request()
+    owner = "a" * 64
+    item = {
+        "status": {"S": "running"},
+        "audit_principal_hash": {"S": owner},
+        "request_json": {"S": request.model_dump_json()},
+        "detail": {"S": MediaJobResult(job_id=request.job_id, status="running").model_dump_json()},
+    }
+    done, _ = _done_item(request.job_id, audit_principal_hash=owner)
+
+    class Dynamo(_ResultDynamo):
+        updates = 0
+
+        def update_item(self, **kwargs: Any) -> dict[str, Any]:
+            self.updates += 1
+            assert (
+                kwargs["ConditionExpression"] == "#status = :previous AND request_json = :request"
+            )
+            assert kwargs["ExpressionAttributeValues"][":previous"] == {"S": "running"}
+            assert kwargs["ExpressionAttributeValues"][":request"] == item["request_json"]
+            if race:
+                self.item = done
+                raise _ConditionalFailureError()
+            self.item.update(
+                status={"S": "failed"}, detail=kwargs["ExpressionAttributeValues"][":detail"]
+            )
+            return {}
+
+    ddb = Dynamo(item)
+    clock = [request.deadline_epoch_s - 1]
+    client = MediaJobClient(
+        session=_Session(queue=object(), ddb=ddb, s3=object()),
+        queue_url="queue",
+        table="jobs",
+        bucket=_BUCKET,
+        clock=lambda: float(clock[0]),
+    )
+    before = client.get_result(
+        request.job_id, deadline_epoch_s=1000, expected_audit_principal_hash=owner
+    )
+    assert before is not None and before.status == "running" and ddb.updates == 0
+    clock[0] += 2
+    result = client.get_result(
+        request.job_id, deadline_epoch_s=1000, expected_audit_principal_hash=owner
+    )
+    assert result is not None and result.status == ("done" if race else "failed")
+    if not race:
+        assert result.error_code == "MEDIA_JOB_DEADLINE_EXCEEDED"
+    assert ddb.updates == 1
+    client.get_result(request.job_id, deadline_epoch_s=1000, expected_audit_principal_hash=owner)
+    assert ddb.updates == 1
