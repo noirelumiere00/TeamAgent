@@ -454,6 +454,14 @@ def _badge(code: str | None) -> str:
     )
 
 
+def _inference_badge(row: Mapping[str, Any]) -> str:
+    return (
+        '<small class="badge" title="広告主・案件をAIが推定">AI推定</small>'
+        if row.get("case_inferred")
+        else ""
+    )
+
+
 def _row_tags(row: Mapping[str, Any]) -> str:
     body = (
         '<div class="tag-groups"><div class="tag-group"><h3>区分</h3>'
@@ -549,6 +557,7 @@ def _video_card(
         '<div class="card-body">'
         + category
         + (f'<span class="period">{" · " if category else ""}{flags}</span>' if flags else "")
+        + _inference_badge(row)
         + f'<h3>{_e(title)}</h3><p class="card-meta" '
         f'title="合計再生 {_metric(row.get("total_plays"))}">' + '<span class="meta-source">'
         f'<span class="account-name" title="{_e(account)}">{_e(account)}</span>'
@@ -640,6 +649,7 @@ def search_campaigns(conn: Any, params: Mapping[str, str], *, admin: bool) -> li
             CASE v.business_category WHEN 'media' THEN 0 WHEN 'tto' THEN 1
                 WHEN 'kirinuki' THEN 2 WHEN 'other' THEN 3 WHEN 'organic' THEN 4
                 ELSE 5 END))[1] AS primary_category,
+        bool_or(v.case_inferred) AS case_inferred,
         max(v.industry) AS industry, max(v.purpose) AS purpose, {totals},
         avg(CASE WHEN m.total_plays > 0
             THEN m.total_saves / m.total_plays END) AS average_save_rate,
@@ -727,6 +737,7 @@ def _campaign_card(row: Mapping[str, Any]) -> str:
         '<span class="preview">' + _cover(row["representative"]) + "</span>"
         '<div class="card-body">'
         + " · ".join(label for code in row["categories"] if (label := _category_label(code)))
+        + _inference_badge(row)
         + f'<h3>{_e(row["campaign"])}</h3><p class="card-meta" title="{_e(meta)}">'
         + f'<span class="meta-source">{_e(meta)}</span><span class="meta-plays">'
         + compact_plays(row.get("total_plays"))
@@ -1118,7 +1129,7 @@ def register_library_routes(
         )
         if isinstance(row.get("posted_at"), datetime):
             body += f'<p class="posted-date muted">{_day(row["posted_at"])}</p>'
-        body += _row_tags(row)
+        body += _inference_badge(row) + _row_tags(row)
         if str(row.get("caption") or "").strip():
             body += "<h3>投稿文</h3><pre>" + _e(row["caption"]) + "</pre>"
         if row.get("advertiser") and row.get("campaign"):
@@ -1126,6 +1137,8 @@ def register_library_routes(
                 f'<p><a href="{_e(_campaign_url(row))}">{_e(row["advertiser"])} / '
                 f"{_e(row['campaign'])} の事例を見る</a></p>"
             )
+        elif row.get("advertiser"):
+            body += f"<p>広告主: {_e(row['advertiser'])}</p>"
         body += (
             '</div></div><div><p class="muted">数値取得日: '
             + _e(row.get("captured_on") or "不明")

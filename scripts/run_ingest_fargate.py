@@ -182,6 +182,15 @@ def main() -> int:
                 logger.error("video_library_thumbnails_failed", exit_code=code)
         except (Exception, SystemExit) as exc:
             logger.error("video_library_thumbnails_failed", error=type(exc).__name__)
+    if not dry_run and os.environ.get("VIDEO_LIBRARY_CASE_INFERENCE_ENABLED", "0") == "1":
+        try:
+            from teamagent.ingest.video_library_case_inference import main as infer_video_cases
+
+            code = infer_video_cases([])
+            if code:
+                logger.error("video_library_case_inference_failed", exit_code=code)
+        except (Exception, SystemExit) as exc:
+            logger.error("video_library_case_inference_failed", error=type(exc).__name__)
     print("[run_ingest_fargate] done", flush=True)
     return 0
 

@@ -1,0 +1,159 @@
+"""0038 real database contracts, isolated and rolled back; never writes public tables."""
+
+from __future__ import annotations
+
+from pathlib import Path
+from typing import Any
+
+import psycopg
+import pytest
+
+from teamagent.connect_web.library import search_campaigns
+from teamagent.ingest.video_library_case_models import Case, Prediction
+from teamagent.ingest.video_library_case_repository import CaseRepository
+from tests.ingest.test_video_library_postgres import _DSN, NOW, db, seed_batch
+
+__all__ = ["db"]
+pytestmark = pytest.mark.skipif(not _DSN, reason="Requires TEAMAGENT_TEST_DB_DSN")
+MIGRATIONS = Path(__file__).resolve().parents[2] / "infra/migrations"
+
+
+def prepare(conn: Any, repository: Any) -> tuple[CaseRepository, dict[str, Any]]:
+    for name in ("0036_video_library_settings.sql", "0037_video_library_url_import.sql"):
+        conn.execute((MIGRATIONS / name).read_text())
+    before = [
+        (c.name, c.type_code)
+        for c in conn.execute("SELECT * FROM vl_videos_effective LIMIT 0").description
+    ]
+    conn.execute((MIGRATIONS / "0038_video_campaign_links.sql").read_text())
+    after = [
+        (c.name, c.type_code)
+        for c in conn.execute("SELECT * FROM vl_videos_effective LIMIT 0").description
+    ]
+    assert after[:-1] == before
+    assert after[-1][0] == "case_inferred"
+    assert "page_is_ad" not in dict(after)
+    batch = seed_batch()
+    batch.videos[0].caption = "test #PR"
+    repository.save(batch, request_id="initial", started_at=NOW)
+    repo = CaseRepository(repository.pg)
+    return repo, repo.load()[1][0]
+
+
+def result(**changes: Any) -> Prediction:
+    return Prediction.model_validate(
+        dict(
+            advertiser="test",
+            campaign="test",
+            match_type="existing",
+            confidence=0.99,
+            evidence=[dict(field="caption", quote="test")],
+        )
+        | changes
+    )
+
+
+def effective(conn: Any) -> dict[str, Any]:
+    return dict(conn.execute("SELECT * FROM vl_videos_effective").fetchone())
+
+
+def test_sheet_sync_preserves_links_and_effective_priority(db: tuple[Any, Any]) -> None:
+    conn, sheet_repo = db
+    repo, row = prepare(conn, sheet_repo)
+    cases = [Case(advertiser="test", campaign="test")]
+    assert repo.save(row, result(), "applied", "hash", "haiku", cases)
+    assert effective(conn)["case_inferred"] is True
+    assert effective(conn)["campaign"] == "test"
+    conn.execute("""INSERT INTO vl_campaign_settings
+        (advertiser,campaign,business_category,is_private,updated_by)
+        VALUES ('test','test','media',true,'admin')""")
+    assert effective(conn)["is_private"] is True
+    assert effective(conn)["business_category"] == "media"
+    batch = seed_batch()
+    batch.videos[0].caption = "test #PR"
+    sheet_repo.save(batch, request_id="resync", started_at=NOW)
+    assert effective(conn)["campaign"] == "test"
+    assert conn.execute("SELECT count(*) AS n FROM vl_video_campaign_links").fetchone()["n"] == 1
+    conn.execute("""INSERT INTO vl_video_campaign_links
+        SELECT platform,video_id,advertiser,NULL,'human','applied','unknown',1,'[]',
+        'human','v1','human-hash','admin',now() FROM vl_video_campaign_links WHERE source='ai'""")
+    assert effective(conn)["advertiser"] == "test" and effective(conn)["campaign"] is None
+    assert effective(conn)["case_inferred"] is False
+    conn.execute("UPDATE vl_video_campaign_links SET campaign='test' WHERE source='human'")
+    assert effective(conn)["campaign"] == "test" and effective(conn)["case_inferred"] is False
+    batch.videos[0].advertiser = "sheet advertiser"
+    batch.videos[0].campaign = "sheet campaign"
+    sheet_repo.save(batch, request_id="known", started_at=NOW)
+    assert effective(conn)["advertiser"] == "sheet advertiser"
+    assert effective(conn)["campaign"] == "sheet campaign"
+    assert effective(conn)["case_inferred"] is False
+    batch.videos[0].campaign = None
+    sheet_repo.save(batch, request_id="partial", started_at=NOW)
+    assert effective(conn)["campaign"] is None  # Never mix different advertisers' campaigns.
+    assert repo.load()[1] == []  # Human decisions are never reinferred.
+
+
+@pytest.mark.parametrize("status", ["candidate", "unknown", "rejected"])
+def test_unapplied_results_never_create_cases_or_change_organic(
+    db: tuple[Any, Any],
+    status: str,
+) -> None:
+    conn, sheet_repo = db
+    repo, row = prepare(conn, sheet_repo)
+    conn.execute("UPDATE vl_videos SET is_pr=false, advertiser='test'")
+    row.update(is_pr=False, advertiser="test")
+    p = result(campaign="new", match_type="new") if status == "candidate" else result()
+    assert repo.save(row, p, status, "hash", "haiku", repo.load()[0])
+    assert effective(conn)["campaign"] is None
+    assert effective(conn)["business_category"] == "organic"
+    assert conn.execute("SELECT count(*) AS n FROM vl_campaigns").fetchone()["n"] == 1
+    assert search_campaigns(conn, {}, admin=True) == []
+    assert repo.load()[1][0]["input_hash"] == "hash"
+
+
+def test_organic_stays_organic_and_case_aggregate_marks_inference(db: tuple[Any, Any]) -> None:
+    conn, sheet_repo = db
+    repo, row = prepare(conn, sheet_repo)
+    conn.execute("UPDATE vl_videos SET is_pr=false, advertiser='test'")
+    row.update(is_pr=False, advertiser="test")
+    assert repo.save(row, result(), "applied", "hash", "haiku", repo.load()[0])
+    assert effective(conn)["is_pr"] is False
+    assert effective(conn)["business_category"] == "organic"
+    assert search_campaigns(conn, {}, admin=True)[0]["case_inferred"] is True
+    conn.execute("UPDATE vl_videos SET campaign='sheet campaign'")
+    assert effective(conn)["campaign"] == "sheet campaign"
+    assert effective(conn)["case_inferred"] is False
+
+
+def test_links_rls_human_rejection_stale_inputs_and_settings(db: tuple[Any, Any]) -> None:
+    conn, sheet_repo = db
+    repo, row = prepare(conn, sheet_repo)
+    cases = repo.load()[0]
+    assert repo.save(row, result(), "applied", "hash", "haiku", cases)
+    conn.execute("UPDATE vl_videos SET caption='changed'")
+    assert not repo.save(row, result(), "applied", "hash2", "haiku", cases)
+    repo.invalidate(row)
+    assert effective(conn)["campaign"] is None
+    conn.execute("UPDATE vl_videos SET caption='test #PR'")
+    assert not repo.save(row, result(), "applied", "hash2", "haiku", [])
+    assert repo.save(row, result(), "applied", "hash2", "haiku", cases)
+    conn.execute("""INSERT INTO vl_video_campaign_links
+        SELECT platform,video_id,NULL,NULL,'human','rejected','unknown',0,'[]',
+        'human','v1','human-hash','admin',now() FROM vl_video_campaign_links WHERE source='ai'""")
+    assert effective(conn)["campaign"] is None
+    assert not repo.save(row, result(), "applied", "hash3", "haiku", cases)
+    conn.execute("SELECT set_config('app.user_role','viewer',true)")
+    assert conn.execute("SELECT count(*) AS n FROM vl_video_campaign_links").fetchone()["n"] == 2
+    assert conn.execute("UPDATE vl_video_campaign_links SET status='applied'").rowcount == 0
+    with pytest.raises(psycopg.errors.InsufficientPrivilege), conn.transaction():
+        conn.execute("DELETE FROM vl_video_campaign_links")
+    with pytest.raises(psycopg.errors.InsufficientPrivilege), conn.transaction():
+        conn.execute("""INSERT INTO vl_video_campaign_links
+            (platform,video_id,source,status,match_type,confidence,model,prompt_version,input_hash,decided_by)
+            VALUES ('tiktok','1','ai','unknown','unknown',0,'haiku','v1','x','viewer')""")
+    assert (
+        "security_invoker=true"
+        in conn.execute(
+            "SELECT reloptions FROM pg_class WHERE oid='vl_videos_effective'::regclass"
+        ).fetchone()["reloptions"]
+    )
