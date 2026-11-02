@@ -25,6 +25,7 @@ from psycopg.conninfo import make_conninfo
 from psycopg.rows import dict_row
 
 from teamagent.adapters.pgvector_client import PgVectorClient
+from teamagent.ingest import video_library_url_repository as url_repository
 from teamagent.ingest.video_library import Account, Campaign, Metrics, SyncBatch, Video
 from teamagent.ingest.video_library_repository import VideoLibraryRepository
 from teamagent.ingest.video_library_url_models import (
@@ -38,6 +39,7 @@ from teamagent.ingest.video_library_url_worker import drain_queue
 from tests.ingest.test_video_library_url_import import NOW, URL, item, page
 
 _DSN = os.environ.get("TEAMAGENT_TEST_DB_DSN")
+_PRODUCTION_FETCH_LOCK = url_repository.FETCH_LOCK
 MIGRATIONS = Path(__file__).resolve().parents[2] / "infra/migrations"
 pytestmark = pytest.mark.skipif(
     not _DSN, reason="Actual DB validation requires TEAMAGENT_TEST_DB_DSN"
@@ -61,12 +63,17 @@ class SchemaPg(PgVectorClient):
 
 
 @pytest.fixture
-def db() -> Iterator[tuple[PgVectorClient, URLImportRepository]]:
+def db(monkeypatch: pytest.MonkeyPatch) -> Iterator[tuple[PgVectorClient, URLImportRepository]]:
     assert _DSN
     schema = "vl_url_test_" + uuid.uuid4().hex
     with psycopg.connect(_DSN, autocommit=True) as owner:
         owner.execute(sql.SQL("CREATE SCHEMA {}").format(sql.Identifier(schema)))
         try:
+            schema_oid = owner.execute(
+                "SELECT oid FROM pg_namespace WHERE nspname=%s", (schema,)
+            ).fetchone()[0]
+            # Advisory locks are database-wide; UUID schemas alone do not isolate workers.
+            monkeypatch.setattr(url_repository, "FETCH_LOCK", (0x564C << 32) | schema_oid)
             owner.execute(sql.SQL("SET search_path TO {},public").format(sql.Identifier(schema)))
             owner.execute(
                 sql.SQL("GRANT USAGE ON SCHEMA {} TO teamagent_app").format(sql.Identifier(schema))
@@ -83,6 +90,21 @@ def db() -> Iterator[tuple[PgVectorClient, URLImportRepository]]:
         finally:
             owner.execute("RESET ROLE")
             owner.execute(sql.SQL("DROP SCHEMA {} CASCADE").format(sql.Identifier(schema)))
+
+
+def test_fetch_lock_isolated_from_other_tests_but_shared_within_one_test(
+    db: tuple[PgVectorClient, URLImportRepository],
+) -> None:
+    _, repo = db
+    assert _DSN
+    with psycopg.connect(_DSN, autocommit=True) as other_test:
+        other_test.execute("SELECT pg_advisory_lock(%s)", (_PRODUCTION_FETCH_LOCK,))
+        with repo.fetch_lock() as acquired:
+            assert acquired  # Another schema's worker must not make drain_queue return zero.
+            with repo.fetch_lock() as competing_worker:
+                assert not competing_worker  # Replicas within this test still share one lock.
+        with repo.fetch_lock() as reacquired:
+            assert reacquired
 
 
 def save(repo: URLImportRepository, *, at: datetime = NOW, **changes: Any) -> ImportResult:
