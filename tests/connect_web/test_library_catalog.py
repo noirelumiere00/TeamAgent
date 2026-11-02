@@ -59,9 +59,9 @@ def test_catalog_case_links_copy_and_all_videos(setup: tuple[TestClient, Pg]) ->
     }
     assert "<script>" not in response.text
     assert soup.select_one("nav [aria-current]")["href"] == "/library"
-    assert soup.find("button", disabled=True).text == "構成・フックで探す（近日公開）"
+    assert soup.select_one("main .filters") is None
     assert "オーガニック投稿を見る" in response.text
-    assert len(pg.calls) == 3  # aggregate + diversified videos + categories, never N+1
+    assert len(pg.calls) == 2  # aggregate + diversified videos, never N+1
     response = client.get(path, cookies=_auth_cookie())
     soup = BeautifulSoup(response.text, "html.parser")
     summary = soup.select_one("#campaign-copy").text
@@ -78,7 +78,8 @@ def test_catalog_case_links_copy_and_all_videos(setup: tuple[TestClient, Pg]) ->
     ):
         assert expected in summary
     assert soup.select_one("#campaign-urls").text == pg.row["url"]
-    assert soup.select_one("a.preview")["target"] == "_blank"
+    assert soup.select_one(".card-link .preview") is not None
+    assert soup.select_one(".case-hero [data-copy=campaign-copy]") is not None
     assert soup.select_one('a[href="/library/v/tiktok/123"]') is not None
     assert "<img>" not in response.text
     assert "LIMIT %s" not in pg.calls[-1][0]  # case copy/grid include every video
@@ -95,6 +96,7 @@ def test_catalog_navigation_and_security(
     for path in (
         "/library",
         "/library/videos",
+        "/library/cases",
         "/library/c?advertiser=a&campaign=b",
         "/library/v/tiktok/123",
     ):
@@ -117,7 +119,7 @@ def test_empty_catalog_and_missing_case(setup: tuple[TestClient, Pg]) -> None:
     assert (
         client.get("/library/c?advertiser=a&campaign=b", cookies=_auth_cookie()).status_code == 404
     )
-    assert client.get("/library?sort=bad", cookies=_auth_cookie()).status_code == 400
+    assert client.get("/library/cases?sort=bad", cookies=_auth_cookie()).status_code == 400
 
 
 def test_diversify_never_repeats_campaign_or_account_and_does_not_mutate() -> None:
@@ -213,21 +215,15 @@ def test_catalog_industry_chips_and_card_tag_labels(setup: tuple[TestClient, Pg]
     pg.row.update(industry="食品 & 飲料", purpose="認知")
     catalog_pg(pg)
     soup = BeautifulSoup(client.get("/library", cookies=_auth_cookie()).text, "html.parser")
-    chip = soup.select_one('.filters [aria-label="業種"] a')
-    assert chip is not None
-    assert parse_qs(urlsplit(str(chip["href"])).query)["industry"] == ["食品 & 飲料"]
+    assert soup.select_one("main .filters") is None
+    listing = BeautifulSoup(
+        client.get("/library/cases", cookies=_auth_cookie()).text, "html.parser"
+    )
+    assert listing.select_one('[name="industry"]') is not None
     card = soup.select_one(".video-grid .card")
-    assert [label.text for label in card.select(".card-tag .filter-label")] == [
-        "区分",
-        "業種",
-        "目的",
-    ]
-    assert len(card.select(".badge")) == 3
-    for field, value in (("category", "media"), ("industry", "食品 & 飲料"), ("purpose", "認知")):
-        assert any(
-            parse_qs(urlsplit(str(tag["href"])).query).get(field) == [value]
-            for tag in card.select("a.badge")
-        )
+    assert [label.text for label in card.select(".card-tag .filter-label")] == ["業種", "目的"]
+    assert card.select_one(".category-label")["aria-label"] == "メディア"
+    assert len(card.select("a")) == 1
     detail = BeautifulSoup(
         client.get("/library/v/tiktok/123", cookies=_auth_cookie()).text, "html.parser"
     )

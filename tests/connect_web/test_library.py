@@ -93,6 +93,7 @@ def setup(monkeypatch: pytest.MonkeyPatch) -> tuple[TestClient, Pg]:
     [
         "/library",
         "/library/videos",
+        "/library/cases",
         "/library/c?advertiser=a&campaign=b",
         "/library/api/videos",
         "/library/v/tiktok/123",
@@ -173,7 +174,7 @@ def test_listing_csp_escaping_copy_and_single_player(setup: tuple[TestClient, Pg
     assert (
         'data-player="https://www.tiktok.com/player/v1/123?autoplay=1&amp;muted=1' in response.text
     )
-    assert "再生 17,800（オーガニック 4,000）" in response.text
+    assert "1.7万回再生" in response.text
     assert pg.sessions[0]["app_role"] == "teamagent_app"
     assert not any("FROM vl_videos " in query for query, _ in pg.calls)
 
@@ -415,17 +416,17 @@ def test_detail_uses_formatted_metrics_and_paid_labels(setup: tuple[TestClient, 
 
 
 @pytest.mark.parametrize("organic", [5535.0, None])
-def test_card_uses_total_plays_and_save_rate(
+def test_card_uses_rounded_total_and_detail_keeps_exact_rates(
     setup: tuple[TestClient, Pg], organic: float | None
 ) -> None:
     client, pg = setup
     pg.row.update(organic_plays=organic, total_plays=17800.0, total_saves=356.0)
     response = client.get("/library/videos", cookies=_auth_cookie())
-    expected = "再生 17,800" + ("（オーガニック 5,535）" if organic is not None else "")
-    assert expected + " · 保存率 2.00%" in response.text
+    assert "1.7万回再生" in response.text
+    assert 'title="合計再生 17,800"' in response.text
     assert "再生・保存率・ENG率と並び順は総計の最新数値" in response.text
-    if organic is None:
-        assert "（オーガニック " not in response.text
+    detail = client.get("/library/v/tiktok/123", cookies=_auth_cookie())
+    assert "17,800" in detail.text and "保存率 2.00%" in detail.text
     assert "17,800.0" not in response.text
 
 
@@ -441,7 +442,7 @@ def test_missing_thumbnail_has_initial_and_fallback(
     assert 'class="preview"' in response.text
     assert "サムネ準備中" in response.text
     assert 'class="placeholder"' in response.text
-    assert 'aria-label="投稿を開く"' in response.text
+    assert 'class="card-link" href="/library/v/tiktok/123"' in response.text
     assert ('src="/library/thumb/tiktok/123"' in response.text) is present
 
 

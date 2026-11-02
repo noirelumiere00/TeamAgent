@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 import re
+from datetime import timedelta
 from typing import Any
 from unittest.mock import MagicMock
-from urllib.parse import parse_qs, urlsplit
 
 import pytest
 from bs4 import BeautifulSoup
@@ -24,6 +24,7 @@ class LargeCatalogPg(Pg):
 
     def __init__(self) -> None:
         super().__init__()
+        codes = [None] * 30 + ["organic"] * 18 + ["media"] * 3 + ["tto"] * 2 + ["kirinuki", "other"]
         self.videos = [
             {
                 **self.row,
@@ -33,10 +34,11 @@ class LargeCatalogPg(Pg):
                 "account_handle": f"account_{i % 40}",
                 "advertiser": f"サンプル企業 {i % 55 + 1:02}",
                 "campaign": f"暮らしに役立つ提案 {i % 55 + 1:02}",
-                "thumbnail_s3_key": "preview" if i % 55 >= 40 else None,
+                "thumbnail_s3_key": "preview" if i % 10 else None,
+                "business_category": codes[i % 55],
                 "total_plays": 2_800_000 - i * 500,
                 "total_saves": 28000 - i * 5,
-                "posted_at": self.row["posted_at"] if i % 3 else None,
+                "posted_at": self.row["posted_at"] - timedelta(days=54 - i % 55) if i % 3 else None,
                 "caption": "毎日のちょっとした工夫をご紹介。" if i % 3 else "",
                 "industry": "食品" if i % 2 else "日用品",
                 "purpose": "認知",
@@ -53,7 +55,10 @@ class LargeCatalogPg(Pg):
                     "video_count": len(members),
                     "total_plays": sum(v["total_plays"] for v in members),
                     "total_saves": sum(v["total_saves"] for v in members),
-                    "representative": members[0].copy(),
+                    "categories": [codes[i]],
+                    "first_posted": self.row["posted_at"] - timedelta(days=84 - i),
+                    "last_posted": self.row["posted_at"] - timedelta(days=54 - i),
+                    "representative": next(v.copy() for v in members if v["thumbnail_s3_key"]),
                 }
             )
         self.row = self.videos[0]
@@ -73,6 +78,8 @@ class LargeCatalogPg(Pg):
             result.fetchall.return_value = self.videos[:240]
         elif "SELECT count(*) AS n" in query:
             result.fetchone.return_value = {"n": len(self.videos)}
+        elif "AND NOT (v.platform=%s" in query:
+            result.fetchall.return_value = self.videos[55::55][:6]
         elif "SELECT v.*" in query and "v.advertiser = %s" in query:
             result.fetchall.return_value = self.videos[::55]
         elif "SELECT v.*" in query and "LIMIT %s OFFSET %s" in query:
@@ -86,36 +93,17 @@ def css_rule(selector: str) -> str:
     return match[1]
 
 
-def test_catalog_limits_default_but_all_and_filters_show_every_match(
-    setup: tuple[TestClient, Pg],
-) -> None:
+def test_case_listing_is_paginated_with_large_catalog(setup: tuple[TestClient, Pg]) -> None:
     client, pg = setup
     large = LargeCatalogPg()
     pg.execute = large.execute  # type: ignore[method-assign]
-    assert len(large.videos) == 2800 and len(large.cases) == 55
-    assert sum(not v["thumbnail_s3_key"] for v in large.videos) > 1400
-    for query in ("", "?sort=count", "?q=%20", "?all=0"):
+    for query, count in (("", 12), ("?page=5", 7), ("?q=暮らし", 12)):
         soup = BeautifulSoup(
-            client.get("/library" + query, cookies=_auth_cookie()).text, "html.parser"
+            client.get("/library/cases" + query, cookies=_auth_cookie()).text, "html.parser"
         )
-        assert len(soup.select(".campaign-grid .card")) == 12
-        more = soup.select_one(".catalog-more a")
-        assert more.text == "すべての事例を見る（55件）"
-        assert parse_qs(urlsplit(more["href"]).query)["all"] == ["1"]
-        assert len(soup.select(".video-grid .card")) == 12
-    for query in (
-        "?all=1",
-        "?q=暮らし",
-        "?category=media",
-        "?industry=食品",
-        "?pr=yes",
-        "?purpose=認知",
-    ):
-        soup = BeautifulSoup(
-            client.get("/library" + query, cookies=_auth_cookie()).text, "html.parser"
-        )
-        assert len(soup.select(".campaign-grid .card")) == 55
-        assert soup.select_one(".catalog-more") is None
+        assert len(soup.select(".campaign-grid .card")) == count
+        assert "55件の事例" in soup.text
+        assert soup.select_one(".pagination a") is not None
     soup = BeautifulSoup(client.get("/library/videos", cookies=_auth_cookie()).text, "html.parser")
     assert "2,800件" in soup.text and len(soup.select(".video-grid .card")) == 50
     assert soup.find("a", string="次へ") is not None
@@ -172,16 +160,15 @@ def test_absent_date_and_caption_do_not_render_empty_metadata(
     assert detail.find("h3", string="投稿文") is None
     pg.row["is_pr"] = True
     card = BeautifulSoup(library._video_card(pg.row), "html.parser")
-    assert card.select_one(".period").text == "PR"
+    assert card.select_one(".period").text == " · PR"  # Separator follows the category label.
+    assert "不明" not in card.text
 
 
-def test_mobile_filters_keep_search_category_outside_disclosure(
-    setup: tuple[TestClient, Pg],
-) -> None:
+def test_filters_keep_search_and_sort_outside_disclosure(setup: tuple[TestClient, Pg]) -> None:
     client, _ = setup
-    for path in ("/library", "/library/videos"):
+    for path in ("/library/cases", "/library/videos"):
         response = client.get(
-            path, params={"industry": "食品", "purpose": "認知", "all": "1"}, cookies=_auth_cookie()
+            path, params={"industry": "食品", "purpose": "認知"}, cookies=_auth_cookie()
         )
         soup = BeautifulSoup(response.text, "html.parser")
         form = soup.select_one("form.filters")
@@ -189,10 +176,9 @@ def test_mobile_filters_keep_search_category_outside_disclosure(
         assert not details.has_attr("open")
         assert details.summary.text == "詳しく絞り込む"
         assert form.select_one('[name="q"]').find_parent("details") is None
-        assert form.select_one('[aria-label="区分"]').find_parent("details") is None
-        assert details.select_one('[aria-label="PRの有無"]') is not None
+        assert form.select_one('[name="sort"]').find_parent("details") is None
+        assert details.select_one('[name="pr"]') is not None
         for field, value in (("industry", "食品"), ("purpose", "認知")):
             assert details.select_one(f'[name="{field}"]')["value"] == value
-        assert details.select_one('[name="sort"]') is not None
         assert details.select_one('[type="submit"]') is not None
-        assert form.select_one('[name="all"]')["value"] == "1"
+        assert "食品 / 認知" in soup.select_one(".active-filters").text

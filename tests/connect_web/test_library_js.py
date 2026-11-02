@@ -41,7 +41,7 @@ const checks=[{checked:true,dataset:{url:'https://www.tiktok.com/@sample/video/1
 let copied=null;
 global.document=Object.assign(doc,{
  querySelectorAll(selector){
-  if(selector==='.advanced-filters')return [filters];
+  if(selector==='.header-search')return [filters];
   if(selector==='.preview[data-player]')return cards;
   if(selector==='.preview img')return [pendingImage,failedImage,loadedImage];
   if(selector==='[data-copy]')return [caseCopy,urlCopy];
