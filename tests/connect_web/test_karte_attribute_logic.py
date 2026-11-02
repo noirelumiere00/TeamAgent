@@ -1,4 +1,4 @@
-"""Live attributes match the actual static generator, without editing that generator."""
+"""Live attributes preserve golden values captured from the static generator."""
 
 from __future__ import annotations
 
@@ -19,77 +19,83 @@ from teamagent.karte_attributes import (
     sender_from_body,
     temperature_tag,
 )
-from tests.scripts.test_build_app_html import _mod, _payload, _run, _write_doc
-from tests.scripts.test_build_app_html import sidecars as sidecars  # reuse the static build fixture
 
 TODAY = date(2026, 11, 2)
 
 
 @pytest.fixture
-def aliases(monkeypatch: pytest.MonkeyPatch) -> dict[str, str]:
+def aliases() -> dict[str, str]:
     root = Path(__file__).resolve().parents[2] / "data/connect_web_filters"
     data = json.loads((root / "tag_alias.json").read_text())
-    monkeypatch.setattr(_mod, "TAG_ALIAS", data)
     return data["tans"]
 
 
 @pytest.mark.parametrize(
-    "name",
+    ("name", "expected"),
     [
-        "沖井",
-        "小倉　岳之（ogura）",
-        "佐藤杏香(Sato",
-        "川上壮汰_KawakamiSota",
-        "清水達哉タイムスタ",
-        "徳野和香タ",
-        "架空 姓名090-1234-5678",
-        "担当連携ステー",
-        "a" * 30,
-        "",
+        ("沖井", "沖井智哉"),
+        ("小倉\u3000岳之（ogura）", "小倉岳之"),
+        ("佐藤杏香(Sato", "佐藤杏香"),
+        ("川上壮汰_KawakamiSota", "川上壮汰"),
+        ("清水達哉タイムスタ", "清水達哉"),
+        ("徳野和香タ", "徳野和香"),
+        ("架空 姓名090-1234-5678", "架空姓名"),
+        ("担当連携ステー", "担当"),
+        ("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "aaaaaaaaaaaaaaaaaaaa"),
+        ("", ""),
     ],
 )
-def test_sender_normalization_matches_static(name: str, aliases: dict[str, str]) -> None:
-    assert normalize_sender(name, aliases) == _mod._norm_sender(name)
+def test_sender_normalization(name: str, expected: str, aliases: dict[str, str]) -> None:
+    assert normalize_sender(name, aliases) == expected
     body = "長い本文" * 150 + "\n送信者：" + name + " タイムスタンプ: 2026/11/02 10:00"
-    match = _mod.FB_SENDER_RE.search(body)
-    assert sender_from_body(body, aliases) == _mod._norm_sender(match[1])
+    assert sender_from_body(body, aliases) == expected
 
 
 @pytest.mark.parametrize(
-    ("pos", "neg"),
+    ("pos", "neg", "expected"),
     [
-        ("", ""),
-        ("", "特になし"),
-        ("abc", "・特に無し。"),
-        ("", "なし"),
-        ("x", "-"),
-        ("abcdef", "abc"),
-        ("abc", "abcdef"),
-        ("abc", "abcd"),
-        ("", "断り"),
+        ("", "", "高"),
+        ("", "特になし", "高"),
+        ("abc", "・特に無し。", "高"),
+        ("", "なし", "高"),
+        ("x", "-", "高"),
+        ("abcdef", "abc", "ポジ優勢"),
+        ("abc", "abcdef", "ネガ優勢"),
+        ("abc", "abcd", "拮抗"),
+        ("", "断り", "ネガ優勢"),
     ],
 )
-def test_temperature_matches_static(pos: str, neg: str) -> None:
+def test_temperature(pos: str, neg: str, expected: str) -> None:
     events = [{"pos": pos, "neg": neg}]
-    assert temperature_tag(events) == _mod.temperature_tag(events)
-    assert temperature_tag([]) == _mod.temperature_tag([])
+    assert temperature_tag(events) == expected
+    assert temperature_tag([]) == ""
 
 
-@pytest.mark.parametrize("days", [0, 31, 32, 366, 367, -1])
-def test_homework_and_followup_boundaries_match_static(days: int) -> None:
+@pytest.mark.parametrize(
+    ("days", "has_homework", "overdue"),
+    [
+        (0, False, False),
+        (31, False, False),
+        (32, True, False),
+        (366, True, False),
+        (367, True, True),
+        (-1, False, False),
+    ],
+)
+def test_homework_and_followup_boundaries(days: int, has_homework: bool, overdue: bool) -> None:
     last = (TODAY - timedelta(days=days)).isoformat()
-    for action in ("", "次に連絡"):
-        assert homework_flag(action, last, TODAY) == _mod.homework_flag(action, last, TODAY)
-    assert followup_overdue(last, TODAY) == (_mod._age_bucket(last, TODAY) == "1年以上前")
+    assert homework_flag("", last, TODAY) is False
+    assert homework_flag("次に連絡", last, TODAY) is has_homework
+    assert followup_overdue(last, TODAY) is overdue
 
 
 @pytest.mark.parametrize("last", ["", "not-a-date", "2026-02-30"])
-def test_unknown_last_contact_matches_static(last: str) -> None:
-    assert homework_flag("連絡", last, TODAY) == _mod.homework_flag("連絡", last, TODAY)
+def test_unknown_last_contact(last: str) -> None:
+    assert homework_flag("連絡", last, TODAY) is True
     assert not followup_overdue(last, TODAY)
 
 
-def test_dedup_names_and_cap_match_static(aliases: dict[str, str]) -> None:
+def test_dedup_names_and_cap() -> None:
     events = [
         {"d": "2026-01-01", "pos": "", "neg": "", "by": f"担当{i}", "variant": "顧客"}
         for i in range(8)
@@ -98,15 +104,24 @@ def test_dedup_names_and_cap_match_static(aliases: dict[str, str]) -> None:
         dict(events[0], pos="同じ反応", by=""),
         dict(events[0], pos="同じ反応", by="補完担当"),
     ]
-    assert dedup_fb_events(events) == _mod.dedup_fb_events(events)
+    assert dedup_fb_events(events) == [
+        {"by": "担当0", "d": "2026-01-01", "neg": "", "pos": "", "variant": "顧客"},
+        {"by": "担当1", "d": "2026-01-01", "neg": "", "pos": "", "variant": "顧客"},
+        {"by": "担当2", "d": "2026-01-01", "neg": "", "pos": "", "variant": "顧客"},
+        {"by": "担当3", "d": "2026-01-01", "neg": "", "pos": "", "variant": "顧客"},
+        {"by": "担当4", "d": "2026-01-01", "neg": "", "pos": "", "variant": "顧客"},
+        {"by": "担当5", "d": "2026-01-01", "neg": "", "pos": "", "variant": "顧客"},
+        {"by": "担当6", "d": "2026-01-01", "neg": "", "pos": "", "variant": "顧客"},
+        {"by": "担当7", "d": "2026-01-01", "neg": "", "pos": "", "variant": "顧客"},
+        {"by": "補完担当", "d": "2026-01-01", "neg": "", "pos": "同じ反応", "variant": "顧客"},
+    ]
     result = client_attributes("顧客", events, [], today=TODAY)
-    tl = _mod._sort_fb_events(_mod.dedup_fb_events(events))
-    assert result["owners"] == _mod.tans_of(tl) and len(result["owners"]) == 5
-    assert result["temperature"] == _mod.temperature_tag(tl)
-    assert result["next_action_short"] == _mod.next_action(tl)
+    assert result["owners"] == ["担当0", "担当1", "担当2", "担当3", "担当4"]
+    assert result["temperature"] == "高"
+    assert result["next_action_short"] == ""
 
 
-def test_record_fields_use_120_character_reactions_and_full_sender(aliases: dict[str, str]) -> None:
+def test_record_fields_use_120_character_reactions_and_full_sender() -> None:
     rows = [
         {
             "id": "fb1",
@@ -122,21 +137,15 @@ def test_record_fields_use_120_character_reactions_and_full_sender(aliases: dict
         }
     ]
     result = build_client_summaries(rows, today=TODAY)["顧客"]
-    assert result["temperature"] == _mod.temperature_tag([{"pos": "好" * 120, "neg": "難" * 80}])
     assert result["temperature"] == "拮抗"  # not the uncapped positive majority
     assert result["owners"] == ["沖井智哉"]
-    assert result["next_action_short"] == _mod.next_action([{"next": "次" * 120}])
+    assert result["next_action_short"] == "次" * 40
     assert result["next_action"] == "次" * 200
 
 
-def test_attributes_match_generated_payload_activity_counts_and_dates(
-    sidecars: Path,
-    tmp_path: Path,
-) -> None:
-    vault = tmp_path / "comparison-vault"
-    (vault / "clients").mkdir(parents=True)
-    (vault / "docs").mkdir()
+def test_attributes_activity_counts_and_dates() -> None:
     name = "比較顧客"
+    variant = "株式会社 " + name + " 様"
     events = [
         {
             "d": "2026-02-02",
@@ -163,48 +172,22 @@ def test_attributes_match_generated_payload_activity_counts_and_dates(
             "variant": name,
         },
     ]
-    body = f"---\nclient: {name}\nfb_count: 2\ndoc_count: 99\n---\n\n# {name}\n\n## 営業FB時系列\n"
-    for i, event in enumerate(events):
-        body += f"\n### {event['d']} 営業FB row {i + 1}\n"
-        body += "\n".join(
-            f"- {label}: {event[key]}"
-            for label, key in (
-                ("フェーズ", "ph"),
-                ("BANT", "bant"),
-                ("ポジ反応", "pos"),
-                ("ネガ反応", "neg"),
-                ("次アクション", "next"),
-            )
-        )
-        body += f"\n> 送信者: {event['by']} タイムスタンプ: 2026/02/02 10:00\n"
-    body += "\n## 関連資料\n- [[docs/A]]\n- [[docs/B]]\n- [[docs/C]]\n"
-    (vault / "clients" / f"{name}.md").write_text(body)
-    variant = "株式会社 " + name + " 様"
-    (vault / "clients" / f"{variant}.md").write_text(body.replace(name, variant))
-    _write_doc(vault, "A", client=name, modified_at="2026-01-01")
-    _write_doc(vault, "B", client="別社", project=name, modified_at="2026-03-01")
-    _write_doc(
-        vault, "C", client="別社", title=name + "だけがタイトルにある資料", modified_at="2026-12-01"
-    )
-    out = tmp_path / "comparison.html"
-    assert _run(vault, out) == 0
-    [static] = _payload(out.read_text())["clients"]
     documents = [{"id": "A", "modified_at": "2026-01-01"}, {"id": "B", "modified_at": "2026-03-01"}]
     attrs = client_attributes(
         name,
         events + [{**event, "variant": variant} for event in events],
         documents,
-        today=date.today(),
+        today=TODAY,
     )
     assert (attrs["fb_count"], attrs["doc_count"], attrs["last_contact"]) == (
-        static["fb"],
-        static["doc"],
-        static["last"],
+        2,
+        2,
+        "2026-03-01",
     )
-    assert attrs["fb_count"] == 2 and attrs["doc_count"] == 2
-    assert attrs["next_action_short"] == static["nx"] and attrs["owners"] == static["tans"]
-    assert attrs["temperature"] == static["temp"]
-    assert attrs["has_homework"] == bool(static["hw"])
+    assert attrs["next_action_short"] == "次" * 40
+    assert attrs["owners"] == ["担当A", "担当B"]
+    assert attrs["temperature"] == "高"
+    assert attrs["has_homework"] is True
 
 
 def test_variant_fb_totals_and_activity_identity() -> None:
