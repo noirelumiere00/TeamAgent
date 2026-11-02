@@ -230,6 +230,7 @@ def _page(
 ) -> str:
     params = params or {}
     links = [
+        ("connect", "/", "Connect ホーム"),
         ("home", "/library", "ホーム"),
         ("cases", "/library/cases", "事例一覧"),
         ("videos", "/library/videos", "動画一覧"),
