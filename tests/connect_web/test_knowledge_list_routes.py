@@ -242,9 +242,9 @@ def test_invalid_query_defaults_to_existing_search_without_db(
     assert response.status_code == 200
     assert 'id="mainList"' in response.text and 'id="mainGraph"' in response.text
     assert pg.calls == pg.connections == []
-    assert _safe_next("/search?" + query) == "/app"
+    assert _safe_next("/search?" + query) == "/"
     response = client.get("/search?" + query, follow_redirects=False)
-    assert response.status_code == 303 and response.headers["location"] == "/search/login"
+    assert response.status_code == 303 and response.headers["location"] == "/search/login?next=%2Fsearch"
 
 
 @pytest.mark.parametrize(
@@ -263,7 +263,7 @@ def test_invalid_query_defaults_to_existing_search_without_db(
     ],
 )
 def test_safe_next_rejects_unlisted_targets(target: str) -> None:
-    assert _safe_next(target) == "/app"
+    assert _safe_next(target) == "/"
 
 
 @pytest.mark.parametrize(

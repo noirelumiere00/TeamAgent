@@ -73,11 +73,11 @@ def test_login_and_safe_next(monkeypatch: Any) -> None:
     )
     target = unquote(response.headers["location"].split("next=")[1])
     assert _safe_next(target) == "/search/graph/focus?seed=" + uid(1)
-    assert _safe_next("/search/graph/focus?seed=" + uid(1) + "&evil=x") == "/app"
-    assert _safe_next("//evil.test/search/graph") == "/app"
+    assert _safe_next("/search/graph/focus?seed=" + uid(1) + "&evil=x") == "/"
+    assert _safe_next("//evil.test/search/graph") == "/"
     assert _safe_next("/search/graph/focus") == "/search/graph/focus"
     for path in ("/search/graph", "/search/graph?seed=" + uid(1)):
-        assert _safe_next(path) == "/app"
+        assert _safe_next(path) == "/"
     assert seen == []
 
 
