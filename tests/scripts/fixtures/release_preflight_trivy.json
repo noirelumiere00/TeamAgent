@@ -1,0 +1,38 @@
+{
+  "SchemaVersion": 2,
+  "Results": [
+    {
+      "Target": "Wolfi",
+      "Class": "os-pkgs",
+      "Type": "wolfi",
+      "Packages": [{"Name": "python-3.14", "Version": "3.14.8-r0"}],
+      "Vulnerabilities": [
+        {"VulnerabilityID": "CVE-2099-10001", "Severity": "MEDIUM", "PkgName": "py3-pip-wheel", "InstalledVersion": "26.2.1-r0", "FixedVersion": "26.2.2-r2"},
+        {"VulnerabilityID": "CVE-2099-10002", "Severity": "CRITICAL", "PkgName": "python-3.14", "InstalledVersion": "3.14.8-r0", "FixedVersion": "3.14.10-r0"},
+        {"VulnerabilityID": "CVE-2099-10003", "Severity": "HIGH", "PkgName": "libc", "InstalledVersion": "2.44-r4"},
+        {"VulnerabilityID": "CVE-2099-10004", "Severity": "LOW", "PkgName": "liblow", "InstalledVersion": "1.0-r0", "FixedVersion": "1.1-r0"}
+      ]
+    },
+    {
+      "Target": "uv.lock",
+      "Class": "lang-pkgs",
+      "Type": "uv",
+      "Packages": [{"Name": "pypdf", "Version": "6.0.0"}],
+      "Vulnerabilities": [
+        {"VulnerabilityID": "CVE-2099-20001", "Severity": "HIGH", "PkgName": "pypdf", "InstalledVersion": "6.0.0", "FixedVersion": "6.0.1, 7.0.0"},
+        {"VulnerabilityID": "CVE-2099-20002", "Severity": "CRITICAL", "PkgName": "pyasn1", "InstalledVersion": "0.6.0", "FixedVersion": ""},
+        {"VulnerabilityID": "CVE-2099-20003", "Severity": "MEDIUM", "PkgName": "medium", "InstalledVersion": "1.0", "FixedVersion": "2.0"}
+      ]
+    },
+    {
+      "Target": "slack/package-lock.json",
+      "Class": "lang-pkgs",
+      "Type": "npm",
+      "Packages": [{"Name": "follow-redirects", "Version": "1.16.1"}],
+      "Vulnerabilities": [
+        {"VulnerabilityID": "CVE-2099-30001", "Severity": "HIGH", "PkgName": "follow-redirects", "InstalledVersion": "1.16.1", "FixedVersion": "1.16.2"},
+        {"VulnerabilityID": "CVE-2099-30002", "Severity": "CRITICAL", "PkgName": "unfixed", "InstalledVersion": "1.0.0", "FixedVersion": ""}
+      ]
+    }
+  ]
+}
