@@ -104,10 +104,6 @@ USER_VERBATIM_OK: dict[Key, str] = {
     ("proposal_deck", "target_persona"): "ターゲット像（自然文）",
     ("workspace_search", "query"): "検索語",
     ("video_analysis", "url"): "動画 URL。pattern が無いのは短縮URL許容のため（要検討）",
-    ("workspace_search", "service"): (
-        "🔴 schema.py:12 に WORKSPACE_SERVICES=('calendar','people') があるのに Literal 化"
-        "されていない。dark（USE_WORKSPACE_TOOLS）だが露出前に Literal へ（〜2026-09-30）"
-    ),
 }
 
 _ALL_LEDGERS: tuple[dict[Key, str], ...] = (

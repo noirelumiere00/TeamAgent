@@ -1969,14 +1969,14 @@ def test_effective_tool_scope_matches_config_and_deployment_gates() -> None:
     excluded = config["mcp"]["servers"]["teamagent"]["toolFilter"]["exclude"]
     inventory_names = [tool["name"] for tool in scope["tools"]]
     assert scope["schemaVersion"] == 2
-    assert len(inventory_names) == len(set(inventory_names)) == 44  # 10-30 ad_label_check を追加
+    assert (
+        len(inventory_names) == len(set(inventory_names)) == 46
+    )  # A9: recommend / workspace_search
     assert set(inventory_names) == set(included)
     assert {
         "chitchat",
-        "recommend",
         "proposal_campaign",
         "mail_constraints",
-        "workspace_search",
         "proposal_deck",
         "proposal_builder",
     } <= set(excluded)
@@ -2028,6 +2028,13 @@ def test_effective_tool_scope_matches_config_and_deployment_gates() -> None:
         "names": ["USE_X_RESEARCH_TOOLS"],
     }
     assert activation_by_name["video_approval"] == {"kind": "never"}
+    assert activation_by_name["operation_log"] == {"kind": "never"}
+    for name, flag in {
+        "recommend": "USE_RECOMMEND_SKILL",
+        "workspace_search": "USE_WORKSPACE_TOOLS",
+        "knowledge_search_url": "USE_KNOWLEDGE_SEARCH_URL_TOOL",
+    }.items():
+        assert activation_by_name[name] == {"kind": "envAllTrue", "names": [flag]}
     # ☑️確認済みボタンの押下処理。既定 OFF（default_enabled にも入らない）で、
     # 解禁は USE_DIGEST_ACK_TOOL 1 本に束ねる＝描画フラグ側だけ ON にしても発火しない。
     assert activation_by_name["digest_ack"] == {

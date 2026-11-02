@@ -25,6 +25,7 @@ from teamagent.case_state import (
 
 __all__ = [
     "KEY",
+    "VERSION_KEY",
     "attach",
     "configured",
     "enabled",
@@ -37,6 +38,7 @@ if TYPE_CHECKING:
     from teamagent.ingest.repository import ChunkUpsert, DocumentUpsert
 
 KEY = "case_state_evidence"
+VERSION_KEY = "case_state_evidence_input_version"
 _MANIFEST = Path("data/case_state_reviews.yaml")
 JST = timezone(timedelta(hours=9))
 
@@ -46,7 +48,7 @@ def _manifest_bytes() -> bytes:
 
 
 def input_version() -> str:
-    """差分 skip に判定版と人手確認入力を含める。OFF 時はファイルも読まない。"""
+    """metadata 更新用の判定版と人手確認入力。OFF 時はファイルも読まない。"""
     return "1:" + hashlib.sha256(_manifest_bytes()).hexdigest() if configured() else ""
 
 
@@ -86,7 +88,7 @@ def source_ref(doc: DocumentUpsert, chunks: list[ChunkUpsert]) -> SourceRef:
             k: v
             for k, v in meta.items()
             if not k.startswith("cls_")
-            and k not in {KEY, "content_sha256"}
+            and k not in {KEY, VERSION_KEY, "content_sha256"}
             and not (k == "industry" and "cls_industry" in meta)
         },
     }
@@ -237,7 +239,10 @@ def attach(doc: DocumentUpsert, chunks: list[ChunkUpsert]) -> DocumentUpsert:
         records=tuple(records),
         delivery_observation=observation,
     )
-    return replace(doc, metadata={**meta, KEY: bundle.model_dump(mode="json")})
+    return replace(
+        doc,
+        metadata={**meta, KEY: bundle.model_dump(mode="json"), VERSION_KEY: input_version()},
+    )
 
 
 def main() -> None:

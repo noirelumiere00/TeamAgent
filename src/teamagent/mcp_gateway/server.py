@@ -1111,7 +1111,7 @@ def _complete_detached(
         logger.warning("usage_event_schedule_failed", request_id=request_id, error="LoopClosed")
 
 
-#: 本人の受信メール・下書き・ダイジェストを読む道具（本人 DM でだけ動かす）。
+#: 本人のメール・予定・連絡先を読む道具（本人 DM でだけ動かす）。
 #: 足すときはここに名前を追加する（tests/mcp_gateway/test_dm_only_tools.py が一覧を固定）。
 DM_ONLY_TOOLS: frozenset[str] = frozenset(
     {
@@ -1121,10 +1121,11 @@ DM_ONLY_TOOLS: frozenset[str] = frozenset(
         "mail_to_internal_context",
         "morning_digest",
         "meeting_prep",
+        "workspace_search",
     }
 )
 DM_ONLY_MESSAGE = (
-    "メールの中身は、ほかの人の目に触れないよう Aico との DM でだけお出ししています。"
+    "メール・予定・連絡先の中身は、ほかの人の目に触れないよう Aico との DM でだけお出ししています。"
     "DM でもう一度お声がけください。"
 )
 
