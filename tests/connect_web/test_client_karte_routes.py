@@ -252,6 +252,16 @@ def test_karte_api_production_path_uses_recent_timeline(
     calls: list[tuple[str, str, int]] = []
 
     class _StubPg:
+        def get_knowledge_client_attributes(self, conn: Any, client: str) -> dict[str, Any]:
+            return {
+                "fb_count": 1,
+                "doc_count": 0,
+                "owners": [],
+                "temperature": "高",
+                "last_contact": "2026-06-15",
+                "has_homework": False,
+            }
+
         @contextmanager
         def connection(self, **kwargs: Any) -> Iterator[object]:
             yield object()
