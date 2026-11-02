@@ -66,6 +66,22 @@ def test_soul_capabilities_match_production_fixture(monkeypatch: pytest.MonkeyPa
     assert guided == registered, "準備中への実行案内、または ON ツールの案内漏れ"
 
     assert registered <= exposed
+    excluded = config.split("exclude:", 1)[1].split("]", 1)[0]
+    assert not registered & set(re.findall(r'"([a-z_]+)"', excluded))
+    scope_config = json.loads((ROOT / "infra/openclaw/effective-tool-scope.json").read_text())
+    callable_names = {
+        tool["name"]
+        for tool in scope_config["tools"]
+        if tool["enabledBy"]["kind"] == "always"
+        or (
+            tool["enabledBy"]["kind"] == "envAllTrue"
+            and all(
+                snapshot["mcp_env"].get(flag, "").lower() in {"1", "true", "yes", "on"}
+                for flag in tool["enabledBy"]["names"]
+            )
+        )
+    }
+    assert callable_names == registered
     assert snapshot["openclaw_env"]["SLACK_DM_ALLOWLIST"] == "*"
     for name, phrases in {
         "digest_settings": ("朝のサマリーを止めて", "予定の直前通知を止めて"),

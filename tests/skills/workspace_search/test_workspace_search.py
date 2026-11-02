@@ -96,7 +96,7 @@ def test_people_happy(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def test_unsupported_service() -> None:
     skill = WorkspaceSearchSkill(token_store=_store_with("a@x.com"))
-    with pytest.raises(ValueError, match="未対応"):
+    with pytest.raises(ValueError, match=r"calendar.*people"):
         skill.run(WorkspaceSearchInput(service="drive", query="x"), _ctx("a@x.com"))
 
 

@@ -5,6 +5,8 @@
 
 from __future__ import annotations
 
+from typing import Literal
+
 from pydantic import BaseModel, Field
 
 # 対応サービス（query→結果が綺麗な2つ。Gmail は mail_constraints、Docs/Sheets/Slides は
@@ -15,7 +17,9 @@ WORKSPACE_SERVICES = ("calendar", "people")
 class WorkspaceSearchInput(BaseModel):
     """本人の Workspace を横断検索する入力。"""
 
-    service: str = Field(description="検索対象: 'calendar'（予定）| 'people'（連絡先）")
+    service: Literal["calendar", "people"] = Field(
+        description="検索対象: 'calendar'（予定）| 'people'（連絡先）"
+    )
     query: str = Field(min_length=1, max_length=200, description="クライアント名・人名などの検索語")
     limit: int = Field(default=10, ge=1, le=50, description="返す最大件数")
 

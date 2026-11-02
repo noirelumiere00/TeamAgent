@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import json
 from typing import Any
+from unittest.mock import MagicMock
 
 import pytest
 
-from teamagent.adapters.apify_client import ApifyError
+from teamagent.adapters.apify_client import ApifyClient, ApifyError
+from teamagent.adapters.cost_guard import CostGuard
 from teamagent.adapters.tiktok_scraper import TikTokComment, TikTokCommentResult, TikTokScrapeError
 from teamagent.skills.base import SkillContext
 from teamagent.skills.tiktok_comment_mining.schema import CommentMiningInput
@@ -53,9 +55,32 @@ class _FakeApify:
 
     def tiktok_comments(self, url: str, **kw: Any) -> tuple[list[dict[str, Any]], float]:
         self.calls += 1
+        assert kw["require_cost_reservation"] is True
         if self.fail:
             raise ApifyError("APIFY_RUN_FAILED")
         return [{"text": "Apify経由コメント", "likes": 3, "author": "c"}], 0.001
+
+
+@pytest.mark.parametrize("budget", ["no_ledger", "no_monthly_limit", "ledger_failure"])
+def test_apify_requires_confirmed_budget_before_any_http(
+    monkeypatch: pytest.MonkeyPatch, budget: str
+) -> None:
+    monkeypatch.delenv("COST_APIFY_MONTHLY_USD", raising=False)
+    monkeypatch.delenv("COST_APIFY_PER_CALL_USD", raising=False)
+    monkeypatch.delenv("COST_PER_USER_MONTHLY_USD", raising=False)
+    http = MagicMock()
+    ddb = MagicMock()
+    ddb.update_item.side_effect = RuntimeError("ledger unavailable")
+    ledger = None if budget == "no_ledger" else CostGuard("test-costs", ddb=ddb)
+    if budget == "ledger_failure":
+        monkeypatch.setenv("COST_APIFY_MONTHLY_USD", "50")
+    skill = TikTokCommentMiningSkill(
+        apify=ApifyClient("test-token", ledger=ledger, http=http), comments_fn=_chromium_fail
+    )
+    out = skill.run(CommentMiningInput(video_urls=[_URL], classify=False), _ctx())
+    assert out.videos[0].status == "skipped"
+    assert "費用予約を確認できない" in " ".join(out.warnings)
+    http.request.assert_not_called()
 
 
 _CLASSIFY_JSON = json.dumps(

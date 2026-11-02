@@ -1,5 +1,5 @@
 {
-  "source": "2026-10-30 live_config.json: teamagent-dev-mcp:202 / teamagent-dev-openclaw:89. Missing factory flags fixed to false; no secrets or real addresses.",
+  "source": "2026-11-02 A9 post-rollout target based on 2026-10-30 production audit; five tools enabled, operation_log held. Not a live snapshot; no secrets or real addresses.",
   "openclaw_env": {
     "SLACK_DM_ALLOWLIST": "*"
   },
@@ -18,9 +18,9 @@
     "USE_DIGEST_SETTINGS_TOOL": "true",
     "USE_FOLLOWUP_TOOL": "true",
     "USE_KNOWLEDGE_DELIVER": "true",
-    "USE_KNOWLEDGE_SEARCH_URL_TOOL": "false",
+    "USE_KNOWLEDGE_SEARCH_URL_TOOL": "true",
     "USE_MAIL_DRAFT_TOOL": "true",
-    "USE_MAIL_LINK_TOOL": "false",
+    "USE_MAIL_LINK_TOOL": "true",
     "USE_MAIL_REPLY_TOOL": "true",
     "USE_MAIL_SUMMARY_TOOL": "true",
     "USE_MAIL_TOOLS": "false",
@@ -34,19 +34,19 @@
     "USE_PROPOSAL_BUILDER_TOOLS": "1",
     "USE_PROPOSAL_CAMPAIGN_TOOLS": "false",
     "USE_PROPOSAL_DECK_TOOLS": "false",
-    "USE_RECOMMEND_SKILL": "false",
+    "USE_RECOMMEND_SKILL": "true",
     "USE_SCHEDULE_PROPOSE_TOOL": "true",
     "USE_SEARCH_SURFACE_TOOL": "1",
     "USE_SLACK_SEARCH_TOOL": "true",
     "USE_SLACK_SUMMARY_TOOL": "true",
     "USE_TIKTOK_ACQUIRE": "1",
-    "USE_TIKTOK_COMMENT_TOOLS": "false",
+    "USE_TIKTOK_COMMENT_TOOLS": "true",
     "USE_TIKTOK_TOOLS": "1",
     "USE_VIDEO_APPROVAL": "false",
     "USE_VIDEO_CAPTURE_TOOL": "true",
     "USE_VIDEO_TOOLS": "1",
     "USE_WEB_RESEARCH_TOOL": "true",
-    "USE_WORKSPACE_TOOLS": "false",
+    "USE_WORKSPACE_TOOLS": "true",
     "USE_X_RESEARCH_TOOLS": "1",
     "WEB_RESEARCH_ALLOWED_EMAILS": "",
     "X_RESEARCH_ALLOWED_EMAILS": ""
@@ -82,7 +82,7 @@
     },
     "knowledge_search_url": {
       "flag": "USE_KNOWLEDGE_SEARCH_URL_TOOL",
-      "availability": "準備中"
+      "availability": "全員"
     },
     "mail_constraints": {
       "flag": "USE_MAIL_TOOLS",
@@ -106,7 +106,7 @@
     },
     "mail_to_internal_context": {
       "flag": "USE_MAIL_LINK_TOOL",
-      "availability": "準備中"
+      "availability": "全員"
     },
     "media_case_search": {
       "flag": "USE_MEDIA_CASE_SEARCH",
@@ -162,7 +162,7 @@
     },
     "recommend": {
       "flag": "USE_RECOMMEND_SKILL",
-      "availability": "準備中"
+      "availability": "全員"
     },
     "schedule_propose": {
       "flag": "USE_SCHEDULE_PROPOSE_TOOL",
@@ -194,7 +194,7 @@
     },
     "tiktok_comment_mining": {
       "flag": "USE_TIKTOK_COMMENT_TOOLS",
-      "availability": "準備中"
+      "availability": "全員"
     },
     "tiktok_search": {
       "flag": "USE_TIKTOK_TOOLS",
@@ -226,7 +226,7 @@
     },
     "workspace_search": {
       "flag": "USE_WORKSPACE_TOOLS",
-      "availability": "準備中"
+      "availability": "全員"
     },
     "x_buzz_measure": {
       "flag": "USE_X_RESEARCH_TOOLS",
