@@ -69,7 +69,7 @@ jobs:
             'mcp>=1.28.1,<2' \
             fastapi uvicorn \
             'sentry-sdk[asyncio]>=2.18.0' \
-            pyyaml pypdf python-pptx pillow python-docx openpyxl \
+            pyyaml pypdf python-pptx pillow python-docx openpyxl beautifulsoup4 \
             'fonttools[woff]>=4.63.0' defusedxml types-defusedxml \
             google-auth google-api-python-client google-auth-oauthlib 'google-genai==2.7.0' \
             pytest pytest-asyncio pytest-cov 'pytest-xdist>=3.8.0' mypy 'ruff==0.15.15' bandit import-linter
