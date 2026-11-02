@@ -53,9 +53,9 @@ variable "ingest_sources" {
 }
 
 variable "ingest_schedule_expression" {
-  description = "EventBridge cron 式（既定: 平日 09:00 UTC = 平日 18:00 JST。EventBridge cron は常に UTC）"
+  description = "EventBridge cron 式（既定: 毎日 09:00 UTC = 毎日 18:00 JST。2026-11-02 小俣さん「更新は毎日」。EventBridge cron は常に UTC）"
   type        = string
-  default     = "cron(0 9 ? * MON-FRI *)"
+  default     = "cron(0 9 * * ? *)"
 }
 
 variable "ingest_max_runtime_hours" {
