@@ -78,8 +78,8 @@ def list_tabs(view: str) -> str:
         view = "docs"
     out = ""
     for key, label, url in (
-        ("list", "ノート", "/search"),
-        ("graph", "グラフ", "/search/graph"),
+        ("list", "検索", "/search"),
+        ("graph", "関係図", "/search/graph"),
         ("clients", "取引先一覧", "/search?view=clients&amp;page=1"),
         ("docs", "資料一覧", "/search?view=docs&amp;page=1"),
         ("tags", "タグ", "/search?view=tags"),
@@ -99,10 +99,34 @@ LIST_STYLE = (
     ".knowledge-list .meta{line-height:1.8}"
     ".knowledge-list nav{display:flex;gap:20px;margin:20px 0}"
     ".ws-tabs a.ws-tab{text-decoration:none;white-space:nowrap}"
-    ".ws-tabs{overflow-x:auto}"
+    ".ws-tabs{flex-wrap:wrap}"
     ".knowledge-list pre{white-space:pre-wrap;overflow-wrap:anywhere;font:inherit;line-height:1.8}"
     ".knowledge-list dt{color:var(--muted);margin-top:12px}"
     ".knowledge-list dd{margin:4px 0;overflow-wrap:anywhere}"
+    ".knowledge-list h1{margin:16px 0 12px;font-size:26px}"
+    ".knowledge-list h2{font-size:17px;margin:24px 0 12px}"
+    ".knowledge-list th{background:var(--bg-secondary);color:var(--muted);font-weight:600}"
+    ".knowledge-list tbody tr:hover{background:var(--bg-secondary)}"
+    ".knowledge-list table{table-layout:fixed}.knowledge-list td:first-child{font-weight:600}"
+    ".document-meta{display:grid;grid-template-columns:100px minmax(0,1fr);gap:12px 20px;"
+    "padding:20px;background:var(--bg-secondary);border:1px solid var(--border);border-radius:8px}"
+    ".knowledge-list .document-meta dt,.knowledge-list .document-meta dd{margin:0}"
+    ".knowledge-list pre{padding:20px;border:1px solid var(--border);border-radius:8px}"
+    ".tag-list{display:flex;flex-wrap:wrap;gap:8px;list-style:none;padding:0}"
+    ".tag-list li{padding:6px 10px;background:var(--bg-secondary);border-radius:6px;"
+    "font-size:13px;overflow-wrap:anywhere;max-width:100%}"
+    ".list-note{margin:16px 0;font-size:13px;color:var(--muted)}"
+    ".list-note summary{cursor:pointer}.knowledge-list [role=alert]{padding:20px;"
+    "border:1px solid #b84a4a;border-radius:8px;background:#fff2f1}"
+    "@media(max-width:767px){.knowledge-list{padding:16px}.knowledge-list h1{font-size:22px}"
+    ".knowledge-list table,.knowledge-list tbody,.knowledge-list tr,"
+    ".knowledge-list td{display:block}"
+    ".knowledge-list thead{position:absolute;width:1px;height:1px;overflow:hidden;"
+    "clip-path:inset(50%)}.knowledge-list tr{border:1px solid var(--border);border-radius:8px;"
+    "margin:12px 0;padding:8px}.knowledge-list td{padding:6px;border:0}"
+    ".knowledge-list td:before{content:attr(data-label);display:block;font-size:11px;"
+    "color:var(--muted);font-weight:400}.document-meta{grid-template-columns:70px minmax(0,1fr);"
+    "padding:14px;gap:10px}.knowledge-list nav{flex-wrap:wrap}}"
 )
 
 
@@ -154,11 +178,13 @@ def render_list(
         )
     first_url = html.escape("/search?" + urlencode({**query, "page": 1}))
     out += (
+        '<p class="sub">取引先名からカルテを開き、最新の反応と次アクションを確認できます。</p>'
+        '<details class="list-note"><summary>件数・表示範囲について</summary>'
         '<p class="meta">資料件数はFBを除く資料の数です。'
         "重複として非表示の資料・研究ノートは対象外です。"
         "最新FB日は閲覧できるFBのみから集計します。"
         "リンク先のカルテは名前の部分一致で取得し、FB・関連資料を各最大50件表示するため、"
-        "この一覧の資料件数と異なる場合があります。</p>"
+        "この一覧の資料件数と異なる場合があります。</p></details>"
         if view == "clients"
         else '<p class="meta">閲覧できる資料を更新日の新しい順に並べています。'
         "FB・重複として非表示の資料・研究ノートは対象外です。</p>"
@@ -202,7 +228,14 @@ def render_list(
                 html.escape(str(row.get("client_name") or "—")),
                 source_link(row),
             ]
-        out += "<tr>" + "".join(f"<td>{cell}</td>" for cell in cells) + "</tr>"
+        out += (
+            "<tr>"
+            + "".join(
+                f'<td data-label="{label}">{cell}</td>'
+                for label, cell in zip(columns, cells, strict=True)
+            )
+            + "</tr>"
+        )
     out += '</tbody></table><nav aria-label="ページ切替">'
     if page > 1:
         url = html.escape("/search?" + urlencode({**query, "page": page - 1}))
@@ -219,7 +252,11 @@ def render_document(document: dict[str, Any] | None, *, failed: bool = False) ->
         return out + '<h1>資料詳細</h1><p role="alert">資料を取得できませんでした。</p></main>'
     if document is None:
         return out + "<h1>資料詳細</h1><p>見つからないか、閲覧できません。</p></main>"
-    out += "<h1>" + html.escape(str(document.get("title") or "（無題）")) + "</h1><dl>"
+    out += (
+        "<h1>"
+        + html.escape(str(document.get("title") or "（無題）"))
+        + '</h1><dl class="document-meta">'
+    )
     client = str(document.get("client_name") or "")
     client_html = (
         f'<a href="/search/client/{quote(client, safe="")}">{html.escape(client)}</a>'
@@ -234,7 +271,7 @@ def render_document(document: dict[str, Any] | None, *, failed: bool = False) ->
         ("出典", source_link(document)),
     ):
         out += f"<dt>{label}</dt><dd>{value}</dd>"
-    out += "</dl><h2>タグ</h2><ul>"
+    out += '</dl><h2>関連する資料をタグから探す</h2><ul class="tag-list">'
     for axis, label in KNOWLEDGE_TAG_AXES.items():
         if tag_value := document.get(axis):
             out += f"<li>{label}：{tag_link(axis, str(tag_value))}</li>"
@@ -262,7 +299,7 @@ def render_tags(rows: list[dict[str, Any]] | None) -> str:
         entries = [row for row in rows if row["axis"] == axis]
         if not entries:
             continue
-        out += f"<h2>{label}</h2><ul>"
+        out += f'<h2>{label}</h2><ul class="tag-list">'
         for row in entries:
             out += (
                 "<li>"

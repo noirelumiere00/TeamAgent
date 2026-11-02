@@ -27,6 +27,7 @@ _PUBLIC_SITES = {
     "動画事例を探す": "/library",
     "資料・議事録を検索": "/search",
     "共有ナレッジを一覧": "/app",
+    "取引先の状況を確認": "/search?view=clients&page=1",
     "自分の会話履歴": "/app/history",
 }
 _ADMIN_SITES = {
@@ -96,7 +97,11 @@ def test_home_public_sites_and_security_without_external_io(
     ]
     assert page.select(".connect-card .connect-eyebrow") == []
     assert _paths(page, ".connect-section-archive .connect-card") == {"/library"}
-    assert _paths(page, ".connect-section-knowledge .connect-card") == {"/search", "/app"}
+    assert _paths(page, ".connect-section-knowledge .connect-card") == {
+        "/search",
+        "/app",
+        "/search?view=clients&page=1",
+    }
     assert _paths(page, ".connect-section-personal .connect-card") == {"/app/history"}
     assert page.select("script") == []
     assert response.headers["cache-control"] == "no-store, max-age=0"

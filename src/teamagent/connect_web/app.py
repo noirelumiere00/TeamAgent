@@ -874,13 +874,20 @@ def _load_search_config(env: dict[str, str] | None = None) -> DashboardConfig:
     )
 
 
-# Obsidian 風シェルのデザイントークン（既存パレットを :root 変数化し両エンジンで継承）。
-# 色は既存の literal をそのまま採用＝ブルーアクセントを維持（紫には切替えない）。
+# Home / 動画アーカイブと同じ白・青を検索と関係図で共有する。
 _ROOT_TOKENS = (
-    ":root{--bg-primary:#0f1420;--bg-secondary:#0c111c;--bg-elev:#1a2233;"
-    "--bg-hover:#222d44;--border:#283450;--accent:#4f8cff;--text:#e8edf7;"
-    "--muted:#93a1bd;--faint:#5b6b86;--radius:8px;--ribbon-w:44px;--side-w:270px;"
+    ":root{color-scheme:light;--bg-primary:#ffffff;--bg-secondary:#f5f7fa;--bg-elev:#ffffff;"
+    "--bg-hover:#edf2fa;--border:#dce2e9;--accent:#234e89;--text:#20252d;"
+    "--muted:#5b6470;--faint:#5b6470;--radius:8px;--ribbon-w:44px;--side-w:270px;"
     "--right-w:320px}"
+    "*{box-sizing:border-box}body{line-height:1.6}"
+    "a{color:var(--accent);text-underline-offset:3px}"
+    "button,input,select,textarea{font:inherit;max-width:100%;min-width:0}"
+    "input::placeholder{color:var(--muted);opacity:1}"
+    "input,select,textarea{accent-color:var(--accent)}"
+    ":focus-visible{outline:2px solid var(--accent);outline-offset:3px}"
+    "h1,h2,h3,p,.card,.pv,.ncard{overflow-wrap:anywhere}"
+    "[hidden]{display:none!important}"
 )
 
 
@@ -891,7 +898,7 @@ _SEARCH_STYLE = (
     "main{max-width:840px;margin:0 auto;padding:24px 18px}"
     "h1{font-size:20px;margin:0 0 4px}.sub{color:var(--muted);font-size:13px;margin:0 0 18px}"
     ".searchbar{display:flex;gap:8px;margin-bottom:18px}"
-    ".searchbar input{flex:1;background:var(--bg-elev);border:1px solid var(--border);"
+    ".searchbar input{flex:1;min-width:0;background:var(--bg-elev);border:1px solid var(--border);"
     "border-radius:10px;color:var(--text);padding:11px 14px;font-size:15px}"
     ".searchbar button{background:var(--accent);color:#fff;border:0;border-radius:10px;"
     "padding:0 20px;font-weight:600;cursor:pointer}"
@@ -899,10 +906,10 @@ _SEARCH_STYLE = (
     ".filterbar input[type=text],.filterbar select{background:var(--bg-elev);"
     "border:1px solid var(--border);border-radius:8px;color:var(--text);"
     "padding:7px 10px;font-size:13px}"
-    ".filterbar input[type=text]{min-width:220px}"
+    ".filterbar input[type=text]{width:220px;min-width:0}"
     ".filterbar .ck{display:inline-flex;align-items:center;gap:4px;font-size:12px;"
     "color:var(--muted);cursor:pointer}"
-    ".answer{background:#16203a;border:1px solid #2b3a5e;border-radius:12px;padding:16px 18px;"
+    ".answer{background:#f3f7fc;border:1px solid #dce2e9;border-radius:12px;padding:16px 18px;"
     "margin-bottom:18px;line-height:1.7;white-space:pre-wrap}"
     ".answer h2{font-size:13px;color:var(--muted);margin:0 0 8px;font-weight:600}"
     ".card{background:var(--bg-elev);border:1px solid var(--border);border-radius:12px;"
@@ -910,46 +917,46 @@ _SEARCH_STYLE = (
     ".card .title{font-weight:700;font-size:15px;margin-bottom:6px}"
     ".card .title.clk{cursor:pointer}.card .title.clk:hover{color:var(--accent)}"
     ".chips{margin-bottom:8px}"
-    ".chip{display:inline-block;background:rgba(79,140,255,.16);color:#9fc1ff;border-radius:999px;"
+    ".chip{display:inline-block;background:#edf2fa;color:#234e89;border-radius:999px;"
     "padding:2px 9px;font-size:11px;margin:0 6px 4px 0}"
-    ".chip.tag{background:rgba(45,170,90,.18);color:#7fd6a0;cursor:pointer}"
-    ".chip.tag:hover{background:rgba(45,170,90,.32)}"
-    ".chip.tag.on{background:rgba(45,170,90,.45);color:#dff7e8}"
+    ".chip.tag{background:#e8f3ed;color:#246a48;cursor:pointer}"
+    ".chip.tag:hover{background:#daecdf}"
+    ".chip.tag.on{background:#c9e4d2;color:#175638}"
     ".toplinks{display:flex;gap:14px;margin:0 0 14px;font-size:13px}"
     ".toplinks a{color:var(--accent);text-decoration:none}"
     ".toplinks a:hover{text-decoration:underline}"
     ".filters{display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin-bottom:12px}"
     ".filters .lbl{font-size:12px;color:var(--muted)}"
-    ".fchip{display:inline-flex;align-items:center;gap:6px;background:rgba(79,140,255,.22);"
-    "color:#bcd4ff;border-radius:999px;padding:3px 10px;font-size:12px}"
-    ".fchip button{background:none;border:0;color:#bcd4ff;cursor:pointer;font-size:13px;padding:0}"
-    ".excerpt{color:#c5d0e6;font-size:13px;line-height:1.6;margin-bottom:8px}"
-    ".meta{display:flex;align-items:center;gap:12px;font-size:12px;color:var(--muted)}"
+    ".fchip{display:inline-flex;align-items:center;gap:6px;background:#e4ecf8;"
+    "color:#234e89;border-radius:999px;padding:3px 10px;font-size:12px}"
+    ".fchip button{background:none;border:0;color:#234e89;cursor:pointer;font-size:13px;padding:0}"
+    ".excerpt{color:#344054;font-size:13px;line-height:1.6;margin-bottom:8px}"
+    ".meta{display:flex;flex-wrap:wrap;align-items:center;gap:12px;font-size:12px;color:var(--muted)}"
     ".meta a{color:var(--accent);text-decoration:none}.meta a:hover{text-decoration:underline}"
     ".score{font-variant-numeric:tabular-nums}"
     ".fb{margin-left:auto;display:flex;gap:6px}"
-    ".fb button{background:var(--bg-hover);border:1px solid #34425f;color:#c5d0e6;"
+    ".fb button{background:var(--bg-hover);border:1px solid #adb8c6;color:#344054;"
     "border-radius:8px;padding:3px 9px;font-size:13px;cursor:pointer}"
-    ".fb button:hover{background:#2c3a58}"
-    ".fb button.on{background:#2a5}.fb button.off{background:#a33}"
+    ".fb button:hover{background:#e3ebf7}"
+    ".fb button.on{background:#237345;color:#fff}.fb button.off{background:#a33;color:#fff}"
     ".empty{color:var(--muted);padding:8px}"
     # 0 件時のグレースフルな空状態（§4）。
     ".emptyx{background:var(--bg-elev);border:1px solid var(--border);border-radius:12px;"
-    "padding:22px 20px;text-align:center;color:#c5d0e6}"
+    "padding:22px 20px;text-align:center;color:#344054}"
     ".emptyx .ei{font-size:30px;margin-bottom:6px}"
     ".emptyx .et{font-size:15px;font-weight:600;color:var(--text);margin-bottom:6px}"
     ".emptyx .es{color:var(--muted);font-size:13px;line-height:1.7;margin:2px 0}"
     ".emptyx .eb{margin-top:12px;display:flex;flex-wrap:wrap;gap:8px;justify-content:center}"
-    ".emptyx .eb button{background:var(--bg-hover);border:1px solid #34425f;color:#cdd9f0;"
+    ".emptyx .eb button{background:var(--bg-hover);border:1px solid #adb8c6;color:#344054;"
     "border-radius:8px;padding:6px 12px;font-size:13px;cursor:pointer}"
-    ".emptyx .eb button:hover{background:#2c3a58}"
+    ".emptyx .eb button:hover{background:#e3ebf7}"
     ".emptyx .es .lead{color:var(--muted);font-size:12px;margin-right:4px}"
-    ".errx{border-color:#7a3b3b;background:rgba(120,50,50,.18)}"
+    ".errx{border-color:#b84a4a;background:#fff2f1}"
     # 検索中の視覚状態（#4）: ボタン disable + スケルトンカード（shimmer アニメ）。
     ".searchbar button:disabled{opacity:.55;cursor:progress}"
     ".card.skel{pointer-events:none}"
     ".skl{border-radius:6px;background:linear-gradient(90deg,var(--bg-hover) 25%,"
-    "#2c3a58 37%,var(--bg-hover) 63%);background-size:400% 100%;"
+    "#e3ebf7 37%,var(--bg-hover) 63%);background-size:400% 100%;"
     "animation:skshine 1.4s ease infinite}"
     ".skl-t{height:16px;width:55%;margin-bottom:10px}"
     ".skl-l{height:12px;width:90%;margin-bottom:8px}"
@@ -958,31 +965,42 @@ _SEARCH_STYLE = (
     # アクセシビリティ: 動きを減らす設定ではシマーを止める（静的プレースホルダ化）。
     "@media (prefers-reduced-motion:reduce){.skl{animation:none}}"
     # クエリ語ハイライト（#2）: excerpt 中の検索語を span.hl で強調（textContent 分割挿入）。
-    ".hl{background:rgba(255,193,79,.18);color:#ffd27a;border-radius:3px;padding:0 1px}"
+    ".hl{background:#fff0c2;color:#714b00;border-radius:3px;padding:0 1px}"
     # 二段レスポンス（#1）: AI要約の生成中プレースホルダ＋失敗時の再試行ボタン。
     ".answer .abody.pending{color:var(--muted)}"
-    ".answer .aretry{margin-left:8px;background:var(--bg-hover);border:1px solid #34425f;"
-    "color:#c5d0e6;border-radius:8px;padding:2px 10px;font-size:12px;cursor:pointer}"
-    ".answer .aretry:hover{background:#2c3a58}"
-    ".rate4{margin-top:14px;border-top:1px solid #2b3a5e;padding-top:12px;white-space:normal}"
-    ".rate4Question{font-size:13px;color:#c5d0e6;margin-bottom:8px}"
+    ".answer .aretry{margin-left:8px;background:var(--bg-hover);border:1px solid #adb8c6;"
+    "color:#344054;border-radius:8px;padding:2px 10px;font-size:12px;cursor:pointer}"
+    ".answer .aretry:hover{background:#e3ebf7}"
+    ".rate4{margin-top:14px;border-top:1px solid #dce2e9;padding-top:12px;white-space:normal}"
+    ".rate4Question{font-size:13px;color:#344054;margin-bottom:8px}"
     ".rate4Choices{display:flex;flex-wrap:wrap;gap:6px}"
-    ".rate4Choice{background:var(--bg-hover);border:1px solid #34425f;color:#c5d0e6;"
+    ".rate4Choice{background:var(--bg-hover);border:1px solid #adb8c6;color:#344054;"
     "border-radius:8px;padding:5px 9px;font-size:13px;cursor:pointer}"
-    ".rate4Choice:hover{background:#2c3a58}.rate4Choice.selected{background:#2a5;border-color:#53c77b;color:#fff}"
+    ".rate4Choice:hover{background:#e3ebf7}.rate4Choice.selected{background:#237345;border-color:#237345;color:#fff}"
     ".rate4Status{min-height:1.5em;margin-top:8px;color:var(--muted);font-size:12px}"
-    ".rate4Status.error{color:#ffaaaa}.rate4Retry{margin-left:8px;background:none;border:0;color:var(--accent);"
+    ".rate4Status.error{color:#b42318}.rate4Retry{margin-left:8px;background:none;border:0;color:var(--accent);"
     "font-size:12px;cursor:pointer;text-decoration:underline}"
     ".rate4Note{max-height:0;opacity:0;overflow:hidden;transition:max-height .2s ease,"
     "opacity .2s ease}"
     ".rate4Note.open{max-height:180px;opacity:1;margin-top:10px}"
     ".rate4Note textarea{box-sizing:border-box;width:100%;min-height:68px;resize:vertical;"
-    "background:var(--bg-elev);border:1px solid #34425f;border-radius:8px;color:var(--text);"
+    "background:var(--bg-elev);border:1px solid #adb8c6;border-radius:8px;color:var(--text);"
     "padding:8px;font:inherit;font-size:12px}"
-    ".rate4Note button{margin-top:6px;background:var(--bg-hover);border:1px solid #34425f;"
-    "color:#c5d0e6;"
+    ".rate4Note button{margin-top:6px;background:var(--bg-hover);border:1px solid #adb8c6;"
+    "color:#344054;"
     "border-radius:8px;padding:4px 10px;font-size:12px;cursor:pointer}"
     ".rate4Help{margin-top:8px;color:var(--muted);font-size:11px}"
+    ".journey-links{display:flex;flex-wrap:wrap;gap:8px;margin:24px 0}"
+    ".journey-links a{padding:8px 12px;border:1px solid var(--border);border-radius:6px;"
+    "background:var(--bg-secondary);font-size:13px;text-decoration:none}"
+    ".journey-links a:hover{background:var(--bg-hover)}"
+    ".search-label{display:block;font-size:14px;font-weight:600;margin-bottom:8px}"
+    ".search-options{margin:0 0 18px;font-size:13px}"
+    ".search-options summary{cursor:pointer;color:var(--accent);margin-bottom:12px}"
+    "@media(max-width:767px){main{padding:24px 16px}.filterbar>*{max-width:100%}"
+    ".filterbar input[type=text]{width:100%}.toplinks{flex-wrap:wrap}"
+    ".searchbar button{padding:0 14px}.journey-links{gap:6px;margin:18px 0}"
+    ".journey-links a{padding:7px 9px}.meta{gap:8px}}"
 )
 
 
@@ -1000,13 +1018,19 @@ _DOC_TYPES = ("提案書", "議事録", "報告書", "価格表", "契約", "そ
 # 見出し/サブは textContent ではなく静的文字列だが「社内ナレッジ検索」をルートテストが参照。
 _SEARCH_DOM = (
     "<main>"
-    "<h1>📚 社内ナレッジ検索</h1>"
-    '<p class="sub">過去の提案書・議事録・Slack など社内ナレッジを自然文で検索します。</p>'
+    "<h1>社内ナレッジ検索</h1>"
+    '<p class="sub">提案書・議事録・Slack を、取引先名や知りたいことから探せます。</p>'
+    '<nav class="journey-links" aria-label="目的から探す">'
+    '<a href="/search?view=clients&amp;page=1">取引先の状況を確認</a>'
+    '<a href="/search?view=docs&amp;page=1">最近の資料を見る</a>'
+    '<a href="/library">動画の事例を探す ↗</a></nav>'
+    '<label class="search-label" for="q">何を探していますか？</label>'
     '<div class="searchbar">'
     '<input id="q" type="text" placeholder="例: 飲料メーカー向けの保存率訴求の提案">'
     '<button id="go" type="button">検索</button></div>'
+    '<details class="search-options"><summary>条件を絞り込む（取引先・種別・予算）</summary>'
     '<div class="filterbar">'
-    '<input id="fclient" type="text" list="clientlist" '
+    '<input id="fclient" type="text" list="clientlist" aria-label="取引先で絞る" '
     'placeholder="取引先で絞る（例: 日本ガイシ）">'
     '<datalist id="clientlist"></datalist>'
     '<select id="fbudget" aria-label="予算で絞る">'
@@ -1022,11 +1046,11 @@ _SEARCH_DOM = (
     "<option>提案書</option><option>議事録</option><option>報告書</option>"
     "<option>価格表</option><option>契約</option><option>その他</option>"
     "</select>"
-    '<input id="fsolution" type="text" maxlength="50" '
+    '<input id="fsolution" type="text" maxlength="50" aria-label="施策で絞る" '
     'placeholder="施策で絞る（例: 動画広告）">'
-    "</div>"
+    "</div></details>"
     '<div id="filters" class="filters"></div>'
-    '<div id="results"></div>'
+    '<div id="results" aria-live="polite"></div>'
     "</main>"
 )
 
@@ -1513,71 +1537,74 @@ _GRAPH_STYLE = (
     ".toplinks{margin-bottom:12px;font-size:13px}"
     ".toplinks a{color:var(--accent);text-decoration:none}"
     ".toplinks a:hover{text-decoration:underline}"
-    ".legend{display:flex;flex-wrap:wrap;gap:12px;margin-bottom:10px;font-size:12px;color:#c5d0e6}"
+    ".legend{display:flex;flex-wrap:wrap;gap:12px;margin-bottom:10px;font-size:12px;color:#344054}"
     ".legend .lg{display:inline-flex;align-items:center;gap:5px}"
     ".legend .dot{width:10px;height:10px;border-radius:50%}"
     ".graphwrap{position:relative;height:600px;background:var(--bg-secondary);"
     "border:1px solid var(--border);border-radius:14px;overflow:hidden}"
     "#cv{width:100%;height:100%;display:block;cursor:grab}"
-    ".tip{position:absolute;pointer-events:none;background:var(--bg-elev);border:1px solid #34425f;"
+    ".tip{position:absolute;pointer-events:none;background:var(--bg-elev);border:1px solid #adb8c6;"
     "border-radius:8px;padding:6px 9px;font-size:12px;color:var(--text);max-width:280px;"
     "display:none;line-height:1.5;z-index:2;white-space:pre-line}"
     ".status{position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);"
     "color:var(--muted);font-size:13px}"
     # --- 大規模グラフ時の隅ヒント（ズーム/ホバーでラベル表示）---
     ".ghint{position:absolute;left:10px;bottom:10px;z-index:2;pointer-events:none;"
-    "background:rgba(20,28,46,.78);border:1px solid #2b3a5e;border-radius:8px;"
-    "padding:4px 9px;font-size:11px;color:#8fa3c6;max-width:calc(100% - 20px)}"
+    "background:rgba(255,255,255,.96);border:1px solid #dce2e9;border-radius:8px;"
+    "padding:4px 9px;font-size:11px;color:#5b6470;max-width:calc(100% - 20px)}"
     ".ghint[hidden]{display:none}"
     # --- Obsidian 風グラフ設定パネル（左上オーバーレイ）---
     ".gtoggle{position:absolute;top:10px;left:10px;z-index:4;width:30px;height:30px;"
-    "display:flex;align-items:center;justify-content:center;background:rgba(20,28,46,.92);"
-    "border:1px solid #2b3a5e;border-radius:8px;color:#c5d0e6;cursor:pointer;font-size:15px;"
+    "display:flex;align-items:center;justify-content:center;background:rgba(255,255,255,.98);"
+    "border:1px solid #dce2e9;border-radius:8px;color:#344054;cursor:pointer;font-size:15px;"
     "line-height:1;user-select:none}"
-    ".gtoggle:hover{background:#222d44}"
+    ".gtoggle:hover{background:#edf2fa}"
     ".gpanel{position:absolute;top:50px;left:10px;width:236px;max-height:calc(100% - 60px);"
-    "overflow:auto;background:rgba(20,28,46,.92);border:1px solid #2b3a5e;border-radius:10px;"
-    "font-size:12px;color:#c5d0e6;z-index:3;backdrop-filter:blur(2px);padding:4px 0 8px}"
+    "overflow:auto;background:rgba(255,255,255,.98);border:1px solid #dce2e9;border-radius:10px;"
+    "font-size:12px;color:#344054;z-index:3;backdrop-filter:blur(2px);padding:4px 0 8px}"
     ".gpanel[hidden]{display:none}"
-    ".gsec{border-top:1px solid #243152}.gsec:first-child{border-top:0}"
+    ".gsec{border-top:1px solid #dce2e9}.gsec:first-child{border-top:0}"
     ".gsec>h3{cursor:pointer;margin:0;padding:8px 12px;font-size:12px;font-weight:600;"
-    "color:#dbe4f5;display:flex;justify-content:space-between;align-items:center;user-select:none}"
-    ".gsec>h3 .chev{color:#7d8cab;font-size:10px}"
+    "color:#20252d;display:flex;justify-content:space-between;align-items:center;user-select:none}"
+    ".gsec>h3 .chev{color:#5b6470;font-size:10px}"
     ".gsec.collapsed .gbody{display:none}"
     ".gbody{padding:2px 12px 8px}"
     ".grow{margin:7px 0}.grow label{display:block;margin-bottom:2px}"
-    ".grow .gval{color:#8fa3c6;float:right}"
-    ".gpanel input[type=range]{width:100%;accent-color:#4f8cff;margin:0}"
+    ".grow .gval{color:#5b6470;float:right}"
+    ".gpanel input[type=range]{width:100%;accent-color:#234e89;margin:0}"
     ".gpanel input[type=search],.gpanel select{width:100%;box-sizing:border-box;"
-    "background:#101827;border:1px solid #2b3a5e;border-radius:6px;color:#e8edf7;"
+    "background:#ffffff;border:1px solid #dce2e9;border-radius:6px;color:#20252d;"
     "padding:4px 6px;font-size:12px}"
     ".gchk{display:flex;align-items:center;gap:6px;margin:4px 0;cursor:pointer}"
-    ".gchk input{accent-color:#4f8cff;margin:0}"
+    ".gchk input{accent-color:#234e89;margin:0}"
     ".gchk .sw{width:9px;height:9px;border-radius:50%;flex:0 0 auto}"
-    ".greset{display:block;text-align:center;color:#7fb0ff;cursor:pointer;padding:8px 0 2px;"
+    ".greset{display:block;text-align:center;color:#234e89;cursor:pointer;padding:8px 0 2px;"
     "font-size:12px;text-decoration:none}"
     ".greset:hover{text-decoration:underline}"
     ".grule{display:flex;align-items:center;gap:5px;margin:5px 0}"
-    ".grule input[type=text]{flex:1 1 auto;min-width:0;background:#101827;border:1px solid #2b3a5e;"
-    "border-radius:6px;color:#e8edf7;padding:3px 6px;font-size:12px}"
+    ".grule input[type=text]{flex:1 1 auto;min-width:0;background:#ffffff;border:1px solid #dce2e9;"
+    "border-radius:6px;color:#20252d;padding:3px 6px;font-size:12px}"
     ".grule input[type=color]{width:24px;height:24px;border:0;background:none;padding:0;"
     "cursor:pointer}"
-    ".grule .x{color:#8a99b8;cursor:pointer;padding:0 2px}"
-    ".gbtn{background:#1b2740;border:1px solid #2b3a5e;border-radius:6px;color:#cdd9f0;"
+    ".grule .x{color:#5b6470;cursor:pointer;padding:0 2px}"
+    ".gbtn{background:#f5f7fa;border:1px solid #dce2e9;border-radius:6px;color:#344054;"
     "padding:4px 8px;font-size:12px;cursor:pointer}"
-    ".gbtn:hover{background:#243556}"
+    ".gbtn:hover{background:#edf2fa}"
     # --- ツールバー（キャンバス右上）---
     ".gtools{position:absolute;top:10px;right:10px;z-index:4;display:flex;gap:6px}"
     # --- フォーカス時のノードカード ---
-    ".ncard{position:absolute;z-index:4;background:rgba(20,28,46,.96);border:1px solid #2b3a5e;"
-    "border-radius:10px;padding:10px 12px;font-size:12px;color:#dbe4f5;max-width:240px;"
-    "box-shadow:0 6px 20px rgba(0,0,0,.4)}"
+    ".ncard{position:absolute;z-index:4;background:rgba(255,255,255,.98);border:1px solid #dce2e9;"
+    "border-radius:10px;padding:10px 12px;font-size:12px;color:#20252d;max-width:240px;"
+    "box-shadow:0 6px 20px rgba(32,37,45,.12)}"
     ".ncard[hidden]{display:none}"
-    ".ncard .nt{font-weight:600;font-size:13px;margin-bottom:4px;color:#fff;line-height:1.35}"
-    ".ncard .nm{color:#93a1bd;margin:2px 0}"
-    ".ncard .nopen{margin-top:8px;background:#2553a6;border:0;border-radius:6px;color:#eef4ff;"
+    ".ncard .nt{font-weight:600;font-size:13px;margin-bottom:4px;"
+    "color:var(--text);line-height:1.35}"
+    ".ncard .nm{color:#5b6470;margin:2px 0}"
+    ".ncard .nopen{margin-top:8px;background:#234e89;border:0;border-radius:6px;color:#ffffff;"
     "padding:5px 10px;font-size:12px;cursor:pointer}"
-    ".ncard .nopen:hover{background:#2d63c2}"
+    ".ncard .nopen:hover{background:#1b3e6e}"
+    "@media(max-width:767px){.graphwrap .status{width:80%;text-align:center}"
+    ".gpanel{max-width:calc(100% - 20px)}.ncard{max-width:calc(100% - 20px)}}"
 )
 
 
@@ -1600,7 +1627,7 @@ _SHELL_STYLE = (
     "border-radius:8px;color:var(--muted);cursor:pointer;border:0;background:none;"
     "transition:background .14s,color .14s}"
     ".rib:hover{background:var(--bg-hover);color:var(--text)}"
-    ".rib.active{color:var(--accent);background:rgba(79,140,255,.14)}"
+    ".rib.active{color:var(--accent);background:#e4ecf8}"
     ".rib svg{width:19px;height:19px;display:block}"
     ".ribspace{flex:1}"
     ".ribmail{font-size:9px;color:var(--faint);writing-mode:vertical-rl;text-orientation:mixed;"
@@ -1613,23 +1640,24 @@ _SHELL_STYLE = (
     ".side-search input{width:100%;background:var(--bg-elev);border:1px solid var(--border);"
     "border-radius:8px;color:var(--text);padding:8px 10px;font-size:13px}"
     ".tagexp{padding:4px 6px 16px}"
-    ".tgrp{border-top:1px solid #1c2740}.tgrp:first-child{border-top:0}"
-    ".tgrp>h4{margin:0;padding:9px 8px;font-size:12px;font-weight:600;color:#dbe4f5;cursor:pointer;"
+    ".tgrp{border-top:1px solid #e3e6eb}.tgrp:first-child{border-top:0}"
+    ".tgrp>.tgroup-title{margin:0;padding:9px 8px;font-size:12px;font-weight:600;"
+    "color:#20252d;cursor:pointer;"
     "display:flex;justify-content:space-between;align-items:center;user-select:none}"
-    ".tgrp>h4 .cv{color:var(--faint);font-size:10px}"
+    ".tgrp>.tgroup-title .cv{color:var(--faint);font-size:10px}"
     ".tgrp.collapsed .tbody{display:none}"
     ".tbody{padding:0 4px 6px}"
     ".trow{display:flex;justify-content:space-between;align-items:center;gap:8px;"
-    "padding:4px 8px;border-radius:6px;cursor:pointer;font-size:12px;color:#c5d0e6}"
+    "padding:4px 8px;border-radius:6px;cursor:pointer;font-size:12px;color:#344054}"
     ".trow:hover{background:var(--bg-hover)}"
-    ".trow.on{background:rgba(79,140,255,.16);border-left:2px solid var(--accent)}"
+    ".trow.on{background:#edf2fa;border-left:2px solid var(--accent)}"
     ".trow .tv{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}"
     ".trow .tc{color:var(--faint);font-variant-numeric:tabular-nums;flex:0 0 auto}"
     ".tempty{color:var(--faint);font-size:11px;padding:4px 8px}"
     ".tactive{padding:6px 10px;display:flex;align-items:center;gap:8px}"
-    ".tactive .pill{display:inline-flex;align-items:center;gap:6px;background:rgba(79,140,255,.22);"
-    "color:#bcd4ff;border-radius:999px;padding:3px 10px;font-size:12px}"
-    ".tactive .pill button{background:none;border:0;color:#bcd4ff;cursor:pointer;padding:0}"
+    ".tactive .pill{display:inline-flex;align-items:center;gap:6px;background:#e4ecf8;"
+    "color:#234e89;border-radius:999px;padding:3px 10px;font-size:12px}"
+    ".tactive .pill button{background:none;border:0;color:#234e89;cursor:pointer;padding:0}"
     # --- 本体（タブ + 2エンジン）---
     ".work{overflow:auto;min-width:0;position:relative;display:flex;flex-direction:column}"
     ".ws-tabs{display:flex;gap:4px;padding:8px 12px 0;border-bottom:1px solid var(--border);"
@@ -1655,21 +1683,44 @@ _SHELL_STYLE = (
     ".pv .pvx{background:none;border:0;color:var(--muted);font-size:18px;cursor:pointer;"
     "line-height:1;flex:0 0 auto}"
     ".pv .pvchips{margin:4px 0 10px}"
-    ".pv .pvex{color:#c5d0e6;font-size:13px;line-height:1.7;margin:8px 0 12px}"
+    ".pv .pvex{color:#344054;font-size:13px;line-height:1.7;margin:8px 0 12px}"
     ".pv .pvopen{background:var(--accent);border:0;border-radius:8px;color:#fff;"
     "padding:8px 14px;font-size:13px;font-weight:600;cursor:pointer;margin-bottom:14px}"
-    ".pv .pvopen:hover{background:#3f7cef}"
+    ".pv .pvopen:hover{background:#1b3e6e}"
     ".relhdr{display:flex;justify-content:space-between;align-items:center;width:100%;"
-    "background:none;border:0;color:#cfe0ff;font-size:13px;font-weight:600;padding:8px 0;"
+    "background:none;border:0;color:#234e89;font-size:13px;font-weight:600;padding:8px 0;"
     "cursor:pointer}"
-    ".relcount{background:rgba(79,140,255,.22);color:#bcd4ff;border-radius:999px;"
+    ".relcount{background:#e4ecf8;color:#234e89;border-radius:999px;"
     "padding:1px 8px;font-size:11px}"
-    ".relrow{padding:6px 0;border-top:1px solid #1f2940}"
-    ".relrow .t{color:#cfe0ff;cursor:pointer;font-size:13px}.relrow .t:hover{color:var(--accent)}"
+    ".relrow{padding:6px 0;border-top:1px solid #e3e6eb}"
+    ".relrow .t{color:#234e89;cursor:pointer;font-size:13px}.relrow .t:hover{color:var(--accent)}"
     ".relrow .rv{display:block;color:var(--faint);font-size:11px;margin-top:2px}"
     ".relsec.folded .relbody{display:none}"
-    ".relhead{font-size:13px;font-weight:600;color:#dbe4f5;margin:10px 0 2px}"
+    ".relhead{font-size:13px;font-weight:600;color:#20252d;margin:10px 0 2px}"
     ".relnone{color:var(--muted);font-size:12px;padding:6px 0}"
+    ".side-caption{font-size:11px;color:var(--muted);margin:8px 14px}"
+    ".tgroup-title,.trow{width:100%;text-align:left;background:none;border:0;font-family:inherit}"
+    ".ws-tabs{background:var(--bg-secondary);flex-wrap:wrap}"
+    ".ws-tab{text-decoration:none;white-space:nowrap}"
+    ".ws-tab.active{background:var(--bg-primary);border-radius:6px 6px 0 0;font-weight:600}"
+    ".side,.right{min-width:0}.work{background:var(--bg-primary)}"
+    ".shell.shell-list{grid-template-columns:minmax(0,1fr)}"
+    ".shell.shell-list .work{grid-column:1}"
+    "@media(max-width:1100px){.shell.right-open,.shell.left-closed.right-open{"
+    "grid-template-columns:var(--ribbon-w) 0 minmax(0,1fr) var(--right-w)}"
+    ".shell.right-open .side{display:none}}"
+    "@media(max-width:767px){.shell,.shell.left-closed,.shell.right-open,"
+    ".shell.left-closed.right-open{grid-template-columns:var(--ribbon-w) minmax(0,1fr);"
+    "position:relative;height:calc(100dvh - var(--connect-header-height))}"
+    ".shell .work{grid-column:2;grid-row:1}.ribbon{grid-column:1;grid-row:1}"
+    ".shell .side{position:absolute;left:var(--ribbon-w);top:0;bottom:0;z-index:10;"
+    "width:min(var(--side-w),calc(100% - var(--ribbon-w)));box-shadow:6px 0 18px #20252d14}"
+    ".shell:not(.left-closed) .side{display:flex}"
+    ".shell.right-open .right{position:absolute;left:var(--ribbon-w);right:0;top:0;bottom:0;"
+    "z-index:11;border-left:0}.ws-tabs{gap:0;padding:6px 6px 0}"
+    ".ws-tab{padding:8px;font-size:12px}#mainList main{padding:20px 14px}"
+    "#mainGraph main{padding:16px 12px}.pcheat .cgrid{grid-template-columns:1fr}"
+    ".graphwrap .status{width:80%;text-align:center}.gpanel{max-width:calc(100% - 20px)}}"
 )
 
 
@@ -1677,13 +1728,13 @@ _SHELL_STYLE = (
 # モーダルは中央オーバーレイ・ポップオーバーは pointer-events:none のフロート。
 _POWER_STYLE = (
     ".pmodal{position:fixed;inset:0;z-index:50;display:flex;align-items:flex-start;"
-    "justify-content:center;background:rgba(6,9,16,.55);backdrop-filter:blur(2px);"
+    "justify-content:center;background:rgba(32,37,45,.24);backdrop-filter:blur(2px);"
     "opacity:0;transition:opacity .14s ease}"
     ".pmodal.show{opacity:1}"
     ".pmodal[hidden]{display:none}"
     ".pbox{margin-top:12vh;width:min(560px,92vw);background:var(--bg-elev);"
     "border:1px solid var(--border);border-radius:12px;overflow:hidden;"
-    "box-shadow:0 18px 50px rgba(0,0,0,.5);transform:translateY(-6px);"
+    "box-shadow:0 18px 50px rgba(32,37,45,.16);transform:translateY(-6px);"
     "transition:transform .14s ease}"
     ".pmodal.show .pbox{transform:translateY(0)}"
     ".pbox input{width:100%;box-sizing:border-box;background:none;border:0;"
@@ -1696,7 +1747,7 @@ _POWER_STYLE = (
     ".prow .pt{flex:1 1 auto;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}"
     ".prow .ps{color:var(--faint);font-size:11px;flex:0 0 auto;"
     "max-width:45%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}"
-    ".prow.sel{background:rgba(79,140,255,.18)}"
+    ".prow.sel{background:#e4ecf8}"
     ".prow:hover{background:var(--bg-hover)}"
     ".pempty{color:var(--muted);font-size:13px;padding:14px 16px}"
     ".phint{padding:7px 14px;border-top:1px solid var(--border);color:var(--faint);"
@@ -1705,16 +1756,16 @@ _POWER_STYLE = (
     # --- ホバーポップオーバー（リスト/グラフ共通）---
     ".phover{position:fixed;z-index:48;pointer-events:none;max-width:320px;"
     "background:var(--bg-elev);border:1px solid var(--border);border-radius:10px;"
-    "padding:10px 12px;box-shadow:0 8px 28px rgba(0,0,0,.45);font-size:12px;"
+    "padding:10px 12px;box-shadow:0 8px 28px rgba(32,37,45,.12);font-size:12px;"
     "color:var(--text);opacity:0;transition:opacity .14s ease}"
     ".phover.show{opacity:1}"
     ".phover[hidden]{display:none}"
-    ".phover .ht{font-weight:600;font-size:13px;color:#fff;margin-bottom:5px;"
+    ".phover .ht{font-weight:600;font-size:13px;color:var(--text);margin-bottom:5px;"
     "line-height:1.35}"
     ".phover .hpills{display:flex;flex-wrap:wrap;gap:4px;margin-bottom:6px}"
-    ".phover .hp{background:rgba(79,140,255,.16);color:#bcd4ff;border-radius:999px;"
+    ".phover .hp{background:#edf2fa;color:#234e89;border-radius:999px;"
     "padding:1px 8px;font-size:11px}"
-    ".phover .hx{color:#c5d0e6;line-height:1.6;margin-bottom:5px}"
+    ".phover .hx{color:#344054;line-height:1.6;margin-bottom:5px}"
     ".phover .hd{color:var(--faint);font-size:11px}"
     # --- ショートカット一覧オーバーレイ ---
     ".pcheat{max-width:520px}"
@@ -1724,8 +1775,8 @@ _POWER_STYLE = (
     "gap:12px;font-size:13px;color:var(--text)}"
     ".pcheat .crow kbd{background:var(--bg-secondary);border:1px solid var(--border);"
     "border-bottom-width:2px;border-radius:5px;padding:1px 7px;font-size:11px;"
-    "font-family:ui-monospace,Menlo,monospace;color:#cfe0ff}"
-    ".pcheat .chd{padding:14px 16px 4px;font-weight:600;color:#fff;font-size:15px}"
+    "font-family:ui-monospace,Menlo,monospace;color:#234e89}"
+    ".pcheat .chd{padding:14px 16px 4px;font-weight:600;color:var(--text);font-size:15px}"
     # --- アクセシビリティ: フォーカスリング ---
     ".prow:focus-visible,.pbox input:focus-visible,button:focus-visible,"
     "a:focus-visible{outline:2px solid var(--accent);outline-offset:2px}"
@@ -1742,8 +1793,9 @@ _POWER_STYLE = (
 # 「社内ナレッジグラフ」「id="cv"」はグラフルートテストが参照するので維持。
 _GRAPH_DOM = (
     "<main>"
-    "<h1>🕸 社内ナレッジグラフ</h1>"
-    '<p class="sub">社内ナレッジを業界・案件・取引先のつながりで俯瞰します。</p>'
+    "<h1>社内ナレッジグラフ</h1>"
+    '<p class="sub">資料をクリックすると、関連資料と出典を確認できます。'
+    "拡大すると資料名が見えます。</p>"
     '<div id="legend" class="legend"></div>'
     '<div class="graphwrap"><canvas id="cv"></canvas>'
     '<button id="gToggle" class="gtoggle" title="グラフ設定" '
@@ -1755,7 +1807,7 @@ _GRAPH_DOM = (
     "</div>"
     '<div id="ncard" class="ncard" hidden></div>'
     '<div id="tip" class="tip"></div>'
-    '<div id="status" class="status">読み込み中…</div></div>'
+    '<div id="status" class="status" role="status">読み込み中…</div></div>'
     '<p class="sub" style="margin-top:8px">'
     "クリックで近傍にフォーカス・ダブルクリック（または右クリック）で出典を開く。"
     "ドラッグで固定、Option+クリックで固定解除。</p>"
@@ -1776,8 +1828,8 @@ const gToggle=document.getElementById('gToggle');
 const fitBtn=document.getElementById('fitBtn');
 const resetBtn=document.getElementById('resetBtn');
 let searchEl=null,localChk=null;
-const PALETTE=['#4f8cff','#2dd4a7','#f0997b','#c084fc','#f7c14b',
-  '#ec6a9c','#7fd6a0','#6ea8fe','#e2725b','#9aa7bd'];
+const PALETTE=['#234e89','#24745c','#a44928','#8052a3','#896300',
+  '#a83e70','#387043','#356ca8','#a74c42','#626d7d'];
 let nodes=[],edges=[],adj=new Map();
 let view={x:0,y:0,scale:1};
 let target={x:0,y:0,scale:1};
@@ -1814,8 +1866,8 @@ const HUB_LABEL_SCALE=1.15,EDGE_MIN_SCALE=0.55;
 function effRepel(){
   return bigGraph?REPEL*(1+nodes.length/200):REPEL;
 }
-const REASON_COLORS={project:'rgba(127,214,160,.65)',client:'rgba(240,153,123,.6)',
-  industry:'rgba(110,168,254,.55)',concept:'rgba(189,147,249,.5)'};
+const REASON_COLORS={project:'#24745c',client:'#a44928',
+  industry:'#356ca8',concept:'#8052a3'};
 function safeUrl(u){return (typeof u==='string'&&/^(https?|slack|gdrive):/i.test(u))?u:null;}
 function colorOf(g){
   if(!groupColors.has(g))groupColors.set(g,PALETTE[groupColors.size%PALETTE.length]);
@@ -1952,15 +2004,15 @@ function draw(){
   const hl=emph?adj.get(emph.id):null;
   ctx.lineWidth=LINK_W/view.scale;ctx.lineCap='round';
   // エッジ de-haze: 大規模グラフはベースを薄く、ズームアウト時は地のエッジを省略して
-  // 「点だけ」にする（淡いエッジの重なりで暗いキャンバスが白っぽく霞むのを防ぐ）。
-  const baseEdge=bigGraph?'rgba(120,140,180,.05)':'rgba(120,140,180,.15)';
+  // 「点だけ」にする（エッジが重なって資料名を隠すのを防ぐ）。
+  const baseEdge=bigGraph?'rgba(91,108,130,.25)':'rgba(91,108,130,.5)';
   const drawBase=!bigGraph||view.scale>=EDGE_MIN_SCALE;
   for(const e of edges){
     if(!visible(e.s)||!visible(e.t))continue;
     const on=emph&&(e.s===emph||e.t===emph);
-    // フォーカス/ホバーの接続線は常に明るく上書き描画。地のエッジはズーム閾値で省略可。
+    // フォーカス/ホバーの接続線は常に青く上書き描画。地のエッジはズーム閾値で省略可。
     if(!on&&!drawBase)continue;
-    if(on)ctx.strokeStyle='rgba(127,214,160,.7)';
+    if(on)ctx.strokeStyle='#234e89';
     else if(colorEdges)ctx.strokeStyle=REASON_COLORS[e.kind]||baseEdge;
     else ctx.strokeStyle=baseEdge;
     ctx.beginPath();ctx.moveTo(e.s.x,e.s.y);ctx.lineTo(e.t.x,e.t.y);ctx.stroke();
@@ -1973,7 +2025,7 @@ function draw(){
     ctx.fillStyle=nodeColor(n);ctx.globalAlpha=dim?0.12:1;ctx.fill();
     if(n===emph){ctx.lineWidth=2/view.scale;ctx.strokeStyle='#fff';ctx.stroke();}
     if(n.pinned){ctx.lineWidth=1.5/view.scale;
-      ctx.strokeStyle='rgba(255,255,255,.55)';
+      ctx.strokeStyle='#234e89';
       ctx.beginPath();ctx.arc(n.x,n.y,r+2,0,6.2832);ctx.stroke();}
     ctx.globalAlpha=1;
   }
@@ -1987,26 +2039,26 @@ function draw(){
   const allLa=bigGraph?Math.max(0,Math.min(1,(view.scale-2.0)/1.0)):0;
   const smallLabels=!bigGraph&&la>0.02;
   if(emph||hubLabels||smallLabels||allLa>0.02){
-    ctx.font='11px sans-serif';ctx.fillStyle='#c5d0e6';
+    ctx.font='11px sans-serif';ctx.fillStyle='#344054';
     for(const n of nodes){
       if(!visible(n))continue;
       const near=emph&&(n===emph||(hl&&hl.has(n.id)));
-      let show=false,a=la;
-      if(near){show=true;a=1;}
+      let show=false;
+      if(near){show=true;}
       else if(emph){show=false;}
-      else if(smallLabels){show=true;a=la;}
+      else if(smallLabels){show=true;}
       else if(bigGraph){
-        if(hubLabels&&hubIds.has(n.id)){show=true;a=1;}
-        else if(allLa>0.02){show=true;a=allLa;}
+        if(hubLabels&&hubIds.has(n.id)){show=true;}
+        else if(allLa>0.02){show=true;}
       }
       if(!show)continue;
-      ctx.globalAlpha=a;
+      ctx.globalAlpha=1;
       ctx.fillText((n.title||'').slice(0,24),n.x+n.r+3,n.y+3);
     }
     ctx.globalAlpha=1;
   }
   if(emph&&view.scale>0.9){
-    ctx.font='10px sans-serif';ctx.fillStyle='rgba(197,208,230,.7)';
+    ctx.font='10px sans-serif';ctx.fillStyle='#5b6470';
     for(const e of edges){
       if((e.s!==emph&&e.t!==emph)||!visible(e.s)||!visible(e.t))continue;
       if(e.reason)ctx.fillText(e.reason,(e.s.x+e.t.x)/2,(e.s.y+e.t.y)/2);
@@ -2052,12 +2104,13 @@ async function load(){
   try{
     const resp=await fetch('/api/v1/graph');
     if(resp.status===401){location.href='/search/login';return;}
+    if(!resp.ok)throw new Error('request_failed');
     data=await resp.json();
   }catch(e){statusEl.classList.remove('loading');
-    statusEl.textContent='グラフの取得に失敗しました。';return;}
+    statusEl.textContent='グラフの取得に失敗しました。ページを再読み込みしてください。';return;}
   statusEl.classList.remove('loading');
   const ns=(data.nodes||[]);
-  if(!ns.length){statusEl.textContent='表示できる社内ナレッジがありません（再取込後に分類タグが付きます）。';return;}
+  if(!ns.length){statusEl.textContent='表示できる関連資料はありません。検索や資料一覧から探してください。';return;}
   statusEl.style.display='none';
   resize();
   const cx=W()/2,cy=H()/2;
@@ -2232,7 +2285,7 @@ function buildPanel(){
     .filter(Boolean))).sort();
   if(srcs.length){
     const h=document.createElement('div');h.className='grow';
-    h.textContent='出典';h.style.color='#8fa3c6';f.body.appendChild(h);
+    h.textContent='出典';h.style.color='#5b6470';f.body.appendChild(h);
     for(const s of srcs){
       mkCheck(f.body,s,!hideSources.has(s),function(v){
         if(v)hideSources.delete(s);else hideSources.add(s);
@@ -2244,7 +2297,7 @@ function buildPanel(){
     .filter(Boolean))).sort();
   if(dts.length){
     const h=document.createElement('div');h.className='grow';
-    h.textContent='資料タイプ';h.style.color='#8fa3c6';f.body.appendChild(h);
+    h.textContent='資料タイプ';h.style.color='#5b6470';f.body.appendChild(h);
     for(const d of dts){
       mkCheck(f.body,d,!hideTypes.has(d),function(v){
         if(v)hideTypes.delete(d);else hideTypes.add(d);
@@ -2485,17 +2538,22 @@ const rightPanel=document.getElementById('rightPanel');
 const LS='ta_shell_v1';
 let st={mode:'list',leftOpen:true,rightOpen:false};
 try{const raw=localStorage.getItem(LS);if(raw)st=Object.assign(st,JSON.parse(raw));}catch(e){}
-let currentMode=st.mode==='graph'?'graph':'list';
+let currentMode=mainGraph.hidden?'list':'graph';
+if(window.innerWidth<=767)st.leftOpen=false;
+st.rightOpen=false;
 let graphStarted=false;
 function persist(){try{localStorage.setItem(LS,JSON.stringify(
   {mode:currentMode,leftOpen:st.leftOpen,rightOpen:st.rightOpen}));}catch(e){}}
 function applyLeft(){
+  leftToggle.setAttribute('aria-expanded',String(st.leftOpen));
   if(st.leftOpen)shell.classList.remove('left-closed');
   else shell.classList.add('left-closed');
 }
 function setMode(m){
   currentMode=(m==='graph')?'graph':'list';
   const g=currentMode==='graph';
+  tabGraph.setAttribute('aria-pressed',String(g));
+  tabList.setAttribute('aria-pressed',String(!g));
   mainGraph.hidden=!g;mainList.hidden=g;
   ribGraph.classList.toggle('active',g);ribList.classList.toggle('active',!g);
   tabGraph.classList.toggle('active',g);tabList.classList.toggle('active',!g);
@@ -2583,7 +2641,8 @@ function buildTagExplorer(){
     const grp=document.createElement('div');grp.className='tgrp';
     const collapsed=tagGroupCollapsed(key);
     if(collapsed)grp.classList.add('collapsed');
-    const h=document.createElement('h4');
+    const h=document.createElement('button');h.type='button';h.className='tgroup-title';
+    h.setAttribute('aria-expanded',String(!collapsed));
     const ht=document.createElement('span');ht.textContent=label;
     const cv=document.createElement('span');cv.className='cv';
     cv.textContent=collapsed?'▸':'▾';
@@ -2591,6 +2650,7 @@ function buildTagExplorer(){
     h.addEventListener('click',function(){
       grp.classList.toggle('collapsed');
       cv.textContent=grp.classList.contains('collapsed')?'▸':'▾';
+      h.setAttribute('aria-expanded',String(!grp.classList.contains('collapsed')));
     });
     grp.appendChild(h);
     const body=document.createElement('div');body.className='tbody';
@@ -2599,12 +2659,12 @@ function buildTagExplorer(){
     }).sort(function(a,b){return b.count-a.count;});
     if(!rows.length){
       const e=document.createElement('div');e.className='tempty';
-      e.textContent='タグ未付与（再取込待ち）';body.appendChild(e);
+      e.textContent='この分類の資料はありません';body.appendChild(e);
     }
     const famKind=key==='industry'?'industry':
       (key==='doc_type'?'doc_type':(key==='client_name'?'client':'source_type'));
     for(const row of rows.slice(0,40)){
-      const r=document.createElement('div');r.className='trow';
+      const r=document.createElement('button');r.type='button';r.className='trow';
       if(activeTag&&activeTag.fam===famKind&&activeTag.value===row.value){
         r.classList.add('on');
       }
@@ -2638,8 +2698,9 @@ async function loadGraphData(){
   try{
     const resp=await fetch('/api/v1/graph');
     if(resp.status===401){location.href='/search/login';return;}
+    if(!resp.ok)throw new Error('request_failed');
     data=await resp.json();
-  }catch(e){return;}
+  }catch(e){tagexp.textContent='分類を取得できませんでした。再読み込みしてください。';return;}
   GNODES=data.nodes||[];GEDGES=data.edges||[];
   buildAdjacency();buildTagExplorer();
   // パワー機能（スイッチャー/ホバー）が読む共有キャッシュ。再 fetch しない。
@@ -2769,8 +2830,6 @@ window.__shellApi={
 };
 
 applyLeft();setMode(currentMode);
-// 永続化された右パネル状態を復元（中身は空でも開いた骨格を出す）。
-if(st.rightOpen)shell.classList.add('right-open');
 loadGraphData();
 """
 
@@ -2937,7 +2996,7 @@ function sApi(){return window.__shellApi;}
 function commandList(){
   var cmds=[
     ['グラフ表示',function(){if(sApi())sApi().setMode('graph');}],
-    ['ノート表示',function(){if(sApi())sApi().setMode('list');}],
+    ['資料を検索',function(){if(sApi())sApi().setMode('list');}],
     ['全体表示 (zoom-to-fit)',function(){if(gApi())gApi().zoomToFit();}],
     ['ビューをリセット',function(){if(gApi())gApi().resetView();}],
     ['左サイドバー開閉',function(){if(sApi())sApi().toggleLeft();}],
@@ -2979,7 +3038,7 @@ function openCheat(){
   hd.textContent='キーボードショートカット';box.appendChild(hd);
   var grid=document.createElement('div');grid.className='cgrid';
   var rows=[
-    ['g','グラフ表示'],['l','ノート表示'],
+    ['g','グラフ表示'],['l','資料を検索'],
     ['f','全体表示'],['r','ビューをリセット'],
     ['/','検索にフォーカス'],['Esc','閉じる/解除'],
     [mod+'+O','クイックスイッチャー'],[mod+'+P','コマンドパレット'],
@@ -3149,7 +3208,7 @@ function runWithOperators(raw){
 // サイドバー検索ボックスの Enter をオペレータ対応に差し替える（capture で先取り）。
 var sideSearchEl=document.getElementById('sideSearch');
 if(sideSearchEl){
-  sideSearchEl.placeholder='検索  tag: source: client: type: industry:';
+  sideSearchEl.placeholder='資料名・取引先名で検索';
   sideSearchEl.addEventListener('keydown',function(e){
     if(e.key!=='Enter')return;
     var v=sideSearchEl.value.trim();if(!v)return;
@@ -3165,7 +3224,7 @@ function maybeOps(){
   return false;
 }
 if(qBox){
-  qBox.placeholder='例: 保存率訴求  /  tag:食品 source:gdrive 保存率';
+  qBox.placeholder='例: 飲料メーカー向けの提案、先週の議事録';
   qBox.addEventListener('keydown',function(e){
     if(e.key==='Enter'&&maybeOps()){e.preventDefault();e.stopPropagation();}
   },true);
@@ -3266,7 +3325,7 @@ def _shell_page(email: str, *, mode: str, list_content: str | None = None) -> st
         return (
             head
             + render_header(email, current_path="/search")
-            + '<div id="shell" class="shell" style="grid-template-columns:1fr">'
+            + '<div id="shell" class="shell shell-list">'
             + '<section class="work"><nav class="ws-tabs" aria-label="ナレッジ表示">'
             + list_tabs(mode)
             + '</nav><div class="ws-body">'
@@ -3277,29 +3336,30 @@ def _shell_page(email: str, *, mode: str, list_content: str | None = None) -> st
         '<nav class="ribbon">'
         '<button id="leftToggle" class="rib" title="サイドバー開閉" '
         'aria-label="サイドバー開閉">' + icon_chev + "</button>"
-        '<button id="ribList" class="rib' + list_active + '" title="ノート" '
-        'aria-label="ノート">' + icon_list + "</button>"
-        '<button id="ribGraph" class="rib' + graph_active + '" title="グラフ" '
-        'aria-label="グラフ">' + icon_graph + "</button>"
+        '<button id="ribList" class="rib' + list_active + '" title="資料を検索" '
+        'aria-label="資料を検索">' + icon_list + "</button>"
+        '<button id="ribGraph" class="rib' + graph_active + '" title="関係図" '
+        'aria-label="関係図">' + icon_graph + "</button>"
         '<span class="ribspace"></span>'
         '<span id="ribMail" class="ribmail"></span></nav>'
     )
     sidebar = (
         '<aside class="side">'
         '<div class="side-search">'
-        '<input id="sideSearch" type="search" '
+        '<input id="sideSearch" type="search" aria-label="社内ナレッジを検索" '
         'placeholder="社内ナレッジを検索…"></div>'
-        '<div id="tagexp" class="tagexp"></div></aside>'
+        '<p class="side-caption">分類から探す · 関係図内の資料数</p>'
+        '<div id="tagexp" class="tagexp" aria-live="polite">読み込み中…</div></aside>'
     )
     work = (
         '<section class="work">'
-        '<div class="ws-tabs">'
-        '<button id="tabList" class="ws-tab' + list_active + '">ノート</button>'
-        '<button id="tabGraph" class="ws-tab' + graph_active + '">グラフ</button>'
+        '<nav class="ws-tabs" aria-label="ナレッジ表示">'
+        '<button id="tabList" class="ws-tab' + list_active + '">検索</button>'
+        '<button id="tabGraph" class="ws-tab' + graph_active + '">関係図</button>'
         '<a class="ws-tab" href="/search?view=clients&amp;page=1">取引先一覧</a>'
         '<a class="ws-tab" href="/search?view=docs&amp;page=1">資料一覧</a>'
         '<a class="ws-tab" href="/search?view=tags">タグ</a>'
-        "</div>"
+        "</nav>"
         '<div class="ws-body">'
         '<div id="mainList"' + list_hidden + ">" + _SEARCH_DOM + "</div>"
         '<div id="mainGraph"' + graph_hidden + ">" + _GRAPH_DOM + "</div>"
@@ -3341,8 +3401,10 @@ _KARTE_STYLE = (
     ".ksec{font-size:14px;color:var(--text);font-weight:600;margin:24px 0 10px}"
     ".kdate{color:var(--muted);font-size:12px;margin-right:8px;"
     "font-variant-numeric:tabular-nums}"
-    ".kv{font-size:12.5px;color:#c5d0e6;margin:3px 0;line-height:1.6}"
+    ".kv{font-size:12.5px;color:#344054;margin:3px 0;line-height:1.6}"
     ".kvl{color:var(--muted);margin-right:6px}"
+    ".kv{display:grid;grid-template-columns:90px minmax(0,1fr);gap:8px;padding:6px 0}"
+    ".ksec{padding-top:16px;border-top:1px solid var(--border)}"
 )
 
 
@@ -3484,24 +3546,27 @@ loadKarte();
 """
 
 
-def _karte_page(client: str) -> str:
+def _karte_page(client: str, email: str) -> str:
     """クライアントカルテの HTML を組む（_shell_page と同じ Python 文字列連結流儀）。
 
     動的値の差し込みは HTML 側 html.escape / JS 側 _js_str の二流儀のみ（XSS 防御）。
     データは /api/v1/client/{client} から fetch し、DOM は textContent だけで組む。
     """
     client_e = html.escape(client)
-    style = _ROOT_TOKENS + _SEARCH_STYLE + _KARTE_STYLE
+    style = _ROOT_TOKENS + _SEARCH_STYLE + _KARTE_STYLE + PORTAL_STYLE
     return (
         '<!doctype html><html lang="ja"><head><meta charset="utf-8">'
         '<meta name="viewport" content="width=device-width, initial-scale=1">'
-        f"<title>クライアントカルテ: {client_e}</title><style>" + style + "</style></head><body>"
-        "<main>"
+        f"<title>クライアントカルテ: {client_e}</title><style>"
+        + style
+        + "</style></head><body>"
+        + render_header(email, current_path="/search")
+        + "<main>"
         '<div class="toplinks"><a href="/search">← 検索に戻る</a>'
-        '<a href="/search/graph">グラフ</a></div>'
+        '<a href="/search?view=clients&amp;page=1">取引先一覧へ</a></div>'
         f"<h1>📇 クライアントカルテ: {client_e}</h1>"
-        '<p class="sub">営業FBの時系列と関連資料を 1 画面に集約します（AI要約は後続）。</p>'
-        '<div id="khead"><div class="empty">読み込み中…</div></div>'
+        '<p class="sub">商談の前に、最新の反応・次アクション・関連資料を確認できます。</p>'
+        '<div id="khead" aria-live="polite"><div class="empty">読み込み中…</div></div>'
         '<div id="ksecFb" class="ksec">📈 営業FB時系列（新しい順）</div>'
         '<div id="ktimeline"></div>'
         '<div id="ksecDocs" class="ksec">📎 関連資料</div>'
@@ -5256,7 +5321,7 @@ def create_app(
         name = client.strip()
         if not name:
             return RedirectResponse("/search", status_code=303)
-        return HTMLResponse(_karte_page(name))
+        return HTMLResponse(_karte_page(name, email))
 
     @app.get("/api/v1/client/{client:path}")
     def api_client_karte(client: str, request: Request) -> JSONResponse:

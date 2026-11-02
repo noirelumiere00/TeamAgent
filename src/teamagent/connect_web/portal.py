@@ -37,6 +37,13 @@ SITES = (
         "search",
     ),
     Site(
+        "clients",
+        "取引先の状況を確認",
+        "/search?view=clients&page=1",
+        "定例・商談の前に、最新の営業FB、次アクション、関連資料をカルテで確認します。",
+        "book",
+    ),
+    Site(
         "vault",
         "共有ナレッジを一覧",
         "/app",
@@ -104,7 +111,7 @@ font:16px/1.6 system-ui,-apple-system,BlinkMacSystemFont,"Hiragino Sans","Noto S
 .connect-header,.connect-header *,.connect-home,.connect-home *{box-sizing:border-box}
 .connect-header{height:var(--connect-header-height);background:#fff;
 border-bottom:1px solid var(--connect-line);position:relative;z-index:20}
-.connect-header-inner{max-width:1328px;height:100%;margin:auto;padding:0 24px;
+.connect-header-inner{max-width:1328px;width:100%;height:100%;margin:auto;padding:0 24px;
 display:flex;align-items:center;gap:24px}
 .connect-header a{color:inherit;text-decoration:none}
 .connect-header .connect-brand{font-size:20px;font-weight:800;letter-spacing:-.04em;
@@ -194,7 +201,7 @@ def render_header(email: str, *, current_path: str) -> str:
     return (
         '<header class="connect-header"><div class="connect-header-inner">'
         f'<a class="connect-brand" href="/"{home_current}>NewsTV Connect</a>'
-        '<details class="connect-switch"><summary>サイト切替</summary>'
+        '<details class="connect-switch"><summary>メニュー</summary>'
         f'<nav class="connect-menu" aria-label="サイト一覧">{links}</nav></details>'
         f'<span class="connect-email">{html.escape(email)}</span></div></header>'
     )
@@ -216,7 +223,7 @@ def render_home(email: str) -> str:
             'stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">'
             f"{_ICONS[site.icon]}</svg><h3>{html.escape(site.name)}</h3>"
             f"<p>{html.escape(site.description)}</p>"
-            '<span class="connect-card-action">サイトを開く <span aria-hidden="true">→</span>'
+            '<span class="connect-card-action">開く <span aria-hidden="true">→</span>'
             "</span></a>"
             for site in sites
             if ("admin" if site.permission != "all" else site.section) == key

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-import html
+from teamagent.connect_web.portal import PORTAL_STYLE, render_header
 
 _EXPAND_JS = r"""
 let graphData={nodes:[],edges:[]}, expanding=false;
@@ -61,7 +61,7 @@ def graph_page(email: str, ids: list[str]) -> str:
     )
     js = js.replace(
         "    if(n===emph){",
-        "    if(n.seed){ctx.lineWidth=3/view.scale;ctx.strokeStyle='#ffd166';ctx.stroke();}"
+        "    if(n.seed){ctx.lineWidth=3/view.scale;ctx.strokeStyle='#896300';ctx.stroke();}"
         "\n    if(n===emph){",
     )
     js = js.replace("  focusNode=n;flyTo(n);", "  expandNode(n);focusNode=n;flyTo(n);")
@@ -83,13 +83,19 @@ def graph_page(email: str, ids: list[str]) -> str:
     return (
         '<!doctype html><html lang="ja"><head><meta charset="utf-8">'
         '<meta name="viewport" content="width=device-width,initial-scale=1">'
-        "<title>Aico Vault 関係図</title><style>"
+        "<title>関連資料の関係図 | NewsTV Connect</title><style>"
         + _ROOT_TOKENS
         + _GRAPH_STYLE
-        + "</style></head><body><header>Aico Vault 関係図 — "
-        + html.escape(email)
-        + ' <a href="/search">検索に戻る</a></header>'
-        + _GRAPH_DOM
+        + PORTAL_STYLE
+        + "</style></head><body>"
+        + render_header(email, current_path="/search")
+        + _GRAPH_DOM.replace(
+            "<main>",
+            '<main><nav class="toplinks" aria-label="ナレッジ表示">'
+            '<a href="/search">検索に戻る</a> · '
+            '<a href="/search?view=docs">資料一覧へ</a></nav>',
+            1,
+        )
         + "<script>const SEEDS="
         + _js_str(",".join(ids))
         + ";"
