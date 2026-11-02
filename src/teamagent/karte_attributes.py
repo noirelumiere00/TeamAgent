@@ -6,14 +6,16 @@ import json
 import re
 import unicodedata
 from collections import Counter, defaultdict
-from datetime import date, datetime
+from datetime import date, datetime, timedelta, timezone
 from functools import lru_cache
 from pathlib import Path
 from typing import Any
-from zoneinfo import ZoneInfo
 
 from teamagent.client_identity import client_identity_key
 from teamagent.client_properties import identity_value_map, resolve_client_industry
+
+# 本番イメージに tzdata が無いので IANA 名ではなく固定オフセットで日本時間を表す。
+JST = timezone(timedelta(hours=9))
 
 CLIENT_QUICK_FILTERS = {
     "homework": "宿題あり",
@@ -174,7 +176,7 @@ def build_client_summaries(
     *,
     today: date | None = None,
 ) -> dict[str, dict[str, Any]]:
-    today = today or datetime.now(ZoneInfo("Asia/Tokyo")).date()
+    today = today or datetime.now(JST).date()
     aliases, _ = _references()
     groups: dict[str, dict[str, Any]] = {}
     for record in records:

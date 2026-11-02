@@ -19,7 +19,6 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
-from zoneinfo import ZoneInfo
 
 import psycopg
 import structlog
@@ -30,6 +29,7 @@ from teamagent.adapters.pg_pool import ConnectionPool, PoolStats
 from teamagent.client_identity import client_identity_key
 from teamagent.karte_attributes import (
     CLIENT_QUICK_FILTERS,
+    JST,
     build_client_summaries,
     client_attributes,
     matches_client_quick,
@@ -954,7 +954,7 @@ class PgVectorClient:
         summary = self._knowledge_client_summaries(conn).get(client_identity_key(client_name))
         if summary is not None:
             return summary
-        return client_attributes("", [], [], today=datetime.now(ZoneInfo("Asia/Tokyo")).date())
+        return client_attributes("", [], [], today=datetime.now(JST).date())
 
     def list_knowledge_clients(
         self,
