@@ -170,7 +170,7 @@ def test_listing_csp_escaping_copy_and_single_player(setup: tuple[TestClient, Pg
     assert "&lt;script&gt;" in response.text
     assert 'data-url="https://www.tiktok.com/@sample/video/123"' in response.text
     assert "input[data-url]:checked" in response.text
-    assert "active.remove()" in response.text and "mouseleave" in response.text
+    assert "active.remove()" in response.text and "mouseout" in response.text
     assert (
         'data-player="https://www.tiktok.com/player/v1/123?autoplay=1&amp;muted=1' in response.text
     )
@@ -220,8 +220,8 @@ def test_search_api_matches_listing_and_hides_s3_keys(
     assert "NOT v.is_private" in sql and "vl_videos_effective" in sql
     assert "OR true--" not in sql
     assert params[-2:] == [50, 50]
-    assert params[0] == "%案件' OR true--%"
-    assert params[4].isoformat() == "2026-10-31T00:00:00+09:00"
+    assert params[:3] == ["%案件'%", "%OR%", "%true--%"]
+    assert params[6].isoformat() == "2026-10-31T00:00:00+09:00"
 
 
 @pytest.mark.parametrize(

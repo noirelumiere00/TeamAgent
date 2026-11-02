@@ -6,6 +6,7 @@ import html
 import json
 import os
 import re
+import unicodedata
 from collections.abc import Callable, Mapping
 from datetime import date, datetime, timedelta, timezone
 from typing import Any
@@ -101,29 +102,46 @@ def _day(value: Any) -> str:
     return value.astimezone(JST).strftime("%Y-%m-%d") if isinstance(value, datetime) else "不明"
 
 
+def parse_search(params: Mapping[str, str]) -> tuple[list[str], bool | None]:
+    """Share word/hashtag interpretation between SQL, filters and result labels."""
+    query = params.get("q", "").strip()
+    normalized = unicodedata.normalize("NFKC", query)
+    if max(len(query), len(normalized)) > 500:
+        raise HTTPException(400, "検索語が長すぎます")
+    words = normalized.split()
+    if len(words) > 10:
+        raise HTTPException(400, "検索語は10語以内で指定してください")
+    pr = params.get("pr", "")
+    if pr not in {"", "yes", "no"}:
+        raise HTTPException(400, "PR指定が不正です")
+    is_pr = (pr == "yes") if pr else None
+    terms = []
+    for word in words:
+        if word.casefold() == "#pr":
+            is_pr = True
+        elif term := word.lstrip("#"):
+            terms.append(term)
+    return terms, is_pr
+
+
 def _where(params: Mapping[str, str], admin: bool) -> tuple[str, list[Any], int, str]:
     clauses = [] if admin else ["NOT v.is_private"]
     values: list[Any] = []
-    query = params.get("q", "").strip()
-    if len(query) > 500:
-        raise HTTPException(400, "検索語が長すぎます")
-    if query:
+    terms, is_pr = parse_search(params)
+    for term in terms:
         clauses.append("""concat_ws(' ', v.caption, array_to_string(v.hashtags, ' '),
             v.account_name, v.account_handle, v.advertiser, v.campaign,
             v.industry, v.purpose) ILIKE %s""")
-        values.append("%" + query + "%")
+        values.append("%" + term + "%")
     category = params.get("category", "")
     if category == "unset":
         clauses.append("v.business_category IS NULL")
     elif category:
         clauses.append("v.business_category = %s")
         values.append(category)
-    pr = params.get("pr", "")
-    if pr:
-        if pr not in {"yes", "no"}:
-            raise HTTPException(400, "PR指定が不正です")
+    if is_pr is not None:
         clauses.append("v.is_pr = %s")
-        values.append(pr == "yes")
+        values.append(is_pr)
     for param, operator in (("from", ">="), ("to", "<")):
         if params.get(param):
             try:
@@ -247,10 +265,10 @@ def _page(
         '<svg width="22" height="22" viewBox="0 0 24 24" fill="none" aria-hidden="true">'
         '<circle cx="10" cy="10" r="6" stroke="currentColor" stroke-width="2"/>'
         '<path d="m15 15 6 6" stroke="currentColor" stroke-width="2"/></svg></summary>'
-        '<form action="/library/cases" role="search"><label class="sr-only" '
-        'for="header-query">事例を検索</label>'
+        '<form action="/library/videos" role="search"><label class="sr-only" '
+        'for="header-query">事例・動画を検索</label>'
         f'<input id="header-query" type="search" name="q" value="{_e(params.get("q", ""))}" '
-        'placeholder="事例・キーワードを検索"><button type="submit">検索</button></form></details>'
+        'placeholder="企業名・キーワード #PR"><button type="submit">検索</button></form></details>'
     )
     category = params.get("category", "")
     return (
@@ -326,29 +344,85 @@ def _select(name: str, options: list[tuple[str, str]], value: str | None = "") -
     )
 
 
-def _listing(data: dict[str, Any], params: Mapping[str, str]) -> str:
+def _search_summary(params: Mapping[str, str], total: int, *, catalog: bool = False) -> str:
+    if not params.get("q", "").strip() and not params.get("pr"):
+        return ""
+    terms, is_pr = parse_search(params)
+    subject = "事例" if catalog else "動画"
+    if is_pr is not None:
+        subject = ("PR投稿" if is_pr else "PRなしの投稿") + ("を含む事例" if catalog else "")
+    query = f"「{_e(' / '.join(terms))}」に一致する" if terms else ""
+    body = f'<p class="search-summary">{query}{subject} {total:,}件'
+    body += "（すべての語を含む）" if len(terms) > 1 else ""
+    body += "</p>"
+    if total == 0:
+        body += (
+            '<p class="empty">一致する結果がありません。'
+            "検索する語を減らすか、別の語をお試しください。"
+        )
+        if is_pr is True:
+            body += "#PR を外す・PRの絞り込みを解除すると、PR以外の投稿も探せます。"
+        body += "</p>"
+    return body
+
+
+def _listing(
+    data: dict[str, Any], params: Mapping[str, str], cases: list[Any] | None = None
+) -> str:
     filters = _filters(params, catalog=False)
+    if cases:
+        filters += '<section class="archive-section" aria-labelledby="matching-cases">'
+        filters += '<h2 id="matching-cases">一致した事例</h2><div class="grid campaign-grid">'
+        filters += "".join(_campaign_card(row) for row in cases[:4]) + "</div></section>"
+    if params.get("q", "").strip():
+        filters += "<h2>一致した動画</h2>"
+    filters += _search_summary(params, data["total"])
     filters += (
         "<p class=muted>再生・保存率・ENG率と並び順は総計の最新数値です。"
         "カードは丸めた再生数を表示します。正確な数値・保存率は動画詳細で確認できます。</p>"
     )
     cards = [_video_card(row, selectable=True) for row in data["videos"]]
-    pagination = []
-    for page, label in ((data["page"] - 1, "前へ"), (data["page"] + 1, "次へ")):
-        if page >= 1 and (page - 1) * PAGE_SIZE < data["total"]:
-            pagination.append(
-                f'<a href="/library/videos?{_e(urlencode({**params, "page": page}))}">{label}</a>'
-            )
     return (
         filters
         + f"<p>{data['total']:,}件 · {data['page']:,}ページ</p>"
         + '<button id="copy" type="button">選択したURLをコピー</button>'
         + '<p id="copy-status" role="status"></p><h2 class="sr-only">検索結果の動画</h2>'
-        + '<div class="grid video-grid">'
+        + _paged_cards(
+            cards,
+            total=data["total"],
+            number=data["page"],
+            size=PAGE_SIZE,
+            path="/library/videos",
+            params=params,
+            layout="video-grid",
+        )
+    )
+
+
+def _paged_cards(
+    cards: list[str],
+    *,
+    total: int,
+    number: int,
+    size: int,
+    path: str,
+    params: Mapping[str, str],
+    layout: str,
+) -> str:
+    links = []
+    for n, label, relation in ((number - 1, "前へ", "prev"), (number + 1, "次へ", "next")):
+        if 1 <= n <= 1_000_000 and (n - 1) * size < total:
+            url = path + "?" + urlencode({**params, "page": n})
+            links.append(f'<a rel="{relation}" href="{_e(url)}">{label}</a>')
+    return (
+        f'<div data-autoload data-total="{total}"><div class="grid {layout}" data-items>'
         + "".join(cards)
-        + "</div><p>"
-        + " · ".join(pagination)
-        + "</p>"
+        + '</div><nav class="pagination" aria-label="ページ送り">'
+        + "".join(links)
+        + "</nav>"
+        + '<p data-load-status role="status" aria-live="polite">'
+        + f"{len(cards):,}件表示（全{total:,}件）</p>"
+        + '<button type="button" data-load-more hidden>さらに読み込む</button></div>'
     )
 
 
@@ -401,14 +475,17 @@ def _cover(row: Mapping[str, Any]) -> str:
     account = str(
         row.get("account_name") or row.get("account_handle") or row.get("advertiser") or "V"
     )
+    has_thumbnail = bool(row.get("has_thumbnail") or row.get("thumbnail_s3_key"))
+    # Under a loaded thumbnail the placeholder is only decoration; keep it out of screen readers.
+    hidden = ' aria-hidden="true"' if has_thumbnail else ""
     body = (
-        f'<span class="placeholder" '
+        f'<span class="placeholder"{hidden} '
         f'data-category="{_e(row.get("business_category"))}"><strong>'
         f"{_e(account[0].upper())}</strong>"
         f'<span class="placeholder-account" title="{_e(account)}">{_e(account)}</span>'
         "<small>サムネ準備中</small></span>"
     )
-    if row.get("has_thumbnail") or row.get("thumbnail_s3_key"):
+    if has_thumbnail:
         path = "/".join(quote(str(row[key]), safe="") for key in ("platform", "video_id"))
         body += (
             f'<img loading="lazy" src="/library/thumb/{path}" alt="{_e(account)}の動画サムネイル">'
@@ -488,6 +565,8 @@ def _filters(
     *,
     catalog: bool,
 ) -> str:
+    _, is_pr = parse_search(params)
+    params = {**params, "pr": "" if is_pr is None else "yes" if is_pr else "no"}
     base = "/library/cases" if catalog else "/library/videos"
     sorts = (
         [("plays", "合計再生順"), ("new", "新着順"), ("count", "本数順")]
@@ -526,11 +605,12 @@ def _filters(
     body += '<button type="submit">適用</button></div><div class="filter-row">'
     body += '<button type="button" disabled>構成・フックで探す（近日公開）</button>'
     body += f'<a href="{base}">条件をクリア</a></div></div></details>'
-    active = [
-        params[key]
-        for key in ("pr", "industry", "purpose", "tag", "account", "from", "to")
-        if params.get(key)
+    labels = {"industry": "業種", "purpose": "目的", "tag": "タグ", "account": "アカウント",
+              "from": "開始", "to": "終了"}  # fmt: skip
+    active = [{"yes": "PR投稿のみ", "no": "PR以外"}.get(params.get("pr", ""), "")] + [
+        f"{labels[key]}: {params[key]}" for key in labels if params.get(key)
     ]
+    active = [item for item in active if item]
     if active:
         body += '<p class="active-filters">絞り込み中: ' + _e(" / ".join(active)) + "</p>"
     return body + "</form>"
@@ -892,14 +972,19 @@ def register_library_routes(
         visible = cases[(number - 1) * size : number * size]
         body = _filters(params, catalog=True)
         body += f'<p class="result-count">{len(cases):,}件の事例 · {number:,}ページ</p>'
-        body += '<div class="grid campaign-grid">' + "".join(_campaign_card(r) for r in visible)
-        body += "</div>" if visible else '</div><p class="empty">条件に合う事例がありません。</p>'
-        body += '<nav class="pagination" aria-label="ページ送り">'
-        for n, label in ((number - 1, "前へ"), (number + 1, "次へ")):
-            if 1 <= n and (n - 1) * size < len(cases):
-                url = "/library/cases?" + urlencode({**params, "page": n})
-                body += f'<a href="{_e(url)}">{label}</a>'
-        body += '</nav><p><a href="/library/videos?category=organic&unassigned=yes">'
+        body += _search_summary(params, len(cases), catalog=True)
+        body += _paged_cards(
+            [_campaign_card(r) for r in visible],
+            total=len(cases),
+            number=number,
+            size=size,
+            path="/library/cases",
+            params=params,
+            layout="campaign-grid",
+        )
+        if not visible:
+            body += '<p class="empty">条件に合う事例がありません。</p>'
+        body += '<p><a href="/library/videos?category=organic&unassigned=yes">'
         body += "案件に紐づかないオーガニック投稿を見る →</a></p>"
         return page("事例一覧", body, email, params=params)
 
@@ -908,12 +993,14 @@ def register_library_routes(
         params = {key: request.query_params.get(key, "") for key in ("advertiser", "campaign")}
         if not all(params.values()):
             raise HTTPException(400, "広告主と案件を指定してください")
+        where, values, number, _ = _where(
+            {**params, "page": request.query_params.get("page", "1")}, is_admin(email)
+        )
         with connection(email) as conn:
             cases = search_campaigns(conn, params, admin=is_admin(email))
             if not cases:
                 raise HTTPException(404)
-            where, values, _, _ = _where(params, is_admin(email))
-            # An entire case is needed for both the video grid and one-click copy.
+            # Keep the entire case for one-click copy; only the visible grid is paginated.
             sql = f"SELECT v.*, {_METRIC_SELECT} FROM vl_videos_effective v {_METRICS_JOIN} WHERE {where} ORDER BY m.total_plays DESC NULLS LAST, v.platform, v.video_id"  # noqa: E501  # nosec B608
             videos = list(conn.execute(sql, values).fetchall())
         case = cases[0]
@@ -952,20 +1039,32 @@ def register_library_routes(
             f'<pre id="campaign-urls" hidden>{_e(urls)}</pre><div '
             f'class="section-heading"><h2>この事例の動画</h2><p>再生の多い順</p></div>'
         )
-        body += (
-            '<div class="grid video-grid">'
-            + "".join(_video_card(row, in_campaign=True) for row in videos)
-            + "</div>"
+        body += _paged_cards(
+            [
+                _video_card(row, in_campaign=True)
+                for row in videos[(number - 1) * PAGE_SIZE : number * PAGE_SIZE]
+            ],
+            total=len(videos),
+            number=number,
+            size=PAGE_SIZE,
+            path="/library/c",
+            params=request.query_params,
+            layout="video-grid",
         )
         return page(str(case["campaign"]), body, email, hero=True)
 
     @router.get("/videos")
     def listing(request: Request, email: str = Depends(identity)) -> Response:
+        cases = []
         with connection(email) as conn:
             data = search_videos(conn, request.query_params, admin=is_admin(email))
+            if request.query_params.get("q", "").strip() and data["page"] == 1:
+                cases = search_campaigns(
+                    conn, {**request.query_params, "sort": "plays"}, admin=is_admin(email)
+                )
         return page(
             "動画一覧",
-            _listing(data, request.query_params),
+            _listing(data, request.query_params, cases),
             email,
             "videos",
             params=request.query_params,

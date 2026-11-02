@@ -1,6 +1,9 @@
 """Self-contained library styles and behavior, nonced by the existing HTML renderer."""
 
 STYLE = """
+[data-autoload] [hidden]{display:none!important}
+[data-load-status]{font-size:13px;color:var(--muted);margin:20px 0 12px}
+[data-load-more]{display:block;margin:0 auto 24px}
 :root{color-scheme:light;--ink:#20252d;--muted:#5b6470;--blue:#234e89;--line:#e3e6eb}
 *{box-sizing:border-box}body{margin:0;background:#fff;color:var(--ink);font:16px/1.6
 system-ui,-apple-system,BlinkMacSystemFont,"Hiragino Sans","Noto Sans JP","Yu Gothic UI",sans-serif}
@@ -245,18 +248,26 @@ document.querySelectorAll('.header-search').forEach(details=>{
  function resize(){details.open=desktop.matches;}
  resize();desktop.addEventListener('change',resize);
 });
-document.querySelectorAll('.preview img').forEach(img=>{
- img.addEventListener('error',()=>img.remove());
+document.addEventListener('error',event=>{
+ if(event.target.matches('.preview img'))event.target.remove();
+},true);
+function removeBrokenImages(root){root.querySelectorAll('.preview img').forEach(img=>{
  if(img.complete&&img.naturalWidth===0)img.remove();
-});
+});}
+removeBrokenImages(document);
 let active=null;
 function clearPlayer(){if(active){active.remove();active=null;}}
 function play(card){clearPlayer();active=document.createElement('iframe');
  active.src=card.dataset.player;active.title='TikTok プレビュー';
  active.allow='autoplay; encrypted-media';card.appendChild(active);}
-document.querySelectorAll('.preview[data-player]').forEach(card=>{
- card.addEventListener('mouseenter',()=>{if(!card.classList.contains('detail-player'))play(card);});
- card.addEventListener('mouseleave',()=>{if(!card.classList.contains('detail-player'))clearPlayer();});
+document.addEventListener('mouseover',event=>{
+ const card=event.target.closest('.preview[data-player]');
+ if(card&&!card.classList.contains('detail-player')&&!card.contains(event.relatedTarget))play(card);
+});
+document.addEventListener('mouseout',event=>{
+ const card=event.target.closest('.preview[data-player]');
+ if(card&&!card.classList.contains('detail-player')&&!card.contains(event.relatedTarget)
+    &&card.contains(active))clearPlayer();
 });
 document.querySelectorAll('[data-play]').forEach(button=>{
  button.addEventListener('click',()=>play(document.getElementById(button.dataset.play)));
@@ -284,4 +295,58 @@ document.querySelectorAll('[data-segment]').forEach(button=>{
  });}
  button.addEventListener('click',reveal);button.addEventListener('focus',reveal);
 });
+document.querySelectorAll('[data-autoload]').forEach(root=>{
+ const grid=root.querySelector('[data-items]'),more=root.querySelector('[data-load-more]');
+ const status=root.querySelector('[data-load-status]'),nav=root.querySelector('.pagination');
+ const link=root.querySelector('a[rel="next"]'),previous=root.querySelector('a[rel="prev"]');
+ let next=link?link.getAttribute('href'):null,busy=false,failed=false,observer=null;
+ const total=Number(root.dataset.total),format=n=>n.toLocaleString('ja-JP');
+ function progress(){
+  const count=grid.children.length;
+  status.textContent=!next&&count===total?'すべて表示しました（'+format(total)+'件）':
+   format(count)+'件表示（全'+format(total)+'件）'+(!next?'・この先はありません':'');
+  more.hidden=!next;more.textContent='さらに読み込む';
+  if(!next&&observer)observer.disconnect();
+ }
+ function pageURL(raw){
+  const url=new URL(raw,window.location.href);
+  if(url.origin!==window.location.origin||url.pathname!==window.location.pathname)
+   throw Error('Invalid next page');
+  return url.href;
+ }
+ async function load(){
+  if(busy||!next)return;
+  busy=true;failed=false;more.disabled=true;root.setAttribute('aria-busy','true');
+  status.textContent='読み込み中…';
+  try{
+   const url=pageURL(next);
+   const response=await fetch(url,{credentials:'same-origin',mode:'same-origin',redirect:'error'});
+   if(!response.ok)throw Error('Page unavailable');
+   const parsed=new DOMParser().parseFromString(await response.text(),'text/html');
+   const page=parsed.querySelector('[data-autoload]');
+   const items=page?.querySelectorAll('[data-items] > .card');
+   if(!items||!items.length)throw Error('Missing cards');
+   const following=page.querySelector('a[rel="next"]')?.getAttribute('href')||null;
+   if(following&&pageURL(following)===url)throw Error('Repeated next page');
+   grid.append(...Array.from(items,card=>document.importNode(card,true)));
+   next=following;
+   if(next)link.setAttribute('href',next);
+   link.hidden=true;nav.hidden=!previous;removeBrokenImages(grid);progress();
+  }catch(error){
+   failed=true;status.textContent='読み込めませんでした。再試行するか、次ページを開いてください。';
+   more.textContent='再試行';nav.hidden=false;link.hidden=false;
+  }finally{
+   busy=false;more.disabled=false;root.setAttribute('aria-busy','false');
+  }
+ }
+ more.addEventListener('click',load);
+ if(link)link.hidden=true;nav.hidden=!previous;progress();
+ if(next&&'IntersectionObserver' in window){
+  observer=new IntersectionObserver(entries=>{
+   if(!failed&&entries.some(entry=>entry.isIntersecting))load();
+  },{rootMargin:'400px'});
+  observer.observe(more);
+ }
+});
+
 """
