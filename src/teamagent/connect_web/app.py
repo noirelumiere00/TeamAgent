@@ -29,6 +29,7 @@ from collections.abc import Callable
 from functools import lru_cache
 from pathlib import Path
 from typing import Any
+from urllib.parse import parse_qs, quote
 
 import structlog
 from fastapi import FastAPI, HTTPException, Request
@@ -65,6 +66,13 @@ from teamagent.connect_diagnostics import (
     format_diag_line,
     mask_email,
     now_jst,
+)
+from teamagent.connect_web.knowledge_lists import (
+    LIST_STYLE,
+    PAGE_SIZE,
+    list_tabs,
+    render_list,
+    search_list_target,
 )
 from teamagent.connect_web.library import library_target, register_library_routes
 from teamagent.connect_web.portal import PORTAL_STYLE, render_header, render_home
@@ -668,12 +676,14 @@ def _resolve_app_html() -> dict[str, Any]:
 def _safe_next(raw: str | None) -> str:
     """ログイン後の戻り先を検証（オープンリダイレクト防止）。
 
-    既知の内部ページと検証済みの ``/library`` 配下のみ許可し、
+    既知の内部ページ・一覧 query と検証済みの ``/library`` 配下のみ許可し、
     それ以外は既定 ``/app``。
     ＝ログイン後は原則 Obsidian 風 UI(/app) に着地する（旧 /search UI は明示遷移時のみ）。
     外部 URL・``//host``・スキーム付き等は一切通さない（ホワイトリスト方式）。
     """
     candidate = (raw or "").strip()
+    if target := search_list_target(raw or ""):
+        return target
     if library_target(candidate) is not None:
         return candidate
     if candidate in {"/", "/app", "/search", "/admin", "/app/history", "/admin/history"}:
@@ -3198,7 +3208,7 @@ window.__powerReady=function(){
 """
 
 
-def _shell_page(email: str, *, mode: str) -> str:
+def _shell_page(email: str, *, mode: str, list_content: str | None = None) -> str:
     """Obsidian 風シェル。/search は list・/search/graph は graph で起動する。
 
     両エンジン（検索/グラフ）の DOM を #mainList / #mainGraph に mount し、
@@ -3235,12 +3245,31 @@ def _shell_page(email: str, *, mode: str) -> str:
         'stroke-width="2" stroke-linecap="round" stroke-linejoin="round">'
         '<polyline points="15 18 9 12 15 6"></polyline></svg>'
     )
-    style = _ROOT_TOKENS + _SEARCH_STYLE + _GRAPH_STYLE + _SHELL_STYLE + _POWER_STYLE + PORTAL_STYLE
+    style = (
+        _ROOT_TOKENS
+        + _SEARCH_STYLE
+        + _GRAPH_STYLE
+        + _SHELL_STYLE
+        + _POWER_STYLE
+        + PORTAL_STYLE
+        + LIST_STYLE
+    )
     head = (
         '<!doctype html><html lang="ja"><head><meta charset="utf-8">'
         '<meta name="viewport" content="width=device-width, initial-scale=1">'
         "<title>社内ナレッジ検索</title><style>" + style + "</style></head><body>"
     )
+    if list_content is not None:
+        return (
+            head
+            + render_header(email, current_path="/search")
+            + '<div id="shell" class="shell" style="grid-template-columns:1fr">'
+            + '<section class="work"><nav class="ws-tabs" aria-label="ナレッジ表示">'
+            + list_tabs(mode)
+            + '</nav><div class="ws-body">'
+            + list_content
+            + "</div></section></div></body></html>"
+        )
     ribbon = (
         '<nav class="ribbon">'
         '<button id="leftToggle" class="rib" title="サイドバー開閉" '
@@ -3264,6 +3293,8 @@ def _shell_page(email: str, *, mode: str) -> str:
         '<div class="ws-tabs">'
         '<button id="tabList" class="ws-tab' + list_active + '">ノート</button>'
         '<button id="tabGraph" class="ws-tab' + graph_active + '">グラフ</button>'
+        '<a class="ws-tab" href="/search?view=clients&amp;page=1">取引先一覧</a>'
+        '<a class="ws-tab" href="/search?view=docs&amp;page=1">資料一覧</a>'
         "</div>"
         '<div class="ws-body">'
         '<div id="mainList"' + list_hidden + ">" + _SEARCH_DOM + "</div>"
@@ -3345,8 +3376,8 @@ function renderHeader(h){
   if(h.deal_phase)chips.appendChild(kChip('フェーズ '+h.deal_phase));
   if(h.bant_score)chips.appendChild(kChip('BANT '+h.bant_score));
   if(h.last_contact)chips.appendChild(kChip('最終接触 '+h.last_contact));
-  chips.appendChild(kChip('FB '+(h.fb_count||0)+'件'));
-  chips.appendChild(kChip('資料 '+(h.doc_count||0)+'件'));
+  chips.appendChild(kChip('FB 表示'+(h.fb_count||0)+'件（最大50件）'));
+  chips.appendChild(kChip('資料 表示'+(h.doc_count||0)+'件（最大50件）'));
   card.appendChild(chips);
   khead.appendChild(card);
 }
@@ -4761,9 +4792,38 @@ def create_app(
     @app.get("/search")
     def search_ui(request: Request) -> Response:
         """検索 UI（未認証は /search/login へリダイレクト）。"""
+        target = search_list_target("/search?" + request.url.query)
         email = _search_email(request)
         if email is None:
-            return RedirectResponse("/search/login", status_code=303)
+            login = "/search/login" + ("?next=" + quote(target, safe="") if target else "")
+            return RedirectResponse(login, status_code=303)
+        if target:
+            params = parse_qs(target.split("?", 1)[1])
+            view, page = params["view"][0], int(params["page"][0])
+            from teamagent.adapters.pgvector_client import PgVectorClient
+
+            rows: list[dict[str, Any]] = []
+            total: int | None = None
+            try:
+                pg = PgVectorClient.from_env()
+                domain = email.split("@", 1)[1] if "@" in email else email
+                # 同期 GET は FastAPI の worker thread で動く（async loop を塞がない）。
+                with pg.connection(
+                    app_role=app_role, user_email=email, user_groups=[domain], user_role="user"
+                ) as conn:
+                    query = (
+                        pg.list_knowledge_clients
+                        if view == "clients"
+                        else pg.list_knowledge_documents
+                    )
+                    rows, total = query(conn, limit=PAGE_SIZE, offset=(page - 1) * PAGE_SIZE)
+            except Exception as exc:
+                rows, total = [], None
+                logger.warning("knowledge_list_failed", view=view, error=type(exc).__name__)
+            return HTMLResponse(
+                _shell_page(email, mode=view, list_content=render_list(view, page, rows, total)),
+                status_code=503 if total is None else 200,
+            )
         return HTMLResponse(_shell_page(email, mode="list"))
 
     @app.get("/app")

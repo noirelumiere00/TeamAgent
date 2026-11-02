@@ -1,0 +1,53 @@
+"""Normalization/counting without a database; actual RLS/SQL lives in connect_web tests."""
+
+from __future__ import annotations
+
+from typing import Any
+from unittest.mock import MagicMock
+
+from teamagent.adapters.pgvector_client import PgVectorClient
+
+
+def test_clients_merge_before_count_sort_and_page() -> None:
+    conn = MagicMock()
+    cursor = conn.cursor.return_value.__enter__.return_value
+    cursor.fetchall.return_value = [
+        {"name": f"顧客{i:03}", "is_fb": False, "fb_date": "2099-01-01"}
+        for i in reversed(range(51))
+    ] + [
+        {"name": "株式会社 顧客000 様", "is_fb": False, "fb_date": None},
+        {"name": "顧客000", "is_fb": True, "fb_date": "2026-01-01"},
+        {"name": "顧客000", "is_fb": True, "fb_date": "2026-02-01"},
+        {"name": "顧客001", "is_fb": True, "fb_date": "2026-02-01"},
+        {"name": "FBのみ", "is_fb": True, "fb_date": None},
+        {"name": None, "is_fb": False, "fb_date": None},
+        {"name": " \t ", "is_fb": False, "fb_date": None},
+    ]
+    pg = PgVectorClient("fixture")
+    rows, total = pg.list_knowledge_clients(conn, limit=2)
+    assert total == 52
+    assert rows == [
+        {"name": "株式会社 顧客000 様", "document_count": 2, "latest_fb_at": "2026-02-01"},
+        {"name": "顧客001", "document_count": 1, "latest_fb_at": "2026-02-01"},
+    ]
+    rows, total = pg.list_knowledge_clients(conn, offset=50)
+    assert total == 52
+    assert [row["name"] for row in rows] == ["顧客049", "顧客050"]
+    assert pg.list_knowledge_clients(conn, offset=100) == ([], 52)
+    # The visible input has no LIMIT, and is independent of chunk multiplicity.
+    query = cursor.execute.call_args.args[0]
+    assert "LIMIT" not in query and "JOIN chunks" not in query
+
+
+def test_documents_empty_page_keeps_total_and_stable_id() -> None:
+    conn = MagicMock()
+    cursor = conn.cursor.return_value.__enter__.return_value
+    pg = PgVectorClient("fixture")
+    cursor.fetchall.return_value = [{"id": None, "total": 51}]
+    assert pg.list_knowledge_documents(conn, offset=100) == ([], 51)
+    assert cursor.execute.call_args.args[1] == [50, 100]
+    cursor.fetchall.return_value = [{"id": None, "total": 0}]
+    assert pg.list_knowledge_documents(conn) == ([], 0)
+    row: dict[str, Any] = {"id": "stable-uuid", "title": "資料", "total": 51}
+    cursor.fetchall.return_value = [row]
+    assert pg.list_knowledge_documents(conn) == ([{"id": "stable-uuid", "title": "資料"}], 51)
