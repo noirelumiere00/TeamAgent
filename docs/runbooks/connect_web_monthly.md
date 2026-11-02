@@ -5,6 +5,19 @@ No-AI 静的 HTML（/app）として 16 名へ配信する月次サイクルの�
 production releaseは必ず `infra/terraform/README.md` の単一guarded
 full saved-plan workflowに従う。
 
+> **⚠️ 2026-11-03 追記: 静的 `/app` の月次配信は不要になった**
+>
+> - #799 から `GET /app` は常に `303 → /search` になり、静的 HTML はどこにも表示されない。
+>   ナレッジは `/search`（本人の RLS で毎回 DB から取得する一覧・詳細・タグ・カルテ）で見る。
+>   #799 が入ったイメージが本番に出た時点から、この手順の **export → build → publish → 静的 HTML の
+>   release は実施しない**（新しい HTML を作っても利用者には見えない）。
+> - **月次の ingest（取り込み）は引き続き必要**。`/search` が読む pgvector を更新するため。
+> - **固定済みの静的成果物（S3 object・VersionId・SHA）は消さない・差し替えない**。
+>   `/healthz`・CodeBuild・release evidence・runtime guard が今も参照しているため、
+>   消すと本番の便と guarded apply が止まる。外すときは別の計画で、release 契約ごと移行する。
+> - ローカル Vault 出力（`scripts/export_vault.py`）を別用途で使うのは引き続き可。
+> - 以下の本文は、静的 `/app` を配信していた時点の記録として残している。
+
 > **公開範囲の契約**: 静的 `/app` は per-user ACL 表示ではなく、
 > `--shared-group` で指定した会社共有集合のミラー。`owner_email` だけ、
 > `acl_emails` だけ、`acl_groups` 空の資料は配信しない。raw ACL や安定 source key は
