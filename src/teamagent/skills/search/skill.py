@@ -572,12 +572,14 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
         top_k: int = 5,
         filter_industry: str | None = None,
         strict_industry: bool = False,
+        prefer_same_client: bool = True,
     ) -> list[SearchHit]:
         """要約せず検索ヒットだけを返す公開メソッド (他 Skill からの再利用口)。
 
         embed → _retrieve のラッパ。新スキーマ + Rerank + min_relevance + 集約モード等、
         run() と同じ retrieval パイプライン (gold set top-1 88% 構成) をそのまま通す。
         ProposalDraftSkill 等が「類似過去提案の取得」に再利用する。
+        prefer_same_client=False は他社比較用。社名の自動絞り込み・boost・sortを外す。
         """
         embedding = self._embed(query)
         retrieval_input = SearchInput(
@@ -586,7 +588,9 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
             filter_industry=filter_industry,
             strict_industry=strict_industry,
         )
-        return self._retrieve(embedding, retrieval_input, ctx)
+        return self._retrieve(
+            embedding, retrieval_input, ctx, prefer_same_client=prefer_same_client
+        )
 
     @google_connection_guard(lambda input: SearchOutput(answer="", total_cost_usd=0))
     def run(self, input: SearchInput, ctx: SkillContext) -> SearchOutput:
@@ -770,13 +774,16 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
             else None
         )
         case_probe: dict[str, Any] = {}
+        retrieval_kwargs: dict[str, Any] = (
+            {"fanout_probe": case_probe} if case_listing or drive_comparison else {}
+        )
         hits = self._retrieve(
             embedding,
             input,
             ctx,
             timings=timings,
             probe=probe,
-            **({"fanout_probe": case_probe} if case_listing or drive_comparison else {}),
+            **retrieval_kwargs,
         )
         if visit:
             hits = [*hits, *case_probe.get("named", [])]
@@ -1872,6 +1879,7 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
         timings: dict[str, float] | None = None,
         probe: dict[str, str] | None = None,
         fanout_probe: dict[str, Any] | None = None,
+        prefer_same_client: bool = True,
     ) -> list[SearchHit]:
         """pgvector で類似検索する。
 
@@ -2095,7 +2103,12 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
                         # client は metadata_contains（OR-ILIKE 部分一致）側で扱い、昇格時は
                         # plan_client_used=True にして boost をスキップ（明示時と挙動を揃え
                         # 別 client 混入を防ぐ）。fail-open（空 plan は no-op）。
-                        if mc is None and plan.client_names and not comparison_clients:
+                        if (
+                            prefer_same_client
+                            and mc is None
+                            and plan.client_names
+                            and not comparison_clients
+                        ):
                             mc = {"__client__": plan.client_names[0]}
                             plan_client_used = True
                     else:
@@ -2197,7 +2210,12 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
                 # ただし input.filter_client 明示時はユーザーの絞り込みを優先し boost をスキップ
                 # （自動 boost が別 client を混ぜ「A 社で絞ったのに B 社が混ざる」のを防ぐ）。
                 # plan 由来 client を __client__ に昇格したときも明示時と同じ扱いでスキップする。
-                if self._use_client_boost and not input.filter_client and not plan_client_used:
+                if (
+                    prefer_same_client
+                    and self._use_client_boost
+                    and not input.filter_client
+                    and not plan_client_used
+                ):
                     hits = self._apply_client_boost(
                         conn=conn,
                         query=input.query,
@@ -2364,7 +2382,7 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
                 # 並べ替える（絞らない）。明示 filter_client があればそれを、無ければ既知
                 # クライアント語彙への substring 一致（_match_client・初回のみ語彙取得しキャッシュ）
                 # を基準にする。env-gate SEARCH_CLIENT_MATCH_SORT（既定 OFF・恒等）。
-                if self._client_match_sort and hits:
+                if prefer_same_client and self._client_match_sort and hits:
                     client_for_sort = input.filter_client or self._match_client(
                         input.query, conn, ctx.request_id, vocab_key=vocab_key
                     )

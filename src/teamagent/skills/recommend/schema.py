@@ -1,8 +1,4 @@
-"""Recommend Skill (類似案件レコメンド) の入出力 Pydantic スキーマ。
-
-新規案件の概要テキストから、過去の類似「提案書 / 議事録 / 営業 FB」をベクトル近傍で
-3 バケットに振り分けて提示する (Phase1)。検索は SearchSkill.retrieve_hits を再利用。
-"""
+"""類似提案書の推薦結果。内部スコアは回答モデルへ渡さない。"""
 
 from __future__ import annotations
 
@@ -24,31 +20,39 @@ class RecommendInput(BaseModel):
         default=12,
         ge=1,
         le=30,
-        description="ベクトル近傍で取得する候補件数 (各バケット上位3件に振り分け前の母数)",
+        description="検索候補件数（会社・原本の重複を除き最大3件を提示）",
     )
 
 
 class RecommendItem(BaseModel):
-    """レコメンド 1 件 (各バケットの上位エントリ)。"""
+    """原本リンクを確認できた提案書1件。"""
 
     title: str | None = Field(default=None, description="資料/スレッドのタイトル")
-    source_uri: str | None = Field(default=None, description="参照元 URI (Drive/Slack 等)")
-    score: float = Field(description="類似度スコア (rerank 時は relevance_score)")
+    source_uri: str | None = Field(default=None, description="Drive の原本リンク")
+    score: float = Field(exclude=True, description="内部順位用。回答には表示しない")
     client_name: str | None = Field(default=None, description="クライアント名")
     cls_project: str | None = Field(default=None, description="自動分類された案件名")
+    date: str = Field(default="日付不明", description="資料の年月")
+    similarity: str = Field(default="", description="根拠のある類似点")
 
 
 class RecommendOutput(BaseModel):
-    """Recommend Skill の出力 (3 バケット × 各上位3件)。"""
+    """他社の類似提案書を最大3件。同一社の資料は補足に分離する。"""
 
     brief: str
     similar_proposals: list[RecommendItem] = Field(
         default_factory=list, description="類似提案書 (上位3件)"
     )
     similar_minutes: list[RecommendItem] = Field(
-        default_factory=list, description="類似議事録 (上位3件)"
+        default_factory=list, description="互換用。提案書推薦では空"
     )
     similar_sales_fb: list[RecommendItem] = Field(
-        default_factory=list, description="類似営業 FB (上位3件)"
+        default_factory=list, description="互換用。提案書推薦では空"
     )
-    total_count: int = Field(ge=0, description="3 バケット合計のレコメンド件数")
+    same_client_materials: list[RecommendItem] = Field(default_factory=list)
+    total_count: int = Field(ge=0, description="類似提案書の件数（同一社の補足は含めない）")
+    answer: str = Field(default="", description="利用者へそのまま返す回答")
+    model_instructions: str = (
+        "answer をそのまま返してください。案件名・年月・似ている点・資料を見るのリンクを"
+        "省略せず、スコア等の内部数値や別の候補を追加しないでください。"
+    )
