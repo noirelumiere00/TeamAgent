@@ -14,7 +14,7 @@ from __future__ import annotations
 import hashlib
 import time
 from collections.abc import Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 import psycopg
@@ -498,6 +498,87 @@ class IngestRepository:
         return {
             str(row["external_id"]): str(row["content_hash"]) for row in rows if row["content_hash"]
         }
+
+    def refresh_case_state_evidence(
+        self,
+        doc: DocumentUpsert,
+        chunks: list[ChunkUpsert],
+        *,
+        expected_content_hash: str,
+        request_id: str,
+    ) -> bool:
+        """内容不変の文書に根拠 metadata だけを合成する。分類・chunks・ACL は保持する。"""
+        import json
+
+        from teamagent.ingest import case_state_evidence as evidence
+
+        if not evidence.enabled(doc.owner_email):
+            return False
+        version = evidence.input_version()
+        with self._document_connection(doc) as conn:
+            self._lock_source(conn, doc.source_type, doc.external_id)
+            with conn.cursor(row_factory=dict_row) as cur:
+                cur.execute(
+                    """
+                    SELECT metadata FROM documents
+                    WHERE source_type = %s::document_source_type AND external_id = %s
+                    FOR UPDATE
+                    """,
+                    (doc.source_type, _strip_nul(doc.external_id)),
+                )
+                row = cur.fetchone()
+                if (
+                    row is None
+                    or row["metadata"].get(INGEST_CONTENT_HASH_KEY) != expected_content_hash
+                ):
+                    raise ValueError("document changed before case state metadata refresh")
+                stored = row["metadata"]
+                if (
+                    stored.get(evidence.VERSION_KEY) == version
+                    and evidence.KEY in stored
+                    and all(
+                        stored.get(key) == doc.metadata.get(key)
+                        for key in ("case_state_reports", "case_state_form_submitted_at")
+                    )
+                ):
+                    return False
+                # 後処理の重複印などを根拠の入力版へ混ぜず、保存済み分類だけを再利用する。
+                classification = {
+                    key: value
+                    for key, value in stored.items()
+                    if key.startswith("cls_") or key == "industry"
+                }
+                prepared = evidence.attach(
+                    replace(doc, metadata={**doc.metadata, **classification}), chunks
+                )
+                patch = {
+                    key: prepared.metadata[key]
+                    for key in (
+                        evidence.KEY,
+                        evidence.VERSION_KEY,
+                        "case_state_reports",
+                        "case_state_form_submitted_at",
+                    )
+                    if key in prepared.metadata
+                }
+                cur.execute(
+                    """
+                    UPDATE documents SET metadata = metadata || %s::jsonb
+                    WHERE source_type = %s::document_source_type AND external_id = %s
+                    """,
+                    (
+                        json.dumps(_sanitize_metadata(patch), ensure_ascii=False),
+                        doc.source_type,
+                        _strip_nul(doc.external_id),
+                    ),
+                )
+        logger.info(
+            "ingest_case_state_metadata_updated",
+            request_id=request_id,
+            source_type=doc.source_type,
+            external_id_ref=_external_id_ref(doc.external_id),
+        )
+        return True
 
     def get_document_metadata_values(
         self,

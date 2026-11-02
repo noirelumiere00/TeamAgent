@@ -307,6 +307,7 @@ def _differential_pipeline_config(*, classify: bool, contextualize: bool = False
     分類 ON/OFF・contextualize ON/OFF・embedder backend が変わった run では
     全文書のハッシュが不一致になり、スキップせず再処理される（設定を切り替えたのに
     旧出力が残り続ける、を防ぐ）。
+    根拠束の版は内容不変時に metadata だけ更新するため含めない。
     """
     from teamagent.adapters.embeddings_client import resolve_embedder_backend
 
@@ -314,11 +315,6 @@ def _differential_pipeline_config(*, classify: bool, contextualize: bool = False
         "classify": classify,
         "contextualize": contextualize,
         "embedder_backend": resolve_embedder_backend(),
-        **(
-            {"case_state_evidence": case_state_evidence.input_version()}
-            if case_state_evidence.configured()
-            else {}
-        ),
     }
 
 
@@ -1862,6 +1858,21 @@ def _ingest_slack_channel(
                 ),
             )
             if stored_content_hashes.get(external_id) == content_hash:
+                if case_state_evidence.enabled(owner_email):
+                    repository.refresh_case_state_evidence(
+                        DocumentUpsert(
+                            source_type="slack",
+                            external_id=external_id,
+                            owner_email=owner_email,
+                            source_uri=f"slack://{spec.channel_id}/{parent.thread_ts or parent.ts}",
+                            title=f"{spec.channel_name} {parent.ts}",
+                            modified_at=_slack_message_modified_at(parent.thread_ts or parent.ts),
+                            metadata=doc_metadata,
+                        ),
+                        [ChunkUpsert(chunk_idx=0, content=text, embedding=[])],
+                        expected_content_hash=content_hash,
+                        request_id=request_id,
+                    )
                 unchanged_n += 1
                 logger.info(
                     "ingest_document_unchanged_skipped",
@@ -4673,6 +4684,21 @@ def _ingest_gsheet(
                     ),
                 )
                 if stored_content_hashes.get(external_id) == content_hash:
+                    if case_state_evidence.enabled(owner_email):
+                        repository.refresh_case_state_evidence(
+                            DocumentUpsert(
+                                source_type="gsheets",
+                                external_id=external_id,
+                                owner_email=owner_email,
+                                source_uri=row_source_uri,
+                                title=row_title,
+                                modified_at=row_modified_at,
+                                metadata=input_metadata,
+                            ),
+                            [ChunkUpsert(chunk_idx=0, content=text, embedding=[])],
+                            expected_content_hash=content_hash,
+                            request_id=request_id,
+                        )
                     unchanged_n += 1
                     logger.info(
                         "ingest_document_unchanged_skipped",
