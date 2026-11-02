@@ -521,7 +521,8 @@ export const AD_LABEL_ROUTE_CONTEXT =
 // 本文が投稿 URL（VIDEO_URL_RULES の 3 媒体）だけなら URL 数、そうでなければ 0。
 export function adLabelUrlCount(text) {
   if (typeof text !== "string") return 0;
-  const head = text.slice(0, VIDEO_URL_SCAN_LIMIT);
+  // アプリ経由の投稿は「*使用して送信されました* <@U…|Claude>」等の定型注記が付く（11-02 実測）。連携と同じく先に落とす。
+  const head = stripConnectBoilerplate(text.slice(0, VIDEO_URL_SCAN_LIMIT)).text;
   const urls = [...head.matchAll(AD_LABEL_URL_RE)].map(m => m[1]);
   if (urls.length === 0 || urls.length > AD_LABEL_MAX_URLS) return 0;
   // チャンネルでは `<@U…> URL` / `@Aico URL` の形で届く。メンションは依頼の中身ではないので除く。
