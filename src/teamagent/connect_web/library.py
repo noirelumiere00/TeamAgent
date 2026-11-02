@@ -475,14 +475,17 @@ def _cover(row: Mapping[str, Any]) -> str:
     account = str(
         row.get("account_name") or row.get("account_handle") or row.get("advertiser") or "V"
     )
+    has_thumbnail = bool(row.get("has_thumbnail") or row.get("thumbnail_s3_key"))
+    # Under a loaded thumbnail the placeholder is only decoration; keep it out of screen readers.
+    hidden = ' aria-hidden="true"' if has_thumbnail else ""
     body = (
-        f'<span class="placeholder" '
+        f'<span class="placeholder"{hidden} '
         f'data-category="{_e(row.get("business_category"))}"><strong>'
         f"{_e(account[0].upper())}</strong>"
         f'<span class="placeholder-account" title="{_e(account)}">{_e(account)}</span>'
         "<small>サムネ準備中</small></span>"
     )
-    if row.get("has_thumbnail") or row.get("thumbnail_s3_key"):
+    if has_thumbnail:
         path = "/".join(quote(str(row[key]), safe="") for key in ("platform", "video_id"))
         body += (
             f'<img loading="lazy" src="/library/thumb/{path}" alt="{_e(account)}の動画サムネイル">'

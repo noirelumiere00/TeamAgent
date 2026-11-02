@@ -183,3 +183,13 @@ def test_active_filter_labels_are_human_readable() -> None:
     html = library._filters({"pr": "yes", "industry": "食品"}, catalog=False)
     assert "PR投稿のみ" in html and "業種: 食品" in html
     assert "絞り込み中: yes" not in html
+
+
+def test_placeholder_is_hidden_from_screen_readers_only_under_a_thumbnail() -> None:
+    from teamagent.connect_web import library
+
+    row = {"platform": "tiktok", "video_id": "1", "account_name": "a"}
+    assert 'aria-hidden="true"' not in library._cover(row)
+    assert 'class="placeholder" aria-hidden="true"' in library._cover(
+        {**row, "thumbnail_s3_key": "video-library/thumbs/tiktok/1.jpg"}
+    )
