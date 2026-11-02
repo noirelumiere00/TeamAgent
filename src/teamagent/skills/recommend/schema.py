@@ -25,7 +25,7 @@ class RecommendInput(BaseModel):
 
 
 class RecommendItem(BaseModel):
-    """原本リンクを確認できた提案書1件。"""
+    """類似提案書1件。原本未登録の場合は担当への確認を案内する。"""
 
     title: str | None = Field(default=None, description="資料/スレッドのタイトル")
     source_uri: str | None = Field(default=None, description="Drive の原本リンク")
@@ -33,6 +33,7 @@ class RecommendItem(BaseModel):
     client_name: str | None = Field(default=None, description="クライアント名")
     cls_project: str | None = Field(default=None, description="自動分類された案件名")
     date: str = Field(default="日付不明", description="資料の年月")
+    contact_name: str | None = Field(default=None, description="元データの共有者または案件担当者")
     similarity: str = Field(default="", description="根拠のある類似点")
 
 
@@ -53,6 +54,6 @@ class RecommendOutput(BaseModel):
     total_count: int = Field(ge=0, description="類似提案書の件数（同一社の補足は含めない）")
     answer: str = Field(default="", description="利用者へそのまま返す回答")
     model_instructions: str = (
-        "answer をそのまま返してください。案件名・年月・似ている点・資料を見るのリンクを"
+        "answer をそのまま返してください。案件名・年月・似ている点・原本リンクまたは未登録案内を"
         "省略せず、スコア等の内部数値や別の候補を追加しないでください。"
     )
