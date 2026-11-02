@@ -26,6 +26,7 @@ from psycopg.rows import dict_row
 
 from teamagent.adapters.pg_pool import ConnectionPool, PoolStats
 from teamagent.client_identity import client_identity_key
+from teamagent.knowledge_query import QUICK_FILTERS, parse_knowledge_query
 
 logger = structlog.get_logger(__name__)
 
@@ -49,6 +50,24 @@ _KNOWLEDGE_DOCUMENTS_SQL = """
       AND d.metadata->>'x_research_tool' IS NULL
       AND d.metadata->>'is_sales_fb' IS DISTINCT FROM 'true'
 """
+
+_KNOWLEDGE_EXCERPT_SQL = """
+    LEFT JOIN LATERAL (
+        SELECT left(COALESCE(c.contextualized, c.content), 2000) AS excerpt
+        FROM chunks c WHERE c.document_id = d.id
+        ORDER BY (COALESCE((c.metadata->>'boilerplate')::bool, false)
+                  OR COALESCE((c.metadata->>'title_only')::bool, false)), c.chunk_idx, c.id
+        LIMIT 1
+    ) ex ON true
+"""
+
+
+def _knowledge_normalized_sql(column: str) -> str:
+    # normalize_literal_term と同じ NFKC / 小文字 / 空白・中黒・ハイフンの除去。
+    return (
+        f"lower(regexp_replace(normalize(COALESCE({column}, ''), NFKC), "
+        r"'[\s・‐‑‒–—―−-]+', '', 'g'))"
+    )  # nosec B608 - column はコード内の固定値のみ
 
 
 def normalize_literal_term(text: str) -> str:
@@ -952,6 +971,8 @@ class PgVectorClient:
         limit: int = 50,
         offset: int = 0,
         tag: tuple[str, str] | None = None,
+        q: str = "",
+        quick: str | None = None,
     ) -> tuple[list[dict[str, Any]], int]:
         """RLS 可視の非 FB 資料を UUID 付きで列挙。空ページでも総数を返す。
 
@@ -959,13 +980,54 @@ class PgVectorClient:
         """
         if tag is not None and tag[0] not in KNOWLEDGE_TAG_AXES:
             raise ValueError("invalid knowledge tag axis")
+        if quick is not None and quick not in QUICK_FILTERS:
+            raise ValueError("invalid knowledge quick filter")
+        parsed = parse_knowledge_query(q)
         # 列は固定列挙値のみ。値は完全一致の placeholder に束縛する。
-        tag_filter = f"WHERE {tag[0]} = %s" if tag is not None else ""
+        conditions = [f"{tag[0]} = %s"] if tag is not None else []
+        params: list[Any] = [tag[1]] if tag is not None else []
+        if quick == "recent":
+            conditions.append(
+                "modified_at BETWEEN CURRENT_TIMESTAMP - (%s * interval '1 day') "
+                "AND CURRENT_TIMESTAMP"
+            )
+            params.append(30)
+        elif quick:
+            conditions.append("doc_type = %s")
+            params.append({"proposal": "提案書", "minutes": "議事録"}[quick])
+        excerpt_join = ""
+        if any(parsed.values()):
+            excerpt_join = _KNOWLEDGE_EXCERPT_SQL if parsed["plain"] or parsed["neg"] else ""
+            for key, values in parsed.items():
+                columns = (
+                    ("title",)
+                    if key in {"file", "nfile"}
+                    else ("industry", "doc_type", "client_name", "source_type")
+                    if key in {"tag", "ntag"}
+                    else ("title", "client_name", "industry", "doc_type", "excerpt")
+                )
+                for value in values:
+                    normalized = normalize_literal_term(value)
+                    if not normalized:
+                        continue
+                    is_tag = key in {"tag", "ntag"}
+                    comparison = "= %s" if is_tag else "LIKE %s ESCAPE '\\'"
+                    clause = " OR ".join(
+                        f"{_knowledge_normalized_sql(column)} {comparison}" for column in columns
+                    )
+                    conditions.append(
+                        ("NOT " if key in {"neg", "ntag", "nfile"} else "") + f"({clause})"
+                    )
+                    pattern = normalized if is_tag else f"%{self._escape_like(normalized)}%"
+                    params.extend([pattern] * len(columns))
+        where = "WHERE " + " AND ".join(conditions) if conditions else ""
         with conn.cursor() as cur:
             cur.execute(
                 f"""
                 WITH candidates AS ({_KNOWLEDGE_DOCUMENTS_SQL}),
-                visible AS (SELECT * FROM candidates {tag_filter})
+                searchable AS (SELECT d.*{", ex.excerpt" if excerpt_join else ""}
+                               FROM candidates d {excerpt_join}),
+                visible AS (SELECT * FROM searchable {where})
                 SELECT page.id::text, page.title, page.source_uri, page.source_type,
                        page.doc_type, page.client_name,
                        to_char(page.modified_at AT TIME ZONE 'Asia/Tokyo', 'YYYY-MM-DD')
@@ -979,7 +1041,7 @@ class PgVectorClient:
                 ) page ON true
                 ORDER BY page.modified_at DESC NULLS LAST, page.id
                 """,  # nosec B608 - SQL は固定定義と列のホワイトリストのみ
-                [*([tag[1]] if tag is not None else []), limit, offset],
+                [*params, limit, offset],
             )
             rows = cur.fetchall()
         total = int(rows[0]["total"])
@@ -1002,14 +1064,7 @@ class PgVectorClient:
                            AS modified_at,
                        ex.excerpt
                 FROM visible d
-                LEFT JOIN LATERAL (
-                    SELECT left(COALESCE(c.contextualized, c.content), 2000) AS excerpt
-                    FROM chunks c WHERE c.document_id = d.id
-                    ORDER BY (COALESCE((c.metadata->>'boilerplate')::bool, false)
-                              OR COALESCE((c.metadata->>'title_only')::bool, false)),
-                             c.chunk_idx, c.id
-                    LIMIT 1
-                ) ex ON true
+                {_KNOWLEDGE_EXCERPT_SQL}
                 WHERE d.id = %s::uuid
                 """,  # nosec B608 - 共通 SQL は固定リテラル
                 [document_id],

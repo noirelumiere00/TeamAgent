@@ -404,3 +404,123 @@ def test_tag_filtered_rls_totals_paging_exact_values_and_axis_isolation(db: Any)
             exact, count = pg.list_knowledge_documents(conn, tag=("industry", "50%_O'Reilly"))
             assert count == 1 and [r["id"] for r in exact] == [percent]
             assert pg.list_knowledge_documents(conn, tag=("industry", "不存在")) == ([], 0)
+
+
+def test_operator_rls_private_words_tags_and_negation(db: Any) -> None:
+    private = seed(db, "Aだけの提案", owner="a@example.com", extra={"cls_industry": "私有タグ"})
+    shared = seed(db, "会社提案", groups=("example.com",), extra={"cls_industry": "食品"})
+    draft = seed(db, "会社提案 下書き", groups=("example.com",), extra={"cls_industry": "食品"})
+    minutes = seed(
+        db,
+        "会議メモ",
+        groups=("example.com",),
+        extra={"cls_industry": "IT", "cls_doc_type": "議事録"},
+    )
+    for extra in ({"suppressed": "true"}, {"x_research_tool": "tool"}, {"is_sales_fb": "true"}):
+        seed(db, "会社提案", groups=("example.com",), extra={"cls_industry": "食品", **extra})
+    db.execute(
+        "UPDATE chunks SET contextualized=%s WHERE document_id=%s", ["本文にしかない秘密", private]
+    )
+    pg = PgVectorClient("fixture")
+    for email in ("a@example.com", "b@example.com"):
+        with TransactionPg(db).connection(email) as conn:
+            for q in ("Aだけ", "本文にしかない秘密", "tag:私有タグ", "file:Aだけ"):
+                rows, total = pg.list_knowledge_documents(conn, q=q)
+                assert total == (1 if email.startswith("a") else 0)
+                assert [r["id"] for r in rows] == ([private] if email.startswith("a") else [])
+            rows, total = pg.list_knowledge_documents(conn, q="食品 file:提案 -下書き")
+            assert total == 1 and [r["id"] for r in rows] == [shared]
+            rows, total = pg.list_knowledge_documents(conn, q="tag:食品 -file:下書き")
+            assert total == 1 and [r["id"] for r in rows] == [shared]
+            rows, total = pg.list_knowledge_documents(conn, q="-tag:食品 file:会議")
+            assert total == 1 and [r["id"] for r in rows] == [minutes]
+            rows, total = pg.list_knowledge_documents(conn, q="file:下書き")
+            assert total == 1 and [r["id"] for r in rows] == [draft]
+            rows, total = pg.list_knowledge_documents(conn, q="tag:gdrive -tag:食品 -tag:私有タグ")
+            assert total == 1 and [r["id"] for r in rows] == [minutes]
+
+
+def test_operator_literal_wildcards_normalization_phrase_and_excerpt(db: Any) -> None:
+    special = seed(db, r"50%_売上\案", groups=("example.com",))
+    seed(db, "50XX売上x案", groups=("example.com",))
+    normalized = seed(
+        db,
+        "ＦＵＬＬ－ＷＩＤＴＨ 提案",
+        groups=("example.com",),
+        extra={"cls_industry": "ＣＡＳＥ ＳＴＵＤＹ"},
+    )
+    seed(db, "跨越", groups=("example.com",), extra={"cls_industry": "字段"})
+    parent = seed(db, "親", groups=("example.com",), extra={"cls_industry": "食品"})
+    seed(db, "子", groups=("example.com",), extra={"cls_industry": "食品/飲料"})
+    excerpt = seed(db, "本文資料", groups=("example.com",))
+    db.execute(
+        "UPDATE chunks SET metadata=%s, content=%s WHERE document_id=%s AND chunk_idx=0",
+        [Jsonb({"title_only": True}), "テンプレだけの語", excerpt],
+    )
+    db.execute(
+        "UPDATE chunks SET contextualized=%s WHERE document_id=%s AND chunk_idx=1",
+        ["代表本文の固有語" + "あ" * 2100 + "上限外の語", excerpt],
+    )
+    pg = PgVectorClient("fixture")
+    with TransactionPg(db).connection("b@example.com") as conn:
+        for q in ("50%", "50%_", r"売上\案", "file:50%_"):
+            rows, total = pg.list_knowledge_documents(conn, q=q)
+            assert total == 1 and [r["id"] for r in rows] == [special]
+        for q in ("fullwidth", "ＦＵＬＬＷＩＤＴＨ", '"full width"', 'tag:"case study"'):
+            rows, total = pg.list_knowledge_documents(conn, q=q)
+            assert total == 1 and [r["id"] for r in rows] == [normalized]
+        assert pg.list_knowledge_documents(conn, q='"跨越字段"') == ([], 0)
+        rows, total = pg.list_knowledge_documents(conn, q="tag:食品")
+        assert total == 1 and [r["id"] for r in rows] == [
+            parent
+        ]  # flat tags, no hierarchy expansion
+        rows, total = pg.list_knowledge_documents(conn, q="代表本文の固有語")
+        assert total == 1 and [r["id"] for r in rows] == [excerpt]
+        assert pg.list_knowledge_documents(conn, q="テンプレだけの語") == ([], 0)
+        assert pg.list_knowledge_documents(conn, q="上限外の語") == ([], 0)
+
+
+def test_operator_and_quick_filtered_totals_paging_and_recent(db: Any) -> None:
+    from datetime import timedelta
+
+    now = db.execute("SELECT CURRENT_TIMESTAMP AS now").fetchone()["now"]
+    shared = [
+        seed(db, "対象提案", groups=("example.com",), extra={"cls_industry": "食品"})
+        for _ in range(51)
+    ]
+    private = seed(db, "対象提案", owner="a@example.com", extra={"cls_industry": "食品"})
+    seed(db, "対象提案 下書き", groups=("example.com",), extra={"cls_industry": "食品"})
+    seed(
+        db,
+        "対象提案",
+        groups=("example.com",),
+        extra={"cls_industry": "食品", "cls_doc_type": "議事録"},
+    )
+    recent = seed(
+        db, "最近の資料", groups=("example.com",), modified=(now - timedelta(days=1)).isoformat()
+    )
+    old = seed(
+        db, "古い資料", groups=("example.com",), modified=(now - timedelta(days=90)).isoformat()
+    )
+    future = seed(
+        db, "未来の資料", groups=("example.com",), modified=(now + timedelta(days=1)).isoformat()
+    )
+    # Independent time cases should not share the proposal tag.
+    pg = PgVectorClient("fixture")
+    for email, total in (("a@example.com", 52), ("b@example.com", 51)):
+        with TransactionPg(db).connection(email) as conn:
+            filters = {"q": "file:対象 -下書き", "tag": ("industry", "食品"), "quick": "proposal"}
+            first, count = pg.list_knowledge_documents(conn, **filters)
+            second, second_count = pg.list_knowledge_documents(conn, offset=50, **filters)
+            assert count == second_count == total and len(first) == 50
+            assert len(second) == total - 50
+            assert [r["id"] for r in first + second] == sorted(
+                shared + ([private] if total == 52 else [])
+            )
+            assert pg.list_knowledge_documents(conn, offset=100, **filters) == ([], total)
+            assert pg.list_knowledge_documents(conn, offset=50, **filters)[0] == second
+            rows, count = pg.list_knowledge_documents(conn, q="file:資料", quick="recent")
+            assert count == 1 and [r["id"] for r in rows] == [recent]
+            assert old not in repr(rows) and future not in repr(rows)
+            rows, count = pg.list_knowledge_documents(conn, q="file:対象", quick="minutes")
+            assert count == 1 and rows[0]["doc_type"] == "議事録"

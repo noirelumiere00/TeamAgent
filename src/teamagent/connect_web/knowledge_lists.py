@@ -9,6 +9,11 @@ from urllib.parse import parse_qsl, quote, urlencode, urlsplit
 from uuid import UUID
 
 from teamagent.adapters.pgvector_client import KNOWLEDGE_TAG_AXES
+from teamagent.knowledge_query import (
+    QUICK_FILTERS,
+    KnowledgeQueryError,
+    parse_knowledge_query,
+)
 
 PAGE_SIZE = 50
 MAX_PAGE = 10_000
@@ -56,7 +61,7 @@ def search_list_target(raw: str) -> str | None:
         return "/search?" + urlencode({"view": "doc", "id": document_id})
     if view == "tags":
         return "/search?view=tags" if set(values) == {"view"} else None
-    allowed_keys = {"view", "page", "tag"} if view == "docs" else {"view", "page"}
+    allowed_keys = {"view", "page", "tag", "q", "quick"} if view == "docs" else {"view", "page"}
     if (
         view not in VIEWS
         or set(values) - allowed_keys
@@ -70,6 +75,16 @@ def search_list_target(raw: str) -> str | None:
         if parse_tag(values["tag"]) is None:
             return None
         query["tag"] = values["tag"]
+    if "q" in values:
+        try:
+            parse_knowledge_query(values["q"])
+        except KnowledgeQueryError:
+            return None
+        query["q"] = values["q"]
+    if "quick" in values:
+        if values["quick"] not in QUICK_FILTERS:
+            return None
+        query["quick"] = values["quick"]
     return "/search?" + urlencode(query)
 
 
@@ -118,6 +133,18 @@ LIST_STYLE = (
     ".list-note{margin:16px 0;font-size:13px;color:var(--muted)}"
     ".list-note summary{cursor:pointer}.knowledge-list [role=alert]{padding:20px;"
     "border:1px solid #b84a4a;border-radius:8px;background:#fff2f1}"
+    ".docs-filters{padding:16px;border:1px solid var(--border);border-radius:8px;"
+    "background:var(--bg-secondary);margin:16px 0}.docs-filters label{font-weight:600}"
+    ".docs-filter-input{display:flex;flex-wrap:wrap;gap:8px;margin:8px 0}"
+    ".docs-filter-input input{flex:1;min-width:180px;padding:10px;background:white;"
+    "border:1px solid var(--border);border-radius:6px;color:var(--text)}"
+    ".docs-filter-input button{padding:10px 16px;background:var(--accent);color:white;"
+    "border:0;border-radius:6px;cursor:pointer}"
+    ".quick-filters{display:flex;gap:8px;flex-wrap:wrap;margin-top:12px}"
+    ".quick-filters a{padding:6px 12px;background:white;border:1px solid var(--border);"
+    "border-radius:6px;text-decoration:none}.quick-filters a[aria-current=true]{"
+    "background:var(--accent);color:white;border-color:var(--accent)}"
+    ".docs-filters :focus-visible{outline:2px solid var(--accent);outline-offset:2px}"
     "@media(max-width:767px){.knowledge-list{padding:16px}.knowledge-list h1{font-size:22px}"
     ".knowledge-list table,.knowledge-list tbody,.knowledge-list tr,"
     ".knowledge-list td{display:block}"
@@ -156,6 +183,36 @@ def tag_link(axis: str, value: str) -> str:
     return f'<a href="{html.escape(url)}">{html.escape(value)}</a>'
 
 
+def docs_controls(query: dict[str, str], q: str, quick: str | None) -> str:
+    out = (
+        '<section class="docs-filters" aria-label="資料の条件検索">'
+        '<form action="/search" method="get">'
+    )
+    for key, value in {**query, "page": "1"}.items():
+        if key != "q":
+            out += f'<input type="hidden" name="{key}" value="{html.escape(value)}">'
+    out += (
+        '<label for="docsQuery">条件で絞る</label><div class="docs-filter-input">'
+        f'<input id="docsQuery" type="search" name="q" value="{html.escape(q[:300])}" '
+        'maxlength="300" aria-describedby="docsQueryHelp">'
+        '<button type="submit">絞り込む</button></div></form>'
+        '<p id="docsQueryHelp" class="meta">例：<code>tag:食品 file:提案 -下書き</code>。'
+        '普通の語はAND、引用句は <code>"引用 句"</code>、タグは完全一致です。'
+        "最大10語・1語100文字・全体300文字。path:・属性指定・正規表現は未対応です。"
+        "本文は代表部分の最大2,000文字が対象です。</p>"
+        '<p class="meta"><a href="/search">AI で探す（検索タブ）</a> は別の検索です。</p>'
+        '<div class="quick-filters" aria-label="クイックフィルタ">'
+    )
+    for value, label in {"": "すべて", **QUICK_FILTERS}.items():
+        params = {k: v for k, v in query.items() if k != "quick"}
+        if value:
+            params["quick"] = value
+        url = html.escape("/search?" + urlencode({**params, "page": "1"}))
+        active = ' aria-current="true"' if value == (quick or "") else ""
+        out += f'<a href="{url}"{active}>{label}</a>'
+    return out + "</div></section>"
+
+
 def render_list(
     view: str,
     page: int,
@@ -163,6 +220,9 @@ def render_list(
     total: int | None,
     *,
     tag: str | None = None,
+    q: str = "",
+    quick: str | None = None,
+    error: str | None = None,
 ) -> str:
     """total=None は取得失敗。空集合・範囲外ページと混同させない。"""
     label = "取引先" if view == "clients" else "資料"
@@ -176,6 +236,12 @@ def render_list(
             f"<p>絞り込み：{html.escape(tag_label)}：{html.escape(value)} "
             '<a href="/search?view=docs">解除</a></p>'
         )
+    if view == "docs":
+        if q:
+            query["q"] = q
+        if quick:
+            query["quick"] = quick
+        out += docs_controls(query, q, quick)
     first_url = html.escape("/search?" + urlencode({**query, "page": 1}))
     out += (
         '<p class="sub">取引先名からカルテを開き、最新の反応と次アクションを確認できます。</p>'
@@ -189,6 +255,8 @@ def render_list(
         else '<p class="meta">閲覧できる資料を更新日の新しい順に並べています。'
         "FB・重複として非表示の資料・研究ノートは対象外です。</p>"
     )
+    if error is not None:
+        return out + f'<p role="alert">{html.escape(error)}</p></main>'
     if total is None:
         return (
             out + '<p role="alert">一覧を取得できませんでした。'
