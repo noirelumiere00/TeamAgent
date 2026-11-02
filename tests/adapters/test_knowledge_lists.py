@@ -51,3 +51,22 @@ def test_documents_empty_page_keeps_total_and_stable_id() -> None:
     row: dict[str, Any] = {"id": "stable-uuid", "title": "資料", "total": 51}
     cursor.fetchall.return_value = [row]
     assert pg.list_knowledge_documents(conn) == ([{"id": "stable-uuid", "title": "資料"}], 51)
+
+
+def test_tag_filter_whitelist_and_parameterized_exact_value() -> None:
+    import pytest
+
+    conn = MagicMock()
+    cursor = conn.cursor.return_value.__enter__.return_value
+    cursor.fetchall.return_value = [{"id": None, "total": 0}]
+    pg = PgVectorClient("fixture")
+    value = "50%_O'Reilly"
+    assert pg.list_knowledge_documents(conn, tag=("industry", value), offset=50) == ([], 0)
+    query, params = cursor.execute.call_args.args
+    assert "WHERE industry = %s" in query and value not in query
+    assert params == [value, 50, 50]
+    with pytest.raises(ValueError, match="invalid knowledge tag axis"):
+        pg.list_knowledge_documents(conn, tag=("industry; DROP TABLE documents", value))
+    cursor.fetchone.return_value = None
+    assert pg.get_knowledge_document(conn, "12345678-1234-1234-abcd-123456789abc") is None
+    assert cursor.execute.call_args.args[1] == ["12345678-1234-1234-abcd-123456789abc"]

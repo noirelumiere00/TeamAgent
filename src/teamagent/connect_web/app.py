@@ -71,7 +71,10 @@ from teamagent.connect_web.knowledge_lists import (
     LIST_STYLE,
     PAGE_SIZE,
     list_tabs,
+    parse_tag,
+    render_document,
     render_list,
+    render_tags,
     search_list_target,
 )
 from teamagent.connect_web.library import library_target, register_library_routes
@@ -3295,6 +3298,7 @@ def _shell_page(email: str, *, mode: str, list_content: str | None = None) -> st
         '<button id="tabGraph" class="ws-tab' + graph_active + '">グラフ</button>'
         '<a class="ws-tab" href="/search?view=clients&amp;page=1">取引先一覧</a>'
         '<a class="ws-tab" href="/search?view=docs&amp;page=1">資料一覧</a>'
+        '<a class="ws-tab" href="/search?view=tags">タグ</a>'
         "</div>"
         '<div class="ws-body">'
         '<div id="mainList"' + list_hidden + ">" + _SEARCH_DOM + "</div>"
@@ -4793,17 +4797,22 @@ def create_app(
     def search_ui(request: Request) -> Response:
         """検索 UI（未認証は /search/login へリダイレクト）。"""
         target = search_list_target("/search?" + request.url.query)
+        if target is None and request.query_params.get("view") == "doc":
+            target = "/search?view=docs&page=1"
         email = _search_email(request)
         if email is None:
             login = "/search/login" + ("?next=" + quote(target, safe="") if target else "")
             return RedirectResponse(login, status_code=303)
         if target:
             params = parse_qs(target.split("?", 1)[1])
-            view, page = params["view"][0], int(params["page"][0])
+            view, page = params["view"][0], int(params.get("page", ["1"])[0])
+            tag = params.get("tag", [None])[0]
             from teamagent.adapters.pgvector_client import PgVectorClient
 
             rows: list[dict[str, Any]] = []
             total: int | None = None
+            document = None
+            failed = False
             try:
                 pg = PgVectorClient.from_env()
                 domain = email.split("@", 1)[1] if "@" in email else email
@@ -4811,18 +4820,35 @@ def create_app(
                 with pg.connection(
                     app_role=app_role, user_email=email, user_groups=[domain], user_role="user"
                 ) as conn:
-                    query = (
-                        pg.list_knowledge_clients
-                        if view == "clients"
-                        else pg.list_knowledge_documents
-                    )
-                    rows, total = query(conn, limit=PAGE_SIZE, offset=(page - 1) * PAGE_SIZE)
+                    if view == "doc":
+                        document = pg.get_knowledge_document(conn, params["id"][0])
+                    elif view == "tags":
+                        rows = pg.list_knowledge_tags(conn)
+                    elif view == "clients":
+                        rows, total = pg.list_knowledge_clients(
+                            conn, limit=PAGE_SIZE, offset=(page - 1) * PAGE_SIZE
+                        )
+                    else:
+                        filters = {"tag": parse_tag(tag)} if tag is not None else {}
+                        rows, total = pg.list_knowledge_documents(
+                            conn, limit=PAGE_SIZE, offset=(page - 1) * PAGE_SIZE, **filters
+                        )
             except Exception as exc:
                 rows, total = [], None
+                failed = True
                 logger.warning("knowledge_list_failed", view=view, error=type(exc).__name__)
+            status = 503 if failed else 200
+            if view == "doc":
+                content = render_document(document, failed=failed)
+                if not failed and document is None:
+                    status = 404
+            elif view == "tags":
+                content = render_tags(None if failed else rows)
+            else:
+                content = render_list(view, page, rows, total, tag=tag)
             return HTMLResponse(
-                _shell_page(email, mode=view, list_content=render_list(view, page, rows, total)),
-                status_code=503 if total is None else 200,
+                _shell_page(email, mode=view, list_content=content),
+                status_code=status,
             )
         return HTMLResponse(_shell_page(email, mode="list"))
 
