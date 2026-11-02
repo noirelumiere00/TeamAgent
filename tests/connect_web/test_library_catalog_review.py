@@ -84,7 +84,8 @@ class LargeCatalogPg(Pg):
         elif "SELECT v.*" in query and "v.advertiser = %s" in query:
             result.fetchall.return_value = self.videos[::55]
         elif "SELECT v.*" in query and "LIMIT %s OFFSET %s" in query:
-            result.fetchall.return_value = [v.copy() for v in self.videos[:50]]
+            offset, size = params[-1], params[-2]
+            result.fetchall.return_value = [v.copy() for v in self.videos[offset : offset + size]]
         return result
 
 
@@ -182,4 +183,4 @@ def test_filters_keep_search_and_sort_outside_disclosure(setup: tuple[TestClient
         for field, value in (("industry", "食品"), ("purpose", "認知")):
             assert details.select_one(f'[name="{field}"]')["value"] == value
         assert details.select_one('[type="submit"]') is not None
-        assert "食品 / 認知" in soup.select_one(".active-filters").text
+        assert "業種: 食品 / 目的: 認知" in soup.select_one(".active-filters").text

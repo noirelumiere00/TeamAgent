@@ -146,7 +146,7 @@ def test_category_navigation_current_and_header_search(
     assert len(nav.select("a")) == 6
     search = soup.select_one(".header-search")
     assert search.select_one("summary[aria-label]") is not None
-    assert search.select_one('form[role="search"]')["action"] == "/library/cases"
+    assert search.select_one('form[role="search"]')["action"] == "/library/videos"
     assert not search.has_attr("open")  # Mobile/no-JS defaults to a native disclosure.
 
 
@@ -247,7 +247,7 @@ def test_primary_category_is_counted_in_one_parameterized_aggregate() -> None:
     assert sql.count("FROM vl_videos_effective") == 1
     assert sql.count("GROUP BY v.advertiser, v.campaign") == 1
     assert "NOT v.is_private" in sql and "' OR true--" not in sql
-    assert params == ["%' OR true--%"]
+    assert params == ["%'%", "%OR%", "%true--%"]
 
 
 @pytest.mark.parametrize("count", [1, 3, 4, 5])

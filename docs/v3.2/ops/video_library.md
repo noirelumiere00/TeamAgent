@@ -317,3 +317,76 @@ DPR 2。トップ・事例一覧・動画詳細は全ページ、事例詳細と
 fake 55事例・2,800動画（サムネ無し280本）に種別混在と異なる投稿文を加え、1440／375pxで再撮影・目視した。トップは `/tmp/library-v3-review-screenshots/home-1440.png`、`home-375.png`。事例は `case-1440.png`（上部1,600 CSS px）、`case-375-full.png`（ブラウザの撮影上限により上部8,192 CSS px）。すべてDPR 2。375pxのビューポート撮影はブラウザ側で拡大・切り抜きになるため全体撮影に切り替え、動画タイトルを含む画像を確認した。棚と先頭カードの左端一致は撮影用のレイアウト検査でも確認。撮影用ウィンドウは終了後に閉じた。
 
 未実施: 実DB9テスト、本番データでの再確認、実TikTok／本番S3疎通、768／1024px再撮影、デプロイ。依頼どおりコミット・push・PRはせず、変更を作業ツリーに残す。
+
+## 一覧オートロード（2026-11-02）
+
+ブランチ `feat/video-library-autoload`、開始時のHEADは `origin/dev` と同じ `6376b01b`。対象は `/library/videos`、`/library/cases`、`/library/c?advertiser=…&campaign=…`。動画一覧は既存50件、事例一覧は既存12件の単位を維持し、事例内動画の描画も50件単位にした。SQLとJSON APIの形式は変更していない。事例コピーに全動画が必要なため、事例ページのDB読出しとコピー本文は全件のまま、カードだけをページ分割する。
+
+各一覧はページ番号と条件を保持した `rel="next"`／`rel="prev"` を返す。JavaScriptなしでも通常のページ遷移ができる。JavaScriptがある場合は次リンクを隠し、下部の400px手前で同じHTMLページを同一オリジン・cookie付きでfetchし、DOMParserからカードと次リンクだけを取り出す。次ページのスクリプトやヘッダー、コピー本文は追加しない。直接2ページ目以降を開いた時の前リンクは残す。新しいAPIやpartialモードは追加していない。
+
+二重取得を防ぎ、失敗後は自動再試行を止めて「再試行」と次ページリンクを表示する。「さらに読み込む」はObserver非対応時にも操作可能。表示件数と終端をaria-live politeで通知する。URLや履歴は書き換えず、独自のスクロール位置復元は行わない。ホバーはmouseover／mouseoutの委譲、画像エラーはcaptureで処理し、追加カードにも1枚だけのiframe制御が効く。コピーは操作時に現在のチェック済み要素を読む。
+
+変更ファイル:
+
+- `src/teamagent/connect_web/library.py`: 共通のページ付きグリッド、条件保持リンク、事例内50件表示
+- `src/teamagent/connect_web/library_assets.py`: オートロード、件数・再試行表示、ホバー／画像イベントの委譲
+- `tests/connect_web/test_library_autoload.py`: HTML・ページ境界・コピー・ページ上限と150本事例fake
+- `tests/connect_web/test_library_autoload_browser.py`: opt-inのヘッドレス実行手順（外部ネットワーク不要）
+- `tests/connect_web/test_library_js.py`: 配信JSをNodeで実行する回帰テスト
+- `tests/connect_web/test_library.py`: mouseleaveから委譲mouseoutへの期待値更新
+- `tests/connect_web/test_library_catalog_review.py`: fakeのLIMIT／OFFSET対応
+- `docs/v3.2/ops/video_library.md`: 本記録
+
+### 検証
+
+| テスト名 | 確認内容／一時的に壊して赤を確認した内容 |
+| --- | --- |
+| `test_next_links_preserve_all_filters_and_end` | 条件・種別・並び順保持、最終ページ、JSなしのリンク／rel=nextの除去・条件の脱落 |
+| `test_case_grid_pages_fifty_but_copy_includes_every_video` | 150本を50本×3ページ、コピーは全150本／表示上限の除去・コピーを50本に切断 |
+| `test_autoload_page_limit_stays_validated` | 3種類の一覧で0・負数・100万超・非数値を拒否 |
+| `test_autoload_serial_fetch_retry_completion_and_button_fallback` | 二重取得、再試行、終端、Observerなし、途中ページの前リンク、ログインHTML・異常な次リンク／busy制御の除去・自動再試行抑止の除去・ボタン無効化・cookie省略・完了表示の破壊 |
+| `test_single_player_disposal_and_checked_urls_clipboard` | 追加カードの委譲ホバー、iframe1枚・破棄、追加チェックのコピー、追加画像のエラー／委譲イベント名の破壊・未選択URLの混入 |
+
+計11件で失敗検出後に復元した。結果は `/tmp/library-autoload-mutations.json`、失敗全文は `/tmp/library-autoload-mutation-*.log`。関係するpytestは8ファイルに限定。実DB9件はDSN未設定、ブラウザ1件は通常実行ではopt-inのためスキップする。最終結果と静的検査ログは `/tmp/library-autoload-{pytest,mypy,ruff,format,imports}-final.log`。ログ設定はテストから変更していない。
+
+### ブラウザ確認の制限と再実行
+
+ヘッドレス検証は `TEAMAGENT_LIBRARY_BROWSER=1` を指定して実際に実行したが、Chromium起動時の `MachPortRendezvousServer: Permission denied (1100)` で失敗した。画面表示前のOS権限制約であり、スクロール／追加カード操作／1440pxスクリーンショットは今回未確認・未取得。起動したプロセスは終了し、Playwrightの一時プロファイルcleanupまでログで確認した。失敗全文は `/tmp/library-autoload-browser.log`。既存の利用者ブラウザは操作していない。
+
+実行環境の制約がない場所では以下で再現できる（既存dev/media依存のPlaywright・Chromiumを使用）。ブラウザはfinallyで閉じる。
+
+```bash
+TEAMAGENT_LIBRARY_BROWSER=1 PYTHONPATH=.:src .venv/bin/pytest -q \
+  tests/connect_web/test_library_autoload_browser.py
+```
+
+このテストは実ルートのHTML・認証cookie・CSPをTestClientで返し、2,800動画の一覧を50→100→150→200件、55事例を終端まで、150本事例を50→100→150件にロードする。追加されたカードで選択コピーとiframe生成・破棄、JSなしの次リンクも検証する設計。TikTokと画像はfake応答で、本番DB・外部サービスには接続しない。成功時の画像保存先は `/tmp/library-autoload-screenshots/{videos-200,cases-55,case-150}-1440.png`（今回は未生成）。
+
+未実施: 上記のブラウザ実機確認と撮影、実DB9テスト、本番データ・実TikTok／S3疎通・デプロイ。push・PRは行わない。
+
+最終検証結果: 関連pytest **177 passed / 10 skipped**、mypy strict **526ファイル成功**、ruff **0.15.15** check／format（1,468ファイル）成功、import-linter **2契約成功**。opt-inブラウザを明示実行した別runは起動エラーで1 failedであり、ブラウザ確認まで完了したという意味ではない。
+
+コミット未実施: `git add` が `/Users/s-komata/dev/teamagent/.git/worktrees/teamagent-vl-ui/index.lock` 作成を `Operation not permitted` で拒否した。依頼の許容条件どおり、8ファイルを作業ツリーに保持。push・PRは未実施。
+
+## 営業向け検索（2026-11-02）
+
+ヘッダー検索は `/library/videos?q=…` に遷移する。1ページ目だけ、一致した事例を合計再生順で最大4件、その下に一致した動画の9:16グリッドを表示する。事例候補は既存の集計1クエリを追加するだけで、追加ロードでは再集計しない。動画のオートロード・ホバー再生・選択コピー・遅延サムネ読み込みは既存の仕組みを利用する。
+
+`parse_search` を動画一覧・事例一覧・動画API・検索解釈表示で共用する。検索語はNFKC正規化→空白で分割し、既存の連結フィールドに対して各語をANDでILIKE検索する。利用者の値はSQLパラメータだけに渡す。上限は10語、正規化前後とも500字。空白で区切られた `#PR`（全角・大文字小文字も同等）は検索語から除き、`is_pr = true` にする。明示的な `pr=no` より `#PR` を優先し、フォームの選択と解釈表示もPRありに揃える。`PR広告` は通常の語で、その他の先頭ハッシュは取り除く。検索解釈・件数・複数語ANDの説明と、0件時の語を減らす／PR指定を解除する案内を表示する。
+
+今回の変更: `library.py`、`test_library_search.py`（新規）、`test_library.py`・`test_library_archive.py`（既存期待値更新）、本記録。前回のオートロード変更は保持し、コミット・push・PRは行わない。
+
+| テスト名（`test_library_search.py`） | 確認内容／一時的に壊して失敗を確認 |
+| --- | --- |
+| `test_search_words_execute_as_and_and_pr` | 生成したSQL条件をSQLiteに方言変換して実行し対象IDを検証／NFKC無効化、AND→OR、PR判定無効化、先頭ハッシュ除去無効化 |
+| `test_search_limits_and_pr_override` | 10語・500字・正規化で長くなる入力・PR優先／語数上限と文字数上限の緩和 |
+| `test_all_search_routes_share_parameters_and_validation` | 動画・事例・APIの共通条件、パラメータ、400、認証／検索パラメータの破壊 |
+| `test_combined_results_keep_video_interactions_and_next_query` | 事例最大4件→動画、PR説明、サムネ・ホバー・選択コピーのHTML、条件保持、初回3クエリ・追加2クエリ、CSP／ヘッダー遷移先と事例上限の破壊 |
+| `test_search_interpretation_escaping_and_empty_guidance` | AND・PR解釈、エスケープ、0件案内／PR説明とエスケープの破壊 |
+| `test_empty_search_page_guidance` | 両一覧の0件案内、候補なしは事例枠なし／PR解除案内の削除 |
+
+計12件の変異で失敗検出後に復元。結果 `/tmp/library-search-mutations.json`、失敗全文 `/tmp/library-search-mutation-*.log`。検索判定テストのSQLiteはWHEREの論理検証用で、実PostgreSQL接続の代替ではない。
+
+前回のオートロード実ブラウザテストは利用者から `test_library_autoload_browser.py: 1 passed` の確認済み連絡あり。今回はブラウザ再実行・スクリーンショット追加は行わず、関連pytestと静的検査で検索変更を検証する。実DBテストは `TEAMAGENT_TEST_DB_DSN` 未設定時にスキップする。今回の最終ログは `/tmp/library-search-{pytest,mypy,ruff,format,imports}-final.log`。
+
+最終検証結果: 関連pytest **196 passed / 10 skipped**（実DB9件・opt-inブラウザ1件）、`mypy --strict src` **526ファイル成功**、`uvx ruff@0.15.15 check src/ tests/ scripts/` 成功、同 `format --check` **1,469ファイル成功**、import-linter **2契約成功**、`git diff --check` 成功。ruffは既存のローカルキャッシュから指定版をオフライン実行。今回の変更に実DB・実ブラウザでの追加確認は含まない。コミットは利用者が行うため未実施。
