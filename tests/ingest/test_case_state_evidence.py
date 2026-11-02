@@ -125,16 +125,19 @@ def test_proposal_report_and_post_numbers_are_independent(manifest: Path) -> Non
     assert observation["source_ref"] == bundle["source_ref"]
 
 
-def test_review_survives_reingest_and_changes_skip_input(manifest: Path) -> None:
+def test_review_survives_reingest_and_only_changes_metadata_version(manifest: Path) -> None:
     doc, body = document(), chunks()
     before = _differential_pipeline_config(classify=False)
+    version = evidence.input_version()
     manifest.write_text(json.dumps({"version": 1, "reviews": [official_review(doc, body)]}))
     first = evidence.attach(doc, body)
     second = evidence.attach(doc, body)
     assert first.metadata == second.metadata
     assert first.metadata[evidence.KEY]["records"][0]["authority"] == "official"
     assert first.metadata[evidence.KEY]["subject_ref"] == "case:anonymous-001"
-    assert before != _differential_pipeline_config(classify=False)
+    assert before == _differential_pipeline_config(classify=False)
+    assert version != evidence.input_version()
+    assert first.metadata[evidence.VERSION_KEY] == evidence.input_version()
 
 
 @pytest.mark.parametrize("change", ["body", "position", "date"])
@@ -216,31 +219,134 @@ def test_reply_report_uses_reply_time_and_link(manifest: Path) -> None:
     assert all(r["state_as_of"] is None and r["authority"] == "reported" for r in records)
 
 
-def test_slack_pipeline_review_change_bypasses_differential_skip(
+@pytest.mark.parametrize("source", ["slack", "gsheets"])
+def test_pipeline_enable_and_review_change_only_refresh_metadata(
     manifest: Path,
     monkeypatch: pytest.MonkeyPatch,
+    source: str,
 ) -> None:
+    from tests.ingest import test_ingest_differential as differential
     from tests.ingest.test_ingest_differential import (
+        _CountingEmbedder,
         _FakeDifferentialRepository,
+        _install_counting_classifier,
+        _install_gsheet_rows,
         _install_slack_channel,
+        _run_gsheet,
         _run_slack,
     )
 
     monkeypatch.setenv("INGEST_DIFFERENTIAL", "1")
-    monkeypatch.setenv("USE_DOC_CLASSIFY", "0")
     monkeypatch.setenv("USE_CONTEXTUAL_INGEST", "0")
-    _install_slack_channel(monkeypatch, text="確認済みの受注記録")
+    monkeypatch.setenv("EMBEDDER_BACKEND", "local")
+    bedrock = _install_counting_classifier(monkeypatch)
+    if source == "slack":
+        _install_slack_channel(
+            monkeypatch, text="*商流*\n直販\n*商談感触（BANT）*\nA\n*商談フェーズ*\n受注"
+        )
+        run = _run_slack
+    else:
+        monkeypatch.setattr(
+            differential,
+            "_GSHEET_HEADERS",
+            ("商流", "商談フェーズ", "商談感触（BANT）", "タイムスタンプ"),
+        )
+        _install_gsheet_rows(monkeypatch, (("直販", "受注", "A", "2026/10/01 23:30:00"),))
+        run = _run_gsheet
+
     repo = _FakeDifferentialRepository()
-    _run_slack(repo)
+    monkeypatch.delenv("CASE_STATE_EVIDENCE_ALLOWED_EMAILS")
+    assert run(repo) == (1, 1)
+    assert bedrock.converse_calls == 1
     saved = repo.upsert_calls[-1]
-    doc = DocumentUpsert(**{k: v for k, v in saved.items() if k != "chunk_texts"})
+    before = dict(repo.documents[(source, saved["external_id"])])
+    assert evidence.KEY not in before
+
+    monkeypatch.setenv("CASE_STATE_EVIDENCE_ALLOWED_EMAILS", "*")
+    bedrock.converse_calls = 0
+    embedder = _CountingEmbedder()
+    assert run(repo, embedder=embedder) == (0, 0)
+    assert bedrock.converse_calls == embedder.calls == 0
+    assert len(repo.upsert_calls) == len(repo.metadata_update_calls) == 1
+    stored = repo.documents[(source, saved["external_id"])]
+    assert {key: stored[key] for key in before} == before
+    assert stored[evidence.KEY]["document_kind"] == before["cls_doc_type"]
+    assert stored[evidence.KEY]["records"][0]["authority"] == "reported"
+
+    assert run(repo, embedder=embedder) == (0, 0)
+    assert len(repo.metadata_update_calls) == 1
+    doc = DocumentUpsert(
+        **{k: v for k, v in saved.items() if k not in {"chunk_texts", "metadata"}},
+        metadata=stored,
+    )
     body = chunks(saved["chunk_texts"][0])
     manifest.write_text(json.dumps({"version": 1, "reviews": [official_review(doc, body)]}))
-    _run_slack(repo)
+    stored["suppressed"] = True  # 取り込み後の重複印は根拠の入力版に含めない。
+    assert run(repo, embedder=embedder) == (0, 0)
+    assert bedrock.converse_calls == embedder.calls == 0
+    assert len(repo.upsert_calls) == 1
+    assert len(repo.metadata_update_calls) == 2
+    assert stored[evidence.VERSION_KEY] == evidence.input_version()
+    assert stored[evidence.KEY]["records"][-1]["authority"] == "official"
+    assert stored["suppressed"] is True
+    assert run(repo, embedder=embedder) == (0, 0)
+    assert len(repo.metadata_update_calls) == 2
+
+    manifest.write_text('{"version": 1, "reviews": []}')
+    if source == "slack":
+        _install_slack_channel(monkeypatch, text="変更した本文")
+    else:
+        _install_gsheet_rows(monkeypatch, (("代理店", "受注", "A", "2026/10/01 23:30:00"),))
+    assert run(repo, embedder=embedder) == (1, 1)
+    assert bedrock.converse_calls == embedder.calls == 1
     assert len(repo.upsert_calls) == 2
-    assert repo.upsert_calls[-1]["metadata"][evidence.KEY]["records"][0]["authority"] == "official"
-    _run_slack(repo)
-    assert len(repo.upsert_calls) == 2
+    assert len(repo.metadata_update_calls) == 2
+
+
+@pytest.mark.parametrize("failure", ["missing", "changed", "invalid_manifest"])
+def test_metadata_refresh_rejects_stale_source_or_invalid_review(
+    manifest: Path, failure: str
+) -> None:
+    from tests.ingest.test_ingest_differential import _FakeDifferentialRepository
+
+    repo = _FakeDifferentialRepository()
+    doc = document()
+    stored = {"content_sha256": "original", "cls_doc_type": "提案書"}
+    if failure != "missing":
+        repo.documents[(doc.source_type, doc.external_id)] = dict(stored)
+    if failure == "invalid_manifest":
+        manifest.write_text('{"version": 1, "reviews": [{}]}')
+    with pytest.raises(ValueError):
+        repo.refresh_case_state_evidence(
+            doc,
+            chunks(),
+            expected_content_hash="changed" if failure == "changed" else "original",
+            request_id="r",
+        )
+    assert repo.metadata_update_calls == []
+    assert repo.documents.get((doc.source_type, doc.external_id)) == (
+        None if failure == "missing" else stored
+    )
+
+
+def test_metadata_refresh_detects_changed_report_without_version_change(manifest: Path) -> None:
+    from tests.ingest.test_ingest_differential import _FakeDifferentialRepository
+
+    doc = document(
+        is_sales_fb=True,
+        deal_phase="受注",
+        case_state_form_submitted_at=None,
+        content_sha256="unchanged",
+    )
+    repo = _FakeDifferentialRepository()
+    repo.upsert_document_with_chunks(evidence.attach(doc, chunks()), chunks(), request_id="r")
+    updated = replace(doc, metadata={**doc.metadata, "case_state_form_submitted_at": "2026-10-01"})
+    assert repo.refresh_case_state_evidence(
+        updated, chunks(), expected_content_hash="unchanged", request_id="r"
+    )
+    stored = repo.documents[(doc.source_type, doc.external_id)]
+    assert stored[evidence.KEY]["records"][0]["evidence_date"] == "2026-10-01"
+    assert stored[evidence.VERSION_KEY] == evidence.input_version()
 
 
 @pytest.mark.parametrize("submitted", ["", "2026/10/01 23:30:00"])

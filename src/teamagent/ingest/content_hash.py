@@ -60,6 +60,7 @@ def compute_document_content_hash(
 
     ``metadata`` には「分類出力（``cls_*``）とハッシュキーを含まない入力 metadata」を
     渡すこと（呼び出し側がハッシュ計算を分類より前に置いて構造的に保証する）。
+    根拠束・その版・本文由来の根拠補助値は metadata 専用の更新で反映するため除外する。
     防御として、ここでも ``cls_*`` / ``content_sha256`` が混入していたら除外する
     （既存 metadata の引き回しバグでスキップ判定が歪むのを防ぐ二重壁）。
 
@@ -69,7 +70,15 @@ def compute_document_content_hash(
     normalized_metadata = {
         str(key): value
         for key, value in metadata.items()
-        if not str(key).startswith("cls_") and str(key) != INGEST_CONTENT_HASH_KEY
+        if not str(key).startswith("cls_")
+        and str(key)
+        not in {
+            INGEST_CONTENT_HASH_KEY,
+            "case_state_evidence",
+            "case_state_evidence_input_version",
+            "case_state_reports",
+            "case_state_form_submitted_at",
+        }
     }
     payload = {
         "hash_schema_version": _HASH_SCHEMA_VERSION,
