@@ -6,6 +6,7 @@ import hashlib
 import json
 import math
 import re
+import unicodedata
 from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -85,12 +86,19 @@ def validate_prediction(text: str, post: Post, cases: list[Case]) -> Prediction:
         raise ValueError("invalid_new_case")
     if result.advertiser and not result.evidence:
         raise ValueError("missing_evidence")
+    tags = {_ground(t).lstrip("#") for t in post.hashtags}
+    text = _ground(post.caption + "".join(f"#{t}" for t in post.hashtags) + "".join(post.mentions))
     for evidence in result.evidence:
-        raw = getattr(post, evidence.field)
-        sources = [raw] if isinstance(raw, str) else raw
-        if not any(evidence.quote in source for source in sources):
+        # Quotes may differ from the stored text only in width, case, spacing and the '#' prefix.
+        quote = _ground(evidence.quote)
+        words = [w.lstrip("#") for w in unicodedata.normalize("NFKC", evidence.quote).split()]
+        if quote not in text and not (words and all(_ground(w) in tags for w in words)):
             raise ValueError("ungrounded_quote")
     return result
+
+
+def _ground(value: str) -> str:
+    return re.sub(r"\s+", "", unicodedata.normalize("NFKC", value)).casefold()
 
 
 def digest(value: Any) -> str:

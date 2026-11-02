@@ -102,7 +102,7 @@ def repo() -> MagicMock:
         {"match_type": "approved"},
         {"advertiser": ""},
         {"evidence": [{"field": "caption", "quote": "not in original"}]},
-        {"evidence": [{"field": "hashtags", "quote": "Product"}]},
+        {"evidence": [{"field": "hashtags", "quote": "Gadget"}]},
         {"evidence": [{"field": "account_name", "quote": "Brand"}]},
         {"evidence": []},
         {"campaign": None},
@@ -414,3 +414,36 @@ def test_fenced_json_answer_is_accepted_but_other_wrapping_is_not() -> None:
 
     with pytest.raises(ValueError):
         validate_prediction("答えは " + body, post, cases)
+
+
+def test_quotes_ground_across_hash_spacing_width_but_not_invented_text() -> None:
+    import pytest
+
+    from teamagent.ingest.video_library_case_models import Case, Post, validate_prediction
+
+    post = Post(
+        caption="時短したくて入れた大阪ガスの乾太くん\n正直いちばん感動 #PR",
+        hashtags=["乾太くん", "大阪ガス", "PR"],
+        mentions=[],
+        account_name="a",
+        account_handle="a",
+        posted_at="",
+        advertiser=None,
+    )
+    cases = [Case(advertiser="大阪ガス", campaign="乾太くん")]
+
+    def answer(field: str, quote: str) -> str:
+        return (
+            '{"advertiser": "大阪ガス", "campaign": "乾太くん", "match_type": "existing", "confidence": 0.9,'
+            ' "evidence": [{"field": "' + field + '", "quote": "' + quote + '"}]}'
+        )
+
+    assert validate_prediction(answer("hashtags", "#乾太くん #大阪ガス"), post, cases)
+    assert validate_prediction(
+        answer("caption", "大阪ガスの乾太くん 正直いちばん感動"), post, cases
+    )
+    assert validate_prediction(answer("caption", "ＰＲ"), post, cases)
+    with pytest.raises(ValueError, match="ungrounded_quote"):
+        validate_prediction(answer("caption", "乾燥機の最高峰"), post, cases)
+    with pytest.raises(ValueError, match="ungrounded_quote"):
+        validate_prediction(answer("hashtags", "#乾太くん #衣類乾燥機"), post, cases)
