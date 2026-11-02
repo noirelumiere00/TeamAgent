@@ -25,6 +25,7 @@ from pgvector.psycopg import register_vector
 from psycopg.rows import dict_row
 
 from teamagent.adapters.pg_pool import ConnectionPool, PoolStats
+from teamagent.client_identity import client_identity_key
 
 logger = structlog.get_logger(__name__)
 
@@ -873,6 +874,99 @@ class PgVectorClient:
             source_types=filter_source_types or None,
         )
         return hits
+
+    def list_knowledge_clients(
+        self,
+        conn: psycopg.Connection[dict[str, Any]],
+        *,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> tuple[list[dict[str, Any]], int]:
+        """RLS 可視全件を名寄せし、非 FB 資料件数・最新 FB 日と LIMIT 前総数を返す。
+
+        client_name を優先し、未設定時だけ cls_project を使う。タイトルの部分一致は
+        名寄せには使わない。chunks を JOIN しないので分割数に件数が影響されない。
+        """
+        # shortcut: 可視全件をメモリで名寄せする。規模で遅くなれば DB 側に identity key を保存する。
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT COALESCE(NULLIF(btrim(d.metadata->>'client_name'), ''),
+                                NULLIF(btrim(d.metadata->>'cls_project'), '')) AS name,
+                       d.metadata->>'is_sales_fb' = 'true' AS is_fb,
+                       to_char(d.modified_at AT TIME ZONE 'Asia/Tokyo', 'YYYY-MM-DD') AS fb_date
+                FROM documents d
+                WHERE d.metadata->>'suppressed' IS DISTINCT FROM 'true'
+                  AND d.metadata->>'x_research_tool' IS NULL
+            """)
+            rows = cur.fetchall()
+        clients: dict[str, dict[str, Any]] = {}
+        for row in rows:
+            name = str(row["name"] or "").strip()
+            key = client_identity_key(name)
+            if not key:
+                continue
+            item = clients.setdefault(
+                key, {"name": name, "document_count": 0, "latest_fb_at": None}
+            )
+            item["name"] = min(item["name"], name)
+            if row["is_fb"]:
+                if row["fb_date"] and (
+                    not item["latest_fb_at"] or row["fb_date"] > item["latest_fb_at"]
+                ):
+                    item["latest_fb_at"] = row["fb_date"]
+            else:
+                item["document_count"] += 1
+        # 安定ソートで最新 FB 日 DESC NULLS LAST、同日は正規化名の昇順。
+        ordered = sorted(
+            (clients[key] for key in sorted(clients)),
+            key=lambda item: item["latest_fb_at"] or "",
+            reverse=True,
+        )
+        return ordered[offset : offset + limit], len(ordered)
+
+    def list_knowledge_documents(
+        self,
+        conn: psycopg.Connection[dict[str, Any]],
+        *,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> tuple[list[dict[str, Any]], int]:
+        """RLS 可視の非 FB 資料を UUID 付きで列挙。空ページでも総数を返す。
+
+        集計とページは同一 statement の可視集合から求める。表示除外は取引先一覧と共通。
+        """
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                WITH visible AS (
+                    SELECT d.id, d.title, d.modified_at, d.source_uri,
+                           d.source_type::text AS source_type,
+                           d.metadata->>'cls_doc_type' AS doc_type,
+                           COALESCE(NULLIF(btrim(d.metadata->>'client_name'), ''),
+                                    NULLIF(btrim(d.metadata->>'cls_project'), '')) AS client_name
+                    FROM documents d
+                    WHERE d.metadata->>'suppressed' IS DISTINCT FROM 'true'
+                      AND d.metadata->>'x_research_tool' IS NULL
+                      AND d.metadata->>'is_sales_fb' IS DISTINCT FROM 'true'
+                )
+                SELECT page.id::text, page.title, page.source_uri, page.source_type,
+                       page.doc_type, page.client_name,
+                       to_char(page.modified_at AT TIME ZONE 'Asia/Tokyo', 'YYYY-MM-DD')
+                           AS modified_at,
+                       totals.total
+                FROM (SELECT count(*) AS total FROM visible) totals
+                LEFT JOIN LATERAL (
+                    SELECT * FROM visible
+                    ORDER BY modified_at DESC NULLS LAST, id
+                    LIMIT %s OFFSET %s
+                ) page ON true
+                ORDER BY page.modified_at DESC NULLS LAST, page.id
+                """,
+                [limit, offset],
+            )
+            rows = cur.fetchall()
+        total = int(rows[0]["total"])
+        return [{k: v for k, v in row.items() if k != "total"} for row in rows if row["id"]], total
 
     def list_documents_for_graph(
         self,
