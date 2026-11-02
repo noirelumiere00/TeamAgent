@@ -68,7 +68,16 @@ def test_search_entries_and_document_mobile_labels() -> None:
         knowledge_lists.render_list("clients", 1, [{"name": "<A>", "document_count": 3}], 1),
         "html.parser",
     )
-    assert [td["data-label"] for td in listing.select("td")] == ["名前", "資料件数", "最新FB日"]
+    assert [td["data-label"] for td in listing.select("td")] == [
+        "名前",
+        "資料件数",
+        "FB件数",
+        "最新FB日",
+        "担当",
+        "温度感",
+        "最終接点",
+        "宿題",
+    ]
     assert listing.select_one("td a").text == "<A>"
 
 
