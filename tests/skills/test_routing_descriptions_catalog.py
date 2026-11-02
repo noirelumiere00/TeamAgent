@@ -285,7 +285,7 @@ NON_TOOL_IDENTIFIERS = frozenset(
 # env フラグが立っておらず登録されない**ツール。ここを指すルーティング指示は「呼べない先」を
 # 案内していることになるので、人間が明示裁定した集合として固定する。
 # （集合そのものは台帳の enabledBy.kind=="never" と完全一致することを下のテストが検証する）
-NOT_WIRED_IN_PRODUCTION = frozenset({"video_approval", "operation_log", "knowledge_search_url"})
+NOT_WIRED_IN_PRODUCTION = frozenset({"video_approval", "operation_log"})
 
 _SCOPE_PATH = (
     Path(__file__).resolve().parents[2] / "infra" / "openclaw" / "effective-tool-scope.json"
@@ -491,14 +491,13 @@ CORPUS_ROWS_EXPECTING_UNWIRED_TOOLS: dict[str, str] = {
     "vapproval-01": "video_approval（USE_VIDEO_APPROVAL 未設定）",
     "vapproval-02": "video_approval（同上）",
     "boundary-04": "video_approval（同上）",
-    "neg-ksurl-01": "knowledge_search_url（USE_KNOWLEDGE_SEARCH_URL_TOOL 未設定）",
 }
 
 
 def test_corpus_expectations_are_callable_in_production() -> None:
     """コーパスの期待ツールが本番で呼べること（呼べない先を新たに期待値にしない）。
 
-    既存の 4 行（:data:`CORPUS_ROWS_EXPECTING_UNWIRED_TOOLS`）は本検出器が可視化した
+    既存の 3 行（:data:`CORPUS_ROWS_EXPECTING_UNWIRED_TOOLS`）は本検出器が可視化した
     **既知の負債**。新しく増えたら赤にする。
     """
     callable_now = _production_callable_tools()

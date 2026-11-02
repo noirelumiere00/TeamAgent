@@ -18,6 +18,7 @@ tests/ingest/test_ingest_differential_postgres.py（TEAMAGENT_TEST_DB_DSN 必須
 
 from __future__ import annotations
 
+import json
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock
@@ -88,6 +89,30 @@ class _FakeDifferentialRepository:
         self.documents: dict[tuple[str, str], dict[str, Any]] = {}
         self.hash_lookup_calls: list[list[str]] = []
         self.fail_hash_lookup = False
+        self.metadata_update_calls: list[dict[str, Any]] = []
+
+    def refresh_case_state_evidence(self, doc: Any, chunks: list[Any], **kwargs: Any) -> bool:
+        """実 repository の更新経路を、DB 接続だけ fake にして通す。"""
+        from teamagent.ingest.repository import IngestRepository
+
+        stored = self.documents.get((doc.source_type, doc.external_id))
+        cursor = MagicMock()
+        cursor.fetchone.return_value = {"metadata": stored} if stored is not None else None
+        conn = MagicMock()
+        conn.cursor.return_value.__enter__.return_value = cursor
+        repository = IngestRepository(MagicMock())
+        repository._document_connection = MagicMock()  # type: ignore[method-assign]
+        repository._document_connection.return_value.__enter__.return_value = conn
+        repository._lock_source = MagicMock()  # type: ignore[method-assign]
+        updated = repository.refresh_case_state_evidence(doc, chunks, **kwargs)
+        if updated:
+            sql, params = cursor.execute.call_args.args
+            assert "UPDATE documents SET metadata = metadata || %s::jsonb" in sql
+            patch = json.loads(params[0])
+            assert stored is not None
+            stored.update(patch)
+            self.metadata_update_calls.append(patch)
+        return updated
 
     def upsert_document_with_chunks(
         self,
@@ -151,7 +176,7 @@ _GSHEET_ROWS = (("飲食", "高"), ("コスメ", "中"))
 
 
 def _install_gsheet_rows(
-    monkeypatch: pytest.MonkeyPatch, rows: tuple[tuple[str, str], ...]
+    monkeypatch: pytest.MonkeyPatch, rows: tuple[tuple[str, ...], ...]
 ) -> None:
     from teamagent.adapters.gsheets_client import TabRows
 

@@ -81,6 +81,7 @@ def test_the_list_covers_every_tool_that_reads_the_inbox() -> None:
         "mail_reply",
         "mail_to_internal_context",
         "morning_digest",
+        "workspace_search",
     } <= DM_ONLY_TOOLS
 
 
