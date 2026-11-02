@@ -231,7 +231,11 @@ def test_paging_over_existing_caps_ties_aliases_and_null_dates(db: Any) -> None:
         assert pg.list_knowledge_documents(conn, offset=650) == ([], total)
         clients, client_total = pg.list_knowledge_clients(conn)
         assert client_total == 602  # 601 normalized names + FB-only client
-        assert clients[0] == {"name": "FBのみ", "document_count": 0, "latest_fb_at": "2026-01-01"}
+        assert {key: clients[0][key] for key in ("name", "document_count", "latest_fb_at")} == {
+            "name": "FBのみ",
+            "document_count": 0,
+            "latest_fb_at": "2026-01-01",
+        }
         assert clients[1]["document_count"] == 2  # aliases merged before paging/counting
         second_clients, _ = pg.list_knowledge_clients(conn, offset=50)
         assert [client_identity_key(r["name"]) for r in second_clients] == [
@@ -256,9 +260,9 @@ def test_empty_rls_visible_set_and_project_name_fallback(db: Any) -> None:
     with sessions.connection("b@example.com") as conn:
         clients, total = pg.list_knowledge_clients(conn)
         assert total == 1
-        assert clients == [
-            {"name": "株式会社 Project 様", "document_count": 1, "latest_fb_at": None}
-        ]
+        assert [
+            {key: row[key] for key in ("name", "document_count", "latest_fb_at")} for row in clients
+        ] == [{"name": "株式会社 Project 様", "document_count": 1, "latest_fb_at": None}]
         docs, doc_total = pg.list_knowledge_documents(conn)
         assert doc_total == 2  # Unnamed documents remain documents, but create no client.
         assert {row["client_name"] for row in docs} == {"株式会社 Project 様", None}
@@ -524,3 +528,113 @@ def test_operator_and_quick_filtered_totals_paging_and_recent(db: Any) -> None:
             assert old not in repr(rows) and future not in repr(rows)
             rows, count = pg.list_knowledge_documents(conn, q="file:対象", quick="minutes")
             assert count == 1 and rows[0]["doc_type"] == "議事録"
+
+
+def test_client_attributes_counts_filters_and_http_are_scoped_by_real_rls(
+    db: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from datetime import date, timedelta
+    from urllib.parse import urlencode
+
+    from fastapi.testclient import TestClient
+
+    from teamagent.connect_web.app import create_app
+    from teamagent.dashboard.auth import make_session
+    from tests.connect_web.test_search_routes import _SECRET, _config
+
+    today = date.today()
+    name = "属性検証顧客"
+    doc_date = (today - timedelta(days=450)).isoformat()
+    for i in range(55):
+        fb_date = (today - timedelta(days=550 - i)).isoformat()
+        fid = seed(
+            db,
+            name,
+            groups=("example.com",),
+            fb=True,
+            modified=fb_date,
+            extra={"negative_reaction": f"長い懸念の記録 {i}", "next_action": "共有の次の連絡"},
+        )
+        db.execute(
+            "UPDATE chunks SET contextualized=%s WHERE document_id=%s",
+            ["本文" * 200 + "\n送信者: 沖井 タイムスタンプ: 2024/1/1 10:00", fid],
+        )
+        seed(db, name, groups=("example.com",), modified=doc_date, extra={"cls_industry": "食品"})
+    private = seed(
+        db,
+        name,
+        owner="a@example.com",
+        fb=True,
+        modified=today.isoformat(),
+        extra={"negative_reaction": "特になし", "next_action": "私有の別アクション"},
+    )
+    db.execute(
+        "UPDATE chunks SET contextualized=%s WHERE document_id=%s",
+        ["本文" * 200 + "\n送信者: 私有担当 タイムスタンプ: 2026/1/1 10:00", private],
+    )
+    seed(
+        db,
+        name,
+        groups=("example.com",),
+        modified=(today + timedelta(days=100)).isoformat(),
+        extra={"client_name": "別取引先"},
+    )  # title-only relationship must not alter activity dates/counts
+    for extra in ({"suppressed": "true"}, {"x_research_tool": "tool"}):
+        seed(
+            db,
+            name,
+            groups=("example.com",),
+            fb=True,
+            modified=(today + timedelta(days=200)).isoformat(),
+            extra=extra,
+        )
+    db.execute("""
+        UPDATE documents SET metadata = jsonb_set(metadata, '{is_sales_fb}', 'true'::jsonb)
+        WHERE metadata->>'is_sales_fb' = 'true'
+    """)
+    pg = HttpPg(db)
+    monkeypatch.setattr(PgVectorClient, "from_env", lambda: pg)
+    client = TestClient(create_app(search_config=_config()))
+    observed_b = None
+    for email in ("b@example.com", "a@example.com", "b@example.com"):
+        cookie = {"ta_search_session": make_session(email, _SECRET, ttl_s=3600)}
+        response = client.get("/api/v1/client/" + name, cookies=cookie)
+        assert response.status_code == 200
+        payload = response.json()
+        attrs = payload["attributes"]
+        assert attrs["doc_count"] == 55 and attrs["fb_count"] == (
+            56 if email.startswith("a") else 55
+        )
+        assert len(payload["timeline"]) == len(payload["documents"]) == 50
+        assert payload["header"]["fb_count"] == payload["header"]["doc_count"] == 50
+        if email.startswith("b"):
+            assert attrs["owners"] == ["沖井智哉"]
+            assert attrs["temperature"] == "ネガ優勢" and attrs["last_contact"] == doc_date
+            assert attrs["next_action"] == "共有の次の連絡"
+            assert attrs["has_homework"] and attrs["followup_overdue"]
+            assert "私有" not in repr(payload)
+            if observed_b is not None:
+                assert attrs == observed_b
+            observed_b = attrs
+        else:
+            assert set(attrs["owners"]) == {"私有担当", "沖井智哉"}
+            assert attrs["temperature"] == "高" and attrs["last_contact"] == today.isoformat()
+            assert attrs["next_action"] == "私有の別アクション"
+            assert not attrs["has_homework"] and not attrs["followup_overdue"]
+        listing, count = pg.list_knowledge_clients(db)
+        assert count == 2
+        row = next(row for row in listing if row["name"] == name)
+        assert row == attrs
+        for quick in ("homework", "negative", "overdue", "high"):
+            selected, total = pg.list_knowledge_clients(db, quick=quick)
+            expected = (quick == "high") == email.startswith("a")
+            assert (any(row["name"] == name for row in selected)) == expected
+            assert total == (1 if expected else 0)
+            assert pg.list_knowledge_clients(db, quick=quick, offset=50) == ([], total)
+            page = client.get(
+                "/search?" + urlencode({"view": "clients", "quick": quick}), cookies=cookie
+            )
+            assert page.status_code == 200
+            if email.startswith("b"):
+                assert "私有" not in page.text

@@ -11,7 +11,7 @@ from teamagent.adapters.pgvector_client import PgVectorClient
 def test_clients_merge_before_count_sort_and_page() -> None:
     conn = MagicMock()
     cursor = conn.cursor.return_value.__enter__.return_value
-    cursor.fetchall.return_value = [
+    raw = [
         {"name": f"顧客{i:03}", "is_fb": False, "fb_date": "2099-01-01"}
         for i in reversed(range(51))
     ] + [
@@ -23,10 +23,24 @@ def test_clients_merge_before_count_sort_and_page() -> None:
         {"name": None, "is_fb": False, "fb_date": None},
         {"name": " \t ", "is_fb": False, "fb_date": None},
     ]
+    cursor.fetchall.return_value = [
+        {
+            "id": str(i),
+            "modified_at": row["fb_date"],
+            "content": "",
+            "metadata": {
+                "client_name": row["name"],
+                **({"is_sales_fb": "true"} if row["is_fb"] else {}),
+            },
+        }
+        for i, row in enumerate(raw)
+    ]
     pg = PgVectorClient("fixture")
     rows, total = pg.list_knowledge_clients(conn, limit=2)
     assert total == 52
-    assert rows == [
+    assert [
+        {key: row[key] for key in ("name", "document_count", "latest_fb_at")} for row in rows
+    ] == [
         {"name": "株式会社 顧客000 様", "document_count": 2, "latest_fb_at": "2026-02-01"},
         {"name": "顧客001", "document_count": 1, "latest_fb_at": "2026-02-01"},
     ]
@@ -36,7 +50,7 @@ def test_clients_merge_before_count_sort_and_page() -> None:
     assert pg.list_knowledge_clients(conn, offset=100) == ([], 52)
     # The visible input has no LIMIT, and is independent of chunk multiplicity.
     query = cursor.execute.call_args.args[0]
-    assert "LIMIT" not in query and "JOIN chunks" not in query
+    assert "LIMIT" not in query and "string_agg" in query
 
 
 def test_documents_empty_page_keeps_total_and_stable_id() -> None:

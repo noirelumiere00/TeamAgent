@@ -9,6 +9,7 @@ from urllib.parse import parse_qsl, quote, urlencode, urlsplit
 from uuid import UUID
 
 from teamagent.adapters.pgvector_client import KNOWLEDGE_TAG_AXES
+from teamagent.karte_attributes import CLIENT_QUICK_FILTERS
 from teamagent.knowledge_query import (
     QUICK_FILTERS,
     KnowledgeQueryError,
@@ -61,7 +62,13 @@ def search_list_target(raw: str) -> str | None:
         return "/search?" + urlencode({"view": "doc", "id": document_id})
     if view == "tags":
         return "/search?view=tags" if set(values) == {"view"} else None
-    allowed_keys = {"view", "page", "tag", "q", "quick"} if view == "docs" else {"view", "page"}
+    allowed_keys = (
+        {"view", "page", "tag", "q", "quick"}
+        if view == "docs"
+        else {"view", "page", "quick"}
+        if view == "clients"
+        else {"view", "page"}
+    )
     if (
         view not in VIEWS
         or set(values) - allowed_keys
@@ -82,7 +89,8 @@ def search_list_target(raw: str) -> str | None:
             return None
         query["q"] = values["q"]
     if "quick" in values:
-        if values["quick"] not in QUICK_FILTERS:
+        quick_filters = CLIENT_QUICK_FILTERS if view == "clients" else QUICK_FILTERS
+        if values["quick"] not in quick_filters:
             return None
         query["quick"] = values["quick"]
     return "/search?" + urlencode(query)
@@ -242,6 +250,18 @@ def render_list(
         if quick:
             query["quick"] = quick
         out += docs_controls(query, q, quick)
+    elif quick:
+        query["quick"] = quick
+    if view == "clients":
+        out += '<div class="quick-filters" aria-label="取引先クイックフィルタ">'
+        for value, text in {"": "すべて", **CLIENT_QUICK_FILTERS}.items():
+            params = {"view": "clients", "page": "1"}
+            if value:
+                params["quick"] = value
+            url = html.escape("/search?" + urlencode(params))
+            active = ' aria-current="true"' if value == (quick or "") else ""
+            out += f'<a href="{url}"{active}>{text}</a>'
+        out += "</div>"
     first_url = html.escape("/search?" + urlencode({**query, "page": 1}))
     out += (
         '<p class="sub">取引先名からカルテを開き、最新の反応と次アクションを確認できます。</p>'
@@ -249,8 +269,9 @@ def render_list(
         '<p class="meta">資料件数はFBを除く資料の数です。'
         "重複として非表示の資料・研究ノートは対象外です。"
         "最新FB日は閲覧できるFBのみから集計します。"
-        "リンク先のカルテは名前の部分一致で取得し、FB・関連資料を各最大50件表示するため、"
-        "この一覧の資料件数と異なる場合があります。</p></details>"
+        "活動総数・最終接点は取引先名の厳密な名寄せで集計します。"
+        "カルテの表示は名前の部分一致でFB・関連資料を各最大50件取得するため、"
+        "活動総数と表示件数は異なる場合があります。フォロー漏れは最終接点が366日超前です。</p></details>"
         if view == "clients"
         else '<p class="meta">閲覧できる資料を更新日の新しい順に並べています。'
         "FB・重複として非表示の資料・研究ノートは対象外です。</p>"
@@ -271,7 +292,7 @@ def render_list(
     start = (page - 1) * PAGE_SIZE + 1
     out += f"<p>{label} {total} 件中 {start}–{start + len(rows) - 1} 件</p>"
     columns = (
-        ("名前", "資料件数", "最新FB日")
+        ("名前", "資料件数", "FB件数", "最新FB日", "担当", "温度感", "最終接点", "宿題")
         if view == "clients"
         else ("タイトル", "更新日", "資料種別", "取引先", "出典")
     )
@@ -283,7 +304,12 @@ def render_list(
             cells = [
                 f'<a href="/search/client/{quote(name, safe="")}">{html.escape(name)}</a>',
                 html.escape(str(row["document_count"])),
+                html.escape(str(row.get("fb_count", 0))),
                 html.escape(str(row.get("latest_fb_at") or "—")),
+                html.escape("・".join(row.get("owners") or []) or "—"),
+                html.escape(str(row.get("temperature") or "—")),
+                html.escape(str(row.get("last_contact") or "—")),
+                "あり" if row.get("has_homework") else "なし",
             ]
         else:
             detail_url = html.escape("/search?" + urlencode({"view": "doc", "id": row["id"]}))
