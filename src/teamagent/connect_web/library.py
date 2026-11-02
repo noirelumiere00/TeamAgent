@@ -617,8 +617,13 @@ def featured_videos(conn: Any, params: Mapping[str, str], *, admin: bool) -> lis
         SELECT * FROM ranked ORDER BY greatest(campaign_rank,account_rank),
         total_plays DESC NULLS LAST, platform, video_id LIMIT 240"""  # nosec B608
     rows = list(conn.execute(sql, values).fetchall())
+    # A browse shelf: thumbnailed videos lead, so the first cards are not placeholders.
     rows.sort(
-        key=lambda row: (row.get("total_plays") is not None, row.get("total_plays") or 0),
+        key=lambda row: (
+            bool(row.get("thumbnail_s3_key")),
+            row.get("total_plays") is not None,
+            row.get("total_plays") or 0,
+        ),
         reverse=True,
     )
     return diversify(rows)

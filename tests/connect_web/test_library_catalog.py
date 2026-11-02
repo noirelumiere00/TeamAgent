@@ -261,3 +261,32 @@ def test_detail_has_clickable_player_and_only_supported_analysis(
     assert "wrong-version" not in response.text
     assert "この動画の分析結果ではありません" not in response.text
     assert all(tag.get("nonce") for tag in soup.select("style,script"))
+
+
+def test_featured_videos_put_thumbnailed_videos_first() -> None:
+    rows = [
+        {
+            "platform": "tiktok",
+            "video_id": "1",
+            "account_handle": "a",
+            "total_plays": 900,
+            "thumbnail_s3_key": None,
+        },
+        {
+            "platform": "tiktok",
+            "video_id": "2",
+            "account_handle": "b",
+            "total_plays": 100,
+            "thumbnail_s3_key": "video-library/thumbs/tiktok/2.jpg",
+        },
+    ]
+
+    class _Conn:
+        def execute(self, sql: str, values: object) -> _Conn:
+            return self
+
+        def fetchall(self) -> list[dict[str, object]]:
+            return [dict(row) for row in rows]
+
+    result = library.featured_videos(_Conn(), {}, admin=True)
+    assert [row["video_id"] for row in result] == ["2", "1"]
