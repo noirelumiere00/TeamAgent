@@ -98,7 +98,7 @@ def test_find_disclosures(text: str, tags: list[str], expected: list[str]) -> No
     assert find_disclosures(text, tags) == expected
 
 
-def test_mixed_urls_are_grouped_by_platform_with_labels_and_tags() -> None:
+def test_mixed_urls_keep_pasted_order_with_label_and_tag_presence() -> None:
     fake = FakeApify(ITEMS)
     pasted = "\n".join([TT, IG, YT, "https://example.com/a", TT_PLAIN, YT_GONE])
     out = _run(AdLabelCheckSkill(apify=fake), [pasted])
@@ -119,16 +119,15 @@ def test_mixed_urls_are_grouped_by_platform_with_labels_and_tags() -> None:
     assert by_url[YT].label is None and by_url[YT].disclosure_tags == ["【PR】"]
     assert by_url[YT_GONE].found is False and not by_url[YT_GONE].needs_review
 
-    assert out.slack_summary == "\n\n".join(
+    # 11-02 要望: 媒体ごとにまとめず貼られた順のまま・右にラベルとハッシュタグの有無だけ・問題の行だけ ⚠️。
+    assert out.slack_summary == "\n".join(
         [
-            "「TT」\n"
-            f"{TT}　ラベルOK　ハッシュタグ#PR OK\n"
+            f"{TT}　ラベルあり　ハッシュタグあり",
+            f"{IG}　ラベルあり　ハッシュタグなし",
+            f"{YT}　ラベル取れず　ハッシュタグあり",
+            "https://example.com/a　対象外（TikTok・Instagram・YouTube の投稿URLではありません）",
             f"{TT_PLAIN}　ラベルなし　ハッシュタグなし　⚠️要確認",
-            f"「IG」\n{IG}　ラベルOK（@sephora）　ハッシュタグなし",
-            "「YT」\n"
-            f"{YT}　ラベル取れず　ハッシュタグ【PR】 OK\n"
-            f"{YT_GONE}　取得できず（削除・非公開・URL違いの可能性）",
-            "「対象外」\nhttps://example.com/a",
+            f"{YT_GONE}　⚠️取得できず（削除・非公開・URL違いの可能性）",
         ]
     )
     assert out.total_cost_usd == pytest.approx(0.03)
