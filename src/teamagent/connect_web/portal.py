@@ -17,14 +17,48 @@ class Site:
     description: str
     icon: str
     permission: Literal["all", "admin", "memory_admin", "history_admin"] = "all"
+    section: Literal["archive", "knowledge", "personal"] = "knowledge"
 
 
 SITES = (
-    Site("search", "ナレッジ検索", "/search", "社内の資料やナレッジを検索します。", "search"),
-    Site("vault", "ナレッジ Vault", "/app", "ナレッジをノートやグラフでたどります。", "book"),
-    Site("library", "動画ライブラリ", "/library", "動画の事例と配信結果を探します。", "video"),
-    Site("history", "Aico との会話", "/app/history", "自分と Aico の会話を振り返ります。", "chat"),
-    Site("admin", "管理: 利用状況", "/admin", "Connect の利用状況を確認します。", "chart", "admin"),
+    Site(
+        "library",
+        "動画事例を探す",
+        "/library",
+        "注目の事例、新着の施策、よく伸びた動画から、次のアイデアを見つけます。",
+        "video",
+        section="archive",
+    ),
+    Site(
+        "search",
+        "資料・議事録を検索",
+        "/search",
+        "提案書・議事録・Slack を言葉で検索。自分が見られる最新の資料から探します。",
+        "search",
+    ),
+    Site(
+        "vault",
+        "共有ナレッジを一覧",
+        "/app",
+        "整理済みの共有資料を、取引先やタグからたどります。",
+        "book",
+    ),
+    Site(
+        "history",
+        "自分の会話履歴",
+        "/app/history",
+        "自分と Aico の会話を振り返ります。",
+        "chat",
+        section="personal",
+    ),
+    Site(
+        "admin",
+        "利用状況",
+        "/admin",
+        "Connect の利用状況を確認します。",
+        "chart",
+        "admin",
+    ),
     Site(
         "memory_admin",
         "本人メモ管理",
@@ -58,46 +92,84 @@ def visible_sites(email: str) -> tuple[Site, ...]:
     return tuple(site for site in SITES if permissions[site.permission])
 
 
+# library_assets.STYLE の値に合わせ、検索シェルへ影響しない名前空間に閉じる。
 PORTAL_STYLE = """
 :root{--connect-header-height:64px}
-.connect-header,.connect-header *{box-sizing:border-box}
-.connect-header{height:var(--connect-header-height);display:flex;align-items:center;gap:20px;
-padding:0 24px;background:#141c2e;border-bottom:1px solid #2b3a5e;color:#e8edf7;
-font:14px/1.5 system-ui,sans-serif;position:relative;z-index:20}
+.connect-header,.connect-home,.connect-page{
+--connect-ink:#20252d;--connect-muted:#5b6470;--connect-blue:#234e89;--connect-line:#e3e6eb;
+color-scheme:light;color:var(--connect-ink);
+font:16px/1.6 system-ui,-apple-system,BlinkMacSystemFont,"Hiragino Sans","Noto Sans JP",
+"Yu Gothic UI",sans-serif}
+.connect-page{margin:0;background:#fff}
+.connect-header,.connect-header *,.connect-home,.connect-home *{box-sizing:border-box}
+.connect-header{height:var(--connect-header-height);background:#fff;
+border-bottom:1px solid var(--connect-line);position:relative;z-index:20}
+.connect-header-inner{max-width:1328px;height:100%;margin:auto;padding:0 24px;
+display:flex;align-items:center;gap:24px}
 .connect-header a{color:inherit;text-decoration:none}
-.connect-header .connect-brand{font-size:17px;font-weight:700;white-space:nowrap}
-.connect-header .connect-brand[aria-current]{color:#a8caff}
-.connect-switch{position:relative;flex-shrink:0}
+.connect-header .connect-brand{font-size:20px;font-weight:800;letter-spacing:-.04em;
+line-height:1.3;white-space:nowrap}
+.connect-header .connect-brand[aria-current]{color:var(--connect-blue)}
+.connect-switch{position:relative;flex-shrink:0;font-size:13px}
 .connect-switch summary{cursor:pointer;padding:8px;border-radius:6px}
-.connect-header a:focus-visible,.connect-switch summary:focus-visible{
-outline:2px solid #8cb5ff;outline-offset:3px}
-.connect-header .connect-menu{position:absolute;top:100%;left:0;width:260px;
+.connect-header a:focus-visible,.connect-switch summary:focus-visible,
+.connect-card:focus-visible{outline:3px solid #2563eb;outline-offset:4px}
+.connect-header .connect-menu{display:block;position:absolute;top:100%;left:0;width:260px;
 max-width:calc(100vw - 32px);max-height:calc(100vh - 80px);overflow:auto;margin:0;
-padding:8px;background:#1a2233;border:1px solid #46536d;border-radius:8px;
-box-shadow:0 8px 24px #0006}
-.connect-menu a{display:block;padding:10px;border-radius:5px}
-.connect-menu a:hover,.connect-menu a[aria-current]{background:#293c60;color:#fff}
+padding:8px;background:#fff;border:1px solid var(--connect-line);border-radius:6px;
+box-shadow:0 8px 24px #20252d14}
+.connect-menu a{display:block;padding:10px 14px;border-radius:6px;font-size:14px;
+line-height:1.6;overflow-wrap:anywhere}
+.connect-menu a:hover,.connect-menu a[aria-current]{background:#eff4ff;color:var(--connect-blue)}
 .connect-menu a[aria-current]{font-weight:700}
 .connect-email{margin-left:auto;min-width:0;overflow:hidden;text-overflow:ellipsis;
-white-space:nowrap;color:#aebbd3}
-.connect-home{max-width:1080px;margin:0 auto;padding:48px 24px}
-.connect-home h1{font-size:30px;margin:0 0 12px}
-.connect-home>p{color:#aebbd3;margin-bottom:32px}
-.connect-cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:20px}
-.connect-card{display:block;padding:24px;background:#1a2233;border:1px solid #34425e;
-border-radius:12px;text-decoration:none;color:#e8edf7}
-.connect-card:hover{background:#23304a;border-color:#8cb5ff}
-.connect-card:focus-visible{outline:2px solid #8cb5ff;outline-offset:3px}
-.connect-card svg{width:28px;height:28px;color:#8cb5ff}
-.connect-card h2{font-size:18px;margin:16px 0 8px}
-.connect-card p{color:#aebbd3;font-size:14px;line-height:1.7;margin:0}
-@media(max-width:600px){
-.connect-header{gap:8px;padding:0 12px}
-.connect-header .connect-brand{font-size:14px}
+white-space:nowrap;color:var(--connect-muted);font-size:12px}
+.connect-home{max-width:1328px;margin:auto;padding:32px 24px 64px;background:#fff}
+.connect-home h1,.connect-home h2,.connect-home h3,.connect-home p{overflow-wrap:anywhere}
+.connect-hero{margin:12px 0 52px;padding-bottom:32px;border-bottom:1px solid var(--connect-line)}
+.connect-home .connect-eyebrow{font-size:12px;font-weight:800;letter-spacing:.14em;
+color:var(--connect-blue);margin:0 0 12px}
+.connect-home h1{font-size:40px;line-height:1.35;letter-spacing:-.03em;margin:0 0 14px}
+.connect-intro{max-width:720px;margin:0;color:var(--connect-muted)}
+.connect-section{margin:12px 0 70px;min-width:0}
+.connect-section:last-child{margin-bottom:0}
+.connect-section-heading{margin:0 0 26px}
+.connect-section-heading h2{font-size:34px;font-weight:900;letter-spacing:.025em;
+line-height:1.15;padding-top:18px;position:relative;margin:0}
+.connect-section-heading h2:before{content:"";position:absolute;top:0;left:0;
+width:32px;height:3px;background:var(--connect-blue)}
+.connect-section-heading h2 span{display:block;font-size:12px;letter-spacing:.14em;
+color:var(--connect-blue);margin-top:10px}
+.connect-cards{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:24px}
+.connect-card{display:flex;flex-direction:column;align-items:flex-start;min-width:0;
+padding:24px;background:#f5f7fa;border:1px solid var(--connect-line);
+border-radius:5px;text-decoration:none;color:var(--connect-ink)}
+.connect-card:hover{background:#eff4ff;border-color:var(--connect-blue)}
+.connect-card svg{width:32px;height:32px;color:var(--connect-blue);margin-bottom:24px}
+.connect-card h3{font-size:18px;line-height:1.5;margin:0 0 8px}
+.connect-card p{color:var(--connect-muted);font-size:14px;line-height:1.6;margin:0 0 24px}
+.connect-card-action{display:block;margin-top:auto;font-size:13px;font-weight:700;
+color:var(--connect-blue)}
+.connect-section-archive .connect-cards{grid-template-columns:1fr}
+.connect-section-archive .connect-card{position:relative;padding:32px 96px 32px 32px}
+.connect-section-archive .connect-card svg{position:absolute;right:32px;top:32px;
+width:40px;height:40px}
+.connect-section-archive .connect-card h3{font-size:26px}
+@media(max-width:767px){
+.connect-header-inner{gap:12px;padding:0 16px}
+.connect-header .connect-brand{font-size:17px}
 .connect-switch summary{font-size:12px;padding:8px 4px}
 .connect-header .connect-menu{position:fixed;top:var(--connect-header-height);left:16px}
 .connect-email{font-size:11px}
-.connect-home{padding:32px 16px}
+.connect-home{padding:28px 16px 48px}
+.connect-home h1{font-size:28px}
+.connect-hero{margin-bottom:40px;padding-bottom:28px}
+.connect-section{margin-bottom:48px}
+.connect-section-heading h2{font-size:28px}
+.connect-cards{grid-template-columns:1fr;gap:16px}
+.connect-section-archive .connect-card{padding:24px}
+.connect-section-archive .connect-card svg{position:static;width:32px;height:32px}
+.connect-section-archive .connect-card h3{font-size:24px}
 }
 """
 
@@ -120,32 +192,54 @@ def render_header(email: str, *, current_path: str) -> str:
     )
     home_current = ' aria-current="page"' if current_path == "/" else ""
     return (
-        '<header class="connect-header">'
+        '<header class="connect-header"><div class="connect-header-inner">'
         f'<a class="connect-brand" href="/"{home_current}>NewsTV Connect</a>'
         '<details class="connect-switch"><summary>サイト切替</summary>'
         f'<nav class="connect-menu" aria-label="サイト一覧">{links}</nav></details>'
-        f'<span class="connect-email">{html.escape(email)}</span></header>'
+        f'<span class="connect-email">{html.escape(email)}</span></div></header>'
     )
 
 
 def render_home(email: str) -> str:
     """外部サービスへ問い合わせず、利用できるサイトだけを並べる。"""
-    cards = "".join(
-        f'<a class="connect-card" href="{html.escape(site.path)}">'
-        '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" '
-        'stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">'
-        f"{_ICONS[site.icon]}</svg><h2>{html.escape(site.name)}</h2>"
-        f"<p>{html.escape(site.description)}</p></a>"
-        for site in visible_sites(email)
-    )
+    sites = visible_sites(email)
+    sections = []
+    for key, heading, label in (
+        ("archive", "VIDEO ARCHIVE", "動画の事例から探す"),
+        ("knowledge", "KNOWLEDGE", "社内の知見をたどる"),
+        ("personal", "MY AICO", "自分の会話を振り返る"),
+        ("admin", "ADMIN", "管理者向け"),
+    ):
+        cards = "".join(
+            f'<a class="connect-card" href="{html.escape(site.path)}">'
+            '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" '
+            'stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">'
+            f"{_ICONS[site.icon]}</svg><h3>{html.escape(site.name)}</h3>"
+            f"<p>{html.escape(site.description)}</p>"
+            '<span class="connect-card-action">サイトを開く <span aria-hidden="true">→</span>'
+            "</span></a>"
+            for site in sites
+            if ("admin" if site.permission != "all" else site.section) == key
+        )
+        if cards:
+            sections.append(
+                f'<section class="connect-section connect-section-{key}" '
+                f'aria-labelledby="connect-{key}-heading">'
+                f'<div class="connect-section-heading"><h2 id="connect-{key}-heading">'
+                f"{label}<span>{heading}</span></h2></div>"
+                f'<div class="connect-cards">{cards}</div></section>'
+            )
     return (
         '<!doctype html><html lang="ja"><head><meta charset="utf-8">'
         '<meta name="viewport" content="width=device-width,initial-scale=1">'
-        f"<title>NewsTV Connect</title><style>{PORTAL_STYLE}"
-        "body{margin:0;background:#0f1420;color:#e8edf7;font-family:system-ui,sans-serif}"
-        "</style></head><body>"
+        f"<title>NewsTV Connect</title><style>{PORTAL_STYLE}</style></head>"
+        '<body class="connect-page">'
         + render_header(email, current_path="/")
-        + '<main class="connect-home"><h1>NewsTV Connect</h1>'
-        "<p>社内のナレッジ、動画、Aico との会話へ。</p>"
-        f'<div class="connect-cards">{cards}</div></main></body></html>'
+        + '<main class="connect-home"><div class="connect-hero">'
+        '<p class="connect-eyebrow">NEWSTV CONNECT</p>'
+        "<h1>事例と知見を、次のアイデアに。</h1>"
+        '<p class="connect-intro">動画の事例、社内のナレッジ、Aico との会話。<br>'
+        "今日の仕事に役立つ情報を、ここから。</p></div>"
+        + "".join(sections)
+        + "</main></body></html>"
     )
