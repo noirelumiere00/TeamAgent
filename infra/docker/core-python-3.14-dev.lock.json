@@ -1,0 +1,23 @@
+{
+  "schema_version": 1,
+  "url": "https://packages.wolfi.dev/os/aarch64/python-3.14-dev-3.14.10_git20261028-r0.apk",
+  "archive": "python-3.14-dev-3.14.10_git20261028-r0.apk",
+  "archive_sha256": "3a77fd24c4083d26e7fce2b5885062083f40f9207f7546143978ce2da646cf2f",
+  "base_version": "3.14.8_git20261008-r0",
+  "apkindex": {
+    "C": "Q1GF65aow+05kyLUBl6J3uvlXU/RY=",
+    "P": "python-3.14-dev",
+    "V": "3.14.10_git20261028-r0",
+    "A": "aarch64",
+    "S": "27748",
+    "I": "42464",
+    "T": "python-3.14 development headers",
+    "L": "PSF-2.0",
+    "o": "python-3.14",
+    "m": "wolfi",
+    "t": "1793380656",
+    "c": "9da7870980298cbc9e21507c18e22be9d7211591",
+    "D": "python-3.14-base-dev=3.14.10_git20261028-r0 python-3.14-runtime=3.14.10_git20261028-r0",
+    "p": "python-3-dev=0 python3-dev=0"
+  }
+}
