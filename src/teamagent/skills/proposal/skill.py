@@ -35,7 +35,12 @@ class ProposalDraftSkill(BaseSkill[ProposalDraftInput, ProposalDraftOutput]):
     """過去の類似提案を再利用して提案ドラフト骨子を生成する Skill。"""
 
     name: ClassVar[str] = "proposal_draft"
-    description: ClassVar[str] = "新規案件ブリーフから類似過去提案を検索し提案ドラフト骨子を生成"
+    description: ClassVar[str] = (
+        "提案（の骨子・たたき台）を作って、という明示依頼で案件概要から提案ドラフト骨子を生成する。"
+        "例: 伊藤ハムの提案の骨子を作って。"
+        "似た・類似の・近い・参考になる過去の提案書／資料を探して、は recommend。"
+        "迷ったら recommend を優先して資料を見せ、骨子は求められてから。"
+    )
     input_schema: ClassVar[type[BaseModel]] = ProposalDraftInput
     output_schema: ClassVar[type[BaseModel]] = ProposalDraftOutput
 

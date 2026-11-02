@@ -24,6 +24,8 @@ from typing import Any
 
 from teamagent.skills.base import SkillRegistry
 from teamagent.skills.media_case_search.skill import accounts
+from teamagent.skills.proposal.skill import ProposalDraftSkill
+from teamagent.skills.recommend.skill import RecommendSkill
 from teamagent.skills.search_surface_check.skill import SearchSurfaceCheckSkill
 from teamagent.skills.tiktok_acquire.skill import TikTokAcquireSkill, TikTokAcquireStatusSkill
 from teamagent.skills.tiktok_comment_mining.skill import TikTokCommentMiningSkill
@@ -536,6 +538,44 @@ def test_user_eval_campaign_routing_examples_are_frozen() -> None:
     assert rows["iter1-campaign-results"]["expect"] == "search"
     assert "何が効いたか" in rows["iter1-campaign-results"]["utterance"]
     assert rows["iter1-new-market-videos"]["expect"] == "video_algorithm"
+
+
+def test_recommend_vs_proposal_draft_boundary_hardened() -> None:
+    soul = _SOUL_PATH.read_text(encoding="utf-8")
+    for text in (soul, RecommendSkill.description, ProposalDraftSkill.description):
+        assert "似た・類似の・近い・参考になる過去の提案書／資料を探して" in text
+        assert "提案（の骨子・たたき台）を作って" in text
+        assert "`recommend` を優先" in text or "recommend を優先" in text
+        assert "骨子は求められてから" in text
+    assert "資料名・時期・リンクを結果の範囲で一覧" in soul
+    assert "一覧提示" in RecommendSkill.description
+    assert "明示依頼は proposal_draft" in RecommendSkill.description
+    assert "明示依頼" in ProposalDraftSkill.description
+
+
+def test_similar_proposals_vs_draft_examples_are_frozen() -> None:
+    rows = {row["id"]: row for row in _corpus_rows()}
+    for row_id, utterance, expected, forbidden, description in (
+        (
+            "recommend-similar-proposals",
+            "伊藤ハムの提案書に似た過去の提案書を探して",
+            "recommend",
+            "proposal_draft",
+            RecommendSkill.description,
+        ),
+        (
+            "proposal-draft-explicit",
+            "伊藤ハムの提案の骨子を作って",
+            "proposal_draft",
+            "recommend",
+            ProposalDraftSkill.description,
+        ),
+    ):
+        row = rows[row_id]
+        assert row["utterance"] == utterance
+        assert row["expect"] == expected
+        assert forbidden in row["forbid"]
+        assert utterance in description
 
 
 def test_proposal_only_request_does_not_start_surface_research() -> None:
