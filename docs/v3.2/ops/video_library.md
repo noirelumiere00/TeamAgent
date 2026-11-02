@@ -390,3 +390,60 @@ TEAMAGENT_LIBRARY_BROWSER=1 PYTHONPATH=.:src .venv/bin/pytest -q \
 前回のオートロード実ブラウザテストは利用者から `test_library_autoload_browser.py: 1 passed` の確認済み連絡あり。今回はブラウザ再実行・スクリーンショット追加は行わず、関連pytestと静的検査で検索変更を検証する。実DBテストは `TEAMAGENT_TEST_DB_DSN` 未設定時にスキップする。今回の最終ログは `/tmp/library-search-{pytest,mypy,ruff,format,imports}-final.log`。
 
 最終検証結果: 関連pytest **196 passed / 10 skipped**（実DB9件・opt-inブラウザ1件）、`mypy --strict src` **526ファイル成功**、`uvx ruff@0.15.15 check src/ tests/ scripts/` 成功、同 `format --check` **1,469ファイル成功**、import-linter **2契約成功**、`git diff --check` 成功。ruffは既存のローカルキャッシュから指定版をオフライン実行。今回の変更に実DB・実ブラウザでの追加確認は含まない。コミットは利用者が行うため未実施。
+
+## URL 取り込み PR1（2026-11-02）
+
+画面を含まない受付・取得・保存・worker。0037 は runner 所有 transaction で適用する追加 migration で、`vl_metrics` と既存シート同期の書き込みは変更しない。`vl_public_metrics` は公開ページの5指標を別の日次スナップショットに保存する。既存ビューは再作成せず列契約を保つ。`vl_videos` に page 観測と経路、`vl_campaigns` に nullable の作成者情報を追加する。シートが URL 動画を own に更新すると、trigger が sheet 経路を追加する。
+
+入口は `teamagent.ingest.video_library_url_import.submit_import(text, repository, requested_by=..., idempotency_key=..., wake=...)`。認証済みの社内依頼者を呼び出し元で渡す。非空100行までを通信前に検査し、依頼者とキーで冪等保存後に wake する。画面を閉じても行結果は DB に残る。P3b 用の `import_one_url(..., source="p3b", requested_by=...)` は同じ取得・保存・制限を使い、列挙や分析は実行しない。
+
+| 設定 | 既定 | 用途 |
+| --- | --- | --- |
+| `VIDEO_LIBRARY_IMPORT_WORKER_ENABLED` | OFF | `1` / `true` で connect-web lifespan の1スレッドを起動 |
+| `VIDEO_LIBRARY_IMPORT_DAILY_LIMIT` | 300 | 固定 UTC+9 の日次枠。0は取得停止、負数・非整数は起動拒否 |
+| `VIDEO_LIBRARY_IMPORT_STALE_SECONDS` | 600 | processing 回収までの秒数。回収時は lease を更新し旧 worker の保存を拒否 |
+| `VIDEO_LIBRARY_S3_BUCKET` | 既存設定 | 共通 CDN/JPEG 検査後のサムネ保存先 |
+
+単独実行は `python -m teamagent.ingest.video_library_url_worker`。同じ queue を空になるまで処理する。スレッドは空 queue を1秒ごとに再確認するため、翌日の deferred 行もプロセス稼働中は自動的に候補へ戻る。CLI は未来の deferred 行を待たず終了する。
+
+複数 replica / CLI の HTTP は session advisory lock で直列化し、行は `FOR UPDATE SKIP LOCKED` で確保する。ページ・短縮各段・再試行は通信前に全員共通の日次枠を消費し、開始間隔を1秒以上にする。画像保存は同じ投稿観測の一部で追加の投稿枠を使わない。通信失敗/5xxの追加試行は最大2回（2秒・4秒）。429/403/明確なチャレンジ・連続5失敗は DB の `vl_public_fetch_control` に停止状態を残す。次のバッチやプロセス再起動で停止は解除しない。共通停止解除は管理者による明示的な DB 操作に限定し、この PR には解除画面を設けない。従来の独立した `fill_thumbnails()` の選択・停止・枠の挙動は維持する。
+
+新規動画は external と入力経路を保存する。既存動画は page 観測・公開指標・未保存サムネ・経路だけ更新し、caption/is_pr/案件/origin/台帳/既存分析へ書かない。desc 不明の新規動画は classification_pending の行観測に残して公開・分析待機登録を保留する。同日部分取得で有効な指標が欠けた場合は旧スナップショット全体を保持し、異なる回の値を混ぜない。失敗では最終正常値を残して試行状態だけ更新する。シートが後から caption=NULL を上書きする既存動作は MVP の既知の制限として残す。
+
+新規テストは `test_video_library_url_import.py`（A01-A05/A08、HTTP・worker）と `test_video_library_url_import_postgres.py`（A02/A05-A08、RLS・並行claim・回収・日次枠・両順序のシート同期）。実 DB は `TEAMAGENT_TEST_DB_DSN` がある場合のみランダムな一時 schema で実行し、public の既存データには触れない。新規の外部依存はない（CI latest の既存依存一覧で充足）。
+
+PR1 の変更ファイル（12件）:
+
+- `infra/migrations/0037_video_library_url_import.sql`
+- `src/teamagent/adapters/video_library_page.py`
+- `src/teamagent/ingest/video_library_url_models.py`
+- `src/teamagent/ingest/video_library_url_repository.py`
+- `src/teamagent/ingest/video_library_url_import.py`
+- `src/teamagent/ingest/video_library_url_worker.py`
+- `src/teamagent/ingest/video_library_thumbs.py`
+- `src/teamagent/connect_web/app.py`
+- `tests/ingest/test_video_library_url_import.py`
+- `tests/ingest/test_video_library_url_import_postgres.py`
+- `tests/ingest/test_video_library_thumbs.py`
+- `docs/v3.2/ops/video_library.md`
+
+主要テスト名:
+
+| テスト | 確認すること |
+| --- | --- |
+| `test_a01_limits_count_before_dedup_and_preserve_line_numbers` | 100/101行、空行、全入力への結果対応 |
+| `test_a02_queries_and_handles_deduplicate_by_video_id` | クエリ・handle違いの同一IDを1回に集約 |
+| `test_short_redirect_body_never_read` / `test_redirect_refuses_untrusted_destination_before_request` / `test_redirect_maximum_five` | 許可された短縮3形式、本文非読込、各段検査、5段上限 |
+| `test_a04_empty_missing_broken_and_mismatched_pages` / `test_a04_string_metrics_statsv2_and_zero` | 1.4KB空ページ・JSON・ID検査、文字列、statsV2、0/NULL |
+| `test_a05_pr_rule_does_not_use_is_ad` | #PR規則と広告配信観測の分離 |
+| `test_a08_http_blocks_pause_without_retries` / `test_a08_retries_count_every_attempt_and_backoff` / `test_a08_one_failed_row_does_not_discard_later_success` | 制限停止・試行総数・個別失敗後の継続 |
+| `test_a06_sheet_always_wins_and_page_public_settings_analysis_survive` | 両順序のシート共存（実DB・未実行） |
+| `test_a07_snapshot_unit_partial_failure_and_jst_date` | スナップショット・部分欠損・JST境界（実DB・未実行） |
+| `test_a08_claim_skips_locked_row_in_another_session` / `test_a08_two_workers_claim_distinct_rows` | 実ロック下の非重複claim（実DB・未実行） |
+| `test_a08_processing_recovery_fences_old_worker` / `test_a08_daily_budget_counts_failed_retry_and_defers` / `test_a08_pause_is_durable_and_leaves_remaining_queue` | 回収・旧lease拒否・全体枠・永続停止（実DB・未実行） |
+
+最終の関連 pytest は8ファイルに限定し **374 passed / 23 skipped**（新設実DB14件、既存実DB9件）。`mypy --strict src` は533ファイル成功、import-linterは2契約成功、bandit `-ll` は中・高の指摘0。Ruff **0.15.15** の `check src/ tests/ scripts/` と `format --check src/ tests/ scripts/` は成功（1,487ファイル）。`uvx ruff@0.15.15` はキャッシュ解決／ネットワーク制約で起動できず、既存の `/private/tmp/teamagent-pgx2-venv/bin/ruff`（同じ0.15.15）で実行した。pytest本数の事前確認は `ps` が OS に拒否され計測不能だった。pytestは並列化せず、1プロセスずつ実行した。ログ設定は変更していない。
+
+一時的な変異8件（101行受付、ID重複排除無効、redirect HTTP許可、ID一致検査無効、0を欠損化、PR部分一致、429停止無効、retry上限増加）はすべて対応テストで赤を確認後に復元。結果は `/private/tmp/vl-url-pr1-mutations.json`、失敗全文は `/private/tmp/vl-url-pr1-mutation-*.log`。最終検査ログは `/private/tmp/vl-url-pr1-final-{pytest,mypy,ruff,format,imports,bandit}.log`。
+
+未検証: DSN未設定による実DB23件、実TikTok/S3疎通、本番migration適用・worker起動。Docker接続は権限で拒否され、利用可能なローカルPostgreSQLも確認できず、実DB確認の完了条件は残っている。画面・IAM・本番env反映はPR2/PR3の範囲。`git add` は共有管理領域 `/Users/s-komata/dev/teamagent/.git/worktrees/teamagent-vl-import/index.lock` 作成を `Operation not permitted` で拒否されたため、コミットせず全変更を作業ツリーに保持。push・PR作成は未実施。

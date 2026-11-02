@@ -89,6 +89,7 @@ from teamagent.dashboard.auth import (
 from teamagent.dashboard.config import DashboardConfig
 from teamagent.dashboard.insights import AdminPeriod, admin_period, analyze_questions
 from teamagent.dashboard.render import render_admin_page, render_usage_admin
+from teamagent.ingest.video_library_url_worker import worker_lifespan
 from teamagent.karte_attributes import CLIENT_QUICK_FILTERS
 from teamagent.knowledge_query import QUICK_FILTERS, KnowledgeQueryError, parse_knowledge_query
 
@@ -3754,7 +3755,13 @@ def create_app(
     """
     redirect = redirect_uri or os.environ.get("OAUTH_REDIRECT_URI", "")
     slack_redirect = slack_redirect_uri or os.environ.get("SLACK_OAUTH_REDIRECT_URI", "")
-    app = FastAPI(title="TeamAgent Connect", docs_url=None, redoc_url=None, openapi_url=None)
+    app = FastAPI(
+        title="TeamAgent Connect",
+        docs_url=None,
+        redoc_url=None,
+        openapi_url=None,
+        lifespan=worker_lifespan,
+    )
     app.add_middleware(_SecurityHeadersMiddleware)
 
     search_cfg = search_config or _load_search_config()
