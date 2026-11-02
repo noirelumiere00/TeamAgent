@@ -61,8 +61,13 @@ class Prediction(StrictModel):
     evidence: Annotated[list[Evidence], Field(max_length=10)]
 
 
+_FENCE = re.compile(r"\A\s*```(?:json)?\s*\n(.*)\n\s*```\s*\Z", re.S)
+
+
 def validate_prediction(text: str, post: Post, cases: list[Case]) -> Prediction:
-    result = Prediction.model_validate_json(text)
+    # Haiku often wraps the JSON in a ```json fence; only a whole-text fence is unwrapped.
+    fenced = _FENCE.match(text)
+    result = Prediction.model_validate_json(fenced.group(1) if fenced else text)
     pairs = {(c.advertiser, c.campaign) for c in cases}
     if post.advertiser and result.advertiser not in (None, post.advertiser):
         raise ValueError("known_advertiser_conflict")

@@ -389,3 +389,28 @@ def test_entry_point_without_policy_is_safe_and_errors_do_not_log_inputs(
     )
     assert module.main([]) == 1
     assert "private name" not in capsys.readouterr().out
+
+
+def test_fenced_json_answer_is_accepted_but_other_wrapping_is_not() -> None:
+    from teamagent.ingest.video_library_case_models import Case, Post, validate_prediction
+
+    post = Post(
+        caption="サクセスで白髪ケア #PR",
+        hashtags=["PR"],
+        mentions=[],
+        account_name="a",
+        account_handle="a",
+        posted_at="",
+        advertiser=None,
+    )
+    cases = [Case(advertiser="花王", campaign="サクセス")]
+    body = (
+        '{"advertiser": "花王", "campaign": "サクセス", "match_type": "existing", "confidence": 0.95,'
+        ' "evidence": [{"field": "caption", "quote": "白髪ケア"}]}'
+    )
+    assert validate_prediction("```json\n" + body + "\n```", post, cases).campaign == "サクセス"
+    assert validate_prediction(body, post, cases).advertiser == "花王"
+    import pytest
+
+    with pytest.raises(ValueError):
+        validate_prediction("答えは " + body, post, cases)
