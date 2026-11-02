@@ -230,7 +230,7 @@ def matches_client_quick(attributes: dict[str, Any], quick: str) -> bool:
         return bool(attributes["has_homework"])
     if quick == "overdue":
         return bool(attributes["followup_overdue"])
-    return (
+    return bool(
         attributes["temperature"]
         == {
             "high": "高",
