@@ -158,7 +158,10 @@ def test_query_is_escaped_and_db_failure_is_separate(setup: tuple[TestClient, Se
     response = client.get(target, cookies=_auth_cookie())
     assert response.status_code == 200 and q not in response.text
     page = BeautifulSoup(response.text, "html.parser")
-    assert page.select("img, script") == [] and page.select_one("#docsQuery")["value"] == q
+    assert (
+        page.select("img, script:not([data-knowledge-bookmarks])") == []
+        and page.select_one("#docsQuery")["value"] == q
+    )
     assert "0 件中 表示0件" in page.text
     pg.error = True
     response = client.get(target, cookies=_auth_cookie())

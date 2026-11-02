@@ -67,6 +67,11 @@ from teamagent.connect_diagnostics import (
     mask_email,
     now_jst,
 )
+from teamagent.connect_web.knowledge_bookmarks import (
+    BOOKMARK_JS,
+    BOOKMARK_PAGE,
+    BOOKMARK_STYLE,
+)
 from teamagent.connect_web.knowledge_lists import (
     LIST_STYLE,
     PAGE_SIZE,
@@ -92,6 +97,7 @@ from teamagent.dashboard.render import render_admin_page, render_usage_admin
 from teamagent.ingest.video_library_url_worker import worker_lifespan
 from teamagent.karte_attributes import CLIENT_QUICK_FILTERS
 from teamagent.knowledge_query import QUICK_FILTERS, KnowledgeQueryError, parse_knowledge_query
+from teamagent.legacy_knowledge import validate_legacy_requests
 
 logger = structlog.get_logger(__name__)
 
@@ -3318,22 +3324,32 @@ def _shell_page(email: str, *, mode: str, list_content: str | None = None) -> st
         + _POWER_STYLE
         + PORTAL_STYLE
         + LIST_STYLE
+        + BOOKMARK_STYLE
     )
     head = (
         '<!doctype html><html lang="ja"><head><meta charset="utf-8">'
         '<meta name="viewport" content="width=device-width, initial-scale=1">'
         "<title>社内ナレッジ検索</title><style>" + style + "</style></head><body>"
     )
+    bookmark_root = (
+        '<div id="knowledgeBookmarkRoot" class="bookmark-notice" hidden data-user="'
+        + html.escape(email.lower(), quote=True)
+        + '" aria-live="polite"></div>'
+    )
+    bookmark_script = "<script data-knowledge-bookmarks>" + BOOKMARK_JS + "</script>"
     if list_content is not None:
         return (
             head
             + render_header(email, current_path="/search")
+            + bookmark_root
             + '<div id="shell" class="shell shell-list">'
             + '<section class="work"><nav class="ws-tabs" aria-label="ナレッジ表示">'
             + list_tabs(mode)
             + '</nav><div class="ws-body">'
             + list_content
-            + "</div></section></div></body></html>"
+            + "</div></section></div>"
+            + bookmark_script
+            + "</body></html>"
         )
     ribbon = (
         '<nav class="ribbon">'
@@ -3362,6 +3378,7 @@ def _shell_page(email: str, *, mode: str, list_content: str | None = None) -> st
         '<a class="ws-tab" href="/search?view=clients&amp;page=1">取引先一覧</a>'
         '<a class="ws-tab" href="/search?view=docs&amp;page=1">資料一覧</a>'
         '<a class="ws-tab" href="/search?view=tags">タグ</a>'
+        '<a class="ws-tab" href="/search?view=bookmarks">ブックマーク</a>'
         "</nav>"
         '<div class="ws-body">'
         '<div id="mainList"' + list_hidden + ">" + _SEARCH_DOM + "</div>"
@@ -3382,6 +3399,7 @@ def _shell_page(email: str, *, mode: str, list_content: str | None = None) -> st
     )
     body = (
         render_header(email, current_path="/search")
+        + bookmark_root
         + '<div id="shell" class="shell">'
         + ribbon
         + sidebar
@@ -3389,6 +3407,7 @@ def _shell_page(email: str, *, mode: str, list_content: str | None = None) -> st
         + right
         + "</div>"
         + scripts
+        + bookmark_script
         + "</body></html>"
     )
     return head + body
@@ -4012,6 +4031,29 @@ def create_app(
         if not cookie:
             return None
         return verify_session(cookie, search_cfg.session_secret)
+
+    @app.post("/api/v1/knowledge/resolve")
+    def resolve_knowledge_links(request: Request, entries: list[dict[str, Any]]) -> JSONResponse:
+        email = _search_email(request)
+        if email is None:
+            return JSONResponse({"error": "unauthorized"}, status_code=401)
+        try:
+            validate_legacy_requests(entries)
+        except ValueError:
+            return JSONResponse({"error": "リンクの形式が正しくありません。"}, status_code=400)
+        from teamagent.adapters.pgvector_client import PgVectorClient
+
+        try:
+            pg = PgVectorClient.from_env()
+            domain = email.split("@", 1)[1] if "@" in email else email
+            with pg.connection(
+                app_role=app_role, user_email=email, user_groups=[domain], user_role="user"
+            ) as conn:
+                results = pg.resolve_knowledge_links(conn, entries)
+        except Exception as exc:
+            logger.warning("knowledge_resolve_failed", error=type(exc).__name__)
+            return JSONResponse({"error": "取得できませんでした。"}, status_code=503)
+        return JSONResponse({"results": results}, headers={"Cache-Control": "no-store"})
 
     def _get_admin_pg() -> Any:
         pg = admin_state["pg"]
@@ -4933,6 +4975,8 @@ def create_app(
         if target:
             params = parse_qs(target.split("?", 1)[1])
             view, page = params["view"][0], int(params.get("page", ["1"])[0])
+            if view == "bookmarks":
+                return HTMLResponse(_shell_page(email, mode=view, list_content=BOOKMARK_PAGE))
             tag = params.get("tag", [None])[0]
             q = params.get("q", [""])[0]
             quick = params.get("quick", [None])[0]

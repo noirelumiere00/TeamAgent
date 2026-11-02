@@ -117,7 +117,8 @@ def test_missing_and_failure_are_distinct(setup: tuple[TestClient, DocsTagsPg]) 
     pg.error = True
     response = client.get(f"/search?view=doc&id={DOC_ID}", cookies=_auth_cookie())
     assert response.status_code == 503 and "資料を取得できませんでした" in response.text
-    assert "見つからないか" not in response.text and "PRIVATE" not in response.text
+    assert "見つからないか" not in BeautifulSoup(response.text, "html.parser").get_text()
+    assert "PRIVATE" not in response.text
 
 
 @pytest.mark.parametrize(
@@ -299,7 +300,7 @@ def test_dynamic_detail_and_tag_text_are_escaped(setup: tuple[TestClient, DocsTa
         assert response.status_code == 200 and evil not in response.text
         assert "&lt;script&gt;" in response.text
         page = BeautifulSoup(response.text, "html.parser")
-        assert page.select("script") == []
+        assert page.select("script:not([data-knowledge-bookmarks])") == []
         assert all(not a["href"].startswith("javascript:") for a in page.select("a[href]"))
 
 
