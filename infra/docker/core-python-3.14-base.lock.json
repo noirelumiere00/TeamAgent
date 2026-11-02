@@ -1,0 +1,23 @@
+{
+  "schema_version": 1,
+  "url": "https://packages.wolfi.dev/os/aarch64/python-3.14-base-3.14.10_git20261028-r0.apk",
+  "archive": "python-3.14-base-3.14.10_git20261028-r0.apk",
+  "archive_sha256": "b6c799697766e5ba5a8f8f1ace656ac35f8eccb73ccf46fc1f7a4158101e8e4a",
+  "base_version": "3.14.8_git20261008-r0",
+  "apkindex": {
+    "C": "Q14HW3+YsmNouZjQxGiMiCZaGKIcY=",
+    "P": "python-3.14-base",
+    "V": "3.14.10_git20261028-r0",
+    "A": "aarch64",
+    "S": "12768524",
+    "I": "39436932",
+    "T": "python-3.14 without /usr/bin/python3",
+    "L": "PSF-2.0",
+    "o": "python-3.14",
+    "m": "wolfi",
+    "t": "1793380656",
+    "c": "9da7870980298cbc9e21507c18e22be9d7211591",
+    "D": "py3-pip-wheel so:ld-linux-aarch64.so.1 so:libbz2.so.1 so:libc.so.6 so:libcrypto.so.4 so:libexpat.so.1 so:libffi.so.8 so:libgdbm.so.6 so:libgdbm_compat.so.4 so:liblzma.so.5 so:libm.so.6 so:libmpdec.so.4 so:libncursesw.so.6 so:libpanelw.so.6 so:libreadline.so.8 so:libsqlite3.so.0 so:libssl.so.4 so:libtinfo.so.6 so:libuuid.so.1 so:libz.so.1 so:libzstd.so.1",
+    "p": "cmd:pydoc3.14=3.14.10_git20261028-r0 cmd:python3.14=3.14.10_git20261028-r0 so-ver:libpython3.14.so.1.0=3.14.10_git20261028-r0 so:libpython3.14.so.1.0=1.0"
+  }
+}

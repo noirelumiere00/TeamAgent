@@ -47,7 +47,8 @@ def _repository_files() -> list[Path]:
         check=True,
         capture_output=True,
     )
-    return [ROOT / item for item in result.stdout.decode("utf-8").split("\0") if item]
+    paths = [ROOT / item for item in result.stdout.decode("utf-8").split("\0") if item]
+    return [path for path in paths if path.is_file() or path.is_symlink()]
 
 
 def _repository_file_bytes(path: Path) -> bytes:

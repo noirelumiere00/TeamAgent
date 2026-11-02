@@ -17,8 +17,9 @@ from pathlib import Path
 
 EXPECTED_BAKED_APP_HTML_SHA256 = "716ac25a96516efd6443277c903102d514f3f86729f8706baea41ee48f0ecdeb"
 EXPECTED_E5_REVISION = "3d7cfbdacd47fdda877c5cd8a79fbcc4f2a574f3"
-EXPECTED_PYTHON_SHA256 = "775bf454e5816503fe56f81c9b9e0d3f03790694bdce576cbbefd60971fc88ca"
-EXPECTED_PIP_WHEEL_SHA256 = "3a2bc00388f5e48504cf087d93ab2d7675e19b7c818ab79e82f8e137fc3328a8"
+EXPECTED_PYTHON_SHA256 = "81060a4e37f0e6746c7f53468dcd28c200053b4a2bb377a3fe2169edf3f770ac"
+EXPECTED_LIBPYTHON_SHA256 = "5acb30a9c68ceb2985f094c5621f1d62ff8abd4480ea85c7b4ede09e741df0c6"
+EXPECTED_PIP_WHEEL_SHA256 = "38f4aacff7c3b0d7b216cac0a106a1036eef98b0a7ff5b932ea2fcb787e97bc5"
 
 
 def _sha256(path: Path) -> str:
@@ -111,12 +112,29 @@ def _assert_e5_encode() -> None:
 def _assert_pip_wheel(root: Path = Path("/")) -> None:
     records = (root / "usr/lib/apk/db/installed").read_text().split("\n\n")
     pip = [record for record in records if "P:py3-pip-wheel" in record.splitlines()]
-    assert len(pip) == 1 and "V:26.2.2-r1" in pip[0].splitlines()
+    assert len(pip) == 1 and "V:26.2.2-r2" in pip[0].splitlines()
     wheels = list((root / "usr/share/python-wheels").glob("pip-*.whl"))
     assert [path.name for path in wheels] == ["pip-26.2.2-py3-none-any.whl"]
     assert _sha256(wheels[0]) == EXPECTED_PIP_WHEEL_SHA256
     sboms = list((root / "var/lib/db/sbom").glob("py3-pip-wheel-*.spdx.json"))
-    assert [path.name for path in sboms] == ["py3-pip-wheel-26.2.2-r1.spdx.json"]
+    assert [path.name for path in sboms] == ["py3-pip-wheel-26.2.2-r2.spdx.json"]
+
+
+def _assert_python_packages(root: Path = Path("/")) -> None:
+    version = "3.14.10_git20261028-r0"
+    expected = {"python-3.14", "python-3.14-base", "python-3.14-runtime"}
+    records = (root / "usr/lib/apk/db/installed").read_text().split("\n\n")
+    actual = {}
+    for record in records:
+        fields = dict(
+            line.split(":", 1) for line in record.splitlines() if line.startswith(("P:", "V:"))
+        )
+        if fields.get("P", "").startswith("python-3.14"):
+            actual[fields["P"]] = fields["V"]
+    assert actual == dict.fromkeys(expected, version), actual
+    sboms = {path.name for path in (root / "var/lib/db/sbom").glob("python-3.14*.spdx.json")}
+    assert sboms == {f"{name}-{version}.spdx.json" for name in expected}
+    assert _sha256(root / "usr/lib/libpython3.14.so.1.0") == EXPECTED_LIBPYTHON_SHA256
 
 
 def _assert_repeated_temp_cleanup() -> None:
@@ -134,7 +152,7 @@ def main() -> None:
     assert os.environ["USER"] == os.environ["LOGNAME"] == "teamagent"
     assert pwd.getpwuid(10001).pw_name == "teamagent"
     assert os.environ["TEAMAGENT_RUNTIME_KIND"] == "core"
-    assert sys.version.split()[0].rstrip("+") == "3.14.8"
+    assert sys.version.split()[0].rstrip("+") == "3.14.10"
     assert _sha256(Path("/usr/bin/python3.14")) == EXPECTED_PYTHON_SHA256
     assert (
         _sha256(Path("/app/src/teamagent/connect_web/static/app.html"))
@@ -144,6 +162,7 @@ def main() -> None:
     _assert_runtime_directories()
     _assert_content_boundary()
     _assert_pip_wheel()
+    _assert_python_packages()
     _assert_repeated_temp_cleanup()
     _assert_e5_encode()
     _assert_repeated_temp_cleanup()

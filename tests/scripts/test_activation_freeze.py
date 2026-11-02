@@ -208,17 +208,20 @@ def test_unrelated_changes_still_pass(base: str, head: str, reason: str) -> None
 
 
 def test_unlock_matches_the_committed_declaration() -> None:
-    """pip wheel 26.2.2-r1 へ追随し、scope と退避した宣言を完全一致で封印する。"""
+    """core Python/pip の APK 差し替えに追随し、scope と退避した宣言を完全一致で封印する。"""
     unlock = _freeze_doc()["unlock"]
     assert unlock["active"] is True
-    assert unlock["scope_paths"] == ["infra/codebuild/teamagent_core_media_release_contract.json"]
+    assert unlock["scope_paths"] == [
+        "infra/codebuild/teamagent_runtime_contract.json",
+        "infra/codebuild/teamagent_core_media_release_contract.json",
+    ]
     assert (
         unlock["reason"]
-        == "human gate 2026-10-30（小俣さん指示・r85 段4 core HIGH CVE-2026-114613 対応。py3-pip-wheel を Wolfi 公式 26.2.2-r1 の実物 SHA・APKINDEX で固定し、release 契約・世代・凍結を更新。AWS 書き込み・CodeBuild 起動・S3 公開・commit・push は行わない）"
+        == "human gate 2026-11-02（小俣さん・司令塔指示: Python 3.14 と base digest を維持し、Wolfi secdb 修正済み Python 3.14.10_git20261028-r0 の同梱パッケージ・libpython と py3-pip-wheel 26.2.2-r2 を固定 APK/SHA/APKINDEX で差し替える。runtime/release 契約・世代・凍結をオフライン更新。AWS 書き込み・CodeBuild 起動・S3 公開・git commit・push は行わない）"
     )
     assert (
         unlock["gate"]
-        == "human gate 2026-10-30（小俣さん指示・r85 段4 core HIGH CVE-2026-114613 対応。py3-pip-wheel を Wolfi 公式 26.2.2-r1 の実物 SHA・APKINDEX で固定し、release 契約・世代・凍結を更新。AWS 書き込み・CodeBuild 起動・S3 公開・commit・push は行わない）"
+        == "human gate 2026-11-02（小俣さん・司令塔指示: Python 3.14 と base digest を維持し、Wolfi secdb 修正済み Python 3.14.10_git20261028-r0 の同梱パッケージ・libpython と py3-pip-wheel 26.2.2-r2 を固定 APK/SHA/APKINDEX で差し替える。runtime/release 契約・世代・凍結をオフライン更新。AWS 書き込み・CodeBuild 起動・S3 公開・git commit・push は行わない）"
     )
     assert unlock["previous_scope_20261026_sales25"] == {
         "active": True,
@@ -291,6 +294,12 @@ def test_unlock_matches_the_committed_declaration() -> None:
         "scope_paths": ["infra/codebuild/teamagent_core_media_release_contract.json"],
         "reason": "human gate 2026-10-30（小俣さん指示・発射前検査で ffmpeg 8.1.2-r3 の上流欠落を検出。8.1.3-r0 の実測 SHA・lock・release 契約・世代・凍結を更新。AWS 書き込み・CodeBuild 起動・S3 公開・commit・push は行わない）",
         "gate": "human gate 2026-10-30（小俣さん指示・発射前検査で ffmpeg 8.1.2-r3 の上流欠落を検出。8.1.3-r0 の実測 SHA・lock・release 契約・世代・凍結を更新。AWS 書き込み・CodeBuild 起動・S3 公開・commit・push は行わない）",
+    }
+    assert unlock["previous_scope_20261102_core_base"] == {
+        "active": True,
+        "scope_paths": ["infra/codebuild/teamagent_core_media_release_contract.json"],
+        "reason": "human gate 2026-10-30（小俣さん指示・r85 段4 core HIGH CVE-2026-114613 対応。py3-pip-wheel を Wolfi 公式 26.2.2-r1 の実物 SHA・APKINDEX で固定し、release 契約・世代・凍結を更新。AWS 書き込み・CodeBuild 起動・S3 公開・commit・push は行わない）",
+        "gate": "human gate 2026-10-30（小俣さん指示・r85 段4 core HIGH CVE-2026-114613 対応。py3-pip-wheel を Wolfi 公式 26.2.2-r1 の実物 SHA・APKINDEX で固定し、release 契約・世代・凍結を更新。AWS 書き込み・CodeBuild 起動・S3 公開・commit・push は行わない）",
     }
     assert unlock["previous_scope_20261023_gdbm"] == {
         "active": True,
