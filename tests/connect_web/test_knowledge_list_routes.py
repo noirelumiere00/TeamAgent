@@ -244,7 +244,10 @@ def test_invalid_query_defaults_to_existing_search_without_db(
     assert pg.calls == pg.connections == []
     assert _safe_next("/search?" + query) == "/"
     response = client.get("/search?" + query, follow_redirects=False)
-    assert response.status_code == 303 and response.headers["location"] == "/search/login?next=%2Fsearch"
+    assert (
+        response.status_code == 303
+        and response.headers["location"] == "/search/login?next=%2Fsearch"
+    )
 
 
 @pytest.mark.parametrize(

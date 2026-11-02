@@ -4954,7 +4954,7 @@ def create_app(
             target = "/search?view=docs&page=1"
         email = _search_email(request)
         if email is None:
-            # 戻り先を必ず /search にする（旧 /app#… の pendingHash は /search のシェルが解決するため）。
+            # 戻り先は必ず /search（旧 /app#… の pendingHash は /search のシェルが解決する）。
             login = "/search/login?next=" + quote(target or "/search", safe="")
             return RedirectResponse(login, status_code=303)
         if query_error is not None:
