@@ -82,12 +82,16 @@ def test_sync_failure_keeps_successful_ingest_exit_code(
 
 
 @pytest.mark.parametrize("code", [1, 2])
-def test_ingest_nonzero_exit_skips_sync_and_preserves_code(runner: MagicMock, code: int) -> None:
+def test_ingest_nonzero_exit_still_syncs_library_and_preserves_code(
+    runner: MagicMock, code: int
+) -> None:
+    # Exit 2 = ingest finished with warnings, which happens almost every night.
     runner.ingest.side_effect = SystemExit(code)
     with pytest.raises(SystemExit) as exc:
         fargate.main()
     assert exc.value.code == code
-    runner.sync.assert_not_called()
+    runner.sync.assert_called_once()
+    runner.thumbs.assert_called_once_with([])
     fargate.logger.error.assert_not_called()
 
 
