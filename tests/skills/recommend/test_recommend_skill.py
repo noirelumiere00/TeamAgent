@@ -3,19 +3,27 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from datetime import date, datetime, timedelta
 from unittest.mock import MagicMock
 
 import pytest
 
 from teamagent.adapters.file_record_lookup import SavedFileRecord
 from teamagent.adapters.pgvector_client import SearchHit
+from teamagent.connect_diagnostics import JST
 from teamagent.skills.base import SkillContext
+from teamagent.skills.recommend import skill as recommend_skill
 from teamagent.skills.recommend.schema import RecommendInput
 from teamagent.skills.recommend.skill import RecommendSkill
 from teamagent.skills.search import drive_first
 from teamagent.skills.search.client_match import alias_pairs
 from teamagent.skills.search.query_planner import QueryPlan
 from teamagent.skills.search.skill import SearchSkill
+
+
+@pytest.fixture(autouse=True)
+def fixed_today(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(recommend_skill, "now_jst", lambda: datetime(2026, 11, 2, tzinfo=JST))
 
 
 def _hit(
@@ -85,16 +93,24 @@ def test_sales_fb_with_proposal_classification_includes_unregistered_proposal() 
     assert out.similar_sales_fb == []
 
 
-def test_proposals_capped_at_three_in_score_order() -> None:
+def test_no_recent_proposals_fills_four_in_score_order() -> None:
     scores = [0.5, 0.9, 0.7, 0.3, 0.6]
     hits = [replace(_proposal(i, f"比較食品{i}"), score=scores[i]) for i in range(5)]
     skill, _ = _make_skill(hits)
 
     out = skill.run(RecommendInput(brief="x"), SkillContext())
 
-    assert [i.client_name for i in out.similar_proposals] == ["比較食品1", "比較食品2", "比較食品4"]
-    assert [i.score for i in out.similar_proposals] == [0.9, 0.7, 0.6]
-    assert out.total_count == 3
+    assert [i.client_name for i in out.similar_proposals] == [
+        "比較食品1",
+        "比較食品2",
+        "比較食品4",
+        "比較食品0",
+    ]
+    assert [i.score for i in out.similar_proposals] == [0.9, 0.7, 0.6, 0.5]
+    assert out.total_count == 4
+    assert "直近の似た提案" not in out.answer
+    assert "特に似ている提案" in out.answer
+    assert "自社の過去提案" not in out.answer
 
 
 def test_empty_hits_returns_empty_buckets() -> None:
@@ -106,6 +122,7 @@ def test_empty_hits_returns_empty_buckets() -> None:
     assert out.similar_minutes == []
     assert out.similar_sales_fb == []
     assert out.total_count == 0
+    assert out.answer == "他社の類似提案書は見つかりませんでした。"
     search.retrieve_hits.assert_called_once()
 
 
@@ -153,7 +170,7 @@ def _proposal(n: int, client: str, *, uri: str | None = None) -> SearchHit:
 
 
 @pytest.mark.parametrize("new_has_link", [True, False])
-def test_same_client_prefers_latest_date_after_material_link(new_has_link: bool) -> None:
+def test_same_client_prefers_latest_date_even_without_material_link(new_has_link: bool) -> None:
     old = replace(_proposal(1, "伊藤ハム"), score=0.9)
     old.metadata["title"] = "伊藤ハム_動画提案_2025年11月.pdf"
     new = replace(_proposal(2, "伊藤ハム"), score=0.6)
@@ -166,68 +183,178 @@ def test_same_client_prefers_latest_date_after_material_link(new_has_link: bool)
 
     assert len(out.same_client_materials) == 1
     item = out.same_client_materials[0]
-    assert item.date == ("2026年5月" if new_has_link else "2025年11月")
+    assert item.date == "2026年5月"
     assert item.source_uri == (
-        f"https://drive.google.com/file/d/proposal-{2 if new_has_link else 1}/view"
+        "https://drive.google.com/file/d/proposal-2/view" if new_has_link else None
     )
 
 
 @pytest.mark.parametrize("date_source", ["title", "file_name", "updated_at"])
-@pytest.mark.parametrize(
-    ("old_score", "new_score", "expected"),
-    [
-        (0.9, 0.9, [2, 1]),
-        (0.9, 0.88, [2, 1]),
-        (0.9, 0.85, [2, 1]),
-        (0.23, 0.18, [2, 1]),
-        (0.9, 0.849, [1, 2]),
-        (0.9, 0.7, [1, 2]),
-    ],
-)
-def test_other_clients_prefer_recency_only_within_score_tolerance(
-    date_source: str, old_score: float, new_score: float, expected: list[int]
-) -> None:
-    old = replace(_proposal(1, "比較食品A"), score=old_score)
-    new = replace(_proposal(2, "比較食品B"), score=new_score)
-    for hit, date in ((old, "2025-11-01"), (new, "2026-05-01")):
-        hit.metadata["title"] = f"{hit.metadata['client_name']}_動画提案.pdf"
-        hit.metadata[date_source] = f"提案_{date}.pdf" if date_source != "updated_at" else date
-    skill, _ = _make_skill([old, new])
+def test_recent_two_then_most_similar_two_and_latest_own(date_source: str) -> None:
+    hits = []
+    for n, (client, value, score) in enumerate(
+        [
+            ("比較食品A", "2026-09-01", 0.3),
+            ("比較食品B", "2026-10-01", 0.1),
+            ("比較食品C", "2026-08-01", 0.2),
+            ("比較食品D", "2026-04-01", 0.98),
+            ("比較食品E", "2026-03-01", 0.99),
+            ("比較食品F", "2026-02-01", 0.97),
+            ("基準食品", "2026-08-01", 0.9),
+            ("基準食品", "2026-10-01", 0.4),
+        ],
+        start=1,
+    ):
+        hit = replace(_proposal(n, client), score=score)
+        hit.metadata["title"] = f"{client}_動画提案.pdf"
+        hit.metadata[date_source] = f"提案_{value}.pdf" if date_source != "updated_at" else value
+        hits.append(hit)
+    skill, _ = _make_skill(hits)
+
+    out = skill.run(RecommendInput(brief="基準食品の提案書に似た過去の提案書"), SkillContext())
+
+    assert [item.source_uri for item in out.similar_proposals] == [
+        f"https://drive.google.com/file/d/proposal-{i}/view" for i in (2, 1, 5, 4)
+    ]
+    assert [item.date for item in out.similar_proposals] == [
+        "2026年10月",
+        "2026年9月",
+        "2026年3月",
+        "2026年4月",
+    ]
+    assert [item.date for item in out.same_client_materials] == ["2026年10月"]
+    assert out.total_count == 4
+    others_section, own_section = out.answer.split("*自社の過去提案*\n\n")
+    recent_section, similar_section = others_section.removeprefix("*直近の似た提案*\n\n").split(
+        "*特に似ている提案*\n\n"
+    )
+    assert out.answer.startswith("*直近の似た提案*\n\n")
+    for section, items in (
+        (recent_section, out.similar_proposals[:2]),
+        (similar_section, out.similar_proposals[2:]),
+        (own_section, out.same_client_materials),
+    ):
+        for item in items:
+            assert f"*{item.title}*（{item.date}）\n• {item.similarity}\n• " in section
+            assert item.source_uri in section
+    assert out.answer.count("資料を見る") == 5
+
+
+def test_one_recent_leaves_three_similarity_slots_and_excludes_its_company() -> None:
+    recent = replace(_proposal(1, "比較食品A"), score=0.1)
+    recent.metadata["title"] = "比較食品A_動画提案_2026年10月.pdf"
+    duplicate_company = replace(_proposal(2, "株式会社比較食品A"), score=0.99)
+    duplicate_company.metadata["title"] = "比較食品A_動画提案_2026年9月.pdf"
+    others = [replace(_proposal(i, f"比較食品{i}"), score=1 / i) for i in range(3, 7)]
+    skill, _ = _make_skill([duplicate_company, *others, recent, replace(recent, chunk_id=99)])
+
+    out = skill.run(RecommendInput(brief="食品の動画広告の提案書"), SkillContext())
+
+    assert [item.client_name for item in out.similar_proposals] == [
+        "比較食品A",
+        "比較食品3",
+        "比較食品4",
+        "比較食品5",
+    ]
+    assert out.total_count == 4
+    assert out.answer.count("*直近の似た提案*") == 1
+    assert out.answer.count("*特に似ている提案*") == 1
+
+
+def test_remaining_recent_candidate_can_fill_similarity_slot() -> None:
+    hits = [_proposal(i, f"比較食品{i}") for i in range(1, 4)]
+    for hit, month in zip(hits, (8, 9, 10), strict=True):
+        hit.metadata["title"] = f"動画提案_2026年{month}月.pdf"
+    skill, _ = _make_skill(hits)
 
     out = skill.run(RecommendInput(brief="食品の動画広告の提案書"), SkillContext())
 
     assert [item.source_uri for item in out.similar_proposals] == [
-        f"https://drive.google.com/file/d/proposal-{i}/view" for i in expected
+        f"https://drive.google.com/file/d/proposal-{i}/view" for i in (3, 2, 1)
     ]
+    assert "proposal-1/view" in out.answer.split("*特に似ている提案*")[1]
 
 
-@pytest.mark.parametrize(("dated_score", "expected"), [(0.88, [2, 1]), (0.7, [1, 2])])
-def test_unknown_date_follows_dated_peers_only(dated_score: float, expected: list[int]) -> None:
+def test_recent_candidates_prioritize_links_before_unregistered_materials() -> None:
+    hits = [_proposal(i, f"比較食品{i}") for i in range(1, 4)]
+    for hit, month in zip(hits, (10, 9, 8), strict=True):
+        hit.metadata["title"] = f"動画提案_2026年{month}月.pdf"
+    hits[0].metadata.pop("source_uri")
+    skill, _ = _make_skill(hits)
+
+    out = skill.run(RecommendInput(brief="食品の動画広告の提案書"), SkillContext())
+
+    assert [item.client_name for item in out.similar_proposals] == [
+        "比較食品2",
+        "比較食品3",
+        "比較食品1",
+    ]
+    assert "登録されていません" not in out.answer.split("*特に似ている提案*")[0]
+
+
+@pytest.mark.parametrize(
+    ("today", "boundary"),
+    [
+        (datetime(2026, 11, 2, tzinfo=JST), "2026-05-02"),
+        (datetime(2026, 3, 31, tzinfo=JST), "2025-09-30"),
+        (datetime(2024, 8, 31, tzinfo=JST), "2024-02-29"),
+    ],
+)
+def test_recent_window_includes_calendar_boundary_and_today_only(
+    monkeypatch: pytest.MonkeyPatch, today: datetime, boundary: str
+) -> None:
+    monkeypatch.setattr(recommend_skill, "now_jst", lambda: today)
+    values = [
+        boundary,
+        today.date().isoformat(),
+        (date.fromisoformat(boundary) - timedelta(days=1)).isoformat(),
+        (today.date() + timedelta(days=1)).isoformat(),
+        "",
+    ]
+    hits = []
+    for n, value in enumerate(values, start=1):
+        hit = _proposal(n, f"比較食品{n}")
+        hit.metadata["title"] = f"比較食品{n}_動画提案_{value}.pdf"
+        hits.append(hit)
+    skill, _ = _make_skill(hits)
+
+    out = skill.run(RecommendInput(brief="食品の動画広告の提案書"), SkillContext())
+
+    assert [item.source_uri for item in out.similar_proposals] == [
+        f"https://drive.google.com/file/d/proposal-{i}/view" for i in (2, 1, 3, 4)
+    ]
+    recent_section = out.answer.split("*特に似ている提案*")[0]
+    assert "proposal-1/view" in recent_section and "proposal-2/view" in recent_section
+    assert "proposal-3/view" not in recent_section and "proposal-4/view" not in recent_section
+
+
+@pytest.mark.parametrize("dated_value", ["2026年4月", "2026年10月"])
+def test_unknown_date_is_only_selected_by_similarity(dated_value: str) -> None:
     unknown = replace(_proposal(1, "比較食品A"), score=0.9)
     unknown.metadata["title"] = "比較食品A_動画提案.pdf"
-    dated = replace(_proposal(2, "比較食品B"), score=dated_score)
+    dated = replace(_proposal(2, "比較食品B"), score=0.1)
+    dated.metadata["title"] = f"比較食品B_動画提案_{dated_value}.pdf"
     skill, _ = _make_skill([unknown, dated])
 
     out = skill.run(RecommendInput(brief="食品の動画広告の提案書"), SkillContext())
 
+    expected = [2, 1] if dated_value == "2026年10月" else [1, 2]
     assert [item.source_uri for item in out.similar_proposals] == [
         f"https://drive.google.com/file/d/proposal-{i}/view" for i in expected
     ]
     assert next(item for item in out.similar_proposals if item.score == 0.9).date == "日付不明"
 
 
-def test_score_tolerance_does_not_chain_across_more_than_point_zero_five() -> None:
-    hits = [
-        replace(_proposal(i, f"比較食品{i}"), score=score)
-        for i, score in enumerate((0.9, 0.86, 0.82), start=1)
-    ]
-    for hit, month in zip(hits, (3, 4, 5), strict=True):
-        hit.metadata["title"] = f"比較食品{hit.chunk_id}_動画提案_2026年{month}月.pdf"
-    skill, _ = _make_skill(hits)
+def test_recent_only_does_not_show_empty_sections() -> None:
+    hit = _proposal(1, "比較食品A")
+    hit.metadata["title"] = "比較食品A_動画提案_2026年10月.pdf"
+    skill, _ = _make_skill([hit])
 
     out = skill.run(RecommendInput(brief="食品の動画広告の提案書"), SkillContext())
 
-    assert [item.score for item in out.similar_proposals] == [0.86, 0.9, 0.82]
+    assert "直近の似た提案" in out.answer
+    assert "特に似ている提案" not in out.answer
+    assert "自社の過去提案" not in out.answer
 
 
 def test_similar_proposals_prioritize_other_clients_and_expand_the_query() -> None:
@@ -264,7 +391,8 @@ def test_recommend_output_has_case_cards_and_never_serializes_scores() -> None:
     assert "*比較食品A 冷凍食品の動画提案*（2026年4月）" in out.answer
     assert "似ている点" in out.answer and "食品" in out.answer and "動画広告" in out.answer
     assert "• <https://drive.google.com/file/d/proposal-1/view|資料を見る>" in out.answer
-    assert len(out.answer.splitlines()) == 3
+    assert len(out.answer.splitlines()) == 5
+    assert out.answer.startswith("*特に似ている提案*\n\n")
 
 
 def test_unresolved_links_and_slack_threads_follow_drive_recommendations() -> None:
@@ -296,7 +424,7 @@ def test_same_company_and_same_original_do_not_fill_the_list() -> None:
     assert out.total_count == 2
 
 
-def test_same_client_only_is_one_supplementary_line() -> None:
+def test_same_client_only_shows_one_card_without_empty_sections() -> None:
     skill, _ = _make_skill([_proposal(n, "基準食品") for n in range(1, 4)])
 
     out = skill.run(RecommendInput(brief="基準食品の提案書に似た過去の提案書"), SkillContext())
@@ -304,7 +432,10 @@ def test_same_client_only_is_one_supplementary_line() -> None:
     assert out.similar_proposals == []
     assert out.total_count == 0
     assert len(out.same_client_materials) == 1
-    assert len(out.answer.split("同じ会社の過去資料：")[1].splitlines()) == 1
+    assert out.answer.startswith("他社の類似提案書は見つかりませんでした。\n\n*自社の過去提案*\n\n")
+    assert len(out.answer.splitlines()) == 7
+    assert "直近の似た提案" not in out.answer
+    assert "特に似ている提案" not in out.answer
     assert out.answer.count("資料を見る") == 1
 
 
@@ -452,9 +583,14 @@ def test_linked_candidates_fill_the_cap_before_unregistered_candidates() -> None
 
     out = skill.run(RecommendInput(brief="食品の動画広告の提案書"), SkillContext())
 
-    assert [i.client_name for i in out.similar_proposals] == ["比較食品2", "比較食品3", "比較食品4"]
+    assert [i.client_name for i in out.similar_proposals] == [
+        "比較食品2",
+        "比較食品3",
+        "比較食品4",
+        "比較食品5",
+    ]
     assert "未登録の案件" not in out.answer
-    assert out.total_count == 3
+    assert out.total_count == 4
 
 
 def test_unregistered_logs_only_displayed_unique_cases_and_contact_presence(
@@ -466,14 +602,16 @@ def test_unregistered_logs_only_displayed_unique_cases_and_contact_presence(
     unknown = _hit(3, 0.7, doc_type="提案書", title="担当不明の案件")
     unknown.metadata.update(document_id="case-2")
     hidden = _hit(4, 0.6, doc_type="提案書", title="表示枠外の案件")
-    skill, _ = _make_skill([missing, duplicate, _proposal(5, "比較食品A"), unknown, hidden])
+    skill, _ = _make_skill(
+        [missing, duplicate, _proposal(5, "比較食品A"), _proposal(6, "比較食品B"), unknown, hidden]
+    )
     ctx = SkillContext()
     log = MagicMock()
     monkeypatch.setattr(ctx, "bind_logger", lambda _: log)
 
     out = skill.run(RecommendInput(brief="食品の動画広告の提案書"), ctx)
 
-    assert out.total_count == 3
+    assert out.total_count == 4
     events = [
         call
         for call in log.info.call_args_list

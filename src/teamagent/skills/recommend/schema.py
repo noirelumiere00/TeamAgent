@@ -20,7 +20,7 @@ class RecommendInput(BaseModel):
         default=12,
         ge=1,
         le=30,
-        description="検索候補件数（会社・原本の重複を除き最大3件を提示）",
+        description="検索候補件数（会社・原本の重複を除き他社最大4件・自社最大1件を提示）",
     )
 
 
@@ -38,11 +38,11 @@ class RecommendItem(BaseModel):
 
 
 class RecommendOutput(BaseModel):
-    """他社の類似提案書を最大3件。同一社の資料は補足に分離する。"""
+    """他社の類似提案書を最大4件。同一社の最新提案は最大1件を別に示す。"""
 
     brief: str
     similar_proposals: list[RecommendItem] = Field(
-        default_factory=list, description="類似提案書 (上位3件)"
+        default_factory=list, description="他社の類似提案書（直近→関連度順、最大4件）"
     )
     similar_minutes: list[RecommendItem] = Field(
         default_factory=list, description="互換用。提案書推薦では空"

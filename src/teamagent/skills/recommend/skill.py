@@ -1,12 +1,11 @@
-"""基準案件の特徴で他社の提案書を最大3件返す。未登録資料は担当への確認を案内する。"""
+"""直近・関連度で他社の提案書を最大4件、自社の過去提案を1件返す。"""
 
 from __future__ import annotations
 
 import re
 import unicodedata
+from calendar import monthrange
 from dataclasses import replace
-from itertools import groupby
-from math import isclose
 from typing import ClassVar
 
 from pydantic import BaseModel
@@ -15,6 +14,7 @@ from teamagent.adapters.pgvector_client import SearchHit
 from teamagent.ingest.classify import _parse_rulebook_title
 from teamagent.ingest.industry_taxonomy import normalize_industry
 from teamagent.skills.base import BaseSkill, SkillContext, register
+from teamagent.skills.morning_digest.calendar_window import now_jst
 from teamagent.skills.recommend.schema import RecommendInput, RecommendItem, RecommendOutput
 from teamagent.skills.search import drive_first
 from teamagent.skills.search.alias_expansion import resolve_topic_client
@@ -66,8 +66,8 @@ class RecommendSkill(BaseSkill[RecommendInput, RecommendOutput]):
     name: ClassVar[str] = "recommend"
     description: ClassVar[str] = (
         "似た・類似の・近い・参考になる過去の提案書／資料を探して、という資料推薦の依頼に使う。"
-        "業種・商材・施策の近い他社の提案書を優先し、原本リンクのある資料を先に最大3件を一覧提示する。"
-        "リンク未登録なら担当への確認を案内する。同じ会社の過去資料は補足に分ける。"
+        "他社の提案書を直近最大2件、残りを関連度順で合計最大4件提示する。原本リンクありを優先する。"
+        "リンク未登録なら担当への確認を案内する。同じ会社の最新の過去提案は最大1件を別に示す。"
         "answer をそのまま返す。"
         "例: 伊藤ハムの提案書に似た過去の提案書を探して。"
         "骨子生成はしない。提案（の骨子・たたき台）を作って、という明示依頼は proposal_draft。"
@@ -137,74 +137,89 @@ class RecommendSkill(BaseSkill[RecommendInput, RecommendOutput]):
 
         candidates = [h for h in hits if self._is_proposal(h)]
         groups, _, _ = drive_first.annotate(self._search, [candidates], (), ctx)
-        proposals: list[RecommendItem] = []
+        recent: list[RecommendItem] = []
+        similar: list[RecommendItem] = []
         same_client: list[RecommendItem] = []
         seen_files: set[tuple[str, str]] = set()
         clients: list[str] = []
         skipped_company = False
 
-        def category(hit: SearchHit) -> tuple[bool, bool]:
-            return self._material_url(hit) is None, bool(
-                target and self._same_client(hit, target[1])
-            )
-
-        ranked: list[SearchHit] = []
-        ordered = sorted(groups[0], key=lambda h: (*category(h), -h.score))
-        for (_, is_same), group in groupby(ordered, key=category):
-            peers: list[SearchHit] = []
-            for hit in group:
-                # 連鎖で関連度の差が広がらないよう、各組の最高スコアを基準にする。
-                gap = peers[0].score - hit.score if peers else 0.0
-                if not is_same and gap > 0.05 and not isclose(gap, 0.05):
-                    ranked.extend(sorted(peers, key=self._date, reverse=True))
-                    peers = []
-                peers.append(hit)
-            ranked.extend(sorted(peers, key=self._date, reverse=True))
-
-        for hit in ranked:
-            ref = hit.metadata[drive_first.REFERENCE_KEY]
-            material_key = (
-                ("drive", ref.drive_file_id)
-                if self._material_url(hit)
-                else (
-                    "record",
-                    str(hit.metadata.get("document_id") or ref.source_uri or hit.chunk_id),
-                )
-            )
-            if material_key in seen_files:
-                continue
-            seen_files.add(material_key)
-            item = self._to_item(hit, features)
-            is_same = bool(target and self._same_client(hit, target[1]))
-            bucket = same_client if is_same else proposals
-            if len(bucket) >= (1 if is_same else 3):
-                continue
-            client = self._client_name(hit)
-            if not is_same and client and any(self._same_client(hit, name) for name in clients):
-                skipped_company = True
-                continue
-            bucket.append(item)
-            if not is_same and client:
-                clients.append(client)
-            if not item.source_uri:
-                log.info(
-                    "recommend_material_unregistered",
-                    case_id=str(hit.metadata.get("document_id") or hit.chunk_id),
-                    has_contact=bool(item.contact_name),
-                )
-
-        cards = [
-            f"*{item.title}*（{item.date}）\n• {item.similarity}\n• {self._material_notice(item)}"
-            for item in proposals
+        today = now_jst().date()
+        year, month = divmod(today.year * 12 + today.month - 1 - 6, 12)
+        month += 1
+        cutoff = today.replace(
+            year=year, month=month, day=min(today.day, monthrange(year, month)[1])
+        ).isoformat()
+        today_iso = today.isoformat()
+        others = [h for h in groups[0] if not (target and self._same_client(h, target[1]))]
+        own = [h for h in groups[0] if target and self._same_client(h, target[1])]
+        dated = [
+            h
+            for h in others
+            if (value := self._date(h))
+            and cutoff <= (value + "-01" if len(value) == 7 else value) <= today_iso
         ]
-        answer = "\n\n".join(cards) or "他社の類似提案書は見つかりませんでした。"
-        if proposals and len(proposals) < 3 and skipped_company:
-            answer += "\n\nこれ以上の他社の類似提案書は、検索した候補に見つかりませんでした。"
-        if same_client:
-            item = same_client[0]
-            answer += (
-                f"\n\n同じ会社の過去資料：{item.title}（{item.date}） {self._material_notice(item)}"
+        recent_hits = sorted(dated, key=self._date, reverse=True)
+        recent_hits.sort(key=lambda h: self._material_url(h) is None)
+        similar_hits = sorted(others, key=lambda h: (self._material_url(h) is None, -h.score))
+        own_hits = sorted(own, key=self._date, reverse=True)
+
+        for bucket, ranked, limit in (
+            (recent, recent_hits, 2),
+            (similar, similar_hits, 4),
+            (same_client, own_hits, 1),
+        ):
+            is_same = bucket is same_client
+            for hit in ranked:
+                if len(bucket) >= limit or (not is_same and len(recent) + len(similar) >= 4):
+                    break
+                ref = hit.metadata[drive_first.REFERENCE_KEY]
+                material_key = (
+                    ("drive", ref.drive_file_id)
+                    if self._material_url(hit)
+                    else (
+                        "record",
+                        str(hit.metadata.get("document_id") or ref.source_uri or hit.chunk_id),
+                    )
+                )
+                if material_key in seen_files:
+                    continue
+                client = self._client_name(hit)
+                if not is_same and client and any(self._same_client(hit, name) for name in clients):
+                    skipped_company = True
+                    continue
+                seen_files.add(material_key)
+                item = self._to_item(hit, features)
+                bucket.append(item)
+                if not is_same and client:
+                    clients.append(client)
+                if not item.source_uri:
+                    log.info(
+                        "recommend_material_unregistered",
+                        case_id=str(hit.metadata.get("document_id") or hit.chunk_id),
+                        has_contact=bool(item.contact_name),
+                    )
+
+        proposals = [*recent, *similar]
+        sections = []
+        for heading, items in (
+            ("直近の似た提案", recent),
+            ("特に似ている提案", similar),
+            ("自社の過去提案", same_client),
+        ):
+            if not items:
+                continue
+            cards = "\n\n".join(
+                f"*{item.title}*（{item.date}）\n• {item.similarity}\n"
+                f"• {self._material_notice(item)}"
+                for item in items
             )
+            sections.append(f"*{heading}*\n\n{cards}")
+        if not proposals:
+            sections.insert(0, "他社の類似提案書は見つかりませんでした。")
+        answer = "\n\n".join(sections)
+        if proposals and len(proposals) < 4 and skipped_company:
+            answer += "\n\nこれ以上の他社の類似提案書は、検索した候補に見つかりませんでした。"
         log.info("recommend_done", proposals=len(proposals), same_client=len(same_client))
         return RecommendOutput(
             brief=input.brief,
