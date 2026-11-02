@@ -3,85 +3,31 @@
 from __future__ import annotations
 
 import argparse
-import json
 import os
 import time
 import uuid
 from collections import Counter
 from collections.abc import Callable
-from html.parser import HTMLParser
 from typing import Any
-from urllib.parse import quote, urlsplit
+from urllib.parse import quote
 
 import httpx
 import structlog
 
 from teamagent.adapters.pgvector_client import PgVectorClient
+from teamagent.adapters.video_library_page import (
+    cover_url as cover_url,
+)
+from teamagent.adapters.video_library_page import (
+    fetch_page,
+    page_client,
+    save_cover,
+)
 from teamagent.adapters.video_library_storage import VideoLibraryStorage
 from teamagent.ingest.video_library import video_identity
 from teamagent.observability.logging_config import configure_logging
 
 logger = structlog.get_logger(__name__)
-MAX_IMAGE_BYTES = 5 * 1024 * 1024
-# 短い UA（"Mozilla/5.0" だけ）だと TikTok は JSON の無い空ページを返す（2026-10-30 実測）
-PAGE_USER_AGENT = (
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
-    "(KHTML, like Gecko) Chrome/124.0 Safari/537.36"
-)
-
-
-class _HydrationParser(HTMLParser):
-    def __init__(self) -> None:
-        super().__init__(convert_charrefs=False)
-        self.active = False
-        self.parts: list[str] = []
-
-    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
-        if tag == "script":
-            self.active = dict(attrs).get("id") == "__UNIVERSAL_DATA_FOR_REHYDRATION__"
-
-    def handle_endtag(self, tag: str) -> None:
-        if tag == "script":
-            self.active = False
-
-    def handle_data(self, data: str) -> None:
-        if self.active:
-            self.parts.append(data)
-
-
-def cover_url(page: str) -> str | None:
-    parser = _HydrationParser()
-    parser.feed(page)
-    try:
-        video = json.loads("".join(parser.parts))["__DEFAULT_SCOPE__"]["webapp.video-detail"][
-            "itemInfo"
-        ]["itemStruct"]["video"]
-        zoom = video.get("zoomCover")
-        url = (zoom.get("480") if isinstance(zoom, dict) else None) or video.get("cover")
-        if isinstance(url, str):
-            parsed = urlsplit(url)
-            host = parsed.hostname or ""
-            # TikTok image CDN only: embedded third-party data must not become an SSRF target.
-            if (
-                parsed.scheme == "https"
-                and not parsed.username
-                and not parsed.password
-                and parsed.port in {None, 443}
-                and any(
-                    host.endswith("." + domain)
-                    for domain in (
-                        "tiktokcdn.com",
-                        "tiktokcdn-us.com",
-                        "tiktokcdn-eu.com",
-                        "byteoversea.com",
-                        "ibytedtos.com",
-                    )
-                )
-            ):
-                return url
-    except (ValueError, KeyError, TypeError, AttributeError):
-        pass
-    return None
 
 
 def fill_thumbnails(
@@ -115,26 +61,16 @@ def fill_thumbnails(
             if identity is None or identity[:2] != (row["platform"], row["video_id"]):
                 raise ValueError("invalid_video_url")
             # Canonical origin avoids redirects/ports/tracking parameters in imported URLs.
-            page = client.get(
-                f"https://www.tiktok.com/@{quote(identity[2] or '', safe='')}/video/{identity[1]}"
+            page = fetch_page(
+                client,
+                f"https://www.tiktok.com/@{quote(identity[2] or '', safe='')}/video/{identity[1]}",
             )
-            page.raise_for_status()
-            url = cover_url(page.text)
+            url = cover_url(page)
             if url is None:
                 counts["cover_missing"] += 1
                 consecutive_failures += 1
             else:
-                with client.stream("GET", url) as response:
-                    response.raise_for_status()
-                    body = bytearray()
-                    for chunk in response.iter_bytes():
-                        body.extend(chunk)
-                        if len(body) > MAX_IMAGE_BYTES:
-                            raise ValueError("cover_too_large")
-                # The source cover is JPEG. Reject HTML/challenges and other active content.
-                if not body.startswith(b"\xff\xd8\xff"):
-                    raise ValueError("invalid_cover_image")
-                key = storage.put(row["platform"], row["video_id"], bytes(body))
+                key = save_cover(client, storage, row["platform"], row["video_id"], url)
                 with pg.connection(
                     app_role="teamagent_app", user_role="admin", user_email=None
                 ) as conn:
@@ -181,9 +117,7 @@ def main(argv: list[str] | None = None) -> int:
     ):
         try:
             pg = PgVectorClient.from_env()
-            with httpx.Client(
-                timeout=20, follow_redirects=False, headers={"User-Agent": PAGE_USER_AGENT}
-            ) as client:
+            with page_client() as client:
                 fill_thumbnails(pg, VideoLibraryStorage(), client, limit=args.limit)
             return 0
         except Exception as exc:

@@ -4,13 +4,13 @@ from __future__ import annotations
 
 import json
 from contextlib import contextmanager
-from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock
 
 import httpx
 import pytest
 
+from teamagent.adapters import video_library_page
 from teamagent.adapters.video_library_storage import (
     THUMB_PREFIX,
     VideoLibraryStorage,
@@ -207,7 +207,10 @@ def test_non_image_response_is_not_saved() -> None:
 
 def test_page_user_agent_is_a_full_browser_string() -> None:
     # 短い UA だと TikTok は JSON の無い空ページを返す（実測）。完全なブラウザ UA を送ること
-    from teamagent.ingest import video_library_thumbs as thumbs
 
-    assert "Chrome/" in thumbs.PAGE_USER_AGENT and "AppleWebKit" in thumbs.PAGE_USER_AGENT
-    assert '"User-Agent": PAGE_USER_AGENT' in Path(thumbs.__file__).read_text()
+    assert (
+        "Chrome/" in video_library_page.PAGE_USER_AGENT
+        and "AppleWebKit" in video_library_page.PAGE_USER_AGENT
+    )
+    with video_library_page.page_client() as client:
+        assert client.headers["User-Agent"] == video_library_page.PAGE_USER_AGENT
