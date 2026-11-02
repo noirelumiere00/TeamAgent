@@ -68,13 +68,20 @@ def test_only_proposals_are_recommended() -> None:
     assert out.total_count == 1
 
 
-def test_sales_fb_with_proposal_classification_is_not_a_proposal() -> None:
+def test_sales_fb_with_proposal_classification_includes_unregistered_proposal() -> None:
     hits = [_hit(1, 0.9, doc_type="提案書", is_sales_fb=True, client_name="比較食品A")]
+    hits[0].metadata.update(
+        source_type="slack", case_owner="担当姓 担当名", submitter="投稿者", client_case="参考案件"
+    )
     skill, _ = _make_skill(hits)
 
     out = skill.run(RecommendInput(brief="食品"), SkillContext())
 
-    assert out.similar_proposals == []
+    assert len(out.similar_proposals) == 1
+    assert out.similar_proposals[0].source_uri is None
+    assert out.similar_proposals[0].title == "参考案件"
+    assert "担当の 担当姓 さんに確認してください" in out.answer
+    assert "投稿者" not in out.answer
     assert out.similar_sales_fb == []
 
 
@@ -179,13 +186,13 @@ def test_recommend_output_has_case_cards_and_never_serializes_scores() -> None:
     assert "score" not in out.model_dump_json()
     assert "0.66" not in out.model_dump_json()
     assert "スコア" not in out.answer
-    assert "*比較食品A_冷凍食品の動画提案_2026年4月.pdf*（2026年4月）" in out.answer
+    assert "*比較食品A 冷凍食品の動画提案*（2026年4月）" in out.answer
     assert "似ている点" in out.answer and "食品" in out.answer and "動画広告" in out.answer
     assert "• <https://drive.google.com/file/d/proposal-1/view|資料を見る>" in out.answer
     assert len(out.answer.splitlines()) == 3
 
 
-def test_unresolved_links_and_slack_threads_are_not_recommendations() -> None:
+def test_unresolved_links_and_slack_threads_follow_drive_recommendations() -> None:
     missing = _hit(1, 0.9, doc_type="提案書", title="原本不明")
     slack = _proposal(2, "比較食品B", uri="slack://C123-1234567890.123456")
     slack.metadata.update(source_type="slack")
@@ -194,7 +201,11 @@ def test_unresolved_links_and_slack_threads_are_not_recommendations() -> None:
 
     out = skill.run(RecommendInput(brief="食品の動画広告の提案書"), SkillContext())
 
-    assert [i.client_name for i in out.similar_proposals] == ["比較食品C"]
+    assert [i.client_name for i in out.similar_proposals] == ["比較食品C", None, "比較食品B"]
+    assert [i.source_uri for i in out.similar_proposals[1:]] == [None, None]
+    assert out.answer.count("資料はナレッジに登録されていません。") == 2
+    assert out.answer.count("担当者を確認できませんでした") == 2
+    assert out.total_count == 3
     assert "slack://" not in out.model_dump_json()
 
 
@@ -288,7 +299,7 @@ def test_slack_uses_saved_original_and_its_date(monkeypatch: pytest.MonkeyPatch)
     saved.assert_called_once_with(search, [hit], ctx)
     assert search.retrieve_hits.call_args.args[1] is ctx
     assert out.similar_proposals[0].source_uri == record.drive_url
-    assert "*比較食品A_提案書_2025年8月.pdf*（2025年8月）" in out.answer
+    assert "*比較食品A*（2025年8月）" in out.answer
     assert "スレッド" not in out.answer
 
 
@@ -303,8 +314,203 @@ def test_slack_attachment_never_uses_a_same_name_file(monkeypatch: pytest.Monkey
 
     out = skill.run(RecommendInput(brief="食品の動画広告の提案書"), SkillContext())
 
-    assert out.similar_proposals == []
+    assert len(out.similar_proposals) == 1
+    assert out.similar_proposals[0].source_uri is None
+    assert "資料はナレッジに登録されていません。" in out.answer
     assert "wrong-original" not in out.model_dump_json()
+
+
+@pytest.mark.parametrize(
+    ("metadata", "expected"),
+    [
+        ({"source_type": "slack", "submitter": "共有姓 共有名", "case_owner": "別担当"}, "共有姓"),
+        (
+            {"source_type": "gsheets", "case_owner": "担当姓　担当名", "submitter": "別共有者"},
+            "担当姓",
+        ),
+        ({"source_type": "gsheets", "case_owner": "担当姓さん"}, "担当姓"),
+        (
+            {
+                "source_type": "slack",
+                "topic": "案件決定",
+                "case_owner": "担当姓",
+                "submitter": "別共有者",
+            },
+            "担当姓",
+        ),
+        (
+            {"source_type": "gsheets", "is_knowledge_share": True, "submitter": "共有姓"},
+            "共有姓",
+        ),
+        ({"source_type": "slack", "case_owner": "別担当"}, None),
+        ({"source_type": "gsheets", "submitter": "別共有者"}, None),
+        ({"source_type": "slack", "submitter": "person@example.com"}, None),
+        ({"source_type": "gsheets", "case_owner": "不明"}, None),
+        ({"source_type": "slack", "submitter": "   "}, None),
+    ],
+)
+def test_unregistered_contact_comes_only_from_source_metadata(
+    metadata: dict[str, object], expected: str | None
+) -> None:
+    hit = _proposal(1, "比較食品A", uri="slack://C123/1234567890.123456")
+    hit.metadata.update(metadata, owner_email="importer@example.com", document_id="case-1")
+    skill, _ = _make_skill([hit])
+
+    out = skill.run(RecommendInput(brief="食品の動画広告の提案書"), SkillContext())
+
+    item = out.similar_proposals[0]
+    assert item.source_uri is None
+    assert item.contact_name == expected
+    assert item.title in out.answer and item.date in out.answer
+    assert item.similarity in out.answer
+    if expected:
+        assert f"担当の {expected} さんに確認してください" in out.answer
+    else:
+        assert "担当者を確認できませんでした" in out.answer
+    assert "importer" not in out.model_dump_json()
+    assert "別担当" not in out.answer and "別共有者" not in out.answer
+
+
+def test_linked_candidates_fill_the_cap_before_unregistered_candidates() -> None:
+    missing = _hit(1, 0.99, doc_type="提案書", title="未登録の案件")
+    skill, _ = _make_skill([missing, *[_proposal(i, f"比較食品{i}") for i in range(2, 6)]])
+
+    out = skill.run(RecommendInput(brief="食品の動画広告の提案書"), SkillContext())
+
+    assert [i.client_name for i in out.similar_proposals] == ["比較食品2", "比較食品3", "比較食品4"]
+    assert "未登録の案件" not in out.answer
+    assert out.total_count == 3
+
+
+def test_unregistered_logs_only_displayed_unique_cases_and_contact_presence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    missing = _hit(1, 0.9, doc_type="提案書", title="未登録の案件")
+    missing.metadata.update(document_id="case-1", case_owner="担当姓 担当名")
+    duplicate = replace(missing, chunk_id=2)
+    unknown = _hit(3, 0.7, doc_type="提案書", title="担当不明の案件")
+    unknown.metadata.update(document_id="case-2")
+    hidden = _hit(4, 0.6, doc_type="提案書", title="表示枠外の案件")
+    skill, _ = _make_skill([missing, duplicate, _proposal(5, "比較食品A"), unknown, hidden])
+    ctx = SkillContext()
+    log = MagicMock()
+    monkeypatch.setattr(ctx, "bind_logger", lambda _: log)
+
+    out = skill.run(RecommendInput(brief="食品の動画広告の提案書"), ctx)
+
+    assert out.total_count == 3
+    events = [
+        call
+        for call in log.info.call_args_list
+        if call.args[0] == "recommend_material_unregistered"
+    ]
+    assert len(events) == 2
+    assert [call.kwargs for call in events] == [
+        {"case_id": "case-1", "has_contact": True},
+        {"case_id": "case-2", "has_contact": False},
+    ]
+
+
+@pytest.mark.parametrize("include_summary", [False, True])
+def test_similarity_uses_classification_or_substantive_body_not_cover_text(
+    include_summary: bool,
+) -> None:
+    summary = "SNS動画で商品の使い方を伝え、店頭購入につなげる施策。"
+    hit = replace(
+        _proposal(1, "比較食品A"),
+        content="正式社名: 比較食品A\n【ご提案書】\nPR TIMES\n架空ビル 東京都架空区1-2-3\n"
+        + (summary if include_summary else ""),
+    )
+    hit.metadata.update(case_product="冷凍調理品", cls_target="比較食品A")
+    skill, _ = _make_skill([hit])
+
+    out = skill.run(RecommendInput(brief="参考になる提案書"), SkillContext())
+
+    similarity = out.similar_proposals[0].similarity
+    assert similarity.startswith("似ている点：")
+    assert "\n" not in similarity
+    if include_summary:
+        assert summary in similarity
+    else:
+        assert "食品" in similarity and "動画広告" in similarity and "冷凍調理品" in similarity
+    for noise in ("正式社名", "比較食品A", "ご提案書", "PR TIMES", "架空ビル", "東京都", "1-2-3"):
+        assert noise not in similarity
+
+
+def test_similarity_does_not_invent_classification_when_only_cover_is_available() -> None:
+    hit = _hit(1, 0.9, doc_type="提案書", title="提案_比較食品A_新商品.pdf")
+    hit = replace(hit, content="正式社名: 比較食品A\n所在地: 架空ビル1-2-3\nご提案書")
+    skill, _ = _make_skill([hit])
+
+    out = skill.run(RecommendInput(brief="食品メーカー向け動画提案"), SkillContext())
+
+    assert (
+        out.similar_proposals[0].similarity
+        == "似ている点：業種・施策の共通点は確認できませんでした。"
+    )
+
+
+@pytest.mark.parametrize(
+    ("title", "expected", "month"),
+    [
+        ("_提案_比較食品A_新商品【ご提案書】_2026年4月.pdf_", "比較食品A 新商品", "2026年4月"),
+        ("提案書＿比較食品A＿新商品＿20260415.PPTX", "比較食品A 新商品", "2026年4月"),
+        ("260415_提案_比較食品A_新商品.pdf", "比較食品A 新商品", "2026年4月"),
+        ("提案_比較食品A_【春の新商品】_2026-04-15.pdf", "比較食品A 【春の新商品】", "2026年4月"),
+        ("提案_比較食品A_新商品.pdf", "比較食品A 新商品", "日付不明"),
+    ],
+)
+def test_case_heading_strips_file_boilerplate_but_keeps_project_and_month(
+    title: str, expected: str, month: str
+) -> None:
+    hit = _proposal(1, "比較食品A")
+    hit.metadata["title"] = title
+    skill, _ = _make_skill([hit])
+
+    out = skill.run(RecommendInput(brief="参考になる提案書"), SkillContext())
+
+    assert out.similar_proposals[0].title == expected
+    assert out.similar_proposals[0].date == month
+    assert f"*{expected}*（{month}）" in out.answer
+
+
+@pytest.mark.parametrize("company_key", [None, "client_company", "case_company", "advertiser"])
+def test_company_limit_uses_original_company_or_rulebook_title_without_client_name(
+    company_key: str | None,
+) -> None:
+    hits = [
+        _proposal(i, client)
+        for i, client in enumerate(
+            ("比較食品A", "株式会社比較食品A", "比較食品B", "比較食品C"), start=1
+        )
+    ]
+    for hit in hits:
+        company = hit.metadata.pop("client_name")
+        hit.metadata.update(
+            title=f"提案_{company}_新商品_2026年4月.pdf", cls_project=f"個別案件{hit.chunk_id}"
+        )
+        if company_key:
+            hit.metadata[company_key] = company
+    skill, _ = _make_skill(hits)
+
+    out = skill.run(RecommendInput(brief="参考になる提案書"), SkillContext())
+
+    assert [item.source_uri for item in out.similar_proposals] == [
+        f"https://drive.google.com/file/d/proposal-{i}/view" for i in (1, 3, 4)
+    ]
+    assert out.total_count == 3
+
+
+def test_no_other_company_adds_one_line_instead_of_repeating_company() -> None:
+    skill, _ = _make_skill([_proposal(1, "比較食品A"), _proposal(2, "株式会社比較食品A")])
+
+    out = skill.run(RecommendInput(brief="参考になる提案書"), SkillContext())
+
+    assert len(out.similar_proposals) == 1
+    assert (
+        out.answer.splitlines()[-1]
+        == "これ以上の他社の類似提案書は、検索した候補に見つかりませんでした。"
+    )
 
 
 @pytest.mark.parametrize("planned", [False, True])
