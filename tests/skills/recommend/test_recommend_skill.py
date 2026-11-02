@@ -437,6 +437,84 @@ def test_similarity_uses_classification_or_substantive_body_not_cover_text(
         assert noise not in similarity
 
 
+@pytest.mark.parametrize(
+    ("key", "value"),
+    [
+        ("cls_solution", "ショート動画（UGC・切り抜き）"),
+        ("proposed_menu", "ショート動画（UGC・切り抜き）"),
+        ("cls_target", "子育て世帯"),
+        ("case_product", "冷凍調理品"),
+        ("detail", "SNS動画で商品の使い方を伝え、店頭購入につなげる施策。"),
+    ],
+)
+def test_similarity_prioritizes_candidate_content_when_only_industry_is_shared(
+    key: str,
+    value: str,
+) -> None:
+    hit = _proposal(1, "比較食品A")
+    hit.metadata.pop("cls_solution")
+    hit.metadata["cls_industry"] = "食品・飲料"
+    if key == "detail":
+        hit = replace(hit, content=value)
+    else:
+        hit.metadata[key] = value
+
+    similarity = RecommendSkill._similarity(hit, {"cls_industry": "食品・飲料"})
+
+    assert value in similarity
+    if "食品" in similarity:
+        assert similarity.index(value) < similarity.index("食品")
+    assert "が共通" not in similarity
+    assert "\n" not in similarity and len(similarity) <= 90
+
+
+@pytest.mark.parametrize(
+    ("key", "label", "value"),
+    [
+        ("cls_solution", "施策", "動画広告"),
+        ("cls_target", "対象層", "子育て世帯"),
+        ("case_product", "商材", "冷凍調理品"),
+    ],
+)
+def test_similarity_puts_shared_content_before_industry_and_limits_length(
+    key: str,
+    label: str,
+    value: str,
+) -> None:
+    hit = replace(
+        _proposal(1, "比較食品A"),
+        content="SNS動画で商品の使い方を伝え、" + "店頭購入につなげる訴求を強化し、" * 10,
+    )
+    hit.metadata[key] = value
+
+    similarity = RecommendSkill._similarity(hit, {"cls_industry": "食品", key: value})
+
+    assert similarity.startswith(f"似ている点：{label}「{value}」が共通。")
+    assert "SNS動画" in similarity
+    assert "\n" not in similarity and len(similarity) <= 90
+    assert similarity.endswith("…")
+
+
+def test_similarity_requests_material_check_when_only_industry_is_available() -> None:
+    hit = replace(
+        _proposal(1, "比較食品A"),
+        content="正式社名: 比較食品A\n所在地: 架空ビル1-2-3\nご提案書",
+    )
+    hit.metadata.update(
+        cls_industry="食品・飲料",
+        cls_solution="未分類",
+        cls_target="比較食品A",
+        case_product="東京都架空区1-2-3",
+    )
+
+    similarity = RecommendSkill._similarity(hit, {"cls_industry": "食品・飲料"})
+
+    assert similarity == (
+        "似ている点：同じ業種（食品・飲料）の提案。中身の共通点は資料で確認してください。"
+    )
+    assert "\n" not in similarity and len(similarity) <= 90
+
+
 def test_similarity_does_not_invent_classification_when_only_cover_is_available() -> None:
     hit = _hit(1, 0.9, doc_type="提案書", title="提案_比較食品A_新商品.pdf")
     hit = replace(hit, content="正式社名: 比較食品A\n所在地: 架空ビル1-2-3\nご提案書")
