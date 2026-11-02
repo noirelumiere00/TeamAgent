@@ -90,6 +90,7 @@ from teamagent.dashboard.config import DashboardConfig
 from teamagent.dashboard.insights import AdminPeriod, admin_period, analyze_questions
 from teamagent.dashboard.render import render_admin_page, render_usage_admin
 from teamagent.ingest.video_library_url_worker import worker_lifespan
+from teamagent.karte_attributes import CLIENT_QUICK_FILTERS
 from teamagent.knowledge_query import QUICK_FILTERS, KnowledgeQueryError, parse_knowledge_query
 
 logger = structlog.get_logger(__name__)
@@ -3436,17 +3437,26 @@ function kEmptyCard(msg){
   const t=document.createElement('div');t.className='et';t.textContent=msg;c.appendChild(t);
   return c;
 }
-function renderHeader(h){
+function renderHeader(h,a){
   khead.textContent='';
   const card=document.createElement('div');card.className='card';
   const chips=document.createElement('div');chips.className='chips';
-  if(h.industry)chips.appendChild(kChip('業界 '+h.industry));
-  if(h.deal_phase)chips.appendChild(kChip('フェーズ '+h.deal_phase));
-  if(h.bant_score)chips.appendChild(kChip('BANT '+h.bant_score));
-  if(h.last_contact)chips.appendChild(kChip('最終接触 '+h.last_contact));
+  const summary=a||h;
+  if(summary.industry)chips.appendChild(kChip('業界 '+summary.industry));
+  if(summary.deal_phase)chips.appendChild(kChip('フェーズ '+summary.deal_phase));
+  if(summary.bant_score)chips.appendChild(kChip('BANT '+summary.bant_score));
+  if(h.last_contact)chips.appendChild(kChip('最新FB '+h.last_contact));
   chips.appendChild(kChip('FB 表示'+(h.fb_count||0)+'件（最大50件）'));
   chips.appendChild(kChip('資料 表示'+(h.doc_count||0)+'件（最大50件）'));
   card.appendChild(chips);
+  if(a){
+    kv(card,'担当',(a.owners||[]).join('・')||'未記録');
+    kv(card,'温度感',a.temperature||'未記録');
+    kv(card,'最終接点',a.last_contact||'不明');
+    kv(card,'次アクション',a.next_action_short||'未記録');
+    kv(card,'宿題',a.has_homework?'あり':'なし');
+    kv(card,'活動総数','FB '+a.fb_count+'件・資料 '+a.doc_count+'件');
+  }
   khead.appendChild(card);
 }
 function renderTimeline(items){
@@ -3533,14 +3543,16 @@ async function loadKarte(){
   }
   const tl=data.timeline||[];
   const docs=data.documents||[];
-  if(!tl.length&&!docs.length){
+  const hasActivity=data.attributes&&
+    ((data.attributes.fb_count||0)>0||(data.attributes.doc_count||0)>0);
+  if(!tl.length&&!docs.length&&!hasActivity){
     khead.textContent='';
     khead.appendChild(kEmptyCard('まだ記録がありません'));
     ktl.textContent='';kdocs.textContent='';
     ksecFb.hidden=true;ksecDocs.hidden=true;
     return;
   }
-  renderHeader(data.header||{});
+  renderHeader(data.header||{},data.attributes);
   renderTimeline(tl);
   renderDocs(docs);
 }
@@ -3584,6 +3596,8 @@ def _karte_payload(
     client: str,
     timeline: list[Any],
     documents: list[dict[str, Any]],
+    *,
+    attributes: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """カルテ API のレスポンス JSON を組む（純関数・DB 非依存）。
 
@@ -3654,7 +3668,13 @@ def _karte_payload(
             }
         )
 
-    return {"client": client, "header": header, "timeline": timeline_out, "documents": docs_out}
+    return {
+        "client": client,
+        "header": header,
+        "timeline": timeline_out,
+        "documents": docs_out,
+        "attributes": attributes,
+    }
 
 
 def _put_verified_oauth_token(
@@ -3983,6 +4003,7 @@ def create_app(
             return {
                 "timeline": pg.list_client_timeline_recent(conn, client, limit=50),
                 "documents": pg.list_documents_for_client(conn, client, limit=50),
+                "attributes": pg.get_knowledge_client_attributes(conn, client),
             }
 
     def _search_email(request: Request) -> str | None:
@@ -4881,6 +4902,13 @@ def create_app(
                 and request.query_params["quick"] not in QUICK_FILTERS
             ):
                 query_error = "このクイックフィルタは使えません。"
+        if (
+            target is None
+            and request.query_params.get("view") == "clients"
+            and "quick" in request.query_params
+            and request.query_params["quick"] not in CLIENT_QUICK_FILTERS
+        ):
+            query_error = "この取引先クイックフィルタは使えません。"
         if target is None and request.query_params.get("view") == "doc":
             target = "/search?view=docs&page=1"
         email = _search_email(request)
@@ -4889,7 +4917,7 @@ def create_app(
             return RedirectResponse(login, status_code=303)
         if query_error is not None:
             content = render_list(
-                "docs",
+                request.query_params.get("view", "docs"),
                 1,
                 [],
                 None,
@@ -4897,7 +4925,10 @@ def create_app(
                 error=query_error,
             )
             return HTMLResponse(
-                _shell_page(email, mode="docs", list_content=content), status_code=400
+                _shell_page(
+                    email, mode=request.query_params.get("view", "docs"), list_content=content
+                ),
+                status_code=400,
             )
         if target:
             params = parse_qs(target.split("?", 1)[1])
@@ -4924,7 +4955,10 @@ def create_app(
                         rows = pg.list_knowledge_tags(conn)
                     elif view == "clients":
                         rows, total = pg.list_knowledge_clients(
-                            conn, limit=PAGE_SIZE, offset=(page - 1) * PAGE_SIZE
+                            conn,
+                            limit=PAGE_SIZE,
+                            offset=(page - 1) * PAGE_SIZE,
+                            **({"quick": quick} if quick else {}),
                         )
                     else:
                         filters: dict[str, Any] = {"tag": parse_tag(tag)} if tag is not None else {}
@@ -5380,6 +5414,7 @@ def create_app(
                 name,
                 list(data.get("timeline") or []),
                 list(data.get("documents") or []),
+                attributes=data.get("attributes"),
             )
         except Exception as exc:
             logger.warning(

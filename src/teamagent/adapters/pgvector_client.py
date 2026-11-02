@@ -17,6 +17,7 @@ import unicodedata
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any
 
 import psycopg
@@ -26,6 +27,13 @@ from psycopg.rows import dict_row
 
 from teamagent.adapters.pg_pool import ConnectionPool, PoolStats
 from teamagent.client_identity import client_identity_key
+from teamagent.karte_attributes import (
+    CLIENT_QUICK_FILTERS,
+    JST,
+    build_client_summaries,
+    client_attributes,
+    matches_client_quick,
+)
 from teamagent.knowledge_query import QUICK_FILTERS, parse_knowledge_query
 
 logger = structlog.get_logger(__name__)
@@ -915,50 +923,57 @@ class PgVectorClient:
         )
         return hits
 
+    def _knowledge_client_summaries(
+        self, conn: psycopg.Connection[dict[str, Any]]
+    ) -> dict[str, dict[str, Any]]:
+        # shortcut: 可視全件をメモリで名寄せ。規模で遅くなれば identity key と集計を DB 側へ移す。
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT d.id::text, d.metadata,
+                       to_char(d.modified_at AT TIME ZONE 'Asia/Tokyo', 'YYYY-MM-DD')
+                           AS modified_at,
+                       fb.content
+                FROM documents d
+                LEFT JOIN LATERAL (
+                    SELECT string_agg(COALESCE(c.contextualized, c.content), E'\\n'
+                                      ORDER BY c.chunk_idx, c.id) AS content
+                    FROM chunks c WHERE c.document_id = d.id
+                      AND d.metadata->>'is_sales_fb' = 'true'
+                ) fb ON true
+                WHERE d.metadata->>'suppressed' IS DISTINCT FROM 'true'
+                  AND d.metadata->>'x_research_tool' IS NULL
+                ORDER BY d.modified_at DESC NULLS LAST, d.id
+            """)
+            rows = cur.fetchall()
+        return build_client_summaries([dict(row) for row in rows])
+
+    def get_knowledge_client_attributes(
+        self, conn: psycopg.Connection[dict[str, Any]], client_name: str
+    ) -> dict[str, Any]:
+        """本人可視全件の厳密 identity による属性・総数。表示用の部分一致50件とは別。"""
+        summary = self._knowledge_client_summaries(conn).get(client_identity_key(client_name))
+        if summary is not None:
+            return summary
+        return client_attributes("", [], [], today=datetime.now(JST).date())
+
     def list_knowledge_clients(
         self,
         conn: psycopg.Connection[dict[str, Any]],
         *,
         limit: int = 50,
         offset: int = 0,
+        quick: str | None = None,
     ) -> tuple[list[dict[str, Any]], int]:
-        """RLS 可視全件を名寄せし、非 FB 資料件数・最新 FB 日と LIMIT 前総数を返す。
-
-        client_name を優先し、未設定時だけ cls_project を使う。タイトルの部分一致は
-        名寄せには使わない。chunks を JOIN しないので分割数に件数が影響されない。
-        """
-        # shortcut: 可視全件をメモリで名寄せする。規模で遅くなれば DB 側に identity key を保存する。
-        with conn.cursor() as cur:
-            cur.execute("""
-                SELECT COALESCE(NULLIF(btrim(d.metadata->>'client_name'), ''),
-                                NULLIF(btrim(d.metadata->>'cls_project'), '')) AS name,
-                       d.metadata->>'is_sales_fb' = 'true' AS is_fb,
-                       to_char(d.modified_at AT TIME ZONE 'Asia/Tokyo', 'YYYY-MM-DD') AS fb_date
-                FROM documents d
-                WHERE d.metadata->>'suppressed' IS DISTINCT FROM 'true'
-                  AND d.metadata->>'x_research_tool' IS NULL
-            """)
-            rows = cur.fetchall()
-        clients: dict[str, dict[str, Any]] = {}
-        for row in rows:
-            name = str(row["name"] or "").strip()
-            key = client_identity_key(name)
-            if not key:
-                continue
-            item = clients.setdefault(
-                key, {"name": name, "document_count": 0, "latest_fb_at": None}
-            )
-            item["name"] = min(item["name"], name)
-            if row["is_fb"]:
-                if row["fb_date"] and (
-                    not item["latest_fb_at"] or row["fb_date"] > item["latest_fb_at"]
-                ):
-                    item["latest_fb_at"] = row["fb_date"]
-            else:
-                item["document_count"] += 1
-        # 安定ソートで最新 FB 日 DESC NULLS LAST、同日は正規化名の昇順。
+        """RLS 可視全件で名寄せ・属性/総数算出・クイックフィルタ後にページングする。"""
+        if quick is not None and quick not in CLIENT_QUICK_FILTERS:
+            raise ValueError("invalid client quick filter")
+        clients = self._knowledge_client_summaries(conn)
         ordered = sorted(
-            (clients[key] for key in sorted(clients)),
+            (
+                clients[key]
+                for key in sorted(clients)
+                if quick is None or matches_client_quick(clients[key], quick)
+            ),
             key=lambda item: item["latest_fb_at"] or "",
             reverse=True,
         )
