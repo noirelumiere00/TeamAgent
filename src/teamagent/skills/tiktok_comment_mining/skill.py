@@ -176,7 +176,11 @@ class TikTokCommentMiningSkill(BaseSkill[CommentMiningInput, CommentMiningOutput
         # 縮退: Apify clockworks（クラウドIP遮断/0件時）
         try:
             comments, cost = self._get_apify().tiktok_comments(
-                video_url, max_comments=max_comments, request_id=request_id, user_email=user
+                video_url,
+                max_comments=max_comments,
+                request_id=request_id,
+                user_email=user,
+                require_cost_reservation=True,
             )
             return comments, "apify", cost
         except CostLimitExceededError:

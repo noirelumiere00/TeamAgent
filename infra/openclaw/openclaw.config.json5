@@ -276,6 +276,7 @@
         toolFilter: {
           include: [
             "search", "clientkarte", "proposal_draft", "proposal_review",
+            "recommend", "workspace_search",
             // proposal_builder: submitは即job_idを返し、MCP内threadが既存RAG/95枠rendererを
             // 継続実行する。statusで完了を照会する。S3固定version資産とmedia workerは引き続き必要。
             "proposal_builder_submit", "proposal_builder_status",
@@ -350,9 +351,7 @@
             "knowledge_deliver",
             // knowledge_search_url: @Aico「検索ページ教えて」で資料検索 Web UI（connect-web の
             // /search・/search/graph）の URL を返す。URL生成のみ（CONNECT_BASE_URL 未設定なら
-            // 「未公開」を返し壊れたリンクは出さない）。現在は scope enabledBy=never。
-            // 解禁4点セット: tf task env / scope enabledBy / contract test / OCイメージ再ビルド。
-            // USE_KNOWLEDGE_SEARCH_URL_TOOL=1 の単独設定では解禁しない。
+            // 「未公開」を返し壊れたリンクは出さない）。USE_KNOWLEDGE_SEARCH_URL_TOOL=1 が必要。
             "knowledge_search_url",
             // tiktok_acquire: TikTok取得の非同期ジョブ（SQS→使い捨てFargate）。search_surface_check
             // と video_algorithm の取得段。USE_TIKTOK_ACQUIRE=1 + tiktok_acquire.tf apply が必要。
@@ -375,12 +374,12 @@
           // ※ L2 run_agent（MCP: USE_AGENT_ORCHESTRATOR=1 で露出する適応オーケストレーター）は
           //   この include に **意図的に入れない**＝パイロット中は dark。OpenClaw 自身がオーケスト
           //   レーションの外殻なので二重オーケストレーションを避ける。解禁はパイロット後に別途判断（§L C2）。
-          // 台帳外7本（SkillRegistryには実在）を明示 exclude。同期proposal_builderは
+          // 台帳外5本（SkillRegistryには実在）を明示 exclude。同期proposal_builderは
           // Python互換用だけに残し、MCPではsubmit/status面だけを公開する。
           // *reply* / *write* ワイルドカードは Step C で外し、include の明示許可リスト（mail_reply）に置き換え。
           exclude: [
-            "chitchat", "recommend", "proposal_campaign",
-            "mail_constraints", "workspace_search", "proposal_deck", "proposal_builder", "*confirm*",
+            "chitchat", "proposal_campaign",
+            "mail_constraints", "proposal_deck", "proposal_builder", "*confirm*",
           ],
         },
       },
