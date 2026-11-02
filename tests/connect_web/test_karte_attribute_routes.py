@@ -141,7 +141,9 @@ def test_attribute_values_are_escaped(setup: tuple[TestClient, ClientPg]) -> Non
         and evil not in response.text
         and "&lt;script&gt;" in response.text
     )
-    assert not BeautifulSoup(response.text, "html.parser").select("script")
+    assert not BeautifulSoup(response.text, "html.parser").select(
+        "script:not([data-knowledge-bookmarks])"
+    )
     assert "innerHTML" not in _KARTE_JS  # summary values use textContent/createElement
 
 

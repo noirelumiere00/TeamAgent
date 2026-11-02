@@ -35,6 +35,7 @@ from teamagent.karte_attributes import (
     matches_client_quick,
 )
 from teamagent.knowledge_query import QUICK_FILTERS, parse_knowledge_query
+from teamagent.legacy_knowledge import resolve_legacy_entries, validate_legacy_requests
 
 logger = structlog.get_logger(__name__)
 
@@ -922,6 +923,22 @@ class PgVectorClient:
             source_types=filter_source_types or None,
         )
         return hits
+
+    def resolve_knowledge_links(
+        self, conn: psycopg.Connection[dict[str, Any]], entries: list[dict[str, Any]]
+    ) -> list[dict[str, Any]]:
+        """旧 hash / bookmark と安定 ID を、RLS 接続の可視全件だけで解決する。"""
+        validate_legacy_requests(entries)
+        # shortcut: 旧stemはSQLから復元できないため可視全件を照合。規模次第でstem索引へ移す。
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT d.id, d.title, d.source_type::text, d.external_id, d.metadata
+                FROM documents d
+                WHERE d.metadata->>'suppressed' IS DISTINCT FROM 'true'
+                  AND d.metadata->>'x_research_tool' IS NULL
+            """)
+            records = [dict(row) for row in cur.fetchall()]
+        return resolve_legacy_entries(records, entries)
 
     def _knowledge_client_summaries(
         self, conn: psycopg.Connection[dict[str, Any]]
