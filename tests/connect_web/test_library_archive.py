@@ -85,7 +85,7 @@ def test_large_home_two_queries_and_limited_shelves(setup: tuple[TestClient, Pg]
     assert len(soup.select("#new .card")) == 8
     assert len(soup.select("#trending .card")) == 12
     assert all(len(s.select(".card")) <= 4 for s in soup.select(".category-section"))
-    assert soup.select_one("main .filters") is None
+    assert soup.select_one(".workspace .sidebar") is not None
     assert "すべての事例を見る（55件）" in soup.text
     assert "数値は毎平日 18 時に更新" in soup.footer.text
     assert "社内限定" in soup.footer.text
@@ -139,15 +139,14 @@ def test_category_navigation_current_and_header_search(
     soup = BeautifulSoup(
         client.get(path + "?category=tto", cookies=_auth_cookie()).text, "html.parser"
     )
-    nav = soup.select_one("header .category-nav")
-    assert len(nav.select("a[aria-current]")) == 1
-    assert nav.select_one("[aria-current]").text == "TTO"
-    assert nav.select_one("[aria-current]")["href"] == path + "?category=tto"
-    assert len(nav.select("a")) == 6
-    search = soup.select_one(".header-search")
-    assert search.select_one("summary[aria-label]") is not None
-    assert search.select_one('form[role="search"]')["action"] == "/library/videos"
-    assert not search.has_attr("open")  # Mobile/no-JS defaults to a native disclosure.
+    form = soup.select_one("form.workspace")
+    selected = form.select('.sidebar input[name="category"][checked]')
+    assert len(selected) == 1 and selected[0]["value"] == "tto"
+    assert selected[0].find_parent("label").text == "TTO"
+    assert len(form.select('.sidebar input[name="category"]')) == 7
+    assert form["action"] == path and form["method"] == "get" and form["role"] == "search"
+    assert form.select_one(".sidebar summary").text == "条件を指定"
+    assert form.select_one(".workspace-search input")["name"] == "q"
 
 
 def test_related_video_query_is_scoped_private_safe_and_bounded(
@@ -198,7 +197,7 @@ def test_card_labels_hide_unset_and_separate_known_categories() -> None:
         library._video_card({**pg.row, "business_category": None, "is_pr": True}), "html.parser"
     )
     assert not video.select(".category-label")
-    assert video.select_one(".video-card-context").text == "PR · campaign"
+    assert video.select_one(".card-context").text == "PR · campaign"
 
 
 def test_category_shelves_use_primary_category_once_and_named_headings() -> None:
@@ -251,13 +250,13 @@ def test_primary_category_is_counted_in_one_parameterized_aggregate() -> None:
 
 
 @pytest.mark.parametrize("count", [1, 3, 4, 5])
-def test_sparse_category_uses_new_list_layout(count: int) -> None:
+def test_categories_use_same_card_layout(count: int) -> None:
     rows = [{**case_row(Pg()), "campaign": str(i)} for i in range(count)]
     soup = BeautifulSoup(library.archive_home(rows, []), "html.parser")
     section = soup.select_one(".category-section")
     grid = section.select_one(".campaign-grid")
-    assert ("new-grid" in grid["class"]) == (count < 4)
-    assert ("grid" in grid["class"]) == (count >= 4)
+    assert "grid" in grid["class"]
+    assert "new-grid" not in grid["class"]
     assert len(grid.select(".card")) == min(count, 4)
 
 
@@ -294,7 +293,7 @@ def test_video_titles_use_caption_first_nonempty_line_or_account(
         "この動画 1.7万回再生",
         "施策計 312万回再生",
     ]
-    assert card.select_one(".video-card-context").text == "MEDIA · PR · 全動画で同じ案件名"
+    assert card.select_one(".card-context").text == "MEDIA · PR · 全動画で同じ案件名"
     assert "次の行" not in card.text
 
 
@@ -312,15 +311,15 @@ def test_pickup_shelf_aligns_with_container_and_keeps_focus_inside() -> None:
 )
 def test_video_card_omits_unavailable_campaign_total(overrides: dict[str, Any]) -> None:
     card = BeautifulSoup(library._video_card({**Pg().row, **overrides}), "html.parser")
-    assert card.select_one(".video-card-plays").text == "この動画 1.7万回再生"
+    assert card.select_one(".card-plays").text == "この動画 1.7万回再生"
     if not overrides.get("campaign", True):
-        assert card.select_one(".video-card-context").text == "MEDIA · PR"
+        assert card.select_one(".card-context").text == "MEDIA · PR"
 
 
 def test_video_card_escapes_context_title_and_selection_label() -> None:
     row = {**Pg().row, "campaign": '施策 <img src=x>"', "caption": '<script>"&\n次の行'}
     card = BeautifulSoup(library._video_card(row, selectable=True), "html.parser")
-    context = card.select_one(".video-card-context")
+    context = card.select_one(".card-context")
     assert context.text == 'MEDIA · PR · 施策 <img src=x>"'
     assert context["title"] == row["campaign"]
     assert card.h3.text == card.h3["title"] == '<script>"&'
@@ -339,6 +338,187 @@ def test_video_card_zero_and_unknown_plays() -> None:
         "この動画 再生数未集計",
         "施策計 0回再生",
     ]
+
+
+def test_campaign_and_video_use_shared_card_component(monkeypatch: pytest.MonkeyPatch) -> None:
+    pg = Pg()
+    calls: list[dict[str, Any]] = []
+    original = library._card
+
+    def render(row: Any, **kwargs: Any) -> str:
+        calls.append(kwargs)
+        return original(row, **kwargs)
+
+    monkeypatch.setattr(library, "_card", render)
+    campaign = BeautifulSoup(library._campaign_card(case_row(pg)), "html.parser")
+    video = BeautifulSoup(library._video_card(pg.row), "html.parser")
+    assert len(calls) == 2
+    assert [calls[i]["metrics"][0][0] for i in (0, 1)] == ["施策計", "この動画"]
+    assert campaign.select_one(".card-context").text == "MEDIA · advertiser"
+    assert campaign.select_one(".card-context")["title"] == "advertiser"
+    assert campaign.h3.text == "campaign"
+    assert campaign.select_one(".card-meta").text == "2026-10-30 — 2026-10-30 · 2本の動画"
+    assert campaign.select_one(".card-plays").text == "施策計 1.7万回再生"
+    for selector in (
+        ".card",
+        ".card-link",
+        ".preview",
+        ".card-body",
+        ".card-context",
+        ".card-meta",
+        ".card-plays",
+        ".card-tags",
+    ):
+        assert campaign.select_one(selector)["class"] == video.select_one(selector)["class"]
+
+
+def test_campaign_card_escapes_advertiser_and_title() -> None:
+    pg = Pg()
+    row = {**case_row(pg), "advertiser": '<script>"&', "campaign": '<img onerror="bad">'}
+    card = BeautifulSoup(library._campaign_card(row), "html.parser")
+    assert card.select_one(".card-context").text == 'MEDIA · <script>"&'
+    assert card.select_one(".card-context")["title"] == row["advertiser"]
+    assert card.h3.text == card.h3["title"] == row["campaign"]
+    assert card.a["aria-label"] == f"{row['advertiser']}: {row['campaign']}の事例"
+    assert not card.select("script, [onerror]")
+
+
+@pytest.mark.parametrize("admin", [False, True])
+@pytest.mark.parametrize(
+    "path,current",
+    [
+        ("/library", "/library"),
+        ("/library/cases", "/library/cases"),
+        ("/library/videos", "/library/videos"),
+        ("/library/c?advertiser=a&campaign=b", "/library/cases"),
+        ("/library/v/tiktok/123", "/library/videos"),
+    ],
+)
+def test_library_navigation_keeps_destinations_current_and_admin_gate(
+    setup: tuple[TestClient, Pg],
+    monkeypatch: pytest.MonkeyPatch,
+    admin: bool,
+    path: str,
+    current: str,
+) -> None:
+    from tests.connect_web.test_library_catalog import catalog_pg
+    from tests.connect_web.test_search_routes import _EMAIL
+
+    client, pg = setup
+    catalog_pg(pg)
+    monkeypatch.setenv("CONNECT_ADMIN_EMAILS", _EMAIL if admin else "")
+    response = client.get(path, cookies=_auth_cookie())
+    assert response.status_code == 200
+    soup = BeautifulSoup(response.text, "html.parser")
+    header = soup.select_one(".library-header")
+    nav = soup.select_one("main .main-nav")
+    assert [(a.text, a["href"]) for a in nav.select("a")] == [
+        ("おすすめ", "/library"),
+        ("事例一覧", "/library/cases"),
+        ("動画一覧", "/library/videos"),
+    ]
+    assert len(nav.select("[aria-current]")) == 1
+    assert nav.select_one('[aria-current="page"]')["href"] == current
+    search = soup.select_one('form[role="search"]')
+    if path in {"/library", "/library/cases", "/library/videos"}:
+        assert search["action"] == (
+            "/library/cases" if current == "/library/cases" else "/library/videos"
+        )
+        assert search.select_one('input[name="q"]').find_parent("label") is not None
+    else:
+        assert search is None
+    admin_link = header.select_one(".library-admin")
+    assert bool(admin_link) == admin
+    if admin:
+        assert admin_link["href"] == "/library/admin/campaigns"
+        assert admin_link.find_parent("nav") is None
+
+
+def test_admin_navigation_keeps_current_location(setup: tuple[TestClient, Pg]) -> None:
+    client, _ = setup
+    page = BeautifulSoup(
+        client.get("/library/admin/accounts", cookies=_auth_cookie()).text, "html.parser"
+    )
+    assert (
+        page.select_one('.library-admin[aria-current="page"]')["href"] == "/library/admin/campaigns"
+    )
+    assert not page.select(".main-nav [aria-current]")
+
+
+@pytest.mark.parametrize("path", ["/library/videos", "/library/cases"])
+def test_workspace_submits_existing_parameters_and_shows_active_filters(
+    setup: tuple[TestClient, Pg], path: str
+) -> None:
+    from tests.connect_web.test_library_catalog import catalog_pg
+
+    client, pg = setup
+    catalog_pg(pg)
+    params = {
+        "q": "企業 <img> #PR",
+        "category": "tto",
+        "industry": '業種 "&',
+        "purpose": "理解",
+        "account": "sample",
+        "from": "2026-10-01",
+        "to": "2026-10-30",
+        "sort": "plays",
+        "advertiser": "企業",
+        "campaign": "施策",
+        "unassigned": "yes",
+        "tag_group": "standards",
+        "tag": "loop",
+        "page": "2",
+    }
+    response = client.get(path, params=params, cookies=_auth_cookie())
+    assert response.status_code == 200
+    soup = BeautifulSoup(response.text, "html.parser")
+    form = soup.select_one('form.workspace[method="get"]')
+    assert form["action"] == path
+    submitted = {}
+    for control in form.select("input[name], select[name]"):
+        if control.name == "select":
+            submitted[control["name"]] = control.select_one("option[selected]")["value"]
+        elif control.get("type") != "radio" or control.has_attr("checked"):
+            submitted[control["name"]] = control.get("value", "")
+    assert submitted == {k: v for k, v in params.items() if k != "page"} | {"pr": "yes"}
+    active = form.select_one(".active-filters")
+    for text in (
+        "検索語: 企業 <img> #PR",
+        "区分: TTO",
+        '業種: 業種 "&',
+        "目的: 理解",
+        "PR投稿のみ",
+        "開始: 2026-10-01",
+        "終了: 2026-10-30",
+        "タグ: loop",
+    ):
+        assert text in active.text
+    assert not active.select("img, script")
+    assert form.select_one(".reset-filters")["href"] == path
+    assert not form.select("form")
+    for name in ("industry", "purpose"):
+        assert form.select_one(f'.sidebar input[name="{name}"]')["type"] == "text"
+        assert not form.select(f'select[name="{name}"], datalist')
+
+
+def test_home_uses_workspace_with_recommendations_and_details_stay_focused(
+    setup: tuple[TestClient, Pg],
+) -> None:
+    from tests.connect_web.test_library_catalog import catalog_pg
+
+    client, pg = setup
+    catalog_pg(pg)
+    home = BeautifulSoup(client.get("/library", cookies=_auth_cookie()).text, "html.parser")
+    assert home.select_one(".workspace")["action"] == "/library/videos"
+    assert home.select_one(".workspace .active-filters").text == "絞り込みなし · すべての区分"
+    assert all(
+        home.select_one(".workspace-main #" + shelf) for shelf in ("pickup", "new", "trending")
+    )
+    assert home.select_one(".library-utility button[disabled]").text == "構成（型）から探す 準備中"
+    assert home.select_one(".library-header form, .library-header nav") is None
+    for path in ("/library/c?advertiser=a&campaign=b", "/library/v/tiktok/123"):
+        detail = BeautifulSoup(client.get(path, cookies=_auth_cookie()).text, "html.parser")
+        assert detail.select_one(".sidebar, .workspace") is None
 
 
 @pytest.mark.parametrize("admin", [False, True])

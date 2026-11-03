@@ -45,7 +45,7 @@ let copied=null;
 global.document=Object.assign(doc,{
  querySelectorAll(selector){
   if(selector==='[data-autoload]')return [];
-  if(selector==='.header-search')return [filters];
+  if(selector==='.sidebar')return [filters];
   if(selector==='.preview[data-player]')return cards;
   if(selector==='.preview img')return [pendingImage,failedImage,loadedImage];
   if(selector==='[data-copy]')return [caseCopy,urlCopy];
@@ -56,7 +56,7 @@ global.document=Object.assign(doc,{
  createElement(tag){assert.equal(tag,'iframe');return element();},
  getElementById(id){return ids[id];}
 });
-global.window=Object.assign(win,{matchMedia(query){assert.equal(query,'(min-width:768px)');return desktop;}});
+global.window=Object.assign(win,{matchMedia(query){assert.equal(query,'(min-width:601px)');return desktop;}});
 Object.defineProperty(global,'navigator',{value:{clipboard:{async writeText(text){copied=text;}}}});
 __SCRIPT__
 (async()=>{

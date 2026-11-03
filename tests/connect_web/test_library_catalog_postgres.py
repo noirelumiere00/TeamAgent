@@ -162,6 +162,48 @@ def test_video_campaign_total_is_zero_or_absent_for_unassigned(db: tuple[Any, An
     assert row["campaign_total_plays"] is None
 
 
+@pytest.mark.parametrize("admin", [False, True])
+def test_workspace_free_text_fields_do_not_offer_private_data(
+    db: tuple[Any, Any], monkeypatch: pytest.MonkeyPatch, admin: bool
+) -> None:
+    from bs4 import BeautifulSoup
+    from fastapi.testclient import TestClient
+
+    from teamagent.connect_web.app import create_app
+    from tests.connect_web.test_search_routes import _EMAIL, _auth_cookie, _config, _verifier_ok
+    from tests.ingest.test_video_library_postgres import TransactionPg
+
+    conn, repository = db
+    seed(conn, repository)
+    for campaign, industry, purpose, private in (
+        ("test", "実在する業種", "実在する目的", False),
+        ("other", "非公開専用業種", "非公開専用目的", True),
+    ):
+        conn.execute(
+            """INSERT INTO vl_campaign_settings
+            (advertiser,campaign,industry,purpose,is_private,updated_by)
+            VALUES ('test',%s,%s,%s,%s,'admin')""",
+            (campaign, industry, purpose, private),
+        )
+    monkeypatch.setenv("CONNECT_ADMIN_EMAILS", _EMAIL if admin else "")
+    client = TestClient(
+        create_app(
+            search_config=_config(), search_verifier=_verifier_ok, admin_pg=TransactionPg(conn)
+        )
+    )
+    for path in ("/library", "/library/cases", "/library/videos"):
+        response = client.get(path, cookies=_auth_cookie())
+        assert response.status_code == 200
+        soup = BeautifulSoup(response.text, "html.parser")
+        for field in ("industry", "purpose"):
+            control = soup.select_one(f'.sidebar input[name="{field}"]')
+            assert control["type"] == "text" and control["value"] == ""
+            assert not soup.select(f'.sidebar select[name="{field}"], .sidebar datalist')
+        assert "実在する業種" in soup.text
+        assert ("非公開専用業種" in soup.text) == admin
+        assert ("非公開専用目的" in soup.text) == admin
+
+
 @pytest.mark.parametrize("winner", ["media", "tto", "kirinuki", "other", "organic", None])
 def test_primary_category_majority_and_tie_priority(
     db: tuple[Any, Any], winner: str | None
