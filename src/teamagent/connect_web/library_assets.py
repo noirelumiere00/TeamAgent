@@ -99,6 +99,9 @@ text-decoration:none}.preview img{transition:transform 200ms ease}
 .card-link:hover .preview img{transform:scale(1.035)}
 .preview img,.preview iframe{position:absolute;inset:0;
 width:100%;height:100%;object-fit:cover;border:0}.preview iframe{pointer-events:none}
+.preview[data-player-failed]::after{content:'TikTok 側でプレビューを再生できない動画です';
+position:absolute;left:8px;right:8px;bottom:8px;padding:6px 8px;border-radius:4px;
+background:rgba(17,24,39,.75);color:#fff;font-size:11px;line-height:1.5}
 .preview.detail-player iframe{pointer-events:auto;z-index:2}
 .play-overlay{position:absolute;inset:0;width:100%;border:0;background:transparent}
 .card-tags{display:flex;flex-wrap:wrap;gap:8px}.card-tag{display:grid;gap:4px}
@@ -280,11 +283,19 @@ function removeBrokenImages(root){root.querySelectorAll('.preview img').forEach(
  if(img.complete&&img.naturalWidth===0)img.remove();
 });}
 removeBrokenImages(document);
-let active=null;
-function clearPlayer(){if(active){active.remove();active=null;}}
-function play(card){clearPlayer();active=document.createElement('iframe');
+let active=null,activeCard=null;
+function clearPlayer(){if(active){active.remove();active=null;activeCard=null;}}
+function play(card){if(card.dataset.playerFailed)return;clearPlayer();
+ active=document.createElement('iframe');activeCard=card;
  active.src=card.dataset.player;active.title='TikTok プレビュー';
  active.allow='autoplay; encrypted-media';card.appendChild(active);}
+/* TikTok cannot play some posts in its embed: fall back to our cover, not its error screen. */
+window.addEventListener('message',event=>{
+ const type=event.data&&event.data.type;
+ if(event.origin!=='https://www.tiktok.com'||!active||event.source!==active.contentWindow
+    ||(type!=='onError'&&type!=='onPlayerError'))return;
+ const card=activeCard;clearPlayer();card.dataset.playerFailed='1';
+});
 document.addEventListener('mouseover',event=>{
  const card=event.target.closest('.preview[data-player]');
  if(card&&!card.classList.contains('detail-player')&&!card.contains(event.relatedTarget))play(card);
