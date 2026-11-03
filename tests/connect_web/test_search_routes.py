@@ -140,6 +140,40 @@ def test_login_rejects_email_outside_allowlist() -> None:
     assert "set-cookie" not in {k.lower() for k in r.headers}
 
 
+@pytest.mark.parametrize("emails", [None, "", " \t "])
+@pytest.mark.parametrize(
+    "allowed_hd,claim_hd,email,status",
+    [
+        ("vectorinc.co.jp", "vectorinc.co.jp", _EMAIL, 303),
+        ("vectorinc.co.jp", "vectorinc.co.jp", "coworker@vectorinc.co.jp", 303),
+        ("vectorinc.co.jp", "other.example", _EMAIL, 403),
+        ("vectorinc.co.jp", None, _EMAIL, 403),
+        ("", "vectorinc.co.jp", _EMAIL, 403),
+    ],
+)
+def test_login_without_email_allowlist_requires_matching_hd(
+    emails: str | None, allowed_hd: str, claim_hd: str | None, email: str, status: int
+) -> None:
+    env = {"CONNECT_GOOGLE_CLIENT_ID": "cid-123", "CONNECT_SEARCH_ALLOWED_HD": allowed_hd}
+    if emails is not None:
+        env["CONNECT_SEARCH_ALLOWED_EMAILS"] = emails
+    config = connect_app._load_search_config(env)
+    assert config.allowed_emails == frozenset()
+
+    def verifier(token: str, client_id: str) -> dict[str, Any]:
+        claims: dict[str, Any] = {"email": email, "email_verified": True}
+        if claim_hd is not None:
+            claims["hd"] = claim_hd
+        return claims
+
+    client, _, _ = _build(config=config, verifier=verifier)
+    response = client.post(
+        "/search/auth/verify", data={"credential": "tok"}, follow_redirects=False
+    )
+    assert response.status_code == status
+    assert ("set-cookie" in response.headers) == (status == 303)
+
+
 # ---------------- /api/v1/search ----------------
 
 

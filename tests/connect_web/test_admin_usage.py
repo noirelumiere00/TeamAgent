@@ -6,6 +6,7 @@ import html
 import re
 from contextlib import contextmanager
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -199,28 +200,28 @@ def test_admin_authenticated_non_admin_gets_404(monkeypatch: pytest.MonkeyPatch)
     assert pg.connection_kwargs == []
 
 
-def test_admin_unset_defaults_to_owner_only(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delenv("CONNECT_ADMIN_EMAILS", raising=False)
+@pytest.mark.parametrize("emails", [None, "", " \t ", ", ,"])
+@pytest.mark.parametrize("path", ["/admin", "/admin/quality", "/admin/analyze"])
+def test_admin_empty_allowlist_denies_everyone(
+    monkeypatch: pytest.MonkeyPatch, emails: str | None, path: str
+) -> None:
+    if emails is None:
+        monkeypatch.delenv("CONNECT_ADMIN_EMAILS", raising=False)
+    else:
+        monkeypatch.setenv("CONNECT_ADMIN_EMAILS", emails)
     client, pg = _client()
-    assert client.get("/admin", cookies=_cookies(_OWNER)).status_code == 200
-    assert client.get("/admin", cookies=_cookies(_OTHER)).status_code == 404
-    assert pg.connection_kwargs
-    assert all(
-        kwargs == {"app_role": "teamagent_dashboard", "user_role": "admin"}
-        for kwargs in pg.connection_kwargs
-    )
+    for email in (_OWNER, _OTHER):
+        if path == "/admin/analyze":
+            response = client.post(path, cookies=_cookies(email), json={"period": "7d"})
+        else:
+            response = client.get(path, cookies=_cookies(email))
+        assert response.status_code == 404
+    assert pg.connection_kwargs == []
 
 
-def test_admin_empty_allowlist_does_not_open_to_everyone(
+def test_admin_explicit_allowlist_grants_only_configured_admin(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setenv("CONNECT_ADMIN_EMAILS", "")
-    client, _ = _client()
-    assert client.get("/admin", cookies=_cookies(_OWNER)).status_code == 200
-    assert client.get("/admin", cookies=_cookies(_OTHER)).status_code == 404
-
-
-def test_admin_override_replaces_default_owner(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("CONNECT_ADMIN_EMAILS", _OVERRIDE)
     client, _ = _client()
     assert client.get("/admin", cookies=_cookies(_OVERRIDE)).status_code == 200
@@ -238,7 +239,7 @@ def test_admin_invalid_nonempty_allowlist_denies_everyone(
 
 
 def test_admin_escapes_question_text_and_renders_jst(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delenv("CONNECT_ADMIN_EMAILS", raising=False)
+    monkeypatch.setenv("CONNECT_ADMIN_EMAILS", _OWNER)
     client, _ = _client()
     response = client.get("/admin", cookies=_cookies(_OWNER))
     assert response.status_code == 200
@@ -254,7 +255,7 @@ def test_admin_escapes_question_text_and_renders_jst(monkeypatch: pytest.MonkeyP
 def test_admin_empty_usage_events_renders_empty_period(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.delenv("CONNECT_ADMIN_EMAILS", raising=False)
+    monkeypatch.setenv("CONNECT_ADMIN_EMAILS", _OWNER)
     client, _ = _client(_FakePg(empty=True))
     response = client.get("/admin", cookies=_cookies(_OWNER))
     assert response.status_code == 200
@@ -263,7 +264,7 @@ def test_admin_empty_usage_events_renders_empty_period(
 
 def test_admin_renders_work_type_bars(monkeypatch: pytest.MonkeyPatch) -> None:
     """作業束の割合と件数が一致し、CSPで許可されたSVG属性で描く。"""
-    monkeypatch.delenv("CONNECT_ADMIN_EMAILS", raising=False)
+    monkeypatch.setenv("CONNECT_ADMIN_EMAILS", _OWNER)
     client, _ = _client()
     response = client.get("/admin", cookies=_cookies(_OWNER))
     assert response.status_code == 200
@@ -296,7 +297,7 @@ def test_admin_renders_work_type_bars(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_admin_user_rows_link_to_drilldown(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delenv("CONNECT_ADMIN_EMAILS", raising=False)
+    monkeypatch.setenv("CONNECT_ADMIN_EMAILS", _OWNER)
     client, _ = _client()
     response = client.get("/admin", cookies=_cookies(_OWNER))
     assert response.status_code == 200
@@ -304,7 +305,7 @@ def test_admin_user_rows_link_to_drilldown(monkeypatch: pytest.MonkeyPatch) -> N
 
 
 def test_admin_drilldown_filters_questions_by_user(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delenv("CONNECT_ADMIN_EMAILS", raising=False)
+    monkeypatch.setenv("CONNECT_ADMIN_EMAILS", _OWNER)
     client, pg = _client()
     response = client.get(f"/admin?user={_OWNER}", cookies=_cookies(_OWNER))
     assert response.status_code == 200
@@ -318,7 +319,7 @@ def test_admin_drilldown_filters_questions_by_user(monkeypatch: pytest.MonkeyPat
 
 
 def test_admin_drilldown_other_user_shows_empty_feed(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delenv("CONNECT_ADMIN_EMAILS", raising=False)
+    monkeypatch.setenv("CONNECT_ADMIN_EMAILS", _OWNER)
     client, pg = _client()
     response = client.get(f"/admin?user={_OTHER}", cookies=_cookies(_OWNER))
     assert response.status_code == 200
@@ -331,7 +332,7 @@ def test_admin_drilldown_escapes_and_does_not_reflect_raw_html(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """?user= の値は絞り込み表示にも出るので、生 HTML として反射させない。"""
-    monkeypatch.delenv("CONNECT_ADMIN_EMAILS", raising=False)
+    monkeypatch.setenv("CONNECT_ADMIN_EMAILS", _OWNER)
     client, _ = _client()
     response = client.get('/admin?user=<img src=x onerror="alert(1)">', cookies=_cookies(_OWNER))
     assert response.status_code == 200
@@ -340,7 +341,7 @@ def test_admin_drilldown_escapes_and_does_not_reflect_raw_html(
 
 
 def test_admin_drilldown_rejects_absurdly_long_user(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delenv("CONNECT_ADMIN_EMAILS", raising=False)
+    monkeypatch.setenv("CONNECT_ADMIN_EMAILS", _OWNER)
     client, pg = _client()
     response = client.get("/admin?user=" + "a" * 300, cookies=_cookies(_OWNER))
     assert response.status_code == 200
@@ -350,7 +351,7 @@ def test_admin_drilldown_rejects_absurdly_long_user(monkeypatch: pytest.MonkeyPa
 
 def test_admin_drilldown_is_not_reachable_for_non_admin(monkeypatch: pytest.MonkeyPatch) -> None:
     """ドリルダウン付きでも非 admin は 404 偽装のまま（DB に触れない）。"""
-    monkeypatch.delenv("CONNECT_ADMIN_EMAILS", raising=False)
+    monkeypatch.setenv("CONNECT_ADMIN_EMAILS", _OWNER)
     client, pg = _client()
     response = client.get(f"/admin?user={_OWNER}", cookies=_cookies(_OTHER))
     assert response.status_code == 404
@@ -360,7 +361,7 @@ def test_admin_drilldown_is_not_reachable_for_non_admin(monkeypatch: pytest.Monk
 
 def test_admin_drilldown_does_not_log_the_email(monkeypatch: pytest.MonkeyPatch) -> None:
     """G8: URL の email を構造化ログへ出さない（クエリ失敗時も含む）。"""
-    monkeypatch.delenv("CONNECT_ADMIN_EMAILS", raising=False)
+    monkeypatch.setenv("CONNECT_ADMIN_EMAILS", _OWNER)
     captured: list[tuple[tuple[Any, ...], dict[str, Any]]] = []
 
     def _capture(*args: Any, **kwargs: Any) -> None:
@@ -416,7 +417,7 @@ def test_admin_query_string_is_redacted_in_uvicorn_access_log() -> None:
 
 def test_admin_renders_answer_feedback_summary(monkeypatch: pytest.MonkeyPatch) -> None:
     """回答評価（直近30日の 👍/👎 と 👎 の質問一覧）を read-only ロールで読んで出す。"""
-    monkeypatch.delenv("CONNECT_ADMIN_EMAILS", raising=False)
+    monkeypatch.setenv("CONNECT_ADMIN_EMAILS", _OWNER)
     client, pg = _client()
     response = client.get("/admin", cookies=_cookies(_OWNER))
     assert response.status_code == 200
@@ -447,7 +448,7 @@ def test_admin_feedback_permission_denied_does_not_break_page(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """dashboard ロールに SELECT が無い環境（GRANT 前の本番）でも他の集計は出る。"""
-    monkeypatch.delenv("CONNECT_ADMIN_EMAILS", raising=False)
+    monkeypatch.setenv("CONNECT_ADMIN_EMAILS", _OWNER)
     client, _ = _client(_FakePg(feedback_denied=True))
     response = client.get("/admin", cookies=_cookies(_OWNER))
     assert response.status_code == 200
@@ -456,7 +457,8 @@ def test_admin_feedback_permission_denied_does_not_break_page(
     assert "作業の内訳" in response.text
 
 
-def test_admin_v2_has_navigation_and_agent_post_is_gated() -> None:
+def test_admin_v2_has_navigation_and_agent_post_is_gated(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("CONNECT_ADMIN_EMAILS", _OWNER)
     client, pg = _client()
     page = client.get("/admin", cookies=_cookies(_OWNER))
     assert 'href="/admin/history"' in page.text
@@ -471,7 +473,8 @@ def test_admin_v2_has_navigation_and_agent_post_is_gated() -> None:
     assert len(pg.connection_kwargs) == before
 
 
-def test_admin_styles_and_script_use_fresh_csp_nonce() -> None:
+def test_admin_styles_and_script_use_fresh_csp_nonce(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("CONNECT_ADMIN_EMAILS", _OWNER)
     client, _ = _client()
     first = client.get("/admin", cookies=_cookies(_OWNER))
     second = client.get("/admin", cookies=_cookies(_OWNER))
@@ -496,6 +499,7 @@ def test_admin_styles_and_script_use_fresh_csp_nonce() -> None:
 def test_admin_analysis_rejects_cross_origin_before_queries(
     monkeypatch: pytest.MonkeyPatch, origin: str | None
 ) -> None:
+    monkeypatch.setenv("CONNECT_ADMIN_EMAILS", _OWNER)
     monkeypatch.setenv("CONNECT_BASE_URL", "http://testserver")
     client, pg = _client()
     headers = {"Origin": origin} if origin is not None else {}
@@ -510,6 +514,7 @@ def test_admin_analysis_rejects_cross_origin_before_queries(
 def test_admin_analysis_uses_server_data_and_readonly_connections(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setenv("CONNECT_ADMIN_EMAILS", _OWNER)
     monkeypatch.setenv("CONNECT_BASE_URL", "http://testserver")
     calls: list[Any] = []
 
@@ -554,6 +559,7 @@ def test_admin_analysis_uses_server_data_and_readonly_connections(
 def test_admin_analysis_rejects_invalid_payload_without_queries(
     monkeypatch: pytest.MonkeyPatch, payload: Any
 ) -> None:
+    monkeypatch.setenv("CONNECT_ADMIN_EMAILS", _OWNER)
     monkeypatch.setenv("CONNECT_BASE_URL", "http://testserver")
     client, pg = _client()
     response = client.post(
@@ -569,6 +575,7 @@ def test_admin_analysis_rejects_invalid_payload_without_queries(
 def test_admin_analysis_failure_never_logs_question_or_email(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setenv("CONNECT_ADMIN_EMAILS", _OWNER)
     monkeypatch.setenv("CONNECT_BASE_URL", "http://testserver")
     captured: list[Any] = []
 
@@ -589,8 +596,33 @@ def test_admin_analysis_failure_never_logs_question_or_email(
     assert "社外秘" not in response.text
 
 
-def test_admin_period_is_validated_after_authorization() -> None:
+def test_admin_period_is_validated_after_authorization(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("CONNECT_ADMIN_EMAILS", _OWNER)
     client, pg = _client()
     assert client.get("/admin?period=week", cookies=_cookies(_OTHER)).status_code == 404
     assert client.get("/admin?period=week", cookies=_cookies(_OWNER)).status_code == 400
     assert not pg.connection_kwargs
+
+
+def test_terraform_allows_empty_or_exactly_one_connect_admin() -> None:
+    root = Path(__file__).resolve().parents[2]
+    tf = (root / "infra/terraform/connect_web.tf").read_text(encoding="utf-8")
+    block = tf[tf.index('variable "connect_admin_emails"') :].split("\n}\n", 1)[0]
+    assert 'default     = ""' in block
+    assert 'var.connect_admin_emails == "" ||' in block
+    pattern = re.search(r'can\(regex\("(.+?)", var\.connect_admin_emails\)\)', block)
+    assert pattern is not None
+    regex = re.compile(pattern.group(1).replace("[:space:]", r"\s"))
+    assert regex.fullmatch(_OWNER)
+    for invalid in (f"{_OWNER},{_OTHER}", " ", f" {_OWNER}", "*", "not-an-email"):
+        assert not regex.fullmatch(invalid)
+    assert '{ name = "CONNECT_ADMIN_EMAILS", value = var.connect_admin_emails }' in tf
+
+
+def test_src_has_no_hardcoded_personal_email() -> None:
+    root = Path(__file__).resolve().parents[2]
+    assert not [
+        str(path.relative_to(root))
+        for path in (root / "src").rglob("*.py")
+        if _OWNER.casefold() in path.read_text(encoding="utf-8").casefold()
+    ]

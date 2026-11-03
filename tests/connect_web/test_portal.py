@@ -40,7 +40,7 @@ _ADMIN_PATHS = set(_ADMIN_SITES.values())
 
 @pytest.fixture
 def client(monkeypatch: pytest.MonkeyPatch) -> TestClient:
-    monkeypatch.setattr(connect_app, "_admin_emails", lambda: frozenset())
+    monkeypatch.delenv("CONNECT_ADMIN_EMAILS", raising=False)
     monkeypatch.setattr(personal_memory_admin, "is_admin", lambda email: False)
     monkeypatch.setattr(dm_history, "is_admin", lambda email: False)
     return TestClient(
@@ -113,6 +113,19 @@ def test_home_public_sites_and_security_without_external_io(
     assert response.headers["content-security-policy"] == connect_app._CONTENT_SECURITY_POLICY
     assert response.headers["x-frame-options"] == "DENY"
     no_search.assert_not_called()
+
+
+@pytest.mark.parametrize("emails", [None, "", " \t ", _EMAIL, "other@example.test"])
+def test_home_admin_card_follows_env(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch, emails: str | None
+) -> None:
+    if emails is not None:
+        monkeypatch.setenv("CONNECT_ADMIN_EMAILS", emails)
+    response = client.get("/", cookies=_auth_cookie())
+    assert response.status_code == 200
+    page = BeautifulSoup(response.text, "html.parser")
+    for selector in (".connect-card", ".connect-menu a"):
+        assert ("/admin" in _paths(page, selector)) == (emails == _EMAIL)
 
 
 @pytest.mark.parametrize("admin_path", sorted(_ADMIN_PATHS))
