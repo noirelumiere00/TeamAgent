@@ -212,17 +212,28 @@ def test_unlock_matches_the_committed_declaration() -> None:
     unlock = _freeze_doc()["unlock"]
     assert unlock["active"] is True
     assert unlock["scope_paths"] == [
-        "infra/codebuild/teamagent_runtime_contract.json",
         "infra/codebuild/teamagent_core_media_release_contract.json",
     ]
     assert (
         unlock["reason"]
-        == "human gate 2026-11-02（小俣さん・司令塔指示: Python 3.14 と base digest を維持し、Wolfi secdb 修正済み Python 3.14.10_git20261028-r0 の同梱パッケージ・libpython と py3-pip-wheel 26.2.2-r2 を固定 APK/SHA/APKINDEX で差し替える。runtime/release 契約・世代・凍結をオフライン更新。AWS 書き込み・CodeBuild 起動・S3 公開・git commit・push は行わない）"
+        == '【media の apk ロック追随】 【2026-11-03 apk ロック追随】Alpine v3.24 / edge の索引で libexpat 2.9.0-r0→2.10.0-r0 に入れ替わり、Dockerfile の明示 pin が "unable to select packages" で解決不能になる。apk 段の実ビルドで lock 差分 -1 +1（240→240 行）。lock の sha256 が動くため契約の artifact.apk-lock.sha256 と release 契約の sha が動き、世代 publish を再度強制する。scope は core_media 契約 1 path のまま。'
     )
     assert (
         unlock["gate"]
-        == "human gate 2026-11-02（小俣さん・司令塔指示: Python 3.14 と base digest を維持し、Wolfi secdb 修正済み Python 3.14.10_git20261028-r0 の同梱パッケージ・libpython と py3-pip-wheel 26.2.2-r2 を固定 APK/SHA/APKINDEX で差し替える。runtime/release 契約・世代・凍結をオフライン更新。AWS 書き込み・CodeBuild 起動・S3 公開・git commit・push は行わない）"
+        == "human gate 2026-11-03（小俣さん承認: connect-web 置き換えの便 r94 のため libexpat 2.9.0-r0→2.10.0-r0 追随を承認。社内網で ECR 大層が切れるため lock は現行から libexpat 1 行のみ置換）"
     )
+    assert unlock[
+        "previous_scope_20261103_teamagent_runtime_contract_teamagent_core_media_release_contract"
+    ] == {
+        "active": True,
+        "scope_paths": [
+            "infra/codebuild/teamagent_runtime_contract.json",
+            "infra/codebuild/teamagent_core_media_release_contract.json",
+        ],
+        "reason": "human gate 2026-11-02（小俣さん・司令塔指示: Python 3.14 と base digest を維持し、Wolfi secdb 修正済み Python 3.14.10_git20261028-r0 の同梱パッケージ・libpython と py3-pip-wheel 26.2.2-r2 を固定 APK/SHA/APKINDEX で差し替える。runtime/release 契約・世代・凍結をオフライン更新。AWS 書き込み・CodeBuild 起動・S3 公開・git commit・push は行わない）",
+        "gate": "human gate 2026-11-02（小俣さん・司令塔指示: Python 3.14 と base digest を維持し、Wolfi secdb 修正済み Python 3.14.10_git20261028-r0 の同梱パッケージ・libpython と py3-pip-wheel 26.2.2-r2 を固定 APK/SHA/APKINDEX で差し替える。runtime/release 契約・世代・凍結をオフライン更新。AWS 書き込み・CodeBuild 起動・S3 公開・git commit・push は行わない）",
+        "note": "dev 取り込み済みで本 PR では触らないため scope から外す（過剰 unlock の禁止）。human gate 2026-11-03（小俣さん承認: 凍結宣言を 11/2 の Python 3.14 ベース更新（#776・dev 取り込み済み）から media の apk 追随へ切り替え）",
+    }
     assert unlock["previous_scope_20261026_sales25"] == {
         "active": True,
         "scope_paths": ["infra/codebuild/teamagent_core_media_release_contract.json"],
