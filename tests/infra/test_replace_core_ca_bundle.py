@@ -109,14 +109,15 @@ def test_vendored_inputs_keep_their_exact_bytes_in_canonical_build_context(tmp_p
     sys.modules[spec.name] = context
     spec.loader.exec_module(context)
     source = tmp_path / "source"
-    for path in (APK, LOCK, PIP_APK, PIP_LOCK, SCRIPT):
+    inputs = (APK, LOCK, PIP_APK, PIP_LOCK, EXPAT_APK, EXPAT_LOCK, SCRIPT)
+    for path in inputs:
         destination = source / path.relative_to(ROOT)
         destination.parent.mkdir(parents=True, exist_ok=True)
         destination.write_bytes(path.read_bytes())
     output = tmp_path / "context.tar"
     original_sha = context.create_canonical_tar(source, output)
     with tarfile.open(output) as archive:
-        for path in (APK, LOCK, PIP_APK, PIP_LOCK, SCRIPT):
+        for path in inputs:
             assert (
                 archive.extractfile(path.relative_to(ROOT).as_posix()).read() == path.read_bytes()
             )
@@ -453,3 +454,167 @@ def test_python_development_packages_follow_the_same_version(tmp_path):
     assert (base / DB).read_bytes().count(b"V:3.14.10_git20261028-r0\n") == 5
     assert os.readlink(base / "usr/bin/python3-config") == "python3.14-config"
     assert os.readlink(base / "usr/lib/libpython3.14.so") == "libpython3.14.so.1.0"
+
+
+EXPAT_APK = ROOT / "infra/docker/vendor/libexpat1-2.10.0-r0.apk"
+EXPAT_LOCK = ROOT / "infra/docker/core-libexpat1.lock.json"
+EXPAT_SHA256 = "68d2212a36051d122200630086b3f9f3edae4785b4700599ac47edb92364e8c5"
+EXPAT_VERSION = "2.10.0-r0"
+OLD_EXPAT_LIBRARY = "usr/lib/libexpat.so.1.13.0"
+OLD_EXPAT_SBOM = "var/lib/db/sbom/libexpat1-2.9.0-r0.spdx.json"
+
+
+def _expat_package(module):
+    return module.load_package(EXPAT_APK, EXPAT_LOCK, EXPAT_SHA256, EXPAT_VERSION)
+
+
+def _expat_base(tmp_path):
+    base, before = _python_base(tmp_path)
+    before += (
+        b"P:libexpat1\nV:2.9.0-r0\no:expat\n"
+        b"D:so:ld-linux-aarch64.so.1 so:libc.so.6\n"
+        b"p:so-ver:libexpat.so.1=2.9.0-r0 so:libexpat.so.1=1\n"
+        b"F:usr/lib\nR:libexpat.so.1\nR:libexpat.so.1.13.0\n"
+        b"F:var/lib/db/sbom\nR:libexpat1-2.9.0-r0.spdx.json\n\n"
+    )
+    (base / DB).write_bytes(before)
+    for name in (OLD_EXPAT_LIBRARY, OLD_EXPAT_SBOM):
+        (base / name).write_bytes(b"old expat payload")
+    (base / "usr/lib/libexpat.so.1").symlink_to("libexpat.so.1.13.0")
+    return base, before
+
+
+def test_expat_replaces_only_its_record_library_symlink_and_sbom(tmp_path):
+    module = _module()
+    package = _expat_package(module)
+    base, before = _expat_base(tmp_path)
+    module.prepare(base, [package])
+    module.verify(base, before, [package])
+    assert (base / DB).read_bytes().split(b"\n\n")[:-2] == before.split(b"\n\n")[:-2]
+    assert not (base / OLD_EXPAT_LIBRARY).exists()
+    assert not (base / OLD_EXPAT_SBOM).exists()
+    spec = importlib.util.spec_from_file_location("smoke_core", ROOT / "infra/docker/smoke_core.py")
+    smoke = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(smoke)
+    smoke._assert_expat_package(base)
+
+
+@pytest.mark.parametrize("field", ["C", "P", "V", "A", "S", "I", "T", "c", "D", "p", "o"])
+def test_expat_rejects_apkindex_mismatch(tmp_path, field):
+    import json
+
+    module = _module()
+    lock = json.loads(EXPAT_LOCK.read_text())
+    lock["apkindex"][field] = "0" if field in ("S", "I") else "wrong"
+    bad = tmp_path / "lock.json"
+    bad.write_text(json.dumps(lock))
+    with pytest.raises(ValueError):
+        module.load_package(EXPAT_APK, bad, EXPAT_SHA256, EXPAT_VERSION)
+
+
+def test_expat_rejects_wrong_apk_sha_before_writing(tmp_path):
+    module = _module()
+    with pytest.raises(ValueError, match="APK SHA-256"):
+        module.load_package(EXPAT_APK, EXPAT_LOCK, "0" * 64, EXPAT_VERSION)
+    corrupt = tmp_path / "corrupt.apk"
+    corrupt.write_bytes(EXPAT_APK.read_bytes() + b"changed")
+    with pytest.raises(ValueError, match="APK SHA-256"):
+        module.load_package(corrupt, EXPAT_LOCK, EXPAT_SHA256, EXPAT_VERSION)
+
+
+@pytest.mark.parametrize("change", ["base-version", "missing-library", "duplicate", "extra-origin"])
+def test_expat_rejects_base_or_dependency_drift_before_writing(tmp_path, change):
+    module = _module()
+    base, before = _expat_base(tmp_path)
+    if change == "base-version":
+        before = before.replace(b"V:2.9.0-r0", b"V:2.8.0-r0")
+    elif change == "missing-library":
+        before = before.replace(b"so:libc.so.6", b"so:libc.so.5", 1)
+    elif change == "duplicate":
+        before += b"P:libexpat1\nV:2.9.0-r0\no:expat\n\n"
+    else:
+        before += b"P:expat-dev\nV:2.9.0-r0\no:expat\n\n"
+    (base / DB).write_bytes(before)
+    with pytest.raises(ValueError):
+        module.prepare(base, [_expat_package(module)])
+    assert (base / DB).read_bytes() == before
+    assert (base / OLD_EXPAT_LIBRARY).read_bytes() == b"old expat payload"
+    assert os.readlink(base / "usr/lib/libexpat.so.1") == "libexpat.so.1.13.0"
+
+
+@pytest.mark.parametrize(
+    "change", ["library", "mode", "symlink", "sbom", "old-library", "old-sbom", "other-package"]
+)
+def test_expat_final_verification_fails_closed(tmp_path, change):
+    module = _module()
+    package = _expat_package(module)
+    base, before = _expat_base(tmp_path)
+    module.prepare(base, [package])
+    if change == "mode":
+        (base / "usr/lib/libexpat.so.1.13.1").chmod(0o644)
+    elif change == "symlink":
+        (base / "usr/lib/libexpat.so.1").unlink()
+        (base / "usr/lib/libexpat.so.1").symlink_to("libexpat.so.1.13.0")
+    elif change == "other-package":
+        db = base / DB
+        db.write_bytes(db.read_bytes().replace(b"P:python-3.14\n", b"P:python-3.15\n"))
+    else:
+        paths = {
+            "library": "usr/lib/libexpat.so.1.13.1",
+            "sbom": "var/lib/db/sbom/libexpat1-2.10.0-r0.spdx.json",
+            "old-library": OLD_EXPAT_LIBRARY,
+            "old-sbom": OLD_EXPAT_SBOM,
+        }
+        (base / paths[change]).write_bytes(b"corrupt")
+    with pytest.raises(ValueError):
+        module.verify(base, before, [package])
+
+
+def test_expat_combines_with_existing_pinned_replacements_and_finalizes_copy(tmp_path):
+    module = _module()
+    base, before = _expat_base(tmp_path)
+    packages = [
+        module.load_package(APK, LOCK, SHA256, VERSION),
+        *_python_packages(module),
+        _expat_package(module),
+    ]
+    module.prepare(base, packages)
+    module.verify(base, before, packages)
+    baseline = tmp_path / "installed-before"
+    baseline.write_bytes(before)
+    retained = {
+        path for package in packages for kind in ("files", "links") for path in package[kind]
+    }
+    for package in packages:
+        for name in module.stale_paths(package, before, retained):
+            path = base / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(b"base layer COPY overlay")
+    command = [
+        sys.executable,
+        str(SCRIPT),
+        "finalize",
+        "--root",
+        str(base),
+        "--base-db",
+        str(baseline),
+    ]
+    for package in packages:
+        lock = package["lock"]
+        name = lock["apkindex"]["P"]
+        path = {
+            "ca-certificates-bundle": LOCK,
+            "py3-pip-wheel": PIP_LOCK,
+        }.get(name, ROOT / f"infra/docker/core-{name}.lock.json")
+        command += [
+            "--apk",
+            str(ROOT / "infra/docker/vendor" / lock["archive"]),
+            "--lock",
+            str(path),
+            "--apk-sha256",
+            lock["archive_sha256"],
+            "--version",
+            lock["apkindex"]["V"],
+        ]
+    subprocess.run(command, check=True, capture_output=True, text=True)
+    module.verify(base, before, packages)

@@ -1,0 +1,23 @@
+{
+  "schema_version": 1,
+  "url": "https://packages.wolfi.dev/os/aarch64/libexpat1-2.10.0-r0.apk",
+  "archive": "libexpat1-2.10.0-r0.apk",
+  "archive_sha256": "68d2212a36051d122200630086b3f9f3edae4785b4700599ac47edb92364e8c5",
+  "base_version": "2.9.0-r0",
+  "apkindex": {
+    "C": "Q1PNKLH+bUHNB3bSnT9O/FGajZYI8=",
+    "P": "libexpat1",
+    "V": "2.10.0-r0",
+    "A": "aarch64",
+    "S": "113820",
+    "I": "317934",
+    "T": "libexpat shared library",
+    "L": "MIT",
+    "o": "expat",
+    "m": "wolfi",
+    "t": "1793620546",
+    "c": "f5ef816d1cb2bd0e165a402c4e8a4c4622464bf3",
+    "D": "so:ld-linux-aarch64.so.1 so:libc.so.6",
+    "p": "so-ver:libexpat.so.1=2.10.0-r0 so:libexpat.so.1=1"
+  }
+}
