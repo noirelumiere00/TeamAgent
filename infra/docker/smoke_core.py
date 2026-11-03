@@ -20,6 +20,7 @@ EXPECTED_E5_REVISION = "3d7cfbdacd47fdda877c5cd8a79fbcc4f2a574f3"
 EXPECTED_PYTHON_SHA256 = "81060a4e37f0e6746c7f53468dcd28c200053b4a2bb377a3fe2169edf3f770ac"
 EXPECTED_LIBPYTHON_SHA256 = "5acb30a9c68ceb2985f094c5621f1d62ff8abd4480ea85c7b4ede09e741df0c6"
 EXPECTED_PIP_WHEEL_SHA256 = "38f4aacff7c3b0d7b216cac0a106a1036eef98b0a7ff5b932ea2fcb787e97bc5"
+EXPECTED_LIBEXPAT_SHA256 = "a152dbe6777769de636347b3cd3c53cd46ccdae7b911a2acb76cf8f66ab9c366"
 
 
 def _sha256(path: Path) -> str:
@@ -137,6 +138,26 @@ def _assert_python_packages(root: Path = Path("/")) -> None:
     assert _sha256(root / "usr/lib/libpython3.14.so.1.0") == EXPECTED_LIBPYTHON_SHA256
 
 
+def _assert_expat_package(root: Path = Path("/")) -> None:
+    records = (root / "usr/lib/apk/db/installed").read_text().split("\n\n")
+    actual = {}
+    for record in records:
+        fields = dict(
+            line.split(":", 1)
+            for line in record.splitlines()
+            if line.startswith(("P:", "V:", "o:"))
+        )
+        if fields.get("o") == "expat" or fields.get("P") == "libexpat1":
+            actual[fields["P"]] = fields["V"]
+    assert actual == {"libexpat1": "2.10.0-r0"}, actual
+    libraries = {path.name for path in (root / "usr/lib").glob("libexpat.so.*")}
+    assert libraries == {"libexpat.so.1", "libexpat.so.1.13.1"}, libraries
+    assert os.readlink(root / "usr/lib/libexpat.so.1") == "libexpat.so.1.13.1"
+    assert _sha256(root / "usr/lib/libexpat.so.1.13.1") == EXPECTED_LIBEXPAT_SHA256
+    sboms = {path.name for path in (root / "var/lib/db/sbom").glob("*expat*.spdx.json")}
+    assert sboms == {"libexpat1-2.10.0-r0.spdx.json"}, sboms
+
+
 def _assert_repeated_temp_cleanup() -> None:
     jobs = Path(os.environ["MEDIA_JOB_TMP_ROOT"])
     jobs.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -163,6 +184,10 @@ def main() -> None:
     _assert_content_boundary()
     _assert_pip_wheel()
     _assert_python_packages()
+    _assert_expat_package()
+    import pyexpat
+
+    assert pyexpat.EXPAT_VERSION == "expat_2.10.0"
     _assert_repeated_temp_cleanup()
     _assert_e5_encode()
     _assert_repeated_temp_cleanup()

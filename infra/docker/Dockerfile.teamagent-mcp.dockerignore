@@ -18,6 +18,8 @@
 !infra/docker/
 !infra/docker/replace_core_ca_bundle.py
 !infra/docker/core-ca-bundle.lock.json
+!infra/docker/core-libexpat1.lock.json
+!infra/docker/vendor/libexpat1-2.10.0-r0.apk
 !infra/docker/core-pip-wheel.lock.json
 !infra/docker/vendor/py3-pip-wheel-26.2.2-r2.apk
 !infra/docker/vendor/

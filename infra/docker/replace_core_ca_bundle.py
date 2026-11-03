@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Apply pinned Wolfi CA, pip-wheel and Python APKs, fail closed."""
+"""Apply pinned Wolfi CA, pip-wheel, Python and libexpat APKs, fail closed."""
 
 from __future__ import annotations
 
@@ -23,6 +23,7 @@ PYTHON_PACKAGES = {
     "python-3.14-dev",
     "python-3.14-base-dev",
 }
+PAYLOAD_PACKAGES = PYTHON_PACKAGES | {"libexpat1"}
 
 
 def q1(data: bytes) -> str:
@@ -32,8 +33,8 @@ def q1(data: bytes) -> str:
 def load_package(apk: Path, lock_path: Path, apk_sha256: str, version: str) -> dict:
     lock = json.loads(lock_path.read_bytes())
     name = lock["apkindex"]["P"]
-    python = name in PYTHON_PACKAGES
-    if name not in (NAME, "py3-pip-wheel") and not python:
+    full_payload = name in PAYLOAD_PACKAGES
+    if name not in (NAME, "py3-pip-wheel") and not full_payload:
         raise ValueError("unexpected replacement package")
     raw = apk.read_bytes()
     if hashlib.sha256(raw).hexdigest() != apk_sha256 or apk_sha256 != lock["archive_sha256"]:
@@ -102,20 +103,22 @@ def load_package(apk: Path, lock_path: Path, apk_sha256: str, version: str) -> d
                     raise ValueError("unexpected APK directory ownership/mode")
                 continue
             if str(path.parent) != directory:
-                if not python or str(path.parent) not in directories:
+                if not full_payload or str(path.parent) not in directories:
                     raise ValueError("APK file without its parent directory")
                 directory = str(path.parent)
                 inventory.append(f"F:{directory}")
-            if member.isfile() and (python or member.name in (payload, sbom)):
+            if member.isfile() and (full_payload or member.name in (payload, sbom)):
                 data = archive.extractfile(member).read()
                 files[member.name] = data
-                expected_mode = member.mode if python and member.mode in (0o644, 0o755) else 0o644
+                expected_mode = (
+                    member.mode if full_payload and member.mode in (0o644, 0o755) else 0o644
+                )
                 modes[member.name] = expected_mode
-            elif member.issym() and (name == NAME or python):
-                if python and (
+            elif member.issym() and (name == NAME or full_payload):
+                if full_payload and (
                     Path(member.linkname).is_absolute() or ".." in Path(member.linkname).parts
                 ):
-                    raise ValueError("unsafe Python symlink")
+                    raise ValueError("unsafe package symlink")
                 data = member.linkname.encode()
                 links[member.name] = member.linkname
                 expected_mode = 0o777
@@ -129,7 +132,12 @@ def load_package(apk: Path, lock_path: Path, apk_sha256: str, version: str) -> d
             if expected_mode != 0o644:
                 inventory.append(f"a:0:0:{expected_mode:o}")
             inventory.append(f"Z:{q1(data)}")
-    if python:
+    if name == "libexpat1":
+        if set(files) != {"usr/lib/libexpat.so.1.13.1", sbom} or links != {
+            "usr/lib/libexpat.so.1": "libexpat.so.1.13.1"
+        }:
+            raise ValueError("unexpected libexpat payload/SBOM")
+    elif full_payload:
         if sbom not in files or (name == "python-3.14-base" and "usr/bin/python3.14" not in files):
             raise ValueError("missing Python payload/SBOM")
     elif set(files) != {payload, sbom} or len(links) != (3 if name == NAME else 0):
@@ -165,7 +173,7 @@ def wheel_path(version: str) -> str:
 
 
 def stale_paths(package: dict, before: bytes, retained: set[str]) -> list[str]:
-    if package["lock"]["apkindex"]["P"] in PYTHON_PACKAGES:
+    if package["lock"]["apkindex"]["P"] in PAYLOAD_PACKAGES:
         paths = []
         for block in before.decode().split("\n\n"):
             if f"P:{package['lock']['apkindex']['P']}" not in block.splitlines():
@@ -209,7 +217,7 @@ def verify_payload(root: Path, package: dict, stale: list[str]) -> None:
             raise ValueError(f"payload mode differs from the pinned APK: {path}")
     for path, target in package["links"].items():
         if not (root / path).is_symlink() or os.readlink(root / path) != target:
-            raise ValueError(f"CA symlink differs from the pinned APK: {path}")
+            raise ValueError(f"symlink differs from the pinned APK: {path}")
     for path in stale:
         if (root / path).exists() or (root / path).is_symlink():
             raise ValueError(f"stale package payload/SBOM remains: {path}")
@@ -220,25 +228,31 @@ def prepare(root: Path, packages: list[dict]) -> None:
     after = before
     for package in packages:
         after = replaced_db(after, package)
-    # Python's new metapackage requires the split runtime and matching development packages.
+    # Prove the pinned replacements have all providers before changing any payload.
     providers = set()
-    python_dependencies = []
+    dependencies = []
+    expat_origin = set()
     for block in after.decode().split("\n\n"):
         fields = dict(
             line.split(":", 1)
             for line in block.splitlines()
-            if line.startswith(("P:", "V:", "p:", "D:"))
+            if line.startswith(("P:", "V:", "p:", "D:", "o:"))
         )
         if "P" in fields:
             providers.update((fields["P"], fields["P"] + "=" + fields["V"]))
             for value in fields.get("p", "").split():
                 providers.update((value, value.split("=", 1)[0]))
-            if fields["P"] in PYTHON_PACKAGES:
-                python_dependencies.extend(fields.get("D", "").split())
-    if any(package["lock"]["apkindex"]["P"] in PYTHON_PACKAGES for package in packages):
-        for dep in python_dependencies:
+            if fields["P"] in PAYLOAD_PACKAGES:
+                dependencies.extend(fields.get("D", "").split())
+            if fields.get("o") == "expat":
+                expat_origin.add(fields["P"])
+    if any(package["lock"]["apkindex"]["P"] == "libexpat1" for package in packages):
+        if expat_origin != {"libexpat1"}:
+            raise ValueError("unexpected expat origin package inventory")
+    if any(package["lock"]["apkindex"]["P"] in PAYLOAD_PACKAGES for package in packages):
+        for dep in dependencies:
             if dep not in providers:
-                raise ValueError(f"unsatisfied Python package dependency: {dep}")
+                raise ValueError(f"unsatisfied replacement package dependency: {dep}")
     retained = {
         path for package in packages for kind in ("files", "links") for path in package[kind]
     }
@@ -266,7 +280,7 @@ def prepare_payload(root: Path, package: dict, stale: list[str]) -> None:
         temporary.chmod(package["modes"][path])
         temporary.replace(destination)
     for path, target in package["links"].items():
-        if package["lock"]["apkindex"]["P"] in PYTHON_PACKAGES:
+        if package["lock"]["apkindex"]["P"] in PAYLOAD_PACKAGES:
             destination = root / path
             destination.parent.mkdir(parents=True, exist_ok=True)
             destination.unlink(missing_ok=True)
