@@ -35,9 +35,24 @@ SENDER_TRUNCATED_RE = re.compile(
 TEMP_NEG_NONE_RE = re.compile(r"^[・\s]*(特になし|特に無し|なし|-)[。、.\s]*$")
 
 
+def _filters_dir() -> Path:
+    """名寄せ辞書の置き場所。
+
+    本番 image は no-editable install で、このファイルは site-packages にあるため
+    ``parents[2]`` はリポジトリ直下にならない（2026-11-03 本番 r95 で FileNotFoundError）。
+    リポジトリの位置、作業ディレクトリ（image は WORKDIR /app に data/ を焼く）の順に探す。
+    """
+    candidates = [Path(__file__).resolve().parents[2], Path.cwd()]
+    for base in candidates:
+        path = base / "data" / "connect_web_filters"
+        if (path / "tag_alias.json").is_file():
+            return path
+    return candidates[-1] / "data" / "connect_web_filters"
+
+
 @lru_cache(maxsize=1)
 def _references() -> tuple[dict[str, Any], dict[str, str]]:
-    root = Path(__file__).resolve().parents[2] / "data/connect_web_filters"
+    root = _filters_dir()
     aliases = json.loads((root / "tag_alias.json").read_text())
     industry = json.loads((root / "client_industry.json").read_text())
     return aliases, identity_value_map(industry["industry"])
