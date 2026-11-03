@@ -99,6 +99,69 @@ def test_analysis_tag_filter_executes_on_latest_supported_payload(db: tuple[Any,
     )
 
 
+@pytest.mark.parametrize("admin,total", [(False, 6000), (True, 56000)])
+@pytest.mark.parametrize(
+    "filters", [{"q": "needle"}, {"industry": "食品"}, {"account": "one", "sort": "plays"}]
+)
+def test_video_campaign_total_ignores_search_but_respects_visibility(
+    db: tuple[Any, Any], admin: bool, total: int, filters: dict[str, str]
+) -> None:
+    conn, repository = db
+    seed(conn, repository)
+    # The current view sets privacy per campaign; exercise mixed visibility at its read boundary.
+    conn.execute("CREATE TEMP TABLE vl_videos_effective AS SELECT * FROM vl_videos_effective")
+    conn.execute("UPDATE vl_videos_effective SET is_private=true WHERE video_id='4'")
+    conn.execute(
+        "UPDATE vl_videos_effective SET caption='needle', industry='食品' WHERE video_id='1'"
+    )
+    # Identical campaign names belonging to different advertisers must not be combined.
+    conn.execute(
+        "UPDATE vl_videos_effective SET campaign='test', advertiser='another' WHERE video_id='5'"
+    )
+    case = next(r for r in search_campaigns(conn, {}, admin=admin) if r["advertiser"] == "test")
+    assert case["total_plays"] == total
+    result = search_videos(conn, filters, admin=admin)
+    assert result["total"] == 1
+    assert result["videos"][0]["total_plays"] == 1000
+    assert result["videos"][0]["campaign_total_plays"] == total
+    featured = featured_videos(conn, filters, admin=admin)
+    assert len(featured) == 1 and featured[0]["campaign_total_plays"] == total
+
+
+@pytest.mark.parametrize("missing_snapshot", [False, True])
+@pytest.mark.parametrize("private", [False, True])
+def test_video_campaign_total_keeps_unknown_metrics_unknown(
+    db: tuple[Any, Any], missing_snapshot: bool, private: bool
+) -> None:
+    conn, repository = db
+    seed(conn, repository)
+    conn.execute("CREATE TEMP TABLE vl_videos_effective AS SELECT * FROM vl_videos_effective")
+    conn.execute("UPDATE vl_videos_effective SET is_private=%s WHERE video_id='4'", (private,))
+    if missing_snapshot:
+        # teamagent_app has no DELETE grant (as in production); only the fixture setup needs it.
+        conn.execute("RESET ROLE")
+        conn.execute("DELETE FROM vl_metrics WHERE video_id='4'")
+        conn.execute("SET ROLE teamagent_app")
+    else:
+        conn.execute("UPDATE vl_metrics SET total_plays=NULL WHERE video_id='4'")
+    for admin in (False, True):
+        expected = 6000 if private and not admin else None
+        case = next(r for r in search_campaigns(conn, {}, admin=admin) if r["campaign"] == "test")
+        assert case["total_plays"] == expected
+        row = search_videos(conn, {"account": "one"}, admin=admin)["videos"][0]
+        assert row["campaign_total_plays"] == expected
+
+
+def test_video_campaign_total_is_zero_or_absent_for_unassigned(db: tuple[Any, Any]) -> None:
+    conn, repository = db
+    seed(conn, repository)
+    conn.execute("UPDATE vl_metrics SET total_plays=0")
+    assert search_videos(conn, {}, admin=False)["videos"][0]["campaign_total_plays"] == 0
+    conn.execute("UPDATE vl_videos SET campaign=NULL WHERE video_id='1'")
+    row = search_videos(conn, {"account": "one"}, admin=False)["videos"][0]
+    assert row["campaign_total_plays"] is None
+
+
 @pytest.mark.parametrize("winner", ["media", "tto", "kirinuki", "other", "organic", None])
 def test_primary_category_majority_and_tie_priority(
     db: tuple[Any, Any], winner: str | None

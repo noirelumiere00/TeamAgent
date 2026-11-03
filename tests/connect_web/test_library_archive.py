@@ -198,7 +198,7 @@ def test_card_labels_hide_unset_and_separate_known_categories() -> None:
         library._video_card({**pg.row, "business_category": None, "is_pr": True}), "html.parser"
     )
     assert not video.select(".category-label")
-    assert video.select_one(".period").text == "PR"
+    assert video.select_one(".video-card-context").text == "PR · campaign"
 
 
 def test_category_shelves_use_primary_category_once_and_named_headings() -> None:
@@ -261,31 +261,41 @@ def test_sparse_category_uses_new_list_layout(count: int) -> None:
     assert len(grid.select(".card")) == min(count, 4)
 
 
-@pytest.mark.parametrize("caption", ["最初の行 <script>\n次の行", "", None, "  \n本文"])
-def test_case_video_titles_use_caption_first_line_or_account(
-    setup: tuple[TestClient, Pg], caption: str | None
+@pytest.mark.parametrize(
+    ("caption", "expected"),
+    [
+        ("最初の行 <script>\n次の行", "最初の行 <script>"),
+        ("", "account_full_name"),
+        (None, "account_full_name"),
+        ("  \n本文", "本文"),
+        (" \n\t", "account_full_name"),
+    ],
+)
+@pytest.mark.parametrize(
+    "path",
+    ["/library", "/library/videos", "/library/c?advertiser=a&campaign=b", "/library/v/tiktok/123"],
+)
+def test_video_titles_use_caption_first_nonempty_line_or_account(
+    setup: tuple[TestClient, Pg], caption: str | None, expected: str, path: str
 ) -> None:
     from tests.connect_web.test_library_catalog import catalog_pg
 
     client, pg = setup
     pg.row.update(caption=caption, campaign="全動画で同じ案件名", account_name="account_full_name")
     catalog_pg(pg)
-    soup = BeautifulSoup(
-        client.get("/library/c?advertiser=a&campaign=b", cookies=_auth_cookie()).text, "html.parser"
-    )
+    soup = BeautifulSoup(client.get(path, cookies=_auth_cookie()).text, "html.parser")
     card = soup.select_one(".video-grid .card")
-    expected = (
-        "最初の行 <script>" if caption and caption.startswith("最初") else "account_full_name"
-    )
     assert card.h3.text == expected
     assert card.select_one(".card-link")["aria-label"].endswith(expected + "の動画詳細")
     assert card.select_one("script") is None
     assert card.select_one(".account-name").text == "account_full_name"
     assert "2026-10-30" in card.select_one(".meta-source").text
-    assert card.select_one(".meta-plays").text == "1.7万回再生"
+    assert [item.text for item in card.select(".meta-plays")] == [
+        "この動画 1.7万回再生",
+        "施策計 312万回再生",
+    ]
+    assert card.select_one(".video-card-context").text == "MEDIA · PR · 全動画で同じ案件名"
     assert "次の行" not in card.text
-    # Other shelves still identify the campaign.
-    assert BeautifulSoup(library._video_card(pg.row), "html.parser").h3.text == pg.row["campaign"]
 
 
 def test_pickup_shelf_aligns_with_container_and_keeps_focus_inside() -> None:
@@ -294,3 +304,69 @@ def test_pickup_shelf_aligns_with_container_and_keeps_focus_inside() -> None:
     rule = css_rule(".pickup-grid")
     assert "margin:0" in rule and "padding:0 0 20px" in rule
     assert "outline-offset:-3px" in css_rule(".pickup-grid .card-link:focus-visible")
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [{"campaign": None}, {"advertiser": ""}, {"campaign_total_plays": None}],
+)
+def test_video_card_omits_unavailable_campaign_total(overrides: dict[str, Any]) -> None:
+    card = BeautifulSoup(library._video_card({**Pg().row, **overrides}), "html.parser")
+    assert card.select_one(".video-card-plays").text == "この動画 1.7万回再生"
+    if not overrides.get("campaign", True):
+        assert card.select_one(".video-card-context").text == "MEDIA · PR"
+
+
+def test_video_card_escapes_context_title_and_selection_label() -> None:
+    row = {**Pg().row, "campaign": '施策 <img src=x>"', "caption": '<script>"&\n次の行'}
+    card = BeautifulSoup(library._video_card(row, selectable=True), "html.parser")
+    context = card.select_one(".video-card-context")
+    assert context.text == 'MEDIA · PR · 施策 <img src=x>"'
+    assert context["title"] == row["campaign"]
+    assert card.h3.text == card.h3["title"] == '<script>"&'
+    assert (
+        card.select_one("input")["aria-label"] == row["account_name"] + ': <script>"&の動画を選択'
+    )
+    assert not card.select(".card-body img, script, [onerror]")
+
+
+def test_video_card_zero_and_unknown_plays() -> None:
+    card = BeautifulSoup(
+        library._video_card({**Pg().row, "total_plays": None, "campaign_total_plays": 0}),
+        "html.parser",
+    )
+    assert [item.text for item in card.select(".meta-plays")] == [
+        "この動画 再生数未集計",
+        "施策計 0回再生",
+    ]
+
+
+@pytest.mark.parametrize("admin", [False, True])
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/library",
+        "/library/videos?q=needle",
+        "/library/c?advertiser=a&campaign=b",
+        "/library/v/tiktok/123",
+    ],
+)
+def test_video_card_queries_aggregate_visible_campaign_before_filtering(
+    setup: tuple[TestClient, Pg], monkeypatch: pytest.MonkeyPatch, admin: bool, path: str
+) -> None:
+    from tests.connect_web.test_library_catalog import catalog_pg
+    from tests.connect_web.test_search_routes import _EMAIL
+
+    client, pg = setup
+    monkeypatch.setenv("CONNECT_ADMIN_EMAILS", _EMAIL if admin else "")
+    catalog_pg(pg)
+    assert client.get(path, cookies=_auth_cookie()).status_code == 200
+    queries = [sql for sql, _ in pg.calls if sql.startswith("WITH campaign_totals AS (")]
+    assert len(queries) == 1
+    totals, selection = queries[0].split("GROUP BY advertiser, campaign)", 1)
+    assert "WHERE true" in totals if admin else "WHERE NOT v.is_private" in totals
+    assert "count(m.total_plays)=count(*)" in totals
+    assert "ORDER BY captured_on DESC LIMIT 1" in totals
+    assert "%s" not in totals and "needle" not in queries[0]
+    assert "ct.campaign_total_plays" in selection
+    assert "LEFT JOIN campaign_totals ct" in selection

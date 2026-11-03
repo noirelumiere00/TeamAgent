@@ -199,6 +199,20 @@ _METRICS_JOIN = """LEFT JOIN LATERAL (
     ORDER BY captured_on DESC LIMIT 1
 ) m ON true"""
 _METRIC_SELECT = ", ".join(f"m.{column}" for column in METRIC_COLUMNS)
+_CAMPAIGN_TOTALS_JOIN = """LEFT JOIN campaign_totals ct
+    ON ct.advertiser=v.advertiser AND ct.campaign=v.campaign"""
+
+
+def _campaign_totals_cte(admin: bool) -> str:
+    # Apply visibility before aggregation, but never the video search filters.
+    where, _, _, _ = _where({}, admin)
+    return f"""WITH campaign_totals AS (
+        SELECT v.advertiser, v.campaign,
+        CASE WHEN count(m.total_plays)=count(*) THEN sum(m.total_plays) END
+            AS campaign_total_plays
+        FROM vl_videos_effective v {_METRICS_JOIN} WHERE {where}
+        AND COALESCE(v.advertiser,'')<>'' AND COALESCE(v.campaign,'')<>''
+        GROUP BY advertiser, campaign)"""  # nosec B608
 
 
 def search_videos(conn: Any, params: Mapping[str, str], *, admin: bool) -> dict[str, Any]:
@@ -209,7 +223,7 @@ def search_videos(conn: Any, params: Mapping[str, str], *, admin: bool) -> dict[
         values,
     ).fetchone()["n"]
     # 同上: 列名・JOIN・句・並び順はコード内の固定値で、利用者の値は %s で渡す
-    list_sql = f"SELECT v.*, {_METRIC_SELECT}, m.captured_on FROM vl_videos_effective v {_METRICS_JOIN} WHERE {where} ORDER BY {order} DESC NULLS LAST, v.platform, v.video_id LIMIT %s OFFSET %s"  # noqa: E501  # nosec B608
+    list_sql = f"{_campaign_totals_cte(admin)} SELECT v.*, {_METRIC_SELECT}, m.captured_on, ct.campaign_total_plays FROM vl_videos_effective v {_METRICS_JOIN} {_CAMPAIGN_TOTALS_JOIN} WHERE {where} ORDER BY {order} DESC NULLS LAST, v.platform, v.video_id LIMIT %s OFFSET %s"  # noqa: E501  # nosec B608
     rows = conn.execute(
         list_sql,
         [*values, PAGE_SIZE, (page - 1) * PAGE_SIZE],
@@ -520,21 +534,36 @@ def _preview(row: Mapping[str, Any], *, detail: bool = False) -> str:
     return f'<span class="preview"{player}>{cover}</span>'
 
 
-def _video_card(
-    row: Mapping[str, Any], *, selectable: bool = False, in_campaign: bool = False
-) -> str:
+def _video_card(row: Mapping[str, Any], *, selectable: bool = False) -> str:
     path = "/".join(quote(str(row[key]), safe="") for key in ("platform", "video_id"))
     url = post_url(row)
     account = str(row.get("account_name") or row.get("account_handle") or "動画")
-    title = str(row.get("campaign") or row.get("caption") or account).strip()
-    if in_campaign:
-        caption = str(row.get("caption") or "").splitlines()
-        title = (caption[0].strip() if caption else "") or account
+    title = next(
+        (line.strip() for line in str(row.get("caption") or "").splitlines() if line.strip()),
+        account,
+    )
     category = _category_label(row.get("business_category"))
     metadata = [_day(row["posted_at"])] if isinstance(row.get("posted_at"), datetime) else []
     flags = " · ".join(
         label for field, label in (("is_pr", "PR"), ("is_private", "非公開")) if row.get(field)
     )
+    heading = " · ".join(part for part in (category, _e(flags)) if part)
+    if row.get("campaign"):
+        heading += (" · " if heading else "") + _e(row["campaign"])
+    plays = (
+        f'<strong class="meta-plays" title="この動画の再生数: {_metric(row.get("total_plays"))}">'
+        f"この動画 {compact_plays(row.get('total_plays'))}</strong>"
+    )
+    if (
+        row.get("advertiser")
+        and row.get("campaign")
+        and row.get("campaign_total_plays") is not None
+    ):
+        plays += (
+            '<span class="meta-plays" '
+            f'title="施策全体の再生数: {_metric(row["campaign_total_plays"])}">'
+            f"施策計 {compact_plays(row['campaign_total_plays'])}</span>"
+        )
     tags = "".join(
         f'<span class="card-tag"><span class="filter-label">{label}</span>'
         f'<span class="badge">{_e(row[field])}</span></span>'
@@ -543,7 +572,7 @@ def _video_card(
     )
     checkbox = (
         f'<label class="card-select"><input type="checkbox" data-url="{_e(url)}" '
-        f'aria-label="{_e(account)}の動画を選択">選択</label>'
+        f'aria-label="{_e(account)}: {_e(title)}の動画を選択">選択</label>'
         if selectable and url
         else ""
     )
@@ -551,15 +580,12 @@ def _video_card(
         f'<article class="card"><a class="card-link" href="/library/v/{path}" '
         f'aria-label="{_e(account)}: {_e(title)}の動画詳細">{_preview(row)}'
         '<div class="card-body">'
-        + category
-        + (f'<span class="period">{" · " if category else ""}{flags}</span>' if flags else "")
-        + f'<h3>{_e(title)}</h3><p class="card-meta" '
-        f'title="合計再生 {_metric(row.get("total_plays"))}">' + '<span class="meta-source">'
+        + f'<p class="video-card-context" title="{_e(row.get("campaign"))}">{heading}</p>'
+        + f'<h3 title="{_e(title)}">{_e(title)}</h3><p class="card-meta">'
+        + '<span class="meta-source">'
         f'<span class="account-name" title="{_e(account)}">{_e(account)}</span>'
         + (" · " + " · ".join(metadata) if metadata else "")
-        + '</span><span class="meta-plays">'
-        + compact_plays(row.get("total_plays"))
-        + "</span></p>"
+        + f'</span></p><p class="video-card-plays">{plays}</p>'
         + f'<div class="card-tags">{tags}</div></div></a>{checkbox}</article>'
     )
 
@@ -690,15 +716,15 @@ def diversify(rows: list[Any], limit: int = 12) -> list[Any]:
 def featured_videos(conn: Any, params: Mapping[str, str], *, admin: bool) -> list[Any]:
     where, values, _, _ = _where({**params, "sort": "plays"}, admin)
     # Rank each campaign/account before the bound, so a posting burst cannot fill the pool.
-    sql = f"""WITH ranked AS (
-        SELECT v.*, {_METRIC_SELECT},
+    sql = f"""{_campaign_totals_cte(admin)}, ranked AS (
+        SELECT v.*, {_METRIC_SELECT}, ct.campaign_total_plays,
         row_number() OVER (PARTITION BY COALESCE(NULLIF(v.advertiser,''),v.platform),
             COALESCE(NULLIF(v.campaign,''),v.video_id)
             ORDER BY m.total_plays DESC NULLS LAST, v.video_id) AS campaign_rank,
         row_number() OVER (PARTITION BY v.platform,
             COALESCE(v.account_handle,v.account_name,v.video_id)
             ORDER BY m.total_plays DESC NULLS LAST, v.video_id) AS account_rank
-        FROM vl_videos_effective v {_METRICS_JOIN} WHERE {where})
+        FROM vl_videos_effective v {_METRICS_JOIN} {_CAMPAIGN_TOTALS_JOIN} WHERE {where})
         SELECT * FROM ranked ORDER BY greatest(campaign_rank,account_rank),
         total_plays DESC NULLS LAST, platform, video_id LIMIT 240"""  # nosec B608
     rows = list(conn.execute(sql, values).fetchall())
@@ -1013,7 +1039,7 @@ def register_library_routes(
             if not cases:
                 raise HTTPException(404)
             # Keep the entire case for one-click copy; only the visible grid is paginated.
-            sql = f"SELECT v.*, {_METRIC_SELECT} FROM vl_videos_effective v {_METRICS_JOIN} WHERE {where} ORDER BY m.total_plays DESC NULLS LAST, v.platform, v.video_id"  # noqa: E501  # nosec B608
+            sql = f"{_campaign_totals_cte(is_admin(email))} SELECT v.*, {_METRIC_SELECT}, ct.campaign_total_plays FROM vl_videos_effective v {_METRICS_JOIN} {_CAMPAIGN_TOTALS_JOIN} WHERE {where} ORDER BY m.total_plays DESC NULLS LAST, v.platform, v.video_id"  # noqa: E501  # nosec B608
             videos = list(conn.execute(sql, values).fetchall())
         case = cases[0]
         body = '<p class="breadcrumb"><a href="/library/cases">事例一覧</a> / 事例詳細</p>'
@@ -1052,10 +1078,7 @@ def register_library_routes(
             f'class="section-heading"><h2>この事例の動画</h2><p>再生の多い順</p></div>'
         )
         body += _paged_cards(
-            [
-                _video_card(row, in_campaign=True)
-                for row in videos[(number - 1) * PAGE_SIZE : number * PAGE_SIZE]
-            ],
+            [_video_card(row) for row in videos[(number - 1) * PAGE_SIZE : number * PAGE_SIZE]],
             total=len(videos),
             number=number,
             size=PAGE_SIZE,
@@ -1085,9 +1108,10 @@ def register_library_routes(
     @router.get("/api/videos")
     def api(request: Request, email: str = Depends(identity)) -> JSONResponse:
         with connection(email) as conn:
-            return JSONResponse(
-                jsonable_encoder(search_videos(conn, request.query_params, admin=is_admin(email)))
-            )
+            data = search_videos(conn, request.query_params, admin=is_admin(email))
+        for row in data["videos"]:
+            row.pop("campaign_total_plays", None)
+        return JSONResponse(jsonable_encoder(data))
 
     def video(conn: Any, platform: str, video_id: str, email: str) -> Any:
         # 列名と JOIN はコード内の固定値。識別子と権限は %s で渡す
@@ -1114,7 +1138,7 @@ def register_library_routes(
                 where, values, _, _ = _where(
                     {"advertiser": row["advertiser"], "campaign": row["campaign"]}, is_admin(email)
                 )
-                related_sql = f"SELECT v.*, {_METRIC_SELECT} FROM vl_videos_effective v {_METRICS_JOIN} WHERE {where} AND NOT (v.platform=%s AND v.video_id=%s) ORDER BY m.total_plays DESC NULLS LAST, v.platform, v.video_id LIMIT 6"  # noqa: E501  # nosec B608
+                related_sql = f"{_campaign_totals_cte(is_admin(email))} SELECT v.*, {_METRIC_SELECT}, ct.campaign_total_plays FROM vl_videos_effective v {_METRICS_JOIN} {_CAMPAIGN_TOTALS_JOIN} WHERE {where} AND NOT (v.platform=%s AND v.video_id=%s) ORDER BY m.total_plays DESC NULLS LAST, v.platform, v.video_id LIMIT 6"  # noqa: E501  # nosec B608
                 related = conn.execute(related_sql, [*values, platform, video_id]).fetchall()
         body = '<div class="detail-layout"><div>' + _preview(row, detail=True)
         url = post_url(row)

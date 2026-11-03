@@ -29,7 +29,7 @@ class AutoloadPg(LargeCatalogPg):
     def execute(self, query: str, params: Any = None) -> MagicMock:
         result = super().execute(query, params)
         if (
-            query.startswith("SELECT v.*")
+            "SELECT v.*" in query
             and "v.advertiser = %s" in query
             and query.endswith("v.platform, v.video_id")
         ):

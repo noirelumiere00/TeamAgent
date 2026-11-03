@@ -75,7 +75,7 @@ class LargeCatalogPg(Pg):
             result.fetchall.return_value = (
                 self.cases[:1] if "v.advertiser = %s" in query else self.cases
             )
-        elif "WITH ranked" in query:
+        elif "ranked AS (" in query:
             result.fetchall.return_value = self.videos[:240]
         elif "SELECT count(*) AS n" in query:
             result.fetchone.return_value = {"n": len(self.videos)}
@@ -162,7 +162,7 @@ def test_absent_date_and_caption_do_not_render_empty_metadata(
     assert detail.find("h3", string="投稿文") is None
     pg.row["is_pr"] = True
     card = BeautifulSoup(library._video_card(pg.row), "html.parser")
-    assert card.select_one(".period").text == " · PR"  # Separator follows the category label.
+    assert card.select_one(".video-card-context").text == "MEDIA · PR · campaign"
     assert "不明" not in card.text
 
 

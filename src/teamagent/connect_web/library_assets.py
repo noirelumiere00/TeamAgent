@@ -186,6 +186,10 @@ white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.card-body p{margin-bo
 .card-meta{display:flex;gap:8px;align-items:baseline}
 .meta-source{min-width:0;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .meta-source .account-name{display:inline}.meta-plays{flex:none;font-variant-numeric:tabular-nums}
+.video-card-context{font-size:10px;font-weight:700;color:var(--blue);
+white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.video-card-plays{display:flex;flex-wrap:wrap;gap:4px 12px;font-size:12px;color:var(--muted)}
+.video-card-plays strong{color:var(--ink)}
 .card-tag{display:flex;gap:4px;align-items:center}.card-tags .badge{font-size:10px;padding:1px 5px}
 .card-tags{margin-top:10px}.card-select{display:block;font-size:13px;padding:8px 0}
 .pickup-grid,.video-shelf{display:grid;grid-auto-flow:column;overflow-x:auto;gap:24px;
