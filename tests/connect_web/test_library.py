@@ -156,11 +156,19 @@ def test_html_pages_share_header_and_nonce(setup: tuple[TestClient, Pg], path: s
 
 @pytest.mark.parametrize("path", ["/library/admin/campaigns", "/library/admin/accounts"])
 @pytest.mark.parametrize("method", ["get", "post"])
+@pytest.mark.parametrize("emails", [None, "", " \t ", "other@example.test"])
 def test_admin_gate(
-    setup: tuple[TestClient, Pg], monkeypatch: pytest.MonkeyPatch, path: str, method: str
+    setup: tuple[TestClient, Pg],
+    monkeypatch: pytest.MonkeyPatch,
+    path: str,
+    method: str,
+    emails: str | None,
 ) -> None:
     client, pg = setup
-    monkeypatch.setenv("CONNECT_ADMIN_EMAILS", "other@example.test")
+    if emails is None:
+        monkeypatch.delenv("CONNECT_ADMIN_EMAILS", raising=False)
+    else:
+        monkeypatch.setenv("CONNECT_ADMIN_EMAILS", emails)
     response = getattr(client, method)(path, cookies=_auth_cookie())
     assert response.status_code == 403
     assert not pg.calls

@@ -714,17 +714,14 @@ def _safe_next(raw: str | None) -> str:
 
 _SEARCH_COOKIE = "ta_search_session"
 _SESSION_TTL_S = 8 * 3600
-_DEFAULT_SEARCH_EMAILS = "s-komata@vectorinc.co.jp"
-_DEFAULT_ADMIN_EMAILS = frozenset({"s-komata@vectorinc.co.jp"})
 # /admin?user= の受け入れ上限。RFC 5321 の email 上限(254)を採る。
 _ADMIN_FILTER_USER_MAX = 254
 
 
 def _admin_emails() -> frozenset[str]:
-    """利用状況ページの email allowlist（空・未設定は小俣さんだけに倒す）。"""
+    """利用状況・品質・動画管理の email allowlist（空・未設定は誰も許可しない）。"""
     raw = os.environ.get("CONNECT_ADMIN_EMAILS", "")
-    parsed = frozenset(email.strip().lower() for email in raw.split(",") if email.strip())
-    return parsed or _DEFAULT_ADMIN_EMAILS
+    return frozenset(email.strip().lower() for email in raw.split(",") if email.strip())
 
 
 def _env_int(name: str, default: int) -> int:
@@ -855,14 +852,14 @@ def _load_search_config(env: dict[str, str] | None = None) -> DashboardConfig:
     """資料検索 Web UI 用の認証設定を env から作る（dashboard.config を流用）。
 
     env:
-      - CONNECT_SEARCH_ALLOWED_EMAILS: カンマ区切り（既定 s-komata@vectorinc.co.jp）
+      - CONNECT_SEARCH_ALLOWED_EMAILS: カンマ区切り（既定は空、HD も空なら誰も許可しない）
       - CONNECT_SEARCH_ALLOWED_HD: 会社ドメイン（hd クレーム照合・任意）
       - CONNECT_SEARCH_SESSION_SECRET: cookie 署名鍵（未設定なら起動毎ランダム）
       - CONNECT_GOOGLE_CLIENT_ID: Google Sign-In の client_id（id_token の aud）
       - CONNECT_SEARCH_COOKIE_SECURE: 1 で Secure Cookie（HTTPS 公開時）
     """
     e = env if env is not None else dict(os.environ)
-    emails_raw = e.get("CONNECT_SEARCH_ALLOWED_EMAILS", _DEFAULT_SEARCH_EMAILS).strip()
+    emails_raw = e.get("CONNECT_SEARCH_ALLOWED_EMAILS", "").strip()
     allowed_emails = frozenset(x.strip().lower() for x in emails_raw.split(",") if x.strip())
     hd = e.get("CONNECT_SEARCH_ALLOWED_HD", "").strip() or None
     secret_raw = e.get("CONNECT_SEARCH_SESSION_SECRET", "").strip()
