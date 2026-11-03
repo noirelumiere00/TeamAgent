@@ -10,14 +10,16 @@ system-ui,-apple-system,BlinkMacSystemFont,"Hiragino Sans","Noto Sans JP","Yu Go
 a{color:#1d4ed8;text-underline-offset:4px}button,input,select,textarea{font:inherit}
 button,a,input,select,summary{touch-action:manipulation}button{cursor:pointer}
 :focus-visible{outline:3px solid #2563eb;outline-offset:4px}
-header{background:#fff;border-bottom:1px solid var(--line)}.header-inner{max-width:1328px;
+.library-header{background:#fff;border-bottom:1px solid var(--line)}.header-inner{max-width:1328px;
 margin:auto;padding:16px 24px;display:flex;align-items:center;justify-content:space-between;
 gap:16px}
 .brand{font-weight:800;font-size:20px;color:var(--ink);text-decoration:none;white-space:nowrap}
-.brand svg{vertical-align:middle;margin-right:8px;color:var(--blue)}nav{display:flex;gap:8px;
+.brand svg{vertical-align:middle;margin-right:8px;color:var(--blue)}
+nav:where(:not(.connect-menu)){display:flex;gap:8px;
 flex-wrap:wrap}
-nav a{padding:8px 14px;color:var(--muted);text-decoration:none;border-radius:6px}
-nav a[aria-current]{background:#eff4ff;color:#1d4ed8;font-weight:700}
+nav:where(:not(.connect-menu)) a{padding:8px 14px;color:var(--muted);
+text-decoration:none;border-radius:6px}
+nav:where(:not(.connect-menu)) a[aria-current]{background:#eff4ff;color:#1d4ed8;font-weight:700}
 main{max-width:1328px;margin:auto;padding:32px 24px 64px}h1,h2,h3,p{margin-top:0}
 h1{font-size:40px;line-height:1.35;letter-spacing:-.03em;margin-bottom:14px}
 h1,h2,h3{overflow-wrap:anywhere}h2{font-size:24px;line-height:1.4}h3{font-size:18px;
@@ -131,7 +133,9 @@ section form label{display:flex;flex-direction:column;gap:6px;font-size:14px}
 @media(max-width:1024px){.grid{grid-template-columns:repeat(3,minmax(0,1fr));gap:18px}
 .metric-groups{grid-template-columns:1fr}.detail-layout{grid-template-columns:300px minmax(0,1fr)}}
 @media(max-width:767px){main{padding:28px 16px 48px}.header-inner{padding:14px 16px;flex-wrap:wrap}
-nav{gap:4px}nav a{padding:6px 10px;font-size:14px}h1{font-size:28px}h2{font-size:21px}
+nav:where(:not(.connect-menu)){gap:4px}
+nav:where(:not(.connect-menu)) a{padding:6px 10px;font-size:14px}
+h1{font-size:28px}h2{font-size:21px}
 .filters{padding:12px 0}.search-row{gap:8px}.search-row input{padding:12px}
 .search-row button{padding:8px 12px}
 .grid{grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}.card-body{padding:12px}
@@ -149,7 +153,8 @@ nav{gap:4px}nav a{padding:6px 10px;font-size:14px}h1{font-size:28px}h2{font-size
 /* Archive presentation; detail metrics and analysis keep their existing contracts. */
 .brand{display:flex;align-items:center;font-size:23px;line-height:1.3;letter-spacing:-.04em}
 .brand small{display:block;font-size:10px;letter-spacing:.23em;margin-top:6px;color:var(--blue)}
-.header-inner{padding-block:26px;flex-wrap:wrap}.main-nav{font-size:13px;margin-left:auto}
+.library-header .brand{font-size:18px}
+.header-inner{padding-block:16px;flex-wrap:wrap}.main-nav{font-size:13px;margin-left:auto}
 .main-nav a{padding:7px 9px}.header-search{margin-left:auto;position:relative}
 .header-search summary{cursor:pointer;
 list-style:none}.header-search summary::-webkit-details-marker{
@@ -218,7 +223,7 @@ margin:24px 0 0}footer>p span{margin-left:24px}
 @media(max-width:1024px){.case-hero{grid-template-columns:240px minmax(0,1fr)}
 .case-numbers{grid-column:1/-1}.case-numbers .stats{grid-template-columns:repeat(4,minmax(0,1fr))}
 .category-nav{gap:24px}.header-search input{width:190px}.main-nav{margin-left:0}}
-@media(max-width:767px){.header-inner{padding:20px 16px 14px;gap:16px}
+@media(max-width:767px){.header-inner{padding:14px 16px;gap:16px}
 .brand{font-size:20px}.main-nav{order:3;justify-content:center;width:100%;gap:14px}
 .header-search{margin-left:auto}.header-search[open]>summary{display:block}
 .header-search form{position:absolute;right:0;top:34px;background:#fff;padding:12px;z-index:10;

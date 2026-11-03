@@ -8,10 +8,11 @@ from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
+from bs4 import BeautifulSoup
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
-from teamagent.connect_web import library
+from teamagent.connect_web import library, portal
 from teamagent.connect_web.app import _safe_next, create_app
 from tests.connect_web.test_search_routes import _EMAIL, _auth_cookie, _config, _verifier_ok
 
@@ -108,6 +109,49 @@ def test_all_routes_require_cookie(setup: tuple[TestClient, Pg], path: str) -> N
     assert response.status_code == 303
     assert response.headers["location"].startswith("/search/login?next=%2Flibrary")
     assert not pg.calls
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/library",
+        "/library/cases",
+        "/library/c?advertiser=advertiser&campaign=campaign",
+        "/library/videos",
+        "/library/v/tiktok/123",
+        "/library/admin/accounts",
+        "/library/admin/campaigns",
+    ],
+)
+def test_html_pages_share_header_and_nonce(setup: tuple[TestClient, Pg], path: str) -> None:
+    from tests.connect_web.test_library_catalog import catalog_pg
+
+    client, pg = setup
+    catalog_pg(pg)
+    response = client.get(path, cookies=_auth_cookie())
+    assert response.status_code == 200
+    page = BeautifulSoup(response.text, "html.parser")
+    headers = page.select(".connect-header")
+    assert len(headers) == 1
+    assert page.body.find(recursive=False) == headers[0]
+    assert page.select_one(".connect-header + .library-header") is not None
+    assert page.select_one('.connect-brand[href="/"]') is not None
+    current = headers[0].select("a[aria-current]")
+    assert len(current) == 1
+    assert current[0]["href"] == "/library"
+    assert current[0]["aria-current"] == "page"
+    assert headers[0].select_one(".connect-email").text == _EMAIL
+    assert page.select_one('.main-nav a[href="/"]') is None
+    styles = page.select("head style")
+    assert len(styles) == 1
+    assert portal.PORTAL_STYLE in styles[0].text
+    nonce = styles[0]["nonce"]
+    assert nonce
+    csp = response.headers["content-security-policy"]
+    style_src = next(part for part in csp.split(";") if part.strip().startswith("style-src "))
+    assert f"'nonce-{nonce}'" in style_src
+    assert "'unsafe-inline'" not in csp
+    assert all(tag.get("nonce") == nonce for tag in page.select("script, style"))
 
 
 @pytest.mark.parametrize("path", ["/library/admin/campaigns", "/library/admin/accounts"])

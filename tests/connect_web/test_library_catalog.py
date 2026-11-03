@@ -59,7 +59,7 @@ def test_catalog_case_links_copy_and_all_videos(setup: tuple[TestClient, Pg]) ->
         "campaign": [pg.row["campaign"]],
     }
     assert "<script>" not in response.text
-    assert soup.select_one("nav [aria-current]")["href"] == "/library"
+    assert soup.select_one(".main-nav [aria-current]")["href"] == "/library"
     assert soup.select_one("main .filters") is None
     assert "オーガニック投稿を見る" in response.text
     assert len(pg.calls) == 2  # aggregate + diversified videos, never N+1

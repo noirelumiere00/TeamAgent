@@ -187,7 +187,7 @@ def test_no_empty_shelves(client: TestClient, monkeypatch: pytest.MonkeyPatch) -
     assert page.select_one("h1") is not None
 
 
-@pytest.mark.parametrize("path", ["/", "/search"])
+@pytest.mark.parametrize("path", ["/", "/search", "/library"])
 def test_email_is_escaped(client: TestClient, path: str) -> None:
     email = '<script>alert("email")</script>@example.test'
     response = client.get(
@@ -258,13 +258,15 @@ def test_shell_html_includes_common_header_and_height_css(client: TestClient, pa
     assert portal.PORTAL_STYLE in response.text
 
 
-def test_library_has_return_link_and_keeps_nonce_csp(client: TestClient) -> None:
+def test_library_has_common_header_and_keeps_nonce_csp(client: TestClient) -> None:
     response = client.get("/library", cookies=_auth_cookie())
     assert response.status_code == 200
     page = BeautifulSoup(response.text, "html.parser")
-    assert page.select_one('header .main-nav a[href="/"]').text == "Connect ホーム"
+    assert page.select_one('header .main-nav a[href="/"]') is None
     assert page.select_one('header .brand[href="/library"]') is not None
-    assert page.select_one(".connect-header") is None
+    assert len(page.select(".connect-header")) == 1
+    assert page.select_one('.connect-brand[href="/"]').text == "NewsTV Connect"
+    assert portal.PORTAL_STYLE in page.select_one("style").text
     nonce = page.select_one("style")["nonce"]
     assert f"'nonce-{nonce}'" in response.headers["content-security-policy"]
     assert "'unsafe-inline'" not in response.headers["content-security-policy"]
