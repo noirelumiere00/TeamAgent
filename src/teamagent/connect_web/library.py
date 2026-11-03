@@ -25,6 +25,7 @@ from teamagent.connect_web.library_analysis import (
 )
 from teamagent.connect_web.library_assets import SCRIPT as _SCRIPT
 from teamagent.connect_web.library_assets import STYLE as _STYLE
+from teamagent.connect_web.portal import PORTAL_STYLE, render_header
 from teamagent.ingest.video_library import (
     METRIC_COLUMNS,
     RATE_METRICS,
@@ -241,6 +242,7 @@ def _page(
     title: str,
     body: str,
     *,
+    email: str,
     admin: bool = False,
     current: str = "cases",
     params: Mapping[str, str] | None = None,
@@ -248,7 +250,6 @@ def _page(
 ) -> str:
     params = params or {}
     links = [
-        ("connect", "/", "Connect ホーム"),
         ("home", "/library", "ホーム"),
         ("cases", "/library/cases", "事例一覧"),
         ("videos", "/library/videos", "動画一覧"),
@@ -274,8 +275,11 @@ def _page(
     return (
         '<!doctype html><html lang="ja"><head><meta charset="utf-8">'
         '<meta name="viewport" content="width=device-width,initial-scale=1">'
-        f"<title>{_e(title)} | 動画ライブラリ</title><style>{_STYLE}</style></head><body>"
-        '<header><div class="header-inner"><a class="brand" href="/library">'
+        f"<title>{_e(title)} | 動画ライブラリ</title>"
+        f"<style>{_STYLE}{PORTAL_STYLE}</style></head><body>"
+        + render_header(email, current_path="/library")
+        + '<header class="library-header"><div class="header-inner">'
+        '<a class="brand" href="/library">'
         + brand
         + "</a>"
         + search
@@ -938,7 +942,15 @@ def register_library_routes(
         hero: bool = False,
     ) -> HTMLResponse:
         response = render(
-            _page(title, body, admin=is_admin(email), current=current, params=params, hero=hero)
+            _page(
+                title,
+                body,
+                email=email,
+                admin=is_admin(email),
+                current=current,
+                params=params,
+                hero=hero,
+            )
         )
         response.headers["Content-Security-Policy"] = response.headers[
             "Content-Security-Policy"
