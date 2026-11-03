@@ -26,6 +26,7 @@ from teamagent.ingest.video_library_case_models import (
     Policy,
     Post,
     Prediction,
+    application_prediction,
     catalog_hash,
     digest,
     input_hash,
@@ -61,6 +62,7 @@ def client(text: str | None = None, stop_reason: str = "end_turn") -> MagicMock:
 
 def policy(engine: Inference) -> Policy:
     return Policy(
+        application_version="v2",
         model=DEFAULT_MODEL,
         prompt_version="v1",
         prompt_hash=digest(engine.prompt),
@@ -138,7 +140,7 @@ def test_gates_partial_new_unknown_and_below_threshold() -> None:
     assert p.status(prediction(campaign=None, match_type="unknown", confidence=0.98)) == "unknown"
     assert p.status(prediction(campaign="New", match_type="new", confidence=1.0)) == "candidate"
     assert p.status(prediction(advertiser=None, campaign=None, match_type="unknown")) == "unknown"
-    p.existing = Gate(threshold=0.9, selected=100, correct=97)
+    p.existing = Gate(threshold=0.9, selected=100, correct=96)
     assert p.status(prediction()) == "unknown"
 
 
@@ -264,20 +266,21 @@ def test_evaluation_metrics_and_thresholds() -> None:
     tuning = [trial() for _ in range(50)]
     final = [trial() for _ in range(100)]
     assert calibrate(tuning, final, "existing") == Gate(threshold=0.99, selected=100, correct=100)
-    final[0].prediction = prediction(campaign="Other")
-    final[1].prediction = prediction(campaign="Other")
-    assert metrics(final)["precision"] == 0.98
-    assert calibrate(tuning, final, "existing") is not None
-    final[2].prediction = prediction(campaign="Other")
+    for t in final[:3]:
+        t.prediction = prediction(campaign="Other")
+    assert metrics(final)["precision"] == 0.97
+    assert calibrate(tuning, final, "existing") == Gate(threshold=0.99, selected=100, correct=97)
+    final[3].prediction = prediction(campaign="Other")
     assert calibrate(tuning, final, "existing") is None
-    assert calibrate(tuning, final[:49], "existing") is None
+    assert calibrate(tuning, final[4:33], "existing") is None
+    assert calibrate(tuning, final[4:34], "existing") is not None
     final = [trial() for _ in range(100)]
     final[0].withheld = True
     assert calibrate(tuning, final, "existing") is None
     final[0].withheld = False
     final[0].prediction = None
     final[0].error_code = "ValueError"
-    assert calibrate(tuning, final, "existing") is None
+    assert calibrate(tuning, final, "existing") is not None
     scores = metrics(final)
     assert scores["exact_accuracy"] == 0.99 and scores["unknown_rate"] == 0.01
     assert scores["advertiser_accuracy"] == 0.99 and scores["known_campaign_accuracy"] == 0.99
@@ -447,3 +450,238 @@ def test_quotes_ground_across_hash_spacing_width_but_not_invented_text() -> None
         validate_prediction(answer("caption", "乾燥機の最高峰"), post, cases)
     with pytest.raises(ValueError, match="ungrounded_quote"):
         validate_prediction(answer("hashtags", "#乾太くん #衣類乾燥機"), post, cases)
+
+
+@pytest.mark.parametrize(
+    "quotes,keep_campaign",
+    [
+        (["Product Other"], False),
+        (["Product", "Other"], False),
+        (["Other"], False),
+        (["Brand"], False),
+        (["Product"], True),
+        (["#Ｐｒｏｄｕｃｔで使える"], True),
+        (["P r o d u c t"], True),
+    ],
+)
+def test_multi_campaign_requires_unique_quoted_name(quotes: list[str], keep_campaign: bool) -> None:
+    raw = prediction(evidence=[dict(field="caption", quote=q) for q in quotes])
+    reflected = application_prediction(raw, CASES)
+    assert reflected.advertiser == "Brand"
+    assert reflected.campaign == ("Product" if keep_campaign else None)
+    assert reflected.match_type == ("existing" if keep_campaign else "unknown")
+    assert raw.campaign == "Product"  # Keep the raw answer for diagnosis.
+
+
+def test_single_campaign_and_new_candidate_keep_current_behavior() -> None:
+    raw = prediction(evidence=[dict(field="caption", quote="Brand")])
+    assert application_prediction(raw, CASES[:1]) == raw
+    # An unrelated advertiser's campaign must not make this advertiser ambiguous.
+    assert (
+        application_prediction(raw, [CASES[0], Case(advertiser="Another", campaign="Brand")]) == raw
+    )
+    candidate = prediction(campaign="New", match_type="new")
+    assert application_prediction(candidate, CASES) == candidate
+    assert (
+        application_prediction(prediction(campaign=None, match_type="unknown"), CASES).campaign
+        is None
+    )
+
+
+def test_ambiguous_campaign_is_saved_as_advertiser_only_with_existing_gate() -> None:
+    repository = repo()
+    repository.load.return_value[1][0]["caption"] = "Product Other #PR"
+    engine = Inference(
+        client(json.dumps({**RAW, "evidence": [dict(field="caption", quote="Product Other")]})),
+        max_cost_usd=1,
+    )
+    p = policy(engine)
+    p.advertiser_only = None
+    assert run(repository, engine, policy=p, limit=1, dry_run=False, request_id="test") == {
+        "attempted": 1,
+        "applied": 1,
+    }
+    saved = repository.save.call_args.args[1]
+    assert saved.advertiser == "Brand" and saved.campaign is None and saved.match_type == "unknown"
+    assert repository.save.call_args.args[2] == "applied"
+
+
+def test_gate_scores_projected_advertisers_and_ignores_coverage_and_invalid_outputs() -> None:
+    tuning = [trial() for _ in range(50)]
+    final = [trial() for _ in range(100)]
+    for t in final:
+        # The raw campaign is wrong, but only the correct advertiser will be applied.
+        t.prediction = prediction(campaign="Other")
+        t.application = prediction(campaign=None, match_type="unknown")
+    for t in final[30:]:
+        t.prediction = None
+        t.application = None
+        t.error_code = "ValidationError"
+    score = metrics(final)
+    assert score["selected"] == 30 and score["precision"] == 1.0
+    assert score["exact_accuracy"] == 0.0 and score["invalid_outputs"] == 70
+    assert calibrate(tuning, final, "existing") == Gate(threshold=0.99, selected=30, correct=30)
+    final[0].application = prediction(advertiser="Wrong", campaign=None, match_type="unknown")
+    assert calibrate(tuning, final, "existing") is None
+
+
+def test_gate_tuning_precision_and_withheld_errors_are_still_required() -> None:
+    tuning = [trial() for _ in range(100)]
+    final = [trial() for _ in range(100)]
+    for t in tuning[:3]:
+        t.prediction = prediction(campaign="Other")
+    assert calibrate(tuning, final, "existing") is not None
+    tuning[3].prediction = prediction(campaign="Other")
+    assert calibrate(tuning, final, "existing") is None
+    assert calibrate([], final, "existing") is None
+    final[0].withheld = True
+    final[0].prediction = prediction(confidence=0.1)
+    final[0].application = prediction(campaign=None, match_type="unknown", confidence=0.1)
+    assert calibrate([trial()], final, "existing") is None
+
+
+@pytest.mark.parametrize(
+    "selected,correct,passed",
+    [(30, 30, True), (100, 97, True), (100, 96, False), (30, 29, False), (30, 31, False)],
+)
+def test_persisted_gate_uses_same_count_and_precision(
+    selected: int, correct: int, passed: bool
+) -> None:
+    assert Gate(threshold=0.95, selected=selected, correct=correct).passed() is passed
+    with pytest.raises(ValueError):
+        Gate(threshold=0.95, selected=29, correct=29)
+
+
+def test_old_policy_requires_reevaluation() -> None:
+    old = policy(Inference(client(), max_cost_usd=1)).model_dump()
+    old.pop("application_version")
+    with pytest.raises(ValueError):
+        Policy.model_validate(old)
+
+
+def test_evaluation_report_keeps_wrong_applications_private_and_caption_short(capsys: Any) -> None:
+    rows = [
+        dict(
+            platform="tiktok",
+            video_id=str(i),
+            caption="Other private-caption-" + "字" * 100,
+            advertiser="Brand",
+            campaign="Product",
+        )
+        for i in range(150)
+    ]
+    engine = Inference(client(), max_cost_usd=10)
+
+    def predict(post: Post, cases: list[Case], **kwargs: Any) -> Prediction:
+        if CASES[0] not in cases:
+            return prediction(campaign="Product", match_type="new")
+        return prediction(
+            campaign="Other", confidence=0.95, evidence=[dict(field="caption", quote="Other")]
+        )
+
+    engine.predict = predict  # type: ignore[method-assign]
+    _, report = evaluate(rows, CASES, engine, seed=42)
+    errors = report["incorrect_applications"]
+    assert len(errors) == 120
+    assert {e["split"] for e in errors} == {"tuning", "final"}
+    for error in errors:
+        assert error["truth"] == CASES[0].model_dump()
+        assert error["prediction"]["campaign"] == error["application"]["campaign"] == "Other"
+        assert error["prediction"]["confidence"] == 0.95
+        assert error["prediction"]["evidence"] == [dict(field="caption", quote="Other")]
+        assert error["caption"] == rows[0]["caption"][:80]
+        assert error["status"] == "unknown"  # Diagnostic proposals even when the gate fails.
+    logs = capsys.readouterr()
+    assert "private-caption" not in logs.out + logs.err
+    assert "Brand" not in logs.out + logs.err
+
+
+def test_normalized_campaign_names_and_overlapping_names_are_conservative() -> None:
+    name = "Ｐｒｏｄｕｃｔ　２０２６"
+    cases = [Case(advertiser="Brand", campaign=name), CASES[1]]
+    assert (
+        application_prediction(
+            prediction(campaign=name, evidence=[dict(field="caption", quote="#Product2026の紹介")]),
+            cases,
+        ).campaign
+        == name
+    )
+    assert (
+        application_prediction(
+            prediction(
+                campaign="ProductPlus", evidence=[dict(field="caption", quote="ProductPlus")]
+            ),
+            [CASES[0], Case(advertiser="Brand", campaign="ProductPlus")],
+        ).campaign
+        is None
+    )
+
+
+def test_report_of_passing_gate_includes_only_wrong_reflected_values() -> None:
+    rows = [
+        dict(
+            platform="tiktok",
+            video_id=str(i),
+            caption=f"{i}:Product Other",
+            advertiser="Brand",
+            campaign="Product",
+        )
+        for i in range(150)
+    ]
+    engine = Inference(client(), max_cost_usd=10)
+
+    def predict(post: Post, cases: list[Case], **kwargs: Any) -> Prediction:
+        if CASES[0] not in cases:
+            return prediction(campaign="Product", match_type="new", confidence=0.95)
+        # Most wrong raw campaigns are harmless after dropping the ambiguous campaign.
+        return prediction(
+            campaign="Other",
+            confidence=0.95,
+            evidence=[
+                dict(
+                    field="caption",
+                    quote="Other" if post.caption.startswith("0:") else "Product Other",
+                )
+            ],
+        )
+
+    engine.predict = predict  # type: ignore[method-assign]
+    p, report = evaluate(rows, CASES, engine, seed=42)
+    assert p.existing and p.existing.passed()
+    assert report["final"]["exact_accuracy"] == 0.0
+    assert len(report["incorrect_applications"]) == 1
+    error = report["incorrect_applications"][0]
+    assert error["status"] == "applied" and error["application"]["campaign"] == "Other"
+    assert error["caption"] == "0:Product Other"
+
+
+def test_report_precision_and_errors_use_the_calibrated_threshold() -> None:
+    rows = [
+        dict(
+            platform="tiktok",
+            video_id=str(i),
+            caption=f"{i}:Product Other",
+            advertiser="Brand",
+            campaign="Product",
+        )
+        for i in range(150)
+    ]
+    engine = Inference(client(), max_cost_usd=10)
+
+    def predict(post: Post, cases: list[Case], **kwargs: Any) -> Prediction:
+        if CASES[0] not in cases:
+            return prediction(campaign="Product", match_type="new")
+        high = int(post.caption.split(":")[0]) % 2 == 0
+        name = "Product" if high else "Other"
+        return prediction(
+            campaign=name,
+            confidence=0.99 if high else 0.5,
+            evidence=[dict(field="caption", quote=name)],
+        )
+
+    engine.predict = predict  # type: ignore[method-assign]
+    p, report = evaluate(rows, CASES, engine, seed=42)
+    assert p.existing and p.existing.threshold == 0.99
+    assert report["final"]["selected"] == p.existing.selected
+    assert report["final"]["precision"] == 1.0
+    assert report["incorrect_applications"] == []

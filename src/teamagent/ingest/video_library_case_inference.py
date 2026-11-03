@@ -21,6 +21,7 @@ from teamagent.ingest.video_library_case_models import (
     Policy,
     Post,
     Prediction,
+    application_prediction,
     input_hash,
     validate_prediction,
 )
@@ -118,7 +119,12 @@ def run(
                 )
                 if not dry_run:
                     if not repository.save(
-                        row, result, status, fingerprint, inference.client.model_id, cases
+                        row,
+                        application_prediction(result, cases),
+                        status,
+                        fingerprint,
+                        inference.client.model_id,
+                        cases,
                     ):
                         counts["stale"] += 1
                         continue

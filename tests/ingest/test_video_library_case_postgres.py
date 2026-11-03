@@ -9,7 +9,7 @@ import psycopg
 import pytest
 
 from teamagent.connect_web.library import search_campaigns
-from teamagent.ingest.video_library_case_models import Case, Prediction
+from teamagent.ingest.video_library_case_models import Case, Prediction, application_prediction
 from teamagent.ingest.video_library_case_repository import CaseRepository
 from tests.ingest.test_video_library_postgres import _DSN, NOW, db, seed_batch
 
@@ -157,3 +157,24 @@ def test_links_rls_human_rejection_stale_inputs_and_settings(db: tuple[Any, Any]
             "SELECT reloptions FROM pg_class WHERE oid='vl_videos_effective'::regclass"
         ).fetchone()["reloptions"]
     )
+
+
+def test_ambiguous_campaign_applies_only_advertiser_and_survives_sheet_sync(
+    db: tuple[Any, Any],
+) -> None:
+    conn, sheet_repo = db
+    repo, row = prepare(conn, sheet_repo)
+    conn.execute("INSERT INTO vl_campaigns(advertiser,campaign) VALUES ('test','other')")
+    conn.execute("UPDATE vl_videos SET caption='test other #PR'")
+    row["caption"] = "test other #PR"
+    projected = application_prediction(
+        result(evidence=[dict(field="caption", quote="test other")]), repo.load()[0]
+    )
+    assert repo.save(row, projected, "applied", "ambiguous", "haiku", repo.load()[0])
+    assert effective(conn)["advertiser"] == "test"
+    assert effective(conn)["campaign"] is None and effective(conn)["case_inferred"] is True
+    assert search_campaigns(conn, {}, admin=True) == []
+    batch = seed_batch()
+    batch.videos[0].caption = "test other #PR"
+    sheet_repo.save(batch, request_id="resync-ambiguous", started_at=NOW)
+    assert effective(conn)["advertiser"] == "test" and effective(conn)["campaign"] is None

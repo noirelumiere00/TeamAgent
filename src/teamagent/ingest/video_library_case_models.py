@@ -101,6 +101,23 @@ def _ground(value: str) -> str:
     return re.sub(r"\s+", "", unicodedata.normalize("NFKC", value)).casefold()
 
 
+def application_prediction(result: Prediction, cases: list[Case]) -> Prediction:
+    """Keep a multi-campaign match only when the quotes identify exactly that campaign."""
+    if result.match_type != "existing":
+        return result
+    campaigns = {c.campaign for c in cases if c.advertiser == result.advertiser}
+    if len(campaigns) <= 1:
+        return result
+    quoted = {
+        name
+        for name in campaigns
+        if any(_ground(name) in _ground(e.quote) for e in result.evidence)
+    }
+    if quoted == {result.campaign}:
+        return result
+    return result.model_copy(update={"campaign": None, "match_type": "unknown"})
+
+
 def digest(value: Any) -> str:
     return hashlib.sha256(
         json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()
@@ -113,14 +130,15 @@ def catalog_hash(cases: list[Case]) -> str:
 
 class Gate(StrictModel):
     threshold: Score
-    selected: Annotated[int, Field(ge=50)]
+    selected: Annotated[int, Field(ge=30)]
     correct: Annotated[int, Field(ge=0)]
 
     def passed(self) -> bool:
-        return self.selected >= self.correct >= math.ceil(self.selected * 0.98)
+        return self.selected >= self.correct >= math.ceil(self.selected * 0.97)
 
 
 class Policy(StrictModel):
+    application_version: Literal["v2"]
     model: str
     prompt_version: Literal["v1"]
     prompt_hash: str

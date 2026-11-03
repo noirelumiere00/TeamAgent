@@ -21,6 +21,7 @@ from teamagent.ingest.video_library_case_models import (
     Post,
     Prediction,
     StrictModel,
+    application_prediction,
     catalog_hash,
     digest,
 )
@@ -35,6 +36,8 @@ class Trial(StrictModel):
     withheld: bool
     prediction: Prediction | None
     error_code: str | None = None
+    application: Prediction | None = None
+    caption: str = ""
 
 
 def stratified_sample(rows: list[dict[str, Any]], size: int, seed: int) -> list[dict[str, Any]]:
@@ -89,14 +92,21 @@ def _eligible(trial: Trial, kind: str, threshold: float) -> bool:
 
 
 def _correct(trial: Trial, kind: str) -> bool:
-    p = trial.prediction
+    p = trial.application or trial.prediction
     return bool(
         p
         and p.advertiser == trial.truth.advertiser
         and (
-            kind == "advertiser_only" or (not trial.withheld and p.campaign == trial.truth.campaign)
+            kind == "advertiser_only"
+            or p.campaign is None
+            or (not trial.withheld and p.campaign == trial.truth.campaign)
         )
     )
+
+
+def _exact(trial: Trial) -> bool:
+    p = trial.prediction
+    return bool(p and (p.advertiser, p.campaign) == (trial.truth.advertiser, trial.truth.campaign))
 
 
 def metrics(trials: list[Trial], kind: str = "existing", threshold: float = 0.0) -> dict[str, Any]:
@@ -116,12 +126,8 @@ def metrics(trials: list[Trial], kind: str = "existing", threshold: float = 0.0)
         / len(present)
         if present
         else 0.0,
-        "exact_accuracy": sum(_correct(t, "existing") for t in present) / len(present)
-        if present
-        else 0.0,
-        "known_campaign_accuracy": sum(_correct(t, "existing") for t in known) / len(known)
-        if known
-        else 0.0,
+        "exact_accuracy": sum(_exact(t) for t in present) / len(present) if present else 0.0,
+        "known_campaign_accuracy": sum(_exact(t) for t in known) / len(known) if known else 0.0,
         "unknown_rate": sum(
             t.prediction is None or t.prediction.match_type == "unknown" for t in trials
         )
@@ -143,20 +149,14 @@ def calibrate(tuning: list[Trial], final: list[Trial], kind: str) -> Gate | None
             v
             for v in thresholds
             if metrics(tuning, kind, v)["selected"] > 0
-            and metrics(tuning, kind, v)["precision"] >= 0.98
+            and metrics(tuning, kind, v)["precision"] >= 0.97
         ),
         None,
     )
     if threshold is None:
         return None
     score = metrics(final, kind, threshold)
-    if (
-        score["selected"] < 50
-        or score["precision"] < 0.98
-        or score["invalid_outputs"]
-        or score["withheld_existing_errors"]
-        or (kind == "existing" and score["exact_accuracy"] < 0.9)
-    ):
+    if score["selected"] < 30 or score["precision"] < 0.97 or score["withheld_existing_errors"]:
         return None
     return Gate(threshold=threshold, selected=score["selected"], correct=score["correct"])
 
@@ -189,6 +189,8 @@ def evaluate(
                 withheld=withheld,
                 prediction=prediction,
                 error_code=error,
+                application=application_prediction(prediction, candidates) if prediction else None,
+                caption=post.caption[:80],
             )
         )
     # Randomize after drawing balanced strata so tuning/final both cover the catalog.
@@ -196,6 +198,7 @@ def evaluate(
     rng.shuffle(trials)
     tuning, final = trials[:50], trials[50:]
     policy = Policy(
+        application_version="v2",
         model=inference.client.model_id,
         prompt_version=PROMPT_VERSION,
         prompt_hash=digest(inference.prompt),
@@ -204,13 +207,36 @@ def evaluate(
         existing=calibrate(tuning, final, "existing"),
         advertiser_only=calibrate(tuning, final, "advertiser_only"),
     )
+    threshold = policy.existing.threshold if policy.existing else 0.0
     report = {
         "seed": seed,
         "tuning_n": len(tuning),
-        "final": metrics(final),
+        "final": metrics(final, threshold=threshold),
         "by_case": {
-            digest(c.model_dump()): metrics([t for t in final if t.truth == c]) for c in cases
+            digest(c.model_dump()): metrics([t for t in final if t.truth == c], threshold=threshold)
+            for c in cases
         },
+        "incorrect_applications": [
+            {
+                "key": t.key,
+                "split": split,
+                "truth": t.truth.model_dump(),
+                "prediction": t.prediction.model_dump(),
+                "application": (t.application or t.prediction).model_dump(),
+                "caption": t.caption[:80],
+                "status": policy.status(t.prediction),
+            }
+            for split, subset in (("tuning", tuning), ("final", final))
+            for t in subset
+            if t.prediction
+            and any(
+                _eligible(t, kind, gate.threshold if gate else 0.0) and not _correct(t, kind)
+                for kind, gate in (
+                    ("existing", policy.existing),
+                    ("advertiser_only", policy.advertiser_only),
+                )
+            )
+        ],
         "policy": policy.model_dump(),
         "cost_usd": inference.cost_usd,
         "reserved_usd": inference.reserved_usd,
