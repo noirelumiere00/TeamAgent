@@ -71,6 +71,8 @@ class Pg:
             for i in range(size)
         ]
         self.calls: list[Any] = []
+        self.paused = False
+        self.consecutive_failures = 0
 
     @contextmanager
     def connection(self, **kwargs: Any) -> Any:
@@ -78,9 +80,20 @@ class Pg:
         assert kwargs["user_role"] == "admin"
         yield self
 
-    def execute(self, sql: str, params: Any) -> MagicMock:
+    def commit(self) -> None:
+        pass
+
+    def execute(self, sql: str, params: Any = None) -> MagicMock:
         self.calls.append((sql, params))
-        return MagicMock(fetchall=lambda: self.rows)
+        result = MagicMock(fetchall=lambda: self.rows)
+        if "pg_try_advisory_lock" in sql:
+            result.fetchone.return_value = {"locked": True}
+        elif "SELECT * FROM vl_public_fetch_control" in sql:
+            result.fetchone.return_value = {"paused": self.paused}
+        elif "consecutive_failures=CASE" in sql:
+            self.consecutive_failures = 0 if params[0] else self.consecutive_failures + 1
+            self.paused |= params[1] is not None or self.consecutive_failures >= 5
+        return result
 
 
 def test_limit_interval_and_s3_key() -> None:
@@ -104,12 +117,14 @@ def test_limit_interval_and_s3_key() -> None:
     assert s3.put_object.call_args.kwargs["Key"] == "video-library/thumbs/tiktok/2.jpg"
     assert THUMB_PREFIX == "video-library/thumbs/"
     assert pg.calls[0][1] == (3,)
-    assert pg.calls[-1][1] == ("video-library/thumbs/tiktok/2.jpg", "tiktok", "2")
+    updates = [params for sql, params in pg.calls if "UPDATE vl_videos SET thumbnail_s3_key" in sql]
+    assert updates[-1] == ("video-library/thumbs/tiktok/2.jpg", "tiktok", "2")
 
 
 @pytest.mark.parametrize(
     "status,expected",
     [
+        (403, {"attempted": 1, "http_403": 1}),
         (429, {"attempted": 1, "http_429": 1}),
         (500, {"attempted": 5, "http_500": 5, "consecutive_failure_stop": 1}),
     ],
@@ -121,7 +136,7 @@ def test_http_failure_stops(status: int, expected: dict[str, int]) -> None:
         counts = thumbs.fill_thumbnails(pg, storage, client, limit=10, sleep=lambda _: None)
     assert counts == expected
     storage.put.assert_not_called()
-    assert len(pg.calls) == 1
+    assert not any("UPDATE vl_videos" in sql for sql, _ in pg.calls)
 
 
 def test_no_json_skips_and_is_retried_next_run() -> None:
@@ -134,7 +149,7 @@ def test_no_json_skips_and_is_retried_next_run() -> None:
             "attempted": 1,
             "cover_missing": 1,
         }
-    assert len(pg.calls) == 1
+    assert not any("UPDATE vl_videos" in sql for sql, _ in pg.calls)
     storage.put.assert_not_called()
 
 
@@ -188,7 +203,7 @@ def test_failure_logs_counts_without_urls_or_exception_text(
     assert logged.info.call_args.kwargs["counts"] == dict(counts)
     output = str(logged.mock_calls)
     assert "private caption" not in output and "https://" not in output
-    assert len(pg.calls) == 1  # A failed upload never records a thumbnail in the DB.
+    assert not any("UPDATE vl_videos" in sql for sql, _ in pg.calls)
 
 
 def test_non_image_response_is_not_saved() -> None:
@@ -214,3 +229,27 @@ def test_page_user_agent_is_a_full_browser_string() -> None:
     )
     with video_library_page.page_client() as client:
         assert client.headers["User-Agent"] == video_library_page.PAGE_USER_AGENT
+
+
+def test_shared_pause_prevents_thumbnail_http() -> None:
+    pg = Pg(1)
+    pg.paused = True
+    transport = MagicMock(return_value=httpx.Response(200, text=page({"cover": COVER})))
+    with httpx.Client(transport=httpx.MockTransport(transport)) as client:
+        assert thumbs.fill_thumbnails(pg, MagicMock(), client, limit=1) == {"fetch_paused": 1}
+    transport.assert_not_called()
+
+
+def test_thumbnail_challenge_persists_shared_pause() -> None:
+    pg = Pg(2)
+    with httpx.Client(
+        transport=httpx.MockTransport(
+            lambda r: httpx.Response(200, text="<html>Security challenge</html>")
+        )
+    ) as client:
+        assert thumbs.fill_thumbnails(pg, MagicMock(), client, limit=2) == {
+            "attempted": 1,
+            "challenge": 1,
+        }
+        assert pg.paused
+        assert thumbs.fill_thumbnails(pg, MagicMock(), client, limit=2) == {"fetch_paused": 1}

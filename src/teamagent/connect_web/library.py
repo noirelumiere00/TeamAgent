@@ -162,6 +162,19 @@ def _where(params: Mapping[str, str], admin: bool) -> tuple[str, list[Any], int,
                 raise HTTPException(400, "絞り込みが長すぎます")
             clauses.append(f"v.{field} = %s")
             values.append(params[field])
+    for field in ("pure_organic", "general", "url_import"):
+        if params.get(field, "") not in {"", "yes"}:
+            raise HTTPException(400, "絞り込み指定が不正です")
+    if params.get("general") == "yes":
+        clauses.append(_GENERAL_POST)
+    if params.get("pure_organic") == "yes":
+        clauses.append("""NOT v.is_pr AND EXISTS (SELECT 1 FROM vl_videos pv
+            WHERE pv.platform=v.platform AND pv.video_id=v.video_id
+            AND pv.page_is_ad=false AND pv.page_disclosure->'disclosures'='[]'::jsonb)""")
+    if params.get("url_import") == "yes":
+        clauses.append("""EXISTS (SELECT 1 FROM vl_videos pv
+            WHERE pv.platform=v.platform AND pv.video_id=v.video_id
+            AND 'url_manual'=ANY(pv.ingest_sources))""")
     if params.get("unassigned") == "yes":
         clauses.append("(COALESCE(v.advertiser, '')='' OR COALESCE(v.campaign, '')='')")
     group, tag = params.get("tag_group", ""), params.get("tag", "")
@@ -194,11 +207,40 @@ def _where(params: Mapping[str, str], admin: bool) -> tuple[str, list[Any], int,
     return " AND ".join(clauses) or "true", values, page, orders[sort]
 
 
-_METRICS_JOIN = """LEFT JOIN LATERAL (
-    SELECT * FROM vl_metrics m0 WHERE m0.platform=v.platform AND m0.video_id=v.video_id
-    ORDER BY captured_on DESC LIMIT 1
-) m ON true"""
-_METRIC_SELECT = ", ".join(f"m.{column}" for column in METRIC_COLUMNS)
+_GENERAL_POST = """(v.origin='external' AND NOT v.is_pr
+    AND COALESCE(v.advertiser,'')='' AND COALESCE(v.campaign,'')='')"""
+_PAGE_COLUMNS = (
+    "page_is_ad",
+    "page_disclosure",
+    "page_observed_at",
+    "page_fetch_status",
+    "page_last_attempted_at",
+    "page_fetch_error_code",
+    "ingest_sources",
+)
+# Choose a whole snapshot by route; never coalesce individual sheet/public metrics.
+_SHEET_METRICS = ", ".join(f"m0.{c}" for c in METRIC_COLUMNS)
+_PUBLIC_METRICS = ", ".join(
+    f"p0.{c}::double precision" if c.startswith("total_") else "NULL::double precision"
+    for c in METRIC_COLUMNS
+)
+# Column names come only from the fixed metric mapping, never from request input.
+_METRICS_JOIN = f"""LEFT JOIN vl_videos pv
+    ON pv.platform=v.platform AND pv.video_id=v.video_id
+    LEFT JOIN LATERAL (
+    SELECT snapshot.* FROM (
+        SELECT {_SHEET_METRICS},
+            m0.captured_on, NULL::timestamptz AS captured_at, 'sheet' AS metric_source
+        FROM vl_metrics m0 WHERE m0.platform=v.platform AND m0.video_id=v.video_id
+        UNION ALL
+        SELECT {_PUBLIC_METRICS}, p0.captured_on,p0.captured_at,'public_page' AS metric_source
+        FROM vl_public_metrics p0 WHERE p0.platform=v.platform AND p0.video_id=v.video_id
+        AND NOT ('sheet'=ANY(pv.ingest_sources))
+    ) snapshot ORDER BY (metric_source='sheet') DESC, captured_on DESC LIMIT 1
+) m ON true"""  # nosec B608
+_METRIC_SELECT = ", ".join(f"m.{column}" for column in METRIC_COLUMNS) + (
+    ", m.metric_source, m.captured_at, " + ", ".join(f"pv.{column}" for column in _PAGE_COLUMNS)
+)
 _CAMPAIGN_TOTALS_JOIN = """LEFT JOIN campaign_totals ct
     ON ct.advertiser=v.advertiser AND ct.campaign=v.campaign"""
 
@@ -212,7 +254,7 @@ def _campaign_totals_cte(admin: bool) -> str:
             AS campaign_total_plays
         FROM vl_videos_effective v {_METRICS_JOIN} WHERE {where}
         AND COALESCE(v.advertiser,'')<>'' AND COALESCE(v.campaign,'')<>''
-        GROUP BY advertiser, campaign)"""  # nosec B608
+        GROUP BY v.advertiser, v.campaign)"""  # nosec B608
 
 
 def search_videos(conn: Any, params: Mapping[str, str], *, admin: bool) -> dict[str, Any]:
@@ -268,6 +310,7 @@ def _page(
         ("home", "/library", "おすすめ"),
         ("cases", "/library/cases", "事例一覧"),
         ("videos", "/library/videos", "動画一覧"),
+        ("import", "/library/import", "URL取り込み"),
     ]
     nav = (
         '<nav class="main-nav" aria-label="ライブラリの表示切替">'
@@ -315,7 +358,7 @@ def _page(
         + brand
         + "</a>"
         + _category_nav(params.get("category", ""), current=current, footer=True)
-        + "<p>数値は毎平日 18 時に更新<span>社内限定</span></p></footer>"
+        + "<p>シート数値は毎日 18 時に更新・公開数値は取得時点<span>社内限定</span></p></footer>"
         + f"<script>{_SCRIPT}</script></body></html>"
     )
 
@@ -484,6 +527,42 @@ def _inference_badge(row: Mapping[str, Any]) -> str:
     )
 
 
+def _page_evidence(row: Mapping[str, Any]) -> str:
+    disclosure = row.get("page_disclosure") or {}
+    body = '<section class="page-evidence"><h3>#PR・広告の根拠</h3>'
+    body += "<p>#PR: " + ("あり（投稿文の #PR）" if row.get("is_pr") else "なし") + "</p>"
+    body += "<p>公開ページ観測日時: " + _e(row.get("page_observed_at") or "未取得") + "</p>"
+    ad = row.get("page_is_ad")
+    body += (
+        "<p>広告配信: " + ("あり" if ad is True else "なし" if ad is False else "未確認") + "</p>"
+    )
+    if disclosure.get("caption") is not None:
+        body += "<p>取得した投稿文: " + _e(disclosure["caption"]) + "</p>"
+    if disclosure.get("disclosures"):
+        body += "<p>補助の広告表記: " + _e(" / ".join(disclosure["disclosures"])) + "</p>"
+    if row.get("page_fetch_status") == "failed":
+        body += "<p>直近の取得に失敗しました。数値は最終正常取得時の値です。</p>"
+    return body + "</section>"
+
+
+def _post_badges(row: Mapping[str, Any]) -> str:
+    labels = []
+    if (
+        row.get("origin") == "external"
+        and not row.get("is_pr")
+        and not row.get("advertiser")
+        and not row.get("campaign")
+    ):
+        labels.append("一般投稿")
+    if row.get("is_pr"):
+        labels.append("#PR")
+        if not row.get("advertiser") or not row.get("campaign"):
+            labels.append("案件未設定")
+    if row.get("page_is_ad") is True:
+        labels.append("広告配信あり")
+    return "".join(f'<small class="badge">{label}</small>' for label in labels)
+
+
 def _row_tags(row: Mapping[str, Any]) -> str:
     body = (
         '<div class="tag-groups"><div class="tag-group"><h3>区分</h3>'
@@ -578,7 +657,7 @@ def _card(
         f'<p class="card-context" title="{_e(context_title)}">{context}{_inference_badge(row)}</p>'
         f'<h3 title="{_e(title)}">{_e(title)}</h3><p class="card-meta">'
         f'<span class="meta-source">{meta}</span></p><p class="card-plays">{"".join(plays)}</p>'
-        f'<div class="card-tags">{tags}</div></div></a>{selection}</article>'
+        f'<div class="card-tags">{_post_badges(row)}{tags}</div></div></a>{selection}</article>'
     )
 
 
@@ -670,6 +749,16 @@ def _workspace(body: str, params: Mapping[str, str], *, current: str, nav: str) 
         + _select("pr", [("", "すべて"), ("yes", "PRあり"), ("no", "PRなし")], params.get("pr"))
         + "</label></div>"
     )
+    if not catalog:
+        for field, label in (
+            ("pure_organic", "純オーガニックのみ"),
+            ("general", "一般投稿"),
+            ("url_import", "URL 取り込み"),
+        ):
+            checked = " checked" if params.get(field) == "yes" else ""
+            sidebar += (
+                f'<label><input type="checkbox" name="{field}" value="yes"{checked}>{label}</label>'
+            )
     for key in ("advertiser", "campaign", "unassigned", "tag_group", "tag"):
         if params.get(key):
             sidebar += f'<input type="hidden" name="{key}" value="{_e(params[key])}">'
@@ -691,6 +780,9 @@ def _workspace(body: str, params: Mapping[str, str], *, current: str, nav: str) 
         "campaign": "施策",
         "tag": "タグ",
         "unassigned": "施策未設定",
+        "pure_organic": "純オーガニックのみ",
+        "general": "一般投稿",
+        "url_import": "URL 取り込み",
     }
     active = []
     for key, label in labels.items():
@@ -799,6 +891,8 @@ def diversify(rows: list[Any], limit: int = 12) -> list[Any]:
 
 def featured_videos(conn: Any, params: Mapping[str, str], *, admin: bool) -> list[Any]:
     where, values, _, _ = _where({**params, "sort": "plays"}, admin)
+    if params.get("general") != "yes":
+        where += " AND NOT " + _GENERAL_POST
     # Rank each campaign/account before the bound, so a posting burst cannot fill the pool.
     sql = f"""{_campaign_totals_cte(admin)}, ranked AS (
         SELECT v.*, {_METRIC_SELECT}, ct.campaign_total_plays,
@@ -848,7 +942,7 @@ def _campaign_card(row: Mapping[str, Any]) -> str:
     )
 
 
-def archive_home(cases: list[Any], videos: list[Any]) -> str:
+def archive_home(cases: list[Any], videos: list[Any], general: list[Any] | None = None) -> str:
     # Reuse one aggregate result for every shelf, without a query per category.
     ranked = sorted(cases, key=lambda r: r.get("total_plays") or 0, reverse=True)
     pickup = sorted(
@@ -908,6 +1002,15 @@ def archive_home(cases: list[Any], videos: list[Any]) -> str:
     )
     body += '<div class="video-grid video-shelf">' + "".join(_video_card(r) for r in videos)
     body += "</div></section>"
+    if general:
+        body += '<section class="archive-section" id="general">' + _section_heading(
+            "GENERAL POSTS",
+            "一般投稿",
+            "外部の一般投稿を、社内の参考資料に。",
+            "/library/videos?general=yes",
+        )
+        body += '<div class="video-grid video-shelf">' + "".join(_video_card(r) for r in general)
+        body += "</div></section>"
     for code in ("media", "tto", "kirinuki", "organic", "other", None):
         rows = [r for r in ranked if code == r["primary_category"]][:4]
         if not rows:
@@ -1081,9 +1184,10 @@ def register_library_routes(
         with connection(email) as conn:
             cases = search_campaigns(conn, {}, admin=is_admin(email))
             videos = featured_videos(conn, {}, admin=is_admin(email))
+            general = featured_videos(conn, {"general": "yes"}, admin=is_admin(email))
         return page(
             "動画の事例を、次のアイデアに。",
-            archive_home(cases, videos),
+            archive_home(cases, videos, general),
             email,
             "home",
             hero=True,
@@ -1244,7 +1348,8 @@ def register_library_routes(
         )
         if isinstance(row.get("posted_at"), datetime):
             body += f'<p class="posted-date muted">{_day(row["posted_at"])}</p>'
-        body += _inference_badge(row) + _row_tags(row)
+        body += _post_badges(row) + _inference_badge(row) + _row_tags(row)
+        body += _page_evidence(row)
         if str(row.get("caption") or "").strip():
             body += "<h3>投稿文</h3><pre>" + _e(row["caption"]) + "</pre>"
         if row.get("advertiser") and row.get("campaign"):
@@ -1259,7 +1364,18 @@ def register_library_routes(
             + _e(row.get("captured_on") or "不明")
             + '</p><div class="metric-groups">'
         )
-        for family, label in (("organic", "オーガニック"), ("total", "総計"), ("ad", "広告")):
+        public = row.get("metric_source") == "public_page"
+        if public:
+            body += (
+                "<p>公開ページの数値（取得日時: " + _e(row.get("captured_at") or "不明") + "）</p>"
+            )
+        for family, label in (
+            ("organic", "オーガニック"),
+            ("total", "公開ページの数値" if public else "総計"),
+            ("ad", "広告"),
+        ):
+            if public and family != "total":
+                continue
             if family == "ad":
                 body += (
                     '<details class="metric-group paid"><summary><h2>広告</h2><span>'
@@ -1393,7 +1509,7 @@ def register_library_routes(
             "admin",
         )
 
-    async def form_data(request: Request) -> dict[str, str]:
+    async def form_data(request: Request, *, import_form: bool = False) -> dict[str, str]:
         # Same exact-origin check as /admin/analyze, also for URL-encoded admin forms.
         base = urlsplit(os.environ.get("CONNECT_BASE_URL") or str(request.base_url))
         if request.headers.get("origin") != f"{base.scheme}://{base.netloc}":
@@ -1406,7 +1522,7 @@ def register_library_routes(
         raw = bytearray()
         async for chunk in request.stream():
             raw.extend(chunk)
-            if len(raw) > 8192:
+            if len(raw) > (1024 * 1024 if import_form else 8192):
                 raise HTTPException(413)
         from urllib.parse import parse_qs
 
@@ -1415,6 +1531,15 @@ def register_library_routes(
         except (UnicodeError, ValueError):
             raise HTTPException(400) from None
         if any(len(values) != 1 for values in parsed.values()):
+            raise HTTPException(400)
+        if import_form and set(parsed) - {
+            "urls",
+            "case",
+            "action",
+            "idempotency_key",
+            "advertiser",
+            "campaign",
+        }:
             raise HTTPException(400)
         return {key: values[0] for key, values in parsed.items()}
 
@@ -1510,4 +1635,15 @@ def register_library_routes(
             )
         return RedirectResponse("/library/admin/accounts", status_code=303)
 
+    from teamagent.connect_web.library_import import register_import_routes
+
+    register_import_routes(
+        router,
+        identity=identity,
+        connection=connection,
+        get_pg=get_pg,
+        page=page,
+        form_data=form_data,
+        is_admin=is_admin,
+    )
     app.include_router(router)

@@ -93,6 +93,12 @@ def page_client() -> httpx.Client:
     return httpx.Client(timeout=20, follow_redirects=False, headers={"User-Agent": PAGE_USER_AGENT})
 
 
+def page_is_challenge(page: str) -> bool:
+    return any(
+        marker in page.lower() for marker in ("captcha", "verify to continue", "security challenge")
+    )
+
+
 def fetch_page(client: httpx.Client, url: str) -> str:
     with client.stream(
         "GET", url, follow_redirects=False, timeout=20, headers={"User-Agent": PAGE_USER_AGENT}

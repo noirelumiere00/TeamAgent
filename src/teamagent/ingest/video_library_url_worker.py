@@ -19,13 +19,17 @@ from teamagent.adapters.pgvector_client import PgVectorClient
 from teamagent.adapters.video_library_page import page_client
 from teamagent.adapters.video_library_storage import VideoLibraryStorage
 from teamagent.ingest.video_library_url_import import process_url
-from teamagent.ingest.video_library_url_repository import URLImportRepository
+from teamagent.ingest.video_library_url_repository import (
+    URLImportRepository,
+    rate_limit_cooldown_seconds,
+)
 from teamagent.observability.logging_config import configure_logging
 
 logger = structlog.get_logger(__name__)
 
 
 def settings() -> tuple[int, int]:
+    rate_limit_cooldown_seconds()
     limit = int(os.environ.get("VIDEO_LIBRARY_IMPORT_DAILY_LIMIT", "300"))
     stale = int(os.environ.get("VIDEO_LIBRARY_IMPORT_STALE_SECONDS", "600"))
     if limit < 0 or stale < 1:

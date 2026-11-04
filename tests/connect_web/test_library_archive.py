@@ -79,15 +79,15 @@ def test_large_home_two_queries_and_limited_shelves(setup: tuple[TestClient, Pg]
     assert sum(not v["thumbnail_s3_key"] for v in large.videos) == 280
     assert sum(c["categories"][0] in (None, "organic") for c in large.cases) == 48
     soup = BeautifulSoup(client.get("/library", cookies=_auth_cookie()).text, "html.parser")
-    assert len(large.calls) == 2
-    assert sum("GROUP BY v.advertiser" in q for q, _ in large.calls) == 1
+    assert len(large.calls) == 3
+    assert sum(q.startswith("WITH categorized AS (") for q, _ in large.calls) == 1
     assert len(soup.select("#pickup .card")) == 5
     assert len(soup.select("#new .card")) == 8
     assert len(soup.select("#trending .card")) == 12
     assert all(len(s.select(".card")) <= 4 for s in soup.select(".category-section"))
     assert soup.select_one(".workspace .sidebar") is not None
     assert "すべての事例を見る（55件）" in soup.text
-    assert "数値は毎平日 18 時に更新" in soup.footer.text
+    assert "数値は毎日 18 時に更新" in soup.footer.text
     assert "社内限定" in soup.footer.text
 
 
@@ -416,6 +416,7 @@ def test_library_navigation_keeps_destinations_current_and_admin_gate(
         ("おすすめ", "/library"),
         ("事例一覧", "/library/cases"),
         ("動画一覧", "/library/videos"),
+        ("URL取り込み", "/library/import"),
     ]
     assert len(nav.select("[aria-current]")) == 1
     assert nav.select_one('[aria-current="page"]')["href"] == current
@@ -478,7 +479,7 @@ def test_workspace_submits_existing_parameters_and_shows_active_filters(
     for control in form.select("input[name], select[name]"):
         if control.name == "select":
             submitted[control["name"]] = control.select_one("option[selected]")["value"]
-        elif control.get("type") != "radio" or control.has_attr("checked"):
+        elif control.get("type") not in {"radio", "checkbox"} or control.has_attr("checked"):
             submitted[control["name"]] = control.get("value", "")
     assert submitted == {k: v for k, v in params.items() if k != "page"} | {"pr": "yes"}
     active = form.select_one(".active-filters")
@@ -542,11 +543,12 @@ def test_video_card_queries_aggregate_visible_campaign_before_filtering(
     catalog_pg(pg)
     assert client.get(path, cookies=_auth_cookie()).status_code == 200
     queries = [sql for sql, _ in pg.calls if sql.startswith("WITH campaign_totals AS (")]
-    assert len(queries) == 1
-    totals, selection = queries[0].split("GROUP BY advertiser, campaign)", 1)
+    assert len(queries) == (2 if path == "/library" else 1)
+    totals, selection = queries[0].split("GROUP BY v.advertiser, v.campaign)", 1)
     assert "WHERE true" in totals if admin else "WHERE NOT v.is_private" in totals
     assert "count(m.total_plays)=count(*)" in totals
-    assert "ORDER BY captured_on DESC LIMIT 1" in totals
+    assert "captured_on DESC LIMIT 1" in totals
+    assert "vl_public_metrics" in totals
     assert "%s" not in totals and "needle" not in queries[0]
     assert "ct.campaign_total_plays" in selection
     assert "LEFT JOIN campaign_totals ct" in selection

@@ -37,7 +37,7 @@ def catalog_pg(pg: Pg) -> None:
 
     def execute(query: str, params: Any = None) -> MagicMock:
         result = original(query, params)
-        if "GROUP BY v.advertiser" in query:
+        if query.startswith("WITH categorized AS ("):
             result.fetchall.return_value = [case_row(pg)]
         return result
 
@@ -62,7 +62,7 @@ def test_catalog_case_links_copy_and_all_videos(setup: tuple[TestClient, Pg]) ->
     assert soup.select_one(".main-nav [aria-current]")["href"] == "/library"
     assert soup.select_one(".workspace .sidebar") is not None
     assert "オーガニック投稿を見る" in response.text
-    assert len(pg.calls) == 2  # aggregate + diversified videos, never N+1
+    assert len(pg.calls) == 3  # aggregate + featured + general shelf, never N+1
     response = client.get(path, cookies=_auth_cookie())
     soup = BeautifulSoup(response.text, "html.parser")
     summary = soup.select_one("#campaign-copy").text

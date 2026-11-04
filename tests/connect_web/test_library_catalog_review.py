@@ -71,7 +71,7 @@ class LargeCatalogPg(Pg):
                 {"code": code, "display_name": label}
                 for code, label in library.CATEGORY_LABELS.items()
             ]
-        elif "GROUP BY v.advertiser" in query:
+        elif query.startswith("WITH categorized AS ("):
             result.fetchall.return_value = (
                 self.cases[:1] if "v.advertiser = %s" in query else self.cases
             )

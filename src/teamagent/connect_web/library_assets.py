@@ -1,6 +1,21 @@
 """Self-contained library styles and behavior, nonced by the existing HTML renderer."""
 
 STYLE = """
+.import-workspace{max-width:1000px;margin:24px auto;line-height:1.7}
+.import-workspace form{display:grid;gap:14px;margin:20px 0}
+.import-workspace label{display:grid;gap:6px}
+.import-workspace textarea{width:100%;resize:vertical;padding:12px;font:inherit;
+border:1px solid var(--line);border-radius:8px}
+.import-workspace select,.import-workspace input{min-width:0;max-width:100%}
+.import-workspace details{border-top:1px solid var(--line);padding-top:20px}
+.import-workspace button{justify-self:start}
+.import-table{overflow-x:auto}
+.import-table table{width:100%;border-collapse:collapse}
+.import-table th,.import-table td{padding:12px;text-align:left;
+border-bottom:1px solid var(--line);vertical-align:top}
+.import-table td{overflow-wrap:anywhere;min-width:70px}
+.import-table td:nth-child(2){min-width:160px;max-width:420px}
+
 [data-autoload] [hidden]{display:none!important}
 [data-load-status]{font-size:13px;color:var(--muted);margin:20px 0 12px}
 [data-load-more]{display:block;margin:0 auto 24px}
@@ -271,6 +286,19 @@ footer{padding:36px 16px}.main-nav a{padding:4px 0}}
 """
 
 SCRIPT = """
+document.querySelectorAll('[data-import-campaign]').forEach(form=>{
+ form.addEventListener('submit',()=>{
+  const source=document.getElementById('import-urls').form;
+  ['urls','case','idempotency_key'].forEach(name=>{
+   form.elements[name].value=source.elements[name].value;
+  });
+ });
+});
+if(document.querySelectorAll('[data-import-poll="true"]').length){
+ window.setTimeout(()=>{if(!document.hidden)window.location.reload();},5000);
+ document.addEventListener('visibilitychange',()=>{if(!document.hidden)window.location.reload();});
+}
+
 document.querySelectorAll('.sidebar').forEach(details=>{
  const desktop=window.matchMedia('(min-width:601px)');
  function resize(){details.open=desktop.matches;}
