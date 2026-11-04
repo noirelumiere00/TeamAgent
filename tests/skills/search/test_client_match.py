@@ -168,3 +168,11 @@ def test_hit_matches_client_behaviour_unchanged() -> None:
     assert _hit_matches_client(_hit_full(content="サンマルクカフェ×祇園辻利"), "サンマルクカフェ")
     assert _hit_matches_client(_hit_full(content="Aを含む長文"), "A") is False
     assert _hit_matches_client(_hit_full(), "") is False
+
+
+def test_hd_and_holdings_spellings_are_the_same_client() -> None:
+    from teamagent.skills.search.client_match import names_overlap
+
+    assert names_overlap("{client_a}ホールディングス", "{client_a}HD")
+    assert names_overlap("{client_a}HD様", "{client_a}ホールディングス")
+    assert not names_overlap("{client_a}HD", "{other_client}ホールディングス")
