@@ -343,6 +343,20 @@ class _RedactOAuthStartAccessLog(logging.Filter):
         return True
 
 
+class RedactMCPAccessLog(logging.Filter):
+    def filter(self, record: logging.LogRecord) -> bool:
+        args = record.args
+        if isinstance(args, tuple) and len(args) >= 3 and isinstance(args[2], str):
+            path = args[2].split("?", 1)[0]
+            login = path == "/search/login" and "mcp-auth" in args[2]
+            if (
+                path in {"/authorize", "/token", "/register", "/mcp-auth/consent", "/mcp", "/mcp/"}
+                or login
+            ):
+                record.args = (*args[:2], path, *args[3:])
+        return True
+
+
 def build_uvicorn_log_config() -> dict[str, Any]:
     """uvicorn の既定ログ設定に、URL の秘匿対象を伏せるフィルタを足して返す。
 
@@ -359,6 +373,7 @@ def build_uvicorn_log_config() -> dict[str, Any]:
     filters["redact_shortlink"] = {"()": f"{__name__}._RedactShortLinkAccessLog"}
     filters["redact_admin_user"] = {"()": f"{__name__}._RedactAdminUserAccessLog"}
     filters["redact_oauth_start"] = {"()": f"{__name__}._RedactOAuthStartAccessLog"}
+    filters["redact_mcp_spike"] = {"()": f"{__name__}.RedactMCPAccessLog"}
     access = cfg.get("loggers", {}).get("uvicorn.access")
     if access is not None:
         access["filters"] = [
@@ -366,6 +381,7 @@ def build_uvicorn_log_config() -> dict[str, Any]:
             "redact_shortlink",
             "redact_admin_user",
             "redact_oauth_start",
+            "redact_mcp_spike",
         ]
     return cfg
 
@@ -698,6 +714,10 @@ def _safe_next(raw: str | None) -> str:
     if library_target(candidate) is not None:
         return candidate
     if candidate in {"/", "/app", "/search", "/admin", "/app/history", "/admin/history"}:
+        return candidate
+    if os.environ.get("CONNECT_MCP_ENABLED", "").lower() in {"1", "true"} and re.fullmatch(
+        r"/mcp-auth/consent\?tx=[A-Za-z0-9_-]{43}", candidate
+    ):
         return candidate
     if candidate == "/search/graph/focus":
         return candidate
@@ -4898,7 +4918,12 @@ def create_app(
         nxt = _safe_next(str(form.get("next", "")))
         ok, email = authenticate_id_token(credential, search_cfg, verifier=search_verifier)
         if not ok or email is None:
-            logger.warning("search_login_denied", email=email)
+            if nxt.startswith("/mcp-auth/consent?"):
+                logger.warning(
+                    "mcp_spike_login_denied", request_id=_request_id_of(request), count=1
+                )
+            else:
+                logger.warning("search_login_denied", email=email)
             return HTMLResponse(
                 _page(
                     "ログインできませんでした",
@@ -4907,7 +4932,10 @@ def create_app(
                 ),
                 status_code=403,
             )
-        logger.info("search_login_ok", user_email=email, next=nxt)
+        if nxt.startswith("/mcp-auth/consent?"):
+            logger.info("mcp_spike_login_ok", request_id=_request_id_of(request), count=1)
+        else:
+            logger.info("search_login_ok", user_email=email, next=nxt)
         resp = RedirectResponse(nxt, status_code=303)
         resp.set_cookie(
             _SEARCH_COOKIE,
@@ -5768,6 +5796,13 @@ def create_app(
                 truncated=read.truncated,
             ),
             headers=history_headers,
+        )
+
+    if os.environ.get("CONNECT_MCP_ENABLED", "").lower() in {"1", "true"}:
+        from teamagent.connect_web.library_mcp_spike import install_spike
+
+        install_spike(
+            app, authenticate=_search_email, safe_next=_safe_next, request_id=_request_id_of
         )
 
     return app
