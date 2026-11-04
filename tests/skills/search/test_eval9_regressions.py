@@ -132,3 +132,11 @@ def test_metrics_only_does_not_satisfy_an_effect_question(
     )
     assert skill._summarize.call_count == 2
     assert "調理実演で利用場面" in out.answer
+
+
+def test_topic_resolution_treats_hd_and_holdings_spellings_as_one_client() -> None:
+    vocabulary = ["{client_a}HD", "{client_a}ホールディングス", "{other_client}"]
+    assert resolve_topic_client("{client_a}の提案書に似た提案書を探して", vocabulary) == (
+        "{client_a}",
+        "{client_a}HD",
+    )
