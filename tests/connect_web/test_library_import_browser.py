@@ -30,7 +30,7 @@ pytestmark = pytest.mark.skipif(
 @pytest.fixture
 def live_import_server(monkeypatch: pytest.MonkeyPatch) -> Iterator[tuple[str, ImportPg]]:
     monkeypatch.setenv("CONNECT_ADMIN_EMAILS", "")
-    monkeypatch.delenv("VIDEO_LIBRARY_IMPORT_WORKER_ENABLED", raising=False)
+    monkeypatch.setenv("VIDEO_LIBRARY_IMPORT_WORKER_ENABLED", "0")
     pg = ImportPg()
     with socket.socket() as sock:
         sock.bind(("127.0.0.1", 0))

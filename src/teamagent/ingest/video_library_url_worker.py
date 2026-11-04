@@ -129,7 +129,8 @@ class URLImportWorker:
 @asynccontextmanager
 async def worker_lifespan(app: Any) -> AsyncIterator[None]:
     worker = None
-    if os.environ.get("VIDEO_LIBRARY_IMPORT_WORKER_ENABLED", "").lower() in {"1", "true"}:
+    # On by default since 11/04 (URL import is live); "0"/"false" turns the worker off.
+    if os.environ.get("VIDEO_LIBRARY_IMPORT_WORKER_ENABLED", "1").lower() not in {"0", "false"}:
         settings()  # Invalid enabled settings fail closed at startup.
         worker = URLImportWorker()
         app.state.video_library_import_worker = worker

@@ -439,12 +439,20 @@ def test_shared_client_has_timeout_and_no_auto_redirect() -> None:
         assert client.headers["User-Agent"] == PAGE_USER_AGENT
 
 
-async def test_worker_lifespan_is_off_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_worker_lifespan_is_on_by_default_and_off_with_zero(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    instance = MagicMock()
+    monkeypatch.setattr(worker, "URLImportWorker", lambda: instance)
     monkeypatch.delenv("VIDEO_LIBRARY_IMPORT_WORKER_ENABLED", raising=False)
+    async with worker.worker_lifespan(MagicMock()):
+        instance.thread.start.assert_called_once()
     factory = MagicMock()
     monkeypatch.setattr(worker, "URLImportWorker", factory)
-    async with worker.worker_lifespan(MagicMock()):
-        factory.assert_not_called()
+    for off in ("0", "false"):
+        monkeypatch.setenv("VIDEO_LIBRARY_IMPORT_WORKER_ENABLED", off)
+        async with worker.worker_lifespan(MagicMock()):
+            factory.assert_not_called()
 
 
 async def test_worker_lifespan_starts_and_stops_one_thread(monkeypatch: pytest.MonkeyPatch) -> None:

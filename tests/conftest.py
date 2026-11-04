@@ -25,6 +25,12 @@ def postgres_roles_lock() -> Iterator[None]:
 
 
 @pytest.fixture(autouse=True)
+def _no_url_import_worker_thread(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The URL-import worker starts with every connect-web app; tests opt in explicitly."""
+    monkeypatch.setenv("VIDEO_LIBRARY_IMPORT_WORKER_ENABLED", "0")
+
+
+@pytest.fixture(autouse=True)
 def _isolate_mail_process_local_state() -> Iterator[None]:
     """受信箱スキャンのプロセス内キャッシュと日次上限カウンタをテスト間で持ち越さない。
 
