@@ -199,6 +199,20 @@ _METRICS_JOIN = """LEFT JOIN LATERAL (
     ORDER BY captured_on DESC LIMIT 1
 ) m ON true"""
 _METRIC_SELECT = ", ".join(f"m.{column}" for column in METRIC_COLUMNS)
+_CAMPAIGN_TOTALS_JOIN = """LEFT JOIN campaign_totals ct
+    ON ct.advertiser=v.advertiser AND ct.campaign=v.campaign"""
+
+
+def _campaign_totals_cte(admin: bool) -> str:
+    # Apply visibility before aggregation, but never the video search filters.
+    where, _, _, _ = _where({}, admin)
+    return f"""WITH campaign_totals AS (
+        SELECT v.advertiser, v.campaign,
+        CASE WHEN count(m.total_plays)=count(*) THEN sum(m.total_plays) END
+            AS campaign_total_plays
+        FROM vl_videos_effective v {_METRICS_JOIN} WHERE {where}
+        AND COALESCE(v.advertiser,'')<>'' AND COALESCE(v.campaign,'')<>''
+        GROUP BY advertiser, campaign)"""  # nosec B608
 
 
 def search_videos(conn: Any, params: Mapping[str, str], *, admin: bool) -> dict[str, Any]:
@@ -209,7 +223,7 @@ def search_videos(conn: Any, params: Mapping[str, str], *, admin: bool) -> dict[
         values,
     ).fetchone()["n"]
     # 同上: 列名・JOIN・句・並び順はコード内の固定値で、利用者の値は %s で渡す
-    list_sql = f"SELECT v.*, {_METRIC_SELECT}, m.captured_on FROM vl_videos_effective v {_METRICS_JOIN} WHERE {where} ORDER BY {order} DESC NULLS LAST, v.platform, v.video_id LIMIT %s OFFSET %s"  # noqa: E501  # nosec B608
+    list_sql = f"{_campaign_totals_cte(admin)} SELECT v.*, {_METRIC_SELECT}, m.captured_on, ct.campaign_total_plays FROM vl_videos_effective v {_METRICS_JOIN} {_CAMPAIGN_TOTALS_JOIN} WHERE {where} ORDER BY {order} DESC NULLS LAST, v.platform, v.video_id LIMIT %s OFFSET %s"  # noqa: E501  # nosec B608
     rows = conn.execute(
         list_sql,
         [*values, PAGE_SIZE, (page - 1) * PAGE_SIZE],
@@ -247,31 +261,40 @@ def _page(
     current: str = "cases",
     params: Mapping[str, str] | None = None,
     hero: bool = False,
+    workspace: bool = False,
 ) -> str:
     params = params or {}
     links = [
-        ("home", "/library", "ホーム"),
+        ("home", "/library", "おすすめ"),
         ("cases", "/library/cases", "事例一覧"),
         ("videos", "/library/videos", "動画一覧"),
     ]
-    if admin:
-        links.append(("admin", "/library/admin/campaigns", "管理"))
-    nav = "".join(
-        f'<a href="{url}"' + (' aria-current="page"' if key == current else "") + f">{label}</a>"
-        for key, url, label in links
+    nav = (
+        '<nav class="main-nav" aria-label="ライブラリの表示切替">'
+        + "".join(
+            f'<a href="{url}"'
+            + (' aria-current="page"' if key == current else "")
+            + f">{label}</a>"
+            for key, url, label in links
+        )
+        + "</nav>"
     )
     brand = "<span>動画ライブラリ<small>VIDEO ARCHIVE</small></span>"
-    search = (
-        '<details class="header-search"><summary aria-label="検索を開く">'
-        '<svg width="22" height="22" viewBox="0 0 24 24" fill="none" aria-hidden="true">'
-        '<circle cx="10" cy="10" r="6" stroke="currentColor" stroke-width="2"/>'
-        '<path d="m15 15 6 6" stroke="currentColor" stroke-width="2"/></svg></summary>'
-        '<form action="/library/videos" role="search"><label class="sr-only" '
-        'for="header-query">事例・動画を検索</label>'
-        f'<input id="header-query" type="search" name="q" value="{_e(params.get("q", ""))}" '
-        'placeholder="企業名・キーワード #PR"><button type="submit">検索</button></form></details>'
+    soon = (
+        '<button class="soon" type="button" disabled>構成（型）から探す '
+        "<span>準備中</span></button>"
     )
-    category = params.get("category", "")
+    admin_link = (
+        '<a class="library-admin" href="/library/admin/campaigns"'
+        + (' aria-current="page"' if current == "admin" else "")
+        + ">管理 ↗</a>"
+        if admin
+        else ""
+    )
+    if workspace:
+        body = _workspace(body, params, current=current, nav=nav)
+    else:
+        body = nav + ("" if hero else f'<div class="page-title"><h1>{_e(title)}</h1></div>') + body
     return (
         '<!doctype html><html lang="ja"><head><meta charset="utf-8">'
         '<meta name="viewport" content="width=device-width,initial-scale=1">'
@@ -282,21 +305,16 @@ def _page(
         '<a class="brand" href="/library">'
         + brand
         + "</a>"
-        + search
-        + f'<nav class="main-nav" aria-label="メインナビゲーション">{nav}</nav></div>'
-        + _category_nav(category, current=current)
-        + "</header><main>"
-        + (
-            ""
-            if hero
-            else f'<div class="page-title"><p class="eyebrow">VIDEO ARCHIVE</p>'
-            f"<h1>{_e(title)}</h1></div>"
-        )
+        + '<div class="library-utility">'
+        + soon
+        + admin_link
+        + "</div></div></header>"
+        + "<main>"
         + body
         + '</main><footer><a class="brand" href="/library">'
         + brand
         + "</a>"
-        + _category_nav(category, current=current, footer=True)
+        + _category_nav(params.get("category", ""), current=current, footer=True)
         + "<p>数値は毎平日 18 時に更新<span>社内限定</span></p></footer>"
         + f"<script>{_SCRIPT}</script></body></html>"
     )
@@ -373,7 +391,7 @@ def _search_summary(params: Mapping[str, str], total: int, *, catalog: bool = Fa
 def _listing(
     data: dict[str, Any], params: Mapping[str, str], cases: list[Any] | None = None
 ) -> str:
-    filters = _filters(params, catalog=False)
+    filters = ""
     if cases:
         filters += '<section class="archive-section" aria-labelledby="matching-cases">'
         filters += '<h2 id="matching-cases">一致した事例</h2><div class="grid campaign-grid">'
@@ -388,7 +406,7 @@ def _listing(
     cards = [_video_card(row, selectable=True) for row in data["videos"]]
     return (
         filters
-        + f"<p>{data['total']:,}件 · {data['page']:,}ページ</p>"
+        + f"<p>{data['total']:,}件 · {data['page']:,}ページ目</p>"
         + '<button id="copy" type="button">選択したURLをコピー</button>'
         + '<p id="copy-status" role="status"></p><h2 class="sr-only">検索結果の動画</h2>'
         + _paged_cards(
@@ -520,104 +538,187 @@ def _preview(row: Mapping[str, Any], *, detail: bool = False) -> str:
     return f'<span class="preview"{player}>{cover}</span>'
 
 
-def _video_card(
-    row: Mapping[str, Any], *, selectable: bool = False, in_campaign: bool = False
+def _card(
+    row: Mapping[str, Any],
+    *,
+    href: str,
+    label: str,
+    preview: str,
+    context: str,
+    context_title: str,
+    title: str,
+    meta: str,
+    metrics: list[tuple[str, float | None]],
+    selection: str = "",
 ) -> str:
+    plays = []
+    for i, (name, value) in enumerate(metrics):
+        tag = "strong" if i == 0 else "span"
+        plays.append(
+            f'<{tag} class="meta-plays" title="{_e(name)}の再生数: {_metric(value)}">'
+            f"{_e(name)} {compact_plays(value)}</{tag}>"
+        )
+    tags = "".join(
+        f'<span class="card-tag"><span class="filter-label">{name}</span>'
+        f'<span class="badge">{_e(row[field])}</span></span>'
+        for field, name in (("industry", "業種"), ("purpose", "目的"))
+        if row.get(field)
+    )
+    return (
+        f'<article class="card"><a class="card-link" href="{_e(href)}" '
+        f'aria-label="{_e(label)}">{preview}<div class="card-body">'
+        f'<p class="card-context" title="{_e(context_title)}">{context}</p>'
+        f'<h3 title="{_e(title)}">{_e(title)}</h3><p class="card-meta">'
+        f'<span class="meta-source">{meta}</span></p><p class="card-plays">{"".join(plays)}</p>'
+        f'<div class="card-tags">{tags}</div></div></a>{selection}</article>'
+    )
+
+
+def _video_card(row: Mapping[str, Any], *, selectable: bool = False) -> str:
     path = "/".join(quote(str(row[key]), safe="") for key in ("platform", "video_id"))
     url = post_url(row)
     account = str(row.get("account_name") or row.get("account_handle") or "動画")
-    title = str(row.get("campaign") or row.get("caption") or account).strip()
-    if in_campaign:
-        caption = str(row.get("caption") or "").splitlines()
-        title = (caption[0].strip() if caption else "") or account
-    category = _category_label(row.get("business_category"))
-    metadata = [_day(row["posted_at"])] if isinstance(row.get("posted_at"), datetime) else []
+    title = next(
+        (line.strip() for line in str(row.get("caption") or "").splitlines() if line.strip()),
+        account,
+    )
     flags = " · ".join(
-        label for field, label in (("is_pr", "PR"), ("is_private", "非公開")) if row.get(field)
+        name for field, name in (("is_pr", "PR"), ("is_private", "非公開")) if row.get(field)
     )
-    tags = "".join(
-        f'<span class="card-tag"><span class="filter-label">{label}</span>'
-        f'<span class="badge">{_e(row[field])}</span></span>'
-        for field, label in (("industry", "業種"), ("purpose", "目的"))
-        if row.get(field)
+    context = " · ".join(
+        part
+        for part in (
+            _category_label(row.get("business_category")),
+            _e(flags),
+            _e(row.get("campaign")),
+        )
+        if part
     )
-    checkbox = (
+    meta = f'<span class="account-name" title="{_e(account)}">{_e(account)}</span>'
+    if isinstance(row.get("posted_at"), datetime):
+        meta += " · " + _day(row["posted_at"])
+    metrics = [("この動画", row.get("total_plays"))]
+    if (
+        row.get("advertiser")
+        and row.get("campaign")
+        and row.get("campaign_total_plays") is not None
+    ):
+        metrics.append(("施策計", row["campaign_total_plays"]))
+    selection = (
         f'<label class="card-select"><input type="checkbox" data-url="{_e(url)}" '
-        f'aria-label="{_e(account)}の動画を選択">選択</label>'
+        f'aria-label="{_e(account)}: {_e(title)}の動画を選択">選択</label>'
         if selectable and url
         else ""
     )
-    return (
-        f'<article class="card"><a class="card-link" href="/library/v/{path}" '
-        f'aria-label="{_e(account)}: {_e(title)}の動画詳細">{_preview(row)}'
-        '<div class="card-body">'
-        + category
-        + (f'<span class="period">{" · " if category else ""}{flags}</span>' if flags else "")
-        + f'<h3>{_e(title)}</h3><p class="card-meta" '
-        f'title="合計再生 {_metric(row.get("total_plays"))}">' + '<span class="meta-source">'
-        f'<span class="account-name" title="{_e(account)}">{_e(account)}</span>'
-        + (" · " + " · ".join(metadata) if metadata else "")
-        + '</span><span class="meta-plays">'
-        + compact_plays(row.get("total_plays"))
-        + "</span></p>"
-        + f'<div class="card-tags">{tags}</div></div></a>{checkbox}</article>'
+    return _card(
+        row,
+        href=f"/library/v/{path}",
+        label=f"{account}: {title}の動画詳細",
+        preview=_preview(row),
+        context=context,
+        context_title=str(row.get("campaign") or ""),
+        title=title,
+        meta=meta,
+        metrics=metrics,
+        selection=selection,
     )
 
 
-def _filters(
-    params: Mapping[str, str],
-    *,
-    catalog: bool,
-) -> str:
+def _workspace(body: str, params: Mapping[str, str], *, current: str, nav: str) -> str:
     _, is_pr = parse_search(params)
     params = {**params, "pr": "" if is_pr is None else "yes" if is_pr else "no"}
+    catalog = current == "cases"
     base = "/library/cases" if catalog else "/library/videos"
     sorts = (
-        [("plays", "合計再生順"), ("new", "新着順"), ("count", "本数順")]
+        [("plays", "施策の再生数順"), ("new", "新着順"), ("count", "動画の本数順")]
         if catalog
-        else [("new", "新着順"), ("plays", "再生順"), ("saves", "保存率順"), ("eng", "ENG率順")]
+        else [("new", "新着順"), ("plays", "再生数順"), ("saves", "保存率順"), ("eng", "ENG率順")]
     )
-    body = (
-        f'<form method="get" action="{base}" class="filters"><div class="search-row">'
-        '<label><span class="sr-only">事例・動画を検索</span>'
-        f'<input type="search" name="q" value="{_e(params.get("q", ""))}" '
-        'placeholder="キーワードで探す"></label>'
-        + _select("sort", sorts, params.get("sort", "plays" if catalog else "new"))
-        + '<button type="submit" class="primary">検索</button></div>'
+    sidebar = (
+        '<details class="sidebar" open><summary>条件を指定</summary>'
+        '<fieldset><legend>区分</legend><div class="category-options">'
     )
-    for key in ("category", "advertiser", "campaign", "unassigned", "tag_group", "tag"):
-        if params.get(key):
-            body += f'<input type="hidden" name="{key}" value="{_e(params[key])}">'
-    body += '<details class="advanced-filters"><summary>詳しく絞り込む</summary><div>'
-    body += _select("pr", [("", "PRすべて"), ("yes", "PRあり"), ("no", "PRなし")], params.get("pr"))
-    body += '<div class="filter-row">'
-    for field, label in (("industry", "業種"), ("purpose", "目的")):
-        body += (
-            f'<label>{label}<input name="{field}" '
-            f'value="{_e(params.get(field, ""))}" placeholder="{label}名"></label>'
+    for code, label in [("", "すべて"), *CATEGORY_LABELS.items(), ("unset", "未設定")]:
+        checked = " checked" if code == params.get("category", "") else ""
+        sidebar += (
+            '<label class="category-option"><input type="radio" name="category" '
+            f'value="{code}"{checked}>'
+            f"<span>{label}</span></label>"
         )
-    if not catalog:
-        for field, label, kind in (
-            ("from", "開始", "date"),
-            ("to", "終了", "date"),
-            ("account", "アカウント", "text"),
-        ):
-            body += (
-                f'<label>{label}<input type="{kind}" name="{field}" '
-                f'value="{_e(params.get(field, ""))}"></label>'
-            )
-    body += '<button type="submit">適用</button></div><div class="filter-row">'
-    body += '<button type="button" disabled>構成・フックで探す（近日公開）</button>'
-    body += f'<a href="{base}">条件をクリア</a></div></div></details>'
-    labels = {"industry": "業種", "purpose": "目的", "tag": "タグ", "account": "アカウント",
-              "from": "開始", "to": "終了"}  # fmt: skip
-    active = [{"yes": "PR投稿のみ", "no": "PR以外"}.get(params.get("pr", ""), "")] + [
-        f"{labels[key]}: {params[key]}" for key in labels if params.get(key)
-    ]
-    active = [item for item in active if item]
-    if active:
-        body += '<p class="active-filters">絞り込み中: ' + _e(" / ".join(active)) + "</p>"
-    return body + "</form>"
+    sidebar += '</div></fieldset><div class="sidebar-fields">'
+    for field, label, kind in (
+        ("industry", "業種", "text"),
+        ("purpose", "目的", "text"),
+        ("account", "アカウント", "text"),
+        ("from", "投稿日（開始）", "date"),
+        ("to", "投稿日（終了）", "date"),
+    ):
+        sidebar += (
+            f'<label>{label}<input type="{kind}" name="{field}" '
+            f'value="{_e(params.get(field, ""))}"></label>'
+        )
+    sidebar += (
+        "<label>PRの有無"
+        + _select("pr", [("", "すべて"), ("yes", "PRあり"), ("no", "PRなし")], params.get("pr"))
+        + "</label></div>"
+    )
+    for key in ("advertiser", "campaign", "unassigned", "tag_group", "tag"):
+        if params.get(key):
+            sidebar += f'<input type="hidden" name="{key}" value="{_e(params[key])}">'
+    sidebar += (
+        '<button type="submit" class="primary apply-filters">条件を適用</button>'
+        f'<a class="reset-filters" href="{base}">条件をリセット</a>'
+        '<p class="sidebar-note">企業名だけでなく、業種・目的・区分を組み合わせて探せます。'
+        "<br>構成（型）から探す：準備中</p></details>"
+    )
+    labels = {
+        "q": "検索語",
+        "category": "区分",
+        "industry": "業種",
+        "purpose": "目的",
+        "account": "アカウント",
+        "from": "開始",
+        "to": "終了",
+        "advertiser": "広告主",
+        "campaign": "施策",
+        "tag": "タグ",
+        "unassigned": "施策未設定",
+    }
+    active = []
+    for key, label in labels.items():
+        if value := params.get(key):
+            if key == "category":
+                value = CATEGORY_LABELS.get(value, "未設定" if value == "unset" else value)
+            if key == "unassigned":
+                value = "のみ" if value == "yes" else value
+            active.append(f"{label}: {value}")
+    if is_pr is not None:
+        active.append("PR投稿のみ" if is_pr else "PR以外")
+    if params.get("sort"):
+        active.append("並び順: " + dict(sorts).get(params["sort"], params["sort"]))
+    heading = (
+        "条件に合う事例を探す" if current == "home" else "事例を探す" if catalog else "動画を探す"
+    )
+    return (
+        f'<form method="get" action="{base}" class="filters workspace" role="search">'
+        + sidebar
+        + '<div class="workspace-main"><p class="eyebrow">YOUR REFERENCE DESK</p>'
+        f'<h1>{heading}</h1><div class="workspace-search"><label>'
+        '<span class="sr-only">企業名・キーワード・#PRで検索</span>'
+        f'<input type="search" name="q" value="{_e(params.get("q", ""))}" '
+        'placeholder="企業名・キーワード・#PR で検索"></label>'
+        '<button type="submit" class="primary">検索</button></div>'
+        '<p class="search-hint">検索例：企業名 #PR · 複数の語はすべて含むものを検索</p>'
+        '<p class="active-filters" role="status">'
+        + ("絞り込み中: " + _e(" / ".join(active)) if active else "絞り込みなし · すべての区分")
+        + '</p><div class="workspace-toolbar">'
+        + nav
+        + "<label>並び順 "
+        + _select("sort", sorts, params.get("sort", "plays" if catalog else "new"))
+        + "</label></div>"
+        + body
+        + "</div></form>"
+    )
 
 
 def search_campaigns(conn: Any, params: Mapping[str, str], *, admin: bool) -> list[Any]:
@@ -690,15 +791,15 @@ def diversify(rows: list[Any], limit: int = 12) -> list[Any]:
 def featured_videos(conn: Any, params: Mapping[str, str], *, admin: bool) -> list[Any]:
     where, values, _, _ = _where({**params, "sort": "plays"}, admin)
     # Rank each campaign/account before the bound, so a posting burst cannot fill the pool.
-    sql = f"""WITH ranked AS (
-        SELECT v.*, {_METRIC_SELECT},
+    sql = f"""{_campaign_totals_cte(admin)}, ranked AS (
+        SELECT v.*, {_METRIC_SELECT}, ct.campaign_total_plays,
         row_number() OVER (PARTITION BY COALESCE(NULLIF(v.advertiser,''),v.platform),
             COALESCE(NULLIF(v.campaign,''),v.video_id)
             ORDER BY m.total_plays DESC NULLS LAST, v.video_id) AS campaign_rank,
         row_number() OVER (PARTITION BY v.platform,
             COALESCE(v.account_handle,v.account_name,v.video_id)
             ORDER BY m.total_plays DESC NULLS LAST, v.video_id) AS account_rank
-        FROM vl_videos_effective v {_METRICS_JOIN} WHERE {where})
+        FROM vl_videos_effective v {_METRICS_JOIN} {_CAMPAIGN_TOTALS_JOIN} WHERE {where})
         SELECT * FROM ranked ORDER BY greatest(campaign_rank,account_rank),
         total_plays DESC NULLS LAST, platform, video_id LIMIT 240"""  # nosec B608
     rows = list(conn.execute(sql, values).fetchall())
@@ -720,21 +821,21 @@ def _campaign_card(row: Mapping[str, Any]) -> str:
         for key in ("first_posted", "last_posted")
         if isinstance(row.get(key), datetime)
     )
-    meta = " · ".join(
-        value
-        for value in (str(row["advertiser"]), period, f"{row['video_count']:,}本の動画")
-        if value
+    meta = " · ".join(value for value in (period, f"{row['video_count']:,}本の動画") if value)
+    context = " · ".join(
+        [label for code in row["categories"] if (label := _category_label(code))]
+        + [_e(row["advertiser"])]
     )
-    return (
-        f'<article class="card"><a class="card-link" href="{_e(_campaign_url(row))}" '
-        f'aria-label="{_e(row["advertiser"])}: {_e(row["campaign"])}の事例">'
-        '<span class="preview">' + _cover(row["representative"]) + "</span>"
-        '<div class="card-body">'
-        + " · ".join(label for code in row["categories"] if (label := _category_label(code)))
-        + f'<h3>{_e(row["campaign"])}</h3><p class="card-meta" title="{_e(meta)}">'
-        + f'<span class="meta-source">{_e(meta)}</span><span class="meta-plays">'
-        + compact_plays(row.get("total_plays"))
-        + "</span></p></div></a></article>"
+    return _card(
+        row,
+        href=_campaign_url(row),
+        label=f"{row['advertiser']}: {row['campaign']}の事例",
+        preview='<span class="preview">' + _cover(row["representative"]) + "</span>",
+        context=context,
+        context_title=str(row["advertiser"]),
+        title=str(row["campaign"]),
+        meta=_e(meta),
+        metrics=[("施策計", row.get("total_plays"))],
     )
 
 
@@ -757,7 +858,7 @@ def archive_home(cases: list[Any], videos: list[Any]) -> str:
         ),
         reverse=True,
     )[:8]
-    body = '<h1 class="sr-only">動画の事例を、次のアイデアに。</h1>'
+    body = ""
     for key, heading, label, description, rows, layout, url in (
         (
             "pickup",
@@ -774,7 +875,7 @@ def archive_home(cases: list[Any], videos: list[Any]) -> str:
             "新着の事例",
             "最新の投稿から、施策の動きをチェック。",
             recent,
-            "new-grid",
+            "grid",
             "/library/cases?sort=new",
         ),
     ):
@@ -813,8 +914,7 @@ def archive_home(cases: list[Any], videos: list[Any]) -> str:
             f"{label}の事例から、次のヒントを。",
             url,
         )
-        layout = "new-grid" if len(rows) < 4 else "grid"
-        body += f'<div class="{layout} campaign-grid">' + "".join(_campaign_card(r) for r in rows)
+        body += '<div class="grid campaign-grid">' + "".join(_campaign_card(r) for r in rows)
         body += "</div></section>"
     body += '<section class="archive-section archive-entry">' + _section_heading(
         "ARCHIVE", "すべての事例", "業種や目的で絞って、企画に合う事例を探す。", "/library/cases"
@@ -940,6 +1040,7 @@ def register_library_routes(
         *,
         params: Mapping[str, str] | None = None,
         hero: bool = False,
+        workspace: bool = False,
     ) -> HTMLResponse:
         response = render(
             _page(
@@ -950,6 +1051,7 @@ def register_library_routes(
                 current=current,
                 params=params,
                 hero=hero,
+                workspace=workspace,
             )
         )
         response.headers["Content-Security-Policy"] = response.headers[
@@ -971,7 +1073,12 @@ def register_library_routes(
             cases = search_campaigns(conn, {}, admin=is_admin(email))
             videos = featured_videos(conn, {}, admin=is_admin(email))
         return page(
-            "動画の事例を、次のアイデアに。", archive_home(cases, videos), email, "home", hero=True
+            "動画の事例を、次のアイデアに。",
+            archive_home(cases, videos),
+            email,
+            "home",
+            hero=True,
+            workspace=True,
         )
 
     @router.get("/cases")
@@ -982,8 +1089,7 @@ def register_library_routes(
         _, _, number, _ = _where({**params, "sort": "plays"}, is_admin(email))
         size = 12
         visible = cases[(number - 1) * size : number * size]
-        body = _filters(params, catalog=True)
-        body += f'<p class="result-count">{len(cases):,}件の事例 · {number:,}ページ</p>'
+        body = f'<p class="result-count">{len(cases):,}件の事例 · {number:,}ページ目</p>'
         body += _search_summary(params, len(cases), catalog=True)
         body += _paged_cards(
             [_campaign_card(r) for r in visible],
@@ -998,7 +1104,7 @@ def register_library_routes(
             body += '<p class="empty">条件に合う事例がありません。</p>'
         body += '<p><a href="/library/videos?category=organic&unassigned=yes">'
         body += "案件に紐づかないオーガニック投稿を見る →</a></p>"
-        return page("事例一覧", body, email, params=params)
+        return page("事例一覧", body, email, params=params, workspace=True)
 
     @router.get("/c")
     def campaign_detail(request: Request, email: str = Depends(identity)) -> HTMLResponse:
@@ -1013,7 +1119,7 @@ def register_library_routes(
             if not cases:
                 raise HTTPException(404)
             # Keep the entire case for one-click copy; only the visible grid is paginated.
-            sql = f"SELECT v.*, {_METRIC_SELECT} FROM vl_videos_effective v {_METRICS_JOIN} WHERE {where} ORDER BY m.total_plays DESC NULLS LAST, v.platform, v.video_id"  # noqa: E501  # nosec B608
+            sql = f"{_campaign_totals_cte(is_admin(email))} SELECT v.*, {_METRIC_SELECT}, ct.campaign_total_plays FROM vl_videos_effective v {_METRICS_JOIN} {_CAMPAIGN_TOTALS_JOIN} WHERE {where} ORDER BY m.total_plays DESC NULLS LAST, v.platform, v.video_id"  # noqa: E501  # nosec B608
             videos = list(conn.execute(sql, values).fetchall())
         case = cases[0]
         body = '<p class="breadcrumb"><a href="/library/cases">事例一覧</a> / 事例詳細</p>'
@@ -1052,10 +1158,7 @@ def register_library_routes(
             f'class="section-heading"><h2>この事例の動画</h2><p>再生の多い順</p></div>'
         )
         body += _paged_cards(
-            [
-                _video_card(row, in_campaign=True)
-                for row in videos[(number - 1) * PAGE_SIZE : number * PAGE_SIZE]
-            ],
+            [_video_card(row) for row in videos[(number - 1) * PAGE_SIZE : number * PAGE_SIZE]],
             total=len(videos),
             number=number,
             size=PAGE_SIZE,
@@ -1080,14 +1183,16 @@ def register_library_routes(
             email,
             "videos",
             params=request.query_params,
+            workspace=True,
         )
 
     @router.get("/api/videos")
     def api(request: Request, email: str = Depends(identity)) -> JSONResponse:
         with connection(email) as conn:
-            return JSONResponse(
-                jsonable_encoder(search_videos(conn, request.query_params, admin=is_admin(email)))
-            )
+            data = search_videos(conn, request.query_params, admin=is_admin(email))
+        for row in data["videos"]:
+            row.pop("campaign_total_plays", None)
+        return JSONResponse(jsonable_encoder(data))
 
     def video(conn: Any, platform: str, video_id: str, email: str) -> Any:
         # 列名と JOIN はコード内の固定値。識別子と権限は %s で渡す
@@ -1114,7 +1219,7 @@ def register_library_routes(
                 where, values, _, _ = _where(
                     {"advertiser": row["advertiser"], "campaign": row["campaign"]}, is_admin(email)
                 )
-                related_sql = f"SELECT v.*, {_METRIC_SELECT} FROM vl_videos_effective v {_METRICS_JOIN} WHERE {where} AND NOT (v.platform=%s AND v.video_id=%s) ORDER BY m.total_plays DESC NULLS LAST, v.platform, v.video_id LIMIT 6"  # noqa: E501  # nosec B608
+                related_sql = f"{_campaign_totals_cte(is_admin(email))} SELECT v.*, {_METRIC_SELECT}, ct.campaign_total_plays FROM vl_videos_effective v {_METRICS_JOIN} {_CAMPAIGN_TOTALS_JOIN} WHERE {where} AND NOT (v.platform=%s AND v.video_id=%s) ORDER BY m.total_plays DESC NULLS LAST, v.platform, v.video_id LIMIT 6"  # noqa: E501  # nosec B608
                 related = conn.execute(related_sql, [*values, platform, video_id]).fetchall()
         body = '<div class="detail-layout"><div>' + _preview(row, detail=True)
         url = post_url(row)

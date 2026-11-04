@@ -45,7 +45,7 @@ let copied=null;
 global.document=Object.assign(doc,{
  querySelectorAll(selector){
   if(selector==='[data-autoload]')return [];
-  if(selector==='.header-search')return [filters];
+  if(selector==='.sidebar')return [filters];
   if(selector==='.preview[data-player]')return cards;
   if(selector==='.preview img')return [pendingImage,failedImage,loadedImage];
   if(selector==='[data-copy]')return [caseCopy,urlCopy];
@@ -56,7 +56,7 @@ global.document=Object.assign(doc,{
  createElement(tag){assert.equal(tag,'iframe');return element();},
  getElementById(id){return ids[id];}
 });
-global.window=Object.assign(win,{matchMedia(query){assert.equal(query,'(min-width:768px)');return desktop;}});
+global.window=Object.assign(win,{matchMedia(query){assert.equal(query,'(min-width:601px)');return desktop;}});
 Object.defineProperty(global,'navigator',{value:{clipboard:{async writeText(text){copied=text;}}}});
 __SCRIPT__
 (async()=>{
@@ -98,6 +98,16 @@ __SCRIPT__
  assert.equal(panels[1].hidden,true);assert.equal(segments[0].attributes['aria-expanded'],'true');
  segments[1].events.click();assert.equal(panels[0].hidden,true);
  assert.equal(panels[1].hidden,false);
+ // TikTok's own player error: only a message from the active TikTok frame falls back to the cover.
+ doc.events.mouseover({target:cards[0],relatedTarget:null});
+ const frame=cards[0].children[0];frame.contentWindow={};
+ win.events.message({origin:'https://evil.example',source:frame.contentWindow,data:{type:'onError'}});
+ win.events.message({origin:'https://www.tiktok.com',source:{},data:{type:'onError'}});
+ win.events.message({origin:'https://www.tiktok.com',source:frame.contentWindow,data:{type:'onStateChange'}});
+ assert.equal(cards[0].children.length,1);assert.equal(cards[0].dataset.playerFailed,undefined);
+ win.events.message({origin:'https://www.tiktok.com',source:frame.contentWindow,data:{type:'onPlayerError'}});
+ assert.equal(cards[0].children.length,0);assert.equal(cards[0].dataset.playerFailed,'1');
+ doc.events.mouseover({target:cards[0],relatedTarget:null});assert.equal(cards[0].children.length,0);
  navigator.clipboard.writeText=async()=>{throw Error('denied');};
  await copyButton.events.click();assert.match(status.textContent,/コピーできませんでした/);
 })().catch(e=>{console.error(e);process.exitCode=1;});

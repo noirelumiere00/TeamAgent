@@ -43,6 +43,7 @@ class Pg:
             "organic_comments": 2,
             "organic_shares": 3,
             "total_plays": 17800,
+            "campaign_total_plays": 3120000,
             "total_saves": 178,
             "thumbnail_s3_key": "video-library/thumbs/tiktok/123.jpg",
             "video_s3_key": "secret-key",
@@ -264,6 +265,7 @@ def test_search_api_matches_listing_and_hides_s3_keys(
     assert row["rates"] == {"save_rate": 0.01, "engagement_rate": None, "is_reference": False}
     assert "thumbnail_s3_key" not in row and "video_s3_key" not in row
     assert row["has_thumbnail"] is True
+    assert "campaign_total_plays" not in row
     assert "m.total_plays" in pg.calls[1][0] and "m.total_saves" in pg.calls[1][0]
     api_calls = pg.calls.copy()
     client.get("/library/videos", params=query, cookies=_auth_cookie())
@@ -475,7 +477,7 @@ def test_card_uses_rounded_total_and_detail_keeps_exact_rates(
     pg.row.update(organic_plays=organic, total_plays=17800.0, total_saves=356.0)
     response = client.get("/library/videos", cookies=_auth_cookie())
     assert "1.7万回再生" in response.text
-    assert 'title="合計再生 17,800"' in response.text
+    assert 'title="この動画の再生数: 17,800"' in response.text
     assert "再生・保存率・ENG率と並び順は総計の最新数値" in response.text
     detail = client.get("/library/v/tiktok/123", cookies=_auth_cookie())
     assert "17,800" in detail.text and "保存率 2.00%" in detail.text

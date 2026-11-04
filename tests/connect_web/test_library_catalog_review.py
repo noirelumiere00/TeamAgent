@@ -75,7 +75,7 @@ class LargeCatalogPg(Pg):
             result.fetchall.return_value = (
                 self.cases[:1] if "v.advertiser = %s" in query else self.cases
             )
-        elif "WITH ranked" in query:
+        elif "ranked AS (" in query:
             result.fetchall.return_value = self.videos[:240]
         elif "SELECT count(*) AS n" in query:
             result.fetchone.return_value = {"n": len(self.videos)}
@@ -111,9 +111,9 @@ def test_case_listing_is_paginated_with_large_catalog(setup: tuple[TestClient, P
     assert soup.find("a", string="次へ") is not None
 
 
-def test_case_cover_is_compact_but_video_stays_portrait() -> None:
-    assert "aspect-ratio:4/5" in css_rule(".campaign-grid .preview")
+def test_campaign_and_video_cards_share_portrait_preview() -> None:
     assert "aspect-ratio:9/16" in css_rule(".preview")
+    assert ".campaign-grid .preview" not in library._STYLE
 
 
 def test_placeholder_is_quiet_and_clear_of_detail_play_button() -> None:
@@ -162,7 +162,7 @@ def test_absent_date_and_caption_do_not_render_empty_metadata(
     assert detail.find("h3", string="投稿文") is None
     pg.row["is_pr"] = True
     card = BeautifulSoup(library._video_card(pg.row), "html.parser")
-    assert card.select_one(".period").text == " · PR"  # Separator follows the category label.
+    assert card.select_one(".card-context").text == "MEDIA · PR · campaign"
     assert "不明" not in card.text
 
 
@@ -174,13 +174,14 @@ def test_filters_keep_search_and_sort_outside_disclosure(setup: tuple[TestClient
         )
         soup = BeautifulSoup(response.text, "html.parser")
         form = soup.select_one("form.filters")
-        details = form.select_one("details.advanced-filters")
-        assert not details.has_attr("open")
-        assert details.summary.text == "詳しく絞り込む"
+        details = form.select_one("details.sidebar")
+        assert details.has_attr("open")  # Usable without JS; enhanced mobile view folds it.
+        assert details.summary.text == "条件を指定"
         assert form.select_one('[name="q"]').find_parent("details") is None
         assert form.select_one('[name="sort"]').find_parent("details") is None
         assert details.select_one('[name="pr"]') is not None
         for field, value in (("industry", "食品"), ("purpose", "認知")):
-            assert details.select_one(f'[name="{field}"]')["value"] == value
+            assert details.select_one(f'input[name="{field}"]')["value"] == value
+            assert not details.select(f'select[name="{field}"], datalist')
         assert details.select_one('[type="submit"]') is not None
         assert "業種: 食品 / 目的: 認知" in soup.select_one(".active-filters").text
