@@ -43,7 +43,6 @@ from teamagent.skills._shared.google_connection import (
 )
 from teamagent.skills._shared.mail_compose import env_bool, should_skip_mail
 from teamagent.skills._shared.mail_connection import (
-    CONNECT_SUFFIX,
     NOT_CONNECTED_MESSAGE,
     REAUTH_NEEDED_MESSAGE,
 )
@@ -82,13 +81,10 @@ class MailToInternalContextSkill(BaseSkill[MailInternalContextInput, MailInterna
 
     name: ClassVar[str] = "mail_to_internal_context"
     description: ClassVar[str] = (
-        "本人の受信箱（読み取りのみ・メタデータのみ）で指定クライアントのメールを確認し、"
-        "対応する社内のSlackスレッド・過去提案・営業FBを突き合わせて参照リンクつきで返す。"
-        "『このメール、社内で何か話してた?』に答える。本人が利用するには"
-        + CONNECT_SUFFIX
-        + "連携済みの時のみ使える。"
-        + USER_CONTEXT_RULE
-    )
+        "本人の受信箱のメタデータと社内Slack・過去提案・営業FBを突き合わせ参照リンク"
+        "を返す（読み取りのみ、Google連携が必要）。「このメール、"
+        "社内で何か話してた？」に使う。"
+    ) + USER_CONTEXT_RULE
     input_schema: ClassVar[type[BaseModel]] = MailInternalContextInput
     output_schema: ClassVar[type[BaseModel]] = MailInternalContextOutput
 

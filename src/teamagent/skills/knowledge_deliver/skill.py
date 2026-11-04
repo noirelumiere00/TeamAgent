@@ -198,22 +198,10 @@ class KnowledgeDeliverSkill(BaseSkill[KnowledgeDeliverInput, KnowledgeDeliverOut
 
     name: ClassVar[str] = "knowledge_deliver"
     description: ClassVar[str] = (
-        "「〇〇への提案資料出して」「〇〇業界の提案事例ある？」「〇〇施策のレポート出して」"
-        "のような依頼に対し、社内ナレッジを検索して要約し、該当資料の実ファイルを"
-        "依頼者本人の DM に添付して届ける（チャンネルで頼まれても DM・その場は note の 1 行だけ）。"
-        "ファイル本体が欲しい時に使う（リンク・要約だけで良い時は search）。\n"
-        "依頼文に含まれる条件は必ず該当フィールドに振り分けて埋めること（自然文の精度が上がる）:\n"
-        "- 取引先/会社名（電通・サイバーエージェント・ニチレイ・アース製薬 等）→ filter_client\n"
-        "- 資料種別（提案資料/提案書→提案書、レポート/施策レポート→報告書、議事録、"
-        "価格表/料金表→価格表、契約書→契約）→ filter_doc_type\n"
-        "- 施策/ソリューション（SNS運用・動画広告・インフルエンサー・SEO 等の『○○施策』の○○）"
-        "→ filter_solution\n"
-        "- 業界（食品・飲料・化粧品・小売・金融・IT 等の『○○業界』の○○）→ filter_industry\n"
-        "例: 『電通への提案資料』→filter_client=電通, filter_doc_type=提案書 / "
-        "『食品業界の提案事例』→filter_industry=食品, filter_doc_type=提案書 / "
-        "『動画広告施策のレポート』→filter_solution=動画広告, filter_doc_type=報告書。\n"
-        "query には依頼文全体（自然文）をそのまま入れてよい。" + USER_CONTEXT_RULE
-    )
+        "社内資料の実ファイルを検索・要約して本人DMへ添付する（チャンネルではnoteのみ"
+        "）。リンク・要約だけならsearch。依頼の条件を各filterへ、"
+        "queryに依頼文全体を入れる。"
+    ) + USER_CONTEXT_RULE
     input_schema: ClassVar[type[BaseModel]] = KnowledgeDeliverInput
     output_schema: ClassVar[type[BaseModel]] = KnowledgeDeliverOutput
 

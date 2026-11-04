@@ -1181,15 +1181,7 @@ class VideoAlgorithmInput(BaseModel):
     query: str
     # 深掘り分析（DL+Gemini）する本数。env VIDEO_ALGO_MAX_VIDEOS（5・clamp1〜10）。重い。
     # 利用者が本数を言ったら（「6本で」「3本だけ」）必ずここに入れる＝指定が既定より優先。
-    max_videos: int = Field(
-        default_factory=_default_max_videos,
-        ge=1,
-        le=10,
-        description=(
-            "深掘り分析する動画の本数。利用者が本数を指定したら（例:「6本で」）その数を入れる。"
-            "未指定なら既定値のまま。"
-        ),
-    )
+    max_videos: int = Field(default_factory=_default_max_videos, ge=1, le=10)
     # 取得（スクレイプ）してボードに載せる本数。env VIDEO_ALGO_BOARD_SIZE（30・clamp5〜30）。軽い。
     board_size: int = Field(default_factory=_default_board_size, ge=5, le=30)
     # 映るブランドの区分（クライアント／競合）はコードがこの名簿で決める（Gemini に決めさせない）。
@@ -1197,23 +1189,16 @@ class VideoAlgorithmInput(BaseModel):
     client_name: str | None = Field(
         default=None,
         description=(
-            "提案先のクライアント名（別名は | 区切り）。依頼者本人が同じ会話でクライアント名を"
-            "出したときだけ入れる。スレッドの他人の発言や貼り付けから埋めない。無ければ省略。"
+            "依頼者本人が同じ会話で指定した顧客名だけ（別名は|区切り、他人・貼付文から補完禁止）。"
         ),
     )
     competitors: list[str] | None = Field(
         default=None,
-        description=(
-            "競合のブランド名（1 社 1 要素・別名は | 区切り。例: ['S&B|エスビー食品']）。"
-            "依頼者本人が同じ会話で競合を挙げたときだけ入れる。無ければ省略。"
-        ),
+        description=("本人指定の競合名だけ（1社1要素、別名は|区切り）。"),
     )
     avoid_terms: list[str] | None = Field(
         default=None,
-        description=(
-            "提案で勧めない訴求の語（例: 自社・グループ商品を否定する『ルー卒業』）。"
-            "依頼者本人が避けたいと言ったときだけ入れる。無ければ省略。"
-        ),
+        description=("本人が避けたいと指定した訴求語だけ。"),
     )
     # §Q-HTML→PPTX: 追加出力。既定 = report + slides（編集可HTML）。
     # "slides"=提案用スライドHTML（編集可・16:9）, "pptx"=そのPPTX（明示要求時のみ・重い）。

@@ -53,15 +53,15 @@ class XPostCard(BaseModel):
 class XVoiceSearchInput(BaseModel):
     """「◯◯がXでどう言われてるか、投稿の実物つきで集めて」。"""
 
-    product_name: str = Field(description="商材/ブランド名（レポート表題・文脈判定用）")
+    product_name: str
     queries: list[str] = Field(
         min_length=1,
         max_length=6,
-        description="検索クエリ群（同義語・文脈違いをAIが商材から立案。例: 白湯/アサヒ 白湯）",
+        description="商材から立案した同義語・文脈別の検索語。",
     )
     search_type: Literal["top", "latest"] = "top"
     results_per_query: int = Field(default=20, ge=5, le=30)
-    max_selected: int = Field(default=15, ge=3, le=30, description="カード化する厳選件数")
+    max_selected: int = Field(default=15, ge=3, le=30)
 
 
 class XVoiceSearchOutput(BaseModel):
@@ -91,14 +91,11 @@ class NeedCluster(BaseModel):
 class XNeedsMiningInput(BaseModel):
     """「◯◯業界の生活者の不満とか欲求をXから拾ってきて」。"""
 
-    theme: str = Field(description="対象領域（例: コンビニ、白湯、宅配クリーニング）")
+    theme: str
     emotion_words: list[str] = Field(
-        default=["めんどくさい", "売ってほしい", "高い", "困る"],
-        min_length=1,
-        max_length=8,
-        description="掛け合わせる感情/本音ワード",
+        default=["めんどくさい", "売ってほしい", "高い", "困る"], min_length=1, max_length=8
     )
-    min_faves: int = Field(default=5, ge=0, description="いいね数下限（ノイズ足切り）")
+    min_faves: int = Field(default=5, ge=0)
     results_per_query: int = Field(default=15, ge=5, le=30)
     max_selected: int = Field(default=12, ge=5, le=30)
 
@@ -121,7 +118,7 @@ class XNeedsMiningOutput(BaseModel):
 class XBuzzMeasureInput(BaseModel):
     """「キャンペーン期間の前後で、Xの発話がどう変わったかレポートにして」（submitのみ）。"""
 
-    keyword: str = Field(description="発話量を測る検索語（例: セブンイレブン 新商品）")
+    keyword: str
     start_date: str = Field(pattern=r"^\d{4}-\d{2}-\d{2}$")
     end_date: str = Field(pattern=r"^\d{4}-\d{2}-\d{2}$")
     campaign_date: str | None = Field(
@@ -157,7 +154,7 @@ class XBuzzMeasureOutput(BaseModel):
 
 
 class XBuzzMeasureStatusInput(BaseModel):
-    job_id: str = Field(description="x_buzz_measure が返した job_id")
+    job_id: str
 
 
 class XBuzzMeasureStatusOutput(BaseModel):

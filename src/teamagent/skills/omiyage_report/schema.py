@@ -51,15 +51,11 @@ class Sales25Intake(_StrictModel):
     brand_synonyms: dict[
         Annotated[str, Field(min_length=1, max_length=200)],
         Annotated[list[Annotated[str, Field(min_length=1, max_length=100)]], Field(max_length=12)],
-    ] = Field(
-        default_factory=dict,
-        max_length=3,
-        description="ブランド別に広く数える同義語。例: コープデリ→コープ/COOP/生協",
-    )
+    ] = Field(default_factory=dict, max_length=3)
     queries: list[Annotated[str, Field(min_length=1, max_length=200)]] = Field(
         default_factory=list,
         max_length=6,
-        description="実検索語6本（自社・競合A/B・中立3語の順）。省略時は確定名称を使う",
+        description="自社・競合A/B・中立3語の順の実検索語（省略時は確定名称）。",
     )
     mode: Literal["research", "revision"] = "research"
     source_job_id: str = Field(default="", pattern=r"^(?:omy_[0-9a-f]{32})?$")
@@ -68,49 +64,29 @@ class Sales25Intake(_StrictModel):
 class OmiyageReportSubmitInput(_StrictModel):
     """お土産資料ジョブの投入入力（不足があれば needs_input で返る）。"""
 
-    brand: str = Field(
-        default="",
-        max_length=200,
-        description="対象ブランド名（例: エムキュア）。不明なら空のまま呼ぶ",
-    )
+    brand: str = Field(default="", max_length=200)
     competitors: list[str] = Field(
         default_factory=list,
         max_length=4,
-        description="競合ブランド名（1〜4社）。不明なら空のまま呼ぶ",
+        description="本人指定の競合名（不明なら空）。",
     )
     keywords: list[str] = Field(
         default_factory=list,
         max_length=3,
-        description="一般検索キーワード（1〜3語・例: ヘアケア）。不明なら空のまま呼ぶ",
+        description="ブランド名を含まない一般検索語。",
     )
-    official_tiktok_account: str = Field(
-        default="",
-        max_length=200,
-        description="対象ブランドの公式TikTokアカウント（URLまたは@ハンドル・任意）",
-    )
-    category: str = Field(
-        default="",
-        max_length=60,
-        description=(
-            "商材カテゴリ（任意・例: スパイス・調味料／スキンケア／格安SIM）。"
-            "検索結果から関係の無い動画を除くのと、界隈の分類表を選ぶのに使う。不明なら空のまま呼ぶ"
-        ),
-    )
+    official_tiktok_account: str = Field(default="", max_length=200)
+    category: str = Field(default="", max_length=60)
     research_notes: str = Field(
         default="",
         max_length=RESEARCH_NOTES_MAX_CHARS,
-        description=(
-            "先行調査の要点（任意・最大4000字）。x_voice_search / search_surface_check / "
-            "web_research 等で裏取りした「生活者の声」「検索面の勢力図」を1行1要点で書き、"
-            "各行に出典URL(https://…)を添える。出典URLの無い行は資料に採用しない（捏造防止）。"
-            "無ければ空のまま呼ぶ"
-        ),
+        description=("先行調査を1行1要点＋出典URLで記載（なければ空）。"),
     )
     # OFF の既存要求・capture JSONへ新しいキーを出さない。
     sales25: Sales25Intake | None = Field(
         default=None,
         exclude=True,
-        description="本人限定sales25の対象商品・守る訴求条件。条件なしも明示する",
+        description="本人限定sales25の対象商品・訴求条件（条件なしも明示）。",
     )
 
     @model_validator(mode="before")

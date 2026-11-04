@@ -13,10 +13,7 @@ class MeetingPrepInput(BaseModel):
     target: str = Field(
         default="",
         max_length=80,
-        description=(
-            "Part of the meeting title or the client company name. Empty = the next external "
-            "meeting (today first, else the coming days)."
-        ),
+        description=("予定名の一部・会社名（空=次の社外商談、今日優先）。"),
     )
 
 

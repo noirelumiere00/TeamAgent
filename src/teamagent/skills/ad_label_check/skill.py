@@ -92,11 +92,9 @@ class AdLabelCheckSkill(BaseSkill[AdLabelCheckInput, AdLabelCheckOutput]):
 
     name: ClassVar[str] = "ad_label_check"
     description: ClassVar[str] = (
-        "TikTok/Instagram/YouTube の投稿URL（改行区切り・混在可・最大20件）を受け取り、各媒体の"
-        "タイアップ表示（有料パートナーシップ・タイアップ投稿・プロモーションを含みます）の有無と、"
-        "キャプションの #PR #ad #タイアップ 等の表記の有無を確かめ、"
-        "ラベルなし・ハッシュタグなしの件数と URL を返す。"
-        "ステマ表記チェック・広告表示の確認・PR表記の確認に使う。再生数などの効果測定は対象外。"
+        "TikTok/Instagram/YouTube投稿のタイアップ表示と#PR/#ad/"
+        "#タイアップを確認し欠落URL・件数を返す。ステマ・広告・PR表記チェック用、"
+        "効果測定は対象外。"
     )
     input_schema: ClassVar[type[BaseModel]] = AdLabelCheckInput
     output_schema: ClassVar[type[BaseModel]] = AdLabelCheckOutput

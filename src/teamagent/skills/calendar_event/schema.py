@@ -25,35 +25,20 @@ class CalendarEventInput(BaseModel):
     event_token: str = Field(
         default="",
         max_length=500,
-        description=(
-            "『📅 カレンダーに登録』ボタンの value（HMAC署名トークン）。"
-            "ボタン押下の処理ではこれだけを渡す（title/start/end は渡さない）"
-        ),
+        description=("登録ボタンの署名付きvalue（ボタン時は他の引数不要）。"),
     )
-    title: str = Field(
-        default="",
-        max_length=200,
-        description="自由文登録の予定タイトル（例『A社と打合せ』）。event_token を渡すときは不要",
-    )
+    title: str = Field(default="", max_length=200)
     start: str = Field(
         default="",
         max_length=40,
-        description=(
-            "自由文登録の開始日時。ISO 8601（例 2026-08-20T15:00:00+09:00）。"
-            "タイムゾーン省略時は JST として解釈する。曖昧な表現（『来週あたり』等）は"
-            "渡さず、利用者に確認して確定した日時だけを渡すこと"
-        ),
+        description=("確定した開始日時ISO 8601（TZ省略時JST）。"),
     )
     end: str = Field(
         default="",
         max_length=40,
-        description="自由文登録の終了日時（ISO 8601）。省略時は開始の 60 分後。所要は最大 8 時間",
+        description="終了日時ISO 8601（省略時60分後、最大8時間）。",
     )
-    location: str = Field(
-        default="",
-        max_length=200,
-        description="場所（任意・自由文。会議室名やオンライン会議の案内文など）",
-    )
+    location: str = Field(default="", max_length=200)
 
 
 class CalendarEventOutput(BaseModel):

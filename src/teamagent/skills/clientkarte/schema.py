@@ -11,15 +11,12 @@ from pydantic import BaseModel, Field
 class ClientKarteInput(BaseModel):
     """ClientKarte Skill の入力。"""
 
-    client_name: str = Field(min_length=1, max_length=100, description="対象クライアント名")
-    limit: int = Field(default=20, ge=1, le=50, description="束ねる FB イベントの上限")
+    client_name: str = Field(min_length=1, max_length=100)
+    limit: int = Field(default=20, ge=1, le=50)
     project_name: str | None = Field(
         default=None,
         max_length=100,
-        description=(
-            "案件名（分かる場合）。指定すると関連資料をこの案件名に一致するものへ絞り、"
-            "0 件なら同じ顧客の別案件の資料を代わりに提案する"
-        ),
+        description=("案件名で資料を絞る（0件なら同じ顧客の別案件を提案）。"),
     )
 
 
