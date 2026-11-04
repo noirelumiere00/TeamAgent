@@ -244,9 +244,13 @@ def test_lock_stale_policy_and_budget_stop() -> None:
     }
     repository.run_lock.side_effect = lambda: nullcontext(True)
     p = policy(engine)
-    p.catalog_hash = "stale"
+    p.prompt_hash = "stale"
     with pytest.raises(ValueError, match="stale_evaluation_policy"):
         run(repository, engine, policy=p, limit=1, dry_run=False, request_id="t")
+    # A new case in the catalog must not silently stop auto-apply.
+    fresh = policy(engine)
+    fresh.catalog_hash = "older-catalog"
+    assert fresh.compatible(engine.client.model_id, engine.prompt, CASES)
 
 
 def trial(**changes: Any) -> Trial:
@@ -717,3 +721,49 @@ def test_v2_policy_requires_reevaluation_for_whole_source_rule() -> None:
     old["application_version"] = "v2"
     with pytest.raises(ValueError):
         Policy.model_validate(old)
+
+
+def test_campaign_needs_its_name_in_the_post_even_for_single_campaign_advertisers() -> None:
+    from teamagent.ingest.video_library_case_models import (
+        Case,
+        Gate,
+        Policy,
+        Post,
+        Prediction,
+        application_prediction,
+    )
+
+    cases = [Case(advertiser="セブンイレブン", campaign="増量CP2026")]
+    guess = Prediction(
+        advertiser="セブンイレブン",
+        campaign="増量CP2026",
+        match_type="existing",
+        confidence=0.9,
+        evidence=[],
+    )
+    unnamed = Post(
+        caption="アサイーバナナスムージーが進化",
+        hashtags=["セブンイレブン"],
+        mentions=[],
+        account_name="a",
+        account_handle="a",
+        posted_at="",
+        advertiser=None,
+    )
+    named = unnamed.model_copy(update={"hashtags": ["セブンイレブン", "増量CP2026"]})
+    assert application_prediction(guess, cases, unnamed).campaign is None
+    assert application_prediction(guess, cases, unnamed).advertiser == "セブンイレブン"
+    assert application_prediction(guess, cases, named).campaign == "増量CP2026"
+    # Advertiser-only results fall back to the existing-pair gate.
+    gate = Gate(threshold=0.0, selected=66, correct=66)
+    pol = Policy(
+        application_version="v3",
+        model="m",
+        prompt_version="v1",
+        prompt_hash="h",
+        catalog_hash="c",
+        evaluation_hash="e",
+        existing=gate,
+        advertiser_only=None,
+    )
+    assert pol.status(application_prediction(guess, cases, unnamed)) == "applied"

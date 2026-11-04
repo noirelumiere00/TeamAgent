@@ -141,6 +141,20 @@ def run(
     return counts
 
 
+def default_policy_path() -> Path:
+    """The evaluated policy shipped in data/ (the image bakes data/ under WORKDIR /app).
+
+    The package is a no-editable install in production, so parents[3] is not the repo root
+    there; look in the repository first, then the working directory (same as the sync's yaml).
+    """
+    candidates = [Path(__file__).resolve().parents[3], Path.cwd()]
+    for base in candidates:
+        path = base / "data" / "video_library_case_policy.json"
+        if path.is_file():
+            return path
+    return candidates[-1] / "data" / "video_library_case_policy.json"
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -151,8 +165,10 @@ def main(argv: list[str] | None = None) -> int:
     request_id = uuid.uuid4().hex
     started = time.perf_counter()
     try:
-        policy_path = os.environ.get("VIDEO_LIBRARY_CASE_POLICY")
-        policy = Policy.model_validate_json(Path(policy_path).read_text()) if policy_path else None
+        policy_path = Path(os.environ.get("VIDEO_LIBRARY_CASE_POLICY") or default_policy_path())
+        policy = (
+            Policy.model_validate_json(policy_path.read_text()) if policy_path.is_file() else None
+        )
         inference = Inference(
             BedrockClient.from_env(
                 model_id_override=os.environ.get("VIDEO_LIBRARY_CASE_MODEL", DEFAULT_MODEL)

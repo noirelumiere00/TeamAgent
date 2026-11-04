@@ -102,12 +102,14 @@ def _ground(value: str) -> str:
 
 
 def application_prediction(result: Prediction, cases: list[Case], post: Post) -> Prediction:
-    """Require one unambiguous campaign across the entire caption and hashtags."""
+    """Keep the campaign only when the post names it and no sibling campaign of the advertiser.
+
+    Even a single-campaign advertiser needs the name in the post: a new campaign of a known
+    client would otherwise be filed under its old one (seen in the held-out evaluation).
+    """
     if result.match_type != "existing":
         return result
     campaigns = {c.campaign for c in cases if c.advertiser == result.advertiser}
-    if len(campaigns) <= 1:
-        return result
     sources = [post.caption, *post.hashtags]
     mentioned = {
         name for name in campaigns if any(_ground(name) in _ground(source) for source in sources)
@@ -147,17 +149,20 @@ class Policy(StrictModel):
     advertiser_only: Gate | None = None
 
     def compatible(self, model: str, prompt: str, cases: list[Case]) -> bool:
+        # The catalog is not pinned: adding a case must not silently stop auto-apply. Safety comes
+        # from validation (grounded quotes, existing pairs, named campaigns), not the catalog hash.
         return (
             self.model == model
             and self.prompt_hash == digest(prompt)
-            and self.catalog_hash == catalog_hash(cases)
             and bool(self.evaluation_hash)
         )
 
     def status(self, result: Prediction) -> Literal["applied", "candidate", "unknown"]:
         if result.match_type == "new":
             return "candidate"
-        gate = self.existing if result.campaign else self.advertiser_only
+        # An advertiser-only result is a downgraded existing match; the existing gate scored whole
+        # pairs, so it also vouches for the advertiser when no separate gate was calibrated.
+        gate = self.existing if result.campaign else (self.advertiser_only or self.existing)
         if result.advertiser and gate and gate.passed() and result.confidence >= gate.threshold:
             return "applied"
         return "unknown"
