@@ -263,6 +263,10 @@ resource "aws_ecs_task_definition" "ingest" {
       #    live が異なるため、ここで導出すると誤った値が焼かれる）。
       { name = "USE_INCREMENTAL_SYNC", value = "1" },
       { name = "VIDEO_LIBRARY_S3_BUCKET", value = aws_s3_bucket.raw_files.bucket },
+      # 事例の自動推定（Haiku）を取り込みの後段で毎日回す（小俣さん 11/02「承認なしで自動」、11/04 本番評価 66/66）。
+      { name = "VIDEO_LIBRARY_CASE_INFERENCE_ENABLED", value = "1" },
+      { name = "VIDEO_LIBRARY_CASE_LIMIT", value = "200" },
+      { name = "VIDEO_LIBRARY_CASE_MAX_COST_USD", value = "2" },
       ], var.enable_scrape_tools ? [
       { name = "VERTEX_SA_PATH", value = "/tmp/vertex-sa.json" },
       { name = "GEMINI_USE_VERTEX", value = "true" },
