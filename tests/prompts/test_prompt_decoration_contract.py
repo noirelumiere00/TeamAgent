@@ -95,6 +95,8 @@ EXEMPT_PROMPTS = {
     "proposal_research/v1/repair_section.md": "内部 JSON（区分の再生成）",
     # 全 DM 品質の判定（Haiku に区分 JSON だけを返させる内部プロンプト）。人には見えない。
     "dm_quality/v1/system.md": "内部 JSON（判定区分だけ）",
+    # 動画ライブラリの事例推定（Haiku に広告主・案件・根拠の JSON だけを返させる）。人には見えない。
+    "case_inference/v1/system.md": "内部 JSON（広告主・案件の推定と根拠の引用だけ）",
     # 時系列フラグ ON 時だけ本体へ足す規律。装飾の禁止節は v2d/v3 から継承する。
     "search/timeline/system.md": "search の system への時系列追記（装飾の決まりは本体側）",
     # 本番で読まれない版。装飾を直しても誰にも届かず、差分だけ増える。

@@ -25,6 +25,7 @@ def runner(monkeypatch: pytest.MonkeyPatch) -> MagicMock:
         "GOOGLE_OAUTH_REFRESH_TOKEN",
     ):
         monkeypatch.delenv(name, raising=False)
+    monkeypatch.delenv("VIDEO_LIBRARY_CASE_INFERENCE_ENABLED", raising=False)
     monkeypatch.setenv("INGEST_DRY_RUN", "0")
     monkeypatch.setenv("INGEST_OWNER_EMAIL", "owner@example.test")
     monkeypatch.setattr(sys, "argv", ["test-ingest"])
@@ -147,3 +148,33 @@ def test_thumbnail_failure_preserves_ingest_status(
     runner.thumbs.assert_called_once_with([])
     assert fargate.logger.error.call_args.args == ("video_library_thumbnails_failed",)
     assert "do-not-log" not in str(fargate.logger.mock_calls)
+
+
+@pytest.mark.parametrize("outcome", [0, 1, RuntimeError("private customer"), SystemExit(7)])
+def test_case_inference_opt_in_runs_after_thumbnails_and_keeps_exit_status(
+    runner: MagicMock, monkeypatch: pytest.MonkeyPatch, outcome: int | BaseException
+) -> None:
+    from teamagent.ingest import video_library_case_inference as inference
+
+    monkeypatch.setenv("VIDEO_LIBRARY_CASE_INFERENCE_ENABLED", "1")
+    runner.inference.return_value = outcome if isinstance(outcome, int) else 0
+    if isinstance(outcome, BaseException):
+        runner.inference.side_effect = outcome
+    monkeypatch.setattr(inference, "main", runner.inference)
+    assert fargate.main() == 0
+    assert runner.mock_calls[-2:] == [call.thumbs([]), call.inference([])]
+    assert "private customer" not in str(fargate.logger.mock_calls)
+
+
+def test_case_inference_disabled_and_dry_run_skip(
+    runner: MagicMock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from teamagent.ingest import video_library_case_inference as inference
+
+    monkeypatch.setattr(inference, "main", runner.inference)
+    assert fargate.main() == 0
+    runner.inference.assert_not_called()
+    monkeypatch.setenv("VIDEO_LIBRARY_CASE_INFERENCE_ENABLED", "1")
+    monkeypatch.setenv("INGEST_DRY_RUN", "1")
+    assert fargate.main() == 0
+    runner.inference.assert_not_called()

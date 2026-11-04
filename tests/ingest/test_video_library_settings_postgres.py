@@ -23,6 +23,7 @@ MIGRATION = Path(__file__).resolve().parents[2] / "infra/migrations/0036_video_l
 def prepare(conn: Any, repository: Any) -> None:
     conn.execute(MIGRATION.read_text())
     conn.execute(MIGRATION.read_text())  # Reapplying must preserve human settings.
+    conn.execute((MIGRATION.parent / "0038_video_campaign_links.sql").read_text())
     batch = seed_batch()
     batch.videos[0].advertiser = "test"
     batch.videos[0].campaign = "test"

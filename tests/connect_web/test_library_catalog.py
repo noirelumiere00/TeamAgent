@@ -290,3 +290,29 @@ def test_featured_videos_put_thumbnailed_videos_first() -> None:
 
     result = library.featured_videos(_Conn(), {}, admin=True)
     assert [row["video_id"] for row in result] == ["2", "1"]
+
+
+@pytest.mark.parametrize("inferred", [False, True])
+def test_ai_inference_badge_on_case_card_and_video_detail(
+    setup: tuple[TestClient, Pg], inferred: bool
+) -> None:
+    client, pg = setup
+    pg.row["case_inferred"] = inferred
+    card = BeautifulSoup(library._campaign_card(case_row(pg)), "html.parser")
+    assert ("AI推定" in card.text) is inferred
+    assert ("AI推定" in library._video_card(pg.row)) is inferred
+    detail = client.get("/library/v/tiktok/123", cookies=_auth_cookie())
+    assert detail.status_code == 200
+    assert ("AI推定" in detail.text) is inferred
+
+
+def test_advertiser_only_inference_is_visible_without_invented_case(
+    setup: tuple[TestClient, Pg],
+) -> None:
+    client, pg = setup
+    pg.row.update(case_inferred=True, advertiser="Brand <script>", campaign=None)
+    response = client.get("/library/v/tiktok/123", cookies=_auth_cookie())
+    assert response.status_code == 200
+    assert "広告主: Brand &lt;script&gt;" in response.text
+    assert "AI推定" in response.text
+    assert "の事例を見る" not in response.text

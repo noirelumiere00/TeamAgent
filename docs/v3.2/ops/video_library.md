@@ -447,3 +447,74 @@ PR1 の変更ファイル（12件）:
 一時的な変異8件（101行受付、ID重複排除無効、redirect HTTP許可、ID一致検査無効、0を欠損化、PR部分一致、429停止無効、retry上限増加）はすべて対応テストで赤を確認後に復元。結果は `/private/tmp/vl-url-pr1-mutations.json`、失敗全文は `/private/tmp/vl-url-pr1-mutation-*.log`。最終検査ログは `/private/tmp/vl-url-pr1-final-{pytest,mypy,ruff,format,imports,bandit}.log`。
 
 未検証: DSN未設定による実DB23件、実TikTok/S3疎通、本番migration適用・worker起動。Docker接続は権限で拒否され、利用可能なローカルPostgreSQLも確認できず、実DB確認の完了条件は残っている。画面・IAM・本番env反映はPR2/PR3の範囲。`git add` は共有管理領域 `/Users/s-komata/dev/teamagent/.git/worktrees/teamagent-vl-import/index.lock` 作成を `Operation not permitted` で拒否されたため、コミットせず全変更を作業ツリーに保持。push・PR作成は未実施。
+
+### キャプションからの広告主・案件補完（0038）
+
+0038 はシートとは別の `vl_video_campaign_links` に AI / human の判断を保存する。
+`vl_videos_effective` は既存列の名前・型・順番を維持し、末尾に `case_inferred` を追加する。
+有効値はシート（別名の読み替え後） > human > applied の AI。広告主が異なる案件は混ぜず、人の却下も AI の再適用を防ぐ。
+0038 の `vl_case_aliases` は元の広告主×案件の組を完全一致で読み替える。`to_campaign=NULL` は元の案件名を保つ。
+候補一覧は読み替え後の組を重複除去する。評価の正解はシートで案件が埋まった投稿の読み替え後の値だけを使い、
+AI・human で補完したラベルは正解にしない。過去の判断行も表示時に読み替える。
+設定は読み替え先を優先し、元の設定にフォールバックする。元が非公開なら読み替え先が公開でも非公開を維持する。
+別名は社内共有read、adminのみinsert/update。シートと事例マスターの生データは書き換えない。
+
+11/04 決定の初期2件は migration には入れず、0038 適用後に一回だけ登録する。
+
+```bash
+python scripts/register_video_case_aliases.py --decided-by '<実行者の識別子>'
+```
+
+`TikTok / 20260717 → ラフォーレ / セール`、`トップバリュ / 昭和レトロ → AEON / 昭和レトロ` を登録する。
+後者の `to_campaign` は NULL。既存の別名は再実行でも上書きせず、決定者・日時も維持する。
+案件が空の PR 投稿と、PR なし・広告主ありの投稿が対象。PR 判定は変更しない。
+新規案件は candidate として保存するだけで、事例マスターは増やさない。
+
+日次実行は既定 OFF。`VIDEO_LIBRARY_CASE_INFERENCE_ENABLED=1` の場合だけ同期・サムネ処理後に実行し、
+推定失敗は ingest の終了コードを変えない。管理画面の修正 UI は次の PR。
+
+最初に正解ラベルを伏せて評価し、設定ファイルを作る（実行には DB と Bedrock の権限が必要）。
+
+```bash
+VIDEO_LIBRARY_CASE_MAX_COST_USD=10 python scripts/evaluate_video_campaigns.py \
+  --report /path/to/case-evaluation.json --policy-output /path/to/case-policy.json
+VIDEO_LIBRARY_CASE_POLICY=/path/to/case-policy.json \
+  python -m teamagent.ingest.video_library_case_inference --dry-run
+```
+
+評価は案件・アカウント・月・文の長さで層別に150本を抽出し、重複投稿を除く。
+50本で閾値を調整、100本で固定評価。広告主も伏せる投稿／残す投稿を半分ずつにし、
+一部は正解案件を候補から除く。全体と案件別の広告主一致率、完全一致率、既知広告主での案件一致率、
+適合率、提案率、不明率、不正出力件数を JSON に保存する。
+既存一致の自動反映には固定評価で30件以上、適合率97%以上、候補除外時の誤った既存一致が0件必要。
+完全一致率と不正出力件数は指標として残すが、ゲートの合否には使わない。不正出力自体は反映しない。
+同じ広告主に複数案件がある場合、キャプション・ハッシュタグ全体に選んだ案件名があり、他の案件名が一切無い時だけ案件まで反映する。
+案件名の照合は NFKC・空白無視・大小無視で行う。引用に一方だけあっても、本文やハッシュタグに別の案件名があれば広告主だけにする。
+それ以外の既存一致は広告主だけに落とす。1案件の広告主は従来どおり。
+適合率は、案件まで反映する時は広告主×案件の一致、広告主だけの時は広告主一致で計算する。
+既存一致から広告主だけに落とした結果も既存一致ゲートで評価・反映する。
+モデルが初めから広告主だけ返した結果は、別に30件以上・97%以上を評価する。
+未合格の種類は適用不可。少数の評価結果は将来の精度を保証しない。
+設定はモデル・プロンプト本文・候補一覧のハッシュと反映ルールの版 (`application_version=v3`) に結び付ける。
+旧ルールの設定は読み込まず、別名登録後に実データで再評価して生成し直す。
+本文・顧客名・引用をログに出さず、評価レポートの案件別キーもハッシュにする。
+レポートの `incorrect_applications` は正解・元の推定（確信度と引用含む）・反映値・本文の先頭80字を保存する。
+閾値設定の `status`、調整用／最終評価の `split` も記録し、ゲート未合格時の誤った反映候補も診断用に含める。
+この一覧はローカルのレポートだけに出し、本番ログには出さない。
+
+| 環境変数 | 既定・意味 |
+|---|---|
+| `VIDEO_LIBRARY_CASE_MODEL` | 既存 Bedrock 価格表の東京 Haiku 4.5。価格が不明なモデルは拒否 |
+| `VIDEO_LIBRARY_CASE_POLICY` | 未設定。未設定・未合格では applied にしない。新規候補は candidate、それ以外は unknown |
+| `VIDEO_LIBRARY_CASE_LIMIT` | 100件 / 実行（既推定で入力が同じ投稿は数えない） |
+| `VIDEO_LIBRARY_CASE_MAX_COST_USD` | 推定 $1 / 実行、評価 $10 / 実行 |
+
+費用は UTF-8 バイト数による入力 token 上限・cache 書込料金・最大出力を呼出し前に予約する。
+タイムアウトも予約を消費し、SDK 内部リトライは無効。実費より保守的に停止する。
+`--dry-run` は推定呼出しを行うが DB は更新しない。
+同一入力・候補・設定・モデル・プロンプトはスキップし、変更された AI 判断は更新前に無効化する。
+失敗は次回再試行する。human 行は推定で更新しない。
+
+確認対象: `test_video_library_case_inference.py`, `test_video_library_case_postgres.py`,
+`test_run_ingest_fargate.py`, `test_library_catalog.py`。
+実 DB テストには隔離・ロールバック用の `TEAMAGENT_TEST_DB_DSN` が必要。
