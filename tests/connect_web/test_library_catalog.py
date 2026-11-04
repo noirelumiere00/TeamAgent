@@ -59,8 +59,8 @@ def test_catalog_case_links_copy_and_all_videos(setup: tuple[TestClient, Pg]) ->
         "campaign": [pg.row["campaign"]],
     }
     assert "<script>" not in response.text
-    assert soup.select_one("nav [aria-current]")["href"] == "/library"
-    assert soup.select_one("main .filters") is None
+    assert soup.select_one(".main-nav [aria-current]")["href"] == "/library"
+    assert soup.select_one(".workspace .sidebar") is not None
     assert "オーガニック投稿を見る" in response.text
     assert len(pg.calls) == 2  # aggregate + diversified videos, never N+1
     response = client.get(path, cookies=_auth_cookie())
@@ -216,7 +216,7 @@ def test_catalog_industry_chips_and_card_tag_labels(setup: tuple[TestClient, Pg]
     pg.row.update(industry="食品 & 飲料", purpose="認知")
     catalog_pg(pg)
     soup = BeautifulSoup(client.get("/library", cookies=_auth_cookie()).text, "html.parser")
-    assert soup.select_one("main .filters") is None
+    assert soup.select_one(".workspace .sidebar") is not None
     listing = BeautifulSoup(
         client.get("/library/cases", cookies=_auth_cookie()).text, "html.parser"
     )

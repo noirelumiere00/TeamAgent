@@ -325,3 +325,68 @@ def test_python_apks_are_pinned_in_both_builder_and_final_runtime() -> None:
         "COPY --from=builder /tmp/core-ca/root/usr/lib/libpython3.14.so.1.0 /usr/lib/libpython3.14.so.1.0"
         in final
     )
+
+
+def test_expat_is_pinned_and_verified_in_builder_and_final_runtime() -> None:
+    import json
+
+    digest = "68d2212a36051d122200630086b3f9f3edae4785b4700599ac47edb92364e8c5"
+    binary_sha = "a152dbe6777769de636347b3cd3c53cd46ccdae7b911a2acb76cf8f66ab9c366"
+    lock = ROOT / "infra/docker/core-libexpat1.lock.json"
+    apk = ROOT / "infra/docker/vendor/libexpat1-2.10.0-r0.apk"
+    data = json.loads(lock.read_bytes())
+    assert data["url"] == "https://packages.wolfi.dev/os/aarch64/libexpat1-2.10.0-r0.apk"
+    assert data["archive_sha256"] == hashlib.sha256(apk.read_bytes()).hexdigest() == digest
+    assert data["base_version"] == "2.9.0-r0"
+    assert data["apkindex"]["V"] == "2.10.0-r0"
+    assert data["apkindex"]["C"] == "Q1PNKLH+bUHNB3bSnT9O/FGajZYI8="
+    builder, final = _stage("builder", "final"), _stage("final")
+    for path in (apk, lock):
+        assert f"COPY {path.relative_to(ROOT)} " in builder
+        assert f"!{path.relative_to(ROOT)}" in DOCKERIGNORE.read_text()
+    assert (
+        f"{hashlib.sha256(lock.read_bytes()).hexdigest()} /tmp/core-expat/{lock.name} | sha256sum -c -"
+        in builder
+    )
+    assert "ARG EXPAT_PACKAGE_VERSION=2.10.0-r0" in TEXT
+    assert f"ARG LIBEXPAT_APK_SHA256={digest}" in TEXT
+    assert f"ARG LIBEXPAT_BINARY_SHA256={binary_sha}" in TEXT
+    assert (
+        builder.count('--apk-sha256 "$LIBEXPAT_APK_SHA256" --version "$EXPAT_PACKAGE_VERSION"') == 2
+    )
+    assert '"--apk-sha256", "' + digest + '", "--version", "2.10.0-r0"' in final
+    assert "source=/tmp/core-expat,target=/tmp/core-expat" in final
+    assert "cp -a /tmp/core-ca/root/usr/lib/libexpat.so.1* /tmp/core-expat/lib/" in builder
+    assert "COPY --from=builder /tmp/core-expat/lib/ /usr/lib/" in final
+    assert "COPY --from=builder /tmp/core-ca/root/usr/lib/libexpat.so.1*" not in final
+    assert (
+        "COPY --from=builder /tmp/core-ca/root/var/lib/db/sbom/libexpat1-2.10.0-r0.spdx.json "
+        in final
+    )
+    with tarfile.open(apk) as archive:
+        library = archive.extractfile("usr/lib/libexpat.so.1.13.1").read()
+        assert hashlib.sha256(library).hexdigest() == binary_sha
+        assert library[:5] == b"\x7fELF\x02"
+        assert int.from_bytes(library[18:20], "little") == 183
+        assert b"libc.so.6\x00" in library
+    runtime = json.loads((ROOT / "infra/codebuild/teamagent_runtime_contract.json").read_bytes())
+    python = next(
+        entry
+        for entry in runtime["receipt"]["entries"]
+        if entry["key"] == "component.python.version"
+    )
+    check = "python -c \"import pyexpat; assert pyexpat.EXPAT_VERSION == 'expat_2.10.0'\""
+    assert check in python["dockerfile_uses"] and check in builder
+    contract = json.loads(
+        (ROOT / "infra/codebuild/teamagent_core_media_release_contract.json").read_bytes()
+    )
+    core = next(subject for subject in contract["subjects"] if subject["name"] == "core")
+    for arg, expected in (
+        ("LIBEXPAT_APK_SHA256", digest),
+        ("LIBEXPAT_BINARY_SHA256", binary_sha),
+        ("EXPAT_PACKAGE_VERSION", "2.10.0-r0"),
+    ):
+        assertion = next(item for item in core["source_assertions"] if item["build_arg"] == arg)
+        assert assertion["value"] == expected
+        assert f'{assertion["oci_label"]}="${arg}"' in final
+        assert all(use in builder for use in assertion["dockerfile_uses"])

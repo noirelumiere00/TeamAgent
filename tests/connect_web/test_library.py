@@ -8,10 +8,11 @@ from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
+from bs4 import BeautifulSoup
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
-from teamagent.connect_web import library
+from teamagent.connect_web import library, portal
 from teamagent.connect_web.app import _safe_next, create_app
 from tests.connect_web.test_search_routes import _EMAIL, _auth_cookie, _config, _verifier_ok
 
@@ -42,6 +43,7 @@ class Pg:
             "organic_comments": 2,
             "organic_shares": 3,
             "total_plays": 17800,
+            "campaign_total_plays": 3120000,
             "total_saves": 178,
             "thumbnail_s3_key": "video-library/thumbs/tiktok/123.jpg",
             "video_s3_key": "secret-key",
@@ -110,13 +112,64 @@ def test_all_routes_require_cookie(setup: tuple[TestClient, Pg], path: str) -> N
     assert not pg.calls
 
 
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/library",
+        "/library/cases",
+        "/library/c?advertiser=advertiser&campaign=campaign",
+        "/library/videos",
+        "/library/v/tiktok/123",
+        "/library/admin/accounts",
+        "/library/admin/campaigns",
+    ],
+)
+def test_html_pages_share_header_and_nonce(setup: tuple[TestClient, Pg], path: str) -> None:
+    from tests.connect_web.test_library_catalog import catalog_pg
+
+    client, pg = setup
+    catalog_pg(pg)
+    response = client.get(path, cookies=_auth_cookie())
+    assert response.status_code == 200
+    page = BeautifulSoup(response.text, "html.parser")
+    headers = page.select(".connect-header")
+    assert len(headers) == 1
+    assert page.body.find(recursive=False) == headers[0]
+    assert page.select_one(".connect-header + .library-header") is not None
+    assert page.select_one('.connect-brand[href="/"]') is not None
+    current = headers[0].select("a[aria-current]")
+    assert len(current) == 1
+    assert current[0]["href"] == "/library"
+    assert current[0]["aria-current"] == "page"
+    assert headers[0].select_one(".connect-email").text == _EMAIL
+    assert page.select_one('.main-nav a[href="/"]') is None
+    styles = page.select("head style")
+    assert len(styles) == 1
+    assert portal.PORTAL_STYLE in styles[0].text
+    nonce = styles[0]["nonce"]
+    assert nonce
+    csp = response.headers["content-security-policy"]
+    style_src = next(part for part in csp.split(";") if part.strip().startswith("style-src "))
+    assert f"'nonce-{nonce}'" in style_src
+    assert "'unsafe-inline'" not in csp
+    assert all(tag.get("nonce") == nonce for tag in page.select("script, style"))
+
+
 @pytest.mark.parametrize("path", ["/library/admin/campaigns", "/library/admin/accounts"])
 @pytest.mark.parametrize("method", ["get", "post"])
+@pytest.mark.parametrize("emails", [None, "", " \t ", "other@example.test"])
 def test_admin_gate(
-    setup: tuple[TestClient, Pg], monkeypatch: pytest.MonkeyPatch, path: str, method: str
+    setup: tuple[TestClient, Pg],
+    monkeypatch: pytest.MonkeyPatch,
+    path: str,
+    method: str,
+    emails: str | None,
 ) -> None:
     client, pg = setup
-    monkeypatch.setenv("CONNECT_ADMIN_EMAILS", "other@example.test")
+    if emails is None:
+        monkeypatch.delenv("CONNECT_ADMIN_EMAILS", raising=False)
+    else:
+        monkeypatch.setenv("CONNECT_ADMIN_EMAILS", emails)
     response = getattr(client, method)(path, cookies=_auth_cookie())
     assert response.status_code == 403
     assert not pg.calls
@@ -140,7 +193,7 @@ def test_admin_gate(
 )
 def test_next_rejects_redirect_tricks(target: str) -> None:
     assert library.library_target(target) is None
-    assert _safe_next(target) == "/app"
+    assert _safe_next(target) == "/"
 
 
 def test_login_returns_to_library_with_query(setup: tuple[TestClient, Pg]) -> None:
@@ -212,6 +265,7 @@ def test_search_api_matches_listing_and_hides_s3_keys(
     assert row["rates"] == {"save_rate": 0.01, "engagement_rate": None, "is_reference": False}
     assert "thumbnail_s3_key" not in row and "video_s3_key" not in row
     assert row["has_thumbnail"] is True
+    assert "campaign_total_plays" not in row
     assert "m.total_plays" in pg.calls[1][0] and "m.total_saves" in pg.calls[1][0]
     api_calls = pg.calls.copy()
     client.get("/library/videos", params=query, cookies=_auth_cookie())
@@ -423,7 +477,7 @@ def test_card_uses_rounded_total_and_detail_keeps_exact_rates(
     pg.row.update(organic_plays=organic, total_plays=17800.0, total_saves=356.0)
     response = client.get("/library/videos", cookies=_auth_cookie())
     assert "1.7万回再生" in response.text
-    assert 'title="合計再生 17,800"' in response.text
+    assert 'title="この動画の再生数: 17,800"' in response.text
     assert "再生・保存率・ENG率と並び順は総計の最新数値" in response.text
     detail = client.get("/library/v/tiktok/123", cookies=_auth_cookie())
     assert "17,800" in detail.text and "保存率 2.00%" in detail.text

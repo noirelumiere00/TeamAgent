@@ -98,7 +98,7 @@ def test_filter_url_login_and_paging(setup: tuple[TestClient, ClientPg], quick: 
 def test_bad_client_filter_never_fetches(setup: tuple[TestClient, ClientPg], quick: str) -> None:
     client, pg = setup
     target = "/search?" + urlencode({"view": "clients", "quick": quick})
-    assert _safe_next(target) == "/app"
+    assert _safe_next(target) == "/"
     response = client.get(target, cookies=_auth_cookie())
     assert response.status_code == 400 and "この取引先クイックフィルタは使えません" in response.text
     assert pg.connections == []
@@ -116,7 +116,7 @@ def test_bad_client_filter_never_fetches(setup: tuple[TestClient, ClientPg], qui
     ],
 )
 def test_client_filter_safe_next_whitelist(target: str) -> None:
-    assert _safe_next(target) == "/app"
+    assert _safe_next(target) == "/"
 
 
 def test_attribute_values_are_escaped(setup: tuple[TestClient, ClientPg]) -> None:
@@ -141,7 +141,9 @@ def test_attribute_values_are_escaped(setup: tuple[TestClient, ClientPg]) -> Non
         and evil not in response.text
         and "&lt;script&gt;" in response.text
     )
-    assert not BeautifulSoup(response.text, "html.parser").select("script")
+    assert not BeautifulSoup(response.text, "html.parser").select(
+        "script:not([data-knowledge-bookmarks])"
+    )
     assert "innerHTML" not in _KARTE_JS  # summary values use textContent/createElement
 
 

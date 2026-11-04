@@ -56,7 +56,8 @@ UV_DIGEST = "9941e2d8e06ff884d328905091eac0a6bc1e40e5ce12e6dd0de4ef4ee26baac4"
 # 2026-10-27: Python / pyc 3.14.10-r0 を fresh APKINDEX + apk-tools 3.0.6 で再導出（241→240 行、gdbm 脱落）。
 # 2026-10-27: Python / pyc 3.14.10-r0→r1、署名検証済み APKINDEX + apk-tools 3.0.6 で再導出（240 行不変、ELF SHA 不変）。
 # 2026-10-30: 署名検証済み索引 + apk-tools 3.0.6 で ffmpeg 8.1.3-r0 と ffmpeg8 副パッケージを再導出（240 行不変）。
-APK_LOCK_SHA256 = "e60c8179777678a50a55d00fde9535bf25f710b4eaec071aecbc219837fb03cb"
+# 2026-11-03: Alpine 上流への追随（libexpat 2.9.0-r0→2.10.0-r0）。apk 段の実ビルドで lock 差分 -1 +1（240→240 行）。
+APK_LOCK_SHA256 = "6fe82f1df0c5050550f16f830533d9e66757844312fa1b8b21c0c62f6194bba4"
 CHROMIUM_PATH = "/usr/lib/chromium/chromium"
 
 
@@ -165,7 +166,7 @@ def test_base_bundled_cve_packages_are_pinned_to_the_fixed_versions() -> None:
         "LIBUUID_PACKAGE_VERSION": ("libuuid", "2.42.3-r1"),
         "LIBCRYPTO3_PACKAGE_VERSION": ("libcrypto3", "3.5.9-r0"),
         # 2026-09-24: 2.8.4-r0 が上流索引から消え 2.8.5-r0 へ（Alpine secdb: CVE-2026-93990 の修正版）。
-        "LIBEXPAT_PACKAGE_VERSION": ("libexpat", "2.9.0-r0"),
+        "LIBEXPAT_PACKAGE_VERSION": ("libexpat", "2.10.0-r0"),
         # 2026-10-02 便 r43 段3: base(v3.24)同梱の pcre2 10.47-r1 に公開済み CVE 8 件（HIGH 4）。secdb v3.24 main で 10.48-r0 が 7 件・10.49-r0 が CVE-2026-103111 を fixed。glib 等の依存で外せないため修正版を明示 pin。
         "PCRE2_PACKAGE_VERSION": ("pcre2", "10.49-r0"),
         # Alpine v3.24 の base 同梱 zlib 1.3.2-r0 に CVE-2026-85091（ECR は HIGH・Trivy は MEDIUM）。Alpine secdb v3.24 main が 1.3.2-r1 を fixed とする。r51 撃ち直し（4c5811a6）の段3 で media が停止

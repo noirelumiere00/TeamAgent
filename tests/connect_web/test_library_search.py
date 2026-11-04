@@ -114,7 +114,7 @@ def test_combined_results_keep_video_interactions_and_next_query(
     response = client.get("/library/videos", params=query, cookies=_auth_cookie())
     soup = BeautifulSoup(response.text, "html.parser")
     assert response.status_code == 200
-    assert soup.select_one(".header-search form")["action"] == "/library/videos"
+    assert soup.select_one("form.workspace")["action"] == "/library/videos"
     assert soup.select_one(".search-summary").text == "「サラヤ」に一致するPR投稿 123件"
     assert soup.select_one('select[name="pr"] option[selected]')["value"] == "yes"
     assert len(soup.select(".campaign-grid .card-link")) == 4
@@ -180,7 +180,7 @@ def test_empty_search_page_guidance(setup: tuple[TestClient, Pg], path: str) -> 
 def test_active_filter_labels_are_human_readable() -> None:
     from teamagent.connect_web import library
 
-    html = library._filters({"pr": "yes", "industry": "食品"}, catalog=False)
+    html = library._workspace("", {"pr": "yes", "industry": "食品"}, current="videos", nav="")
     assert "PR投稿のみ" in html and "業種: 食品" in html
     assert "絞り込み中: yes" not in html
 

@@ -108,7 +108,7 @@ def test_scroll_loads_three_pages_and_appended_cards_work(monkeypatch: pytest.Mo
                     cards.nth(index).locator(".preview").hover()
                     expect(page.locator("iframe")).to_have_count(1)
                     expect(cards.nth(index).locator("iframe")).to_have_count(1)
-                page.locator("header").hover()
+                page.locator(".library-header").hover()
                 expect(page.locator("iframe")).to_have_count(0)
                 assert cards.nth(100).locator(".card-link").get_attribute("href").endswith("10100")
                 assert cards.nth(101).locator("img").get_attribute("loading") == "lazy"

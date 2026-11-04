@@ -67,6 +67,11 @@ from teamagent.connect_diagnostics import (
     mask_email,
     now_jst,
 )
+from teamagent.connect_web.knowledge_bookmarks import (
+    BOOKMARK_JS,
+    BOOKMARK_PAGE,
+    BOOKMARK_STYLE,
+)
 from teamagent.connect_web.knowledge_lists import (
     LIST_STYLE,
     PAGE_SIZE,
@@ -92,6 +97,7 @@ from teamagent.dashboard.render import render_admin_page, render_usage_admin
 from teamagent.ingest.video_library_url_worker import worker_lifespan
 from teamagent.karte_attributes import CLIENT_QUICK_FILTERS
 from teamagent.knowledge_query import QUICK_FILTERS, KnowledgeQueryError, parse_knowledge_query
+from teamagent.legacy_knowledge import validate_legacy_requests
 
 logger = structlog.get_logger(__name__)
 
@@ -337,6 +343,20 @@ class _RedactOAuthStartAccessLog(logging.Filter):
         return True
 
 
+class RedactMCPAccessLog(logging.Filter):
+    def filter(self, record: logging.LogRecord) -> bool:
+        args = record.args
+        if isinstance(args, tuple) and len(args) >= 3 and isinstance(args[2], str):
+            path = args[2].split("?", 1)[0]
+            login = path == "/search/login" and "mcp-auth" in args[2]
+            if (
+                path in {"/authorize", "/token", "/register", "/mcp-auth/consent", "/mcp", "/mcp/"}
+                or login
+            ):
+                record.args = (*args[:2], path, *args[3:])
+        return True
+
+
 def build_uvicorn_log_config() -> dict[str, Any]:
     """uvicorn の既定ログ設定に、URL の秘匿対象を伏せるフィルタを足して返す。
 
@@ -353,6 +373,7 @@ def build_uvicorn_log_config() -> dict[str, Any]:
     filters["redact_shortlink"] = {"()": f"{__name__}._RedactShortLinkAccessLog"}
     filters["redact_admin_user"] = {"()": f"{__name__}._RedactAdminUserAccessLog"}
     filters["redact_oauth_start"] = {"()": f"{__name__}._RedactOAuthStartAccessLog"}
+    filters["redact_mcp_spike"] = {"()": f"{__name__}.RedactMCPAccessLog"}
     access = cfg.get("loggers", {}).get("uvicorn.access")
     if access is not None:
         access["filters"] = [
@@ -360,6 +381,7 @@ def build_uvicorn_log_config() -> dict[str, Any]:
             "redact_shortlink",
             "redact_admin_user",
             "redact_oauth_start",
+            "redact_mcp_spike",
         ]
     return cfg
 
@@ -683,8 +705,7 @@ def _safe_next(raw: str | None) -> str:
     """ログイン後の戻り先を検証（オープンリダイレクト防止）。
 
     既知の内部ページ・一覧 query と検証済みの ``/library`` 配下のみ許可し、
-    それ以外は既定 ``/app``。
-    ＝ログイン後は原則 Obsidian 風 UI(/app) に着地する（旧 /search UI は明示遷移時のみ）。
+    それ以外は Home（``/``）へ戻す。旧 ``/app`` も転送先への互換入口として許可する。
     外部 URL・``//host``・スキーム付き等は一切通さない（ホワイトリスト方式）。
     """
     candidate = (raw or "").strip()
@@ -694,6 +715,10 @@ def _safe_next(raw: str | None) -> str:
         return candidate
     if candidate in {"/", "/app", "/search", "/admin", "/app/history", "/admin/history"}:
         return candidate
+    if os.environ.get("CONNECT_MCP_ENABLED", "").lower() in {"1", "true"} and re.fullmatch(
+        r"/mcp-auth/consent\?tx=[A-Za-z0-9_-]{43}", candidate
+    ):
+        return candidate
     if candidate == "/search/graph/focus":
         return candidate
     if candidate.startswith("/search/graph/focus?seed="):
@@ -702,24 +727,21 @@ def _safe_next(raw: str | None) -> str:
         try:
             ids = parse_document_ids(candidate.removeprefix("/search/graph/focus?seed="))
         except ValueError:
-            return "/app"
+            return "/"
         return "/search/graph/focus?seed=" + ",".join(ids)
-    return "/app"
+    return "/"
 
 
 _SEARCH_COOKIE = "ta_search_session"
 _SESSION_TTL_S = 8 * 3600
-_DEFAULT_SEARCH_EMAILS = "s-komata@vectorinc.co.jp"
-_DEFAULT_ADMIN_EMAILS = frozenset({"s-komata@vectorinc.co.jp"})
 # /admin?user= の受け入れ上限。RFC 5321 の email 上限(254)を採る。
 _ADMIN_FILTER_USER_MAX = 254
 
 
 def _admin_emails() -> frozenset[str]:
-    """利用状況ページの email allowlist（空・未設定は小俣さんだけに倒す）。"""
+    """利用状況・品質・動画管理の email allowlist（空・未設定は誰も許可しない）。"""
     raw = os.environ.get("CONNECT_ADMIN_EMAILS", "")
-    parsed = frozenset(email.strip().lower() for email in raw.split(",") if email.strip())
-    return parsed or _DEFAULT_ADMIN_EMAILS
+    return frozenset(email.strip().lower() for email in raw.split(",") if email.strip())
 
 
 def _env_int(name: str, default: int) -> int:
@@ -850,14 +872,14 @@ def _load_search_config(env: dict[str, str] | None = None) -> DashboardConfig:
     """資料検索 Web UI 用の認証設定を env から作る（dashboard.config を流用）。
 
     env:
-      - CONNECT_SEARCH_ALLOWED_EMAILS: カンマ区切り（既定 s-komata@vectorinc.co.jp）
+      - CONNECT_SEARCH_ALLOWED_EMAILS: カンマ区切り（既定は空、HD も空なら誰も許可しない）
       - CONNECT_SEARCH_ALLOWED_HD: 会社ドメイン（hd クレーム照合・任意）
       - CONNECT_SEARCH_SESSION_SECRET: cookie 署名鍵（未設定なら起動毎ランダム）
       - CONNECT_GOOGLE_CLIENT_ID: Google Sign-In の client_id（id_token の aud）
       - CONNECT_SEARCH_COOKIE_SECURE: 1 で Secure Cookie（HTTPS 公開時）
     """
     e = env if env is not None else dict(os.environ)
-    emails_raw = e.get("CONNECT_SEARCH_ALLOWED_EMAILS", _DEFAULT_SEARCH_EMAILS).strip()
+    emails_raw = e.get("CONNECT_SEARCH_ALLOWED_EMAILS", "").strip()
     allowed_emails = frozenset(x.strip().lower() for x in emails_raw.split(",") if x.strip())
     hd = e.get("CONNECT_SEARCH_ALLOWED_HD", "").strip() or None
     secret_raw = e.get("CONNECT_SEARCH_SESSION_SECRET", "").strip()
@@ -3318,22 +3340,32 @@ def _shell_page(email: str, *, mode: str, list_content: str | None = None) -> st
         + _POWER_STYLE
         + PORTAL_STYLE
         + LIST_STYLE
+        + BOOKMARK_STYLE
     )
     head = (
         '<!doctype html><html lang="ja"><head><meta charset="utf-8">'
         '<meta name="viewport" content="width=device-width, initial-scale=1">'
         "<title>社内ナレッジ検索</title><style>" + style + "</style></head><body>"
     )
+    bookmark_root = (
+        '<div id="knowledgeBookmarkRoot" class="bookmark-notice" hidden data-user="'
+        + html.escape(email.lower(), quote=True)
+        + '" aria-live="polite"></div>'
+    )
+    bookmark_script = "<script data-knowledge-bookmarks>" + BOOKMARK_JS + "</script>"
     if list_content is not None:
         return (
             head
             + render_header(email, current_path="/search")
+            + bookmark_root
             + '<div id="shell" class="shell shell-list">'
             + '<section class="work"><nav class="ws-tabs" aria-label="ナレッジ表示">'
             + list_tabs(mode)
             + '</nav><div class="ws-body">'
             + list_content
-            + "</div></section></div></body></html>"
+            + "</div></section></div>"
+            + bookmark_script
+            + "</body></html>"
         )
     ribbon = (
         '<nav class="ribbon">'
@@ -3362,6 +3394,7 @@ def _shell_page(email: str, *, mode: str, list_content: str | None = None) -> st
         '<a class="ws-tab" href="/search?view=clients&amp;page=1">取引先一覧</a>'
         '<a class="ws-tab" href="/search?view=docs&amp;page=1">資料一覧</a>'
         '<a class="ws-tab" href="/search?view=tags">タグ</a>'
+        '<a class="ws-tab" href="/search?view=bookmarks">ブックマーク</a>'
         "</nav>"
         '<div class="ws-body">'
         '<div id="mainList"' + list_hidden + ">" + _SEARCH_DOM + "</div>"
@@ -3382,6 +3415,7 @@ def _shell_page(email: str, *, mode: str, list_content: str | None = None) -> st
     )
     body = (
         render_header(email, current_path="/search")
+        + bookmark_root
         + '<div id="shell" class="shell">'
         + ribbon
         + sidebar
@@ -3389,6 +3423,7 @@ def _shell_page(email: str, *, mode: str, list_content: str | None = None) -> st
         + right
         + "</div>"
         + scripts
+        + bookmark_script
         + "</body></html>"
     )
     return head + body
@@ -4013,6 +4048,29 @@ def create_app(
             return None
         return verify_session(cookie, search_cfg.session_secret)
 
+    @app.post("/api/v1/knowledge/resolve")
+    def resolve_knowledge_links(request: Request, entries: list[dict[str, Any]]) -> JSONResponse:
+        email = _search_email(request)
+        if email is None:
+            return JSONResponse({"error": "unauthorized"}, status_code=401)
+        try:
+            validate_legacy_requests(entries)
+        except ValueError:
+            return JSONResponse({"error": "リンクの形式が正しくありません。"}, status_code=400)
+        from teamagent.adapters.pgvector_client import PgVectorClient
+
+        try:
+            pg = PgVectorClient.from_env()
+            domain = email.split("@", 1)[1] if "@" in email else email
+            with pg.connection(
+                app_role=app_role, user_email=email, user_groups=[domain], user_role="user"
+            ) as conn:
+                results = pg.resolve_knowledge_links(conn, entries)
+        except Exception as exc:
+            logger.warning("knowledge_resolve_failed", error=type(exc).__name__)
+            return JSONResponse({"error": "取得できませんでした。"}, status_code=503)
+        return JSONResponse({"results": results}, headers={"Cache-Control": "no-store"})
+
     def _get_admin_pg() -> Any:
         pg = admin_state["pg"]
         if pg is None:
@@ -4035,6 +4093,8 @@ def create_app(
 
     @app.get("/healthz")
     def healthz() -> JSONResponse:
+        if not os.environ.get("CONNECT_APP_HTML_S3_URI", "").strip():
+            return JSONResponse({"ok": True, "knowledge_delivery": "dynamic"})
         # Expose the exact immutable object contract so rollout verification can
         # compare VersionId and all content anchors, not a short observational hash.
         state = _resolve_app_html()
@@ -4858,7 +4918,12 @@ def create_app(
         nxt = _safe_next(str(form.get("next", "")))
         ok, email = authenticate_id_token(credential, search_cfg, verifier=search_verifier)
         if not ok or email is None:
-            logger.warning("search_login_denied", email=email)
+            if nxt.startswith("/mcp-auth/consent?"):
+                logger.warning(
+                    "mcp_spike_login_denied", request_id=_request_id_of(request), count=1
+                )
+            else:
+                logger.warning("search_login_denied", email=email)
             return HTMLResponse(
                 _page(
                     "ログインできませんでした",
@@ -4867,7 +4932,10 @@ def create_app(
                 ),
                 status_code=403,
             )
-        logger.info("search_login_ok", user_email=email, next=nxt)
+        if nxt.startswith("/mcp-auth/consent?"):
+            logger.info("mcp_spike_login_ok", request_id=_request_id_of(request), count=1)
+        else:
+            logger.info("search_login_ok", user_email=email, next=nxt)
         resp = RedirectResponse(nxt, status_code=303)
         resp.set_cookie(
             _SEARCH_COOKIE,
@@ -4913,7 +4981,8 @@ def create_app(
             target = "/search?view=docs&page=1"
         email = _search_email(request)
         if email is None:
-            login = "/search/login" + ("?next=" + quote(target, safe="") if target else "")
+            # 戻り先は必ず /search（旧 /app#… の pendingHash は /search のシェルが解決する）。
+            login = "/search/login?next=" + quote(target or "/search", safe="")
             return RedirectResponse(login, status_code=303)
         if query_error is not None:
             content = render_list(
@@ -4933,6 +5002,8 @@ def create_app(
         if target:
             params = parse_qs(target.split("?", 1)[1])
             view, page = params["view"][0], int(params.get("page", ["1"])[0])
+            if view == "bookmarks":
+                return HTMLResponse(_shell_page(email, mode=view, list_content=BOOKMARK_PAGE))
             tag = params.get("tag", [None])[0]
             q = params.get("q", [""])[0]
             quick = params.get("quick", [None])[0]
@@ -4989,18 +5060,9 @@ def create_app(
         return HTMLResponse(_shell_page(email, mode="list"))
 
     @app.get("/app")
-    def obsidian_app(request: Request) -> Response:
-        """Obsidian 風 単一 HTML UI（allowlist 認証の内側でのみ配信）。
-
-        ⚠️ 認証必須。単一 HTML のため per-user RLS は掛からない（allowlist を
-        通った全員が同一内容を見る）。埋め込むのは共有可のナレッジのみ。
-        配信内容は _resolve_app_html が S3 オーバーライド→イメージ同梱→準備中の
-        優先順位で初回アクセス時に1回だけ解決する（No-AI 配信は維持）。
-        """
-        email = _search_email(request)
-        if email is None:
-            return RedirectResponse("/search/login?next=%2Fapp", status_code=303)
-        return HTMLResponse(_resolve_app_html()["html"])
+    def obsidian_app() -> Response:
+        """旧入口。認証と fragment の解決は転送先の /search に任せる。"""
+        return RedirectResponse("/search", status_code=303)
 
     @app.get("/r/{rid}")
     def report_redirect(rid: str) -> Response:
@@ -5734,6 +5796,13 @@ def create_app(
                 truncated=read.truncated,
             ),
             headers=history_headers,
+        )
+
+    if os.environ.get("CONNECT_MCP_ENABLED", "").lower() in {"1", "true"}:
+        from teamagent.connect_web.library_mcp_spike import install_spike
+
+        install_spike(
+            app, authenticate=_search_email, safe_next=_safe_next, request_id=_request_id_of
         )
 
     return app

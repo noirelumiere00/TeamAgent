@@ -18,7 +18,7 @@ from teamagent.knowledge_query import (
 
 PAGE_SIZE = 50
 MAX_PAGE = 10_000
-VIEWS = ("clients", "docs", "doc", "tags")
+VIEWS = ("clients", "docs", "doc", "tags", "bookmarks")
 
 
 def parse_tag(raw: str) -> tuple[str, str] | None:
@@ -60,8 +60,8 @@ def search_list_target(raw: str) -> str | None:
         if document_id != values["id"].lower():
             return None
         return "/search?" + urlencode({"view": "doc", "id": document_id})
-    if view == "tags":
-        return "/search?view=tags" if set(values) == {"view"} else None
+    if view in ("tags", "bookmarks"):
+        return f"/search?view={view}" if set(values) == {"view"} else None
     allowed_keys = (
         {"view", "page", "tag", "q", "quick"}
         if view == "docs"
@@ -106,6 +106,7 @@ def list_tabs(view: str) -> str:
         ("clients", "取引先一覧", "/search?view=clients&amp;page=1"),
         ("docs", "資料一覧", "/search?view=docs&amp;page=1"),
         ("tags", "タグ", "/search?view=tags"),
+        ("bookmarks", "ブックマーク", "/search?view=bookmarks"),
     ):
         active = " active" if key == view else ""
         current = ' aria-current="page"' if key == view else ""

@@ -156,11 +156,13 @@ def main() -> int:
     # サブモジュールの main() を呼ぶか、runpy で起動する。シンプルに runpy で。
     import runpy
 
+    ingest_exit: int | str | None = None
     try:
         runpy.run_path("scripts/ingest_sources.py", run_name="__main__")
     except SystemExit as exc:
-        if exc.code not in (None, 0):
-            raise
+        ingest_exit = exc.code
+    # The video library reads its own sheet, so ingest warnings (exit 2, almost nightly) must not
+    # skip it; the ingest exit code is still reported after the library steps.
 
     try:
         from teamagent.ingest.video_library_sync import main as sync_video_library
@@ -192,6 +194,8 @@ def main() -> int:
         except (Exception, SystemExit) as exc:
             logger.error("video_library_case_inference_failed", error=type(exc).__name__)
     print("[run_ingest_fargate] done", flush=True)
+    if ingest_exit not in (None, 0):
+        raise SystemExit(ingest_exit)
     return 0
 
 

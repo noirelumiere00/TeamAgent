@@ -120,7 +120,7 @@ def test_visible_page_uses_rls_connection_and_range(
     assert page.select_one(f'nav[aria-label="ページ切替"] a[href="/search?view={view}&page=1"]')
     assert "次の50件" not in page.text
     # List views do not boot the graph/search fetch engines.
-    assert page.select("script") == []
+    assert page.select("script:not([data-knowledge-bookmarks])") == []
     if view == "clients":
         assert page.select_one('a[href="/search/client/%E9%A1%A7%E5%AE%A2"]')
     else:
@@ -187,7 +187,7 @@ def test_html_escape_and_safe_source_links(setup: tuple[TestClient, Pg], view: s
     assert response.status_code == 200 and evil not in response.text
     assert "&lt;script&gt;" in response.text
     page = BeautifulSoup(response.text, "html.parser")
-    assert page.select("script") == []
+    assert page.select("script:not([data-knowledge-bookmarks])") == []
     assert all(not str(link["href"]).startswith("javascript:") for link in page.select("a[href]"))
 
 
@@ -206,7 +206,7 @@ def test_source_url_boundary(setup: tuple[TestClient, Pg], uri: str) -> None:
     response = client.get("/search?view=docs", cookies=_auth_cookie())
     assert response.status_code == 200
     page = BeautifulSoup(response.text, "html.parser")
-    assert page.select("script") == []
+    assert page.select("script:not([data-knowledge-bookmarks])") == []
     sources = page.select(".knowledge-list td:last-child a")
     assert len(sources) == (1 if uri.startswith("https://example.com/?") else 0)
     if sources:
@@ -242,9 +242,12 @@ def test_invalid_query_defaults_to_existing_search_without_db(
     assert response.status_code == 200
     assert 'id="mainList"' in response.text and 'id="mainGraph"' in response.text
     assert pg.calls == pg.connections == []
-    assert _safe_next("/search?" + query) == "/app"
+    assert _safe_next("/search?" + query) == "/"
     response = client.get("/search?" + query, follow_redirects=False)
-    assert response.status_code == 303 and response.headers["location"] == "/search/login"
+    assert (
+        response.status_code == 303
+        and response.headers["location"] == "/search/login?next=%2Fsearch"
+    )
 
 
 @pytest.mark.parametrize(
@@ -263,7 +266,7 @@ def test_invalid_query_defaults_to_existing_search_without_db(
     ],
 )
 def test_safe_next_rejects_unlisted_targets(target: str) -> None:
-    assert _safe_next(target) == "/app"
+    assert _safe_next(target) == "/"
 
 
 @pytest.mark.parametrize(

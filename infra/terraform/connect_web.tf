@@ -23,6 +23,17 @@ variable "enable_connect_web" {
   default     = false
 }
 
+variable "connect_admin_emails" {
+  description = "利用状況・品質・動画管理（/admin・/admin/analyze・/admin/quality・/library/admin/*）の管理者（CONNECT_ADMIN_EMAILS）。v1 は小俣さん 1 名。空＝誰も管理者でない。⚠️ TD で変えたら activation 版 tfvars（正本）へ同じ値を追記。"
+  type        = string
+  default     = ""
+
+  validation {
+    condition     = var.connect_admin_emails == "" || can(regex("^[^,@[:space:]]+@[^,@[:space:]]+$", var.connect_admin_emails))
+    error_message = "connect_admin_emails は空か email ちょうど 1 件（v1 の決裁。広げるには決裁が要る）。"
+  }
+}
+
 variable "personal_memory_admin_emails" {
   description = "本人メモの管理者閲覧（/admin/memory）を許す email（PERSONAL_MEMORY_ADMIN_EMAILS）。利用状況画面の CONNECT_ADMIN_EMAILS とは共用しない。v1 は小俣さんちょうど 1 名（2026-09-25 決裁・10-05 再確認）。空＝誰も見られない。⚠️ TD で変えたら activation 版 tfvars（正本）へ同じ値を追記。"
   type        = string
@@ -471,6 +482,7 @@ resource "aws_ecs_task_definition" "connect_web" {
       { name = "CONNECT_WEB_HOST", value = "0.0.0.0" },
       { name = "CONNECT_WEB_PORT", value = "8788" },
       { name = "CONNECT_ANSWER_RATING", value = var.connect_answer_rating ? "true" : "false" },
+      { name = "CONNECT_ADMIN_EMAILS", value = var.connect_admin_emails },
       # 本人メモの管理者閲覧（M6）。本人メモ専用の allowlist（空＝誰も見られない）。
       { name = "PERSONAL_MEMORY_ADMIN_EMAILS", value = var.personal_memory_admin_emails },
       # 質問と回答の履歴の管理者閲覧（上司 5）。専用の allowlist（空＝誰も見られない）。
@@ -483,7 +495,7 @@ resource "aws_ecs_task_definition" "connect_web" {
       { name = "CONNECT_BASE_URL", value = var.connect_base_url },
       { name = "CONNECT_GOOGLE_CLIENT_ID", value = var.connect_google_client_id },
       # /app・/search を @vectorinc.co.jp の社員全員に開放（email_verified + 会社ドメイン hd 許可）。
-      # 未設定だと既定 allowlist（s-komata 1名）のみ。2026-07-07 ユーザー承認（全社ナレッジ共有）。
+      # HD・email allowlist ともに未設定ならログイン不可。2026-07-07 ユーザー承認（全社ナレッジ共有）。
       { name = "CONNECT_SEARCH_ALLOWED_HD", value = "vectorinc.co.jp" },
       # /app is an immutable object contract, not a mutable-key hot swap. The
       # task asks S3 for this exact VersionId, verifies the returned VersionId

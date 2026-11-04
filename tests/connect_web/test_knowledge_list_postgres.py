@@ -68,7 +68,7 @@ def db() -> Iterator[Any]:
                 CREATE TABLE documents (
                     id uuid PRIMARY KEY, title text, modified_at timestamptz,
                     source_uri text, source_type text, metadata jsonb NOT NULL,
-                    owner_email text, acl_emails text[], acl_groups text[]
+                    owner_email text, acl_emails text[], acl_groups text[], external_id text
                 );
                 CREATE TABLE chunks (
                     id uuid PRIMARY KEY, document_id uuid REFERENCES documents(id),
@@ -104,7 +104,9 @@ def seed(
     if fb:
         metadata["is_sales_fb"] = "true"
     conn.execute(
-        """INSERT INTO documents VALUES (%s,%s,%s,%s,'gdrive',%s,%s,%s,%s)""",
+        """INSERT INTO documents
+           (id,title,modified_at,source_uri,source_type,metadata,owner_email,acl_emails,acl_groups)
+           VALUES (%s,%s,%s,%s,'gdrive',%s,%s,%s,%s)""",
         [
             doc_id,
             name + (" FBタイトル" if fb else " 資料タイトル"),
@@ -638,3 +640,56 @@ def test_client_attributes_counts_filters_and_http_are_scoped_by_real_rls(
             assert page.status_code == 200
             if email.startswith("b"):
                 assert "私有" not in page.text
+
+
+def test_legacy_hash_and_import_resolution_are_rls_scoped(
+    db: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from fastapi.testclient import TestClient
+
+    from teamagent.connect_web.app import create_app
+    from teamagent.dashboard.auth import make_session
+    from teamagent.legacy_knowledge import safe_legacy_filename
+    from tests.connect_web.test_search_routes import _SECRET, _config
+
+    private = seed(db, "Aだけ秘密", owner="a@example.com")
+    visible = [seed(db, "共有", groups=("example.com",)) for _ in range(2)]
+    hidden_collision = seed(db, "共有", owner="a@example.com")
+    excluded = [
+        seed(db, "抑制", groups=("example.com",), extra={"suppressed": "true"}),
+        seed(db, "研究", groups=("example.com",), extra={"x_research_tool": "tool"}),
+        seed(db, "FB", groups=("example.com",), fb=True),
+    ]
+    pg = HttpPg(db)
+    monkeypatch.setattr(PgVectorClient, "from_env", lambda: pg)
+    client = TestClient(create_app(search_config=_config()))
+    cookie = {"ta_search_session": make_session("b@example.com", _SECRET, ttl_s=3600)}
+
+    def resolve(entries: list[dict[str, Any]]) -> Any:
+        response = client.post("/api/v1/knowledge/resolve", json=entries, cookies=cookie)
+        assert response.status_code == 200
+        return response.json()["results"]
+
+    missing = {"status": "missing", "candidates": []}
+    for kind in ("doc", "open"):
+        private_entry = {"kind": kind, "value": "Aだけ秘密 資料タイトル", "legacy": True}
+        nonexistent = {**private_entry, "value": "存在しないstem"}
+        assert resolve([private_entry]) == resolve([nonexistent]) == [missing]
+        # 同じ API を使う取り込みの一括照合でも、私有の UUID・タイトルは返らない。
+        result = resolve([private_entry, {**private_entry, "value": "共有 資料タイトル_2"}])
+        assert result[0] == missing and result[1]["status"] == "ambiguous"
+        assert {c["id"] for c in result[1]["candidates"]} == set(visible)
+        assert private not in str(result) and hidden_collision not in str(result)
+        assert "Aだけ秘密" not in str(result)
+    assert resolve([{"kind": "client", "value": "Aだけ秘密", "legacy": True}]) == [missing]
+    assert resolve([{"kind": "doc", "value": private, "legacy": False}]) == [missing]
+    for doc_id in excluded:
+        assert resolve([{"kind": "doc", "value": doc_id, "legacy": False}]) == [missing]
+    # A は自分の私有資料と、共有の同名資料すべてを候補に持つ。
+    cookie["ta_search_session"] = make_session("a@example.com", _SECRET, ttl_s=3600)
+    own = resolve(
+        [{"kind": "doc", "value": safe_legacy_filename("Aだけ秘密 資料タイトル"), "legacy": True}]
+    )[0]
+    assert own["status"] == "resolved" and own["candidates"][0]["id"] == private
+    shared = resolve([{"kind": "doc", "value": "共有 資料タイトル", "legacy": True}])[0]
+    assert {c["id"] for c in shared["candidates"]} == {*visible, hidden_collision}

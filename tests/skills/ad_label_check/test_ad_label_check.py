@@ -98,7 +98,7 @@ def test_find_disclosures(text: str, tags: list[str], expected: list[str]) -> No
     assert find_disclosures(text, tags) == expected
 
 
-def test_mixed_urls_keep_pasted_order_with_label_and_tag_presence() -> None:
+def test_summary_lists_counts_and_urls_per_problem() -> None:
     fake = FakeApify(ITEMS)
     pasted = "\n".join([TT, IG, YT, "https://example.com/a", TT_PLAIN, YT_GONE])
     out = _run(AdLabelCheckSkill(apify=fake), [pasted])
@@ -119,15 +119,15 @@ def test_mixed_urls_keep_pasted_order_with_label_and_tag_presence() -> None:
     assert by_url[YT].label is None and by_url[YT].disclosure_tags == ["【PR】"]
     assert by_url[YT_GONE].found is False and not by_url[YT_GONE].needs_review
 
-    # 11-02 要望: 媒体ごとにまとめず貼られた順のまま・右にラベルとハッシュタグの有無だけ・問題の行だけ ⚠️。
-    assert out.slack_summary == "\n".join(
+    # 11-02 要望: 問題ごとに件数と URL（貼られた順）。両方に当たる URL は両方に出す。
+    assert out.slack_summary == "\n\n".join(
         [
-            f"{TT}　ラベルあり　ハッシュタグあり",
-            f"{IG}　ラベルあり　ハッシュタグなし",
-            f"{YT}　ラベル取れず　ハッシュタグあり",
-            "https://example.com/a　対象外（TikTok・Instagram・YouTube の投稿URLではありません）",
-            f"{TT_PLAIN}　ラベルなし　ハッシュタグなし　⚠️要確認",
-            f"{YT_GONE}　⚠️取得できず（削除・非公開・URL違いの可能性）",
+            "確認 4件（ラベルあり 2件・ハッシュタグあり 2件）",
+            f"ラベルなし 1件\n{TT_PLAIN}",
+            f"ラベル取れず 1件\n{YT}",
+            f"ハッシュタグなし 2件\n{IG}\n{TT_PLAIN}",
+            f"⚠️取得できず 1件\n{YT_GONE}",
+            "対象外 1件\nhttps://example.com/a",
         ]
     )
     assert out.total_cost_usd == pytest.approx(0.03)
@@ -180,3 +180,11 @@ def test_input_splits_lines_dedupes_and_caps() -> None:
     urls = [f"{TT}\n{TT}\n{IG}"] + [f"https://youtu.be/{i:011d}" for i in range(30)]
     inp = AdLabelCheckInput(urls=urls)
     assert inp.urls[:2] == [TT, IG] and len(inp.urls) == 20
+
+
+def test_all_clear_is_one_line() -> None:
+    fake = FakeApify(
+        {ACTOR_TIKTOK_VIDEO: [{"id": "7400000000000000001", "isSponsored": True, "text": "#PR"}]}
+    )
+    out = _run(AdLabelCheckSkill(apify=fake), [TT])
+    assert out.slack_summary == "1件すべてラベルあり・ハッシュタグあり"

@@ -13,7 +13,7 @@
   },
   "source_runtime_contract": {
     "path": "infra/codebuild/teamagent_runtime_contract.json",
-    "sha256": "1134016c15ec3a75de1151c62591dd0d3007331abfc6899c873c2667a79ce719"
+    "sha256": "ac1ad51a68a17b7d1575a986667986a53317df99b91b3fb67ad23019e2093227"
   },
   "app_html": {
     "bucket": "teamagent-dev-raw-files",
@@ -124,6 +124,15 @@
           ]
         },
         {
+          "key": "artifact.libexpat-apk-sha256",
+          "value": "68d2212a36051d122200630086b3f9f3edae4785b4700599ac47edb92364e8c5",
+          "build_arg": "LIBEXPAT_APK_SHA256",
+          "oci_label": "io.teamagent.contract.libexpat-apk-sha256",
+          "dockerfile_uses": [
+            "--apk-sha256 \"$LIBEXPAT_APK_SHA256\""
+          ]
+        },
+        {
           "key": "artifact.pip-wheel-apk-sha256",
           "value": "6dcca154f23de54db689ec2006bb65c67de74d556f55f8836bf5d438da8b8ee1",
           "build_arg": "PIP_WHEEL_APK_SHA256",
@@ -175,6 +184,24 @@
           "oci_label": "io.teamagent.contract.python-3.14-runtime-apk-sha256",
           "dockerfile_uses": [
             "--apk-sha256 \"$PYTHON_RUNTIME_APK_SHA256\""
+          ]
+        },
+        {
+          "key": "binary.libexpat.sha256",
+          "value": "a152dbe6777769de636347b3cd3c53cd46ccdae7b911a2acb76cf8f66ab9c366",
+          "build_arg": "LIBEXPAT_BINARY_SHA256",
+          "oci_label": "io.teamagent.contract.libexpat-binary-sha256",
+          "dockerfile_uses": [
+            "printf '%s  %s\\n' \"$LIBEXPAT_BINARY_SHA256\" /usr/lib/libexpat.so.1.13.1 | sha256sum -c -"
+          ]
+        },
+        {
+          "key": "package.expat.version",
+          "value": "2.10.0-r0",
+          "build_arg": "EXPAT_PACKAGE_VERSION",
+          "oci_label": "io.teamagent.contract.expat-package-version",
+          "dockerfile_uses": [
+            "--version \"$EXPAT_PACKAGE_VERSION\""
           ]
         },
         {
@@ -246,7 +273,7 @@
       "source_assertions": [
         {
           "key": "artifact.apk-lock.sha256",
-          "value": "e60c8179777678a50a55d00fde9535bf25f710b4eaec071aecbc219837fb03cb",
+          "value": "6fe82f1df0c5050550f16f830533d9e66757844312fa1b8b21c0c62f6194bba4",
           "build_arg": "MEDIA_APK_LOCK_SHA256",
           "oci_label": "io.teamagent.contract.apk-lock-sha256",
           "dockerfile_uses": [

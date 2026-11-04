@@ -60,6 +60,20 @@ libpython SHA-256は `5acb30a9c68ceb2985f094c5621f1d62ff8abd4480ea85c7b4ede09e74
 runtime receiptはPython版・binary SHAのみを更新し、release契約は各APK SHA・package版を束縛し、libpythonの実byteはsmokeで照合する。
 TrivyとECR Inspectorの実スキャン結果は通常便でも確認する。
 
+2026-11-03: CVE-2026-113351 / CVE-2026-115506 は Wolfi secdb の origin `expat`
+修正版 `2.10.0-r0` で対応する。固定した builder/runtime base の APK DB では同 origin は
+`libexpat1` `2.9.0-r0` だけであり、`expat`（xmlwf コマンド）や開発用パッケージは追加しない。
+[`core-libexpat1.lock.json`](./core-libexpat1.lock.json) が公式 aarch64 APK の SHA-256
+`68d2212a36051d122200630086b3f9f3edae4785b4700599ac47edb92364e8c5` と APKINDEX を固定する。
+既存検証器で両 stage の共有ライブラリ・symlink・SBOM・APK DB を更新し、旧実体と SBOM を削除する。
+SHA・依存 provider・同 origin の package 集合・対象外 DB record・実体 checksum が一致しなければ build を止める。
+`libexpat.so.1.13.1` SHA-256 は
+`a152dbe6777769de636347b3cd3c53cd46ccdae7b911a2acb76cf8f66ab9c366`。
+runtime receipt は既存 Python 構成の条件として `pyexpat.EXPAT_VERSION == 'expat_2.10.0'` を追加し、
+release 契約は APK SHA・package 版・実体 SHA の OCI label と builder の実体 SHA 検査を束縛する。
+smoke でも同 origin の installed inventory・唯一の新 SBOM・実体 SHA・ロード済み expat 版を照合する。
+base digest と既存 CA・Brotli・pip-wheel・Python 差し替えは維持する。
+
 Productionのconnect-webは `CONNECT_APP_HTML_S3_URI` による `source=s3` が正であり、baked
 fallbackとQA済みproduction artifactを同一digestとして扱わない。最終core OCI contractは次を
 固定する。

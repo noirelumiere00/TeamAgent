@@ -122,7 +122,7 @@ def test_bad_or_unsupported_query_is_visible_and_never_fetches(
     assert response.status_code == 400 and message in response.text
     assert "一覧を取得できませんでした" not in response.text
     assert "件中" not in response.text and pg.connections == []
-    assert _safe_next(target) == "/app"
+    assert _safe_next(target) == "/"
     assert BeautifulSoup(response.text, "html.parser").select_one("#docsQuery") is not None
 
 
@@ -137,7 +137,7 @@ def test_unknown_quick_and_query_key_whitelist(setup: tuple[TestClient, SearchPg
         "/search?view=docs&quick=recent&quick=minutes",
         "/search?view=tags&q=食品",
     ):
-        assert _safe_next(target) == "/app"
+        assert _safe_next(target) == "/"
 
 
 @pytest.mark.parametrize(
@@ -147,7 +147,7 @@ def test_unknown_quick_and_query_key_whitelist(setup: tuple[TestClient, SearchPg
 def test_next_rejects_external_and_prefix_paths(prefix: str) -> None:
     assert (
         _safe_next(prefix + "?" + urlencode({"view": "docs", "q": "食品", "quick": "recent"}))
-        == "/app"
+        == "/"
     )
 
 
@@ -158,7 +158,10 @@ def test_query_is_escaped_and_db_failure_is_separate(setup: tuple[TestClient, Se
     response = client.get(target, cookies=_auth_cookie())
     assert response.status_code == 200 and q not in response.text
     page = BeautifulSoup(response.text, "html.parser")
-    assert page.select("img, script") == [] and page.select_one("#docsQuery")["value"] == q
+    assert (
+        page.select("img, script:not([data-knowledge-bookmarks])") == []
+        and page.select_one("#docsQuery")["value"] == q
+    )
     assert "0 件中 表示0件" in page.text
     pg.error = True
     response = client.get(target, cookies=_auth_cookie())

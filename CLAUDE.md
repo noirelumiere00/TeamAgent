@@ -94,7 +94,7 @@
 - **C2 RLS は `app_role="teamagent_app"` 必須**：master user（table owner）で接続すると FORCE RLS でも実質 bypass する。アプリは `PgVectorClient.connection(app_role="teamagent_app", user_email, user_groups, user_role)` で session 注入。`user_email=None` は会社共有モデルでは許容だが意図的にのみ。
 - **C3 Fargate からの Drive ファイルアクセス（knowledge_deliver / ingest）は `GOOGLE_FORCE_OAUTH=1`**：Vertex SA だと共有ドライブを開けず失敗 → 個人 OAuth に強制。（morning_digest は別経路＝per-user token refresh なので GOOGLE_FORCE_OAUTH は使わない）。
 - **C4 Slack identity は fail-closed**：`adapters/slack_client.py` の identity 解決が社外/ゲスト/bot を拒否（データ非到達で安全）。dmPolicy:open でも resolve_identity が最終ガード。
-- **既知 caveat（未修正・このまま運用）**：`connect_web/app.py` の `_DEFAULT_SEARCH_EMAILS = "s-komata@..."` は env `CONNECT_SEARCH_ALLOWED_EMAILS` 未設定時に**個人固定にフォールバック**する。多人数で使うなら**本番は必ず `CONNECT_SEARCH_ALLOWED_EMAILS` を明示**すること。
+- **修正済み**：connect-web の検索・管理者 allowlist は個人 email にフォールバックしない。検索は `CONNECT_SEARCH_ALLOWED_EMAILS` または `CONNECT_SEARCH_ALLOWED_HD`、管理者は Terraform の `connect_admin_emails`（`CONNECT_ADMIN_EMAILS`）で明示し、未設定は許可しない。
 - **C5 `SLACK_TEAM_ID` を本番 mcp env に必ず設定**（2026-07-10 検証済み・①は事実だった）：`resolve_identity` は `SLACK_TEAM_ID` 未設定だと team 検証を **skip（fail-open）** する（`slack_client.py` の `expected_team` ガード）。ゲスト/is_stranger/bot 拒否と email 検証は残るが、多人数運用では tfvars に `slack_team_id = "T…"` を明示して他ワークスペースを fail-closed で拒否すること。未設定のまま起動すると初回解決時に `slack_team_check_disabled` の WARN が出る。
 - **未検証メモ（要確認・着手前に裏取り）**：② `connect_google_client_id` 変数が `variables*.tf` に未定義で `enable_connect_web=false` 時に terraform error の疑い。
 

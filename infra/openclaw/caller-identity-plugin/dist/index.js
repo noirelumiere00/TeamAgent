@@ -515,7 +515,7 @@ const AD_LABEL_REST_RE =
 const AD_LABEL_MAX_URLS = 20;
 export const AD_LABEL_ROUTE_CONTEXT =
   "この発話は TikTok / Instagram / YouTube の投稿 URL だけです。`ad_label_check` が使えるなら、" +
-  "urls に URL をすべてそのまま渡し、戻り値の slack_summary を貼られた順のまま返してください" +
+  "urls に URL をすべてそのまま渡し、戻り値の slack_summary をそのまま返してください" +
   "（要約し直さない）。使えないときは通常どおり答えてください。";
 
 // 本文が投稿 URL（VIDEO_URL_RULES の 3 媒体）だけなら URL 数、そうでなければ 0。
