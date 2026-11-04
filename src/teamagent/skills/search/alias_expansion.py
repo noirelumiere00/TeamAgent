@@ -39,10 +39,7 @@ def resolve_topic_client(
             else None
         )
         if surface:
-            # 「◯◯HD」と「◯◯ホールディングス」は同じ会社の書き分けなので 1 社に数える。
-            matches.setdefault(
-                re.sub(r"hd$", "ホールディングス", normalize_client(name)), (surface, name)
-            )
+            matches.setdefault(normalize_client(name), (surface, name))
     return next(iter(matches.values())) if len(matches) == 1 else None
 
 

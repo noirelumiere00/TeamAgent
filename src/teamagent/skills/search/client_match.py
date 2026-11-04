@@ -50,7 +50,8 @@ def normalize_client(name: str | None) -> str:
         return ""
     out = _LEGAL_SUFFIX_RE.sub("", unicodedata.normalize("NFKC", str(name)))
     out = _NOISE_RE.sub("", out)
-    return out.casefold()
+    # 「◯◯HD」と「◯◯ホールディングス」は同じ会社の書き分け（◯◯ 単体とは別のまま）。
+    return re.sub(r"hd(様?)$", r"ホールディングス\1", out.casefold())
 
 
 def clients_match(a: str | None, b: str | None) -> bool:
