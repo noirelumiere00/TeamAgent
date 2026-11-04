@@ -50,6 +50,38 @@ def flag(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("SEARCH_TIMELINE_STATUS", "1")
 
 
+@pytest.mark.parametrize(
+    "query",
+    [
+        "今どう？",
+        "どうなっている？",
+        "進捗は？",
+        "現況は？",
+        "状況は？",
+        "現状は？",
+        "今の状態は？",
+        "ステータスは？",
+        "◯◯は受注した？",
+        "◯◯は失注した？",
+        "◯◯は決まった？",
+        "◯◯は決定した？",
+        "◯◯は提案中？",
+    ],
+)
+def test_status_questions_share_detection_with_status_answer(query: str) -> None:
+    assert timeline.asks_status(query)
+    assert timeline.status_answer(query, [hit()], lambda h: None)
+
+
+@pytest.mark.parametrize(
+    "query",
+    ["", "JTB と HIS の過去の提案書や事例ってある？", "提案書\n補足: 案件の進捗・受注状況"],
+)
+def test_non_status_questions_and_context_lines_do_not_trigger_status(query: str) -> None:
+    assert not timeline.asks_status(query)
+    assert timeline.status_answer(query, [hit()], lambda h: None) == ""
+
+
 def test_posted_beats_old_fb_and_new_proposal_without_double_counting() -> None:
     rows = [hit(), campaign(), campaign(), hit(3, occurred_at="2026-10-14", cls_phase="提案")]
     assert [s.text for s in timeline.resolve_statuses(rows)] == [

@@ -13,7 +13,7 @@ from tests.skills.search.test_case_state_evidence import row
 from tests.skills.search.test_search_dates_exposure import _build, _pgvector
 
 
-@pytest.mark.parametrize("query", ["提案書", "案件の現状", "事例を一覧で"])
+@pytest.mark.parametrize("query", ["案件の現状", "◯◯の進捗は？", "◯◯は受注した？"])
 @pytest.mark.parametrize("legacy_timeline", ["0", "1"])
 def test_model_added_won_and_fabricated_date_never_reach_answer(
     monkeypatch: pytest.MonkeyPatch, query: str, legacy_timeline: str
@@ -37,6 +37,29 @@ def test_model_added_won_and_fabricated_date_never_reach_answer(
     assert "2026-08-15 時点の正式状態: 提案" in out.answer
     assert "根拠日（確認日）: 2026-09-01" in out.answer
     assert "https://example.test/source#1" in out.answer
+    assert out.case_state_answer == out.answer
+    assert out.direct_answer_kind == "case_state"
+
+
+@pytest.mark.parametrize(
+    "query", ["提案書", "事例を一覧で", "JTB と HIS の過去の提案書や事例ってある？"]
+)
+@pytest.mark.parametrize("legacy_timeline", ["0", "1"])
+def test_non_status_question_keeps_search_answer(
+    monkeypatch: pytest.MonkeyPatch, query: str, legacy_timeline: str
+) -> None:
+    monkeypatch.setenv("CASE_STATE_EVIDENCE_ALLOWED_EMAILS", "reader@example.test")
+    monkeypatch.setenv("SEARCH_TIMELINE_STATUS", legacy_timeline)
+    skill = _build(_pgvector([row(state="proposed")]))
+    monkeypatch.setattr(skill, "_summarize", lambda *a, **kw: ("検索で見つかった提案資料です。", 0))
+    ctx = SkillContext(metadata={"user_email": "reader@example.test"})
+    out = skill.run(SearchInput(query=query), ctx)
+    monkeypatch.setenv("CASE_STATE_EVIDENCE_ALLOWED_EMAILS", "")
+    baseline = skill.run(SearchInput(query=query), ctx)
+    assert out.answer == baseline.answer
+    assert out.answer
+    assert out.case_state_answer is None
+    assert out.direct_answer_kind != "case_state"
 
 
 @pytest.mark.parametrize(
@@ -66,6 +89,37 @@ def test_renderer_keeps_conflicting_sources_and_never_borrows_another_cases_stat
     assert "受注" not in text and "失注" not in text
 
 
+def test_renderer_shows_three_subjects_and_remaining_count() -> None:
+    sources = [row(n, state="proposed") for n in range(1, 6)]
+    for n, source in enumerate(sources, 1):
+        source.metadata["case_state_evidence"]["subject_ref"] = f"case:{n}"
+    text = timeline.render_case_states(sources)
+    assert text.count("対象 ") == 3
+    assert text.endswith("\nほか 2 件")
+    assert all(f"https://example.test/source#{n}" in text for n in range(1, 4))
+    assert all(f"https://example.test/source#{n}" not in text for n in (4, 5))
+
+
+@pytest.mark.parametrize("locator", ["chunk:-1371208571", "message:1790784000.000002", "page:1"])
+@pytest.mark.parametrize("has_records", [False, True])
+def test_renderer_hides_internal_positions_and_keeps_source_links(
+    locator: str, has_records: bool
+) -> None:
+    source = row(state="proposed")
+    bundle = source.metadata["case_state_evidence"]
+    bundle["source_ref"]["locator"] = locator
+    bundle["records"][0]["source_ref"]["locator"] = locator
+    if not has_records:
+        bundle["records"] = []
+    text = timeline.render_case_states([source])
+    assert "出典: https://example.test/source#1" in text
+    if locator.startswith(("chunk:", "message:")):
+        assert "位置:" not in text
+        assert locator not in text
+    else:
+        assert f"位置: {locator}" in text
+
+
 @pytest.mark.parametrize("state,word", [("won", "受注"), ("completed", "完了"), ("lost", "失注")])
 def test_final_word_guard_only_allows_the_resolved_official_state(state: str, word: str) -> None:
     statuses = timeline.resolve_statuses([row(state=state)], case_state=True)
@@ -92,7 +146,7 @@ def test_public_hits_share_conflict_resolution_and_keep_their_own_sources(
     hits = [row(), row(2, state="lost")]
     skill = _build(_pgvector(hits))
     out = skill.run(
-        SearchInput(query="提案書", include_answer=False),
+        SearchInput(query="案件の進捗は？", include_answer=False),
         SkillContext(metadata={"user_email": "reader@example.test"}),
     )
     parallel = fanout._output_hits(skill, hits, {}, case_state=True)
@@ -165,7 +219,8 @@ def test_live_slack_only_answer_uses_post_date_and_permalink(
     )
     monkeypatch.setattr(skill, "_summarize", lambda *a, **kw: ("受注の実績。完了。", 0))
     out = skill.run(
-        SearchInput(query="提案書"), SkillContext(metadata={"user_email": "reader@example.test"})
+        SearchInput(query="案件の進捗は？"),
+        SkillContext(metadata={"user_email": "reader@example.test"}),
     )
     assert "正式状態は不明" in out.answer
     assert f"根拠日（投稿日）: {item.hit.posted_on}" in out.answer
