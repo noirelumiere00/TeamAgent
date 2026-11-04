@@ -45,9 +45,26 @@ class CaseRepository:
         return [
             Case(**r)
             for r in conn.execute(
-                "SELECT advertiser, campaign FROM vl_campaigns ORDER BY advertiser, campaign"
+                """SELECT DISTINCT COALESCE(a.to_advertiser,c.advertiser) AS advertiser,
+                   COALESCE(a.to_campaign,c.campaign) AS campaign
+                   FROM vl_campaigns c LEFT JOIN vl_case_aliases a
+                   ON a.from_advertiser=c.advertiser AND a.from_campaign=c.campaign
+                   ORDER BY advertiser, campaign"""
             ).fetchall()
         ]
+
+    @staticmethod
+    def evaluation_rows(conn: Connection[dict[str, Any]]) -> list[dict[str, Any]]:
+        # Only sheet-labelled rows are truth; never evaluate against an inferred/human label.
+        return list(
+            conn.execute(
+                """SELECT v.* FROM vl_videos_effective v
+               JOIN vl_videos sheet ON sheet.platform=v.platform AND sheet.video_id=v.video_id
+               JOIN vl_campaigns c ON c.advertiser=sheet.advertiser AND c.campaign=sheet.campaign
+               WHERE sheet.is_pr AND v.caption IS NOT NULL AND v.caption<>''
+               ORDER BY v.platform, v.video_id"""
+            ).fetchall()
+        )
 
     def load(self) -> tuple[list[Case], list[dict[str, Any]]]:
         with self.connection() as conn:

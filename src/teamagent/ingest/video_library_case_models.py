@@ -101,19 +101,18 @@ def _ground(value: str) -> str:
     return re.sub(r"\s+", "", unicodedata.normalize("NFKC", value)).casefold()
 
 
-def application_prediction(result: Prediction, cases: list[Case]) -> Prediction:
-    """Keep a multi-campaign match only when the quotes identify exactly that campaign."""
+def application_prediction(result: Prediction, cases: list[Case], post: Post) -> Prediction:
+    """Require one unambiguous campaign across the entire caption and hashtags."""
     if result.match_type != "existing":
         return result
     campaigns = {c.campaign for c in cases if c.advertiser == result.advertiser}
     if len(campaigns) <= 1:
         return result
-    quoted = {
-        name
-        for name in campaigns
-        if any(_ground(name) in _ground(e.quote) for e in result.evidence)
+    sources = [post.caption, *post.hashtags]
+    mentioned = {
+        name for name in campaigns if any(_ground(name) in _ground(source) for source in sources)
     }
-    if quoted == {result.campaign}:
+    if mentioned == {result.campaign}:
         return result
     return result.model_copy(update={"campaign": None, "match_type": "unknown"})
 
@@ -138,7 +137,7 @@ class Gate(StrictModel):
 
 
 class Policy(StrictModel):
-    application_version: Literal["v2"]
+    application_version: Literal["v3"]
     model: str
     prompt_version: Literal["v1"]
     prompt_hash: str

@@ -62,7 +62,7 @@ def client(text: str | None = None, stop_reason: str = "end_turn") -> MagicMock:
 
 def policy(engine: Inference) -> Policy:
     return Policy(
-        application_version="v2",
+        application_version="v3",
         model=DEFAULT_MODEL,
         prompt_version="v1",
         prompt_hash=digest(engine.prompt),
@@ -464,9 +464,9 @@ def test_quotes_ground_across_hash_spacing_width_but_not_invented_text() -> None
         (["P r o d u c t"], True),
     ],
 )
-def test_multi_campaign_requires_unique_quoted_name(quotes: list[str], keep_campaign: bool) -> None:
+def test_multi_campaign_requires_unique_source_name(quotes: list[str], keep_campaign: bool) -> None:
     raw = prediction(evidence=[dict(field="caption", quote=q) for q in quotes])
-    reflected = application_prediction(raw, CASES)
+    reflected = application_prediction(raw, CASES, Post(caption=" ".join(quotes)))
     assert reflected.advertiser == "Brand"
     assert reflected.campaign == ("Product" if keep_campaign else None)
     assert reflected.match_type == ("existing" if keep_campaign else "unknown")
@@ -475,15 +475,18 @@ def test_multi_campaign_requires_unique_quoted_name(quotes: list[str], keep_camp
 
 def test_single_campaign_and_new_candidate_keep_current_behavior() -> None:
     raw = prediction(evidence=[dict(field="caption", quote="Brand")])
-    assert application_prediction(raw, CASES[:1]) == raw
+    assert application_prediction(raw, CASES[:1], POST) == raw
     # An unrelated advertiser's campaign must not make this advertiser ambiguous.
     assert (
-        application_prediction(raw, [CASES[0], Case(advertiser="Another", campaign="Brand")]) == raw
+        application_prediction(raw, [CASES[0], Case(advertiser="Another", campaign="Brand")], POST)
+        == raw
     )
     candidate = prediction(campaign="New", match_type="new")
-    assert application_prediction(candidate, CASES) == candidate
+    assert application_prediction(candidate, CASES, POST) == candidate
     assert (
-        application_prediction(prediction(campaign=None, match_type="unknown"), CASES).campaign
+        application_prediction(
+            prediction(campaign=None, match_type="unknown"), CASES, POST
+        ).campaign
         is None
     )
 
@@ -603,6 +606,7 @@ def test_normalized_campaign_names_and_overlapping_names_are_conservative() -> N
         application_prediction(
             prediction(campaign=name, evidence=[dict(field="caption", quote="#Product2026の紹介")]),
             cases,
+            Post(caption="#Product2026の紹介"),
         ).campaign
         == name
     )
@@ -612,12 +616,13 @@ def test_normalized_campaign_names_and_overlapping_names_are_conservative() -> N
                 campaign="ProductPlus", evidence=[dict(field="caption", quote="ProductPlus")]
             ),
             [CASES[0], Case(advertiser="Brand", campaign="ProductPlus")],
+            Post(caption="ProductPlus"),
         ).campaign
         is None
     )
 
 
-def test_report_of_passing_gate_includes_only_wrong_reflected_values() -> None:
+def test_report_drops_wrong_campaign_when_competitor_is_elsewhere_in_caption() -> None:
     rows = [
         dict(
             platform="tiktok",
@@ -649,10 +654,7 @@ def test_report_of_passing_gate_includes_only_wrong_reflected_values() -> None:
     p, report = evaluate(rows, CASES, engine, seed=42)
     assert p.existing and p.existing.passed()
     assert report["final"]["exact_accuracy"] == 0.0
-    assert len(report["incorrect_applications"]) == 1
-    error = report["incorrect_applications"][0]
-    assert error["status"] == "applied" and error["application"]["campaign"] == "Other"
-    assert error["caption"] == "0:Product Other"
+    assert report["incorrect_applications"] == []
 
 
 def test_report_precision_and_errors_use_the_calibrated_threshold() -> None:
@@ -660,7 +662,7 @@ def test_report_precision_and_errors_use_the_calibrated_threshold() -> None:
         dict(
             platform="tiktok",
             video_id=str(i),
-            caption=f"{i}:Product Other",
+            caption=f"{i}:" + ("Product" if i % 2 == 0 else "Other"),
             advertiser="Brand",
             campaign="Product",
         )
@@ -685,3 +687,33 @@ def test_report_precision_and_errors_use_the_calibrated_threshold() -> None:
     assert report["final"]["selected"] == p.existing.selected
     assert report["final"]["precision"] == 1.0
     assert report["incorrect_applications"] == []
+
+
+@pytest.mark.parametrize(
+    "post,keep",
+    [
+        (Post(caption="Product Other"), False),
+        (Post(caption="Product", hashtags=["Other"]), False),
+        (Post(caption="Other", hashtags=["Product"]), False),
+        (Post(caption="unrelated", hashtags=["Other"]), False),
+        (Post(caption="Productだけ"), True),
+        (Post(caption="unrelated", hashtags=["Ｐｒｏｄｕｃｔ"]), True),
+        (Post(caption="p r o d u c t", hashtags=["OTHER"]), False),
+        (Post(caption="unrelated", account_name="Product"), False),
+    ],
+)
+def test_other_campaign_anywhere_in_caption_or_hashtags_blocks_full_match(
+    post: Post, keep: bool
+) -> None:
+    # Haiku quotes only its preferred campaign; the guard must inspect the unquoted source too.
+    raw = prediction(evidence=[dict(field="caption", quote="Product")])
+    applied = application_prediction(raw, CASES, post)
+    assert applied.advertiser == "Brand"
+    assert applied.campaign == ("Product" if keep else None)
+
+
+def test_v2_policy_requires_reevaluation_for_whole_source_rule() -> None:
+    old = policy(Inference(client(), max_cost_usd=1)).model_dump()
+    old["application_version"] = "v2"
+    with pytest.raises(ValueError):
+        Policy.model_validate(old)

@@ -120,7 +120,7 @@ def run(
                 if not dry_run:
                     if not repository.save(
                         row,
-                        application_prediction(result, cases),
+                        application_prediction(result, cases, post),
                         status,
                         fingerprint,
                         inference.client.model_id,

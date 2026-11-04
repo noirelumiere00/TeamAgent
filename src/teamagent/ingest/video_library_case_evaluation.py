@@ -189,7 +189,9 @@ def evaluate(
                 withheld=withheld,
                 prediction=prediction,
                 error_code=error,
-                application=application_prediction(prediction, candidates) if prediction else None,
+                application=application_prediction(prediction, candidates, post)
+                if prediction
+                else None,
                 caption=post.caption[:80],
             )
         )
@@ -198,7 +200,7 @@ def evaluate(
     rng.shuffle(trials)
     tuning, final = trials[:50], trials[50:]
     policy = Policy(
-        application_version="v2",
+        application_version="v3",
         model=inference.client.model_id,
         prompt_version=PROMPT_VERSION,
         prompt_hash=digest(inference.prompt),
@@ -264,14 +266,7 @@ def main(argv: list[str] | None = None) -> int:
         repo = CaseRepository(PgVectorClient.from_env())
         with repo.connection() as conn:
             cases = repo.cases(conn)
-            rows = list(
-                conn.execute(
-                    """SELECT v.* FROM vl_videos v JOIN vl_campaigns c
-                  ON c.advertiser=v.advertiser AND c.campaign=v.campaign
-                  WHERE v.is_pr AND v.caption IS NOT NULL AND v.caption<>''
-                  ORDER BY v.platform, v.video_id"""
-                ).fetchall()
-            )
+            rows = repo.evaluation_rows(conn)
         sample = stratified_sample(rows, args.sample_size, args.seed)
         if len(sample) < args.sample_size:
             raise ValueError("insufficient_unique_labelled_videos")
