@@ -1366,7 +1366,9 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
                 )
             answer = compact.strip_linkless_invitation(answer)
         case_answer = None
-        if case_state_enabled(ctx.metadata.get("user_email")):
+        if case_state_enabled(ctx.metadata.get("user_email")) and timeline_status.asks_status(
+            input.query
+        ):
             case_answer = timeline_status.render_case_states(
                 state_hits if found or slack_items else []
             )

@@ -22,6 +22,13 @@ from teamagent.skills.search.dates import extract_title_date
 from teamagent.skills.search.schema import DocumentReference
 
 JST = timezone(timedelta(hours=9))
+STATUS_QUESTION = re.compile(
+    r"今どう|どうなって|進捗|現況|状況|現状|今の状態|ステータス|受注した|失注した|決まった|決まりました|決定した|提案中[？?]"
+)
+
+
+def asks_status(query: str) -> bool:
+    return STATUS_QUESTION.search(query.split("\n", 1)[0]) is not None
 
 
 def enabled() -> bool:
@@ -367,8 +374,16 @@ def render_case_states(hits: Sequence[SearchHit]) -> str:
             else "リンク不明"
         )
 
+    def source_line(ref: SourceRef) -> str:
+        position = (
+            ""
+            if ref.locator.startswith(("chunk:", "message:"))
+            else f" / 位置: {literal(ref.locator)}"
+        )
+        return f"出典: {link(ref.url)}{position}"
+
     blocks = []
-    for index, status in enumerate(statuses, 1):
+    for index, status in enumerate(statuses[:3], 1):
         lines = [f"対象 {index}（資料名: {literal(status.label)}）", status.text]
         for bundle in status.evidence_sources:
             lines.append(f"資料種別: {literal(bundle.document_kind)}")
@@ -387,11 +402,9 @@ def render_case_states(hits: Sequence[SearchHit]) -> str:
                         "報告の記載（正式状態ではありません）: "
                         + literal(record.raw_value or "不明")
                     )
-                ref = record.source_ref
-                lines.append(f"出典: {link(ref.url)} / 位置: {literal(ref.locator)}")
+                lines.append(source_line(record.source_ref))
             if not bundle.records:
-                ref = bundle.source_ref
-                lines.append(f"出典: {link(ref.url)} / 位置: {literal(ref.locator)}")
+                lines.append(source_line(bundle.source_ref))
             if observation := bundle.delivery_observation:
                 lines.append(
                     f"投稿観測: {observation.video_count} 本 / "
@@ -404,6 +417,8 @@ def render_case_states(hits: Sequence[SearchHit]) -> str:
                 )
         # 案件ごとに検査する。他案件の受注を提案中の案件へ流用しない。
         blocks.append(guard_state_words("\n".join(lines), [status]))
+    if len(statuses) > 3:
+        blocks.append(f"ほか {len(statuses) - 3} 件")
     return "\n\n".join(blocks)
 
 
@@ -424,9 +439,9 @@ def status_answer(
     from teamagent.skills.search import drive_first
     from teamagent.skills.search.case_list import case_link
 
-    own = query.split("\n", 1)[0]
-    if not re.search(r"今どう|どうなって|進捗|現況|状況|現状|今の状態|ステータス", own):
+    if not asks_status(query):
         return ""
+    own = query.split("\n", 1)[0]
     named = {
         identity(h)
         for h in hits

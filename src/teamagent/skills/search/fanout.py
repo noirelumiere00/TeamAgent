@@ -1164,6 +1164,9 @@ def run_fanout(skill: Any, input: SearchInput, ctx: SkillContext) -> SearchOutpu
             *case_hits,
             *(drive_first.slack_hit(i, n) for n, i in enumerate(slack.items)),
         ]
+    if case_state_enabled(ctx.metadata.get("user_email")) and timeline_status.asks_status(
+        input.query
+    ):
         case_answer = timeline_status.render_case_states(state_hits if found or slack.items else [])
         if not complete:
             case_answer += "\n\n検索は一部未確認です。"
