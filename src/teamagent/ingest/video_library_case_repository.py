@@ -6,6 +6,8 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from typing import Any
 
+import psycopg
+import structlog
 from psycopg import Connection
 from psycopg.types.json import Jsonb
 
@@ -17,6 +19,8 @@ from teamagent.ingest.video_library_case_models import (
     Prediction,
     catalog_hash,
 )
+
+logger = structlog.get_logger(__name__)
 
 
 class CaseRepository:
@@ -35,10 +39,22 @@ class CaseRepository:
 
     @contextmanager
     def run_lock(self) -> Iterator[bool]:
-        # Transaction-scoped and released on exception; serializes replicas' daily budgets.
+        # Session lock, then end the transaction: holding a transaction open across Haiku calls
+        # hit the RDS idle-in-transaction timeout (OperationalError after ~1-2 min on 11/04).
+        # The lock still serializes replicas and is released with the session if the run dies.
         with self.connection() as conn:
-            row = conn.execute("SELECT pg_try_advisory_xact_lock(864238) AS acquired").fetchone()
-            yield bool(row and row["acquired"])
+            row = conn.execute("SELECT pg_try_advisory_lock(864238) AS acquired").fetchone()
+            acquired = bool(row and row["acquired"])
+            conn.commit()
+            try:
+                yield acquired
+            finally:
+                if acquired and not conn.closed:
+                    try:
+                        conn.execute("SELECT pg_advisory_unlock(864238)")
+                        conn.commit()
+                    except psycopg.Error:
+                        logger.warning("case_inference_unlock_failed")  # session end releases it
 
     @staticmethod
     def cases(conn: Connection[dict[str, Any]]) -> list[Case]:
