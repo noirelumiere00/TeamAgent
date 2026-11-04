@@ -25,7 +25,8 @@ def runner(monkeypatch: pytest.MonkeyPatch) -> MagicMock:
         "GOOGLE_OAUTH_REFRESH_TOKEN",
     ):
         monkeypatch.delenv(name, raising=False)
-    monkeypatch.delenv("VIDEO_LIBRARY_CASE_INFERENCE_ENABLED", raising=False)
+    # Other tests cover ingest/sync only; the inference step is tested explicitly below.
+    monkeypatch.setenv("VIDEO_LIBRARY_CASE_INFERENCE_ENABLED", "0")
     monkeypatch.setenv("INGEST_DRY_RUN", "0")
     monkeypatch.setenv("INGEST_OWNER_EMAIL", "owner@example.test")
     monkeypatch.setattr(sys, "argv", ["test-ingest"])
@@ -174,6 +175,12 @@ def test_case_inference_disabled_and_dry_run_skip(
     monkeypatch.setattr(inference, "main", runner.inference)
     assert fargate.main() == 0
     runner.inference.assert_not_called()
+    # Unset means on (the default since 11/04).
+    monkeypatch.delenv("VIDEO_LIBRARY_CASE_INFERENCE_ENABLED")
+    runner.inference.return_value = 0
+    assert fargate.main() == 0
+    runner.inference.assert_called_once_with([])
+    runner.inference.reset_mock()
     monkeypatch.setenv("VIDEO_LIBRARY_CASE_INFERENCE_ENABLED", "1")
     monkeypatch.setenv("INGEST_DRY_RUN", "1")
     assert fargate.main() == 0
