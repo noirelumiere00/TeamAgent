@@ -11,6 +11,52 @@ from teamagent.connect_web.library import _SCRIPT
 
 
 @pytest.mark.skipif(shutil.which("node") is None, reason="node is required")
+def test_campaign_creation_preserves_unsent_urls_and_selection() -> None:
+    harness = r"""
+const assert=require('node:assert/strict');
+const source={elements:{urls:{value:'https://vt.tiktok.com/short/\ninvalid'},
+ case:{value:'selected'},idempotency_key:{value:'stable-key'}}};
+const form={elements:{urls:{value:''},case:{value:''},idempotency_key:{value:''}},
+ addEventListener(name,fn){assert.equal(name,'submit');this.submit=fn;}};
+global.document={
+ querySelectorAll(selector){return selector==='[data-import-campaign]'?[form]:[];},
+ getElementById(id){return id==='import-urls'?{form:source}:null;},addEventListener(){}};
+global.window={addEventListener(){}};
+__SCRIPT__
+form.submit();assert.deepEqual(form.elements,source.elements);
+""".replace("__SCRIPT__", _SCRIPT)
+    result = subprocess.run(["node", "-e", harness], capture_output=True, text=True, timeout=20)
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node is required")
+@pytest.mark.parametrize("pending", [True, False])
+def test_import_poll_only_pending_visible_pages(pending: bool) -> None:
+    harness = r"""
+const assert=require('node:assert/strict');
+const listeners={},timers=[];let reloads=0;
+global.document={hidden:false,
+ querySelectorAll(selector){return selector==='[data-import-poll="true"]'&&__PENDING__?[{}]:[];},
+ getElementById(){return null;},
+ addEventListener(name,fn){(listeners[name]??=[]).push(fn);}};
+global.window={addEventListener(){},setTimeout(fn,delay){timers.push({fn,delay});},
+ location:{reload(){reloads++;}}};
+__SCRIPT__
+assert.equal(timers.length,__PENDING__?1:0);
+if(__PENDING__){
+ assert.equal(timers[0].delay,5000);document.hidden=true;timers[0].fn();
+ assert.equal(reloads,0);document.hidden=false;
+ listeners.visibilitychange.forEach(fn=>fn());assert.equal(reloads,1);
+ timers[0].fn();assert.equal(reloads,2);
+}else{
+ listeners.visibilitychange.forEach(fn=>fn());assert.equal(reloads,0);
+}
+""".replace("__PENDING__", str(pending).lower()).replace("__SCRIPT__", _SCRIPT)
+    result = subprocess.run(["node", "-e", harness], capture_output=True, text=True, timeout=20)
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node is required")
 def test_single_player_disposal_and_checked_urls_clipboard() -> None:
     harness = r"""
 const assert=require('node:assert/strict');
@@ -44,7 +90,7 @@ const checks=[{checked:true,dataset:{url:'https://www.tiktok.com/@sample/video/1
 let copied=null;
 global.document=Object.assign(doc,{
  querySelectorAll(selector){
-  if(selector==='[data-autoload]')return [];
+  if(['[data-autoload]','[data-import-poll="true"]','[data-import-campaign]'].includes(selector))return [];
   if(selector==='.sidebar')return [filters];
   if(selector==='.preview[data-player]')return cards;
   if(selector==='.preview img')return [pendingImage,failedImage,loadedImage];

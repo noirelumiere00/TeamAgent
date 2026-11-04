@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import time
 import uuid
 from collections.abc import Iterator
@@ -26,6 +27,24 @@ JST = timezone(timedelta(hours=9))
 # Session lock covers HTTP and row recovery across replicas, without an open transaction.
 FETCH_LOCK = 8675309037
 Row = dict[str, Any]
+RETRYABLE = {"failed", "classification_pending", "partial"}
+_RESUME_FETCH = """UPDATE vl_public_fetch_control SET paused=false,pause_reason=NULL,
+    consecutive_failures=0,resumed_by=%s,resumed_at=clock_timestamp()
+    WHERE platform='tiktok' AND paused"""
+_CAMPAIGNS_SELECT = """SELECT c.advertiser,c.campaign FROM vl_campaigns c
+    LEFT JOIN vl_campaign_settings s USING(advertiser,campaign)
+    LEFT JOIN vl_case_aliases a ON a.from_advertiser=c.advertiser AND a.from_campaign=c.campaign
+    LEFT JOIN vl_campaign_settings target
+        ON target.advertiser=COALESCE(a.to_advertiser,c.advertiser)
+        AND target.campaign=COALESCE(a.to_campaign,c.campaign)
+    WHERE NOT COALESCE(s.is_private,false) AND NOT COALESCE(target.is_private,false)"""
+
+
+def rate_limit_cooldown_seconds() -> int:
+    seconds = int(os.environ.get("VIDEO_LIBRARY_FETCH_429_COOLDOWN_SECONDS", "1800"))
+    if seconds < 1:
+        raise ValueError("invalid_fetch_cooldown")
+    return seconds
 
 
 class URLImportRepository:
@@ -41,7 +60,16 @@ class URLImportRepository:
         )
 
     def submit(
-        self, text: str, *, requested_by: str, idempotency_key: str, source: Source = "url_manual"
+        self,
+        text: str,
+        *,
+        requested_by: str,
+        idempotency_key: str,
+        source: Source = "url_manual",
+        advertiser: str | None = None,
+        campaign: str | None = None,
+        parent_batch_id: str | None = None,
+        admin: bool = False,
     ) -> str:
         rows = inspect_input(text)
         if not requested_by.strip() or not idempotency_key.strip() or len(idempotency_key) > 200:
@@ -52,23 +80,88 @@ class URLImportRepository:
         with self.pg.connection(
             app_role="teamagent_app", user_email=requested_by, user_role="viewer"
         ) as conn:
+            if bool(advertiser) != bool(campaign) or (
+                advertiser and not self.campaign_visible(conn, advertiser, campaign)
+            ):
+                raise URLImportError("campaign_unavailable")
+            if parent_batch_id:
+                parent = self.batch(conn, parent_batch_id, requested_by, admin=admin)
+                if parent is None:
+                    raise URLImportError("batch_unavailable")
+                retryable = [r["input_url"] for r in parent["rows"] if r["status"] in RETRYABLE]
+                if text != "\n".join(retryable):
+                    raise URLImportError("retry_changed")
             inserted = conn.execute(
                 """INSERT INTO vl_url_import_batches
-                   (batch_id, requested_by, idempotency_key, source) VALUES (%s,%s,%s,%s)
+                   (batch_id,requested_by,idempotency_key,source,advertiser,campaign,
+                    parent_batch_id)
+                   VALUES (%s,%s,%s,%s,%s,%s,%s)
                    ON CONFLICT (requested_by, idempotency_key) DO NOTHING RETURNING batch_id""",
-                (batch_id, requested_by, idempotency_key, source),
+                (
+                    batch_id,
+                    requested_by,
+                    idempotency_key,
+                    source,
+                    advertiser,
+                    campaign,
+                    parent_batch_id,
+                ),
             ).fetchone()
             if not inserted:
                 existing = conn.execute(
-                    """SELECT batch_id FROM vl_url_import_batches
+                    """SELECT * FROM vl_url_import_batches
                        WHERE requested_by=%s AND idempotency_key=%s""",
                     (requested_by, idempotency_key),
                 ).fetchone()
                 assert existing is not None
+                stored = conn.execute(
+                    "SELECT line_no,input_url FROM vl_url_import_rows "
+                    "WHERE batch_id=%s ORDER BY line_no",
+                    (existing["batch_id"],),
+                ).fetchall()
+                if [(r["line_no"], r["input_url"]) for r in stored] != [
+                    (r.line_no, r.input_url) for r in rows
+                ] or (
+                    existing["source"],
+                    existing["advertiser"],
+                    existing["campaign"],
+                    str(existing["parent_batch_id"]) if existing["parent_batch_id"] else None,
+                ) != (source, advertiser, campaign, parent_batch_id):
+                    raise URLImportError("idempotency_conflict")
                 return str(existing["batch_id"])
             for row in rows:
                 self._insert_row(conn, batch_id, row)
         return batch_id
+
+    @staticmethod
+    def campaigns(conn: Any) -> list[Row]:
+        return list(
+            conn.execute(_CAMPAIGNS_SELECT + " ORDER BY c.advertiser,c.campaign").fetchall()
+        )
+
+    @staticmethod
+    def campaign_visible(conn: Any, advertiser: str, campaign: str | None) -> bool:
+        return bool(
+            conn.execute(
+                _CAMPAIGNS_SELECT + " AND c.advertiser=%s AND c.campaign=%s",
+                (advertiser, campaign),
+            ).fetchone()
+        )
+
+    @staticmethod
+    def batch(
+        conn: Connection[Row], batch_id: str, email: str, *, admin: bool = False
+    ) -> Row | None:
+        batch = conn.execute(
+            "SELECT * FROM vl_url_import_batches WHERE batch_id=%s AND (requested_by=%s OR %s)",
+            (batch_id, email, admin),
+        ).fetchone()
+        if batch is not None:
+            batch["rows"] = conn.execute(
+                "SELECT * FROM vl_url_import_rows WHERE batch_id=%s ORDER BY line_no",
+                (batch_id,),
+            ).fetchall()
+        return batch
 
     @staticmethod
     def _insert_row(conn: Connection[Row], batch_id: str, row: InputRow) -> None:
@@ -110,8 +203,30 @@ class URLImportRepository:
                 if locked:
                     conn.execute("SELECT pg_advisory_unlock(%s)", (FETCH_LOCK,))
 
+    @staticmethod
+    def resume_fetches(conn: Connection[Row], *, resumed_by: str) -> bool:
+        return bool(conn.execute(_RESUME_FETCH, (resumed_by,)).rowcount)
+
+    @staticmethod
+    def _resume_rate_limit(conn: Connection[Row]) -> None:
+        conn.execute(
+            _RESUME_FETCH + " AND pause_reason='http_429' "
+            "AND paused_at<=clock_timestamp()-%s*interval '1 second'",
+            ("automatic:http_429", rate_limit_cooldown_seconds()),
+        )
+
+    def fetch_control(self) -> Row:
+        with self.connection() as conn:
+            self._resume_rate_limit(conn)
+            row = conn.execute(
+                "SELECT * FROM vl_public_fetch_control WHERE platform='tiktok'"
+            ).fetchone()
+            assert row is not None
+            return row
+
     def claim(self, *, stale_seconds: int = 600) -> Row | None:
         with self.connection() as conn:
+            self._resume_rate_limit(conn)
             conn.execute(
                 """UPDATE vl_url_import_rows SET status='queued', lease_token=NULL,
                    error_code='processing_recovered' WHERE status='processing'
@@ -130,7 +245,7 @@ class URLImportRepository:
                     started_at=clock_timestamp(),
                     lease_token=%s FROM candidate c
                     WHERE r.batch_id=c.batch_id AND r.line_no=c.line_no RETURNING r.*
-                ) SELECT c.*,b.source,b.requested_by FROM claimed c
+                ) SELECT c.*,b.source,b.requested_by,b.advertiser,b.campaign FROM claimed c
                   JOIN vl_url_import_batches b USING(batch_id)""",
                 (uuid.uuid4(),),
             ).fetchone()
@@ -138,6 +253,7 @@ class URLImportRepository:
     def before_request(self, limit: int, row: Row | None = None) -> None:
         """Commit every page/redirect/retry attempt before HTTP; failed requests count too."""
         with self.connection() as conn:
+            self._resume_rate_limit(conn)
             control = conn.execute(
                 """SELECT paused, GREATEST(0, EXTRACT(EPOCH FROM
                    last_request_at + interval '1 second' - clock_timestamp())) AS delay
@@ -239,6 +355,19 @@ class URLImportRepository:
                 result.error_code = "caption_missing"
             else:
                 result.registration_result = "新規登録" if inserted else "登録済み（統合済み）"
+                # Apply the intake choice only to new #PR posts; never move an existing video.
+                if inserted and o.is_pr and row and row.get("advertiser"):
+                    if self.campaign_visible(conn, row["advertiser"], row["campaign"]):
+                        conn.execute(
+                            """UPDATE vl_videos SET advertiser=%s,campaign=%s
+                               WHERE platform='tiktok' AND video_id=%s""",
+                            (row["advertiser"], row["campaign"], o.video_id),
+                        )
+                    else:
+                        result.warnings.append("campaign_unavailable")
+                        o.warnings.append("campaign_unavailable")
+                        result.error_code = "campaign_unavailable"
+                        result.status = "partial"
                 conn.execute(
                     """UPDATE vl_videos SET page_is_ad=%s,page_ad_label_version=%s,
                        page_disclosure=%s,page_observed_at=%s,page_last_success_at=%s,
@@ -359,11 +488,16 @@ class URLImportRepository:
             """UPDATE vl_public_fetch_control SET
                consecutive_failures=CASE WHEN %s THEN 0 ELSE consecutive_failures+1 END,
                paused=paused OR %s::text IS NOT NULL OR (NOT %s AND consecutive_failures>=4),
-               pause_reason=CASE WHEN %s::text IS NOT NULL THEN %s
+               pause_reason=CASE WHEN paused AND pause_reason IN ('http_403','challenge')
+                 THEN pause_reason WHEN %s::text IS NOT NULL THEN %s
                  WHEN NOT %s AND consecutive_failures>=4 THEN 'consecutive_failures'
                  ELSE pause_reason END WHERE platform='tiktok'""",
             (success, stop, success, stop, stop, success),
         )
+
+    def record_fetch_outcome(self, *, success: bool, stop: str | None = None) -> None:
+        with self.connection() as conn:
+            self._record_outcome(conn, success=success, stop=stop)
 
     def finish_failure(self, row: Row, result: ImportResult, *, stop: str | None = None) -> None:
         with self.connection() as conn:

@@ -59,7 +59,7 @@ class Pg:
         result = MagicMock()
         result.fetchone.return_value = {"n": 1}
         result.fetchall.return_value = []
-        if "SELECT v.*" in query and "GROUP BY v.advertiser" not in query:
+        if "SELECT v.*" in query and not query.startswith("WITH categorized AS ("):
             result.fetchone.return_value = self.row.copy()
             result.fetchall.return_value = [self.row.copy()]
         elif "SELECT * FROM vl_business_categories" in query:

@@ -103,7 +103,7 @@ def test_combined_results_keep_video_interactions_and_next_query(
 
     def execute(query: str, params: Any = None) -> MagicMock:
         result = original(query, params)
-        if "GROUP BY v.advertiser" in query:
+        if query.startswith("WITH categorized AS ("):
             result.fetchall.return_value = [case_row(pg) for _ in range(6)]
         elif "count(*) AS n" in query:
             result.fetchone.return_value = {"n": 123}

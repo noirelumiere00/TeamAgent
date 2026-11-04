@@ -21,10 +21,13 @@ from teamagent.adapters.video_library_page import (
 from teamagent.adapters.video_library_page import (
     fetch_page,
     page_client,
+    page_is_challenge,
     save_cover,
+    stop_reason,
 )
 from teamagent.adapters.video_library_storage import VideoLibraryStorage
 from teamagent.ingest.video_library import video_identity
+from teamagent.ingest.video_library_url_repository import URLImportRepository
 from teamagent.observability.logging_config import configure_logging
 
 logger = structlog.get_logger(__name__)
@@ -51,47 +54,66 @@ def fill_thumbnails(
                ORDER BY random() LIMIT %s""",
             (limit,),
         ).fetchall()
+    repository = URLImportRepository(pg)
     consecutive_failures = 0
-    for index, row in enumerate(rows[:limit]):
-        if index:
-            sleep(interval)
-        counts["attempted"] += 1
-        try:
-            identity = video_identity(row["url"])
-            if identity is None or identity[:2] != (row["platform"], row["video_id"]):
-                raise ValueError("invalid_video_url")
-            # Canonical origin avoids redirects/ports/tracking parameters in imported URLs.
-            page = fetch_page(
-                client,
-                f"https://www.tiktok.com/@{quote(identity[2] or '', safe='')}/video/{identity[1]}",
-            )
-            url = cover_url(page)
-            if url is None:
-                counts["cover_missing"] += 1
-                consecutive_failures += 1
-            else:
-                key = save_cover(client, storage, row["platform"], row["video_id"], url)
-                with pg.connection(
-                    app_role="teamagent_app", user_role="admin", user_email=None
-                ) as conn:
-                    conn.execute(
-                        """UPDATE vl_videos SET thumbnail_s3_key=%s
-                           WHERE platform=%s AND video_id=%s AND thumbnail_s3_key IS NULL""",
-                        (key, row["platform"], row["video_id"]),
-                    )
-                counts["saved"] += 1
-                consecutive_failures = 0
-        except httpx.HTTPStatusError as exc:
-            counts[f"http_{exc.response.status_code}"] += 1
-            if exc.response.status_code == 429:
+    with repository.fetch_lock() as locked:
+        if not locked:
+            counts["worker_busy"] += 1
+            rows = []
+        for index, row in enumerate(rows[:limit]):
+            if repository.fetch_control()["paused"]:
+                counts["fetch_paused"] += 1
                 break
-            consecutive_failures += 1
-        except Exception as exc:
-            counts[type(exc).__name__] += 1
-            consecutive_failures += 1
-        if consecutive_failures >= 5:
-            counts["consecutive_failure_stop"] += 1
-            break
+            if index:
+                sleep(interval)
+            counts["attempted"] += 1
+            try:
+                identity = video_identity(row["url"])
+                if identity is None or identity[:2] != (row["platform"], row["video_id"]):
+                    raise ValueError("invalid_video_url")
+                # Canonical origin avoids redirects/ports/tracking parameters in imported URLs.
+                page = fetch_page(
+                    client,
+                    f"https://www.tiktok.com/@{quote(identity[2] or '', safe='')}"
+                    f"/video/{identity[1]}",
+                )
+                url = cover_url(page)
+                if url is None:
+                    if page_is_challenge(page):
+                        raise ValueError("challenge")
+                    counts["cover_missing"] += 1
+                    consecutive_failures += 1
+                    repository.record_fetch_outcome(success=False)
+                else:
+                    key = save_cover(client, storage, row["platform"], row["video_id"], url)
+                    with pg.connection(
+                        app_role="teamagent_app", user_role="admin", user_email=None
+                    ) as conn:
+                        conn.execute(
+                            """UPDATE vl_videos SET thumbnail_s3_key=%s
+                               WHERE platform=%s AND video_id=%s AND thumbnail_s3_key IS NULL""",
+                            (key, row["platform"], row["video_id"]),
+                        )
+                    counts["saved"] += 1
+                    consecutive_failures = 0
+                    repository.record_fetch_outcome(success=True)
+            except httpx.HTTPStatusError as exc:
+                counts[f"http_{exc.response.status_code}"] += 1
+                stop = stop_reason(exc)
+                repository.record_fetch_outcome(success=False, stop=stop)
+                if stop:
+                    break
+                consecutive_failures += 1
+            except Exception as exc:
+                stop = stop_reason(exc)
+                counts[stop or type(exc).__name__] += 1
+                repository.record_fetch_outcome(success=False, stop=stop)
+                if stop:
+                    break
+                consecutive_failures += 1
+            if consecutive_failures >= 5:
+                counts["consecutive_failure_stop"] += 1
+                break
     logger.info(
         "video_library_thumbnails",
         counts=dict(counts),

@@ -10,7 +10,7 @@ from urllib.parse import urlsplit
 
 from pydantic import BaseModel, Field
 
-from teamagent.adapters.video_library_page import item_struct
+from teamagent.adapters.video_library_page import item_struct, page_is_challenge
 from teamagent.skills.ad_label_check.skill import find_disclosures
 
 Source = Literal["url_manual", "p3b"]
@@ -117,10 +117,7 @@ def parse_observation(page: str, target: NormalizedURL, now: datetime) -> Observ
     try:
         item = item_struct(page)
     except ValueError:
-        if any(
-            marker in page.lower()
-            for marker in ("captcha", "verify to continue", "security challenge")
-        ):
+        if page_is_challenge(page):
             raise URLImportError("challenge") from None
         raise URLImportError("page_data_missing") from None
     if not isinstance(item.get("id"), str) or item["id"] != target.video_id:

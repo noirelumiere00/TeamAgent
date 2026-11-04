@@ -189,10 +189,21 @@ def submit_import(
     idempotency_key: str,
     source: Source = "url_manual",
     wake: Callable[[], None] | None = None,
+    advertiser: str | None = None,
+    campaign: str | None = None,
+    parent_batch_id: str | None = None,
+    admin: bool = False,
 ) -> str:
     """Validate all rows and commit the idempotent intake before waking a local worker."""
     batch = repository.submit(
-        text, requested_by=requested_by, idempotency_key=idempotency_key, source=source
+        text,
+        requested_by=requested_by,
+        idempotency_key=idempotency_key,
+        source=source,
+        advertiser=advertiser,
+        campaign=campaign,
+        parent_batch_id=parent_batch_id,
+        admin=admin,
     )
     if wake:
         wake()

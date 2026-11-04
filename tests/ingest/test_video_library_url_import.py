@@ -559,3 +559,17 @@ def test_a08_one_failed_row_does_not_discard_later_success() -> None:
     assert repo.save.call_count == 1
     assert repo.save.call_args.args[0].video_id == "2"
     assert repo.save.call_args.kwargs["result"].status == "succeeded"
+
+
+@pytest.mark.parametrize("value", ["0", "-1", "invalid"])
+def test_worker_rejects_invalid_fetch_cooldown(monkeypatch: pytest.MonkeyPatch, value: str) -> None:
+    monkeypatch.setenv("VIDEO_LIBRARY_FETCH_429_COOLDOWN_SECONDS", value)
+    with pytest.raises(ValueError):
+        worker.settings()
+
+
+def test_default_fetch_cooldown(monkeypatch: pytest.MonkeyPatch) -> None:
+    from teamagent.ingest.video_library_url_repository import rate_limit_cooldown_seconds
+
+    monkeypatch.delenv("VIDEO_LIBRARY_FETCH_429_COOLDOWN_SECONDS", raising=False)
+    assert rate_limit_cooldown_seconds() == 1800
