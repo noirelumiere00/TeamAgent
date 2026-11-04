@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 import unicodedata
 from calendar import monthrange
+from collections import Counter
 from dataclasses import replace
 from typing import ClassVar
 
@@ -140,6 +141,7 @@ class RecommendSkill(BaseSkill[RecommendInput, RecommendOutput]):
         recent: list[RecommendItem] = []
         similar: list[RecommendItem] = []
         same_client: list[RecommendItem] = []
+        selected: list[tuple[SearchHit, RecommendItem]] = []
         seen_files: set[tuple[str, str]] = set()
         clients: list[str] = []
         skipped_company = False
@@ -160,19 +162,24 @@ class RecommendSkill(BaseSkill[RecommendInput, RecommendOutput]):
             and cutoff <= (value + "-01" if len(value) == 7 else value) <= today_iso
         ]
         recent_hits = sorted(dated, key=self._date, reverse=True)
-        recent_hits.sort(key=lambda h: self._material_url(h) is None)
-        similar_hits = sorted(others, key=lambda h: (self._material_url(h) is None, -h.score))
+        similar_hits = sorted(others, key=lambda h: h.score, reverse=True)
         own_hits = sorted(own, key=self._date, reverse=True)
+        own_hits.sort(key=lambda h: self._material_url(h) is None)
 
-        for bucket, ranked, limit in (
-            (recent, recent_hits, 2),
-            (similar, similar_hits, 4),
-            (same_client, own_hits, 1),
+        # リンク無しの行が、別の枠にあるリンク付き提案の会社枠を先取りしない。
+        for bucket, ranked, limit, has_link in (
+            (recent, recent_hits, 2, True),
+            (similar, similar_hits, 4, True),
+            (recent, recent_hits, 2, False),
+            (similar, similar_hits, 4, False),
+            (same_client, own_hits, 1, None),
         ):
             is_same = bucket is same_client
             for hit in ranked:
                 if len(bucket) >= limit or (not is_same and len(recent) + len(similar) >= 4):
                     break
+                if has_link is not None and bool(self._material_url(hit)) != has_link:
+                    continue
                 ref = hit.metadata[drive_first.REFERENCE_KEY]
                 material_key = (
                     ("drive", ref.drive_file_id)
@@ -191,6 +198,7 @@ class RecommendSkill(BaseSkill[RecommendInput, RecommendOutput]):
                 seen_files.add(material_key)
                 item = self._to_item(hit, features)
                 bucket.append(item)
+                selected.append((hit, item))
                 if not is_same and client:
                     clients.append(client)
                 if not item.source_uri:
@@ -199,6 +207,16 @@ class RecommendSkill(BaseSkill[RecommendInput, RecommendOutput]):
                         case_id=str(hit.metadata.get("document_id") or hit.chunk_id),
                         has_contact=bool(item.contact_name),
                     )
+
+        similarities = Counter(item.similarity for _, item in selected)
+        # 共通項の前置きが違っても、同じ説明文は全候補から外す。
+        content_similarities = Counter(self._similarity(hit, {}) for hit, _ in selected)
+        for hit, item in selected:
+            if (
+                similarities[item.similarity] > 1
+                or content_similarities[self._similarity(hit, {})] > 1
+            ):
+                item.similarity = self._similarity(hit, features, fallback=True)
 
         proposals = [*recent, *similar]
         sections = []
@@ -263,7 +281,7 @@ class RecommendSkill(BaseSkill[RecommendInput, RecommendOutput]):
         return _clean(title.strip(" -()（）"), 100)
 
     @staticmethod
-    def _similarity(hit: SearchHit, features: dict[str, str]) -> str:
+    def _similarity(hit: SearchHit, features: dict[str, str], *, fallback: bool = False) -> str:
         meta = hit.metadata
         company = RecommendSkill._client_name(hit)
         companies = {company, *aliases(company)} - {""}
@@ -310,9 +328,9 @@ class RecommendSkill(BaseSkill[RecommendInput, RecommendOutput]):
             )
         ]
         industry = values.pop("cls_industry", "")
-        if common:
+        if common and not fallback:
             summary = "・".join(common) + "が共通。" + detail
-        elif detail:
+        elif detail and not fallback:
             summary = detail
         elif values:
             summary = (

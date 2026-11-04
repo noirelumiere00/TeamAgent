@@ -169,12 +169,19 @@ def _proposal(n: int, client: str, *, uri: str | None = None) -> SearchHit:
     return hit
 
 
-@pytest.mark.parametrize("new_has_link", [True, False])
-def test_same_client_prefers_latest_date_even_without_material_link(new_has_link: bool) -> None:
+@pytest.mark.parametrize(
+    ("old_has_link", "new_has_link", "expected_id"),
+    [(True, True, 2), (True, False, 1), (False, True, 2), (False, False, 2)],
+)
+def test_same_client_prefers_latest_linked_material(
+    old_has_link: bool, new_has_link: bool, expected_id: int
+) -> None:
     old = replace(_proposal(1, "伊藤ハム"), score=0.9)
     old.metadata["title"] = "伊藤ハム_動画提案_2025年11月.pdf"
     new = replace(_proposal(2, "伊藤ハム"), score=0.6)
     new.metadata["title"] = "伊藤ハム_動画提案_2026年5月.pdf"
+    if not old_has_link:
+        old.metadata.pop("source_uri")
     if not new_has_link:
         new.metadata.pop("source_uri")
     skill, _ = _make_skill([old, new])
@@ -183,9 +190,11 @@ def test_same_client_prefers_latest_date_even_without_material_link(new_has_link
 
     assert len(out.same_client_materials) == 1
     item = out.same_client_materials[0]
-    assert item.date == "2026年5月"
+    assert item.date == ("2026年5月" if expected_id == 2 else "2025年11月")
     assert item.source_uri == (
-        "https://drive.google.com/file/d/proposal-2/view" if new_has_link else None
+        f"https://drive.google.com/file/d/proposal-{expected_id}/view"
+        if old_has_link or new_has_link
+        else None
     )
 
 
@@ -290,6 +299,50 @@ def test_recent_candidates_prioritize_links_before_unregistered_materials() -> N
         "比較食品1",
     ]
     assert "登録されていません" not in out.answer.split("*特に似ている提案*")[0]
+
+
+def test_recent_unregistered_row_does_not_take_linked_company_slot() -> None:
+    missing = _proposal(1, "株式会社比較食品A")
+    missing.metadata.update(title="比較食品A_動画提案_2026年10月.pdf", source_type="gsheets")
+    missing.metadata.pop("source_uri")
+    linked = [
+        _proposal(i, client)
+        for i, client in enumerate(("比較食品A", "比較食品B", "比較食品C", "比較食品D"), start=2)
+    ]
+    skill, _ = _make_skill([missing, *linked])
+
+    out = skill.run(RecommendInput(brief="食品の動画広告の提案書"), SkillContext())
+
+    assert [item.source_uri for item in out.similar_proposals] == [
+        f"https://drive.google.com/file/d/proposal-{i}/view" for i in range(2, 6)
+    ]
+    assert "直近の似た提案" not in out.answer
+    assert "登録されていません" not in out.answer
+
+
+@pytest.mark.parametrize(
+    ("months", "expected_ids"), [((10, 9, 8), [3, 4, 1, 2]), ((10, 4, 3), [3, 1, 2, 5])]
+)
+def test_two_linked_materials_are_filled_with_unregistered_recent_then_similar(
+    months: tuple[int, int, int], expected_ids: list[int]
+) -> None:
+    linked = [replace(_proposal(i, f"比較食品{i}"), score=0.01) for i in (1, 2)]
+    missing = []
+    for n, month in enumerate(months, start=3):
+        hit = replace(_proposal(n, f"比較食品{n}"), score=n / 10)
+        hit.metadata["title"] = f"動画提案_2026年{month}月.pdf"
+        hit.metadata.pop("source_uri")
+        missing.append(hit)
+    skill, _ = _make_skill([*missing, *linked])
+
+    out = skill.run(RecommendInput(brief="食品の動画広告の提案書"), SkillContext())
+
+    assert [item.client_name for item in out.similar_proposals] == [
+        f"比較食品{i}" for i in expected_ids
+    ]
+    assert sum(item.source_uri is not None for item in out.similar_proposals) == 2
+    assert out.total_count == 4
+    assert "*直近の似た提案*" in out.answer and "*特に似ている提案*" in out.answer
 
 
 @pytest.mark.parametrize(
@@ -726,6 +779,55 @@ def test_similarity_requests_material_check_when_only_industry_is_available() ->
         "似ている点：同じ業種（食品・飲料）の提案。中身の共通点は資料で確認してください。"
     )
     assert "\n" not in similarity and len(similarity) <= 90
+
+
+@pytest.mark.parametrize("only_industry", [False, True])
+@pytest.mark.parametrize("include_own", [False, True])
+def test_all_repeated_similarities_fall_back_including_first_and_own(
+    only_industry: bool, include_own: bool
+) -> None:
+    detail = "ショート動画提案（UGCや切り抜き、メディア）"
+    unique = "SNS広告を配信して新商品の認知拡大を目指す施策。"
+    clients = ["比較食品A", "比較食品B", "基準食品" if include_own else "比較食品C"]
+    hits = [replace(_proposal(i, client), content=detail) for i, client in enumerate(clients, 1)]
+    for n, hit in enumerate(hits):
+        if only_industry:
+            hit.metadata.pop("cls_solution")
+        else:
+            hit.metadata["case_product"] = f"冷凍調理品{n}"
+    hits.append(replace(_proposal(4, "比較食品D"), content=unique))
+    skill, _ = _make_skill(hits)
+    brief = "基準食品の提案書に似た過去の提案書" if include_own else "参考になる提案書"
+
+    out = skill.run(RecommendInput(brief=brief), SkillContext())
+
+    repeated = [item for item in out.similar_proposals if item.client_name != "比較食品D"]
+    repeated.extend(out.same_client_materials)
+    assert len(repeated) == 3
+    assert detail not in out.answer
+    for item in repeated:
+        assert detail not in item.similarity
+        assert item.similarity in out.answer
+        if only_industry:
+            assert "中身の共通点は資料で確認してください" in item.similarity
+        else:
+            assert "施策「動画広告」" in item.similarity and "冷凍調理品" in item.similarity
+    assert unique in next(
+        item.similarity for item in out.similar_proposals if item.client_name == "比較食品D"
+    )
+
+
+def test_unselected_duplicate_does_not_suppress_selected_similarity() -> None:
+    detail = "SNS動画で商品の使い方を伝え、店頭購入につなげる施策。"
+    hits = [replace(_proposal(1, "比較食品A"), content=detail)]
+    hits.extend(_proposal(i, f"比較食品{i}") for i in (2, 3, 4))
+    hits.append(replace(_proposal(5, "比較食品B"), content=detail, score=0.1))
+    skill, _ = _make_skill(hits)
+
+    out = skill.run(RecommendInput(brief="参考になる提案書"), SkillContext())
+
+    assert detail in out.similar_proposals[0].similarity
+    assert detail in out.answer
 
 
 def test_similarity_does_not_invent_classification_when_only_cover_is_available() -> None:
