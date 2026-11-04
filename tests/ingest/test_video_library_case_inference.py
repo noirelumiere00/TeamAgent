@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from contextlib import nullcontext
 from copy import deepcopy
+from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock
 
@@ -379,6 +380,8 @@ def test_entry_point_without_policy_is_safe_and_errors_do_not_log_inputs(
     from teamagent.ingest import video_library_case_inference as module
 
     monkeypatch.delenv("VIDEO_LIBRARY_CASE_POLICY", raising=False)
+    # Without an evaluated policy nothing is applied (the shipped data/ policy is hidden here).
+    monkeypatch.setattr(module, "default_policy_path", lambda: Path("/nonexistent/policy.json"))
     monkeypatch.setenv("VIDEO_LIBRARY_CASE_LIMIT", "2")
     monkeypatch.setenv("VIDEO_LIBRARY_CASE_MAX_COST_USD", "1")
     monkeypatch.setattr(module, "configure_logging", lambda: False)
@@ -767,3 +770,14 @@ def test_campaign_needs_its_name_in_the_post_even_for_single_campaign_advertiser
         advertiser_only=None,
     )
     assert pol.status(application_prediction(guess, cases, unnamed)) == "applied"
+
+
+def test_shipped_policy_is_loadable_and_matches_the_current_prompt_and_model() -> None:
+    from teamagent.ingest.video_library_case_inference import default_policy_path
+    from teamagent.ingest.video_library_case_models import DEFAULT_MODEL, Policy, digest
+    from teamagent.prompts.loader import load_prompt
+
+    pol = Policy.model_validate_json(default_policy_path().read_text())
+    assert pol.existing is not None and pol.existing.passed()
+    assert pol.model == DEFAULT_MODEL
+    assert pol.prompt_hash == digest(load_prompt("case_inference", "v1", "system"))
