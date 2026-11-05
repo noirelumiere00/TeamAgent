@@ -189,6 +189,7 @@ def collect_named_sources(
     industry: str | None = None,
     comparison_clients: list[str] | None = None,
     client_alias: str | None = None,
+    embedding: list[float] | None = None,
 ) -> None:
     """金庫の接続で名指し資料・カルテ・事例を読む。SAVEPOINT で本体を守る。"""
     from teamagent.skills.search.case_list import CANDIDATE_LIMIT
@@ -229,7 +230,12 @@ def collect_named_sources(
                 with connect() as named_conn:
                     named.extend(
                         skill._pgvector.find_documents_for_advertiser(
-                            named_conn, name, limit=8, drive_only=bool(comparison_clients)
+                            named_conn,
+                            name,
+                            limit=8,
+                            drive_only=bool(comparison_clients),
+                            embedding=embedding,
+                            embedding_col=skill._embedding_column,
                         )
                     )
             except Exception as exc:

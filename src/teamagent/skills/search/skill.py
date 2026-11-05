@@ -2006,6 +2006,7 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
                     or (extract_query_industry(input.query) if not visit else None),
                     comparison_clients=comparison_clients,
                     client_alias=(probe or {}).get("query_client_alias"),
+                    embedding=embedding,
                 )
             if drive_mode:
                 # boost・各リコール床にも、業種のSQL条件を持ち込ませない。
@@ -2282,7 +2283,12 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
                             hits = [
                                 *hits,
                                 *self._pgvector.find_documents_for_advertiser(
-                                    conn, asked_client, drive_only=True, doc_type=wanted_type
+                                    conn,
+                                    asked_client,
+                                    drive_only=True,
+                                    doc_type=wanted_type,
+                                    embedding=embedding,
+                                    embedding_col=self._embedding_column,
                                 ),
                             ]
                         except Exception as exc:
