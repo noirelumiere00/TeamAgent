@@ -67,7 +67,7 @@ from teamagent.skills.clientkarte.skill import (
 )
 
 RAW_KARTE_BODY = "### 1. 一行サマリ\n提案中"
-KARTE_BODY = "### 1. 一行サマリ（5/10 時点）\n提案中"
+KARTE_BODY = "### 1. 一行サマリ\n提案中\n（5/10 時点の記録）"
 ME = "u@vectorinc.co.jp"
 # ⚠️ 面のフィクスチャは **実在する Slack ID の形**でなければ意味が無い。
 # 本番の channel_id は mcp_gateway/caller_claim.py の ``^[CDG][A-Z0-9]{8,}$`` を

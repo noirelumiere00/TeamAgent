@@ -6,6 +6,8 @@ import pytest
 
 from teamagent.skills.search import fanout
 from teamagent.skills.search.expand import ExpansionResult
+from tests.skills.clientkarte.test_clientkarte_status import status_skill as status_skill
+from tests.skills.search.test_case_state_evidence import jtb_state_record as jtb_state_record
 from tests.skills.search.test_case_state_evidence import row
 
 fixtures = import_module("tests.skills.search.test_fanout")
@@ -57,3 +59,41 @@ def test_non_status_question_keeps_fanout_search_answer(
     assert out.answer
     assert out.case_state_answer is None
     assert out.direct_answer_kind != "case_state"
+
+
+@pytest.mark.parametrize("client", ["JTB", "ＪＴＢ", "株式会社JTB"])
+def test_named_case_state_record_is_shared_with_clientkarte(
+    monkeypatch: pytest.MonkeyPatch, status_skill: tuple, jtb_state_record: object, client: str
+) -> None:
+    from teamagent.skills.base import SkillContext
+    from teamagent.skills.clientkarte.schema import ClientKarteInput
+    from teamagent.skills.search.client_match import normalize_client
+
+    karte, karte_pg = status_skill
+    search, pg = fixtures.make([])
+    for adapter in (pg, karte_pg):
+        adapter.list_client_names.return_value = ["株式会社 ＪＴＢ"]
+        adapter.find_documents_for_advertiser.return_value = [jtb_state_record]
+    monkeypatch.setenv("CASE_STATE_EVIDENCE_ALLOWED_EMAILS", fixtures.ME)
+    monkeypatch.setenv("SEARCH_DRIVE_FIRST", "1")
+    monkeypatch.setenv("SEARCH_DRIVE_FIRST_ALLOWED_EMAILS", fixtures.ME)
+    query = f"{client}の案件って今どうなってる？"
+    result = fixtures.run(search, query=query)
+    out = karte.run(
+        ClientKarteInput(client_name=client),
+        SkillContext(metadata={"user_email": fixtures.ME, "request_text": query}),
+    )
+    assert result.case_state_answer is not None
+    for text in (result.case_state_answer, out.answer):
+        assert "2026-09-11 時点の正式状態: 失注" in text
+        assert "JTB 企業広報の提案" in text
+        assert "根拠日" in text and "https://example.test/source#1" in text
+    assert "\n状態:" in out.answer
+    for adapter in (pg, karte_pg):
+        assert adapter.find_documents_for_advertiser.call_args_list[0].args[1] == "株式会社 ＪＴＢ"
+        kwargs = adapter.find_documents_for_advertiser.call_args.kwargs
+        assert kwargs["limit"] == 8 and kwargs["drive_only"] is False
+        assert {
+            normalize_client(call.args[1])
+            for call in adapter.find_documents_for_advertiser.call_args_list
+        } == {"jtb"}

@@ -24,17 +24,17 @@ from tests.mcp_gateway.test_surface_video_followup import (
     _Verifier,
 )
 from tests.skills.clientkarte.test_clientkarte_status import status_skill as status_skill
-from tests.skills.search.test_case_state_evidence import row
+from tests.skills.search.test_case_state_evidence import jtb_state_record as jtb_state_record
 
 REQUEST = "JTBの案件って今どうなってる？"
 
 
 @pytest.fixture
-def skill(status_skill: tuple, monkeypatch: pytest.MonkeyPatch) -> ClientKarteSkill:
+def skill(
+    status_skill: tuple, monkeypatch: pytest.MonkeyPatch, jtb_state_record: Any
+) -> ClientKarteSkill:
     skill, pg = status_skill
-    source = row(state="lost", state_as_of="2026-09-11", evidence_date="2026-09-11")
-    source.metadata.update({"client_name": "JTB", "title": "JTB 企業広報の提案"})
-    pg.search_drive_by_client_names.return_value = [source]
+    pg.find_documents_for_advertiser.return_value = [jtb_state_record]
     monkeypatch.setenv("CASE_STATE_EVIDENCE_ALLOWED_EMAILS", ME)
     return skill  # type: ignore[no-any-return]
 
@@ -91,7 +91,9 @@ async def test_posts_complete_answer_without_model_material(
             "channel": DM,
             "thread_ts": None,
             "blocks": None,
-            "text": detached_jobs.slack_escape(answer),
+            "text": detached_jobs.slack_escape(
+                answer.replace("### JTB（8/24 時点）", "*JTB（8/24 時点）*")
+            ),
         }
     ]
     assert result["status"] == "posted" and result["delivered"] is True
@@ -100,6 +102,30 @@ async def test_posts_complete_answer_without_model_material(
     event = next(log for log in logs if log["event"] == "direct_karte_posted")
     assert event["status"] == "posted"
     assert "JTB" not in str(event) and "https://" not in str(event)
+
+
+async def test_direct_post_removes_internal_citations_and_formats_slack_headings(
+    skill: ClientKarteSkill, slack: _FakeSlack
+) -> None:
+    skill._bedrock.converse.return_value.text = (  # type: ignore[attr-defined]
+        "# JTB クライアント・カルテ\n"
+        "*企業広報案件*\n共有 [chunk_id: 1]\n"
+        "**代理店案件**\n提案 [chunk_id: 2, score: 0.9]\n"
+        "## 次の動き\n担当者 (根拠 chunk_id: 1)\n### 確認事項\n"
+        "[資料](https://example.test/doc)"
+    )
+    baseline = _baseline(skill)["answer"]
+    result = await _dispatch(skill)
+    text = slack.posts[0]["text"]
+    assert result["status"] == "posted"
+    assert "chunk_id" not in text
+    assert "#" not in text.split("https://", 1)[0]
+    assert text.startswith("*JTB クライアント・カルテ*\n")
+    assert "*次の動き*\n" in text and "*確認事項*\n" in text
+    assert "*企業広報案件*（8/24 時点）\n" in text
+    assert "*代理店案件*（8/10 時点）\n" in text
+    assert "https://example.test/doc" in text and "時点の記録" not in text
+    assert "# JTB" in baseline and "[chunk_id: 1]" in baseline
 
 
 @pytest.mark.parametrize("case", ["off", "outside", "empty", "channel"])

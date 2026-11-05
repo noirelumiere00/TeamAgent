@@ -54,6 +54,12 @@ from teamagent.skills.clientkarte.schema import (
 from teamagent.skills.clientkarte.status import case_state_lines, dated_answer
 from teamagent.skills.morning_digest.calendar_window import now_jst
 from teamagent.skills.search import timeline_status
+from teamagent.skills.search.alias_expansion import resolve_topic_client
+from teamagent.skills.search.client_match import (
+    aliases,
+    hit_is_about_client,
+    normalize_filter_client,
+)
 
 logger = structlog.get_logger(__name__)
 
@@ -486,24 +492,29 @@ class ClientKarteSkill(BaseSkill[ClientKarteInput, ClientKarteOutput]):
             )
             state_hits = []
             if check_status and classify_client_name(input.client_name).verdict == "ok":
+                client = normalize_filter_client(input.client_name) or input.client_name
+                names = [client]
                 try:
-                    state_hits = self._pgvector.search_drive_by_client_names(
-                        conn,
-                        [input.client_name],
-                        limit=_DOCS_FETCH_LIMIT,
-                        request_id=ctx.request_id,
+                    resolved = resolve_topic_client(
+                        str(request_text),
+                        self._pgvector.list_client_names(conn=conn, request_id=ctx.request_id),
+                        input.client_name,
                     )
+                    surface, client = resolved or (
+                        input.client_name,
+                        normalize_filter_client(input.client_name) or input.client_name,
+                    )
+                    names = list(dict.fromkeys([client, surface, *sorted(aliases(client))]))[:3]
+                    for name in names:
+                        state_hits.extend(
+                            self._pgvector.find_documents_for_advertiser(
+                                conn, name, limit=8, drive_only=False
+                            )
+                        )
                 except Exception:
                     log.warning("clientkarte_case_state_lookup_failed")
                 state_hits = [
-                    h
-                    for h in state_hits
-                    if all(
-                        belongs_to_client(d, input.client_name)
-                        for d in to_docs(
-                            [{**h.metadata, "title": h.metadata.get("title") or input.client_name}]
-                        )
-                    )
+                    h for h in state_hits if hit_is_about_client(h, client, aliases=names)
                 ]
 
         events = [self._to_event(h) for h in hits]
