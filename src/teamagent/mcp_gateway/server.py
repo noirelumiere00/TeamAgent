@@ -701,7 +701,7 @@ async def _resolve_metadata(
     request_metadata = {}
     request_text = raw.get("request_text")
     if (
-        tool in {"proposal_builder", "proposal_builder_submit"}
+        tool in {"proposal_builder", "proposal_builder_submit", "clientkarte"}
         and verified_caller is not None
         and verified_caller.channel_id.startswith("D")
         and isinstance(request_text, str)

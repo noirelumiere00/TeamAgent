@@ -6153,7 +6153,7 @@ export function createCallerIdentityPlugin({
       slack_team_id: trusted.teamId,
       channel_id: trusted.channelId,
       ...(trusted.threadTs === null ? {} : {thread_ts: trusted.threadTs}),
-      ...((tool === "proposal_builder" || tool === "proposal_builder_submit") &&
+      ...((tool === "proposal_builder" || tool === "proposal_builder_submit" || tool === "clientkarte") &&
         typeof trusted.requestText === "string" ? {request_text: trusted.requestText} : {}),
     };
     const adjustedParams = {
