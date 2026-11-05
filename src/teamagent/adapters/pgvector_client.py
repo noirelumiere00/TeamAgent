@@ -2157,10 +2157,31 @@ class PgVectorClient:
         limit: int = 8,
         drive_only: bool = False,
         doc_type: str | None = None,
+        embedding: list[float] | None = None,
+        embedding_col: str = "embedding",
     ) -> list[SearchHit]:
         """名指し資料を種類を問わず新しい順に引く（RLS 済み接続・読み取りだけ）。"""
         if not client_name.strip():
             return []
+        if embedding_col not in _ALLOWED_EMBEDDING_COLUMNS:
+            raise ValueError(f"invalid embedding_col: {embedding_col!r}")
+        # 問いに最も近い本文のページ番号だけを足す（hit の本文は変えない）。
+        chunk_columns = ""
+        chunk_join = ""
+        if embedding is not None:
+            chunk_columns = ", ex.page_num, ex.metadata_page_num"
+            chunk_join = f"""
+            LEFT JOIN LATERAL (
+                SELECT c.page_num, c.metadata->>'page_num' AS metadata_page_num
+                FROM chunks c
+                WHERE c.document_id = d.id AND d.source_type = 'gdrive'
+                  AND c.{embedding_col} IS NOT NULL
+                  AND c.metadata->>'boilerplate' IS DISTINCT FROM 'true'
+                  AND c.metadata->>'title_only' IS DISTINCT FROM 'true'
+                ORDER BY c.{embedding_col} <=> %s::vector, c.chunk_idx
+                LIMIT 1
+            ) ex ON true
+            """  # nosec B608 - embedding_col は許可リストで検証済み
         pattern = f"%{self._escape_like(client_name.strip())}%"
         type_filter = (
             ""
@@ -2176,9 +2197,10 @@ class PgVectorClient:
         sql = f"""
             SELECT -(abs(hashtext(d.id::text)::bigint) + 1) AS chunk_id,
                    d.id AS document_id, d.title, d.source_uri, d.source_type::text AS source_type,
-                   d.metadata,
+                   d.metadata{chunk_columns},
                    to_char(d.modified_at AT TIME ZONE 'Asia/Tokyo', 'YYYY-MM-DD') AS updated_at
             FROM documents d
+            {chunk_join}
             WHERE d.metadata->>'suppressed' IS DISTINCT FROM 'true'
               AND (d.title ILIKE %s ESCAPE '\\'
                    OR d.metadata->>'cls_project' ILIKE %s ESCAPE '\\'
@@ -2192,6 +2214,7 @@ class PgVectorClient:
             cur.execute(
                 sql,
                 [
+                    *([embedding] if embedding is not None else []),
                     pattern,
                     pattern,
                     pattern,
@@ -2200,22 +2223,29 @@ class PgVectorClient:
                 ],
             )
             rows = cur.fetchall()
-        return [
-            SearchHit(
-                chunk_id=int(row["chunk_id"]),
-                content=str(row["title"] or "") if doc_type else "",
-                score=1.0,
-                metadata={
-                    **(row.get("metadata") or {}),
-                    "document_id": str(row["document_id"]),
-                    **{
-                        key: row.get(key)
-                        for key in ("title", "source_uri", "source_type", "updated_at")
-                    },
+        hits: list[SearchHit] = []
+        for row in rows:
+            meta = {
+                **(row.get("metadata") or {}),
+                "document_id": str(row["document_id"]),
+                **{
+                    key: row.get(key)
+                    for key in ("title", "source_uri", "source_type", "updated_at")
                 },
+            }
+            if embedding is not None:
+                meta.pop("page_num", None)
+                if (page_num := _chunk_page_num(row)) is not None:
+                    meta["page_num"] = page_num
+            hits.append(
+                SearchHit(
+                    chunk_id=int(row["chunk_id"]),
+                    content=str(row["title"] or "") if doc_type else "",
+                    score=1.0,
+                    metadata=meta,
+                )
             )
-            for row in rows
-        ]
+        return hits
 
     def find_drive_files_for_advertisers(
         self,
