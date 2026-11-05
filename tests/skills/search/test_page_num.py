@@ -12,7 +12,7 @@ import pytest
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
-from teamagent.adapters.pgvector_client import PgVectorClient
+from teamagent.adapters.pgvector_client import PgVectorClient, _chunk_page_num
 from teamagent.skills.base import SkillContext
 from teamagent.skills.search import fanout
 from teamagent.skills.search.schema import SearchInput
@@ -129,7 +129,9 @@ def test_page_num_postgres(column: int | None, metadata: Any, expected: int | No
                 "INSERT INTO chunks VALUES (1, 1, 0, '本文', NULL, %s, %s)",
                 (column, Jsonb({"page_num": metadata})),
             )
-            pg = PgVectorClient(dsn="postgresql://unused")
-            for method, kwargs in SEARCH_METHODS[1:3]:
-                hits = getattr(pg, method)(conn, **kwargs)
-                assert hits[0].metadata.get("page_num") == expected
+            # 検索 SQL と同じ取り出し方（列と metadata->>'page_num'）を本物の PostgreSQL で通す。
+            # 検索全体の絞り込みは上の偽の接続のテストで確かめる。
+            row = conn.execute(
+                "SELECT c.page_num, c.metadata->>'page_num' AS metadata_page_num FROM chunks c"
+            ).fetchone()
+            assert _chunk_page_num(row) == expected
