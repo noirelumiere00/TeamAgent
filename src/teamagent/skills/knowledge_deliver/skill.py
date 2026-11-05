@@ -227,7 +227,7 @@ class KnowledgeDeliverSkill(BaseSkill[KnowledgeDeliverInput, KnowledgeDeliverOut
 
         # 1. 検索＋要約（Phase1 の分類フィルタ・再ランクをそのまま通す）。
         search = self._search or self._build_search()
-        # 配信候補を広めに取るため top_k は最低 5 で検索し、添付は input.top_k 件に絞る。
+        # 配信候補を広めに取るため top_k は最低 5 で検索し、添付は最大 3 件に絞る。
         s_out = search.run(
             SearchInput(
                 query=input.query,
@@ -273,6 +273,7 @@ class KnowledgeDeliverSkill(BaseSkill[KnowledgeDeliverInput, KnowledgeDeliverOut
         evidence_refs: list[KnowledgeRef] = []
         refs: list[KnowledgeRef] = []
         ref_by_fid: dict[str, list[KnowledgeRef]] = {}
+        pages_by_fid: dict[str, list[int]] = {}
         candidates: list[tuple[str, str]] = []  # (file_id, filename)
         seen_ids: set[str] = set()
         resolved_candidates = 0
@@ -294,7 +295,13 @@ class KnowledgeDeliverSkill(BaseSkill[KnowledgeDeliverInput, KnowledgeDeliverOut
                     file_id = extract_drive_binary_file_id(h.drive_url)
             ref = KnowledgeRef(
                 title=h.title or h.file_name,
-                url=h.url or h.source_uri,
+                url=(
+                    h.url
+                    if extract_drive_binary_file_id(h.url) == file_id
+                    else f"https://drive.google.com/file/d/{file_id}/view"
+                )
+                if file_id
+                else h.url or h.source_uri,
                 doc_type=h.doc_type,
                 industry=h.industry,
                 score=h.score,
@@ -316,6 +323,11 @@ class KnowledgeDeliverSkill(BaseSkill[KnowledgeDeliverInput, KnowledgeDeliverOut
             if about_client:
                 evidence_refs.append(ref)
                 kept_urls |= hit_urls
+                # 解決元のシート行等の番号を、Drive 原本のページ番号として扱わない。
+                if file_id and h.source_type in (None, "gdrive") and h.page_num is not None:
+                    pages = pages_by_fid.setdefault(file_id, [])
+                    if h.page_num not in pages and len(pages) < 3:
+                        pages.append(h.page_num)
             else:
                 other_client_urls |= hit_urls
             industry_mismatch = bool(query_industry and h.industry and h.industry != query_industry)
@@ -325,7 +337,7 @@ class KnowledgeDeliverSkill(BaseSkill[KnowledgeDeliverInput, KnowledgeDeliverOut
                 and not h.is_low_confidence
                 and not industry_mismatch
                 and file_id not in seen_ids
-                and len(candidates) < input.top_k
+                and len(candidates) < min(input.top_k, 3)
             ):
                 if not_found_block:
                     continue
@@ -343,10 +355,7 @@ class KnowledgeDeliverSkill(BaseSkill[KnowledgeDeliverInput, KnowledgeDeliverOut
         # 同じ URL を名指しの取引先のヒットも持っていれば残す。
         answer = s_out.answer
         if wanted_type and candidates:
-            answer = f"該当する{wanted_type}です。\n" + "\n".join(
-                f"{filename}: https://drive.google.com/file/d/{fid}/view"
-                for fid, filename in candidates
-            )
+            answer = f"該当する{wanted_type}です。"
         elif wanted_type:
             answer = f"{wanted_type}のファイル本体は確認できませんでした。"
         if compact:
@@ -359,6 +368,22 @@ class KnowledgeDeliverSkill(BaseSkill[KnowledgeDeliverInput, KnowledgeDeliverOut
             answer = _drop_link_lines(
                 answer, other_client_urls - kept_urls, canonical=drive_first_enabled(ctx.metadata)
             )
+        for fid, file_refs in ref_by_fid.items():
+            for ref in file_refs:
+                ref.pages = list(pages_by_fid.get(fid, []))
+        if candidates:
+            file_details: list[str] = []
+            for fid, filename in candidates:
+                ref = ref_by_fid[fid][0]
+                # 検索の答えに同じリンクがもう出ていれば、原本の行を重ねない。
+                already_linked = bool(ref.url) and ref.url in answer
+                detail = filename if already_linked else f"{filename}\n原本: {ref.url}"
+                if ref.pages:
+                    numbers = "・".join(str(page) for page in ref.pages)
+                    unit = "スライド" if filename.lower().endswith(".pptx") else "ページ"
+                    detail += f"\n該当: {numbers} {unit}"
+                file_details.append(detail)
+            answer = answer.rstrip() + "\n\n" + "\n\n".join(file_details)
         # ガードが無ければ添付していた（＝ガードが 0 件の原因）なら、従来の理由文ではなく
         # 「名指しの取引先の資料は無い」とそのまま言う。
         guard_emptied = not candidates and (not_found_block or client_excluded > 0)
@@ -476,7 +501,6 @@ class KnowledgeDeliverSkill(BaseSkill[KnowledgeDeliverInput, KnowledgeDeliverOut
                             thread_ts=thread_ts,
                             email=requester_email,
                             dm_channel=dm_channel,
-                            single_post=compact or drive_mode,
                         )
                     )
                 except Exception:
@@ -547,8 +571,7 @@ class KnowledgeDeliverSkill(BaseSkill[KnowledgeDeliverInput, KnowledgeDeliverOut
             total_cost_usd=s_out.total_cost_usd,
             delivery=(
                 KnowledgeDeliveryReceipt(delivered_count=len(delivered_ids))
-                if (compact or drive_mode)
-                and delivered_ids
+                if delivered_ids
                 and len(delivered_ids) == len(candidates)
                 and where in {"thread", "dm"}
                 else None
@@ -565,22 +588,19 @@ class KnowledgeDeliverSkill(BaseSkill[KnowledgeDeliverInput, KnowledgeDeliverOut
         thread_ts: str | None = None,
         email: str | None = None,
         dm_channel: str | None = None,
-        single_post: bool = False,
     ) -> tuple[set[str], str]:
         """prepared を配信（配信先の決定ルールは _shared/drive_slack_delivery に集約）。"""
         slack = self._slack or self._build_slack()
         return await deliver_files(
             slack,
             prepared=prepared,
-            comment=(answer or f"該当資料 {len(prepared)} 件を添付します。")
-            if single_post
-            else answer,
+            comment=answer or f"該当資料 {len(prepared)} 件を添付します。",
             request_id=request_id,
             channel_id=channel_id,
             thread_ts=thread_ts,
             email=email,
             dm_channel=dm_channel,
-            single_post=single_post,
+            single_post=True,
         )
 
     # --- 遅延生成（factory が注入しない / 本番起動時のフォールバック） ---
