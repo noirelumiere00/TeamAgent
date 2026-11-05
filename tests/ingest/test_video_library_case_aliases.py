@@ -26,16 +26,18 @@ def catalog() -> Iterator[Any]:
                 to_advertiser TEXT, to_campaign TEXT);
             CREATE TABLE vl_videos(platform TEXT,video_id TEXT,advertiser TEXT,campaign TEXT,is_pr BOOLEAN);
             CREATE TABLE vl_videos_effective(platform TEXT,video_id TEXT,advertiser TEXT,campaign TEXT,
-                caption TEXT);
+                caption TEXT,origin TEXT);
             INSERT INTO vl_campaigns VALUES ('TikTok','20260717'),('ラフォーレ','セール'),
                 ('トップバリュ','昭和レトロ'),('AEON','昭和レトロ');
             INSERT INTO vl_case_aliases VALUES ('TikTok','20260717','ラフォーレ','セール'),
                 ('トップバリュ','昭和レトロ','AEON',NULL);
             INSERT INTO vl_videos VALUES ('tiktok','1','TikTok','20260717',true),
                 ('tiktok','2','トップバリュ','昭和レトロ',true),('tiktok','3',NULL,NULL,true);
-            INSERT INTO vl_videos_effective VALUES ('tiktok','1','ラフォーレ','セール','ラフォーレ セール'),
-                ('tiktok','2','AEON','昭和レトロ','昭和レトロ'),
-                ('tiktok','3','ラフォーレ','セール','an inferred label is not truth');
+            INSERT INTO vl_videos_effective VALUES ('tiktok','1','ラフォーレ','セール','ラフォーレ セール','own'),
+                ('tiktok','2','AEON','昭和レトロ','昭和レトロ','own'),
+                ('tiktok','3','ラフォーレ','セール','an inferred label is not truth','own'),
+                ('tiktok','4','ラフォーレ','セール','external PR','external');
+            INSERT INTO vl_videos VALUES ('tiktok','4','TikTok','20260717',true);
         """)
         yield conn
 
@@ -86,3 +88,28 @@ def test_evaluation_truth_and_known_advertiser_are_canonical_but_inferred_rows_e
     first = engine.predict.call_args_list[0].args
     assert first[0].advertiser == "ラフォーレ" and first[1] == cases
     assert engine.predict.call_args_list[1].args[0].advertiser is None
+
+
+def test_inference_routes_external_pr_even_with_campaign_but_skips_non_pr_and_human(
+    catalog: Any,
+) -> None:
+    catalog.executescript("""
+        ALTER TABLE vl_videos ADD COLUMN caption TEXT DEFAULT 'MOFT #PR';
+        ALTER TABLE vl_videos_effective ADD COLUMN is_pr BOOLEAN DEFAULT true;
+        CREATE TABLE vl_video_campaign_links(platform TEXT,video_id TEXT,source TEXT,
+            prompt_version TEXT,input_hash TEXT,decided_at TEXT);
+    """)
+    pg = MagicMock()
+    pg.connection.return_value.__enter__.return_value = catalog
+    repo = CaseRepository(pg)
+    rows = repo.load()[1]
+    assert {r["video_id"]: r["effective_origin"] for r in rows} == {"3": "own", "4": "external"}
+    catalog.execute("UPDATE vl_videos_effective SET is_pr=false WHERE video_id='4'")
+    assert [r["video_id"] for r in repo.load()[1]] == ["3"]
+    catalog.execute("UPDATE vl_videos_effective SET is_pr=true WHERE video_id='4'")
+    catalog.execute(
+        "INSERT INTO vl_video_campaign_links VALUES ('tiktok','4','human','external-v1',NULL,NULL)"
+    )
+    assert [r["video_id"] for r in repo.load()[1]] == ["3"]
+    catalog.execute("UPDATE vl_video_campaign_links SET prompt_version='v1'")
+    assert {r["video_id"] for r in repo.load()[1]} == {"3", "4"}

@@ -86,6 +86,7 @@ def db(monkeypatch: pytest.MonkeyPatch) -> Iterator[tuple[PgVectorClient, URLImp
                     "0038_video_campaign_links.sql",
                     "0039_video_library_import_ui.sql",
                     "0040_video_library_fetch_resume.sql",
+                    "0041_video_library_external_cases.sql",
                 ):
                     owner.execute((MIGRATIONS / name).read_text())
             pg = SchemaPg(make_conninfo(_DSN, options=f"-csearch_path={schema},public"))
@@ -479,13 +480,16 @@ def test_view_column_contract_unchanged_and_campaign_creator_preserved(
     with repo.connection() as conn:
         cursor = conn.execute("SELECT * FROM vl_videos_effective LIMIT 0")
         names = [column.name for column in cursor.description or ()]
-        assert names[-5:] == [
+        # Existing columns keep their order; 0041 appends the external fields after them.
+        start = names.index("business_category")
+        assert names[start : start + 5] == [
             "business_category",
             "is_private",
             "industry",
             "purpose",
             "case_inferred",
         ]
+        assert names[start + 5 :] == ["external_advertiser", "is_external_case"]
         assert "page_is_ad" not in names
         conn.execute(
             "INSERT INTO vl_campaigns VALUES ('advertiser','campaign','member@example.test',now(),'url_import')"

@@ -54,7 +54,13 @@ def test_viewer_campaign_intake_worker_results_and_creation_rls(
     response = client.post(
         "/library/import",
         headers=ORIGIN,
-        data={"urls": text, "action": "submit", "idempotency_key": "key", "case": choice},
+        data={
+            "urls": text,
+            "action": "submit",
+            "idempotency_key": "key",
+            "case": choice,
+            "requested_origin": "own",
+        },
         follow_redirects=False,
     )
     assert response.status_code == 303
@@ -95,7 +101,7 @@ def test_viewer_campaign_intake_worker_results_and_creation_rls(
             == _EMAIL
         )
         assert len(search_campaigns(conn, {}, admin=False)) == 1
-        assert search_videos(conn, {"general": "yes"}, admin=False)["total"] == 1
+        assert search_videos(conn, {"general": "yes"}, admin=False)["total"] == 0
         assert (
             search_videos(conn, {"pure_organic": "yes"}, admin=False)["videos"][0]["video_id"]
             == "124"
@@ -159,7 +165,12 @@ def test_assignment_does_not_move_existing_and_private_choice_at_processing(
             "INSERT INTO vl_campaigns(advertiser,campaign) VALUES ('one','case'),('two','case')"
         )
     batch = repo.submit(
-        URL, requested_by=_EMAIL, idempotency_key="one", advertiser="one", campaign="case"
+        URL,
+        requested_by=_EMAIL,
+        idempotency_key="one",
+        requested_origin="own",
+        advertiser="one",
+        campaign="case",
     )
     row = repo.claim()
     assert row and str(row["batch_id"]) == batch
@@ -174,7 +185,14 @@ def test_assignment_does_not_move_existing_and_private_choice_at_processing(
         result=ImportResult(status="succeeded", video_id="123"),
         row=row,
     )
-    repo.submit(URL, requested_by=_EMAIL, idempotency_key="two", advertiser="two", campaign="case")
+    repo.submit(
+        URL,
+        requested_by=_EMAIL,
+        idempotency_key="two",
+        requested_origin="own",
+        advertiser="two",
+        campaign="case",
+    )
     row = repo.claim()
     assert row
     repo.save(
@@ -191,6 +209,7 @@ def test_assignment_does_not_move_existing_and_private_choice_at_processing(
         URL.replace("123", "124"),
         requested_by=_EMAIL,
         idempotency_key="private",
+        requested_origin="own",
         advertiser="two",
         campaign="case",
     )
@@ -238,6 +257,7 @@ def test_private_alias_target_is_not_an_intake_choice(db: tuple[Any, Any]) -> No
             URL,
             requested_by=_EMAIL,
             idempotency_key="private-alias",
+            requested_origin="own",
             advertiser="source",
             campaign="case",
         )

@@ -781,3 +781,100 @@ def test_shipped_policy_is_loadable_and_matches_the_current_prompt_and_model() -
     assert pol.existing is not None and pol.existing.passed()
     assert pol.model == DEFAULT_MODEL
     assert pol.prompt_hash == digest(load_prompt("case_inference", "v1", "system"))
+
+
+def test_external_advertiser_uses_caption_without_own_catalog() -> None:
+    fake = client(
+        json.dumps(
+            {
+                **RAW,
+                "advertiser": "MOFT",
+                "campaign": None,
+                "match_type": "new",
+                "evidence": [{"field": "caption", "quote": "MOFT"}],
+            }
+        )
+    )
+    engine = Inference(fake, max_cost_usd=1)
+    repository = repo()
+    repository.load.return_value[1][0].update(
+        origin="external", caption="MOFTの新商品 #PR", campaign="legacy case"
+    )
+    counts = run(repository, engine, policy=None, limit=1, dry_run=False, request_id="external")
+    assert counts["applied"] == 1
+    result = repository.save.call_args.args[1]
+    assert result.advertiser == "MOFT" and result.campaign is None
+    assert result.match_type == "unknown"
+    options = fake.converse.call_args.kwargs
+    assert "Product" not in options["system"] and "Brand" not in options["system"]
+    assert options["temperature"] == 0.1 and options["cache_system"] is True
+    assert options["max_attempts"] == 1 and engine.cost_usd > 0
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"evidence": [{"field": "caption", "quote": "架空の引用"}]},
+        {"advertiser": "存在しない企業"},
+        {"campaign": "架空の案件"},
+        {"evidence": []},
+    ],
+)
+def test_external_advertiser_rejects_invented_name_quote_or_campaign(
+    changes: dict[str, Any],
+) -> None:
+    raw = {
+        **RAW,
+        "advertiser": "MOFT",
+        "campaign": None,
+        "match_type": "new",
+        "evidence": [{"field": "caption", "quote": "MOFT"}],
+        **changes,
+    }
+    engine = Inference(client(json.dumps(raw)), max_cost_usd=1)
+    with pytest.raises(ValueError):
+        engine.predict_advertiser(Post(caption="MOFT #PR"), request_id="external")
+
+
+@pytest.mark.parametrize("changes", [{"is_pr": False}, {"caption": ""}, {"caption": None}])
+def test_external_advertiser_skips_non_pr_or_missing_caption(changes: dict[str, Any]) -> None:
+    fake = client()
+    repository = repo()
+    repository.load.return_value[1][0].update(origin="external", **changes)
+    counts = run(
+        repository,
+        Inference(fake, max_cost_usd=1),
+        policy=None,
+        limit=1,
+        dry_run=False,
+        request_id="skip",
+    )
+    assert counts["attempted"] == 0
+    fake.converse.assert_not_called()
+    repository.save.assert_not_called()
+
+
+def test_external_unknown_does_not_apply_an_advertiser() -> None:
+    fake = client(
+        json.dumps(
+            {
+                "advertiser": None,
+                "campaign": None,
+                "match_type": "unknown",
+                "confidence": 0,
+                "evidence": [],
+            }
+        )
+    )
+    repository = repo()
+    repository.load.return_value[1][0].update(origin="external")
+    counts = run(
+        repository,
+        Inference(fake, max_cost_usd=1),
+        policy=None,
+        limit=1,
+        dry_run=False,
+        request_id="unknown",
+    )
+    assert counts["unknown"] == 1
+    assert repository.save.call_args.args[1].advertiser is None

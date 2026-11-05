@@ -218,8 +218,8 @@ def test_primary_category_majority_and_tie_priority(
     for i, code in enumerate(codes):
         conn.execute(
             """INSERT INTO vl_videos_effective
-            (platform,video_id,advertiser,campaign,business_category,is_private,is_pr)
-            VALUES ('tiktok',%s,'test','mixed',%s,false,true)""",
+            (platform,video_id,advertiser,campaign,business_category,is_private,is_pr,origin)
+            VALUES ('tiktok',%s,'test','mixed',%s,false,true,'own')""",
             (str(i), code),
         )
     # All tied, then remove each winner: proves the complete priority including NULL last.
@@ -232,8 +232,8 @@ def test_primary_category_majority_and_tie_priority(
     for i, code in enumerate([*codes, winner]):
         conn.execute(
             """INSERT INTO vl_videos_effective
-            (platform,video_id,advertiser,campaign,business_category,is_private,is_pr)
-            VALUES ('tiktok',%s,'test','mixed',%s,false,true)""",
+            (platform,video_id,advertiser,campaign,business_category,is_private,is_pr,origin)
+            VALUES ('tiktok',%s,'test','mixed',%s,false,true,'own')""",
             (str(i), code),
         )
     assert search_campaigns(conn, {}, admin=False)[0]["primary_category"] == winner

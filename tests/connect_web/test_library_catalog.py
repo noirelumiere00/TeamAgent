@@ -62,7 +62,7 @@ def test_catalog_case_links_copy_and_all_videos(setup: tuple[TestClient, Pg]) ->
     assert soup.select_one(".main-nav [aria-current]")["href"] == "/library"
     assert soup.select_one(".workspace .sidebar") is not None
     assert "オーガニック投稿を見る" in response.text
-    assert len(pg.calls) == 3  # aggregate + featured + general shelf, never N+1
+    assert len(pg.calls) == 4  # aggregate + featured + general + shared imports; never N+1
     response = client.get(path, cookies=_auth_cookie())
     soup = BeautifulSoup(response.text, "html.parser")
     summary = soup.select_one("#campaign-copy").text

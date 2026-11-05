@@ -323,3 +323,26 @@ def test_alias_rls_matches_human_settings(db: tuple[Any, Any]) -> None:
         "SELECT relrowsecurity,relforcerowsecurity FROM pg_class WHERE oid='vl_case_aliases'::regclass"
     ).fetchone()
     assert flags == {"relrowsecurity": True, "relforcerowsecurity": True}
+
+
+def test_0041_preserves_all_existing_view_columns(db: tuple[Any, Any]) -> None:
+    conn, _ = db
+    for name in (
+        "0036_video_library_settings.sql",
+        "0037_video_library_url_import.sql",
+        "0038_video_campaign_links.sql",
+        "0039_video_library_import_ui.sql",
+        "0040_video_library_fetch_resume.sql",
+    ):
+        conn.execute((MIGRATIONS / name).read_text())
+    before = [
+        (d.name, d.type_code)
+        for d in conn.execute("SELECT * FROM vl_videos_effective LIMIT 0").description
+    ]
+    conn.execute((MIGRATIONS / "0041_video_library_external_cases.sql").read_text())
+    after = [
+        (d.name, d.type_code)
+        for d in conn.execute("SELECT * FROM vl_videos_effective LIMIT 0").description
+    ]
+    assert after[:-2] == before
+    assert [name for name, _ in after[-2:]] == ["external_advertiser", "is_external_case"]

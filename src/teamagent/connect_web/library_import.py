@@ -80,6 +80,10 @@ def register_import_routes(
     is_admin: Callable[[str], bool],
 ) -> None:
     def selected(form: dict[str, str], choices: list[Any]) -> tuple[str | None, str | None]:
+        if form.get("requested_origin", "external") not in {"own", "external"}:
+            raise HTTPException(400, "自社・他社の指定が不正です")
+        if form.get("requested_origin", "external") != "own":
+            return None, None
         # The submitted value is a pair, never an index into a potentially changed list.
         value = form.get("case", "")
         if not value:
@@ -145,11 +149,25 @@ def register_import_routes(
             f'<textarea id="import-urls" name="urls" rows="9" required>{_e(text)}</textarea>'
             '<input type="hidden" name="idempotency_key" '
             f'value="{_e(form.get("idempotency_key") or str(uuid.uuid4()))}">'
-            "<label>広告主・案件（任意）"
+            "<label>投稿の区分"
+            + _select(
+                "requested_origin",
+                [
+                    ("external", "他社・世の中の投稿"),
+                    ("own", "自社の案件（KOL・インフルエンサーへの依頼も含む）"),
+                ],
+                form.get("requested_origin", "external"),
+            )
+            + "</label>"
+            '<p class="muted">シート掲載・自社アカウントの動画は、'
+            "選択にかかわらず自社になります。</p>"
+            "<div data-own-campaign"
+            + (" hidden" if form.get("requested_origin", "external") != "own" else "")
+            + "><label>広告主・案件（任意）"
             + _select("case", options, form.get("case", ""))
             + "</label>"
             '<p class="muted">選択した案件は新規の #PR 付き動画にだけ適用します。'
-            "登録済みの動画は数値を更新し、既存の案件を維持します。</p>"
+            "登録済みの動画は数値を更新し、既存の案件を維持します。</p></div>"
             '<button name="action" value="check" class="primary">確認</button>'
         )
         if preview:
@@ -192,12 +210,14 @@ def register_import_routes(
                 body += '<button name="action" value="submit" class="primary">取り込む</button>'
         body += (
             "</form>"
-            "<details>"
+            "<details data-own-campaign"
+            + (" hidden" if form.get("requested_origin", "external") != "own" else "")
+            + ">"
             "<summary>新しい広告主・案件を追加</summary>"
             "<p>表記揺れに注意してください。上の既存候補を確認し、同じ組がある場合はそちらを選んでください。</p>"
         )
         body += '<form method="post" action="/library/import/campaign" data-import-campaign>'
-        for name in ("urls", "case", "idempotency_key"):
+        for name in ("urls", "case", "idempotency_key", "requested_origin"):
             body += f'<input type="hidden" name="{name}" value="{_e(form.get(name, ""))}">'
         body += (
             '<label>広告主<input name="advertiser" required maxlength="500">'
@@ -256,6 +276,7 @@ def register_import_routes(
                 URLImportRepository(get_pg()),
                 requested_by=email,
                 idempotency_key=form.get("idempotency_key", ""),
+                requested_origin=form.get("requested_origin", "external"),
                 advertiser=advertiser,
                 campaign=campaign,
                 wake=lambda: wake(request),
@@ -286,6 +307,7 @@ def register_import_routes(
                    VALUES (%s,%s,%s,now(),'url_import') ON CONFLICT DO NOTHING""",
                 (advertiser, campaign, email),
             )
+        form["requested_origin"] = "own"
         form["case"] = json.dumps([advertiser, campaign], ensure_ascii=False)
         return screen(
             email, form, notice="広告主・案件を選択しました。表記を確認してから取り込んでください。"
@@ -403,6 +425,7 @@ def register_import_routes(
                 URLImportRepository(get_pg()),
                 requested_by=email,
                 idempotency_key=form.get("idempotency_key", ""),
+                requested_origin=batch["requested_origin"],
                 advertiser=batch["advertiser"],
                 campaign=batch["campaign"],
                 parent_batch_id=str(batch_id),

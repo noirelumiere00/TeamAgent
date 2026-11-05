@@ -77,7 +77,7 @@ class CaseRepository:
                 """SELECT v.* FROM vl_videos_effective v
                JOIN vl_videos sheet ON sheet.platform=v.platform AND sheet.video_id=v.video_id
                JOIN vl_campaigns c ON c.advertiser=sheet.advertiser AND c.campaign=sheet.campaign
-               WHERE sheet.is_pr AND v.caption IS NOT NULL AND v.caption<>''
+               WHERE v.origin='own' AND sheet.is_pr AND v.caption IS NOT NULL AND v.caption<>''
                ORDER BY v.platform, v.video_id"""
             ).fetchall()
         )
@@ -86,13 +86,16 @@ class CaseRepository:
         with self.connection() as conn:
             return self.cases(conn), list(
                 conn.execute(
-                    """SELECT v.*, l.input_hash FROM vl_videos v
+                    """SELECT raw.*, v.origin AS effective_origin, l.input_hash FROM vl_videos raw
+                JOIN vl_videos_effective v USING(platform,video_id)
                 LEFT JOIN vl_video_campaign_links l
                     ON l.platform=v.platform AND l.video_id=v.video_id AND l.source='ai'
-                WHERE COALESCE(v.campaign,'')=''
-                  AND (v.is_pr OR COALESCE(v.advertiser,'')<>'')
+                WHERE ((v.origin='own' AND COALESCE(raw.campaign,'')=''
+                    AND (v.is_pr OR COALESCE(raw.advertiser,'')<>''))
+                    OR (v.origin='external' AND v.is_pr AND COALESCE(v.caption,'')<>''))
                   AND NOT EXISTS (SELECT 1 FROM vl_video_campaign_links h
-                    WHERE h.platform=v.platform AND h.video_id=v.video_id AND h.source='human')
+                    WHERE h.platform=v.platform AND h.video_id=v.video_id AND h.source='human'
+                    AND ((v.origin='external') = (h.prompt_version='external-v1')))
                 ORDER BY l.decided_at NULLS FIRST, v.platform, v.video_id"""
                 ).fetchall()
             )
@@ -115,22 +118,34 @@ class CaseRepository:
         cases: list[Case],
     ) -> bool:
         with self.connection() as conn:
+            conn.execute(
+                "SELECT pg_advisory_xact_lock(hashtextextended(%s,41))",
+                (f"{row['platform']}:{row['video_id']}",),
+            )
             current = conn.execute(
                 "SELECT * FROM vl_videos WHERE platform=%s AND video_id=%s FOR UPDATE",
                 (row["platform"], row["video_id"]),
             ).fetchone()
+            effective = conn.execute(
+                "SELECT origin FROM vl_videos_effective WHERE platform=%s AND video_id=%s",
+                (row["platform"], row["video_id"]),
+            ).fetchone()
+            external = row.get("effective_origin", row.get("origin")) == "external"
             if (
                 not current
-                or current["campaign"]
+                or not effective
+                or (effective["origin"] == "external") != external
+                or (not external and current["campaign"])
                 or Post.from_row(current) != Post.from_row(row)
                 or current["is_pr"] != row["is_pr"]
-                or catalog_hash(self.cases(conn)) != catalog_hash(cases)
+                or (not external and catalog_hash(self.cases(conn)) != catalog_hash(cases))
             ):
                 return False
             if conn.execute(
                 """SELECT 1 FROM vl_video_campaign_links
-                WHERE platform=%s AND video_id=%s AND source='human'""",
-                (row["platform"], row["video_id"]),
+                WHERE platform=%s AND video_id=%s AND source='human'
+                AND ((prompt_version='external-v1')=%s)""",
+                (row["platform"], row["video_id"], external),
             ).fetchone():
                 return False
             conn.execute(
@@ -155,7 +170,7 @@ class CaseRepository:
                     result.confidence,
                     Jsonb([e.model_dump() for e in result.evidence]),
                     model,
-                    PROMPT_VERSION,
+                    "external-v1" if external else PROMPT_VERSION,
                     fingerprint,
                 ),
             )
