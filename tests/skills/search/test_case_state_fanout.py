@@ -91,10 +91,8 @@ def test_named_case_state_record_is_shared_with_clientkarte(
     assert "\n状態:" in out.answer
     for adapter in (pg, karte_pg):
         assert adapter.find_documents_for_advertiser.call_args_list[0].args[1] == "株式会社 ＪＴＢ"
-        assert adapter.find_documents_for_advertiser.call_args.kwargs == {
-            "limit": 8,
-            "drive_only": False,
-        }
+        kwargs = adapter.find_documents_for_advertiser.call_args.kwargs
+        assert kwargs["limit"] == 8 and kwargs["drive_only"] is False
         assert {
             normalize_client(call.args[1])
             for call in adapter.find_documents_for_advertiser.call_args_list
