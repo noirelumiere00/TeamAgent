@@ -12,15 +12,9 @@ from pydantic import BaseModel, Field
 class ProposalDraftInput(BaseModel):
     """ProposalDraft Skill の入力 (新規案件ブリーフ)。"""
 
-    brief: str = Field(
-        min_length=1,
-        max_length=2000,
-        description="新規案件の概要 (クライアント/業界/ターゲット/予算/目的など自然文)",
-    )
-    industry: str | None = Field(
-        default=None, max_length=100, description="業界フィルタ (任意、検索の絞り込み用)"
-    )
-    top_k: int = Field(default=8, ge=1, le=20, description="参照する類似過去提案の件数")
+    brief: str = Field(min_length=1, max_length=2000)
+    industry: str | None = Field(default=None, max_length=100)
+    top_k: int = Field(default=8, ge=1, le=20)
 
 
 class ProposalSource(BaseModel):

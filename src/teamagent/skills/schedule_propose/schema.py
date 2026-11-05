@@ -15,7 +15,7 @@ class ScheduleProposeInput(BaseModel):
     schedule_token: str = Field(
         min_length=1,
         max_length=400,
-        description="『🗓 日程候補を提案』ボタンの value（HMAC署名トークン・生thread_id非露出）",
+        description="日程候補ボタンの署名付きvalue。",
     )
 
 

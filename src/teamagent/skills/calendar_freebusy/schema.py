@@ -21,37 +21,18 @@ from pydantic import BaseModel, Field
 class CalendarFreeBusyInput(BaseModel):
     """「空いてる時間ある？」「明日の予定は？」等の自由文照会の入力（全項目省略可）。"""
 
-    mode: Literal["free", "agenda"] = Field(
-        default="free",
-        description=(
-            "free=空き時間（既定）/ agenda=予定の一覧。"
-            "『予定』『何がある』『スケジュール』を聞かれたら agenda、"
-            "『空いてる』『◯分入る？』は free。"
-        ),
-    )
+    mode: Literal["free", "agenda"] = Field(default="free")
     date: str = Field(
         default="",
         pattern=r"^(\d{4}-\d{2}-\d{2})?$",
-        description=(
-            "対象日 YYYY-MM-DD（JST）。**自分で今日の日付を計算して入れないこと**。"
-            "依頼文に具体日が書かれている時だけ使い、"
-            "『今日』『明日』は relative_day で指定する（省略時はサーバが明日を採用）。"
-        ),
+        description=("本人指定の具体日YYYY-MM-DD（JST、今日・明日はrelative_day）。"),
     )
     relative_day: Literal["", "today", "tomorrow"] = Field(
         default="",
-        description=(
-            "『今日』なら 'today'、『明日』なら 'tomorrow'（省略時も明日）。"
-            "実日付の算出はサーバが JST で行う（LLM の日付計算を使わない）。"
-            "date が指定されている場合は date が優先。"
-        ),
+        description=("today=今日、tomorrow=明日（date優先、日付計算はサーバ）。"),
     )
-    days: int = Field(
-        default=1, ge=1, le=7, description="対象日から何日ぶん照会するか（1〜7・既定1）"
-    )
-    duration_min: int = Field(
-        default=60, ge=15, le=480, description="入れたい打合せの所要時間（分・15〜480・既定60）"
-    )
+    days: int = Field(default=1, ge=1, le=7)
+    duration_min: int = Field(default=60, ge=15, le=480)
 
 
 class FreeWindow(BaseModel):

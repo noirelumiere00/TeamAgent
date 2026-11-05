@@ -85,47 +85,26 @@ class SlackSummaryInput(BaseModel):
     scope: Literal["auto", "thread", "channel"] = Field(
         default="auto",
         description=(
-            "要約対象の範囲。channel は『このチャンネルの要約』『チャンネルの決定事項』"
-            "『ここ最近の流れ』など、スレッドではなくチャンネル全体の直近の流れを指す依頼で使う。"
-            "thread はスレッド単体を要約する。auto は省略時の既定値で、まず現スレッドを読み、"
-            "依頼メッセージだけの 1 件以下なら自動的にチャンネル要約へ切り替える。"
+            "「このチャンネルの要約」「チャンネルの決定事項」「ここ最近の流れ」はchannel"
+            "、単一スレッドはthread、autoは1件以下でchannelに切替。"
         ),
     )
-    channel_id: str = Field(
-        default="",
-        pattern=r"^([CGD][A-Za-z0-9]{1,32})?$",
-        description=(
-            "対象スレッドまたは対象チャンネルの ID（<#C…|name> 由来の C…/G…/D…）。"
-            "**省略時は依頼が行われたチャンネルを自動採用**する。"
-            "名前指定は channel_name を使う。"
-        ),
-    )
-    channel_name: str = Field(
-        default="", max_length=100, description="対象のチャンネル名・部分名。"
-    )
+    channel_id: str = Field(default="", pattern="^([CGD][A-Za-z0-9]{1,32})?$")
+    channel_name: str = Field(default="", max_length=100)
     period: str = Field(
         default="",
         max_length=80,
         description=(
-            "今日・昨日・一昨日・今週・先週・先々週・今月・先月・直近N日（過去N日間）・"
-            "M月D日〜D日（10月1日〜5日・10/1〜10/5・年は省略可）・YYYY-MM-DD（〜で日付範囲）。"
-            "利用者の言葉をそのまま渡す（例: 先週、直近7日、10/1〜10/5）。"
+            "期間の原文（今日/昨日/一昨日/今週/先週/先々週/今月/先月/直近N日/M月D日〜D日/"
+            "YYYY-MM-DD等）。"
         ),
     )
     thread_ts: str = Field(
         default="",
         pattern=r"^(\d{6,20}\.\d{1,8})?$",
-        description=(
-            "対象スレッドの親メッセージ ts（例 1755400000.123456・Slack のスレッドリンク末尾）。"
-            "thread/auto では **明示された場合はこちらを優先**し、省略時は依頼が行われた"
-            "現スレッドを自動採用する。channel では不要。"
-        ),
+        description=("明示された親ts（省略時は現スレッド、channelでは不要）。"),
     )
-    focus: str = Field(
-        default="",
-        max_length=200,
-        description="要約で特に知りたい観点（例『決定事項だけ』『自分への依頼』）。省略可。",
-    )
+    focus: str = Field(default="", max_length=200)
 
 
 class SlackSummaryOutput(BaseModel):

@@ -8,20 +8,9 @@ from pydantic import BaseModel, Field
 class RecommendInput(BaseModel):
     """Recommend Skill の入力 (新規案件の概要)。"""
 
-    brief: str = Field(
-        min_length=1,
-        max_length=2000,
-        description="新規案件の概要 (クライアント/業界/ターゲット/予算/目的など自然文)",
-    )
-    industry: str | None = Field(
-        default=None, max_length=100, description="業界フィルタ (任意、検索の絞り込み用)"
-    )
-    top_k: int = Field(
-        default=12,
-        ge=1,
-        le=30,
-        description="検索候補件数（会社・原本の重複を除き他社最大4件・自社最大1件を提示）",
-    )
+    brief: str = Field(min_length=1, max_length=2000)
+    industry: str | None = Field(default=None, max_length=100)
+    top_k: int = Field(default=12, ge=1, le=30)
 
 
 class RecommendItem(BaseModel):

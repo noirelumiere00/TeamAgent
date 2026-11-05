@@ -25,54 +25,31 @@ CategoryLabel = Literal[
 
 
 class SearchSurfaceCheckInput(BaseModel):
-    keywords: list[str] = Field(min_length=1, max_length=5, description="検索KW群(1〜5)")
+    keywords: list[str] = Field(min_length=1, max_length=5)
     platforms: list[Literal["tiktok", "instagram"]] = Field(
         default=["tiktok", "instagram"], min_length=1
     )
-    client_name: str | None = Field(default=None, description="クライアント名（在圏判定の補助）")
-    client_accounts: list[str] = Field(
-        default_factory=list, description="クライアントのアカウント（@handle。TikTok/IG両方可）"
-    )
+    client_name: str | None = Field(default=None)
+    client_accounts: list[str] = Field(default_factory=list)
     acquire_job_id: str | None = Field(
         default=None,
         pattern=r"^(?:mj_[0-9a-f]{24}|tk_[0-9a-f]{12})$",
-        description=(
-            "tiktok_acquire が返した job_id。3KW以上のTikTok面はこの経路が必須"
-            "（本人所有ジョブのimmutable成果物だけを読む）"
-        ),
+        description=("3KW以上のTikTok面で必須の本人所有tiktok_acquireジョブID。"),
     )
     # 上限は TikTok 取得 dispatcher の n_per_kw 上限（TIKTOK_N_PER_KW_MAX=30）と同一。
     # 31〜50 を受理していた頃は _tiktok_direct → search_tiktok の fail-fast で
     # TIKTOK_MEDIA_JOB_FAILED: ValueError になり、面の取得が丸ごと落ちていた。
-    max_posts_per_kw: int = Field(
-        default=TIKTOK_N_PER_KW_MAX,
-        ge=5,
-        le=TIKTOK_N_PER_KW_MAX,
-        description=(
-            f"KWあたりの取得本数（5〜{TIKTOK_N_PER_KW_MAX}）。"
-            "上限は TikTok 取得 dispatcher の n_per_kw 上限と同一"
-        ),
-    )
+    max_posts_per_kw: int = Field(default=TIKTOK_N_PER_KW_MAX, ge=5, le=TIKTOK_N_PER_KW_MAX)
     ig_surface: Literal["search", "hashtag"] | None = Field(
         default=None,
-        description="IG面の取得方式（未指定=環境既定。search=検索面/hashtag=タグ面）",
+        description="IGの検索面/タグ面（省略時は環境既定）。",
     )
-    analyze: bool = Field(default=True, description="Bedrockでの勢力図分類を行うか")
-    competitor_accounts: list[str] = Field(
-        default_factory=list,
-        max_length=5,
-        description="比較する競合のアカウント（@handle・最大5）。面に出ている順位を数える",
-    )
-    max_videos: Literal[5, 10] | None = Field(
-        default=None,
-        description="動画の中身を分析する本数（5 か 10。未指定=5）。全 KW の上位から選ぶ",
-    )
+    analyze: bool = Field(default=True)
+    competitor_accounts: list[str] = Field(default_factory=list, max_length=5)
+    max_videos: Literal[5, 10] | None = Field(default=None)
     confirmed: bool = Field(
         default=False,
-        description=(
-            "依頼者が KW・分析本数・競合の確認に答えた後なら true。false だと（対象の人には）"
-            "取得の前に確認文だけを返す"
-        ),
+        description=("KW・分析本数・競合への本人の確認回答後のみtrue。"),
     )
 
 

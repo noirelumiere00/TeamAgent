@@ -50,8 +50,7 @@ class WorkspaceSearchSkill(BaseSkill[WorkspaceSearchInput, WorkspaceSearchOutput
 
     name: ClassVar[str] = "workspace_search"
     description: ClassVar[str] = (
-        "本人の Google Workspace（カレンダー予定・連絡先）を本人 OAuth で検索する。"
-        "未連携では使えないため、利用前に" + CONNECT_SUFFIX + "生データは返さない。"
+        "本人Google Workspaceの予定・連絡先を検索（Google連携が必要、生データなし）。"
     )
     input_schema: ClassVar[type[BaseModel]] = WorkspaceSearchInput
     output_schema: ClassVar[type[BaseModel]] = WorkspaceSearchOutput

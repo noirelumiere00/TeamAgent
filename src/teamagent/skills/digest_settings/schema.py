@@ -21,65 +21,44 @@ Weekday = Literal["mon", "tue", "wed", "thu", "fri"]
 
 
 class DigestSettingsInput(BaseModel):
-    action: Literal["show", "update", "reset"] = Field(
-        default="show",
-        description="show=current settings, update=apply the fields below, reset=back to defaults.",
-    )
-    delivery: bool | None = Field(
-        default=None, description="false=stop the morning summary; true=resume (also ends a pause)."
-    )
+    action: Literal["show", "update", "reset"] = Field(default="show")
+    delivery: bool | None = Field(default=None, description="false=停止、true=再開（休止も解除）。")
     pause_until: _dt.date | None = Field(
-        default=None, description="Skip deliveries through this date (YYYY-MM-DD, inclusive)."
+        default=None, description="この日まで休止（YYYY-MM-DD、当日含む）。"
     )
     pause_days: int | None = Field(
         default=None,
         ge=1,
         le=MAX_PAUSE_DAYS,
-        description="Alternative to pause_until: skip for N days starting today.",
+        description="今日から休止する日数（pause_untilの代替）。",
     )
-    weekdays: list[Weekday] | None = Field(
-        default=None, max_length=5, description="Weekdays to deliver on (weekdays only)."
-    )
+    weekdays: list[Weekday] | None = Field(default=None, max_length=5)
     hide_sections: list[Section] | None = Field(
         default=None,
         max_length=5,
         description=(
-            "Sections to remove. reply=mail needing reply, unread=other unread mail, "
-            "slack=Slack mentions left unanswered, calendar=today's events, "
-            "brief=client meeting brief."
+            "非表示欄（reply=返信対象、unread=他の未読、slack=未返信メンション、"
+            "calendar=今日の予定、brief=商談準備）。"
         ),
     )
-    show_sections: list[Section] | None = Field(
-        default=None, max_length=5, description="Sections to show again."
-    )
-    limit_reply: int | None = Field(default=None, description="Max items in reply (1-8).")
-    limit_unread: int | None = Field(default=None, description="Max items in unread (1-10).")
-    limit_slack: int | None = Field(default=None, description="Max items in slack (1-8).")
-    limit_calendar: int | None = Field(default=None, description="Max items in calendar (1-15).")
-    auto_drafts: bool | None = Field(
-        default=None, description="Whether Aico auto-creates Gmail reply drafts each morning."
-    )
-    reminders: bool | None = Field(
-        default=None, description="Whether to send a DM just before each calendar event."
-    )
-    reminder_lead_minutes: int | None = Field(
-        default=None, description="Minutes before the event to remind (1-60)."
-    )
+    show_sections: list[Section] | None = Field(default=None, max_length=5)
+    limit_reply: int | None = Field(default=None, description="1〜8件。")
+    limit_unread: int | None = Field(default=None, description="1〜10件。")
+    limit_slack: int | None = Field(default=None, description="1〜8件。")
+    limit_calendar: int | None = Field(default=None, description="1〜15件。")
+    auto_drafts: bool | None = Field(default=None)
+    reminders: bool | None = Field(default=None)
+    reminder_lead_minutes: int | None = Field(default=None, description="1〜60分前。")
     reminder_personal_blocks: bool | None = Field(
         default=None,
-        description=(
-            "Remind for events with no guests and no meeting link (tasks the user put on "
-            "the calendar). false for タスクの通知を止めて."
-        ),
+        description=("参加者・会議リンクなしの個人タスクも通知するか。"),
     )
     reminder_skip_add: list[str] | None = Field(
         default=None,
         max_length=MAX_SKIP_KEYWORDS,
-        description="Words: events whose title contains one get no reminder (e.g. タスク).",
+        description="件名に含むと通知を除外する語を追加。",
     )
-    reminder_skip_remove: list[str] | None = Field(
-        default=None, max_length=MAX_SKIP_KEYWORDS, description="Words to remove from that list."
-    )
+    reminder_skip_remove: list[str] | None = Field(default=None, max_length=MAX_SKIP_KEYWORDS)
 
 
 class DigestSettingsOutput(BaseModel):

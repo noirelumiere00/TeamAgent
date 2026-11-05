@@ -235,12 +235,11 @@ class AttachmentAssistSkill(BaseSkill[AttachmentAssistInput, AttachmentAssistOut
     name: ClassVar[str] = "attachment_assist"
     # スイッチ OFF（既定）の説明＝この経路を足す前と同じ文。投稿リンクへ誘導しない。
     description: ClassVar[str] = (
-        "いま話しているスレッド/チャンネルに**添付されたファイル**（PDF/Word/PowerPoint/"
-        "Excel/テキスト）を読んで、要約・修正案・議事録フォーマット化・集計・英訳を返す"
-        "読み取り専用ツール。ファイルが実際に添付されている時だけ使う。"
-        "Drive 内の資料を探して取り出す依頼は knowledge_deliver を使うこと（別ツール）。"
-        "ファイルの書き換え・生成・再配信はしない。" + USER_CONTEXT_RULE
-    )
+        "会話に添付されたPDF/Word/PowerPoint/Excel/"
+        "テキストの要約・修正案・議事録化・集計・英訳（読み取りのみ）。"
+        "実際に添付がある時だけ使う。Drive資料の取得はknowledge_deliver。"
+        "書き換え・生成・再配信なし。"
+    ) + USER_CONTEXT_RULE
     # スイッチ ON の説明。「添付がある時だけ」「再配信しない」に投稿リンクの例外を明記する
     # （例外を書かないと、LLM が「添付が無いので使えない」「添付し直しはできない」と読む）。
     # スレッド・会話の要約は slack_summary（添付ファイルを読む依頼だけをここへ回す）。

@@ -146,21 +146,11 @@ class VideoCaptureSkill(BaseSkill[VideoCaptureInput, VideoCaptureOutput]):
 
     name: ClassVar[str] = "video_capture"
     description: ClassVar[str] = (
-        "動画の「◯分◯秒のシーンを画像にして／切り出して／サムネ用に出して」に応えるツール。"
-        "指定時刻のフレームを JPEG にして、聞かれたスレッド（無ければ本人 DM）に添付する。"
-        "対象は 2 通り: (1) TikTok / Instagram の URL を url に入れる、"
-        "(2) この会話に添付された動画なら url を空にして slack_file=true にする"
-        "（「さっき貼った動画」「上の動画」と言われたら、添付が見えなくても聞き返さずに呼ぶ。"
-        "探すのはサーバで、見つからなければ案内を返す）。"
-        "YouTube の URL は取得元にブロックされるため切り出せないが、"
-        "断らずにそのまま呼べばサーバが添付のお願いを返す"
-        "（この制限は切り出しだけで、YouTube 動画の分析は video_analysis で可能）。"
-        "timecodes はユーザーの言い方のまま渡してよい（「0:05」「1:02:03」「5」いずれも可・"
-        "秒への換算はサーバがやるので自分で計算しないこと）。最大12点。"
-        "『なぜ勝ってるか分析して』は video_algorithm、"
-        "『◯秒のシーンを切り出して・画像にして』が本ツール。"
-        "返ってきた message はそのまま返すこと（枚数・時刻を言い換えない）。" + USER_CONTEXT_RULE
-    )
+        "動画の指定シーンをJPEGでスレッド（なければ本人DM）へ添付。"
+        "URLか添付動画を指定。「さっき貼った動画」はslack_file=trueで、"
+        "添付が見えなくても聞き返さずに呼ぶ。YouTubeも断らずにそのまま呼べば添付の案"
+        "内を返す。YouTube動画の分析はvideo_analysis、勝ち筋分析はvideo_algorithm。"
+    ) + USER_CONTEXT_RULE
     input_schema: ClassVar[type[BaseModel]] = VideoCaptureInput
     output_schema: ClassVar[type[BaseModel]] = VideoCaptureOutput
 

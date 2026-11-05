@@ -19,86 +19,40 @@ from teamagent.case_state import CaseStateEvidence
 class SearchInput(BaseModel):
     """検索 Skill の入力。"""
 
-    query: str = Field(min_length=1, max_length=1000, description="自然文クエリ")
-    top_k: int = Field(default=5, ge=1, le=50, description="返す上位件数")
-    filter_industry: str | None = Field(
-        default=None,
-        max_length=100,
-        description="業界フィルタ（メタデータ JSONB 経由）",
-    )
+    query: str = Field(min_length=1, max_length=1000)
+    top_k: int = Field(default=5, ge=1, le=50)
+    filter_industry: str | None = Field(default=None, max_length=100)
     strict_industry: bool = Field(
         default=False,
-        description=(
-            "業界フィルタの厳密度。"
-            "False (soft, 既定): industry=指定値 OR industry IS NULL を許容。"
-            "Router の auto-detect で Slack docs (industry メタ無し) が全件除外されるのを防ぐ。"
-            "True (strict): 厳密一致。ユーザーが明示的に業界を指定したスラッシュコマンド等で使う。"
-        ),
+        description=("true=業界厳密一致、false=業界不明も含む。"),
     )
-    filter_client: str | None = Field(
-        default=None,
-        max_length=200,
-        description=(
-            "取引先/案件名フィルタ（部分一致 ILIKE）。"
-            "cls_project（全資料に付く取引先）を主に "
-            "client_name（FB）/ title の OR グループへ照合。"
-            "表記ゆれ（例: 日本ガイシ↔NGK）を部分一致で吸収する。"
-        ),
-    )
+    filter_client: str | None = Field(default=None, max_length=200)
     filter_doc_type: str | None = Field(
         default=None,
         max_length=50,
         description=(
-            "資料種別フィルタ（cls_doc_type 等価）。"
-            "提案書 / 議事録 / 報告書 / 価格表 / 契約 / "
-            "施策実績（ショート動画DBの案件ごとの実績。投稿本数・再生数・上位の投稿URL）"
-            " のいずれか。"
-            "事例は資料種別ではないため指定しない。"
-            "fail-open 再検索でも外れない sticky フィルタとして配線する"
-            "（クエリ自動抽出 extract_knowledge_filters より優先）。"
+            "提案書/議事録/報告書/価格表/契約/施策実績（投稿本数・再生数・投稿URL）"
+            "から指定し、事例は指定しない。"
         ),
     )
     filter_solution: str | None = Field(
         default=None,
         max_length=50,
         description=(
-            "施策/ソリューション種別フィルタ（cls_solution 等価）。"
-            "SNS運用 / インフルエンサー / SEO / Web制作 / 広告運用 / イベント 等。"
-            "動画系（動画広告・ショート動画・リール）は資料の分類が割れているため指定しない"
-            "（指定しても DM からの検索では使わない）。"
-            "fail-open 再検索でも外れない sticky フィルタとして配線する。"
+            "SNS運用/インフルエンサー/SEO/Web制作/広告運用/"
+            "イベント等（動画広告・ショート動画・リールは指定しない）。"
         ),
     )
     filter_budget: str | None = Field(
         default=None,
-        description=(
-            "予算バンドフィルタ（cls_budget 等価・〜100万 / 100〜500万 / 500万〜）。"
-            "fail-open 再検索でも外れない sticky フィルタとして配線する。"
-        ),
+        description=("予算帯（〜100万/100〜500万/500万〜）。"),
     )
-    include_unknown_budget: bool = Field(
-        default=False,
-        description=(
-            "予算フィルタ時に cls_budget='不明' も含めるか（soft 化）。"
-            "False (既定, strict): 指定バンドのみ。True: 指定バンド OR '不明' を許容する。"
-        ),
-    )
+    include_unknown_budget: bool = Field(default=False)
     sort_budget_near: str | None = Field(
         default=None,
-        description=(
-            "この予算バンドに近い順で取得後ソート（〜100万 / 100〜500万 / 500万〜）。"
-            "絞らず並べ替えのみ。SEARCH_BUDGET_SORT が有効なときだけ発火する。"
-        ),
+        description=("近い予算帯順に並べる（絞り込みなし、SEARCH_BUDGET_SORT有効時のみ）。"),
     )
-    include_answer: bool = Field(
-        default=True,
-        description=(
-            "Bedrock 要約（answer）を生成するか。"
-            "True (既定): 従来どおり要約を生成する（全既存呼び出し元と完全後方互換）。"
-            "False: _summarize をスキップし answer='' / 要約コスト 0 で hits のみ即返す"
-            "（Web UI 二段レスポンスの fast path 用。retrieval は通常どおり実行）。"
-        ),
-    )
+    include_answer: bool = Field(default=True)
 
 
 class RelatedFileOut(BaseModel):

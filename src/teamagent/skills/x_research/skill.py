@@ -420,12 +420,8 @@ class XVoiceSearchSkill(_XSyncBase, BaseSkill[XVoiceSearchInput, XVoiceSearchOut
 
     name: ClassVar[str] = "x_voice_search"
     description: ClassVar[str] = (
-        "特定の商材/ブランド名がX(Twitter)で「世の中でどう言われてるか」を、実在する投稿の"
-        "全文+いいね数+URL付きカード集(HTML署名URL)で集める。**商材名が主語のとき**は、その商材への"
-        "不満・要望・使われ方を集める依頼でもここ（例『アサヒ白湯の生活者の声＝不満や欲求を集めて』）。"
-        "投稿ID単位で実在検証済み。提案書の『世の中の声』ページやオリエン直後の初動リサーチ用。"
-        "商材を特定せず業界/テーマ全体の不満・欲求を感情ワードで発掘するのは x_needs_mining、"
-        "期間を区切った発話量の増減測定は x_buzz_measure。"
+        "商材名が主語のXの声・評判・不満・要望を実在検証済み投稿全文・いいね・URLで収"
+        "集しHTML化。業界/テーマ全体はx_needs_mining、期間別発話量はx_buzz_measure。"
     )
     input_schema: ClassVar[type[BaseModel]] = XVoiceSearchInput
     output_schema: ClassVar[type[BaseModel]] = XVoiceSearchOutput
@@ -658,11 +654,9 @@ class XNeedsMiningSkill(_XSyncBase, BaseSkill[XNeedsMiningInput, XNeedsMiningOut
 
     name: ClassVar[str] = "x_needs_mining"
     description: ClassVar[str] = (
-        "業界/テーマ全体（特定商材に限定しない）の提案の種さがし。「◯◯ めんどくさい/売ってほしい"
-        "/高い」等の感情ワード掛け合わせでX(Twitter)から生活者の不満・欲求の本音投稿を発掘し、"
-        "ニーズ分類とインサイト仮説付きのレポート(HTML署名URL)にする。いいね数下限でノイズ足切り。"
-        "特定の商材/ブランド名を主語にした声・評判集め（その商材への不満含む）は x_voice_search、"
-        "期間を区切った発話量の測定は x_buzz_measure。"
+        "業界/テーマ全体の不満・欲求を感情語でX検索し、"
+        "ニーズ分類・インサイト仮説をHTML化。商材名が主語ならx_voice_search、"
+        "期間別発話量はx_buzz_measure。"
     )
     input_schema: ClassVar[type[BaseModel]] = XNeedsMiningInput
     output_schema: ClassVar[type[BaseModel]] = XNeedsMiningOutput
@@ -834,10 +828,9 @@ class XBuzzMeasureSkill(BaseSkill[XBuzzMeasureInput, XBuzzMeasureOutput]):
 
     name: ClassVar[str] = "x_buzz_measure"
     description: ClassVar[str] = (
-        "キャンペーン前後でX(Twitter)の発話量がどう変わったかを測る非同期ジョブを開始する。"
-        "期間(最大62日)を1日ずつ分割取得し、日別発話数グラフ+山の日の中身分析+バズ投稿TOP"
-        "全文のレポートを作る。即座にjob_idを返すので、数分後に x_buzz_measure_status を呼ぶ。"
-        "今すぐ見る単発のX検索は x_voice_search / x_needs_mining を使う。"
+        "Xの発話量を期間別・日別に測りグラフ・山の分析・上位投稿を非同期レポート化（"
+        "最大62日）。返されたjob_idはx_buzz_measure_statusで照会。"
+        "即時検索はx_voice_search/x_needs_mining。"
     )
     input_schema: ClassVar[type[BaseModel]] = XBuzzMeasureInput
     output_schema: ClassVar[type[BaseModel]] = XBuzzMeasureOutput
@@ -894,10 +887,7 @@ class XBuzzMeasureStatusSkill(
     """④ 効果測定の状態照会。done 初回に山分析+HTMLレポートを生成しキャッシュする。"""
 
     name: ClassVar[str] = "x_buzz_measure_status"
-    description: ClassVar[str] = (
-        "x_buzz_measure が返した job_id の進行状況を照会する。done なら日別発話数・"
-        "バズ投稿TOP全文・山の日の中身分析・レポート署名URLを返す。"
-    )
+    description: ClassVar[str] = "x_buzz_measureの状態と完了レポートURLを照会する。"
     input_schema: ClassVar[type[BaseModel]] = XBuzzMeasureStatusInput
     output_schema: ClassVar[type[BaseModel]] = XBuzzMeasureStatusOutput
 

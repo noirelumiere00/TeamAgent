@@ -85,11 +85,8 @@ class TikTokCommentMiningSkill(BaseSkill[CommentMiningInput, CommentMiningOutput
 
     name: ClassVar[str] = "tiktok_comment_mining"
     description: ClassVar[str] = (
-        "TikTok動画URL(1〜3本)のコメント欄を取得し、反応の分類（推薦/売切れ嘆き/口コミ検証/"
-        "ツッコミ/質問/願望/批判）と生活者の語彙（広告文言の元ネタ）をレポート(HTML署名URL)に"
-        "する。バズ動画のコメント欄=無料のグループインタビュー。新商品ローンチ後の初速の"
-        "生活者反応レポートに使う。動画の中身(映像)分析は video_algorithm、"
-        "KW検索面の勢力図は search_surface_check。"
+        "TikTok動画URLのコメントを反応分類・生活者の語彙のHTMLレポートにする。"
+        "映像分析はvideo_algorithm、検索面の勢力図はsearch_surface_check。"
     )
     input_schema: ClassVar[type[BaseModel]] = CommentMiningInput
     output_schema: ClassVar[type[BaseModel]] = CommentMiningOutput

@@ -16,55 +16,29 @@ from pydantic import BaseModel, Field
 class MailDraftInput(BaseModel):
     """下書き作成の入力。ボタン押下（draft_token）か一覧からの選択（selection）のどちらか。"""
 
-    draft_token: str = Field(
-        default="",
-        max_length=400,
-        description="『下書きを作成』ボタンの value（HMAC署名トークン・生thread_id非露出）",
-    )
+    draft_token: str = Field(default="", max_length=400)
     selection: str = Field(
         default="",
         max_length=200,
-        description=(
-            "mail_followup の候補一覧に対する**利用者の返事をそのまま**入れる"
-            "（例『1番で』『1と3、丁寧めで』『電通の件』）。"
-            "**要約・番号への言い換えをしないこと**（曖昧さの判定はサーバが行う）"
-        ),
+        description=("mail_followup候補への本人の返事を変換せずそのまま渡す。"),
     )
     candidate_refs: list[str] = Field(
         default_factory=list,
         max_length=10,
-        description=(
-            "直前に提示した候補の evidence_ref を**表示順のまま**並べる"
-            "（mail_followup の items[].evidence_ref をそのままコピーする）。"
-            "**番号（『1番で』等）で選ばれたときは必須**。"
-            "これが無いと番号がどの件を指すか確認できないため、"
-            "下書きを作らずに候補を出し直す（error='ambiguous_selection'）"
-        ),
+        description=("番号選択に必須の直前のitems[].evidence_ref（表示順）。"),
     )
-    instructions: str | None = Field(
-        default=None,
-        max_length=500,
-        description="下書きへの指示（トーン・盛り込みたい点）。利用者が言った範囲だけを入れる",
-    )
+    instructions: str | None = Field(default=None, max_length=500)
     lookback_days: int = Field(
         default=14,
         ge=1,
         le=90,
-        description=(
-            "候補一覧を作ったときと**同じ遡り日数**。"
-            "mail_followup の戻り値 lookback_days（＝実際に遡った日数）があれば"
-            "**その値をそのまま渡す**。窓が狭いと一覧に出ていた件が見つからず"
-            "『見つからなくなっていました』と事実と異なる説明になる"
-        ),
+        description=("mail_followupが返したlookback_daysと同じ値。"),
     )
     idle_days: int | None = Field(
         default=None,
         ge=1,
         le=90,
-        description=(
-            "候補一覧を作ったときと同じ放置日数の下限（mail_followup に idle_days を"
-            "渡したときは**同じ値を渡す**）。一覧と選択で条件がずれると番号が別の件を指す"
-        ),
+        description=("mail_followupに指定したidle_daysと同じ値。"),
     )
 
 

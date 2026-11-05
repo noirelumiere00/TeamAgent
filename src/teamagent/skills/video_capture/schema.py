@@ -138,45 +138,27 @@ class VideoCaptureInput(BaseModel):
         default="",
         max_length=2048,
         description=(
-            "切り出す動画の URL（https のみ・TikTok / Instagram に対応。"
-            "YouTube は取得元にブロックされるため切り出しは未対応だが、"
-            "YouTube の URL もそのまま入れて呼べばサーバが添付の案内を返す。"
-            "YouTube 動画の分析は video_analysis で可能）。"
-            "会話に添付された動画を使うときは空のままにして slack_file=true にする。"
+            "動画のHTTPS URL（添付時は空）；YouTube の URL "
+            "もそのまま入れて呼べば添付を案内し、YouTube動画の分析はvideo_analysisで可能。"
         ),
     )
     slack_file: bool = Field(
         default=False,
         description=(
-            "この会話（スレッド / DM）に添付された動画ファイルを対象にするなら true。"
-            "url とは排他（どちらか一方だけ）。添付動画の特定はサーバ側が行うので"
-            "ファイル名や ID を推測して書かないこと。「さっき貼った動画」のように会話内の動画を"
-            "指されたら、添付が見えなくても true で呼ぶ（無ければサーバが案内を返す）。"
+            "添付動画を使うなら添付が見えなくても true で呼ぶ（urlと排他、特定はサーバ側）。"
         ),
     )
     slack_file_id: str = Field(
         default="",
         max_length=32,
-        description=(
-            "任意。会話に複数の動画がある場合の絞り込み用 Slack file ID（F から始まる）。"
-            "会話内に実在する添付だけが対象になる（slack_file=true のときのみ有効）。"
-        ),
+        description=("複数添付の絞り込み用の実在Slack file ID（slack_file=true時）。"),
     )
     timecodes: list[float | str] = Field(
         min_length=1,
         max_length=MAX_TIMECODES,
-        description=(
-            "切り出したい時刻のリスト（最大12点）。ユーザーが言った表記のまま渡してよい"
-            "（「0:05」「1:02:03」「5」「5.5」すべて可）。秒への換算はサーバが行うので"
-            "自分で計算しないこと。"
-        ),
+        description=("時刻の表記をそのまま渡す（換算不要）。"),
     )
-    width: int = Field(
-        default=DEFAULT_WIDTH,
-        ge=64,
-        le=1920,
-        description="切り出す画像の横幅ピクセル（既定480）",
-    )
+    width: int = Field(default=DEFAULT_WIDTH, ge=64, le=1920)
 
     @field_validator("slack_file_id")
     @classmethod

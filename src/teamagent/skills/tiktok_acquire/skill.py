@@ -112,14 +112,11 @@ class TikTokAcquireSkill(BaseSkill[TikTokAcquireInput, TikTokAcquireOutput]):
 
     name: ClassVar[str] = "tiktok_acquire"
     description: ClassVar[str] = (
-        "商材名/KW群のTikTok上位動画を、動画本体(mp4)込みで一括取得し、提案・"
-        "マルチモーダル分析の素材としてストックする。指標+サムネを集め、上位N本(既定2)は"
-        "mp4本体もS3に保存する。videos_per_kw=0 なら表示順と指標だけを取る（検索面チェック用）。"
-        "1回の実行時間に収まらない量は断らずに組み直す（動画ありはKWごとのジョブに分けて"
-        "job_ids/jobs で返す・変えた点は adjustments）。トリガー=「TikTok取得して/動画も保存して/"
-        "保存率上位の動画も/素材集めて/ストックして/提案用に集めて」。分析や要約はせず素材を"
-        "貯めるだけ（構造分析レポートは video_algorithm、その場で見る軽い検索・横断分析は"
-        " tiktok_search）。非同期で即job_idを返し、結果は tiktok_acquire_status で受け取る。"
+        "TikTok上位動画の指標・サムネ・動画本体(mp4)を非同期一括取得。"
+        "分析はvideo_algorithm、即時の検索・横断分析はtiktok_search。"
+        "トリガー=「TikTok取得して/動画も保存して/保存率上位の動画も/素材集めて/"
+        "ストックして/提案用に集めて」。大量取得はサーバが分割しjob_ids/"
+        "jobsとadjustmentsを返す。tiktok_acquire_statusで照会する。"
     )
     input_schema: ClassVar[type[BaseModel]] = TikTokAcquireInput
     output_schema: ClassVar[type[BaseModel]] = TikTokAcquireOutput
@@ -241,9 +238,8 @@ class TikTokAcquireStatusSkill(BaseSkill[TikTokAcquireStatusInput, TikTokAcquire
 
     name: ClassVar[str] = "tiktok_acquire_status"
     description: ClassVar[str] = (
-        "tiktok_acquire の取得状態を照会する。番号省略時は本人の直近（専用の"
-        "後工程で、単独の入口にはしない）。doneならposts/サムネ/動画(mp4)を署名URLとS3キーで"
-        "返す（url=人向け / s3_key=機械処理用）。"
+        "tiktok_acquireの状態を照会（番号省略=本人の直近、単独の入口にはしない）。"
+        "完了時は投稿・サムネ・mp4のURLとS3キーを返す。"
     )
     input_schema: ClassVar[type[BaseModel]] = TikTokAcquireStatusInput
     output_schema: ClassVar[type[BaseModel]] = TikTokAcquireStatusOutput
