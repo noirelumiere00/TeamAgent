@@ -193,6 +193,7 @@ def submit_import(
     campaign: str | None = None,
     parent_batch_id: str | None = None,
     admin: bool = False,
+    requested_origin: str = "external",
 ) -> str:
     """Validate all rows and commit the idempotent intake before waking a local worker."""
     batch = repository.submit(
@@ -204,6 +205,7 @@ def submit_import(
         campaign=campaign,
         parent_batch_id=parent_batch_id,
         admin=admin,
+        requested_origin=requested_origin,
     )
     if wake:
         wake()

@@ -25,6 +25,13 @@ def prepare(conn: Any, repository: Any) -> None:
     conn.execute(MIGRATION.read_text())  # Reapplying must preserve human settings.
     conn.execute((MIGRATION.parent / "0037_video_library_url_import.sql").read_text())
     conn.execute((MIGRATION.parent / "0038_video_campaign_links.sql").read_text())
+    # The library queries read columns added by later migrations; keep the fixture at head.
+    for later in (
+        "0039_video_library_import_ui.sql",
+        "0040_video_library_fetch_resume.sql",
+        "0041_video_library_external_cases.sql",
+    ):
+        conn.execute((MIGRATION.parent / later).read_text())
     batch = seed_batch()
     batch.videos[0].advertiser = "test"
     batch.videos[0].campaign = "test"

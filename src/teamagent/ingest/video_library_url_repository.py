@@ -70,12 +70,17 @@ class URLImportRepository:
         campaign: str | None = None,
         parent_batch_id: str | None = None,
         admin: bool = False,
+        requested_origin: str = "external",
     ) -> str:
         rows = inspect_input(text)
         if not requested_by.strip() or not idempotency_key.strip() or len(idempotency_key) > 200:
             raise URLImportError("invalid_request_identity")
         if source not in {"url_manual", "p3b"}:
             raise URLImportError("invalid_source")
+        if requested_origin not in {"own", "external"}:
+            raise URLImportError("invalid_origin")
+        if requested_origin == "external":
+            advertiser, campaign = None, None
         batch_id = str(uuid.uuid4())
         with self.pg.connection(
             app_role="teamagent_app", user_email=requested_by, user_role="viewer"
@@ -94,8 +99,8 @@ class URLImportRepository:
             inserted = conn.execute(
                 """INSERT INTO vl_url_import_batches
                    (batch_id,requested_by,idempotency_key,source,advertiser,campaign,
-                    parent_batch_id)
-                   VALUES (%s,%s,%s,%s,%s,%s,%s)
+                    parent_batch_id,requested_origin)
+                   VALUES (%s,%s,%s,%s,%s,%s,%s,%s)
                    ON CONFLICT (requested_by, idempotency_key) DO NOTHING RETURNING batch_id""",
                 (
                     batch_id,
@@ -105,6 +110,7 @@ class URLImportRepository:
                     advertiser,
                     campaign,
                     parent_batch_id,
+                    requested_origin,
                 ),
             ).fetchone()
             if not inserted:
@@ -122,11 +128,12 @@ class URLImportRepository:
                 if [(r["line_no"], r["input_url"]) for r in stored] != [
                     (r.line_no, r.input_url) for r in rows
                 ] or (
+                    existing["requested_origin"],
                     existing["source"],
                     existing["advertiser"],
                     existing["campaign"],
                     str(existing["parent_batch_id"]) if existing["parent_batch_id"] else None,
-                ) != (source, advertiser, campaign, parent_batch_id):
+                ) != (requested_origin, source, advertiser, campaign, parent_batch_id):
                     raise URLImportError("idempotency_conflict")
                 return str(existing["batch_id"])
             for row in rows:
@@ -245,7 +252,8 @@ class URLImportRepository:
                     started_at=clock_timestamp(),
                     lease_token=%s FROM candidate c
                     WHERE r.batch_id=c.batch_id AND r.line_no=c.line_no RETURNING r.*
-                ) SELECT c.*,b.source,b.requested_by,b.advertiser,b.campaign FROM claimed c
+                ) SELECT c.*,b.source,b.requested_by,b.advertiser,b.campaign,b.requested_origin
+                  FROM claimed c
                   JOIN vl_url_import_batches b USING(batch_id)""",
                 (uuid.uuid4(),),
             ).fetchone()
@@ -328,6 +336,9 @@ class URLImportRepository:
         with self.connection() as conn:
             if row:
                 self._check_lease(conn, row)
+            conn.execute(
+                "SELECT pg_advisory_xact_lock(hashtextextended(%s,41))", (f"tiktok:{o.video_id}",)
+            )
             inserted = None
             if o.caption is not None:
                 inserted = conn.execute(
@@ -355,8 +366,27 @@ class URLImportRepository:
                 result.error_code = "caption_missing"
             else:
                 result.registration_result = "新規登録" if inserted else "登録済み（統合済み）"
+                if row and row.get("requested_origin") == "own":
+                    conn.execute(
+                        """INSERT INTO vl_video_origin_decisions
+                           (decision_id,platform,video_id,origin,decided_by)
+                           VALUES (%s,'tiktok',%s,'own',%s) ON CONFLICT DO NOTHING""",
+                        (
+                            uuid.uuid5(
+                                uuid.NAMESPACE_URL, f"{row['batch_id']}:{row['line_no']}:own"
+                            ),
+                            o.video_id,
+                            requested_by,
+                        ),
+                    )
                 # Apply the intake choice only to new #PR posts; never move an existing video.
-                if inserted and o.is_pr and row and row.get("advertiser"):
+                if (
+                    inserted
+                    and o.is_pr
+                    and row
+                    and row.get("requested_origin") == "own"
+                    and row.get("advertiser")
+                ):
                     if self.campaign_visible(conn, row["advertiser"], row["campaign"]):
                         conn.execute(
                             """UPDATE vl_videos SET advertiser=%s,campaign=%s

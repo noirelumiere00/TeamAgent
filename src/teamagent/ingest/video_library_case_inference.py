@@ -21,7 +21,9 @@ from teamagent.ingest.video_library_case_models import (
     Policy,
     Post,
     Prediction,
+    _ground,
     application_prediction,
+    digest,
     input_hash,
     validate_prediction,
 )
@@ -53,6 +55,23 @@ class Inference:
         system = (
             self.prompt + "\n" + json.dumps([c.model_dump() for c in cases], ensure_ascii=False)
         )
+        return validate_prediction(self._response(post, system, request_id), post, cases)
+
+    def predict_advertiser(self, post: Post, *, request_id: str) -> Prediction:
+        # Only caption text is evidence for an external advertiser; no own-case catalog is sent.
+        caption = Post(caption=post.caption)
+        result = validate_prediction(
+            self._response(caption, load_prompt("external_advertiser", "v1", "system"), request_id),
+            caption,
+            [],
+        )
+        if result.campaign or (
+            result.advertiser and _ground(result.advertiser) not in _ground(post.caption)
+        ):
+            raise ValueError("ungrounded_advertiser")
+        return result.model_copy(update={"match_type": "unknown"})
+
+    def _response(self, post: Post, system: str, request_id: str) -> str:
         body = post.model_dump_json()
         # UTF-8 bytes bound input tokens; reserve cache-write price and full output even on timeout.
         tokens = len(system.encode()) + len(body.encode()) + 1024
@@ -74,7 +93,7 @@ class Inference:
         self.cost_usd += response.usage.cost_usd
         if response.stop_reason != "end_turn":
             raise ValueError("incomplete_response")
-        return validate_prediction(response.text, post, cases)
+        return response.text
 
 
 def run(
@@ -98,9 +117,20 @@ def run(
             raise ValueError("stale_evaluation_policy")
         for row in rows:
             post = Post.from_row(row)
+            external = row.get("effective_origin", row.get("origin")) == "external"
+            if external and (not row.get("is_pr") or not post.caption.strip()):
+                continue
             fingerprint = input_hash(
                 post, cases, inference.client.model_id, inference.prompt, policy
             )
+            if external:
+                fingerprint = digest(
+                    [
+                        post.caption,
+                        inference.client.model_id,
+                        load_prompt("external_advertiser", "v1", "system"),
+                    ]
+                )
             if row.get("input_hash") == fingerprint:
                 counts["unchanged"] += 1
                 continue
@@ -111,16 +141,24 @@ def run(
                 repository.invalidate(row)
             counts["attempted"] += 1
             try:
-                result = inference.predict(post, cases, request_id=request_id)
+                result = (
+                    inference.predict_advertiser(post, request_id=request_id)
+                    if external
+                    else inference.predict(post, cases, request_id=request_id)
+                )
                 status = (
-                    policy.status(result)
-                    if policy
-                    else ("candidate" if result.match_type == "new" else "unknown")
+                    ("applied" if result.advertiser else "unknown")
+                    if external
+                    else (
+                        policy.status(result)
+                        if policy
+                        else ("candidate" if result.match_type == "new" else "unknown")
+                    )
                 )
                 if not dry_run:
                     if not repository.save(
                         row,
-                        application_prediction(result, cases, post),
+                        result if external else application_prediction(result, cases, post),
                         status,
                         fingerprint,
                         inference.client.model_id,

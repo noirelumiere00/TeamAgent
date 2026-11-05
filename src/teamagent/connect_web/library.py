@@ -7,6 +7,7 @@ import json
 import os
 import re
 import unicodedata
+import uuid
 from collections.abc import Callable, Mapping
 from datetime import date, datetime, timedelta, timezone
 from typing import Any
@@ -162,9 +163,11 @@ def _where(params: Mapping[str, str], admin: bool) -> tuple[str, list[Any], int,
                 raise HTTPException(400, "絞り込みが長すぎます")
             clauses.append(f"v.{field} = %s")
             values.append(params[field])
-    for field in ("pure_organic", "general", "url_import"):
+    for field in ("pure_organic", "general", "url_import", "external_case"):
         if params.get(field, "") not in {"", "yes"}:
             raise HTTPException(400, "絞り込み指定が不正です")
+    if params.get("external_case") == "yes":
+        clauses.append("v.is_external_case")
     if params.get("general") == "yes":
         clauses.append(_GENERAL_POST)
     if params.get("pure_organic") == "yes":
@@ -207,8 +210,7 @@ def _where(params: Mapping[str, str], admin: bool) -> tuple[str, list[Any], int,
     return " AND ".join(clauses) or "true", values, page, orders[sort]
 
 
-_GENERAL_POST = """(v.origin='external' AND NOT v.is_pr
-    AND COALESCE(v.advertiser,'')='' AND COALESCE(v.campaign,'')='')"""
+_GENERAL_POST = "(v.origin='external' AND NOT v.is_external_case)"
 _PAGE_COLUMNS = (
     "page_is_ad",
     "page_disclosure",
@@ -242,7 +244,7 @@ _METRIC_SELECT = ", ".join(f"m.{column}" for column in METRIC_COLUMNS) + (
     ", m.metric_source, m.captured_at, " + ", ".join(f"pv.{column}" for column in _PAGE_COLUMNS)
 )
 _CAMPAIGN_TOTALS_JOIN = """LEFT JOIN campaign_totals ct
-    ON ct.advertiser=v.advertiser AND ct.campaign=v.campaign"""
+    ON ct.advertiser=v.advertiser AND ct.campaign=v.campaign AND v.origin='own'"""
 
 
 def _campaign_totals_cte(admin: bool) -> str:
@@ -253,7 +255,7 @@ def _campaign_totals_cte(admin: bool) -> str:
         CASE WHEN count(m.total_plays)=count(*) THEN sum(m.total_plays) END
             AS campaign_total_plays
         FROM vl_videos_effective v {_METRICS_JOIN} WHERE {where}
-        AND COALESCE(v.advertiser,'')<>'' AND COALESCE(v.campaign,'')<>''
+        AND v.origin='own' AND COALESCE(v.advertiser,'')<>'' AND COALESCE(v.campaign,'')<>''
         GROUP BY v.advertiser, v.campaign)"""  # nosec B608
 
 
@@ -396,7 +398,14 @@ def _section_heading(english: str, japanese: str, description: str, url: str) ->
 
 
 def _select(name: str, options: list[tuple[str, str]], value: str | None = "") -> str:
-    label = {"category": "区分", "pr": "PRの有無", "sort": "並び順"}.get(name, "種別")
+    # aria-label overrides any wrapping <label>, so every select needs its own accurate name.
+    label = {
+        "category": "区分",
+        "pr": "PRの有無",
+        "sort": "並び順",
+        "requested_origin": "投稿の区分",
+        "case": "広告主・案件（任意）",
+    }.get(name, "種別")
     return (
         f'<select name="{_e(name)}" aria-label="{label}">'
         + "".join(
@@ -547,16 +556,13 @@ def _page_evidence(row: Mapping[str, Any]) -> str:
 
 def _post_badges(row: Mapping[str, Any]) -> str:
     labels = []
-    if (
-        row.get("origin") == "external"
-        and not row.get("is_pr")
-        and not row.get("advertiser")
-        and not row.get("campaign")
-    ):
-        labels.append("一般投稿")
+    if row.get("origin") == "external":
+        labels.append("他社事例" if row.get("is_external_case") else "一般投稿")
     if row.get("is_pr"):
         labels.append("#PR")
-        if not row.get("advertiser") or not row.get("campaign"):
+        if row.get("origin") != "external" and (
+            not row.get("advertiser") or not row.get("campaign")
+        ):
             labels.append("案件未設定")
     if row.get("page_is_ad") is True:
         labels.append("広告配信あり")
@@ -684,9 +690,12 @@ def _video_card(row: Mapping[str, Any], *, selectable: bool = False) -> str:
     meta = f'<span class="account-name" title="{_e(account)}">{_e(account)}</span>'
     if isinstance(row.get("posted_at"), datetime):
         meta += " · " + _day(row["posted_at"])
+    if row.get("external_advertiser"):
+        meta += " · 他社の広告主: " + _e(row["external_advertiser"])
     metrics = [("この動画", row.get("total_plays"))]
     if (
-        row.get("advertiser")
+        row.get("origin") != "external"
+        and row.get("advertiser")
         and row.get("campaign")
         and row.get("campaign_total_plays") is not None
     ):
@@ -753,6 +762,7 @@ def _workspace(body: str, params: Mapping[str, str], *, current: str, nav: str) 
         for field, label in (
             ("pure_organic", "純オーガニックのみ"),
             ("general", "一般投稿"),
+            ("external_case", "他社事例"),
             ("url_import", "URL 取り込み"),
         ):
             checked = " checked" if params.get(field) == "yes" else ""
@@ -782,6 +792,7 @@ def _workspace(body: str, params: Mapping[str, str], *, current: str, nav: str) 
         "unassigned": "施策未設定",
         "pure_organic": "純オーガニックのみ",
         "general": "一般投稿",
+        "external_case": "他社事例",
         "url_import": "URL 取り込み",
     }
     active = []
@@ -837,7 +848,7 @@ def search_campaigns(conn: Any, params: Mapping[str, str], *, admin: bool) -> li
         SELECT v.*, count(*) OVER (
             PARTITION BY v.advertiser, v.campaign, v.business_category) AS category_count
         FROM vl_videos_effective v WHERE {where}
-        AND COALESCE(v.advertiser,'')<>'' AND COALESCE(v.campaign,'')<>'')
+        AND v.origin='own' AND COALESCE(v.advertiser,'')<>'' AND COALESCE(v.campaign,'')<>'')
         SELECT v.advertiser, v.campaign, count(*) AS video_count,
         min(v.posted_at) AS first_posted, max(v.posted_at) AS last_posted,
         array_agg(DISTINCT v.business_category) AS categories,
@@ -942,7 +953,25 @@ def _campaign_card(row: Mapping[str, Any]) -> str:
     )
 
 
-def archive_home(cases: list[Any], videos: list[Any], general: list[Any] | None = None) -> str:
+def recent_imports(conn: Any, *, admin: bool) -> list[Any]:
+    where, values, _, _ = _where({"url_import": "yes"}, admin)
+    sql = f"""SELECT v.*, {_METRIC_SELECT} FROM vl_videos_effective v {_METRICS_JOIN}
+        JOIN LATERAL (
+            SELECT max(r.completed_at) AS imported_at FROM vl_url_import_rows r
+            JOIN vl_url_import_batches b USING(batch_id)
+            WHERE b.source='url_manual' AND v.platform='tiktok' AND r.video_id=v.video_id
+            AND r.status IN ('succeeded','partial')
+        ) recent ON recent.imported_at IS NOT NULL
+        WHERE {where} ORDER BY recent.imported_at DESC,v.platform,v.video_id LIMIT 12"""  # nosec B608
+    return list(conn.execute(sql, values).fetchall())
+
+
+def archive_home(
+    cases: list[Any],
+    videos: list[Any],
+    general: list[Any] | None = None,
+    imported: list[Any] | None = None,
+) -> str:
     # Reuse one aggregate result for every shelf, without a query per category.
     ranked = sorted(cases, key=lambda r: r.get("total_plays") or 0, reverse=True)
     pickup = sorted(
@@ -962,6 +991,18 @@ def archive_home(cases: list[Any], videos: list[Any], general: list[Any] | None 
         reverse=True,
     )[:8]
     body = ""
+    if imported:
+        body += '<section class="archive-section" id="recent-imports">' + _section_heading(
+            "RECENT IMPORTS",
+            "最近取り込んだ動画",
+            "全員のURL取り込みから。",
+            "/library/videos?url_import=yes",
+        )
+        body += (
+            '<div class="video-grid video-shelf">'
+            + "".join(_video_card(r) for r in imported[:12])
+            + "</div></section>"
+        )
     for key, heading, label, description, rows, layout, url in (
         (
             "pickup",
@@ -1185,9 +1226,10 @@ def register_library_routes(
             cases = search_campaigns(conn, {}, admin=is_admin(email))
             videos = featured_videos(conn, {}, admin=is_admin(email))
             general = featured_videos(conn, {"general": "yes"}, admin=is_admin(email))
+            imported = recent_imports(conn, admin=is_admin(email))
         return page(
             "動画の事例を、次のアイデアに。",
-            archive_home(cases, videos, general),
+            archive_home(cases, videos, general, imported),
             email,
             "home",
             hero=True,
@@ -1227,6 +1269,7 @@ def register_library_routes(
         where, values, number, _ = _where(
             {**params, "page": request.query_params.get("page", "1")}, is_admin(email)
         )
+        where += " AND v.origin='own'"
         with connection(email) as conn:
             cases = search_campaigns(conn, params, admin=is_admin(email))
             if not cases:
@@ -1328,10 +1371,11 @@ def register_library_routes(
                 (platform, video_id),
             ).fetchall()
             related = []
-            if row.get("advertiser") and row.get("campaign"):
+            if row.get("origin") != "external" and row.get("advertiser") and row.get("campaign"):
                 where, values, _, _ = _where(
                     {"advertiser": row["advertiser"], "campaign": row["campaign"]}, is_admin(email)
                 )
+                where += " AND v.origin='own'"
                 related_sql = f"{_campaign_totals_cte(is_admin(email))} SELECT v.*, {_METRIC_SELECT}, ct.campaign_total_plays FROM vl_videos_effective v {_METRICS_JOIN} {_CAMPAIGN_TOTALS_JOIN} WHERE {where} AND NOT (v.platform=%s AND v.video_id=%s) ORDER BY m.total_plays DESC NULLS LAST, v.platform, v.video_id LIMIT 6"  # noqa: E501  # nosec B608
                 related = conn.execute(related_sql, [*values, platform, video_id]).fetchall()
         body = '<div class="detail-layout"><div>' + _preview(row, detail=True)
@@ -1350,13 +1394,30 @@ def register_library_routes(
             body += f'<p class="posted-date muted">{_day(row["posted_at"])}</p>'
         body += _post_badges(row) + _inference_badge(row) + _row_tags(row)
         body += _page_evidence(row)
+        own = row.get("origin") == "own"
+        body += (
+            f'<form method="post" action="/library/v/{_e(platform)}/{_e(video_id)}/origin">'
+            f'<input type="hidden" name="origin" value="{"external" if own else "own"}">'
+            f'<input type="hidden" name="decision_id" value="{uuid.uuid4()}">'
+            "<button>" + ("他社事例にする" if own else "自社の案件にする") + "</button></form>"
+            '<p class="muted">シート掲載・自社アカウントの動画は自社が優先されます。'
+            "変更は記録されます。</p>"
+        )
+        if row.get("origin") == "external":
+            body += (
+                f'<form method="post" action="/library/v/{_e(platform)}/{_e(video_id)}/advertiser">'
+                '<label>他社の広告主<input name="advertiser" maxlength="500" '
+                f'value="{_e(row.get("external_advertiser"))}"></label><button>保存</button></form>'
+            )
         if str(row.get("caption") or "").strip():
             body += "<h3>投稿文</h3><pre>" + _e(row["caption"]) + "</pre>"
-        if row.get("advertiser") and row.get("campaign"):
+        if row.get("origin") != "external" and row.get("advertiser") and row.get("campaign"):
             body += (
                 f'<p><a href="{_e(_campaign_url(row))}">{_e(row["advertiser"])} / '
                 f"{_e(row['campaign'])} の事例を見る</a></p>"
             )
+        elif row.get("external_advertiser"):
+            body += f"<p>他社の広告主: {_e(row['external_advertiser'])}</p>"
         elif row.get("advertiser"):
             body += f"<p>広告主: {_e(row['advertiser'])}</p>"
         body += (
@@ -1539,9 +1600,71 @@ def register_library_routes(
             "idempotency_key",
             "advertiser",
             "campaign",
+            "requested_origin",
         }:
             raise HTTPException(400)
         return {key: values[0] for key, values in parsed.items()}
+
+    @router.post("/v/{platform}/{video_id}/origin")
+    async def change_origin(
+        request: Request, platform: str, video_id: str, email: str = Depends(identity)
+    ) -> RedirectResponse:
+        form = await form_data(request)
+        if form.get("origin") not in {"own", "external"}:
+            raise HTTPException(400)
+        try:
+            decision_id = uuid.UUID(form.get("decision_id", ""))
+        except ValueError:
+            raise HTTPException(400) from None
+        with connection(email) as conn:
+            video(conn, platform, video_id, email)
+            conn.execute(
+                "SELECT pg_advisory_xact_lock(hashtextextended(%s,41))",
+                (f"{platform}:{video_id}",),
+            )
+            conn.execute(
+                """INSERT INTO vl_video_origin_decisions
+                   (decision_id,platform,video_id,origin,decided_by) VALUES (%s,%s,%s,%s,%s)
+                   ON CONFLICT DO NOTHING""",
+                (decision_id, platform, video_id, form["origin"], email),
+            )
+        return RedirectResponse(f"/library/v/{platform}/{video_id}", 303)
+
+    @router.post("/v/{platform}/{video_id}/advertiser")
+    async def change_external_advertiser(
+        request: Request, platform: str, video_id: str, email: str = Depends(identity)
+    ) -> RedirectResponse:
+        form = await form_data(request)
+        advertiser = form.get("advertiser", "").strip()
+        if len(advertiser) > 500 or any(ord(c) < 32 for c in advertiser):
+            raise HTTPException(400)
+        with connection(email) as conn:
+            conn.execute(
+                "SELECT pg_advisory_xact_lock(hashtextextended(%s,41))",
+                (f"{platform}:{video_id}",),
+            )
+            row = video(conn, platform, video_id, email)
+            if row["origin"] != "external":
+                raise HTTPException(409)
+            conn.execute(
+                """INSERT INTO vl_video_campaign_links
+                   (platform,video_id,advertiser,campaign,source,status,match_type,confidence,
+                    model,prompt_version,input_hash,decided_by)
+                   VALUES (%s,%s,%s,NULL,'human',%s,'unknown',1,'human','external-v1','human',%s)
+                   ON CONFLICT (platform,video_id,source) DO UPDATE SET
+                   advertiser=EXCLUDED.advertiser,campaign=NULL,status=EXCLUDED.status,
+                   match_type='unknown',confidence=1,evidence='[]',model='human',
+                   prompt_version='external-v1',input_hash='human',
+                   decided_by=EXCLUDED.decided_by,decided_at=clock_timestamp()""",
+                (
+                    platform,
+                    video_id,
+                    advertiser or None,
+                    "applied" if advertiser else "rejected",
+                    email,
+                ),
+            )
+        return RedirectResponse(f"/library/v/{platform}/{video_id}", 303)
 
     @router.post("/admin/campaigns")
     async def save_campaign(

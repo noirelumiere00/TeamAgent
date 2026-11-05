@@ -79,7 +79,7 @@ def test_large_home_two_queries_and_limited_shelves(setup: tuple[TestClient, Pg]
     assert sum(not v["thumbnail_s3_key"] for v in large.videos) == 280
     assert sum(c["categories"][0] in (None, "organic") for c in large.cases) == 48
     soup = BeautifulSoup(client.get("/library", cookies=_auth_cookie()).text, "html.parser")
-    assert len(large.calls) == 3
+    assert len(large.calls) == 4
     assert sum(q.startswith("WITH categorized AS (") for q, _ in large.calls) == 1
     assert len(soup.select("#pickup .card")) == 5
     assert len(soup.select("#new .card")) == 8

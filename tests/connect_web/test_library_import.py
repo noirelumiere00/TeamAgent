@@ -42,7 +42,7 @@ class ImportPg(Pg):
         result = super().execute(query, params)
         result.fetchone.return_value = None
         if "INSERT INTO vl_url_import_batches" in query:
-            batch, email, key, source, advertiser, campaign, parent = params
+            batch, email, key, source, advertiser, campaign, parent, requested_origin = params
             existing = next((b for b in self.batches.values() if b["idempotency_key"] == key), None)
             if existing is None:
                 self.batches[batch] = dict(
@@ -50,6 +50,7 @@ class ImportPg(Pg):
                     requested_by=email,
                     idempotency_key=key,
                     source=source,
+                    requested_origin=requested_origin,
                     advertiser=advertiser,
                     campaign=campaign,
                     parent_batch_id=parent,
@@ -272,10 +273,13 @@ def test_new_campaign_creator_and_selection(intake: tuple[TestClient, ImportPg])
     assert pg.campaigns[0]["created_by"] == _EMAIL
     assert "表記揺れ" in response.text
     choice = json.dumps(["広告主 <img>", "新規案件"], ensure_ascii=False)
-    response = post(client, action="submit", case=choice)
+    response = post(client, action="submit", case=choice, requested_origin="own")
     assert response.status_code == 303
     assert next(iter(pg.batches.values()))["advertiser"] == "広告主 <img>"
-    assert post(client, case=json.dumps(["hidden", "secret"])).status_code == 400
+    assert (
+        post(client, case=json.dumps(["hidden", "secret"]), requested_origin="own").status_code
+        == 400
+    )
 
 
 def test_owner_results_and_pause_quota_polling(intake: tuple[TestClient, ImportPg]) -> None:
@@ -323,10 +327,11 @@ def test_badges_filters_and_public_detail(intake: tuple[TestClient, ImportPg]) -
         "is_pr": False,
         "business_category": "organic",
         "page_is_ad": True,
-        "case_inferred": True,
+        "is_external_case": True,
+        "case_inferred": False,
     }
     card = library._video_card(row)
-    assert all(label in card for label in ("一般投稿", "広告配信あり", "AI推定", "ORGANIC"))
+    assert all(label in card for label in ("他社事例", "広告配信あり", "ORGANIC"))
     assert "一般投稿" not in library._video_card({**row, "is_pr": True})
     for field in ("pure_organic", "general", "url_import"):
         where, values, _, _ = library._where({field: "yes"}, False)

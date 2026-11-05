@@ -286,10 +286,16 @@ footer{padding:36px 16px}.main-nav a{padding:4px 0}}
 """
 
 SCRIPT = """
+document.querySelectorAll('select[name="requested_origin"]').forEach(select=>{
+ function update(){document.querySelectorAll('[data-own-campaign]').forEach(el=>{
+  el.hidden=select.value!=='own';
+ });}
+ select.addEventListener('change',update);update();
+});
 document.querySelectorAll('[data-import-campaign]').forEach(form=>{
  form.addEventListener('submit',()=>{
   const source=document.getElementById('import-urls').form;
-  ['urls','case','idempotency_key'].forEach(name=>{
+  ['urls','case','idempotency_key','requested_origin'].forEach(name=>{
    form.elements[name].value=source.elements[name].value;
   });
  });

@@ -76,6 +76,11 @@ def test_import_confirm_result_and_poll_completion(
             tab.on("pageerror", lambda error: errors.append(str(error)))
             tab.goto(base + "/library/import")
             expect(tab.get_by_role("heading", name="URL取り込み", exact=True)).to_be_visible()
+            expect(tab.get_by_label("広告主・案件（任意）")).to_be_hidden()
+            tab.get_by_label("投稿の区分").select_option("own")
+            expect(tab.get_by_label("広告主・案件（任意）")).to_be_visible()
+            tab.get_by_label("投稿の区分").select_option("external")
+            expect(tab.get_by_label("広告主・案件（任意）")).to_be_hidden()
             tab.screenshot(path=str(output / f"import-input-{width}.png"), full_page=True)
             tab.get_by_label("URL（1行1本・100本まで）").fill(
                 URL

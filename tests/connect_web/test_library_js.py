@@ -15,14 +15,23 @@ def test_campaign_creation_preserves_unsent_urls_and_selection() -> None:
     harness = r"""
 const assert=require('node:assert/strict');
 const source={elements:{urls:{value:'https://vt.tiktok.com/short/\ninvalid'},
- case:{value:'selected'},idempotency_key:{value:'stable-key'}}};
-const form={elements:{urls:{value:''},case:{value:''},idempotency_key:{value:''}},
+ case:{value:'selected'},idempotency_key:{value:'stable-key'},requested_origin:{value:'own'}}};
+const form={elements:{urls:{value:''},case:{value:''},idempotency_key:{value:''},requested_origin:{value:''}},
  addEventListener(name,fn){assert.equal(name,'submit');this.submit=fn;}};
+const ownSections=[{hidden:false},{hidden:false}];
+const originSelect={value:'external',addEventListener(name,fn){this.change=fn;}};
 global.document={
- querySelectorAll(selector){return selector==='[data-import-campaign]'?[form]:[];},
+ querySelectorAll(selector){
+  if(selector==='select[name="requested_origin"]')return [originSelect];
+  if(selector==='[data-own-campaign]')return ownSections;
+  return selector==='[data-import-campaign]'?[form]:[];
+ },
  getElementById(id){return id==='import-urls'?{form:source}:null;},addEventListener(){}};
 global.window={addEventListener(){}};
 __SCRIPT__
+assert.ok(ownSections.every(el=>el.hidden));
+originSelect.value='own';originSelect.change();assert.ok(ownSections.every(el=>!el.hidden));
+originSelect.value='external';originSelect.change();assert.ok(ownSections.every(el=>el.hidden));
 form.submit();assert.deepEqual(form.elements,source.elements);
 """.replace("__SCRIPT__", _SCRIPT)
     result = subprocess.run(["node", "-e", harness], capture_output=True, text=True, timeout=20)
@@ -90,7 +99,7 @@ const checks=[{checked:true,dataset:{url:'https://www.tiktok.com/@sample/video/1
 let copied=null;
 global.document=Object.assign(doc,{
  querySelectorAll(selector){
-  if(['[data-autoload]','[data-import-poll="true"]','[data-import-campaign]'].includes(selector))return [];
+  if(['select[name="requested_origin"]','[data-autoload]','[data-import-poll="true"]','[data-import-campaign]'].includes(selector))return [];
   if(selector==='.sidebar')return [filters];
   if(selector==='.preview[data-player]')return cards;
   if(selector==='.preview img')return [pendingImage,failedImage,loadedImage];

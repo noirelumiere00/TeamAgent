@@ -518,3 +518,61 @@ VIDEO_LIBRARY_CASE_POLICY=/path/to/case-policy.json \
 確認対象: `test_video_library_case_inference.py`, `test_video_library_case_postgres.py`,
 `test_run_ingest_fargate.py`, `test_library_catalog.py`。
 実 DB テストには隔離・ロールバック用の `TEAMAGENT_TEST_DB_DSN` が必要。
+
+## 自社・外部の区分と他社事例（0041、2026-11-05）
+
+0041 を適用してから新しい connect-web / URL worker / 事例推定を起動する。
+既存 migration は変更しない。`vl_videos_effective` の既存列は名前・順序・型を維持し、
+`external_advertiser` と `is_external_case` だけ末尾に追加する。`origin` は有効な区分になる。
+
+- `sheet` 経路、または台帳の自社運営アカウント（NewsTV／ベクトル（VCL）／ベクトル九州／イニシャル／gracemode）は必ず自社。ハンドルの大文字小文字・先頭 @ は同一視する。
+- それ以外は直近の人の選択。選択がなければ外部。取り込みの既定は「他社・世の中の投稿」で、自社の依頼した KOL も「自社の案件」を選ぶ。自社選択時だけ既存の案件選択を表示する。
+- URL 取り込みの自社選択は既存動画にも適用する。既存動画の案件は維持する。既定の外部選択で、既存の自社区分は取り消さない。区分を戻す操作は動画詳細で行う。
+- `vl_video_origin_decisions` は社内全員が追記可能な履歴。選択した区分・本人・時刻を残す。UPDATE/DELETE は付与しない。詳細の切り替えは Origin 照合と受付 UUID による冪等化を行う。シート・自社アカウントの優先順位は切り替え後も維持する。
+- 外部で #PR または広告配信あり（公開ページの isAd、または配信指標が正）の動画を「他社事例」、それ以外を「一般投稿」と表示する。動画一覧の `external_case=yes` で絞り込める。外部は案件が付いていても、自社の事例一覧・詳細・コピー・事例別集計・事例評価から除く。
+- 外部の #PR は既存の定期推定で Haiku にキャプションだけを渡す。自社事例リストは渡さない。既存と同じ予算・温度・キャッシュ・引用検証を使い、広告主名も原文にない場合は不採用。`vl_video_campaign_links` に source=ai、campaign=NULL、prompt_version=external-v1 として保存する。自社と外部の推定結果は区分を跨いで反映しない。
+- 外部広告主は詳細で社内全員が修正できる。source=human に本人・時刻を保存し、空欄への修正も AI の再推定を抑止する。Origin 照合・動画の公開範囲・RLS を適用する。
+- トップの「最近取り込んだ動画」は全員の URL 取り込みの成功・一部取得分を完了日時順に、動画ごとの直近12本。非公開は既存方針で除外し、0本なら棚を表示しない。「もっと見る」は `/library/videos?url_import=yes`。
+- `/library/api/videos` は既存の返却列を保ち、`origin`（有効値）、`is_external_case`、`external_advertiser` で Aico からも区別できる。
+
+検証の入口は `test_library_external.py`、`test_library_js.py`、
+`test_video_library_case_inference.py`、`test_video_library_case_aliases.py`、
+`test_video_library_external_postgres.py`、`test_0041_preserves_all_existing_view_columns`。
+実DB検証は `TEAMAGENT_TEST_DB_DSN` を指定した時だけ、既存の使い捨てスキーマで実行する。
+
+### この変更の確認結果（2026-11-05）
+
+- 関連 pytest: 475 passed / 51 skipped。スキップは実DB用 DSN 未設定によるもの。全件 pytest は実行していない。sandbox が `ps` を拒否したため他セッションの pytest 本数は確認できず、こちらは常に1プロセスで実行した。
+- `mypy --strict src/teamagent`: 543 source files、エラーなし。
+- `uvx --offline ruff@0.15.15 check src/ tests/ scripts/` および `format --check src/ tests/ scripts/`: 成功（1518 files）。既存のキャッシュを `/tmp` から参照し、追加ダウンロードなし。
+- `lint-imports --no-cache`: 2 kept / 0 broken。`bandit -r src/teamagent -ll`: Medium/High なし。
+- 実DBでの0041適用・RLS・優先順位・ビュー列互換と、実ブラウザ・本番 Bedrock は未実施。配信JSは Node のDOMハーネス、Bedrockは fake で確認。実DB用テストは追加済み。
+
+主なテスト名:
+
+- `test_intake_default_external_and_own_choice_survives_retry`
+- `test_external_intake_ignores_campaign_and_own_reveals_it`
+- `test_external_badges_and_filter`
+- `test_own_case_queries_exclude_external_even_with_campaign`
+- `test_recent_imports_shared_order_limit_and_empty_shelf`
+- `test_employee_switch_and_advertiser_edit_require_origin_and_record_actor`
+- `test_api_adds_origin_external_case_and_advertiser`
+- `test_external_advertiser_uses_caption_without_own_catalog`
+- `test_external_advertiser_rejects_invented_name_quote_or_campaign`
+- `test_external_advertiser_skips_non_pr_or_missing_caption`
+- `test_external_unknown_does_not_apply_an_advertiser`
+- `test_inference_routes_external_pr_even_with_campaign_but_skips_non_pr_and_human`
+- `test_campaign_creation_preserves_unsent_urls_and_selection`
+- 実DB用（未実行）: `test_0041_three_ownership_conditions_and_priority`（5運営ラベル）、`test_0041_external_with_campaign_excluded_from_own_cases_and_totals`、`test_0041_external_pr_ad_and_general_tags`、`test_0041_external_advertiser_ai_human_and_origin_race`、`test_0041_switch_is_idempotent_audited_and_employee_rls`、`test_0041_own_intake_and_recent_shared_12_newest`、`test_0041_preserves_all_existing_view_columns`。
+
+引用検証・外部への自社推定の誤適用・外部の事例集計混入・他社タグ・Originガード・棚12本上限・API追加列・自社選択のJS・受付の区分保存の9箇所をそれぞれ一時的に壊し、対象テストが exit 1 になることを確認して復元した。結果は `/tmp/vl-external-mutations.json`、失敗全文は `/tmp/vl-external-mutation-*.log`。最終 pytest 全文は `/tmp/vl-external-pytest-final.log`。
+
+変更ファイル（すべてこのリポジトリ内）:
+
+- DB: `infra/migrations/0041_video_library_external_cases.sql`
+- UI/API: `src/teamagent/connect_web/library.py`、`library_import.py`、`library_assets.py`
+- 取り込み・推定: `src/teamagent/ingest/video_library_url_import.py`、`video_library_url_repository.py`、`video_library_case_inference.py`、`video_library_case_repository.py`
+- Prompt: `src/teamagent/prompts/external_advertiser/v1/system.md`
+- Webテスト: `tests/connect_web/test_library_external.py`、`test_library_import.py`、`test_library_import_postgres.py`、`test_library_import_browser.py`、`test_library_js.py`、`test_library_archive.py`、`test_library_catalog.py`
+- Ingestテスト: `tests/ingest/test_video_library_external_postgres.py`、`test_video_library_case_inference.py`、`test_video_library_case_aliases.py`、`test_video_library_case_postgres.py`、`test_video_library_url_import_postgres.py`
+- 運用・確認記録: 本書 `docs/v3.2/ops/video_library.md`
