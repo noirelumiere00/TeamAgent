@@ -776,7 +776,7 @@ def test_approval_buildspec_is_content_addressed_locked_and_self_checked() -> No
             body,
             "approval_publisher_bootstrap_buildspec_expected_sha256",
         )
-        == "5b89d19d33b4b62506e0bb1ef6d622a37741857aecd275a54df11e397845b49b"
+        == "548b8eb51500164da55ec4484f0c12bd0f33b219d40e11ad9e735ed141ee3d0a"
     )
     assert re.search(
         r"(?ms)^\s*approval_publisher_bootstrap_buildspec\s*=\s*replace\(\s*"

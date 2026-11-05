@@ -6,10 +6,20 @@ import subprocess
 import sys
 from itertools import chain
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
-from tests.pytest_shard import ROOT, committable_durations, partition, verify
+from tests.pytest_shard import ROOT, ShardRun, committable_durations, partition, verify
+
+
+def test_crashed_worker_does_not_hide_the_original_error() -> None:
+    run = ShardRun(SimpleNamespace())
+    run.pytest_testnodedown(SimpleNamespace(), "worker crashed")
+    assert run.manifest is None
+    manifest = {"shard": 1}
+    run.pytest_testnodedown(SimpleNamespace(workeroutput={"ci_shard": manifest}), None)
+    assert run.manifest == manifest
 
 
 def test_partition_balances_durations_including_one_large_file() -> None:

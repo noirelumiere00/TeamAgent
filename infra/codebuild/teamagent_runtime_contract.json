@@ -13,7 +13,7 @@
         "component": "torch",
         "evidence": "artifact_sha256",
         "value_kind": "sha256",
-        "value": "ca021f9eb2f8345c83fa03e3a04587308afb8df71bd472670b3ece00df58621c",
+        "value": "8eb5002ca81af00ae69b57540f615b58b8ae922b6d4848176b366a52bd2196e6",
         "build_arg": "TORCH_ARM64_WHEEL_SHA256",
         "oci_label": "io.teamagent.contract.torch-arm64-wheel-sha256",
         "dockerfile_uses": [
@@ -25,7 +25,7 @@
         "component": "python-builder",
         "evidence": "base_image_digest",
         "value_kind": "sha256_digest",
-        "value": "sha256:2c8414a1ab05655dc3a88e88f4cac4fde9db3342daab7772f1b45f2b937b2fd5",
+        "value": "sha256:16f91a476698cf7b53dc4789d8e6252ddec297a429f9ee726a4078fddbc2deba",
         "build_arg": "PYTHON_BUILDER_ARM64_DIGEST",
         "oci_label": "io.teamagent.contract.python-builder-arm64-digest",
         "dockerfile_uses": [
@@ -37,7 +37,7 @@
         "component": "python-runtime",
         "evidence": "base_image_digest",
         "value_kind": "sha256_digest",
-        "value": "sha256:f9552d99b5fcf870d9cd1d285e0086ae90aa2f0758aeff8d1f80dc9346fb52c5",
+        "value": "sha256:b75f25f6c278e21d5e3569d8e3171deb4a06b7ceffdcaef0e3a908aca3d6bf47",
         "build_arg": "PYTHON_RUNTIME_ARM64_DIGEST",
         "oci_label": "io.teamagent.contract.python-runtime-arm64-digest",
         "dockerfile_uses": [
@@ -61,11 +61,11 @@
         "component": "python",
         "evidence": "binary_sha256",
         "value_kind": "sha256",
-        "value": "81060a4e37f0e6746c7f53468dcd28c200053b4a2bb377a3fe2169edf3f770ac",
+        "value": "016d42a0bdd7464730b5154c2b4f1df8cd0f8cb67b67406e6f10c8c0c1ce3faa",
         "build_arg": "PYTHON_BINARY_SHA256",
         "oci_label": "io.teamagent.contract.python-binary-sha256",
         "dockerfile_uses": [
-          "printf '%s  %s\\n' \"$PYTHON_BINARY_SHA256\" /usr/bin/python3.14 | sha256sum -c -"
+          "printf '%s  %s\\n' \"$PYTHON_BINARY_SHA256\" /usr/bin/python3.15 | sha256sum -c -"
         ]
       },
       {
@@ -85,7 +85,7 @@
         "component": "python",
         "evidence": "component_version",
         "value_kind": "version",
-        "value": "3.14.10",
+        "value": "3.15.1",
         "build_arg": "PYTHON_VERSION",
         "oci_label": "io.teamagent.contract.python-version",
         "dockerfile_uses": [

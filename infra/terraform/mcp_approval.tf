@@ -502,7 +502,7 @@ locals {
   approval_publisher_bootstrap_buildspec_sha256 = sha256(
     local.approval_publisher_bootstrap_buildspec
   )
-  approval_publisher_bootstrap_buildspec_expected_sha256 = "5b89d19d33b4b62506e0bb1ef6d622a37741857aecd275a54df11e397845b49b"
+  approval_publisher_bootstrap_buildspec_expected_sha256 = "548b8eb51500164da55ec4484f0c12bd0f33b219d40e11ad9e735ed141ee3d0a"
   approval_publisher_bootstrap_buildspec_s3_key = (
     "codebuild-buildspecs/${local.approval_publisher_project_name}/${local.approval_publisher_bootstrap_buildspec_expected_sha256}.yml"
   )

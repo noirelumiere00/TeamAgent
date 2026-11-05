@@ -208,21 +208,32 @@ def test_unrelated_changes_still_pass(base: str, head: str, reason: str) -> None
 
 
 def test_unlock_matches_the_committed_declaration() -> None:
-    """core expat の APK 差し替えに追随し、scope と退避した宣言を完全一致で封印する。"""
+    """core Python 3.15 と dev のセキュリティ修正に追随し、scope と退避した宣言を完全一致で封印する。"""
     unlock = _freeze_doc()["unlock"]
     assert unlock["active"] is True
     assert unlock["scope_paths"] == [
-        "infra/codebuild/teamagent_runtime_contract.json",
+        "infra/codebuild/teamagent_bundle_provenance.py",
         "infra/codebuild/teamagent_core_media_release_contract.json",
+        "infra/codebuild/teamagent_runtime_contract.json",
+        "infra/terraform/mcp_approval.tf",
     ]
     assert (
         unlock["reason"]
-        == "human gate 2026-11-03（小俣さん承認: connect-web 置き換えの便 r94 が段 3 の ECR 脆弱性ゲートで core の expat 2.9.0-r0（CVE-2026-113351・CVE-2026-115506 HIGH）を拒否。土台の digest は変えず Wolfi 公式の修正版 expat を固定 APK/SHA/APKINDEX で差し替え、runtime/release 契約・世代・凍結をオフライン更新。AWS 書き込み・CodeBuild 起動・S3 公開・git commit・push は行わない）"
+        == "human gate 2026-11-05（小俣さん指示: core Python 3.15 移行 B1 を dev に追随。3.15.1 と libexpat1 2.10.0-r0・CA bundle 20261020-r0 以上を維持し、media の apk 固定を保持。runtime/release 契約・bundle helper・approval・世代をオフライン再導出。git add・commit・push、AWS 呼び出し、docker build は行わない）"
     )
     assert (
         unlock["gate"]
-        == "human gate 2026-11-03（小俣さん承認: connect-web 置き換えの便 r94 が段 3 の ECR 脆弱性ゲートで core の expat 2.9.0-r0（CVE-2026-113351・CVE-2026-115506 HIGH）を拒否。土台の digest は変えず Wolfi 公式の修正版 expat を固定 APK/SHA/APKINDEX で差し替え、runtime/release 契約・世代・凍結をオフライン更新。AWS 書き込み・CodeBuild 起動・S3 公開・git commit・push は行わない）"
+        == "human gate 2026-11-05（小俣さん指示: core Python 3.15 移行 B1 を dev に追随。3.15.1 と libexpat1 2.10.0-r0・CA bundle 20261020-r0 以上を維持し、media の apk 固定を保持。runtime/release 契約・bundle helper・approval・世代をオフライン再導出。git add・commit・push、AWS 呼び出し、docker build は行わない）"
     )
+    assert unlock["previous_scope_20261105_py315core"] == {
+        "active": True,
+        "scope_paths": [
+            "infra/codebuild/teamagent_runtime_contract.json",
+            "infra/codebuild/teamagent_core_media_release_contract.json",
+        ],
+        "reason": "human gate 2026-11-03（小俣さん承認: connect-web 置き換えの便 r94 が段 3 の ECR 脆弱性ゲートで core の expat 2.9.0-r0（CVE-2026-113351・CVE-2026-115506 HIGH）を拒否。土台の digest は変えず Wolfi 公式の修正版 expat を固定 APK/SHA/APKINDEX で差し替え、runtime/release 契約・世代・凍結をオフライン更新。AWS 書き込み・CodeBuild 起動・S3 公開・git commit・push は行わない）",
+        "gate": "human gate 2026-11-03（小俣さん承認: connect-web 置き換えの便 r94 が段 3 の ECR 脆弱性ゲートで core の expat 2.9.0-r0（CVE-2026-113351・CVE-2026-115506 HIGH）を拒否。土台の digest は変えず Wolfi 公式の修正版 expat を固定 APK/SHA/APKINDEX で差し替え、runtime/release 契約・世代・凍結をオフライン更新。AWS 書き込み・CodeBuild 起動・S3 公開・git commit・push は行わない）",
+    }
     assert unlock[
         "previous_scope_20261103_teamagent_runtime_contract_teamagent_core_media_release_contract"
     ] == {

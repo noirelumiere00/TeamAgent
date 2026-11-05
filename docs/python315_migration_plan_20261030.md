@@ -403,3 +403,87 @@ uv lock \
 - timeout した 8 件を、同じ更新済み依存・正常な locale で単独再検査し、**8 passed in 485.49s**。完全な出力は `/private/tmp/teamagent-py315-survey/pytest-timeout-check.log` に保存した。最長ケースは 116.84 秒で 120 秒制限に近く、並列負荷による実行時間の影響が考えられるが、依存更新との因果関係までは断定していない。**3.14 の全体成功条件は未達**であり、「3.14 の既存挙動をすべて検証済み」とはしない。単独成功と並列全体成功は区別する。全体を通せる実行環境で、通常配分の指定コマンドを再検証する必要がある。
 
 残る停止要因は、3.14 全体 pytest の timeout と全件成功未確認、PyYAML の 3.15 wheel 不足（更新先なし）、実際の 3.15 frozen install / pytest 未確認、本番 arm64 core と embeddings の実 image 検証、および未着手の media APK / Dockerfile / 世代更新。3.15 の lint / typecheck まで広げる場合は、NumPy 2.5 の型定義と mypy の最低版設定の整合も別途必要。今回の変更だけでは段1の検証完了や本番移行完了とはしない。
+
+
+## 7. 段2 core の実装・オフライン世代（2026-10-30）
+
+以下は段1より後の実測。worktree は `teamagent-py315core`、起点 HEAD は `023ffd460d94`。**core の変更案と未公開世代まで。本番反映はしていない。** media の Dockerfile / APK lock / release subject は変更していない。AWS 操作、CodeBuild 起動、S3 公開、commit / push、プロジェクトの `.env` / secrets / `~/.aws` の読み取りは行っていない。
+
+### 3.15 試験 CI の失敗と対応
+
+[段1 PR の CI run 41014674191](https://github.com/noirelumiere00/TeamAgent/actions/runs/41014674191) の全3 shard を確認した。いずれも CPython 3.15.1 の frozen install は成功し、PyYAML 6.0.3 はソースビルド済みだった。
+
+- shard 3 は提案キットの `FIRST_VISIT_CONCRETE_KIT_PATH` 不足で 5 setup errors / 5,664 passed / 32 skipped。3.14 ジョブと同じ Node 24・固定アーカイブの準備を 3.15 ジョブへ追加した。
+- shard 1 / 2 は Playwright sync API の `__enter__` で segfault。lock の greenlet 3.5.1 を指定すると、macOS arm64 / CPython 3.15.1 でも同じ行で再現した。greenlet 3.5.6 では同じ Playwright 1.60.0 / pyee 13.0.1 の起動・終了が成功する。lock の greenlet だけを 3.5.6 に更新し、子プロセスの stack 切替テストを追加した。3.14.7 でも同じ新しい greenlet で stack 切替と Playwright 起動・終了が成功した。core の dev+mcp には greenlet が入らないため、その構成では当該回帰テストは skip、media 依存が入る CI では実行する。Alpine の APK や Playwright の版は変更しない。
+- [greenlet 上流の変更履歴](https://greenlet.readthedocs.io/en/stable/changes.html)は、3.5.1 wheel が 3.15b1 向けで後続 ABI と互換とは限らず、3.5.5 以降は rc1 でビルドしたことを記載している。wheel の cp315 タグだけで互換と判断しない。
+- worker crash 後に `tests/pytest_shard.py` が存在しない `workeroutput` を参照し、元の失敗を INTERNALERROR で覆っていた。欠落時は manifest を受け取らず、残りの収集・実行照合は従来通り fail closed とする。対応する小さい回帰テストを追加した。
+
+### PyYAML・ローカル Python・開発依存
+
+手元の uv 0.11.14 は 3.15.0b1、CI / Docker と同じ uv 0.11.29 は 3.15.0b3 を取得した。この beta での PyYAML ビルド失敗を正式版の結果と混同しない。作業用ディレクトリに uv 0.13.6 を導入し、`uv python install 3.15.1` で正式版を取得した。既存のユーザー環境は更新していない。lock の生成・`--check` は固定版 uv 0.11.29 で行い、lock revision 3 と他パッケージの版・wheel・marker を維持した。
+
+PyYAML 6.0.3 は正式版 3.15.1 で sdist から導入でき、`yaml.__with_libyaml__ == False` の pure Python 実装で `safe_load` が通った。Linux x86_64 は上記 CI でもソースビルドに成功している。**PyYAML は既存の hash 付き sdist と pure Python fallback を採用し、別 YAML ライブラリへ移さない。** Linux arm64 の新しい core image 全体での frozen install / import は下記の停止要因が残る。
+
+指定の `--extra dev --extra mcp` だけでは、テストの無条件 import が要求する Pillow / python-pptx が不足し、28 収集エラーになった。両方を dev extra に追加した。本番 core の標準 dependencies には追加していない。
+
+### 公開 Chainguard arm64 の実測と core の追随
+
+公開レジストリ `https://cgr.dev/v2/chainguard/python/` を匿名 pull token で参照した。`3.15` / `3.15-dev` タグは 404、`latest` / `latest-dev` は 2026-10-29 作成の 3.15.1 だった。index と child manifest を保存し、本文 digest も照合した。
+
+| 固定対象 | 新値 |
+|---|---|
+| builder arm64 child | `sha256:16f91a476698cf7b53dc4789d8e6252ddec297a429f9ee726a4078fddbc2deba` |
+| runtime arm64 child | `sha256:b75f25f6c278e21d5e3569d8e3171deb4a06b7ceffdcaef0e3a908aca3d6bf47` |
+| Python | `3.15.1`、Wolfi package `3.15.1_git20261024-r1` |
+| 両段の `/usr/bin/python3.15` SHA256 | `016d42a0bdd7464730b5154c2b4f1df8cd0f8cb67b67406e6f10c8c0c1ce3faa` |
+| torch CPU arm64 wheel | `cp315-cp315-manylinux_2_28_aarch64`、SHA256 `8eb5002ca81af00ae69b57540f615b58b8ae922b6d4848176b366a52bd2196e6` |
+| CA bundle | `20261020-r0`、APK SHA256 `d2a458ae71b3f6f65302a8dd61c35f75f3eef87aeb5583a3f97523e99698cf49` |
+| Brotli 3 APK | `1.2.1-r2`。各 APK SHA とライブラリ実体は成果物の `packages/` と `brotli-base-equality.json` |
+| pip-wheel | `26.2.2-r2`、APK SHA256 `6dcca154f23de54db689ec2006bb65c67de74d556f55f8836bf5d438da8b8ee1` |
+
+新ベースに既に入っている修正版へ合わせた。旧 APK への downgrade は行わない。Wolfi 公式 APKINDEX / APK の checksum・メタデータを確認し、vendor と CA/pip lock を更新した。`replace_core_ca_bundle.py` は差し替え後にも使うパスを stale として削除しない。同版の CA / pip や、同じ wheel ファイル名の revision 更新に対応し、旧版からの差し替え試験も維持した。固定した runtime コンテナ上の prepare / verify が成功し、Brotli 3 payload の実バイトも新 APK と一致した。旧 1.2.0 の無条件 unlink は撤去した。
+
+Dockerfile の Python 実行パス / site-packages、runtime receipt、release contract の Python probe、bundle helper の probe 制約、smoke の版 / ELF / wheel SHA と対応テストを揃えた。uv の Docker digest / 版やモデル revision は変更していない。
+
+### 世代の再導出と freshness
+
+OLD は `pipwheel-20261030-run/derived/` の公開済み本文。**同ディレクトリの `live/` はさらに前の世代なので採用していない。** `PUBLISHED` と `aico-base-bump-new.env` の4 SHA、旧契約の SHA を照合してから新しい `py315core-20261030-run/old/` に保存した。approval の OLD は Terraform 1.12.2 の最小構成で評価し、既存期待 SHA `33e2a643…` と一致させた再構成本文。AWS live の再照合は行っていない。
+
+MCP / attestor / promoter は runtime contract・release contract・bundle helper の base64 各1か所、image-builder は契約2本と bundle helper の SHA 各1か所、approval は helper の base64 1か所だけを差し替えた。すべて逆置換で OLD とバイト一致し、埋込み Python を compile した。旧世代の台帳を残して新世代を追加し、adopt mapping / import / 18 入力 manifest / freeze scope・退避宣言のテストを更新した。approval bootstrap の導出 SHA も `548b8eb51500164da55ec4484f0c12bd0f33b219d40e11ad9e735ed141ee3d0a` に追随した。歴史的オブジェクトの `prevent_destroy` / identity の `ignore_changes` は維持する。
+
+| 世代 | 新 SHA256（未公開） |
+|---|---|
+| teamagent-dev-mcp-source-publisher | `a589318b08328028e2f9fa6e494c049141583bff9f63e80ecbe26692dad3fa52` |
+| teamagent-dev-image-attestor | `5112b09c4a7366cc415b98bec2071567535f297b9c23f25d95dc892c8ea312c9` |
+| teamagent-dev-image-promoter | `cd7a201323ebc101fedbe8112532a272c562688551899a6343929c5d118c615b` |
+| teamagent-dev-image-builder | `9ac57fca0716575e6a364f5fb8c3b60f03f4913349bdd0601e9c2bef6dba6a10` |
+| teamagent-dev-approval-publisher | `1fba5b9c87c65bff6dc7a5e46b20cbd63ab064ce7dfa06d77b0fe12099583e9f` |
+
+新 runtime 契約 SHA256 は `f265e02f4eecdeec8677b2d9aecc80be4679a57dd50c7ff9fd902de919506fe4`、release 契約は `8f6fbafb7833c76a732e410c6566c8aef27a3e5a006a687aa411caf5412c9dba`。`verify_generation_inputs.py` は **fresh（18 inputs）**、artifact 検証も成功。
+
+成果物は `/Users/s-komata/Documents/Claude/Artifacts/aico-inputs-20260911/py315core-20261030-run/`。導出スクリプト、OLD / NEW 本文、`derivation.json`、公開レジストリ・APK の証拠、全文ログ、OLD / NEW の公開用メタデータを保存した。新世代は公開していないため、公開済み世代との照合・切替は別便で必要。
+
+### 最終検証と停止要因
+
+検証では資格情報を引き継がない一時 HOME を使い、`PYTHON_DOTENV_DISABLED=1` / `AWS_EC2_METADATA_DISABLED=true`、`LC_ALL=C LANG=C` とした。pytest は指定の `uv run --python 3.15 --extra dev --extra mcp pytest -q -n auto`（3.14 も同形）を使い、`PYTEST_XDIST_AUTO_NUM_WORKERS=4` と `PYTEST_ADDOPTS='--maxschedchunk=1 --durations=20'` で配分・負荷・診断だけを調整した。テスト除外や timeout 緩和はしていない。
+
+| 検査 | 結果 |
+|---|---|
+| 3.15.1 全件 | **16,513 passed / 490 skipped / 10 failed / 266 errors**、878.27 秒 |
+| 3.14.7 全件 | **16,513 passed / 490 skipped / 10 failed / 266 errors**、567.97 秒 |
+| ローカル不足を解消後の再検査 | 両版とも 10 passed。上記10失敗中8件が解消（Node依存5件、削除ファイル走査3件） |
+| 関連変更の検証 | 契約・Docker・世代・freeze 等は 552 passed、保持期限の1件を修正後に45件の再検査が成功。CA/pip の最終29件、greenlet 3.5.6 の独立 stack 切替1件も成功 |
+| Ruff | `check src/ tests/ scripts/`、`format --check` とも成功 |
+| mypy / 3.14 | 519 source files、成功 |
+| mypy / 3.15 | 失敗1件：NumPy 2.5.4 の `__init__.pyi:737` が PEP 695 の type 文を使い、設定上の最低対応版 3.11 では構文エラー。最低版や検査の強さは変更していない |
+| 固定 uv の 3.15 frozen 導入 | uv 0.11.29 / macOS arm64 で成功、PyYAML 6.0.3 の `safe_load` も成功 |
+| クリーンな既存 HEAD / 3.14 のガード試験 | 初回 **266 passed / 2 failed**（1857.95 秒）。Node PATH を補った単独再検査は **2 passed**（398.68 秒、timeout 延長なし）。全268件の個別成功を確認したが、並列全体が一度で成功したとは扱わない |
+
+両版で失敗・エラーの nodeid 集合も一致した。266 errors は `test_terraform_runtime_guard.py` の「infra/scripts はコミット済みであること」という autouse fixture の前提。残る2失敗も `mcp_approval.tf` の実体が receipt の Git commit と違うため、引数検査より前に guard が停止したもの。**現在の未コミット worktree の全件成功条件は未達。** commit 禁止と両立しない前提を無効化せず、既存 HEAD の読み取り用クローンでも 3.14 を別検査した。新しい変更を含むクリーンなソースでの再検証は後続に残る。
+
+Node の再検査では、既存の npm lock から依存を準備した（ローカル実行版は Node 25.9.0、CI は Node 24 を指定）。旧 vendor APK は未コミットの削除を既存の全ファイル検査が読めないため残したが、新しい core Docker context の許可リストと COPY は新 APK のみ。runtime を旧版へ戻すものではない。DB・browser・embeddings 等の省略は既存の skip 条件に従う。全文は `logs/pytest315-verified.log` / `logs/pytest314-verified.log`、再検査は `logs/pytest*-local-fixes.log`、失敗集合は `pytest-results.json` に保存した。
+
+
+builder の 136,935,052 bytes のレイヤー `sha256:15246b579b18cd4479925f81bb307648e180e52786d7607a2f4b0744d67e1687` は本文が0 bytesで返り、通常 pull の再試行と Range 取得も EOF になった。それ以外のレイヤーを digest 照合して、builder の Python ELF とパッケージ DB を取得した。runtime の実行は成功しているが、途中から Docker daemon の socket も利用不可となった。**core image 全体の build、Linux arm64 の embeddings 込み frozen sync、E5 offline smoke / health / read-only-root smoke、scanner 結果は未確認**であり、Dockerfile の変更案だけで本番互換を確定しない。
+
+media Alpine は次段のまま。新世代の公開・CodeBuild ref 切替・署名リリース・本番反映・ECR 例外撤去も未実施。

@@ -1,23 +1,22 @@
 {
   "schema_version": 1,
-  "url": "https://packages.wolfi.dev/os/aarch64/ca-certificates-bundle-20260909-r3.apk",
-  "archive": "ca-certificates-bundle-20260909-r3.apk",
-  "archive_sha256": "4f57ebd7dc21d78ecce228f397d0a4ee46b5cfc777ac5f292821d41a97bfd896",
-  "base_version": "20260909-r2",
+  "url": "https://packages.wolfi.dev/os/aarch64/ca-certificates-bundle-20261020-r0.apk",
+  "archive": "ca-certificates-bundle-20261020-r0.apk",
+  "archive_sha256": "d2a458ae71b3f6f65302a8dd61c35f75f3eef87aeb5583a3f97523e99698cf49",
+  "base_version": "20261020-r0",
   "apkindex": {
-    "C": "Q12NXUp1YSrgDFsj3YmYoLOz7Pngg=",
+    "C": "Q1Uxft6BYfAMq8F4Gi9M7Q2XromUs=",
     "P": "ca-certificates-bundle",
-    "V": "20260909-r3",
+    "V": "20261020-r0",
     "A": "aarch64",
-    "S": "119164",
+    "S": "118573",
     "I": "229626",
     "T": "",
-    "U": "",
     "L": "MPL-2.0 AND MIT",
     "o": "ca-certificates",
     "m": "wolfi",
-    "t": "1792505521",
-    "c": "34903eac7b8592ab9906e3aba6b3aa1ad96023df",
+    "t": "1793012842",
+    "c": "8061afafa65af5a9026707a8880e14120dd6f4a0",
     "D": "merged-usrsbin wolfi-baselayout"
   }
 }

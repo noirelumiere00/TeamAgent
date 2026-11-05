@@ -192,7 +192,7 @@ def stale_paths(package: dict, before: bytes, retained: set[str]) -> list[str]:
     paths = [old_sbom(package)]
     if package["lock"]["apkindex"]["P"] == "py3-pip-wheel":
         paths.append(wheel_path(package["lock"]["base_version"]))
-    return paths
+    return [path for path in paths if path not in package["files"]]
 
 
 def verify(root: Path, before: bytes, packages: list[dict]) -> None:
