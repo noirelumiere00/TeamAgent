@@ -36,7 +36,8 @@ def status_skill(monkeypatch: pytest.MonkeyPatch) -> tuple[karte.ClientKarteSkil
             SearchHit(2, "過去の報告", 1.0, {"occurred_at": "2026-08-10"}),
         ]
     )
-    pg.search_drive_by_client_names.return_value = []
+    pg.list_client_names.return_value = ["株式会社 ＪＴＢ"]
+    pg.find_documents_for_advertiser.return_value = []
     return karte.ClientKarteSkill(bedrock=bedrock, pgvector=pg), pg
 
 
@@ -83,7 +84,7 @@ def test_old_karte_is_dated_and_past_plans_are_not_current(status_skill: tuple) 
 def test_plan_dates_use_jst_calendar_day(text: str, expected: str) -> None:
     hits = [SearchHit(1, "FB", 1.0, {"occurred_at": "2026-08-24"})]
     answer = dated_answer(text, hits, "JTB", date(2026, 11, 5))
-    assert answer == expected + ("" if "（8/24 時点）" in expected else "（8/24 時点）")
+    assert answer == expected.replace("（8/24 時点）", "") + "\n（8/24 時点の記録）"
 
 
 def test_each_case_keeps_its_own_latest_contact_date() -> None:
@@ -102,6 +103,64 @@ def test_each_case_keeps_its_own_latest_contact_date() -> None:
     assert "### 採用広報（9/1 時点）" in answer
     assert answer.count("予定だった（結果は未確認）") == 2
     assert answer.count("時点）") == 2
+
+
+@pytest.mark.parametrize("markup", ["*", "**", "### "])
+def test_bold_case_headings_receive_dates_once_at_the_end(markup: str) -> None:
+    def heading(label: str) -> str:
+        return markup + label + (markup if markup.startswith("*") else "")
+
+    hits = [
+        SearchHit(1, "FB", 1.0, {"campaign": "企業広報", "occurred_at": "2026-06-30"}),
+        SearchHit(2, "FB", 1.0, {"campaign": "企業広報", "occurred_at": "2026-08-07"}),
+        SearchHit(3, "FB", 1.0, {"campaign": "採用広報", "occurred_at": "2026-08-26"}),
+    ]
+    text = (
+        f"{heading('直販・企業広報案件（提案）')}\n- 提案の記録（6/30 時点） [chunk_id: 1]\n"
+        f"{heading('採用広報案件')}\n- 次回の提案"
+    )
+    answer = dated_answer(text, hits, "JTB", date(2026, 11, 5))
+    assert answer == (
+        f"{heading('直販・企業広報案件（提案）')}（8/7 時点）\n- 提案の記録 [chunk_id: 1]\n"
+        f"{heading('採用広報案件')}（8/26 時点）\n- 次回の提案"
+    )
+    assert dated_answer(answer, hits, "JTB", date(2026, 11, 5)) == answer
+
+
+def test_menu_names_are_not_case_names_and_citations_bind_each_section() -> None:
+    hits = [
+        SearchHit(n, "FB", 1.0, {"proposed_menu": menu, "occurred_at": f"2026-{found}"})
+        for n, menu, found in [
+            (1, "UGC（TTO，切り抜きなど）", "06-30"),
+            (2, "UGC（TTO、切り抜きなど）, その他", "08-07"),
+            (3, "その他", "08-26"),
+        ]
+    ]
+    answer = dated_answer(
+        "# JTB クライアント・カルテ\n"
+        "*直販・企業広報案件（提案）*\n- 共有 [chunk_id: 1] [chunk_id: 2]\n"
+        "**代理店経由案件**\n- 提案 [chunk_id: 3]",
+        hits,
+        "JTB",
+        date(2026, 11, 5),
+    )
+    assert "*直販・企業広報案件（提案）*（8/7 時点）\n" in answer
+    assert "**代理店経由案件**（8/26 時点）\n" in answer
+    assert answer.count("時点）") == 2
+    assert "UGC" not in answer and "その他" not in answer and "時点の記録" not in answer
+
+
+def test_unmatched_cases_get_only_one_record_note_without_guessing_headings() -> None:
+    answer = dated_answer(
+        "*案件の要点*\n- 本文の企業広報と採用広報への言及",
+        [
+            SearchHit(1, "FB", 1.0, {"campaign": "企業広報", "occurred_at": "2026-06-30"}),
+            SearchHit(2, "FB", 1.0, {"campaign": "採用広報", "occurred_at": "2026-08-26"}),
+        ],
+        "JTB",
+        date(2026, 11, 5),
+    )
+    assert answer == "*案件の要点*\n- 本文の企業広報と採用広報への言及\n（8/26 時点の記録）"
 
 
 def test_no_date_does_not_invent_asof_or_plan_year() -> None:
@@ -140,8 +199,8 @@ def test_state_line_requires_both_email_gate_and_status_question(
 ) -> None:
     skill, pg = status_skill
     source = row(state="lost", state_as_of="2026-09-11", evidence_date="2026-09-11")
-    source.metadata.update({"client_name": "JTB", "title": "JTB 企業広報の提案"})
-    pg.search_drive_by_client_names.return_value = [source]
+    source.metadata.update({"client_name": "株式会社 ＪＴＢ", "title": "JTB 企業広報の提案"})
+    pg.find_documents_for_advertiser.return_value = [source]
     with capture_logs() as logs:
         out = skill.run(
             ClientKarteInput(client_name="JTB"),
@@ -166,17 +225,21 @@ def test_state_line_requires_both_email_gate_and_status_question(
         assert "JTB 企業広報の提案 / 2026-09-11 時点の正式状態: 失注" in out.answer
         assert "根拠日: 2026-09-11" in out.answer
         assert "https://example.test/source#1" in out.answer
-        kwargs = pg.search_drive_by_client_names.call_args.kwargs
-        assert pg.search_drive_by_client_names.call_args.args == (
+        assert pg.find_documents_for_advertiser.call_args_list[0].args == (
             pg.connection.return_value.__enter__.return_value,
-            ["JTB"],
+            "株式会社 ＪＴＢ",
         )
-        assert kwargs["request_id"]
+        assert pg.find_documents_for_advertiser.call_args.kwargs == {
+            "limit": 8,
+            "drive_only": False,
+        }
+        pg.search_drive_by_client_names.assert_not_called()
         pg.connection.assert_called_once_with(
             app_role="teamagent_app", user_email=email, user_groups=["sales"], user_role="member"
         )
     else:
-        pg.search_drive_by_client_names.assert_not_called()
+        pg.find_documents_for_advertiser.assert_not_called()
+        pg.list_client_names.assert_not_called()
 
 
 @pytest.mark.parametrize("count", [0, 1, 2])
@@ -199,13 +262,13 @@ def test_done_log_counts_dated_cases(status_skill: tuple, count: int) -> None:
 def test_no_matching_state_does_not_add_a_line(status_skill: tuple, kind: str) -> None:
     skill, pg = status_skill
     if kind == "legacy":
-        pg.search_drive_by_client_names.return_value = [SearchHit(3, "見送り", 1.0, {})]
+        pg.find_documents_for_advertiser.return_value = [SearchHit(3, "見送り", 1.0, {})]
     elif kind == "other_client":
         source = row(state="lost")
         source.metadata["client_name"] = "HIS"
-        pg.search_drive_by_client_names.return_value = [source]
+        pg.find_documents_for_advertiser.return_value = [source]
     elif kind == "failed":
-        pg.search_drive_by_client_names.side_effect = RuntimeError("unavailable")
+        pg.find_documents_for_advertiser.side_effect = RuntimeError("unavailable")
     out = skill.run(
         ClientKarteInput(client_name="JTB"),
         SkillContext(

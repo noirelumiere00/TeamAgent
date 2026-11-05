@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 import structlog
@@ -36,9 +37,12 @@ def maybe_post(
     answer = data.get("answer")
     if destination is None or not isinstance(answer, str) or not answer.strip():
         return None
+    # 引用 ID はモデル用。改行を残し、出典リンクは送信前の共通洗浄に任せる。
+    body = re.sub(r"[ \t]*[\[(][^\[\]()\n]*chunk_id[^\[\]()\n]*[\])]", "", answer)
+    body = re.sub(r"^#{1,3}[ \t]+(.+?)[ \t]*#*[ \t]*$", r"*\1*", body, flags=re.MULTILINE)
     try:
         status = detached_jobs.post_to_origin_status(
-            markdown_bold_to_mrkdwn(answer),
+            markdown_bold_to_mrkdwn(body),
             destination,
             request_id=request_id,
             permanent_urls=outbound_permanent_urls(data),

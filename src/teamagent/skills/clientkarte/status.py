@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import unicodedata
 from calendar import monthrange
 from datetime import date
 from html import escape
@@ -63,7 +64,7 @@ def _past_plans(text: str, as_of: date, today: date) -> str:
 
 def dated_answer(answer: str, hits: list[SearchHit], client_name: str, today: date) -> str:
     """案件ごとの最新の記録日を一度付け、過去の予定を現在の予定から区別する。"""
-    latest: dict[str, str] = {}
+    dated = []
     for hit in hits:
         meta = hit.metadata or {}
         label = str(
@@ -74,39 +75,53 @@ def dated_answer(answer: str, hits: list[SearchHit], client_name: str, today: da
         )
         found, _ = timeline_status.evidence_date(hit)
         if found:
-            latest[label] = max(latest.get(label, ""), found)
-    if not latest:
+            dated.append((hit.chunk_id, label, date.fromisoformat(found)))
+    if not dated:
         return answer
 
+    # LLM の既存注記も一度外し、案件の見出し末尾にまとめる。
+    answer = re.sub(r"（\d{1,2}/\d{1,2} 時点(?:の記録)?）", "", answer)
     lines = answer.splitlines()
-    current = date.fromisoformat(next(iter(latest.values()))) if len(latest) == 1 else None
-    seen: set[str] = set()
-    for index, line in enumerate(lines):
-        labels = [label for label in latest if label in line]
-        if len(labels) == 1:
-            label = labels[0]
-            current = date.fromisoformat(latest[label])
-            if label not in seen:
-                marker = f"（{current.month}/{current.day} 時点）"
-                if marker not in line and (len(latest) != 1 or marker not in answer):
-                    line = line.replace(label, label + marker, 1)
-                seen.add(label)
-        elif len(labels) > 1:
-            current = None
-        if current:
-            line = _past_plans(line, current, today)
-        lines[index] = line
+    headings = [
+        i
+        for i, line in enumerate(lines)
+        if re.fullmatch(r"\s*(?:#{1,3} +.+|(\*{1,2})[^*]+\1)\s*", line)
+    ]
+    assigned: set[int] = set()
 
-    for label, found in latest.items():
-        if label in seen:
+    def fold(text: str) -> str:
+        return re.sub(r"[\s・、,，()（）*#]", "", unicodedata.normalize("NFKC", text)).casefold()
+
+    for pos, start in enumerate(headings):
+        end = headings[pos + 1] if pos + 1 < len(headings) else len(lines)
+        section = "\n".join(lines[start:end])
+        citations = {int(n) for n in re.findall(r"chunk_id[:：]\s*(-?\d+)", section)}
+        matches = [
+            item
+            for item in dated
+            if item[0] not in assigned
+            and (
+                item[0] in citations
+                or (
+                    (len(headings) == 1 or fold(item[1]) != fold(client_name))
+                    and fold(item[1]) in fold(lines[start])
+                )
+            )
+        ]
+        if not matches:
             continue
-        as_of = date.fromisoformat(found)
-        marker = f"（{as_of.month}/{as_of.day} 時点）"
-        if len(latest) == 1 and lines:
-            if marker not in answer:
-                lines[0] += marker
-        else:
-            lines.append(f"{label}{marker}")
+        current = max(item[2] for item in matches)
+        assigned.update(item[0] for item in matches)
+        lines[start] = lines[start].rstrip() + f"（{current.month}/{current.day} 時点）"
+        for index in range(start + 1, end):
+            lines[index] = _past_plans(lines[index], current, today)
+
+    remaining = [item[2] for item in dated if item[0] not in assigned]
+    if remaining:
+        current = max(remaining)
+        if not assigned and len({item[1] for item in dated}) == 1:
+            lines = [_past_plans(line, current, today) for line in lines]
+        lines.append(f"（{current.month}/{current.day} 時点の記録）")
     return "\n".join(lines)
 
 

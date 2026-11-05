@@ -62,6 +62,13 @@ def row(n: int = 1, state: str = "won", **record_values: Any) -> SearchHit:
     )
 
 
+@pytest.fixture
+def jtb_state_record() -> SearchHit:
+    source = row(state="lost", state_as_of="2026-09-11", evidence_date="2026-09-11")
+    source.metadata.update({"client_name": "株式会社 ＪＴＢ", "title": "JTB 企業広報の提案"})
+    return source
+
+
 def test_official_state_has_its_own_date_and_source() -> None:
     source = row(state_as_of="2026-08", state_as_of_precision="month")
     status = timeline.resolve_statuses([source], case_state=True)[0]
