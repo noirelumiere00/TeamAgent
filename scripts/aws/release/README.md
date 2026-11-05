@@ -6,11 +6,11 @@
 
 | ファイル | 役割 |
 |---|---|
-| `fire_and_authorize.sh` → `apply_mcp_tds.sh` | 便の発射（CodeBuild 起動→承認→タスク定義差し替え）。MFA は `mfa_refresh.sh`（36 時間） |
+| `fire_and_authorize.sh` | 便の発射（CodeBuild 起動→承認）。その後のタスク定義差し替えは正本 `infra/deploy/terraform_runtime_guard.sh` 経由（持ち主の手元にあった `apply_mcp_tds.sh` は CLI で `update-service` するため repo の規則 B9 に反し、ここには入れていない）。MFA は `mfa_refresh.sh`（36 時間） |
 | `driver_oc.sh` | OpenClaw 側の便の運転役 |
 | `release_r99_order.sh` / `release_r100_order.sh` | 11/05 の便の手順書（順序・確認点）。最新の実例 |
 | `apply_00NN_*.sh` | 動画アーカイブの migration 0035〜0041 を本番 RDS に当てた記録（踏み台トンネル方式） |
-| `bootstrap_video_library_s3_iam.sh` / `add_video_library_env.sh` | connect-web / ingest への IAM inline と env の追加 |
+| `bootstrap_video_library_s3_iam.sh` | connect-web の task role への IAM inline 追加。env の追加（持ち主の手元の `add_video_library_env.sh`）はタスク定義の直接登録なので入れていない。env は Terraform（`infra/terraform/fargate.tf`）で |
 | `run_video_library_task.sh` | サムネ取得などを ECS run-task で単発実行 |
 | `vl_*.sh` + `vl_*_2026MMDD.py` | 動画アーカイブの本番データ作業（件数確認・一括登録・Apify 補完・事例推定の手動実行）。`.sh` が run-task の包み、`.py` がタスク内で動く本体 |
 | `db_readonly_query.sh` / `probe_readonly.sh` | 本番 DB の読み取り専用クエリ |
