@@ -276,6 +276,11 @@ class SlackChannelIngestClient:
         )
         return channels, next_cursor
 
+    def get_conversation(self, channel_id: str) -> dict[str, Any]:
+        """user token で private channel と im / mpim を区別する。"""
+        response = asyncio.run(self._client.conversations_info(channel=channel_id))
+        return dict(response.get("channel", {}) or {})
+
     def list_channel_members(
         self,
         channel_id: str,

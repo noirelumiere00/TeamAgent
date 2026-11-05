@@ -15,6 +15,7 @@ Usage:
 前提:
     - DATABASE_URL 設定済（load_secrets.sh 経由推奨）
     - SLACK_BOT_TOKEN 設定済（slack 取り込み時）
+    - 全連携者の user token + files:read（slack_public_files、非公開 ACL の email 解決には bot を利用）
     - GCP credentials 設定済（gdrive/gsheets 取り込み時、Sprint 3 では NotImplementedError）
 
 Exit code:
@@ -60,7 +61,7 @@ def main() -> int:
     p.add_argument(
         "--sources",
         default="all",
-        help="取り込み対象（カンマ区切り）: slack / gdrive / gsheets / all",
+        help="取り込み対象（カンマ区切り）: slack / slack_public_files / gdrive / gsheets / all",
     )
     p.add_argument(
         "--commit",

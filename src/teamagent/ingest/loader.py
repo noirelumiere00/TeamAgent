@@ -41,6 +41,16 @@ class SlackChannelSpec:
 
 
 @dataclass(frozen=True)
+class SlackPublicFilesSpec:
+    """全連携者が参加するチャンネルの PDF / PowerPoint（全期間、DM 除外）。"""
+
+    token_owners: str = "all"
+    filetypes: tuple[str, ...] = ("pdf", "pptx", "ppt")
+    max_files_per_run: int = 300
+    extra_metadata: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
 class SlackChannelPrefixSpec:
     """slack_channel_prefixes[] の 1 件（名前の頭が一致する channel をまとめて取り込む）。
 
@@ -165,6 +175,7 @@ class IngestSources:
     slack_channel_prefixes: tuple[SlackChannelPrefixSpec, ...] = ()
     # 事例集 PPTX（2026-10-06）。gdrive kind の run で一緒に走る（pipeline.IngestRunner.run）。
     case_corpus_decks: tuple[CaseDeckSpec, ...] = ()
+    slack_public_files: SlackPublicFilesSpec | None = None
 
 
 # -----------------------------------------------------------
@@ -258,6 +269,33 @@ def load_ingest_sources(
         gdrive_rulebook_root_folder_id=rulebook_root,
         slack_channel_prefixes=slack_channel_prefixes,
         case_corpus_decks=case_decks,
+        slack_public_files=_parse_slack_public_files(raw.get("slack_public_files")),
+    )
+
+
+def _parse_slack_public_files(raw: Any) -> SlackPublicFilesSpec | None:
+    if raw is None:
+        return None
+    if not isinstance(raw, dict):
+        raise ValueError("slack_public_files は mapping で指定してください")
+    token_owners = raw.get("token_owners", "all")
+    filetypes = raw.get("filetypes", ["pdf", "pptx", "ppt"])
+    limit = int(raw.get("max_files_per_run", 300))
+    if token_owners != "all":
+        raise ValueError("slack_public_files.token_owners は all を指定してください")
+    if (
+        not isinstance(filetypes, list)
+        or not filetypes
+        or any(ft not in ("pdf", "pptx", "ppt") for ft in filetypes)
+    ):
+        raise ValueError("slack_public_files.filetypes は pdf / pptx / ppt のみ指定できます")
+    if limit < 1:
+        raise ValueError("slack_public_files.max_files_per_run は 1 以上にしてください")
+    return SlackPublicFilesSpec(
+        token_owners=token_owners,
+        filetypes=tuple(filetypes),
+        max_files_per_run=limit,
+        extra_metadata=dict(raw.get("extra_metadata", {}) or {}),
     )
 
 

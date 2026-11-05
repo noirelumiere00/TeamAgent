@@ -6,6 +6,7 @@ repr によるトークン秘匿（G8）と、email 正規化込みの get/put/h
 from __future__ import annotations
 
 from typing import Any
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -322,6 +323,24 @@ def test_slack_token_store_scopes_reads_only_scopes_without_decrypting() -> None
         )
     ]
     assert pg.last_user_email == "a@x.com"
+
+
+def test_slack_token_store_lists_files_read_owners_with_admin_rls_without_decrypting() -> None:
+    pg = MagicMock()
+    cursor = (
+        pg.connection.return_value.__enter__.return_value.cursor.return_value.__enter__.return_value
+    )
+    cursor.fetchall.return_value = [{"user_email": "a@x.com"}, {"user_email": "b@x.com"}]
+    cipher = _FakeCipher()
+    store = SlackTokenStore(pg, cipher, app_role="test_role")
+
+    assert store.list_file_reader_emails() == ["a@x.com", "b@x.com"]
+    pg.connection.assert_called_once_with(app_role="test_role", user_role="admin")
+    cursor.execute.assert_called_once_with(
+        "SELECT user_email FROM slack_oauth_tokens WHERE %s = ANY(scopes) ORDER BY user_email",
+        ("files:read",),
+    )
+    assert cipher.dec_context is None and cipher.enc_context is None
 
 
 @pytest.mark.parametrize("scopes", [[], None])
