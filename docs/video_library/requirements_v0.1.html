@@ -1,0 +1,629 @@
+<title>構成×動画 相互検索サイト</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Zen+Kaku+Gothic+New:wght@400;500;700;900&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<style>
+/* Layout: 1カラムの読み物。縦型動画(9:16)の枠を記号に、決定=実線・保留=破線・要判断=青で状態を表す */
+:root {
+  --bg: #F3F4F6;
+  --surface: #FFFFFF;
+  --ink: #16181D;
+  --muted: #5B6170;
+  --line: #DADDE3;
+  --accent: #1F4FD8;
+  --accent-soft: #E6ECFC;
+  --hold: #9A5B00;
+  --hold-soft: #FBF1E1;
+  --ok: #17714A;
+  --ok-soft: #E3F3EA;
+  --font-display: "Zen Kaku Gothic New", "Hiragino Sans", "Yu Gothic", sans-serif;
+  --font-body: "Zen Kaku Gothic New", "Hiragino Sans", "Yu Gothic", sans-serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, "SFMono-Regular", Menlo, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #111318; --surface: #1A1D24; --ink: #E9EBF0; --muted: #9AA1B0; --line: #2C313B;
+    --accent: #7FA2FF; --accent-soft: #1E2944; --hold: #E8B15C; --hold-soft: #33280F;
+    --ok: #63CF9A; --ok-soft: #13301F; color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #111318; --surface: #1A1D24; --ink: #E9EBF0; --muted: #9AA1B0; --line: #2C313B;
+  --accent: #7FA2FF; --accent-soft: #1E2944; --hold: #E8B15C; --hold-soft: #33280F;
+  --ok: #63CF9A; --ok-soft: #13301F; color-scheme: dark;
+}
+* { box-sizing: border-box; }
+body { background: var(--bg); color: var(--ink); font-family: var(--font-body); font-size: 15px; line-height: 1.8; }
+.wrap { max-width: 920px; margin: 0 auto; padding-inline: 20px; padding-block: 48px 80px; display: grid; gap: 56px; }
+h1, h2, h3 { font-family: var(--font-display); text-wrap: balance; margin: 0; line-height: 1.35; }
+h1 { font-size: clamp(28px, 5vw, 40px); font-weight: 900; letter-spacing: 0.01em; }
+h2 { font-size: 21px; font-weight: 700; }
+h3 { font-size: 16px; font-weight: 700; }
+p { margin: 0; max-width: 68ch; }
+a { color: var(--accent); text-underline-offset: 3px; word-break: break-all; }
+a:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+code, .mono { font-family: var(--font-mono); font-size: 0.88em; }
+.label { font-family: var(--font-mono); font-size: 11.5px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); }
+section { display: grid; gap: 18px; min-width: 0; }
+.sec-head { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; border-bottom: 1px solid var(--line); padding-bottom: 10px; }
+.note { font-size: 13px; color: var(--muted); }
+
+/* hero */
+.hero { display: grid; grid-template-columns: 1fr auto; gap: 32px; align-items: center; }
+.hero-text { display: grid; gap: 16px; min-width: 0; }
+.meta { display: flex; flex-wrap: wrap; gap: 8px 16px; color: var(--muted); font-size: 13px; align-items: center; }
+.pill { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; font-weight: 700; padding: 2px 10px; border-radius: 999px; white-space: nowrap; }
+.pill.hold { background: var(--hold-soft); color: var(--hold); border: 1px dashed var(--hold); }
+.pill.ok { background: var(--ok-soft); color: var(--ok); }
+.pill.q { background: var(--accent-soft); color: var(--accent); }
+.lead { font-size: 17px; }
+.frames { display: flex; gap: 10px; }
+.frame { width: 54px; aspect-ratio: 9 / 16; border-radius: 8px; border: 1.5px solid var(--ink); position: relative; background: var(--surface); }
+.frame:nth-child(2) { transform: translateY(-14px); border-color: var(--accent); }
+.frame:nth-child(3) { border-style: dashed; border-color: var(--muted); }
+.frame span { position: absolute; left: 6px; right: 6px; height: 4px; border-radius: 2px; background: var(--line); }
+.changes { border-left: 3px solid var(--accent); background: var(--surface); padding: 14px 18px; border-radius: 0 10px 10px 0; display: grid; gap: 6px; }
+.changes ul { margin: 0; padding-left: 1.1em; font-size: 14px; }
+
+/* cards */
+.card { background: var(--surface); border: 1px solid var(--line); border-radius: 12px; padding: 20px 22px; min-width: 0; }
+.grid2 { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; }
+.grid3 { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px; }
+
+/* hub diagram */
+.hub { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px; }
+.hub .db { grid-column: 1 / -1; border: 2px solid var(--accent); background: var(--accent-soft); border-radius: 12px; padding: 18px 22px; display: grid; gap: 8px; }
+.hub .db ul { margin: 0; padding-left: 1.1em; font-size: 14px; columns: 2; column-gap: 28px; }
+.hub .out { border: 1px solid var(--line); border-radius: 12px; padding: 16px 18px; background: var(--surface); display: grid; gap: 6px; align-content: start; position: relative; }
+.hub .out::before { content: "↑"; position: absolute; top: -22px; left: 50%; transform: translateX(-50%); color: var(--accent); font-family: var(--font-mono); }
+.hub .out p { font-size: 13.5px; }
+.shared { font-size: 13px; color: var(--accent); font-weight: 700; }
+
+/* tables */
+.tbl { overflow-x: auto; border: 1px solid var(--line); border-radius: 12px; background: var(--surface); }
+table { border-collapse: collapse; width: 100%; min-width: 600px; font-size: 14px; }
+th, td { text-align: left; padding: 11px 15px; border-bottom: 1px solid var(--line); vertical-align: top; }
+th { font-size: 12px; color: var(--muted); font-weight: 500; background: var(--bg); }
+tr:last-child td { border-bottom: 0; }
+td.k { font-weight: 700; white-space: nowrap; }
+.num { font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
+.yes { color: var(--ok); font-weight: 700; }
+.no { color: var(--muted); }
+
+/* entity cards */
+.entities { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; }
+.entity { display: grid; gap: 10px; align-content: start; }
+.entity header { display: flex; justify-content: space-between; align-items: baseline; gap: 10px; flex-wrap: wrap; }
+.entity .key { font-family: var(--font-mono); font-size: 12px; color: var(--accent); }
+.fields { display: flex; flex-wrap: wrap; gap: 6px; }
+.f { font-size: 12.5px; padding: 2px 9px; border-radius: 5px; background: var(--bg); border: 1px solid var(--line); }
+.f.new { border-color: var(--accent); color: var(--accent); background: var(--accent-soft); }
+.f.secret { border-style: dashed; color: var(--muted); }
+.src { font-size: 12.5px; color: var(--muted); }
+.legend { display: flex; flex-wrap: wrap; gap: 14px; font-size: 12.5px; color: var(--muted); align-items: center; }
+
+/* timeline */
+.timeline { display: grid; gap: 0; border: 1px solid var(--line); border-radius: 12px; overflow: hidden; background: var(--surface); }
+.seg { display: grid; grid-template-columns: 92px 120px 1fr; gap: 14px; padding: 12px 16px; border-bottom: 1px solid var(--line); align-items: start; }
+.seg:last-child { border-bottom: 0; }
+.seg .t { font-family: var(--font-mono); font-size: 12.5px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.seg .role { font-weight: 700; font-size: 13.5px; }
+.seg .body { display: grid; gap: 2px; font-size: 13.5px; min-width: 0; }
+.seg .body span { color: var(--muted); font-size: 12.5px; }
+.seg.hook { background: var(--accent-soft); }
+.tagline { display: flex; flex-wrap: wrap; gap: 6px; padding: 12px 16px; border-top: 1px solid var(--line); background: var(--bg); }
+.tag { font-size: 12.5px; padding: 2px 10px; border-radius: 999px; border: 1px solid var(--accent); color: var(--accent); background: var(--surface); }
+
+/* hold */
+.holdbox { border: 1.5px dashed var(--hold); background: var(--hold-soft); border-radius: 12px; padding: 18px 22px; display: grid; gap: 8px; }
+.holdbox p { font-size: 14px; }
+
+/* decisions */
+.decide { display: grid; gap: 12px; counter-reset: d; }
+.dq { display: grid; grid-template-columns: 34px 1fr; gap: 14px; background: var(--surface); border: 1px solid var(--line); border-radius: 12px; padding: 16px 18px; }
+.dq::before { counter-increment: d; content: counter(d); font-family: var(--font-mono); font-weight: 500; color: var(--accent); background: var(--accent-soft); border-radius: 8px; display: grid; place-items: center; height: 30px; }
+.dq .q { display: grid; gap: 6px; min-width: 0; }
+.dq .rec { font-size: 13.5px; }
+.dq .rec b { color: var(--ok); }
+
+.flow { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; }
+.step { background: var(--surface); border: 1px solid var(--line); border-radius: 10px; padding: 14px; display: grid; gap: 4px; align-content: start; }
+.step .label { color: var(--accent); }
+.step p { font-size: 13px; }
+
+table.cat { min-width: 860px; font-size: 13px; }
+table.cat td, table.cat th { padding: 8px 12px; }
+table.cat td:first-child { color: var(--muted); white-space: nowrap; }
+table.cat td:nth-child(2) { font-weight: 700; }
+table.cat td:nth-child(5), table.cat td:nth-child(7) { white-space: nowrap; }
+table.cat tr.grp td { background: var(--accent-soft); color: var(--accent); font-weight: 700; font-size: 12.5px; padding: 6px 12px; }
+table.wt { min-width: 640px; }
+table.wt td:not(:first-child), table.wt th:not(:first-child) { text-align: center; }
+table.wt td:not(:first-child) { color: var(--accent); letter-spacing: 0.1em; font-size: 12px; }
+table.wt th .note { font-size: 11px; font-weight: 400; }
+.refs { display: grid; gap: 6px; font-size: 14px; }
+.refs div { display: grid; grid-template-columns: 13em 1fr; gap: 12px; }
+footer { color: var(--muted); font-size: 12.5px; border-top: 1px solid var(--line); padding-top: 16px; display: grid; gap: 4px; }
+
+@media (max-width: 720px) {
+  .hero { grid-template-columns: 1fr; }
+  .frames { display: none; }
+  .grid2, .grid3, .hub, .entities, .flow { grid-template-columns: 1fr; }
+  .hub .db ul { columns: 1; }
+  .hub .out::before { display: none; }
+  .seg { grid-template-columns: 1fr; gap: 2px; }
+  .refs div { grid-template-columns: 1fr; gap: 0; }
+}
+</style>
+
+<main class="wrap">
+
+  <header class="hero">
+    <div class="hero-text">
+      <div class="meta">
+        <span class="pill hold">構想段階</span>
+        <span class="label">要件定義 v0.3</span>
+        <span>2026-10-29 · 小俣（壁打ち: Claude）</span>
+      </div>
+      <h1>構成×動画 相互検索サイト（仮称）</h1>
+      <p class="lead">データベースは1つにまとめ、使う人の考え方に合わせて見せ方（出口）を変える。v0.2 では、そのデータベースに何を入れ、構成をどんな形で持つかを決める。</p>
+      <div class="changes">
+        <span class="label">v0.3 の追加（2026-10-29）</span>
+        <ul>
+          <li>求めるアウトプットから逆算した<b>評価項目カタログ（57項目）</b>、<b>目的別の重み</b>、<b>点数の付け方と校正方法</b>を追加 → <a href="#scoring">評価と点数へ</a></li>
+          <li>楢原さん確定の<b>社内の制作基準10項目</b>を、入っていれば加点する要素としてカタログに組み込み。基準を Web 上で変えられる「基準の設定画面」の構想を追加。事業区分4つも楢原さん OK</li>
+          <li>外部の一般投稿（他人のアカウントのオーガニック投稿）も入れられる形に。評価で決めることは小俣さんが確定</li>
+          <li>公開サイトは newstv.co.jp のサブドメイン（connect と同じ形）、AWS は TeamAgent と同じ。サムネイルはカバー URL から S3 に保存し、動画ファイルも S3 に保存。見た目は内藤さんに判断を依頼</li>
+          <li>事業区分は増やせる一覧にし、PR は区分でなく「PR投稿の印」で持つ。タグの承認・チェックは小俣さん、公開は基本OK（出せない案件だけ非公開）、レポートは「03_レポート」フォルダに決定</li>
+          <li>社内資料7系統と外部の一次情報（TikTok・Google・Meta 公式、研究論文）をエージェントで調べ、出典を確かめたうえで採用</li>
+        </ul>
+      </div>
+      <div class="changes">
+        <span class="label">v0.2 の変更（v0.1 から）</span>
+        <ul>
+          <li>楢原さんの FB（「トレンドメディア寄りすぎる。全部の動画が入った箱がちゃんと機能していればいい」）を受け、<b>1つの DB と3つの出口</b>の形に変更</li>
+          <li>対象を、トレンドメディアの投稿だけから<b>メディア・TTO・切り抜きの全動画</b>に拡大</li>
+          <li>公開範囲は出口ごとに分ける（箱は社内、メディア風は公開）</li>
+          <li>構成タグの基準を FMT100 から<b>楢原さんの「勝ちクリエイティブ」分析</b>に変更（FMT100 は参考扱いのまま）</li>
+          <li>DB の中身・構成データの形・タグ辞書の案を追加</li>
+        </ul>
+      </div>
+    </div>
+    <div class="frames" aria-hidden="true">
+      <div class="frame"><span style="top:18%"></span><span style="top:26%;right:18px"></span></div>
+      <div class="frame"><span style="top:60%"></span><span style="top:68%;right:14px"></span></div>
+      <div class="frame"><span style="top:40%"></span></div>
+    </div>
+  </header>
+
+  <section>
+    <div class="sec-head"><h2>大前提：1つの DB、3つの出口</h2><span class="pill ok">決定</span></div>
+    <div class="hub">
+      <div class="db">
+        <span class="label">共通の DB</span>
+        <h3>全動画＋数値＋構成タグ＋案件レポート</h3>
+        <ul>
+          <li>メディア・TTO・切り抜きの全投稿</li>
+          <li>公開されている数値と広告の数値（分けて保持）</li>
+          <li>構成・フック・見せ方などのタグ</li>
+          <li>案件ごとのレポート（なぜ伸びたかの根拠）</li>
+        </ul>
+        <span class="shared">構成⇔動画の相互検索は DB 側の機能として作り、3つの出口すべてで同じ検索を使う</span>
+      </div>
+      <div class="out">
+        <span class="label">出口 1 · 社内</span>
+        <h3>箱（シンプルな一覧）</h3>
+        <p>全動画を、全項目つきで素早く探せる。見た目は最低限。楢原さんの「欲しい動画をすぐ拾えればいい」に応える。</p>
+      </div>
+      <div class="out">
+        <span class="label">出口 2 · 公開</span>
+        <h3>メディア風アーカイブ</h3>
+        <p>公開してよい動画と数値だけを、見栄えよく出す。カーソルで再生し、クリックで TikTok へ。内藤さんの「メディアっぽく」に応える。</p>
+      </div>
+      <div class="out">
+        <span class="label">出口 3 · Slack</span>
+        <h3>Aico</h3>
+        <p>「◯◯の事例」と聞くと DB から返す。いまの事例回答の延長で、新しく作る部分は少ない。</p>
+      </div>
+    </div>
+    <p class="note">営業がどう使うかは各自が決めるので、出口側で使い方を決め込まない。出口1は見た目にこだわらず、早く探せることだけを満たす。</p>
+  </section>
+
+  <section>
+    <div class="sec-head"><h2>出口ごとに見せる範囲</h2><span class="label">Visibility</span></div>
+    <div class="tbl">
+      <table>
+        <thead><tr><th>項目</th><th>出口1 箱（社内）</th><th>出口2 メディア風（公開）</th><th>出口3 Aico（社内）</th></tr></thead>
+        <tbody>
+          <tr><td class="k">対象の動画</td><td>全部</td><td>自社の動画は基本すべて（「非公開」の印が付いたものと外部の投稿を除く）</td><td>全部</td></tr>
+          <tr><td class="k">公開されている数値</td><td class="yes">表示</td><td class="yes">表示</td><td class="yes">表示</td></tr>
+          <tr><td class="k">広告の数値（費用・CTR・視聴率）</td><td class="yes">表示</td><td class="no">出さない</td><td class="yes">表示</td></tr>
+          <tr><td class="k">広告主名・案件名</td><td class="yes">表示</td><td>表示（非公開の案件を除く）</td><td class="yes">表示</td></tr>
+          <tr><td class="k">構成タグ</td><td class="yes">表示</td><td class="yes">表示</td><td class="yes">表示</td></tr>
+          <tr><td class="k">案件レポート</td><td class="yes">リンク</td><td class="no">出さない</td><td class="yes">要約して引用</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <section>
+    <div class="sec-head"><h2>DB の中身</h2><span class="label">Tables</span></div>
+    <div class="legend">
+      <span><span class="f">項目</span> いまのシートにある</span>
+      <span><span class="f new">項目</span> 新しく足す</span>
+      <span><span class="f secret">項目</span> 社内だけ</span>
+    </div>
+    <div class="entities">
+      <article class="card entity">
+        <header><h3>① 動画</h3><span class="key">キー：媒体＋動画ID</span></header>
+        <p class="note">1投稿につき1行。すべての出口の中心。</p>
+        <div class="fields">
+          <span class="f">動画URL</span><span class="f">動画ID</span><span class="f">アカウント</span><span class="f">投稿日時</span><span class="f">尺</span><span class="f">BGM</span><span class="f">投稿文</span><span class="f new">ハッシュタグ（分解）</span><span class="f new">媒体（TikTok/IG/YT）</span><span class="f new">事業区分（メディア/TTO/切り抜き…増やせる）</span><span class="f new">PR投稿の印</span><span class="f new">サムネイル（カバーURL→S3保存）</span><span class="f new">動画ファイル（S3保存・社内用）</span><span class="f new">非公開フラグ</span>
+        </div>
+        <span class="src">元：データベースタブ・全体Raw（尺・BGM・投稿日時はこちら）</span>
+      </article>
+      <article class="card entity">
+        <header><h3>② 数値</h3><span class="key">キー：動画＋取得日</span></header>
+        <p class="note">取得日ごとに残し、伸び方の推移を追えるようにする。</p>
+        <div class="fields">
+          <span class="f">再生</span><span class="f">いいね</span><span class="f">シェア</span><span class="f">コメント</span><span class="f">保存</span><span class="f">オーガニック再生など</span><span class="f new">取得日</span><span class="f new">保存率・ENG率（計算）</span><span class="f secret">広告費</span><span class="f secret">インプレッション</span><span class="f secret">CTR</span><span class="f secret">2秒/6秒/完了視聴率</span><span class="f secret">リーチ</span>
+        </div>
+        <span class="src">元：データベースタブ・広告Raw。広告ぶんとオーガニックは分けて持つ</span>
+      </article>
+      <article class="card entity">
+        <header><h3>③ 案件</h3><span class="key">キー：広告主＋案件名</span></header>
+        <p class="note">動画をまとめる単位。業種や目的もここに持つ。</p>
+        <div class="fields">
+          <span class="f">広告主名</span><span class="f">案件名</span><span class="f new">事業区分</span><span class="f new">業種</span><span class="f new">目的（認知/理解/購買）</span><span class="f new">実施期間</span><span class="f new">施策管理シートURL</span><span class="f new">非公開フラグ</span>
+        </div>
+        <span class="src">元：データベースタブ（45社・54案件、9/15時点）・投稿URLタブ</span>
+      </article>
+      <article class="card entity">
+        <header><h3>④ アカウント</h3><span class="key">キー：媒体＋ハンドル</span></header>
+        <p class="note">誰の場で出したか。メディアか、クリエイターか、クライアントか。</p>
+        <div class="fields">
+          <span class="f">ハンドル</span><span class="f">表示名</span><span class="f">フォロワー推移</span><span class="f">運用担当</span><span class="f new">運営主体（VCL/クリエイター/クライアント）</span><span class="f new">ジャンル</span>
+        </div>
+        <span class="src">元：アカウント台帳（ベクトルメディア 約113件）</span>
+      </article>
+      <article class="card entity">
+        <header><h3>⑤ 構成の分析結果</h3><span class="key">キー：動画＋分析版</span></header>
+        <p class="note">ローカル分析の結果。フレーム画像そのものは入れず、読み取った中身だけを入れる。</p>
+        <div class="fields">
+          <span class="f new">秒ごとの区間（下の見本）</span><span class="f new">文字起こし</span><span class="f new">テロップ</span><span class="f new">構成タグ</span><span class="f new">分析版・使ったモデル</span><span class="f new">確認状態（未確認/確認済/差し戻し）</span>
+        </div>
+        <span class="src">元：新規（ローカル分析）。既存の分析スキルの「フレーム・文字起こし・テロップ」の出力を流用</span>
+      </article>
+      <article class="card entity">
+        <header><h3>⑥ タグ辞書</h3><span class="key">キー：分類＋タグ名＋版</span></header>
+        <p class="note">付けてよいタグの一覧と定義。ここに無いタグは付けない（表記ゆれを防ぐ）。</p>
+        <div class="fields">
+          <span class="f new">分類</span><span class="f new">タグ名</span><span class="f new">定義</span><span class="f new">良い例・悪い例</span><span class="f new">版</span>
+        </div>
+        <span class="src">元：楢原さんの「勝ちクリエイティブ」分析を v1 の土台にする（下に案）</span>
+      </article>
+      <article class="card entity">
+        <header><h3>⑦ 案件レポート</h3><span class="key">キー：案件＋レポート</span></header>
+        <p class="note">「なぜ伸びたか」の根拠。Aico がここから引用する。</p>
+        <div class="fields">
+          <span class="f new">レポートURL（03_レポート）</span><span class="f new">要約</span><span class="f new">勝ち・負けの所見</span><span class="f new">格納日</span>
+        </div>
+        <span class="src">元：各案件のレポート（楢原さんのメモ：「読み込ませられるだけ読み込む」「格納のアナウンス」）</span>
+      </article>
+      <article class="card entity">
+        <header><h3>⑧ 取込の記録</h3><span class="key">キー：実行日時</span></header>
+        <p class="note">いつ・何件入って・何件失敗したか。取れなかった動画を「0件」と区別する。</p>
+        <div class="fields">
+          <span class="f new">実行日時</span><span class="f new">取込件数</span><span class="f new">失敗件数と理由</span><span class="f">審査落ちで削除した動画</span>
+        </div>
+        <span class="src">元：_処理キュー・「Apifyで取れなかったやつ」タブの役割を引き継ぐ</span>
+      </article>
+    </div>
+  </section>
+
+  <section>
+    <div class="sec-head"><h2>構成データの形（見本）</h2><span class="label">Format</span></div>
+    <p>1本の動画を秒ごとの区間に分け、区間ごとに「役割・テロップ・発話・映像」を持たせる。タグはこの区間から付ける。区間が残っていれば、タグの基準が変わっても付け直せる。</p>
+    <div class="timeline" aria-label="構成データの見本">
+      <div class="seg hook"><span class="t">0.0–1.8s</span><span class="role">冒頭（フック）</span><div class="body">「その日焼け止め、塗り直してる？」<span>テロップ大・顔のアップ・問いかけの発話</span></div></div>
+      <div class="seg"><span class="t">1.8–6.0s</span><span class="role">悩みの提示</span><div class="body">メイクの上から塗り直せない悩み<span>生活者の原体験・手元の映像</span></div></div>
+      <div class="seg"><span class="t">6.0–14.5s</span><span class="role">本編（実演）</span><div class="body">メイクの上からスプレーして崩れないか比べる<span>実演・比較カット</span></div></div>
+      <div class="seg"><span class="t">14.5–19.0s</span><span class="role">商品の提示</span><div class="body">商品名と価格を表示<span>価格の明示</span></div></div>
+      <div class="seg"><span class="t">19.0–22.0s</span><span class="role">締め</span><div class="body">「保存して試してみて」<span>保存を促す</span></div></div>
+      <div class="tagline">
+        <span class="tag">冒頭：問い型</span><span class="tag">見せ方：実演</span><span class="tag">見せ方：比較</span><span class="tag">切り口：価格明示</span><span class="tag">悩み：メイク崩れ</span><span class="tag">目的：購買</span>
+      </div>
+    </div>
+    <p class="note">内容は形を説明するための架空の見本で、実在の動画ではありません。</p>
+  </section>
+
+  <section>
+    <div class="sec-head"><h2>タグ辞書 v1（案）</h2><span class="label">Taxonomy</span></div>
+    <p>楢原さんが案件レポート約11件から出した「伸びた／伸びなかった」の傾向を、そのまま分類にしたもの。広告名にある「ドラマ風」「街録風」のような形式名も、形式の分類として取り込む。</p>
+    <div class="tbl">
+      <table>
+        <thead><tr><th>分類</th><th>タグ（v1 案）</th><th>出どころ</th></tr></thead>
+        <tbody>
+          <tr><td class="k">冒頭の型</td><td>問い型（なぜ？・知ってた？）／数字・価格型／人物・原体験型</td><td>楢原さん：冒頭テンプレート3型</td></tr>
+          <tr><td class="k">冒頭の注意</td><td>企業名・キャンペーン名始まり／抽象スローガン始まり／ほめ言葉始まり</td><td>楢原さん：伸び悩んだ冒頭</td></tr>
+          <tr><td class="k">本編の見せ方</td><td>実演／実食／体験談／生声／原体験／比較／説明・スペック／権威訴求</td><td>楢原さん：本編の見せ方</td></tr>
+          <tr><td class="k">題材・切り口</td><td>問題提起／意外な比較／価格・数値の明示／人間ドラマ化／社内目線</td><td>楢原さん：題材・切り口</td></tr>
+          <tr><td class="k">形式</td><td>ドラマ風／街録風／ほか（実データから追加）</td><td>広告Raw の広告名</td></tr>
+          <tr><td class="k">悩み</td><td>自由記述で付け、似たものを後でまとめて辞書化する</td><td>新規</td></tr>
+          <tr><td class="k">目的</td><td>認知／理解／購買</td><td>新規</td></tr>
+          <tr><td class="k">業種</td><td>食品／飲料／化粧品／日用品／旅行／金融／BtoB ほか</td><td>新規（案件に付ける）</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <section>
+    <div class="sec-head"><h2>データの流れ</h2><span class="label">Pipeline</span></div>
+    <div class="flow">
+      <div class="step"><span class="label">1 · 入力</span><h3>シートは今のまま</h3><p>担当者はいまのスプレッドシートに書き続ける。運用は変えない。</p></div>
+      <div class="step"><span class="label">2 · 同期</span><h3>毎日 DB へ</h3><p>シートの内容を毎日 DB に取り込み、数値は取得日ごとに積む。</p></div>
+      <div class="step"><span class="label">3 · 分析</span><h3>ローカルで構成を読む</h3><p>新しい動画だけを分析し、結果（区間とタグ）を DB に入れる。</p></div>
+      <div class="step"><span class="label">4 · 確認</span><h3>人がタグを確かめる</h3><p>確認済みのタグだけを出口に出す。公開可の印もここで付ける。</p></div>
+    </div>
+  </section>
+
+  <section id="scoring">
+    <div class="sec-head"><h2>評価と点数の考え方</h2><span class="label">Scoring</span></div>
+    <p>動画を細かい項目に分け、目的ごとに重みを変えて点数にする。<b>「測った事実」「判定」「点数」の3段に分けて持つ</b>のが要点。事実を残しておけば、判定基準や重みを変えても、動画を分析し直さずに点数を付け直せる。</p>
+    <div class="grid3">
+      <div class="card decision"><span class="k">1段目 · 事実</span><span class="v">測った値をそのまま</span><p class="note">例：主題を出したのが 0.8 秒、テロップが 1 秒あたり 7 文字、商品が映った合計が 4.2 秒。良し悪しは書かない。</p></div>
+      <div class="card decision"><span class="k">2段目 · 判定</span><span class="v">基準に当てて ◎○△</span><p class="note">例：主題が 1 秒以内なので ◎。基準はタグ辞書と同じように版を付けて管理し、変えたら付け直す。</p></div>
+      <div class="card decision"><span class="k">3段目 · 点数</span><span class="v">目的別の重みで 0〜100</span><p class="note">同じ動画でも「保存を伸ばしたい」と「購買につなげたい」では点数が変わる。</p></div>
+    </div>
+  </section>
+
+  <section>
+    <div class="sec-head"><h2>評価項目カタログ（57項目）</h2><span class="label">Items</span></div>
+    <div class="legend">
+      <span>測り方：<b>自動</b>＝機械で測る／<b>AI</b>＝AI が動画を読んで判定／<b>人</b>＝人が判定</span>
+      <span>根拠：<b>社内</b>＝社内の資料・実績／<b>公式</b>＝媒体の公式推奨／<b>委託</b>＝媒体が委託した調査／<b>研究</b>＝論文／<b>穴</b>＝根拠なし、記録して自社データで確かめる</span>
+    </div>
+    <div class="tbl">
+      <table class="cat">
+        <thead><tr><th>要素</th><th>項目</th><th>記録する事実</th><th>初期の判定基準</th><th>測り方</th><th>効く成果</th><th>根拠</th></tr></thead>
+        <tbody>
+          <tr class="grp"><td colspan="7">キャプション・ハッシュタグ</td></tr>
+          <tr><td>キャプション</td><td>主題語の位置</td><td>1行目にあるか、初出の位置</td><td>1行目にあれば ◎</td><td>自動</td><td>検索</td><td>社内・公式</td></tr>
+          <tr><td>キャプション</td><td>中身との一致</td><td>一致／補完／乖離</td><td>乖離は △</td><td>AI</td><td>検索</td><td>社内</td></tr>
+          <tr><td>キャプション</td><td>文字数</td><td>字数</td><td>判定しない</td><td>自動</td><td>未検証</td><td>穴</td></tr>
+          <tr><td>ハッシュタグ</td><td>本数と種類</td><td>本数、関連タグか汎用タグか</td><td>関連タグ 3〜5 個で ◎、汎用のみ △</td><td>自動＋AI</td><td>検索</td><td>社内（二次情報）</td></tr>
+          <tr><td>ハッシュタグ</td><td>キーワードを含むか</td><td>有無</td><td>あれば ○</td><td>自動</td><td>検索</td><td>社内</td></tr>
+          <tr class="grp"><td colspan="7">サムネイル・1フレーム目</td></tr>
+          <tr><td>サムネ</td><td>主題が判別できるか</td><td>0／1／2（音なし・文字なしでも分かるか）</td><td>2 で ◎</td><td>AI</td><td>再生・想起</td><td>公式</td></tr>
+          <tr><td>サムネ</td><td>文字の作り</td><td>文字の有無・大きさ・2行以内・キーワード・数字</td><td>3つそろえば ◎</td><td>AI</td><td>検索一覧のタップ</td><td>社内</td></tr>
+          <tr><td>サムネ</td><td>顔・寄り・シズル</td><td>各有無</td><td>業種別に決める</td><td>AI</td><td>再生</td><td>社内（仮説）</td></tr>
+          <tr><td>サムネ</td><td>色と明るさ</td><td>明度・彩度・色温度</td><td>判定しない（業種別に実績との関係を見る）</td><td>自動</td><td>再生</td><td>社内（仮説）</td></tr>
+          <tr class="grp"><td colspan="7">冒頭 0〜3 秒</td></tr>
+          <tr><td>冒頭</td><td>主題を出した秒</td><td>秒</td><td>1秒以内 ◎、3秒以内 ○、それ以降 △</td><td>AI</td><td>再生・完了・想起</td><td>社内・公式</td></tr>
+          <tr><td>冒頭</td><td>冒頭の型</td><td>問い／数字・価格／人物・原体験／驚き／その他</td><td>最初の3型のどれかで ◎</td><td>AI</td><td>再生</td><td>社内・委託</td></tr>
+          <tr><td>冒頭</td><td>避ける入り方</td><td>企業名・キャンペーン名／スローガン／ほめ言葉</td><td>当てはまれば減点</td><td>AI</td><td>早期離脱</td><td>社内</td></tr>
+          <tr><td>冒頭</td><td>冒頭のテロップ</td><td>有無、最初のテロップの秒</td><td>0〜3秒にあり、最初が1秒以内で ◎</td><td>AI</td><td>冒頭の維持</td><td>社内</td></tr>
+          <tr><td>冒頭</td><td>冒頭の音・声</td><td>有無</td><td>あれば ○</td><td>自動</td><td>完了</td><td>公式</td></tr>
+          <tr><td>冒頭</td><td>冒頭のカット数</td><td>0〜3秒のカット数</td><td>5〜8カットで ◎（社内基準①）</td><td>自動</td><td>完了</td><td>社内基準・公式</td></tr>
+          <tr class="grp"><td colspan="7">テロップ</td></tr>
+          <tr><td>テロップ</td><td>文字の密度</td><td>1秒あたりの文字数</td><td>記録して自社データで基準を決める（公式は英語で1秒5〜10語）</td><td>AI</td><td>完了</td><td>公式</td></tr>
+          <tr><td>テロップ</td><td>位置</td><td>上・中・下、セーフティ枠からはみ出すか</td><td>枠内に収まっていれば ◎（社内基準⑤）</td><td>AI</td><td>完了</td><td>社内基準・公式</td></tr>
+          <tr><td>テロップ</td><td>キーワードの初出</td><td>秒（テロップか発話）</td><td>3秒以内 ◎、10秒以内 ○</td><td>AI</td><td>検索</td><td>社内</td></tr>
+          <tr><td>テロップ</td><td>3層の一致</td><td>テロップ・キャプション・映像の一致度 0〜100</td><td>80以上 ◎、60以上 ○</td><td>AI</td><td>検索</td><td>社内</td></tr>
+          <tr class="grp"><td colspan="7">音声・BGM</td></tr>
+          <tr><td>音声</td><td>声の種類</td><td>本人の声／機械音声／音楽のみ</td><td>判定しない</td><td>AI</td><td>—</td><td>社内</td></tr>
+          <tr><td>音声</td><td>生声・体験談</td><td>有無</td><td>あれば ○</td><td>AI</td><td>反応</td><td>社内</td></tr>
+          <tr><td>音声</td><td>カメラ目線の語りかけ</td><td>全体に占める割合</td><td>記録して確かめる</td><td>AI</td><td>いいね・コメント・シェア</td><td>研究</td></tr>
+          <tr><td>音声</td><td>発話のキーワード</td><td>冒頭3秒に言っているか</td><td>あれば ◎</td><td>自動</td><td>検索</td><td>社内</td></tr>
+          <tr><td>BGM</td><td>音源の種類</td><td>オリジナル／トレンド音源／なし</td><td>判定しない</td><td>自動</td><td>未検証</td><td>穴</td></tr>
+          <tr><td>BGM</td><td>音楽とナレーションの併用</td><td>有無</td><td>記録して確かめる</td><td>自動</td><td>想起</td><td>委託</td></tr>
+          <tr><td>音声</td><td>音量の優先順位</td><td>ナレーション・SE・BGM の音量の大小</td><td>ナレーション＞SE＞BGM の順なら ◎（社内基準⑥）</td><td>自動</td><td>完了</td><td>社内基準</td></tr>
+          <tr><td>音声</td><td>著名人の声</td><td>著名人の音声の使用・模倣があるか</td><td>なければ ○。あれば「注意」の印を付ける（社内基準⑦）</td><td>AI＋人</td><td>リスク</td><td>社内基準</td></tr>
+          <tr><td>音声</td><td>企業名・商品名の読み</td><td>案件で決めた読みと一致するか</td><td>一致していれば ○（社内基準⑧）</td><td>AI</td><td>リスク</td><td>社内基準</td></tr>
+          <tr><td>BGM</td><td>音源・素材の権利</td><td>商用利用できる音源・素材・SE か</td><td>商用利用できるものだけなら ○。できないものがあれば「注意」の印（社内基準⑨）</td><td>人</td><td>リスク</td><td>社内基準</td></tr>
+          <tr class="grp"><td colspan="7">構成・本編</td></tr>
+          <tr><td>構成</td><td>区間の並び</td><td>フック／悩み／証拠／結果／CTA などの順番</td><td>判定しない（並びの型を後で抽出）</td><td>AI</td><td>—</td><td>社内</td></tr>
+          <tr><td>構成</td><td>本編の見せ方</td><td>実演／実食／体験談／生声／原体験／比較／説明／権威</td><td>実物を見せる系があれば ◎、説明・権威だけなら △</td><td>AI</td><td>再生・反応</td><td>社内</td></tr>
+          <tr><td>構成</td><td>証拠の種類</td><td>数値／比較・検証／第三者／権威</td><td>判定しない</td><td>AI</td><td>—</td><td>社内</td></tr>
+          <tr><td>構成</td><td>情報の組み立て</td><td>手順・リスト型／1メッセージ型</td><td>判定しない</td><td>AI</td><td>保存（仮説）</td><td>社内</td></tr>
+          <tr><td>構成</td><td>題材・切り口</td><td>問題提起／意外な比較／価格明示／社内目線</td><td>社内目線は △</td><td>AI</td><td>再生・保存</td><td>社内</td></tr>
+          <tr><td>構成</td><td>形式</td><td>ドラマ風／街録風／ほか</td><td>判定しない</td><td>人＋AI</td><td>—</td><td>社内</td></tr>
+          <tr><td>構成</td><td>同じ案件内での構成の重複</td><td>同じ案件の他の動画と構成（区間の並び）が同じか</td><td>重複がなければ ○（社内基準④）</td><td>自動</td><td>—</td><td>社内基準</td></tr>
+          <tr><td>構成</td><td>冒頭の約束の回収</td><td>冒頭の問いに最後で答えているか</td><td>あれば ○</td><td>AI</td><td>反応</td><td>社内</td></tr>
+          <tr class="grp"><td colspan="7">出演者</td></tr>
+          <tr><td>出演者</td><td>誰が出ているか</td><td>社員／生活者／クリエイター／タレント／なし</td><td>本物の人なら ○</td><td>AI</td><td>再生・反応</td><td>社内・公式</td></tr>
+          <tr><td>出演者</td><td>顔の割合</td><td>ほぼ全編／半分／少し／なし</td><td>判定しない</td><td>AI</td><td>—</td><td>社内</td></tr>
+          <tr><td>出演者</td><td>作り込み度</td><td>ローファイ〜作り込み</td><td>記録して確かめる</td><td>AI</td><td>行動</td><td>委託</td></tr>
+          <tr class="grp"><td colspan="7">商品の見せ方</td></tr>
+          <tr><td>商品</td><td>初めて映る秒</td><td>秒</td><td>目的で変える（購買なら5秒以内で ◎）</td><td>AI</td><td>購買・想起</td><td>委託・社内</td></tr>
+          <tr><td>商品</td><td>映る時間と目立ち方</td><td>合計秒、主役／目立つ／脇役</td><td>3秒以上かつ目立つなら ◎</td><td>AI</td><td>想起</td><td>社内</td></tr>
+          <tr><td>商品</td><td>使う場面で見せるか</td><td>有無</td><td>あれば ○</td><td>AI</td><td>購買</td><td>委託（二次情報）</td></tr>
+          <tr><td>商品</td><td>度合いを見せるか</td><td>比較・断面など</td><td>あれば ○</td><td>AI</td><td>再生</td><td>社内</td></tr>
+          <tr><td>商品</td><td>価格の表示</td><td>有無と秒</td><td>あれば ○</td><td>AI</td><td>保存・購買</td><td>社内・公式</td></tr>
+          <tr class="grp"><td colspan="7">CTA</td></tr>
+          <tr><td>CTA</td><td>種類と秒</td><td>保存／フォロー／コメント／購入／リンク</td><td>目的で変える</td><td>AI</td><td>保存・行動</td><td>社内・公式</td></tr>
+          <tr><td>CTA</td><td>保存する理由</td><td>一覧・手順・価格・比較表のどれがあるか</td><td>2つ以上で ◎</td><td>AI</td><td>保存</td><td>社内</td></tr>
+          <tr class="grp"><td colspan="7">尺・テンポ</td></tr>
+          <tr><td>尺</td><td>尺</td><td>秒</td><td>判定しない（完了率を尺で補正するのに使う）</td><td>自動</td><td>完了</td><td>研究</td></tr>
+          <tr><td>テンポ</td><td>平均カット秒</td><td>尺 ÷ カット数</td><td>3秒以下 ◎、6秒以下 ○</td><td>自動</td><td>完了</td><td>社内</td></tr>
+          <tr><td>テンポ</td><td>最長カット秒</td><td>いちばん長いカットの秒</td><td>TTO で 2 秒以内なら ◎（社内基準②）</td><td>自動</td><td>完了</td><td>社内基準</td></tr>
+          <tr><td>テンポ</td><td>ループ設計</td><td>冒頭とラストがつながるか</td><td>つながっていれば ◎（社内基準③）</td><td>AI</td><td>再視聴・完了</td><td>社内基準</td></tr>
+          <tr><td>テンポ</td><td>素材の重複率</td><td>同じ素材が動画内で使われている割合</td><td>25% 未満なら ◎（社内基準⑩）</td><td>自動</td><td>完了</td><td>社内基準</td></tr>
+          <tr class="grp"><td colspan="7">投稿の条件（点数には入れず、比べるときの条件として使う）</td></tr>
+          <tr><td>投稿</td><td>投稿日時・曜日</td><td>日時</td><td>判定しない</td><td>自動</td><td>未検証</td><td>穴</td></tr>
+          <tr><td>投稿</td><td>広告配信の有無と比率</td><td>オーガニック／広告の内訳</td><td>判定しない</td><td>自動</td><td>—</td><td>社内</td></tr>
+          <tr><td>投稿</td><td>投稿時のフォロワー数</td><td>数</td><td>判定しない</td><td>自動</td><td>—</td><td>公式</td></tr>
+          <tr><td>投稿</td><td>事業区分・業種</td><td>メディア／TTO／切り抜き、業種</td><td>判定しない</td><td>人</td><td>—</td><td>—</td></tr>
+          <tr><td>投稿</td><td>表現の規制</td><td>薬機法などに当たるか</td><td>当たれば要確認</td><td>人</td><td>リスク</td><td>社内</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p class="note">「判定しない」「記録して確かめる」の項目は、まず事実だけを貯め、自社データで成果との関係が見えたら判定基準を足す。</p>
+  </section>
+
+  <section>
+    <div class="sec-head"><h2>社内の制作基準（加点要素）</h2><span class="pill ok">楢原さん確定 10/29</span></div>
+    <p>合否ではなく、<b>入っていれば良い（加点する）要素</b>として扱う。下の10個はカタログの項目に組み込み済み。著名人の声（⑦）と素材の権利（⑨）は権利上のリスクなので、点数とは別に「注意」の印も出す。基準は時期によって変わる前提なので、下の「基準の設定画面」から変えられるようにする。</p>
+    <div class="tbl">
+      <table>
+        <thead><tr><th>#</th><th>基準</th><th>カタログでの項目</th><th>測り方</th></tr></thead>
+        <tbody>
+          <tr><td class="k">①</td><td>3秒で 5〜8 カット</td><td>冒頭のカット数</td><td>自動</td></tr>
+          <tr><td class="k">②</td><td>1カット 2 秒以内（TTO）</td><td>最長カット秒</td><td>自動</td></tr>
+          <tr><td class="k">③</td><td>冒頭とラストのループ設計</td><td>ループ設計</td><td>AI</td></tr>
+          <tr><td class="k">④</td><td>同じ案件の中で構成を重複させない</td><td>同じ案件内での構成の重複</td><td>自動（区間の並びを比べる）</td></tr>
+          <tr><td class="k">⑤</td><td>テロップはセーフティ枠内</td><td>テロップの位置</td><td>AI</td></tr>
+          <tr><td class="k">⑥</td><td>音量の優先順位：ナレーション＞SE＞BGM</td><td>音量の優先順位</td><td>自動</td></tr>
+          <tr><td class="k">⑦</td><td>著名人の音声の使用・模倣は厳禁</td><td>著名人の声</td><td>AI＋人</td></tr>
+          <tr><td class="k">⑧</td><td>企業名・商品名の発音を事前に統一</td><td>企業名・商品名の読み</td><td>AI（案件ごとに正しい読みを登録）</td></tr>
+          <tr><td class="k">⑨</td><td>商用利用できる音源・素材・SE だけを使う</td><td>音源・素材の権利</td><td>人</td></tr>
+          <tr><td class="k">⑩</td><td>1本の中の素材の重複は 25% 未満</td><td>素材の重複率</td><td>自動</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p class="note">「冒頭2秒の維持60%」のような成果の目安（KPI）は、社内で確定したものは無い。成果の目安は DB の実績から作る。</p>
+  </section>
+
+  <section id="settings">
+    <div class="sec-head"><h2>基準の設定画面（構想）</h2><span class="label">Settings</span></div>
+    <p>判定の基準と重みは、時期によって変わる前提で作る。<b>基準をコードに書かず、DB に「設定」として持ち、社内の画面から変えられるようにする。</b>3段に分けて事実を残しているので、基準を変えても動画を分析し直さずに、その場で付け直せる。</p>
+    <div class="grid3">
+      <div class="card decision"><span class="k">変えられるもの</span><span class="v">基準・重み・項目の出し入れ</span><p class="note">例：「冒頭のカット数」の ◎ を 5〜8 から 4〜7 に変える／「保存」の目的で CTA の重みを上げる／新しい項目を足す・使わない項目を外す。</p></div>
+      <div class="card decision"><span class="k">書き方</span><span class="v">選ぶだけの形にする</span><p class="note">数値の範囲・あり／なし・選択肢、のどれかを選んで値を入れる形にする。自由な式やプログラムは書けないようにして、壊れにくくする。</p></div>
+      <div class="card decision"><span class="k">履歴</span><span class="v">版を残して比べられる</span><p class="note">変えるたびに版を上げ、いつ・誰が・何を変えたかを残す。旧基準と新基準で点数がどう変わるかを、反映前に見比べられるようにする。</p></div>
+    </div>
+    <p class="note">変更できるのは管理者（当面は小俣さん）だけ。基準の定義は社内の箱（出口①）の中に置き、公開サイトには出さない。</p>
+  </section>
+
+  <section>
+    <div class="sec-head"><h2>目的別の重み（初期の仮説）</h2><span class="label">Weights</span></div>
+    <p>同じ要素でも、効く成果は目的によって違う。下の重みは根拠から置いた<b>最初の仮説</b>で、自社データで確かめて直す前提。<span class="mono">●●●</span>＝重い、<span class="mono">●●</span>＝中、<span class="mono">●</span>＝軽い、空欄＝入れない。</p>
+    <div class="tbl">
+      <table class="wt">
+        <thead><tr><th>要素</th><th>再生<br><span class="note">届く</span></th><th>完了<br><span class="note">見られる</span></th><th>保存</th><th>反応<br><span class="note">いいね等</span></th><th>検索</th><th>想起</th><th>購買</th></tr></thead>
+        <tbody>
+          <tr><td class="k">キャプション</td><td>●</td><td></td><td></td><td></td><td>●●●</td><td></td><td></td></tr>
+          <tr><td class="k">ハッシュタグ</td><td></td><td></td><td></td><td></td><td>●●</td><td></td><td></td></tr>
+          <tr><td class="k">サムネ</td><td>●●</td><td></td><td></td><td></td><td>●●●</td><td>●</td><td></td></tr>
+          <tr><td class="k">冒頭</td><td>●●●</td><td>●●●</td><td>●</td><td>●●</td><td>●●</td><td>●●●</td><td>●●</td></tr>
+          <tr><td class="k">テロップ</td><td></td><td>●●</td><td>●</td><td></td><td>●●●</td><td>●●</td><td></td></tr>
+          <tr><td class="k">音声</td><td></td><td>●●</td><td></td><td>●●</td><td>●●</td><td>●</td><td></td></tr>
+          <tr><td class="k">BGM</td><td></td><td></td><td></td><td></td><td></td><td>●</td><td></td></tr>
+          <tr><td class="k">構成・本編</td><td>●●</td><td>●●</td><td>●●</td><td>●●●</td><td></td><td>●</td><td>●●</td></tr>
+          <tr><td class="k">出演者</td><td>●●</td><td></td><td></td><td>●●</td><td></td><td></td><td>●</td></tr>
+          <tr><td class="k">商品の見せ方</td><td></td><td></td><td>●</td><td></td><td></td><td>●●●</td><td>●●●</td></tr>
+          <tr><td class="k">CTA</td><td></td><td></td><td>●●●</td><td>●</td><td></td><td></td><td>●●</td></tr>
+          <tr><td class="k">尺・テンポ</td><td>●</td><td>●●●</td><td></td><td></td><td></td><td></td><td></td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p class="note">保存の列は外部に根拠が見つからず、社内の仮説だけで置いている。購買・想起の列は Meta×Toluna の調査（広告約100本、ドイツ・英国・イタリア・トルコ）が主な根拠で、日本のオーガニック投稿にそのまま当てはまるとは限らない。</p>
+    <div class="card" style="display:grid;gap:8px">
+      <span class="label">点数の計算（案）</span>
+      <p>① 項目の判定を ◎＝2・○＝1・△＝0 にし、「避ける入り方」のような減点項目は当てはまれば −1。② 要素ごとに平均する。③ 目的の列の重み（●●●＝3・●●＝2・●＝1）で加重平均し、0〜100 にそろえる。</p>
+    </div>
+  </section>
+
+  <section>
+    <div class="sec-head"><h2>重みの直し方（校正）</h2><span class="label">Calibration</span></div>
+    <div class="flow">
+      <div class="step"><span class="label">1 · 判定の確認</span><h3>AI と人を比べる</h3><p>50本を人と AI の両方で判定し、項目ごとの一致率を見る。80% に届かない項目は基準を直す。</p></div>
+      <div class="step"><span class="label">2 · 群を比べる</span><h3>上位20%と残りを比べる</h3><p>目的ごとの成果（保存率など）で上位20%を取り、どの項目の出方が違うかを見る。</p></div>
+      <div class="step"><span class="label">3 · 条件をそろえる</span><h3>公平に比べる</h3><p>尺・フォロワー数・広告配信の有無・事業区分・業種が違うものどうしは直接比べない。</p></div>
+      <div class="step"><span class="label">4 · 重みを更新</span><h3>版を上げる</h3><p>差が大きい項目は重みを上げ、差が無い項目は下げる。四半期ごとに見直す。</p></div>
+    </div>
+  </section>
+
+  <section>
+    <div class="sec-head"><h2>外部の一般投稿も入れられるようにする</h2><span class="pill ok">決定</span></div>
+    <p>将来、ベクトルが関わっていない他人のアカウントのオーガニック投稿（「◯◯紹介」系など）を、構成を学ぶ材料として入れる可能性がある。最初から入れられる形にしておく。</p>
+    <div class="tbl">
+      <table>
+        <thead><tr><th>項目</th><th>自社が関わった動画</th><th>外部の一般投稿</th></tr></thead>
+        <tbody>
+          <tr><td class="k">出どころ（新しい項目）</td><td>メディア／TTO／切り抜き</td><td>外部（取得した日・取得の方法・検索語）</td></tr>
+          <tr><td class="k">数値</td><td>公開数値＋広告の数値</td><td>公開数値だけ。広告の数値や視聴率は「算出不可」</td></tr>
+          <tr><td class="k">構成の分析・評価</td><td>同じ評価項目</td><td>同じ評価項目（比べられるように揃える）</td></tr>
+          <tr><td class="k">出す出口</td><td>箱・Aico・（公開可なら）メディア風</td><td>箱・Aico だけ。メディア風（公開）には出さない</td></tr>
+          <tr><td class="k">校正での扱い</td><td>主な母集団</td><td>比較用の母集団として別に集計する（混ぜると広告の有無で差が出る）</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <section>
+    <div class="sec-head"><h2>評価で決めること</h2><span class="pill ok">10/29 決定</span></div>
+    <p class="note">10/29 に小俣さんが確定：評価が逆の4項目は推奨どおり目的別に分ける（評価の軸が複数あってよい）／成果の7分類で始める／指標の定義は下の推奨どおり（算出不可の扱い、オーガニックと広告の分離を含む）。</p>
+    <p>社内資料どうしで、同じ項目の評価が逆になっているものが4つある。点数を付ける前に、どちらを正とするかを決める必要がある。</p>
+    <div class="tbl">
+      <table>
+        <thead><tr><th>項目</th><th>食い違い</th><th>推奨（目的で評価を変える）</th></tr></thead>
+        <tbody>
+          <tr><td class="k">保存を促す CTA</td><td>楢原さんの分析では「前面に出ると課題」、検索面チェックでは加点</td><td>保存の目的では加点、再生・反応の目的では点に入れない。前面に出すぎ（冒頭から保存を促す等）は減点</td></tr>
+          <tr><td class="k">権威訴求</td><td>楢原さんの分析では最弱、別のスキルでは「証拠あり」として加点</td><td>権威だけの動画は △。実演などと組み合わせた場合は点に入れない</td></tr>
+          <tr><td class="k">煽り・ほめ言葉</td><td>楢原さんの分析では冒頭の「一択」「神」は負け、別のスキルではフックありとして数える</td><td>冒頭のほめ言葉は減点、「実は」のような断定の問いかけはフックとして数える。2つを別のタグに分ける</td></tr>
+          <tr><td class="k">商品を出す早さ</td><td>楢原さんの分析では企業名始まりが NG、外部調査では購買目的なら5秒以内が有利</td><td>「企業名・ロゴから入る」と「商品が早く映る」を別の項目にする。前者は減点、後者は購買の目的でだけ加点</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <div class="decide">
+      <div class="dq"><div class="q"><h3>目的の一覧</h3><p>再生・完了・保存・反応・検索・想起・購買の7つで良いか。</p><p class="rec"><b>推奨：</b>この7つで始める。案件ごとに、どの目的で見るかを選べるようにする。</p></div></div>
+      <div class="dq"><div class="q"><h3>指標の定義の統一</h3><p>いまは資料ごとに式や最低ラインが違う。</p><p class="rec"><b>推奨：</b>保存率＝保存÷再生（%）、ENG率＝（いいね＋保存＋コメント＋シェア）÷再生。値が欠けていれば 0 にせず「算出不可」。再生 5,000 未満は参考値。オーガニックと広告は分ける。完了率は広告データの「再生完了数÷動画視聴数」に限る。</p></div></div>
+      <div class="dq"><div class="q"><h3>点数を見せる範囲</h3><p>点数をどの出口に出すか。</p><p class="rec"><b>推奨：</b>社内の出口（箱・Aico）だけに出す。公開のメディア風には出さない。</p></div></div>
+    </div>
+  </section>
+
+  <section>
+    <div class="sec-head"><h2>動画分析</h2><span class="pill hold">構想として保留</span></div>
+    <div class="holdbox">
+      <p>ローカル PC で、1秒あたり約15フレームで分析する構想。API で全本数をやると高額になる見込みのため、ローカル前提。<b>現時点では実行しない。</b>上の「構成データの形」は、分析を始めるときの受け皿として先に決めておくもの。</p>
+    </div>
+  </section>
+
+  <section>
+    <div class="sec-head"><h2>小俣さんが決めること</h2><span class="pill q">要判断</span></div>
+    <div class="decide">
+      <div class="dq"><div class="q"><h3>事業区分の定義</h3><span class="pill ok">10/29 決定</span><p>メディア／TTO／切り抜き／その他で始め、<b>区分は後から増やせる</b>ようにする（タグ辞書と同じく一覧表で管理）。PR 投稿は区分として分けず、それぞれの区分の中に入れる。PR だけを見たいときのために、<b>「PR投稿か」の印（あり／なし）</b>を別に持って絞り込めるようにする（広告主名が入っている＝案件の PR 投稿、または投稿文に #PR があれば付ける。広告配信の有無は PR とは別に数値側に残す）。</p></div></div>
+      <div class="dq"><div class="q"><h3>DB の正本をどこに置くか</h3><p>担当者が書くのはいまのスプレッドシートのままにするか、DB 側の入力画面に移すか。</p><p class="rec"><b>推奨：</b>当面はシートを入力元にし、DB は毎日同期する。運用を変えずに始められる。</p></div></div>
+      <div class="dq"><div class="q"><h3>タグ辞書 v1 の決定者</h3><span class="pill ok">10/29 決定</span><p>辞書の承認とタグの正誤チェックは<b>小俣さんが担当</b>。楢原さんの分析を土台にする。</p></div></div>
+      <div class="dq"><div class="q"><h3>公開の判断ルール</h3><span class="pill ok">10/29 決定</span><p><b>基本は公開OK</b>。出せない案件にだけ「非公開」の印を付ける。広告の数値と外部の投稿は、これまでどおり公開しない。</p></div></div>
+      <div class="dq"><div class="q"><h3>案件レポートの格納場所</h3><span class="pill ok">10/29 決定</span><p><a href="https://drive.google.com/drive/folders/1cb9z8GRyP-I5Tq4_U2w_Yh-eX-jR5bD0">「03_レポート」フォルダ</a>（ショート動画資料全般の下）。10/29 時点で約93ファイル（PPTX 44・PDF 43・画像 4・Excel 2、同じレポートの PDF と PPTX の重複を含む）。ファイル名が「レポート_会社名_案件名_…」の形なので、案件に結びつけられる。このフォルダは Aico の取り込み範囲にすでに入っている。</p></div></div>
+      <div class="dq"><div class="q"><h3>対象の媒体と期間</h3><p>TikTok だけで始めるか、Instagram・YouTube も最初から入れるか。いつ以降の投稿を対象にするか。</p><p class="rec"><b>推奨：</b>TikTok だけで始める。ただし媒体の項目は最初から持たせ、後から足せるようにする。</p></div></div>
+    </div>
+  </section>
+
+  <section>
+    <div class="sec-head"><h2>いまのデータの状態</h2><span class="label">As is</span></div>
+    <div class="tbl">
+      <table>
+        <thead><tr><th>データ</th><th>状態（2026-10-29 確認）</th></tr></thead>
+        <tbody>
+          <tr><td class="k">データベースタブ</td><td>約 <span class="num">3,400</span> 行（シートの範囲から。9/15 時点の集計では約 <span class="num">2,600</span> 本）。40列</td></tr>
+          <tr><td class="k">全体Raw</td><td>約 <span class="num">2,850</span> 行。尺・BGM・投稿日時・アイコン画像を持つ（データベースタブには無い）</td></tr>
+          <tr><td class="k">広告Raw</td><td>約 <span class="num">2,200</span> 行＋2026年9月以降ぶん 約 <span class="num">980</span> 行。広告名に「ドラマ風」「街録風」などの形式名が入っているものがある</td></tr>
+          <tr><td class="k">足りないもの</td><td>事業区分・業種・目的・サムネイル・構成タグ・公開可否の項目が無い</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <section>
+    <div class="sec-head"><h2>参照</h2><span class="label">Links</span></div>
+    <div class="refs">
+      <div><span>ショート動画データベース</span><a href="https://docs.google.com/spreadsheets/d/19Y_IRJxr1oPLqNwgpi9nHRkyMqZPuw13ZikN2gD6pWQ/">Google スプレッドシート</a></div>
+      <div><span>アカウント台帳</span><a href="https://docs.google.com/spreadsheets/d/1Zv-RsxkjwET8OrAMpxVPmfTHLpDPxyni7_HutEGeEwk/">Google スプレッドシート</a></div>
+      <div><span>楢原さんの分析</span><span>「NewsTVショート動画_傾向と基盤の方向性_案.docx」（Slack 共有、2026-10-28）</span></div>
+      <div><span>TikTok 公式ベストプラクティス</span><a href="https://ads.tiktok.com/help/article/creative-best-practices?lang=en">ads.tiktok.com（2025年6月更新）</a></div>
+      <div><span>Meta×Toluna 調査</span><a href="https://tolunacorporate.com/what-makes-short-form-video-ads-work-meta-toluna-study/">tolunacorporate.com（2026年5月）</a></div>
+      <div><span>TikTok Creative Codes</span><a href="https://ads.tiktok.com/business/library/Creative_Codes_May_2023.pdf">ads.tiktok.com（2023年5月・やや古い）</a></div>
+      <div><span>Google ABCD（Shorts）</span><a href="https://services.google.com/fh/files/misc/formarketingshortsabcdsonesheeters.pdf">services.google.com</a></div>
+      <div><span>NewsTV（見た目の参考）</span><a href="https://news-tv.jp/">news-tv.jp</a></div>
+      <div><span>FMT100（内容の参考のみ）</span><a href="https://snazzy-florentine-ed4667.netlify.app/">snazzy-florentine-ed4667.netlify.app</a></div>
+    </div>
+  </section>
+
+  <footer>
+    <span>出どころ：内藤さん・楢原さんとの Slack DM（2026-10-28〜29）と、その後の壁打ち。</span>
+    <span>未確認：埋め込みプレイヤーでのカーソル再生の挙動と、埋め込み再生が TikTok の再生数に入るか。楢原さん共有の Drive フォルダ（Yaaha の参考クリエイティブ）の中身。</span>
+  </footer>
+</main>

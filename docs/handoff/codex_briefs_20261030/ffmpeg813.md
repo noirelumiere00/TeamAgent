@@ -1,0 +1,8 @@
+あなたは teamagent リポジトリの開発者。作業場所はこの worktree（origin/dev 起点・branch fix/media-ffmpeg-813-20261030）。日本語で報告する。
+事態: 本番便の発射前検査が止めた。「pin ffmpeg=8.1.2-r3 が Alpine 上流にもベース同梱にも無い（上流: 8.1.3-r0, 9.0.2-r0）」。lock の ffmpeg 副パッケージは 8.1.3-r0 の行がある。9.x へは上げない（メジャー更新）。
+やること（先例どおり）:
+1. infra/docker/Dockerfile.teamagent-media-worker の FFMPEG_PACKAGE_VERSION（2 か所）を 8.1.3-r0、FFMPEG_VERSION を 8.1.3 にし、FFMPEG_BINARY_SHA256 を新しい版の実物から求める（Alpine の公式 CDN（edge/community か v3.24/community・aarch64）から ffmpeg-8.1.3-r0.apk を取り、中の /usr/bin/ffmpeg の sha256 を計算。署名の確認ができれば行う）。infra/docker/media-apk.lock・テスト定数（tests/infra/test_dockerfile_teamagent_media_worker.py ほか）・release 契約を追随。
+   先例: commit 53368c2d（10/26 の週末の追随・ffmpeg 8.1.2-r3）と、#736（nodejs r0→r1）。手順の自動化は ~/Documents/Claude/Artifacts/aico-inputs-20260911/apkwatch/apply_apklock.sh に書かれている（読むだけ・AWS を使う手順は実行しない）。
+2. 世代の再導出: ~/Documents/Claude/Artifacts/aico-inputs-20260911/node-20261029-run（derive.py・validate_artifacts.py）と s25dur-20261029-run を写して ~/Documents/Claude/Artifacts/aico-inputs-20260911/ffmpeg813-20261030-run を作り、同じ方法で contract・activation_freeze・buildspec_generation_inputs・supply_chain_adoptions・adopt.tf・凍結テストを更新する。最後に `LC_ALL=C PYTHONPATH=src uv run --no-sync python infra/deploy/verify_generation_inputs.py --manifest infra/deploy/buildspec_generation_inputs.json --repo-root .` が fresh になること（未コミットの差分を見ない検査なら、その旨を報告）。run dir には republish_after_bump_1022.sh が読む成果物を先例と同じ形で残す。
+3. `uv run --extra dev --extra mcp --extra media pytest -q -n auto tests/infra tests/codebuild tests/scripts tests/skills/first_visit` と ruff を通す。
+禁止: AWS への書き込み・CodeBuild の起動・S3 への公開、git commit・push、.env・secrets・~/.aws の読み取り。最後に変更ファイル・新 SHA・世代の新しい値・テスト結果・残る懸念を短くまとめる。
