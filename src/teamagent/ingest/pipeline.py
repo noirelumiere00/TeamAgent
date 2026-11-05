@@ -1332,6 +1332,7 @@ def _embed_page_chunks(
                         chunk_idx=offset + batch_idx,
                         content=content,
                         embedding=embedding,
+                        page_num=page_num,
                         metadata={"page_num": page_num},
                     )
                 )
@@ -1346,6 +1347,7 @@ def _embed_page_chunks(
                 chunk_idx=idx,
                 content=text,
                 embedding=embedder.embed_passage(text),
+                page_num=page_num,
                 metadata={"page_num": page_num},
             )
         )

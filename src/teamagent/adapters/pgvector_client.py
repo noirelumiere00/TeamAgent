@@ -111,6 +111,19 @@ def _industry_metadata(row: dict[str, Any]) -> dict[str, Any]:
     return {key: row[key] for key in _INDUSTRY_METADATA_KEYS if row.get(key)}
 
 
+def _chunk_page_num(row: dict[str, Any]) -> int | None:
+    value = row.get("page_num")
+    if value is None:
+        value = row.get("metadata_page_num")
+    if not isinstance(value, (int, str)) or not re.fullmatch(r"[+-]?[0-9]+", str(value).strip()):
+        return None
+    try:
+        page_num = int(value)
+        return page_num if page_num >= 1 else None
+    except ValueError:
+        return None
+
+
 def _case_state_columns() -> str:
     if not any(
         s.strip() for s in os.environ.get("CASE_STATE_EVIDENCE_ALLOWED_EMAILS", "").split(",")
@@ -480,6 +493,14 @@ class PgVectorClient:
             for col in extras:
                 if col in r and col not in meta:
                     meta[col] = r.get(col)
+            if "page_num" in extras or "page_num" in meta:
+                page_num = _chunk_page_num(
+                    {"page_num": r.get("page_num"), "metadata_page_num": meta.get("page_num")}
+                )
+                if page_num is None:
+                    meta.pop("page_num", None)
+                else:
+                    meta["page_num"] = page_num
             hits.append(
                 SearchHit(
                     chunk_id=int(r["chunk_id"]),
@@ -807,6 +828,7 @@ class PgVectorClient:
                 COALESCE(c.contextualized, c.content) AS content{_timeline_columns()},
                 1 - (c.{embedding_col} <=> %s::vector) AS score,
                 c.page_num,
+                c.metadata->>'page_num' AS metadata_page_num,
                 d.id AS document_id,
                 d.source_uri,
                 d.source_type::text AS source_type,
@@ -857,8 +879,8 @@ class PgVectorClient:
             # 同一資料を畳めるようにする。UUID は str 化して JSON 親和にする。
             if r.get("document_id") is not None:
                 meta["document_id"] = str(r["document_id"])
-            if r.get("page_num") is not None:
-                meta["page_num"] = r["page_num"]
+            if (page_num := _chunk_page_num(r)) is not None:
+                meta["page_num"] = page_num
             # Day 8: 営業 FB metadata (Phase 2 Drive 自動マッチング用)
             if r.get("is_sales_fb") == "true":
                 meta["is_sales_fb"] = True
@@ -1315,6 +1337,7 @@ class PgVectorClient:
                 abs(hashtext(c.id::text)::bigint) AS chunk_id,
                 COALESCE(c.contextualized, c.content) AS content{_timeline_columns()},
                 c.page_num,
+                c.metadata->>'page_num' AS metadata_page_num,
                 d.source_uri,
                 d.source_type::text AS source_type,
                 d.title{_industry_columns()},
@@ -1346,8 +1369,8 @@ class PgVectorClient:
                 "channel_name": r.get("channel_name"),
                 "is_sales_fb": True,
             }
-            if r.get("page_num") is not None:
-                meta["page_num"] = r["page_num"]
+            if (page_num := _chunk_page_num(r)) is not None:
+                meta["page_num"] = page_num
             for k in ("client_name", "deal_phase", "bant_score", "channel_type"):
                 if r.get(k):
                     meta[k] = r[k]
@@ -1827,6 +1850,7 @@ class PgVectorClient:
                 abs(hashtext(c.id::text)::bigint) AS chunk_id,
                 COALESCE(c.contextualized, c.content) AS content{_timeline_columns()},
                 c.page_num,
+                c.metadata->>'page_num' AS metadata_page_num,
                 d.source_uri,
                 d.source_type::text AS source_type,
                 d.title{_industry_columns()},
@@ -1859,8 +1883,8 @@ class PgVectorClient:
                 "title": r.get("title"),
                 "is_related_drive": True,  # SearchSkill / Slack Block Kit でこの flag を見て分類
             }
-            if r.get("page_num") is not None:
-                meta["page_num"] = r["page_num"]
+            if (page_num := _chunk_page_num(r)) is not None:
+                meta["page_num"] = page_num
             for key in ("client_name", "cls_project"):
                 if r.get(key):
                     meta[key] = r[key]
@@ -1944,6 +1968,7 @@ class PgVectorClient:
                 {content} AS content{_timeline_columns()},
                 1 - (c.{embedding_col} <=> %s::vector) AS score,
                 c.page_num,
+                c.metadata->>'page_num' AS metadata_page_num,
                 d.source_uri,
                 d.source_type::text AS source_type,
                 d.title,
@@ -1973,8 +1998,8 @@ class PgVectorClient:
                     "title": r.get("title"),
                 }
             )
-            if r.get("page_num") is not None:
-                meta["page_num"] = r["page_num"]
+            if (page_num := _chunk_page_num(r)) is not None:
+                meta["page_num"] = page_num
             if r.get("updated_at"):
                 meta["updated_at"] = str(r["updated_at"])
                 meta["date_basis"] = "modified_at"
