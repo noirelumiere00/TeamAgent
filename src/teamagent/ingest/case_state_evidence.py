@@ -10,6 +10,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+import structlog
 import yaml
 
 from teamagent.case_state import (
@@ -29,6 +30,7 @@ __all__ = [
     "attach",
     "configured",
     "enabled",
+    "has_review",
     "input_version",
     "message_reports",
     "source_ref",
@@ -41,6 +43,7 @@ KEY = "case_state_evidence"
 VERSION_KEY = "case_state_evidence_input_version"
 _MANIFEST = Path("data/case_state_reviews.yaml")
 JST = timezone(timedelta(hours=9))
+logger = structlog.get_logger(__name__)
 
 
 def _manifest_bytes() -> bytes:
@@ -48,8 +51,10 @@ def _manifest_bytes() -> bytes:
 
 
 def input_version() -> str:
-    """metadata 更新用の判定版と人手確認入力。OFF 時はファイルも読まない。"""
-    return "1:" + hashlib.sha256(_manifest_bytes()).hexdigest() if configured() else ""
+    """metadata 更新用の判定版。確認記録があれば owner の公開設定に依存しない。"""
+    if not configured() and not _reviews():
+        return ""
+    return "1:" + hashlib.sha256(_manifest_bytes()).hexdigest()
 
 
 def _day(value: Any) -> str | None:
@@ -138,14 +143,77 @@ def message_reports(channel_id: str, external_id: str, messages: list[Any]) -> l
     return records
 
 
+def _reviews() -> list[tuple[str, StateRecord]]:
+    try:
+        data = _manifest_bytes()
+    except FileNotFoundError:
+        if not configured():
+            return []
+        raise
+    manifest = yaml.safe_load(data)
+    if not isinstance(manifest, dict) or set(manifest) != {"version", "reviews"}:
+        raise ValueError("invalid case state manifest")
+    if (
+        type(manifest["version"]) is not int
+        or manifest["version"] != 1
+        or not isinstance(manifest["reviews"], list)
+    ):
+        raise ValueError("unsupported case state manifest")
+    reviews = []
+    for entry in manifest["reviews"]:
+        if not isinstance(entry, dict) or set(entry) != {"subject_ref", "record"}:
+            raise ValueError("invalid case state review")
+        record = StateRecord.model_validate(entry["record"])
+        if (
+            record.authority != "official"
+            or not isinstance(entry["subject_ref"], str)
+            or not entry["subject_ref"].strip()
+            or entry["subject_ref"] != entry["subject_ref"].strip()
+        ):
+            raise ValueError("review must explicitly verify an official state and subject")
+        reviews.append((entry["subject_ref"], record))
+    return reviews
+
+
+def has_review(source_type: str, external_id: str) -> bool:
+    """人手確認のある資料だけ owner の許可を迂回する。"""
+    return any(
+        (record.source_ref.source_type, record.source_ref.external_id) == (source_type, external_id)
+        for _, record in _reviews()
+    )
+
+
+def source_positions(ref: SourceRef, chunks: list[ChunkUpsert]) -> dict[str, str]:
+    """確認表の locator と CLI の引用候補に同じ位置キーを使う。"""
+    positions = {ref.locator: "\n".join(c.content for c in chunks)}
+    for chunk in chunks:
+        positions[f"chunk:{chunk.chunk_idx}"] = chunk.content
+        if chunk.page_num is not None:
+            key = f"page:{chunk.page_num}"
+            positions[key] = positions.get(key, "") + chunk.content
+    return positions
+
+
 def attach(doc: DocumentUpsert, chunks: list[ChunkUpsert]) -> DocumentUpsert:
-    if not enabled(doc.owner_email):
+    reviews = [
+        (subject, record)
+        for subject, record in _reviews()
+        if (record.source_ref.source_type, record.source_ref.external_id)
+        == (doc.source_type, doc.external_id)
+    ]
+    owner_allowed = enabled(doc.owner_email)
+    if not owner_allowed and not reviews:
         return doc
     ref = source_ref(doc, chunks)
     meta = doc.metadata
-    records = [StateRecord.model_validate(r) for r in meta.get("case_state_reports", [])]
+    records = (
+        [StateRecord.model_validate(r) for r in meta.get("case_state_reports", [])]
+        if owner_allowed
+        else []
+    )
     if (
-        doc.source_type == "gsheets"
+        owner_allowed
+        and doc.source_type == "gsheets"
         and not records
         and meta.get("is_sales_fb")
         and meta.get("deal_phase")
@@ -162,7 +230,7 @@ def attach(doc: DocumentUpsert, chunks: list[ChunkUpsert]) -> DocumentUpsert:
             )
         )
     observation = None
-    if meta.get("campaign_aggregate") in (True, "true"):
+    if owner_allowed and meta.get("campaign_aggregate") in (True, "true"):
         try:
             count = int(str(meta.get("video_count") or "0"))
         except ValueError:
@@ -178,50 +246,25 @@ def attach(doc: DocumentUpsert, chunks: list[ChunkUpsert]) -> DocumentUpsert:
                 },
             )
     subject = f"source:{ref.source_type}:{ref.external_id}:{ref.locator}"
-    manifest = yaml.safe_load(_manifest_bytes())
-    if not isinstance(manifest, dict) or set(manifest) != {"version", "reviews"}:
-        raise ValueError("invalid case state manifest")
-    if (
-        type(manifest["version"]) is not int
-        or manifest["version"] != 1
-        or not isinstance(manifest["reviews"], list)
-    ):
-        raise ValueError("unsupported case state manifest")
-    positions = {ref.locator: "\n".join(c.content for c in chunks)}
-    for chunk in chunks:
-        positions[f"chunk:{chunk.chunk_idx}"] = chunk.content
-        if chunk.page_num is not None:
-            key = f"page:{chunk.page_num}"
-            positions[key] = positions.get(key, "") + chunk.content
-    matched_subjects = set()
-    for entry in manifest["reviews"]:
-        if not isinstance(entry, dict) or set(entry) != {"subject_ref", "record"}:
-            raise ValueError("invalid case state review")
-        record = StateRecord.model_validate(entry["record"])
-        if (
-            record.authority != "official"
-            or not isinstance(entry["subject_ref"], str)
-            or not entry["subject_ref"].strip()
-            or entry["subject_ref"] != entry["subject_ref"].strip()
-        ):
-            raise ValueError("review must explicitly verify an official state and subject")
-        if (record.source_ref.source_type, record.source_ref.external_id) != (
-            ref.source_type,
-            ref.external_id,
-        ):
-            continue
-        if (
-            record.source_ref.content_sha256 != ref.content_sha256
-            or record.source_ref.url != ref.url
-            or record.source_ref.locator not in positions
-            or record.source_ref.excerpt not in positions[record.source_ref.locator]
-        ):
-            raise ValueError("case state review source revision/position mismatch")
-        subject = entry["subject_ref"]
-        matched_subjects.add(subject)
-        records.append(record)
+    positions = source_positions(ref, chunks)
+    matched_subjects = {subject for subject, _ in reviews}
     if len(matched_subjects) > 1:
         raise ValueError("one source cannot verify multiple subjects")
+    mismatch = any(
+        record.source_ref.content_sha256 != ref.content_sha256
+        or record.source_ref.url != ref.url
+        or record.source_ref.locator not in positions
+        or record.source_ref.excerpt not in positions[record.source_ref.locator]
+        for _, record in reviews
+    )
+    if mismatch:
+        logger.warning(
+            "case_state_review_mismatch",
+            external_id_ref=hashlib.sha256(doc.external_id.encode("utf-8")).hexdigest()[:12],
+        )
+    elif reviews:
+        subject = reviews[0][0]
+        records.extend(record for _, record in reviews)
     bundle = CaseStateEvidence(
         subject_ref=subject,
         source_ref=ref,

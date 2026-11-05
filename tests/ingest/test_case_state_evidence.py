@@ -150,8 +150,16 @@ def test_review_rejects_changed_source_revision(manifest: Path, change: str) -> 
         doc = replace(doc, metadata={"row_idx": 3})
     else:
         doc = replace(doc, modified_at="2026-10-02T00:00:00Z")
-    with pytest.raises(ValueError, match="revision/position mismatch"):
-        evidence.attach(doc, body)
+    from structlog.testing import capture_logs
+
+    with capture_logs() as logs:
+        attached = evidence.attach(doc, body)
+    assert attached.metadata[evidence.KEY]["records"] == []
+    assert len(logs) == 1
+    assert logs[0]["event"] == "case_state_review_mismatch"
+    assert logs[0]["log_level"] == "warning"
+    assert set(logs[0]) == {"event", "log_level", "external_id_ref"}
+    assert doc.external_id not in json.dumps(logs)
 
 
 def test_review_never_matches_another_source_by_name(manifest: Path) -> None:
@@ -179,8 +187,16 @@ def test_review_binds_the_actual_quote_and_page(manifest: Path) -> None:
     assert saved["source_ref"]["locator"] == "page:3"
     review["record"]["source_ref"]["locator"] = "page:4"
     manifest.write_text(json.dumps({"version": 1, "reviews": [review]}))
-    with pytest.raises(ValueError, match="revision/position mismatch"):
-        evidence.attach(doc, body)
+    from structlog.testing import capture_logs
+
+    with capture_logs() as logs:
+        attached = evidence.attach(doc, body)
+    assert attached.metadata[evidence.KEY]["records"] == []
+    assert len(logs) == 1
+    assert logs[0]["event"] == "case_state_review_mismatch"
+    assert logs[0]["log_level"] == "warning"
+    assert set(logs[0]) == {"event", "log_level", "external_id_ref"}
+    assert doc.external_id not in json.dumps(logs)
 
 
 @pytest.mark.parametrize(
@@ -401,3 +417,124 @@ def test_offline_diff_does_not_print_source_text(
     change = json.loads(output)[0]
     assert change["changed"] is True and change["state"] == "unknown"
     assert "private-text" not in output and "example.test" not in output
+
+
+@pytest.mark.parametrize("source_type", ["gdrive", "gsheets", "slack"])
+@pytest.mark.parametrize("allowed", ["", "other@example.test"])
+def test_official_review_bypasses_owner_but_reports_do_not(
+    manifest: Path, monkeypatch: pytest.MonkeyPatch, source_type: str, allowed: str
+) -> None:
+    monkeypatch.setenv("CASE_STATE_EVIDENCE_ALLOWED_EMAILS", allowed)
+    doc = replace(
+        document(is_sales_fb=True, deal_phase="受注", campaign_aggregate=True, video_count=3),
+        source_type=source_type,
+    )
+    body = chunks()
+    manifest.write_text(json.dumps({"version": 1, "reviews": [official_review(doc, body)]}))
+    bundle = evidence.attach(doc, body).metadata[evidence.KEY]
+    assert [r["authority"] for r in bundle["records"]] == ["official"]
+    assert bundle["delivery_observation"] is None
+    other = replace(doc, external_id="unreviewed")
+    assert evidence.attach(other, body) is other
+    other = replace(doc, source_type="another_source")
+    assert evidence.attach(other, body) is other
+
+
+@pytest.mark.parametrize("reviewed", [True, False])
+@pytest.mark.parametrize("mismatch", [True, False])
+@pytest.mark.parametrize("allowed", ["", "other@example.test"])
+def test_official_metadata_refresh_bypasses_owner_only_for_reviewed_source(
+    manifest: Path, monkeypatch: pytest.MonkeyPatch, reviewed: bool, mismatch: bool, allowed: str
+) -> None:
+    from structlog.testing import capture_logs
+
+    from tests.ingest.test_ingest_differential import _FakeDifferentialRepository
+
+    monkeypatch.setenv("CASE_STATE_EVIDENCE_ALLOWED_EMAILS", allowed)
+    doc, body = document(is_sales_fb=True, deal_phase="受注"), chunks()
+    review = official_review(doc, body)
+    manifest.write_text(json.dumps({"version": 1, "reviews": [review] if reviewed else []}))
+    repo = _FakeDifferentialRepository()
+    repo.documents[(doc.source_type, doc.external_id)] = {"content_sha256": "unchanged"}
+    with capture_logs() as logs:
+        updated = repo.refresh_case_state_evidence(
+            doc,
+            chunks("changed") if mismatch else body,
+            expected_content_hash="unchanged",
+            request_id="r",
+        )
+    assert updated is reviewed
+    stored = repo.documents[(doc.source_type, doc.external_id)]
+    if reviewed:
+        assert [r["authority"] for r in stored[evidence.KEY]["records"]] == (
+            [] if mismatch else ["official"]
+        )
+    else:
+        assert evidence.KEY not in stored
+    assert any(log["event"] == "case_state_review_mismatch" for log in logs) is (
+        reviewed and mismatch
+    )
+
+
+def test_case_state_md5_skip_only_disabled_for_reviewed_file(
+    manifest: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from unittest.mock import MagicMock
+
+    from teamagent.ingest.pipeline import _should_skip_unchanged_gdrive_file
+
+    monkeypatch.setenv("USE_UNCHANGED_SKIP", "true")
+    doc = replace(document(), source_type="gdrive")
+    manifest.write_text(json.dumps({"version": 1, "reviews": [official_review(doc, chunks())]}))
+    repo = MagicMock()
+    repo.get_document_checksum.return_value = "unchanged"
+    f = SimpleNamespace(id=doc.external_id, md5_checksum="unchanged")
+    assert not _should_skip_unchanged_gdrive_file(repo, f, request_id="r")
+    repo.get_document_checksum.assert_not_called()
+    f.id = "unreviewed"
+    assert _should_skip_unchanged_gdrive_file(repo, f, request_id="r")
+
+
+@pytest.mark.parametrize("source", ["slack", "gsheets"])
+def test_pipeline_official_refresh_and_mismatch_continue_for_unallowed_owner(
+    manifest: Path, monkeypatch: pytest.MonkeyPatch, source: str
+) -> None:
+    from structlog.testing import capture_logs
+
+    from tests.ingest.test_ingest_differential import (
+        _CountingEmbedder,
+        _FakeDifferentialRepository,
+        _install_gsheet_rows,
+        _install_slack_channel,
+        _run_gsheet,
+        _run_slack,
+    )
+
+    monkeypatch.setenv("CASE_STATE_EVIDENCE_ALLOWED_EMAILS", "other@example.test")
+    monkeypatch.setenv("INGEST_DIFFERENTIAL", "1")
+    monkeypatch.setenv("USE_DOC_CLASSIFY", "0")
+    monkeypatch.setenv("USE_CONTEXTUAL_INGEST", "0")
+    if source == "slack":
+        _install_slack_channel(monkeypatch, text="提案だけの本文")
+        run = _run_slack
+    else:
+        _install_gsheet_rows(monkeypatch, (("直販", "受注", "A"),))
+        run = _run_gsheet
+    repo = _FakeDifferentialRepository()
+    embedder = _CountingEmbedder()
+    assert run(repo, embedder=embedder) == (1, 1)
+    saved = repo.upsert_calls[-1]
+    doc = DocumentUpsert(**{k: v for k, v in saved.items() if k != "chunk_texts"})
+    review = official_review(doc, chunks(saved["chunk_texts"][0]))
+    manifest.write_text(json.dumps({"version": 1, "reviews": [review]}))
+    assert run(repo, embedder=embedder) == (0, 0)
+    stored = repo.documents[(source, doc.external_id)]
+    assert [r["authority"] for r in stored[evidence.KEY]["records"]] == ["official"]
+    review["record"]["source_ref"]["content_sha256"] = "0" * 64
+    manifest.write_text(json.dumps({"version": 1, "reviews": [review]}))
+    with capture_logs() as logs:
+        assert run(repo, embedder=embedder) == (0, 0)
+    assert stored[evidence.KEY]["records"] == []
+    assert any(log["event"] == "case_state_review_mismatch" for log in logs)
+    assert embedder.calls == 1
+    assert len(repo.upsert_calls) == 1

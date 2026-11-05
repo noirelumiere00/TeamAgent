@@ -175,6 +175,23 @@ class DriveFile:
     md5_checksum: str | None = None  # binary file の Drive advertised MD5
 
 
+def drive_file_from_metadata(f: dict[str, Any]) -> DriveFile:
+    """list/get のレスポンスを同じ取込入力へ正規化する。"""
+    return DriveFile(
+        id=str(f.get("id", "")),
+        name=str(f.get("name", "")),
+        mime_type=str(f.get("mimeType", "")),
+        modified_time=f.get("modifiedTime"),
+        size=int(f["size"]) if f.get("size") else None,
+        md5_checksum=str(f["md5Checksum"]).lower() if f.get("md5Checksum") else None,
+        parents=tuple(f.get("parents", ()) or ()),
+        web_view_link=f.get("webViewLink"),
+        owners_email=tuple(
+            o.get("emailAddress") for o in (f.get("owners") or []) if o.get("emailAddress")
+        ),
+    )
+
+
 @dataclass(frozen=True)
 class DrivePermission:
     """Drive API permissions.list() 1 件分。
@@ -302,17 +319,22 @@ class GDriveClient:
     # -------------------------------------------------------
     # API 呼び出し
     # -------------------------------------------------------
-    def get_file_metadata(self, file_id: str, request_id: str) -> dict[str, Any]:
+    def get_file_metadata(
+        self, file_id: str, request_id: str, *, for_ingest: bool = False
+    ) -> dict[str, Any]:
         """本人 client から保存先の存在・閲覧可否を確認する。本文取得や認証の切替はしない。"""
         if not re.fullmatch(r"[A-Za-z0-9_-]+", file_id):
             raise ValueError("invalid Drive file ID")
+        fields = "id,name,mimeType,webViewLink,trashed,driveId,parents"
+        if for_ingest:
+            fields += ",modifiedTime,size,md5Checksum,owners(emailAddress)"
         response = (
             self._ensure_service()
             .files()
             .get(
                 fileId=file_id,
                 supportsAllDrives=True,
-                fields="id,name,mimeType,webViewLink,trashed,driveId,parents",
+                fields=fields,
             )
             .execute()
         )
@@ -379,22 +401,7 @@ class GDriveClient:
         )
 
         raw_files = resp.get("files", [])
-        files = [
-            DriveFile(
-                id=str(f.get("id", "")),
-                name=str(f.get("name", "")),
-                mime_type=str(f.get("mimeType", "")),
-                modified_time=f.get("modifiedTime"),
-                size=int(f["size"]) if f.get("size") else None,
-                md5_checksum=str(f["md5Checksum"]).lower() if f.get("md5Checksum") else None,
-                parents=tuple(f.get("parents", ()) or ()),
-                web_view_link=f.get("webViewLink"),
-                owners_email=tuple(
-                    o.get("emailAddress") for o in (f.get("owners") or []) if o.get("emailAddress")
-                ),
-            )
-            for f in raw_files
-        ]
+        files = [drive_file_from_metadata(f) for f in raw_files]
         next_token = resp.get("nextPageToken")
         logger.info(
             "gdrive_list_files",

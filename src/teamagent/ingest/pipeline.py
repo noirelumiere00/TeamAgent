@@ -844,8 +844,8 @@ def _should_skip_unchanged_gdrive_file(
     if not _envflag("USE_UNCHANGED_SKIP", "true"):
         return False
 
-    if case_state_evidence.configured():
-        # shortcut: 段階公開中は Drive の MD5 skip を止める。全社展開時に版照合へ移す。
+    if case_state_evidence.has_review("gdrive", f.id):
+        # 人手確認の追加・変更は Drive の MD5 が不変でも反映する。
         return False
 
     current_checksum = getattr(f, "md5_checksum", None)
@@ -915,7 +915,7 @@ def _known_invalid_office_reason(
 
 def _record_office_warning(
     *,
-    repository: IngestRepository,
+    repository: IngestRepository | None,
     f: Any,
     category: str,
     request_id: str,
@@ -1001,7 +1001,7 @@ def _validator_schema_for_drive_file(f: Any) -> str:
 
 def _record_source_retry(
     *,
-    repository: IngestRepository,
+    repository: IngestRepository | None,
     f: Any,
     source_kind: str,
     source_id: str,
@@ -1078,7 +1078,7 @@ def _record_source_retry(
 
 def _resolve_source_retry(
     *,
-    repository: IngestRepository,
+    repository: IngestRepository | None,
     f: Any,
     source_kind: str,
     source_id: str,
@@ -1303,7 +1303,7 @@ def _bounded_chunk_pages(pages: list[tuple[int, str]]) -> list[tuple[int, str]]:
 def _embed_page_chunks(
     page_chunks: list[tuple[int, str]],
     *,
-    embedder: _EmbedderProto,
+    embedder: _EmbedderProto | None,
     lease_heartbeat: Callable[[bool], None] | None = None,
 ) -> list[ChunkUpsert]:
     """embedding件数をhard capし、利用可能ならまとめて埋め込む。"""
@@ -1346,7 +1346,7 @@ def _embed_page_chunks(
             ChunkUpsert(
                 chunk_idx=idx,
                 content=text,
-                embedding=embedder.embed_passage(text),
+                embedding=embedder.embed_passage(text) if embedder is not None else [],
                 page_num=page_num,
                 metadata={"page_num": page_num},
             )
@@ -1860,7 +1860,9 @@ def _ingest_slack_channel(
                 ),
             )
             if stored_content_hashes.get(external_id) == content_hash:
-                if case_state_evidence.enabled(owner_email):
+                if case_state_evidence.enabled(owner_email) or case_state_evidence.has_review(
+                    "slack", external_id
+                ):
                     repository.refresh_case_state_evidence(
                         DocumentUpsert(
                             source_type="slack",
@@ -2763,6 +2765,735 @@ def _safe_record_job(
         )
 
 
+def _gdrive_source_metadata(
+    spec: GDriveFolderSpec | SharedDriveCrawlSpec, *, drive: Any = None
+) -> dict[str, Any]:
+    if isinstance(spec, GDriveFolderSpec):
+        return {
+            **spec.extra_metadata,
+            "drive_folder_id": spec.folder_id,
+            "drive_folder_name": spec.folder_name,
+        }
+    if drive is None:
+        raise ValueError("shared drive metadata is required")
+    return {
+        **spec.extra_metadata,
+        "shared_drive_id": drive.id,
+        "shared_drive_name": drive.name,
+        "via": "shared_drive_crawl",
+    }
+
+
+def _prepare_gdrive_file(
+    f: Any,
+    *,
+    client: Any,
+    source_metadata: dict[str, Any],
+    file_owner_email: str,
+    acl_emails: list[str],
+    acl_groups: list[str],
+    request_id: str,
+    embedder: _EmbedderProto | None = None,
+    repository: IngestRepository | None = None,
+    dry_run: bool = True,
+    skipped: list[str] | None = None,
+    classifier: DocClassifier | None = None,
+    contextualizer: ChunkContextualizer | None = None,
+    warning_collector: _IngestWarningCollector | None = None,
+    warning_source_kind: str = "gdrive",
+    warning_source_id: str = "gdrive",
+    durable_retry: bool = False,
+    durability_tracker: _DurabilityTracker | None = None,
+    lease_heartbeat: Callable[[bool], None] | None = None,
+    retry_lease_owner: str | None = None,
+    retry_lease_token: str | None = None,
+) -> tuple[DocumentUpsert, list[ChunkUpsert]] | None:
+    """通常取込と確認 CLI で、抽出・分割・根拠の入力 metadata を共有する。"""
+    from teamagent.adapters.gdrive_client import GDriveDownloadContentError
+    from teamagent.ingest.office_extract import (
+        GDOC_NATIVE_MIME,
+        OFFICE_BINARY_MIMES,
+        OfficePayloadError,
+        extract_office_pages,
+    )
+    from teamagent.ingest.pdf_extract import extract_pdf_pages
+
+    if skipped is None:
+        skipped = []
+    # INGEST_RICH_EXTRACT=1 のときだけ rich 抽出（gslide/gsheet/plain-text 本文化・抽出器の
+    # rich 引数）を有効化。OFF（既定）は現行と 1 バイトも挙動を変えない（後方互換）。
+    rich = _rich_extract_enabled()
+    # rich 引数は kwargs dict で渡す（OFF のときは空 dict ＝引数なし呼び出しと同じ）。
+    # 別 agent が extract_pdf_pages / extract_office_pages に同名・既定値=現行挙動で
+    # これらを実装する。OFF（既定）では空 dict なので両関数の現行シグネチャと完全互換。
+    pdf_kwargs: dict[str, Any] = {"min_chars": 40} if rich else {}
+    office_kwargs: dict[str, Any] = (
+        {
+            "include_notes": True,
+            "include_tables": True,
+            "formula_fallback": True,
+            "min_chars": 40,
+        }
+        if rich
+        else {}
+    )
+
+    # PDF / Office (docx/pptx/xlsx) / Google native gdoc は chunk 化、他は title のみ
+    chunks: list[ChunkUpsert] = []
+    if f.mime_type in _PDF_MIME_TYPES:
+        try:
+            data = client.download_file_bytes(file_id=f.id, request_id=request_id)
+        except Exception as exc:
+            _record_pdf_warning(
+                f=f,
+                category="pdf_download_failed",
+                request_id=request_id,
+                warning_collector=warning_collector,
+                warning_source_kind=warning_source_kind,
+                warning_source_id=warning_source_id,
+                event="gdrive_pdf_download_failed",
+                error_type=type(exc).__name__,
+            )
+            _record_source_retry(
+                repository=repository,
+                f=f,
+                source_kind=warning_source_kind,
+                source_id=warning_source_id,
+                reason="pdf_download_failed",
+                request_id=request_id,
+                dry_run=dry_run,
+                enabled=durable_retry,
+                durability_tracker=durability_tracker,
+                expected_lease_owner=retry_lease_owner,
+                expected_lease_token=retry_lease_token,
+            )
+            skipped.append(f.id)
+            return None
+        try:
+            pages = extract_pdf_pages(data, **pdf_kwargs)
+            page_chunks = _bounded_chunk_pages(pages)
+            if page_chunks:
+                chunks.extend(
+                    _embed_page_chunks(
+                        page_chunks,
+                        embedder=embedder,
+                        lease_heartbeat=lease_heartbeat,
+                    )
+                )
+        except _RetryLeaseLostError:
+            raise
+        except _IngestContentVolumeError:
+            _record_pdf_warning(
+                f=f,
+                category="pdf_content_too_large",
+                request_id=request_id,
+                warning_collector=warning_collector,
+                warning_source_kind=warning_source_kind,
+                warning_source_id=warning_source_id,
+                event="gdrive_pdf_content_too_large",
+            )
+            _record_source_retry(
+                repository=repository,
+                f=f,
+                source_kind=warning_source_kind,
+                source_id=warning_source_id,
+                reason="pdf_content_too_large",
+                request_id=request_id,
+                dry_run=dry_run,
+                enabled=durable_retry,
+                durability_tracker=durability_tracker,
+                expected_lease_owner=retry_lease_owner,
+                expected_lease_token=retry_lease_token,
+            )
+            skipped.append(f.id)
+            return None
+        except Exception as exc:
+            _record_pdf_warning(
+                f=f,
+                category="pdf_extract_failed",
+                request_id=request_id,
+                warning_collector=warning_collector,
+                warning_source_kind=warning_source_kind,
+                warning_source_id=warning_source_id,
+                event="gdrive_pdf_extract_failed",
+                error_type=type(exc).__name__,
+            )
+            _record_source_retry(
+                repository=repository,
+                f=f,
+                source_kind=warning_source_kind,
+                source_id=warning_source_id,
+                reason="pdf_extract_failed",
+                request_id=request_id,
+                dry_run=dry_run,
+                enabled=durable_retry,
+                durability_tracker=durability_tracker,
+                expected_lease_owner=retry_lease_owner,
+                expected_lease_token=retry_lease_token,
+            )
+            skipped.append(f.id)
+            return None
+        if not page_chunks:
+            _record_pdf_warning(
+                f=f,
+                category="pdf_empty_text",
+                request_id=request_id,
+                warning_collector=warning_collector,
+                warning_source_kind=warning_source_kind,
+                warning_source_id=warning_source_id,
+                event="gdrive_pdf_empty_text",
+            )
+            _record_source_retry(
+                repository=repository,
+                f=f,
+                source_kind=warning_source_kind,
+                source_id=warning_source_id,
+                reason="pdf_empty_text",
+                request_id=request_id,
+                dry_run=dry_run,
+                enabled=durable_retry,
+                durability_tracker=durability_tracker,
+                expected_lease_owner=retry_lease_owner,
+                expected_lease_token=retry_lease_token,
+            )
+            skipped.append(f.id)
+            return None
+    elif f.mime_type in OFFICE_BINARY_MIMES:
+        # docx / pptx / xlsx: download → extract → chunk_pages（PDF と同じ I/F）
+        try:
+            data = client.download_file_bytes(file_id=f.id, request_id=request_id)
+        except GDriveDownloadContentError as exc:
+            _record_office_warning(
+                repository=repository,
+                f=f,
+                category=exc.category,
+                request_id=request_id,
+                dry_run=dry_run,
+                warning_collector=warning_collector,
+                warning_source_kind=warning_source_kind,
+                warning_source_id=warning_source_id,
+                event="gdrive_office_payload_invalid",
+                actual_bytes=exc.actual_bytes,
+                expected_bytes=f.size,
+            )
+            _record_source_retry(
+                repository=repository,
+                f=f,
+                source_kind=warning_source_kind,
+                source_id=warning_source_id,
+                reason=exc.category,
+                request_id=request_id,
+                dry_run=dry_run,
+                enabled=durable_retry,
+                durability_tracker=durability_tracker,
+                expected_lease_owner=retry_lease_owner,
+                expected_lease_token=retry_lease_token,
+            )
+            skipped.append(f.id)
+            return None
+        except Exception as exc:
+            _record_office_warning(
+                repository=repository,
+                f=f,
+                category="office_download_failed",
+                request_id=request_id,
+                dry_run=dry_run,
+                warning_collector=warning_collector,
+                warning_source_kind=warning_source_kind,
+                warning_source_id=warning_source_id,
+                event="gdrive_office_download_failed",
+                actual_bytes=None,
+                expected_bytes=f.size,
+                error_type=type(exc).__name__,
+            )
+            _record_source_retry(
+                repository=repository,
+                f=f,
+                source_kind=warning_source_kind,
+                source_id=warning_source_id,
+                reason="office_download_failed",
+                request_id=request_id,
+                dry_run=dry_run,
+                enabled=durable_retry,
+                durability_tracker=durability_tracker,
+                expected_lease_owner=retry_lease_owner,
+                expected_lease_token=retry_lease_token,
+            )
+            skipped.append(f.id)
+            return None
+        try:
+            pages = extract_office_pages(
+                data,
+                mime_type=f.mime_type,
+                expected_size=f.size,
+                expected_md5=getattr(f, "md5_checksum", None),
+                progress_callback=(
+                    (lambda: lease_heartbeat(False)) if lease_heartbeat is not None else None
+                ),
+                **office_kwargs,
+            )
+            page_chunks = _bounded_chunk_pages(pages)
+            if page_chunks:
+                chunks.extend(
+                    _embed_page_chunks(
+                        page_chunks,
+                        embedder=embedder,
+                        lease_heartbeat=lease_heartbeat,
+                    )
+                )
+        except _RetryLeaseLostError:
+            raise
+        except _IngestContentVolumeError:
+            _record_office_warning(
+                repository=repository,
+                f=f,
+                category="unsafe_content_volume",
+                request_id=request_id,
+                dry_run=dry_run,
+                warning_collector=warning_collector,
+                warning_source_kind=warning_source_kind,
+                warning_source_id=warning_source_id,
+                event="gdrive_office_payload_invalid",
+                actual_bytes=len(data),
+                expected_bytes=f.size,
+            )
+            _resolve_source_retry(
+                repository=repository,
+                f=f,
+                source_kind=warning_source_kind,
+                source_id=warning_source_id,
+                request_id=request_id,
+                dry_run=dry_run,
+                expected_lease_owner=retry_lease_owner,
+                expected_lease_token=retry_lease_token,
+                durability_tracker=durability_tracker,
+            )
+            skipped.append(f.id)
+            return None
+        except OfficePayloadError as exc:
+            # invalid payloadではDBを書かない。既存document/chunksがあればそのまま保持され、
+            # observed_gdrive_idsには列挙時点で入るためstale誤判定もしない。
+            _record_office_warning(
+                repository=repository,
+                f=f,
+                category=exc.category,
+                request_id=request_id,
+                dry_run=dry_run,
+                warning_collector=warning_collector,
+                warning_source_kind=warning_source_kind,
+                warning_source_id=warning_source_id,
+                event="gdrive_office_payload_invalid",
+                actual_bytes=exc.actual_bytes,
+                expected_bytes=exc.expected_bytes,
+            )
+            if exc.category in _PERSISTENT_OFFICE_INVALID_REASONS:
+                _resolve_source_retry(
+                    repository=repository,
+                    f=f,
+                    source_kind=warning_source_kind,
+                    source_id=warning_source_id,
+                    request_id=request_id,
+                    dry_run=dry_run,
+                    expected_lease_owner=retry_lease_owner,
+                    expected_lease_token=retry_lease_token,
+                    durability_tracker=durability_tracker,
+                )
+            else:
+                _record_source_retry(
+                    repository=repository,
+                    f=f,
+                    source_kind=warning_source_kind,
+                    source_id=warning_source_id,
+                    reason=exc.category,
+                    request_id=request_id,
+                    dry_run=dry_run,
+                    enabled=durable_retry,
+                    durability_tracker=durability_tracker,
+                    expected_lease_owner=retry_lease_owner,
+                    expected_lease_token=retry_lease_token,
+                )
+            skipped.append(f.id)
+            return None
+        except Exception as exc:
+            _record_office_warning(
+                repository=repository,
+                f=f,
+                category="office_extract_failed",
+                request_id=request_id,
+                dry_run=dry_run,
+                warning_collector=warning_collector,
+                warning_source_kind=warning_source_kind,
+                warning_source_id=warning_source_id,
+                event="gdrive_office_extract_failed",
+                actual_bytes=len(data),
+                expected_bytes=f.size,
+                error_type=type(exc).__name__,
+            )
+            _record_source_retry(
+                repository=repository,
+                f=f,
+                source_kind=warning_source_kind,
+                source_id=warning_source_id,
+                reason="office_extract_failed",
+                request_id=request_id,
+                dry_run=dry_run,
+                enabled=durable_retry,
+                durability_tracker=durability_tracker,
+                expected_lease_owner=retry_lease_owner,
+                expected_lease_token=retry_lease_token,
+            )
+            skipped.append(f.id)
+            return None
+        if not page_chunks:
+            _record_office_warning(
+                repository=repository,
+                f=f,
+                category="office_empty_text",
+                request_id=request_id,
+                dry_run=dry_run,
+                warning_collector=warning_collector,
+                warning_source_kind=warning_source_kind,
+                warning_source_id=warning_source_id,
+                event="gdrive_office_empty_text",
+                actual_bytes=len(data),
+                expected_bytes=f.size,
+            )
+            _record_source_retry(
+                repository=repository,
+                f=f,
+                source_kind=warning_source_kind,
+                source_id=warning_source_id,
+                reason="office_empty_text",
+                request_id=request_id,
+                dry_run=dry_run,
+                enabled=durable_retry,
+                durability_tracker=durability_tracker,
+                expected_lease_owner=retry_lease_owner,
+                expected_lease_token=retry_lease_token,
+            )
+            skipped.append(f.id)
+            return None
+    elif f.mime_type == GDOC_NATIVE_MIME:
+        # Google native gdoc: Docs API で plain text 抽出（download_file_bytes は使えない）
+        try:
+            from teamagent.adapters.gdocs_client import GDocsClient
+
+            gdocs = GDocsClient.from_env()
+            doc_content = gdocs.get_document_text(document_id=f.id, request_id=request_id)
+            text = doc_content.text or ""
+            page_chunks = _bounded_chunk_pages([(1, text)]) if text.strip() else []
+            if page_chunks:
+                chunks.extend(
+                    _embed_page_chunks(
+                        page_chunks,
+                        embedder=embedder,
+                        lease_heartbeat=lease_heartbeat,
+                    )
+                )
+        except _RetryLeaseLostError:
+            raise
+        except _IngestContentVolumeError:
+            _record_generic_drive_warning(
+                f=f,
+                category="native_content_too_large",
+                request_id=request_id,
+                warning_collector=warning_collector,
+                warning_source_kind=warning_source_kind,
+                warning_source_id=warning_source_id,
+                event="gdrive_native_content_too_large",
+            )
+            _record_source_retry(
+                repository=repository,
+                f=f,
+                source_kind=warning_source_kind,
+                source_id=warning_source_id,
+                reason="native_content_too_large",
+                request_id=request_id,
+                dry_run=dry_run,
+                enabled=durable_retry,
+                durability_tracker=durability_tracker,
+                expected_lease_owner=retry_lease_owner,
+                expected_lease_token=retry_lease_token,
+            )
+            skipped.append(f.id)
+            return None
+        except Exception as exc:
+            _record_generic_drive_warning(
+                f=f,
+                category="gdoc_extract_failed",
+                request_id=request_id,
+                warning_collector=warning_collector,
+                warning_source_kind=warning_source_kind,
+                warning_source_id=warning_source_id,
+                event="gdrive_gdoc_extract_failed",
+                error_type=type(exc).__name__,
+            )
+            _record_source_retry(
+                repository=repository,
+                f=f,
+                source_kind=warning_source_kind,
+                source_id=warning_source_id,
+                reason="gdoc_extract_failed",
+                request_id=request_id,
+                dry_run=dry_run,
+                enabled=durable_retry,
+                durability_tracker=durability_tracker,
+                expected_lease_owner=retry_lease_owner,
+                expected_lease_token=retry_lease_token,
+            )
+            skipped.append(f.id)
+            return None
+        if not page_chunks:
+            _record_generic_drive_warning(
+                f=f,
+                category="gdoc_empty_text",
+                request_id=request_id,
+                warning_collector=warning_collector,
+                warning_source_kind=warning_source_kind,
+                warning_source_id=warning_source_id,
+                event="gdrive_gdoc_empty_text",
+            )
+            _record_source_retry(
+                repository=repository,
+                f=f,
+                source_kind=warning_source_kind,
+                source_id=warning_source_id,
+                reason="gdoc_empty_text",
+                request_id=request_id,
+                dry_run=dry_run,
+                enabled=durable_retry,
+                durability_tracker=durability_tracker,
+                expected_lease_owner=retry_lease_owner,
+                expected_lease_token=retry_lease_token,
+            )
+            skipped.append(f.id)
+            return None
+    elif rich and (
+        f.mime_type in (_GSLIDE_NATIVE_MIME, _GSHEET_NATIVE_MIME)
+        or f.mime_type in _PLAIN_TEXT_MIMES
+    ):
+        # INGEST_RICH_EXTRACT=1: gslide/gsheet/plain-text を本文 chunk 化（gdoc は上で処理済）。
+        # 抽出失敗を title-only で成功扱いすると、既存本文の退行とcursor取りこぼしを招く。
+        # warning + durable retry として保持し、既存document/chunksには触れない。
+        try:
+            native_pages = _rich_native_pages(f, client=client, request_id=request_id)
+            if native_pages is None:
+                _record_generic_drive_warning(
+                    f=f,
+                    category="native_extract_failed_or_empty",
+                    request_id=request_id,
+                    warning_collector=warning_collector,
+                    warning_source_kind=warning_source_kind,
+                    warning_source_id=warning_source_id,
+                    event="gdrive_native_extract_failed_or_empty",
+                )
+                _record_source_retry(
+                    repository=repository,
+                    f=f,
+                    source_kind=warning_source_kind,
+                    source_id=warning_source_id,
+                    reason="native_extract_failed_or_empty",
+                    request_id=request_id,
+                    dry_run=dry_run,
+                    enabled=durable_retry,
+                    durability_tracker=durability_tracker,
+                    expected_lease_owner=retry_lease_owner,
+                    expected_lease_token=retry_lease_token,
+                )
+                skipped.append(f.id)
+                return None
+            page_chunks = _bounded_chunk_pages(native_pages)
+            if not page_chunks:
+                _record_generic_drive_warning(
+                    f=f,
+                    category="native_empty_text",
+                    request_id=request_id,
+                    warning_collector=warning_collector,
+                    warning_source_kind=warning_source_kind,
+                    warning_source_id=warning_source_id,
+                    event="gdrive_native_empty_text",
+                )
+                _record_source_retry(
+                    repository=repository,
+                    f=f,
+                    source_kind=warning_source_kind,
+                    source_id=warning_source_id,
+                    reason="native_empty_text",
+                    request_id=request_id,
+                    dry_run=dry_run,
+                    enabled=durable_retry,
+                    durability_tracker=durability_tracker,
+                    expected_lease_owner=retry_lease_owner,
+                    expected_lease_token=retry_lease_token,
+                )
+                skipped.append(f.id)
+                return None
+            chunks.extend(
+                _embed_page_chunks(
+                    page_chunks,
+                    embedder=embedder,
+                    lease_heartbeat=lease_heartbeat,
+                )
+            )
+        except _RetryLeaseLostError:
+            raise
+        except _IngestContentVolumeError:
+            _record_generic_drive_warning(
+                f=f,
+                category="native_content_too_large",
+                request_id=request_id,
+                warning_collector=warning_collector,
+                warning_source_kind=warning_source_kind,
+                warning_source_id=warning_source_id,
+                event="gdrive_native_content_too_large",
+            )
+            _record_source_retry(
+                repository=repository,
+                f=f,
+                source_kind=warning_source_kind,
+                source_id=warning_source_id,
+                reason="native_content_too_large",
+                request_id=request_id,
+                dry_run=dry_run,
+                enabled=durable_retry,
+                durability_tracker=durability_tracker,
+                expected_lease_owner=retry_lease_owner,
+                expected_lease_token=retry_lease_token,
+            )
+            skipped.append(f.id)
+            return None
+        except Exception as exc:
+            _record_generic_drive_warning(
+                f=f,
+                category="native_extract_failed",
+                request_id=request_id,
+                warning_collector=warning_collector,
+                warning_source_kind=warning_source_kind,
+                warning_source_id=warning_source_id,
+                event="gdrive_native_extract_failed",
+                error_type=type(exc).__name__,
+            )
+            _record_source_retry(
+                repository=repository,
+                f=f,
+                source_kind=warning_source_kind,
+                source_id=warning_source_id,
+                reason="native_extract_failed",
+                request_id=request_id,
+                dry_run=dry_run,
+                enabled=durable_retry,
+                durability_tracker=durability_tracker,
+                expected_lease_owner=retry_lease_owner,
+                expected_lease_token=retry_lease_token,
+            )
+            skipped.append(f.id)
+            return None
+    else:
+        # 未対応 mime_type: title + mime のフォールバック（検索ヒットだけは可能にする）。
+        # §M: 個人ドライブ folder 経路でも title-only に落ちたことを可視化する
+        # （crawl 経路 shared_drive_title_only と対称・無音落ちを防ぐ）。
+        logger.info(
+            "gdrive_folder_title_only",
+            file_ref=_external_id_ref(f.id),
+            mime_type=f.mime_type,
+            folder_ref=_external_id_ref(source_metadata.get("drive_folder_id", "")),
+        )
+        text = f"{f.name} ({f.mime_type})"
+        if lease_heartbeat is not None:
+            lease_heartbeat(False)
+        chunks.append(
+            ChunkUpsert(
+                chunk_idx=0,
+                content=text,
+                embedding=embedder.embed_passage(text) if embedder is not None else [],
+                metadata={"mime_type": f.mime_type, "title_only": True},
+            )
+        )
+
+    # ナレッジ自動分類（案件 / 業界 / 資料種別 / 商談フェーズ）。
+    # USE_DOC_CLASSIFY=1 のときだけ classifier が非 None。失敗しても取り込みは継続（fail-open）。
+    cls_metadata: dict[str, str] = {}
+    if classifier is not None and chunks:
+        if lease_heartbeat is not None:
+            lease_heartbeat(False)
+        sample = "\n".join(c.content for c in chunks[:8])
+        try:
+            # 2026-07-06: フォルダ置き位置を分類に注入する。gdrive_folders 経路で確実に
+            # 取れるフォルダ文脈は spec.folder_name（yaml の起点フォルダ名）のみ:
+            # walk_files_recursive はサブフォルダ名を保持しない（DriveFile.parents は
+            # ID のみ）ため、サブフォルダ配下のファイルにも起点フォルダ名を渡す
+            # （直上フォルダ名が取れないのは正直なスコープ制限）。
+            # 効き方は classify() 側: Haiku ヒント（格納フォルダ: XX 行）＋
+            # USE_DOC_KIND_RULES gate 配下の決定論ルール（テンプレ/定期報告キーワード）。
+            classification = classifier.classify(
+                title=f.name or "",
+                text=sample,
+                request_id=request_id,
+                folder_name=str(source_metadata.get("drive_folder_name") or ""),
+            )
+        except Exception:
+            logger.exception("gdrive_classify_unexpected", file_id=f.id, file_name=f.name)
+            classification = None
+        if classification is not None:
+            cls_metadata = classification.as_metadata()
+        if lease_heartbeat is not None:
+            lease_heartbeat(False)
+
+    # Contextual Retrieval: 抽出ページを結合した全文を full_text に文脈前置詞を付与する。
+    # contextualizer が None（既定）なら chunks はそのまま＝従来挙動・完全後方互換（fail-open）。
+    if contextualizer is not None and chunks:
+        if lease_heartbeat is not None:
+            lease_heartbeat(False)
+        full_text = "\n\n".join(c.content for c in chunks)
+        chunks = contextualizer.contextualize_chunks(f.name or f.id, full_text, chunks, request_id)
+        if len(chunks) > MAX_INGEST_EMBEDDINGS_PER_FILE:
+            _record_generic_drive_warning(
+                f=f,
+                category="contextualized_content_too_large",
+                request_id=request_id,
+                warning_collector=warning_collector,
+                warning_source_kind=warning_source_kind,
+                warning_source_id=warning_source_id,
+                event="gdrive_contextualized_content_too_large",
+            )
+            _record_source_retry(
+                repository=repository,
+                f=f,
+                source_kind=warning_source_kind,
+                source_id=warning_source_id,
+                reason="contextualized_content_too_large",
+                request_id=request_id,
+                dry_run=dry_run,
+                enabled=durable_retry,
+                durability_tracker=durability_tracker,
+                expected_lease_owner=retry_lease_owner,
+                expected_lease_token=retry_lease_token,
+            )
+            skipped.append(f.id)
+            return None
+        if lease_heartbeat is not None:
+            lease_heartbeat(False)
+
+    doc = DocumentUpsert(
+        source_type="gdrive",
+        external_id=f.id,
+        source_uri=f.web_view_link or f"gdrive://{f.id}",
+        title=f.name,
+        owner_email=file_owner_email,
+        acl_emails=acl_emails,
+        acl_groups=acl_groups,
+        metadata={
+            **source_metadata,
+            "mime_type": f.mime_type,
+            "size": f.size,
+            "md5_checksum": getattr(f, "md5_checksum", None),
+            **cls_metadata,
+        },
+        modified_at=f.modified_time,
+    )
+    return doc, chunks
+
+
 def _process_one_gdrive_file(
     f: Any,
     spec: GDriveFolderSpec,
@@ -2798,37 +3529,12 @@ def _process_one_gdrive_file(
     full_text に各 chunk へ文脈前置詞を付与し contextualized + embedding を差し替える
     （fail-open）。None（既定）なら chunks はそのまま＝従来挙動・完全後方互換。
     """
-    from teamagent.adapters.gdrive_client import GDriveDownloadContentError
-    from teamagent.ingest.office_extract import (
-        GDOC_NATIVE_MIME,
-        OFFICE_BINARY_MIMES,
-        OfficePayloadError,
-        extract_office_pages,
-    )
-    from teamagent.ingest.pdf_extract import extract_pdf_pages
+    from teamagent.ingest.office_extract import OFFICE_BINARY_MIMES
 
     if lease_heartbeat is not None:
         lease_heartbeat(True)
 
     unchanged = _should_skip_unchanged_gdrive_file(repository, f, request_id=request_id)
-
-    # INGEST_RICH_EXTRACT=1 のときだけ rich 抽出（gslide/gsheet/plain-text 本文化・抽出器の
-    # rich 引数）を有効化。OFF（既定）は現行と 1 バイトも挙動を変えない（後方互換）。
-    rich = _rich_extract_enabled()
-    # rich 引数は kwargs dict で渡す（OFF のときは空 dict ＝引数なし呼び出しと同じ）。
-    # 別 agent が extract_pdf_pages / extract_office_pages に同名・既定値=現行挙動で
-    # これらを実装する。OFF（既定）では空 dict なので両関数の現行シグネチャと完全互換。
-    pdf_kwargs: dict[str, Any] = {"min_chars": 40} if rich else {}
-    office_kwargs: dict[str, Any] = (
-        {
-            "include_notes": True,
-            "include_tables": True,
-            "formula_fallback": True,
-            "min_chars": 40,
-        }
-        if rich
-        else {}
-    )
 
     if not unchanged and f.mime_type in OFFICE_BINARY_MIMES:
         known_reason = _known_invalid_office_reason(repository, f)
@@ -2907,661 +3613,32 @@ def _process_one_gdrive_file(
         skipped.append(f.id)
         return 0, 0
 
-    # PDF / Office (docx/pptx/xlsx) / Google native gdoc は chunk 化、他は title のみ
-    chunks: list[ChunkUpsert] = []
-    if f.mime_type in _PDF_MIME_TYPES:
-        try:
-            data = client.download_file_bytes(file_id=f.id, request_id=request_id)
-        except Exception as exc:
-            _record_pdf_warning(
-                f=f,
-                category="pdf_download_failed",
-                request_id=request_id,
-                warning_collector=warning_collector,
-                warning_source_kind=warning_source_kind,
-                warning_source_id=warning_source_id,
-                event="gdrive_pdf_download_failed",
-                error_type=type(exc).__name__,
-            )
-            _record_source_retry(
-                repository=repository,
-                f=f,
-                source_kind=warning_source_kind,
-                source_id=warning_source_id,
-                reason="pdf_download_failed",
-                request_id=request_id,
-                dry_run=dry_run,
-                enabled=durable_retry,
-                durability_tracker=durability_tracker,
-                expected_lease_owner=retry_lease_owner,
-                expected_lease_token=retry_lease_token,
-            )
-            skipped.append(f.id)
-            return 0, 0
-        try:
-            pages = extract_pdf_pages(data, **pdf_kwargs)
-            page_chunks = _bounded_chunk_pages(pages)
-            if page_chunks:
-                chunks.extend(
-                    _embed_page_chunks(
-                        page_chunks,
-                        embedder=embedder,
-                        lease_heartbeat=lease_heartbeat,
-                    )
-                )
-        except _RetryLeaseLostError:
-            raise
-        except _IngestContentVolumeError:
-            _record_pdf_warning(
-                f=f,
-                category="pdf_content_too_large",
-                request_id=request_id,
-                warning_collector=warning_collector,
-                warning_source_kind=warning_source_kind,
-                warning_source_id=warning_source_id,
-                event="gdrive_pdf_content_too_large",
-            )
-            _record_source_retry(
-                repository=repository,
-                f=f,
-                source_kind=warning_source_kind,
-                source_id=warning_source_id,
-                reason="pdf_content_too_large",
-                request_id=request_id,
-                dry_run=dry_run,
-                enabled=durable_retry,
-                durability_tracker=durability_tracker,
-                expected_lease_owner=retry_lease_owner,
-                expected_lease_token=retry_lease_token,
-            )
-            skipped.append(f.id)
-            return 0, 0
-        except Exception as exc:
-            _record_pdf_warning(
-                f=f,
-                category="pdf_extract_failed",
-                request_id=request_id,
-                warning_collector=warning_collector,
-                warning_source_kind=warning_source_kind,
-                warning_source_id=warning_source_id,
-                event="gdrive_pdf_extract_failed",
-                error_type=type(exc).__name__,
-            )
-            _record_source_retry(
-                repository=repository,
-                f=f,
-                source_kind=warning_source_kind,
-                source_id=warning_source_id,
-                reason="pdf_extract_failed",
-                request_id=request_id,
-                dry_run=dry_run,
-                enabled=durable_retry,
-                durability_tracker=durability_tracker,
-                expected_lease_owner=retry_lease_owner,
-                expected_lease_token=retry_lease_token,
-            )
-            skipped.append(f.id)
-            return 0, 0
-        if not page_chunks:
-            _record_pdf_warning(
-                f=f,
-                category="pdf_empty_text",
-                request_id=request_id,
-                warning_collector=warning_collector,
-                warning_source_kind=warning_source_kind,
-                warning_source_id=warning_source_id,
-                event="gdrive_pdf_empty_text",
-            )
-            _record_source_retry(
-                repository=repository,
-                f=f,
-                source_kind=warning_source_kind,
-                source_id=warning_source_id,
-                reason="pdf_empty_text",
-                request_id=request_id,
-                dry_run=dry_run,
-                enabled=durable_retry,
-                durability_tracker=durability_tracker,
-                expected_lease_owner=retry_lease_owner,
-                expected_lease_token=retry_lease_token,
-            )
-            skipped.append(f.id)
-            return 0, 0
-    elif f.mime_type in OFFICE_BINARY_MIMES:
-        # docx / pptx / xlsx: download → extract → chunk_pages（PDF と同じ I/F）
-        try:
-            data = client.download_file_bytes(file_id=f.id, request_id=request_id)
-        except GDriveDownloadContentError as exc:
-            _record_office_warning(
-                repository=repository,
-                f=f,
-                category=exc.category,
-                request_id=request_id,
-                dry_run=dry_run,
-                warning_collector=warning_collector,
-                warning_source_kind=warning_source_kind,
-                warning_source_id=warning_source_id,
-                event="gdrive_office_payload_invalid",
-                actual_bytes=exc.actual_bytes,
-                expected_bytes=f.size,
-            )
-            _record_source_retry(
-                repository=repository,
-                f=f,
-                source_kind=warning_source_kind,
-                source_id=warning_source_id,
-                reason=exc.category,
-                request_id=request_id,
-                dry_run=dry_run,
-                enabled=durable_retry,
-                durability_tracker=durability_tracker,
-                expected_lease_owner=retry_lease_owner,
-                expected_lease_token=retry_lease_token,
-            )
-            skipped.append(f.id)
-            return 0, 0
-        except Exception as exc:
-            _record_office_warning(
-                repository=repository,
-                f=f,
-                category="office_download_failed",
-                request_id=request_id,
-                dry_run=dry_run,
-                warning_collector=warning_collector,
-                warning_source_kind=warning_source_kind,
-                warning_source_id=warning_source_id,
-                event="gdrive_office_download_failed",
-                actual_bytes=None,
-                expected_bytes=f.size,
-                error_type=type(exc).__name__,
-            )
-            _record_source_retry(
-                repository=repository,
-                f=f,
-                source_kind=warning_source_kind,
-                source_id=warning_source_id,
-                reason="office_download_failed",
-                request_id=request_id,
-                dry_run=dry_run,
-                enabled=durable_retry,
-                durability_tracker=durability_tracker,
-                expected_lease_owner=retry_lease_owner,
-                expected_lease_token=retry_lease_token,
-            )
-            skipped.append(f.id)
-            return 0, 0
-        try:
-            pages = extract_office_pages(
-                data,
-                mime_type=f.mime_type,
-                expected_size=f.size,
-                expected_md5=getattr(f, "md5_checksum", None),
-                progress_callback=(
-                    (lambda: lease_heartbeat(False)) if lease_heartbeat is not None else None
-                ),
-                **office_kwargs,
-            )
-            page_chunks = _bounded_chunk_pages(pages)
-            if page_chunks:
-                chunks.extend(
-                    _embed_page_chunks(
-                        page_chunks,
-                        embedder=embedder,
-                        lease_heartbeat=lease_heartbeat,
-                    )
-                )
-        except _RetryLeaseLostError:
-            raise
-        except _IngestContentVolumeError:
-            _record_office_warning(
-                repository=repository,
-                f=f,
-                category="unsafe_content_volume",
-                request_id=request_id,
-                dry_run=dry_run,
-                warning_collector=warning_collector,
-                warning_source_kind=warning_source_kind,
-                warning_source_id=warning_source_id,
-                event="gdrive_office_payload_invalid",
-                actual_bytes=len(data),
-                expected_bytes=f.size,
-            )
-            _resolve_source_retry(
-                repository=repository,
-                f=f,
-                source_kind=warning_source_kind,
-                source_id=warning_source_id,
-                request_id=request_id,
-                dry_run=dry_run,
-                expected_lease_owner=retry_lease_owner,
-                expected_lease_token=retry_lease_token,
-                durability_tracker=durability_tracker,
-            )
-            skipped.append(f.id)
-            return 0, 0
-        except OfficePayloadError as exc:
-            # invalid payloadではDBを書かない。既存document/chunksがあればそのまま保持され、
-            # observed_gdrive_idsには列挙時点で入るためstale誤判定もしない。
-            _record_office_warning(
-                repository=repository,
-                f=f,
-                category=exc.category,
-                request_id=request_id,
-                dry_run=dry_run,
-                warning_collector=warning_collector,
-                warning_source_kind=warning_source_kind,
-                warning_source_id=warning_source_id,
-                event="gdrive_office_payload_invalid",
-                actual_bytes=exc.actual_bytes,
-                expected_bytes=exc.expected_bytes,
-            )
-            if exc.category in _PERSISTENT_OFFICE_INVALID_REASONS:
-                _resolve_source_retry(
-                    repository=repository,
-                    f=f,
-                    source_kind=warning_source_kind,
-                    source_id=warning_source_id,
-                    request_id=request_id,
-                    dry_run=dry_run,
-                    expected_lease_owner=retry_lease_owner,
-                    expected_lease_token=retry_lease_token,
-                    durability_tracker=durability_tracker,
-                )
-            else:
-                _record_source_retry(
-                    repository=repository,
-                    f=f,
-                    source_kind=warning_source_kind,
-                    source_id=warning_source_id,
-                    reason=exc.category,
-                    request_id=request_id,
-                    dry_run=dry_run,
-                    enabled=durable_retry,
-                    durability_tracker=durability_tracker,
-                    expected_lease_owner=retry_lease_owner,
-                    expected_lease_token=retry_lease_token,
-                )
-            skipped.append(f.id)
-            return 0, 0
-        except Exception as exc:
-            _record_office_warning(
-                repository=repository,
-                f=f,
-                category="office_extract_failed",
-                request_id=request_id,
-                dry_run=dry_run,
-                warning_collector=warning_collector,
-                warning_source_kind=warning_source_kind,
-                warning_source_id=warning_source_id,
-                event="gdrive_office_extract_failed",
-                actual_bytes=len(data),
-                expected_bytes=f.size,
-                error_type=type(exc).__name__,
-            )
-            _record_source_retry(
-                repository=repository,
-                f=f,
-                source_kind=warning_source_kind,
-                source_id=warning_source_id,
-                reason="office_extract_failed",
-                request_id=request_id,
-                dry_run=dry_run,
-                enabled=durable_retry,
-                durability_tracker=durability_tracker,
-                expected_lease_owner=retry_lease_owner,
-                expected_lease_token=retry_lease_token,
-            )
-            skipped.append(f.id)
-            return 0, 0
-        if not page_chunks:
-            _record_office_warning(
-                repository=repository,
-                f=f,
-                category="office_empty_text",
-                request_id=request_id,
-                dry_run=dry_run,
-                warning_collector=warning_collector,
-                warning_source_kind=warning_source_kind,
-                warning_source_id=warning_source_id,
-                event="gdrive_office_empty_text",
-                actual_bytes=len(data),
-                expected_bytes=f.size,
-            )
-            _record_source_retry(
-                repository=repository,
-                f=f,
-                source_kind=warning_source_kind,
-                source_id=warning_source_id,
-                reason="office_empty_text",
-                request_id=request_id,
-                dry_run=dry_run,
-                enabled=durable_retry,
-                durability_tracker=durability_tracker,
-                expected_lease_owner=retry_lease_owner,
-                expected_lease_token=retry_lease_token,
-            )
-            skipped.append(f.id)
-            return 0, 0
-    elif f.mime_type == GDOC_NATIVE_MIME:
-        # Google native gdoc: Docs API で plain text 抽出（download_file_bytes は使えない）
-        try:
-            from teamagent.adapters.gdocs_client import GDocsClient
-
-            gdocs = GDocsClient.from_env()
-            doc_content = gdocs.get_document_text(document_id=f.id, request_id=request_id)
-            text = doc_content.text or ""
-            page_chunks = _bounded_chunk_pages([(1, text)]) if text.strip() else []
-            if page_chunks:
-                chunks.extend(
-                    _embed_page_chunks(
-                        page_chunks,
-                        embedder=embedder,
-                        lease_heartbeat=lease_heartbeat,
-                    )
-                )
-        except _RetryLeaseLostError:
-            raise
-        except _IngestContentVolumeError:
-            _record_generic_drive_warning(
-                f=f,
-                category="native_content_too_large",
-                request_id=request_id,
-                warning_collector=warning_collector,
-                warning_source_kind=warning_source_kind,
-                warning_source_id=warning_source_id,
-                event="gdrive_native_content_too_large",
-            )
-            _record_source_retry(
-                repository=repository,
-                f=f,
-                source_kind=warning_source_kind,
-                source_id=warning_source_id,
-                reason="native_content_too_large",
-                request_id=request_id,
-                dry_run=dry_run,
-                enabled=durable_retry,
-                durability_tracker=durability_tracker,
-                expected_lease_owner=retry_lease_owner,
-                expected_lease_token=retry_lease_token,
-            )
-            skipped.append(f.id)
-            return 0, 0
-        except Exception as exc:
-            _record_generic_drive_warning(
-                f=f,
-                category="gdoc_extract_failed",
-                request_id=request_id,
-                warning_collector=warning_collector,
-                warning_source_kind=warning_source_kind,
-                warning_source_id=warning_source_id,
-                event="gdrive_gdoc_extract_failed",
-                error_type=type(exc).__name__,
-            )
-            _record_source_retry(
-                repository=repository,
-                f=f,
-                source_kind=warning_source_kind,
-                source_id=warning_source_id,
-                reason="gdoc_extract_failed",
-                request_id=request_id,
-                dry_run=dry_run,
-                enabled=durable_retry,
-                durability_tracker=durability_tracker,
-                expected_lease_owner=retry_lease_owner,
-                expected_lease_token=retry_lease_token,
-            )
-            skipped.append(f.id)
-            return 0, 0
-        if not page_chunks:
-            _record_generic_drive_warning(
-                f=f,
-                category="gdoc_empty_text",
-                request_id=request_id,
-                warning_collector=warning_collector,
-                warning_source_kind=warning_source_kind,
-                warning_source_id=warning_source_id,
-                event="gdrive_gdoc_empty_text",
-            )
-            _record_source_retry(
-                repository=repository,
-                f=f,
-                source_kind=warning_source_kind,
-                source_id=warning_source_id,
-                reason="gdoc_empty_text",
-                request_id=request_id,
-                dry_run=dry_run,
-                enabled=durable_retry,
-                durability_tracker=durability_tracker,
-                expected_lease_owner=retry_lease_owner,
-                expected_lease_token=retry_lease_token,
-            )
-            skipped.append(f.id)
-            return 0, 0
-    elif rich and (
-        f.mime_type in (_GSLIDE_NATIVE_MIME, _GSHEET_NATIVE_MIME)
-        or f.mime_type in _PLAIN_TEXT_MIMES
-    ):
-        # INGEST_RICH_EXTRACT=1: gslide/gsheet/plain-text を本文 chunk 化（gdoc は上で処理済）。
-        # 抽出失敗を title-only で成功扱いすると、既存本文の退行とcursor取りこぼしを招く。
-        # warning + durable retry として保持し、既存document/chunksには触れない。
-        try:
-            native_pages = _rich_native_pages(f, client=client, request_id=request_id)
-            if native_pages is None:
-                _record_generic_drive_warning(
-                    f=f,
-                    category="native_extract_failed_or_empty",
-                    request_id=request_id,
-                    warning_collector=warning_collector,
-                    warning_source_kind=warning_source_kind,
-                    warning_source_id=warning_source_id,
-                    event="gdrive_native_extract_failed_or_empty",
-                )
-                _record_source_retry(
-                    repository=repository,
-                    f=f,
-                    source_kind=warning_source_kind,
-                    source_id=warning_source_id,
-                    reason="native_extract_failed_or_empty",
-                    request_id=request_id,
-                    dry_run=dry_run,
-                    enabled=durable_retry,
-                    durability_tracker=durability_tracker,
-                    expected_lease_owner=retry_lease_owner,
-                    expected_lease_token=retry_lease_token,
-                )
-                skipped.append(f.id)
-                return 0, 0
-            page_chunks = _bounded_chunk_pages(native_pages)
-            if not page_chunks:
-                _record_generic_drive_warning(
-                    f=f,
-                    category="native_empty_text",
-                    request_id=request_id,
-                    warning_collector=warning_collector,
-                    warning_source_kind=warning_source_kind,
-                    warning_source_id=warning_source_id,
-                    event="gdrive_native_empty_text",
-                )
-                _record_source_retry(
-                    repository=repository,
-                    f=f,
-                    source_kind=warning_source_kind,
-                    source_id=warning_source_id,
-                    reason="native_empty_text",
-                    request_id=request_id,
-                    dry_run=dry_run,
-                    enabled=durable_retry,
-                    durability_tracker=durability_tracker,
-                    expected_lease_owner=retry_lease_owner,
-                    expected_lease_token=retry_lease_token,
-                )
-                skipped.append(f.id)
-                return 0, 0
-            chunks.extend(
-                _embed_page_chunks(
-                    page_chunks,
-                    embedder=embedder,
-                    lease_heartbeat=lease_heartbeat,
-                )
-            )
-        except _RetryLeaseLostError:
-            raise
-        except _IngestContentVolumeError:
-            _record_generic_drive_warning(
-                f=f,
-                category="native_content_too_large",
-                request_id=request_id,
-                warning_collector=warning_collector,
-                warning_source_kind=warning_source_kind,
-                warning_source_id=warning_source_id,
-                event="gdrive_native_content_too_large",
-            )
-            _record_source_retry(
-                repository=repository,
-                f=f,
-                source_kind=warning_source_kind,
-                source_id=warning_source_id,
-                reason="native_content_too_large",
-                request_id=request_id,
-                dry_run=dry_run,
-                enabled=durable_retry,
-                durability_tracker=durability_tracker,
-                expected_lease_owner=retry_lease_owner,
-                expected_lease_token=retry_lease_token,
-            )
-            skipped.append(f.id)
-            return 0, 0
-        except Exception as exc:
-            _record_generic_drive_warning(
-                f=f,
-                category="native_extract_failed",
-                request_id=request_id,
-                warning_collector=warning_collector,
-                warning_source_kind=warning_source_kind,
-                warning_source_id=warning_source_id,
-                event="gdrive_native_extract_failed",
-                error_type=type(exc).__name__,
-            )
-            _record_source_retry(
-                repository=repository,
-                f=f,
-                source_kind=warning_source_kind,
-                source_id=warning_source_id,
-                reason="native_extract_failed",
-                request_id=request_id,
-                dry_run=dry_run,
-                enabled=durable_retry,
-                durability_tracker=durability_tracker,
-                expected_lease_owner=retry_lease_owner,
-                expected_lease_token=retry_lease_token,
-            )
-            skipped.append(f.id)
-            return 0, 0
-    else:
-        # 未対応 mime_type: title + mime のフォールバック（検索ヒットだけは可能にする）。
-        # §M: 個人ドライブ folder 経路でも title-only に落ちたことを可視化する
-        # （crawl 経路 shared_drive_title_only と対称・無音落ちを防ぐ）。
-        logger.info(
-            "gdrive_folder_title_only",
-            file_ref=_external_id_ref(f.id),
-            mime_type=f.mime_type,
-            folder_ref=_external_id_ref(spec.folder_id),
-        )
-        text = f"{f.name} ({f.mime_type})"
-        if lease_heartbeat is not None:
-            lease_heartbeat(False)
-        chunks.append(
-            ChunkUpsert(
-                chunk_idx=0,
-                content=text,
-                embedding=embedder.embed_passage(text),
-                metadata={"mime_type": f.mime_type, "title_only": True},
-            )
-        )
-
-    # ナレッジ自動分類（案件 / 業界 / 資料種別 / 商談フェーズ）。
-    # USE_DOC_CLASSIFY=1 のときだけ classifier が非 None。失敗しても取り込みは継続（fail-open）。
-    cls_metadata: dict[str, str] = {}
-    if classifier is not None and chunks:
-        if lease_heartbeat is not None:
-            lease_heartbeat(False)
-        sample = "\n".join(c.content for c in chunks[:8])
-        try:
-            # 2026-07-06: フォルダ置き位置を分類に注入する。gdrive_folders 経路で確実に
-            # 取れるフォルダ文脈は spec.folder_name（yaml の起点フォルダ名）のみ:
-            # walk_files_recursive はサブフォルダ名を保持しない（DriveFile.parents は
-            # ID のみ）ため、サブフォルダ配下のファイルにも起点フォルダ名を渡す
-            # （直上フォルダ名が取れないのは正直なスコープ制限）。
-            # 効き方は classify() 側: Haiku ヒント（格納フォルダ: XX 行）＋
-            # USE_DOC_KIND_RULES gate 配下の決定論ルール（テンプレ/定期報告キーワード）。
-            classification = classifier.classify(
-                title=f.name or "",
-                text=sample,
-                request_id=request_id,
-                folder_name=spec.folder_name or "",
-            )
-        except Exception:
-            logger.exception("gdrive_classify_unexpected", file_id=f.id, file_name=f.name)
-            classification = None
-        if classification is not None:
-            cls_metadata = classification.as_metadata()
-        if lease_heartbeat is not None:
-            lease_heartbeat(False)
-
-    # Contextual Retrieval: 抽出ページを結合した全文を full_text に文脈前置詞を付与する。
-    # contextualizer が None（既定）なら chunks はそのまま＝従来挙動・完全後方互換（fail-open）。
-    if contextualizer is not None and chunks:
-        if lease_heartbeat is not None:
-            lease_heartbeat(False)
-        full_text = "\n\n".join(c.content for c in chunks)
-        chunks = contextualizer.contextualize_chunks(f.name or f.id, full_text, chunks, request_id)
-        if len(chunks) > MAX_INGEST_EMBEDDINGS_PER_FILE:
-            _record_generic_drive_warning(
-                f=f,
-                category="contextualized_content_too_large",
-                request_id=request_id,
-                warning_collector=warning_collector,
-                warning_source_kind=warning_source_kind,
-                warning_source_id=warning_source_id,
-                event="gdrive_contextualized_content_too_large",
-            )
-            _record_source_retry(
-                repository=repository,
-                f=f,
-                source_kind=warning_source_kind,
-                source_id=warning_source_id,
-                reason="contextualized_content_too_large",
-                request_id=request_id,
-                dry_run=dry_run,
-                enabled=durable_retry,
-                durability_tracker=durability_tracker,
-                expected_lease_owner=retry_lease_owner,
-                expected_lease_token=retry_lease_token,
-            )
-            skipped.append(f.id)
-            return 0, 0
-        if lease_heartbeat is not None:
-            lease_heartbeat(False)
-
-    doc = DocumentUpsert(
-        source_type="gdrive",
-        external_id=f.id,
-        source_uri=f.web_view_link or f"gdrive://{f.id}",
-        title=f.name,
-        owner_email=file_owner_email,
+    prepared = _prepare_gdrive_file(
+        f,
+        client=client,
+        source_metadata=_gdrive_source_metadata(spec),
+        file_owner_email=file_owner_email,
         acl_emails=acl_emails,
         acl_groups=acl_groups,
-        metadata={
-            **spec.extra_metadata,
-            "mime_type": f.mime_type,
-            "size": f.size,
-            "md5_checksum": getattr(f, "md5_checksum", None),
-            "drive_folder_id": spec.folder_id,
-            "drive_folder_name": spec.folder_name,
-            **cls_metadata,
-        },
-        modified_at=f.modified_time,
+        request_id=request_id,
+        embedder=embedder,
+        repository=repository,
+        dry_run=dry_run,
+        skipped=skipped,
+        classifier=classifier,
+        contextualizer=contextualizer,
+        warning_collector=warning_collector,
+        warning_source_kind=warning_source_kind,
+        warning_source_id=warning_source_id,
+        durable_retry=durable_retry,
+        durability_tracker=durability_tracker,
+        lease_heartbeat=lease_heartbeat,
+        retry_lease_owner=retry_lease_owner,
+        retry_lease_token=retry_lease_token,
     )
+    if prepared is None:
+        return 0, 0
+    doc, chunks = prepared
     doc = case_state_evidence.attach(doc, chunks)
     if not dry_run:
         if lease_heartbeat is not None:
@@ -4234,13 +4311,10 @@ def _ingest_shared_drives_crawl(
                     acl_emails=acl_emails,
                     acl_groups=acl_groups,
                     metadata={
-                        **spec.extra_metadata,
+                        **_gdrive_source_metadata(spec, drive=drive),
                         "mime_type": f.mime_type,
                         "size": f.size,
                         "md5_checksum": getattr(f, "md5_checksum", None),
-                        "shared_drive_id": drive.id,
-                        "shared_drive_name": drive.name,
-                        "via": "shared_drive_crawl",
                         **cls_metadata,
                     },
                     modified_at=f.modified_time,
@@ -4686,7 +4760,9 @@ def _ingest_gsheet(
                     ),
                 )
                 if stored_content_hashes.get(external_id) == content_hash:
-                    if case_state_evidence.enabled(owner_email):
+                    if case_state_evidence.enabled(owner_email) or case_state_evidence.has_review(
+                        "gsheets", external_id
+                    ):
                         repository.refresh_case_state_evidence(
                             DocumentUpsert(
                                 source_type="gsheets",
