@@ -639,6 +639,9 @@ resource "aws_ecs_task_definition" "mcp" {
       # Aico が文面を組み直して URL を落とすのを止める。allowlist は上と同じ理由で "*" を直接焼く。
       { name = "USE_DIRECT_SUMMARY_POST", value = var.use_direct_summary_post },
       { name = "DIRECT_SUMMARY_POST_ALLOWED_EMAILS", value = "*" },
+      # カルテの時点・状態行をモデルの書き直しで落とさない（既定 OFF・空は全員拒否）。
+      { name = "USE_DIRECT_KARTE_POST", value = var.use_direct_karte_post },
+      { name = "DIRECT_KARTE_POST_ALLOWED_EMAILS", value = var.direct_karte_post_allowed_emails },
       # 2026-10-14: 検索の「📊 動画ごとの数字」節を mcp が DM へ直接投稿（mcp_gateway/direct_video_metrics.py・
       # #600/#601/#603）。小俣さん「実装した機能はみなさんに公開」で全員へ。live の TD 差し替えで入れた値を
       # tf にも焼く（tfvars に行が無くても guard 経由の apply で消えない）。allowlist は上と同じ理由で "*"。

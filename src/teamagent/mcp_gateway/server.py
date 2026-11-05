@@ -47,6 +47,7 @@ from teamagent.identity import (
 from teamagent.mcp_gateway import (
     answer_feedback,
     detached_jobs,
+    direct_karte,
     direct_search_answer,
     direct_summary,
     direct_video_metrics,
@@ -1744,6 +1745,21 @@ async def dispatch_tool(
                 return direct_summary.posted_response(
                     direct_status, deferred=bool(data.get("deferred"))
                 )
+    if (
+        name == "clientkarte"
+        and isinstance(data, dict)
+        and not needs_input
+        and not needs_model_action
+    ):
+        karte_posted = await asyncio.to_thread(
+            direct_karte.maybe_post,
+            data,
+            verified_caller=verified_caller,
+            metadata=metadata,
+            request_id=ctx.request_id,
+        )
+        if karte_posted is not None:
+            return karte_posted
     search_direct_attempted = False
     if (
         name == SEARCH_TOOL_NAME

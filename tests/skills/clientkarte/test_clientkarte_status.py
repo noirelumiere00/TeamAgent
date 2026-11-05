@@ -4,6 +4,7 @@ from datetime import date, datetime
 from unittest.mock import MagicMock
 
 import pytest
+from structlog.testing import capture_logs
 
 from teamagent.adapters.pgvector_client import SearchHit
 from teamagent.skills.base import SkillContext
@@ -130,6 +131,7 @@ def test_existing_asof_is_not_repeated_in_the_heading() -> None:
         (None, "JTBの案件って今どうなってる？", False),
         ("owner@example.test", "JTBの過去の提案資料を見せて", False),
         ("owner@example.test", "", False),
+        ("owner@example.test", "   ", False),
         ("owner@example.test", None, False),
     ],
 )
@@ -140,17 +142,25 @@ def test_state_line_requires_both_email_gate_and_status_question(
     source = row(state="lost", state_as_of="2026-09-11", evidence_date="2026-09-11")
     source.metadata.update({"client_name": "JTB", "title": "JTB 企業広報の提案"})
     pg.search_drive_by_client_names.return_value = [source]
-    out = skill.run(
-        ClientKarteInput(client_name="JTB"),
-        SkillContext(
-            metadata={
-                "user_email": email,
-                "user_groups": ["sales"],
-                "user_role": "member",
-                **({"request_text": request_text} if request_text is not None else {}),
-            }
-        ),
-    )
+    with capture_logs() as logs:
+        out = skill.run(
+            ClientKarteInput(client_name="JTB"),
+            SkillContext(
+                metadata={
+                    "user_email": email,
+                    "user_groups": ["sales"],
+                    "user_role": "member",
+                    **({"request_text": request_text} if request_text is not None else {}),
+                }
+            ),
+        )
+    event = next(log for log in logs if log["event"] == "clientkarte_done")
+    assert event["has_request_text"] is bool(request_text and request_text.strip())
+    assert event["asks_status"] is bool(request_text and "今どうなってる" in request_text)
+    assert event["case_state_lines"] == int(expected)
+    assert event["asof_lines"] == 1
+    assert "request_text" not in event and "answer" not in event
+    assert "JTB" not in str(event) and "https://" not in str(event)
     assert ("\n状態:" in out.answer) is expected
     if expected:
         assert "JTB 企業広報の提案 / 2026-09-11 時点の正式状態: 失注" in out.answer
@@ -167,6 +177,22 @@ def test_state_line_requires_both_email_gate_and_status_question(
         )
     else:
         pg.search_drive_by_client_names.assert_not_called()
+
+
+@pytest.mark.parametrize("count", [0, 1, 2])
+def test_done_log_counts_dated_cases(status_skill: tuple, count: int) -> None:
+    skill, pg = status_skill
+    pg.list_client_timeline_recent.return_value = [
+        SearchHit(i, "過去の報告", 1.0, {"campaign": f"案件{i}", "occurred_at": "2026-08-24"})
+        for i in range(count)
+    ]
+    skill._bedrock.converse.return_value.text = "\n".join(f"### 案件{i}" for i in range(count))
+    with capture_logs() as logs:
+        skill.run(ClientKarteInput(client_name="JTB"), SkillContext())
+    event = next(log for log in logs if log["event"] == "clientkarte_done")
+    assert event["asof_lines"] == count
+    assert event["case_state_lines"] == 0
+    assert event["has_request_text"] is False and event["asks_status"] is False
 
 
 @pytest.mark.parametrize("kind", ["empty", "legacy", "other_client", "failed"])
