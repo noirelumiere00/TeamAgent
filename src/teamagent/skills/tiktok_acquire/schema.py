@@ -15,35 +15,27 @@ from pydantic import BaseModel, Field
 class TikTokAcquireInput(BaseModel):
     """取得リクエスト（AIが商材からKWを立案して発行）。"""
 
-    keywords: list[str] = Field(min_length=1, max_length=10, description="検索キーワード群(1〜10)")
+    keywords: list[str] = Field(min_length=1, max_length=10)
     search_type: Literal["keyword", "hashtag"] = Field(
         default="keyword",
-        description="keyword検索、またはhashtag検索（空振り時はkeywordへフォールバック）",
+        description="hashtagの空振り時はkeywordに切替。",
     )
-    n_per_kw: int = Field(
-        default=10,
-        ge=1,
-        le=30,
-        description=(
-            "各KWの取得本数(最大30)。1回の実行時間に収まらない組み合わせは断らずに"
-            "組み直して取得する（動画なしは指標だけの取得・動画ありはKWごとに分割）"
-        ),
-    )
+    n_per_kw: int = Field(default=10, ge=1, le=30)
     videos_per_kw: int = Field(
         default=2,
         ge=0,
         le=10,
-        description="各KWで動画本体(mp4)を保存する上位本数。0=指標だけ（検索面チェック用）",
+        description="KWごとのmp4保存数（0=指標のみ）。",
     )
     sort: Literal["display", "save_rate", "recent"] = Field(
         default="display",
-        description="動画DLの選抜軸(display=検索上位/save_rate=保存率上位/recent=新着)。指標の並びは検索順固定。",
+        description=(
+            "mp4選抜軸（display=検索順、save_rate=保存率、recent=新着）；指標は検索順固定。"
+        ),
     )
-    client_name: str | None = Field(
-        default=None, description="クライアント名(任意・config.jsonに反映)"
-    )
-    industry: str | None = Field(default=None, description="業種(任意)")
-    competitors: list[str] = Field(default_factory=list, description="競合名(任意・SoV分析用)")
+    client_name: str | None = Field(default=None)
+    industry: str | None = Field(default=None)
+    competitors: list[str] = Field(default_factory=list)
 
 
 class TikTokAcquireJob(BaseModel):
@@ -80,7 +72,7 @@ class TikTokAcquireOutput(BaseModel):
 
 
 class TikTokAcquireStatusInput(BaseModel):
-    job_id: str = Field(default="", description="省略時は本人の直近の取得")
+    job_id: str = Field(default="")
 
 
 class TikTokAcquireStatusOutput(BaseModel):

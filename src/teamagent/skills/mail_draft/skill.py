@@ -154,22 +154,12 @@ class MailDraftSkill(BaseSkill[MailDraftInput, MailDraftOutput]):
 
     name: ClassVar[str] = "mail_draft"
     description: ClassVar[str] = (
-        "本人が選んだメールに返信下書きを作る（Gmail の下書き保存のみ・送信はしない）。"
-        "入口は 2 つ。"
-        "(1) 朝ダイジェストの『✏️ 下書きを作成』ボタン押下（action='mail_draft'）を受けたら、"
-        "その value（署名トークン）を draft_token に渡す。"
-        "(2) **mail_followup が返した候補一覧に対して本人が『1番で』『1と3、丁寧めで』"
-        "『〇〇の件』と答えたら、その返事をそのまま selection に渡す**"
-        "（言い換え・番号への変換をしない）。あわせて直前の items[].evidence_ref を"
-        "**表示順のまま candidate_refs に必ず入れる**（番号は一覧の位置でしかないので、"
-        "これが無いと番号は解釈されず候補を出し直す）。mail_followup が返した "
-        "lookback_days があれば同じ値を渡し、トーン等の希望は instructions に入れる。"
-        "曖昧な指定なら error='ambiguous_selection' で**下書きを作らずに聞き返す**ので、"
-        "message をそのまま出し、次の呼び出しには戻り値の candidate_refs をそのまま渡す。"
-        "成功時は drafts[] の本文と open_url を原文のまま併記する。"
-        "候補の一覧を出すのは mail_followup、条件を指定した返信起草は mail_reply。"
-        + USER_CONTEXT_RULE
-    )
+        "本人が選んだメールへの返信をGmail下書きに保存（送信しない）。"
+        "ボタンはdraft_token、mail_followup候補への返事はselectionとcandidate_refsを"
+        "渡す。ambiguous_selectionならmessageを提示し、"
+        "次回も返値のcandidate_refsを渡す。成功時はdraftsの本文・open_urlをそのまま提"
+        "示。候補一覧はmail_followup、条件指定の起草はmail_reply。"
+    ) + USER_CONTEXT_RULE
     input_schema: ClassVar[type[BaseModel]] = MailDraftInput
     output_schema: ClassVar[type[BaseModel]] = MailDraftOutput
 

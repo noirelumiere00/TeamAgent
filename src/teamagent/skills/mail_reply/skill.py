@@ -156,22 +156,13 @@ class MailReplySkill(BaseSkill[MailReplyInput, MailReplyOutput]):
 
     name: ClassVar[str] = "mail_reply"
     description: ClassVar[str] = (
-        "本人受信箱の受信メールへの返信案を起草し、Gmail の下書きとして保存する"
-        "（送信はしない＝本人が確認して送信）。依頼文に件名（【…】「…の件」）や差出人"
-        "（「〇〇さんからの」）があれば**必ず** subject_contains / from_contains に入れる"
-        "（会社名・案件名は client_name）。同じ話題のスレッドが複数あるときの取り違えを防ぐため、"
-        "手がかりで 1 件に絞れないと error='ambiguous_threads' と候補 ambiguous_threads"
-        "（最大 3 件）を返し**下書きは作らない**——候補を番号付き（件名・差出人・日時・冒頭）で"
-        "見せて選んでもらい、選ばれたら thread_id にその候補の thread_id を**そのまま**入れて"
-        "呼び直す（thread_id / gmail_draft_id は内部値なので利用者に見せない）。"
-        "利用者が結果に「それじゃない」「違うスレッド」と言ったら、直前の gmail_draft_id を "
-        "discard_draft_id に入れ、正しい件名・差出人（または thread_id）を付けて呼び直す"
-        "（誤った下書きを削除してから作り直す。送信は決してしない）。"
-        "候補一覧を出すだけなら mail_followup、その一覧からの選択は mail_draft。利用前に"
-        + CONNECT_SUFFIX
-        + "gmail.modify を認可済みの時のみ使える。"
-        + USER_CONTEXT_RULE
-    )
+        "受信メールへの返信をGmail下書き保存（送信なし、gmail.modify認可が必要）。"
+        "件名・差出人はsubject_contains/from_containsへ必ず渡す。"
+        "ambiguous_threadsなら下書き未作成、"
+        "番号で選ばれた候補のthread_idをそのまま渡す。"
+        "訂正は直前のgmail_draft_idをdiscard_draft_idへ。候補一覧はmail_followup、"
+        "選択はmail_draft。"
+    ) + USER_CONTEXT_RULE
     input_schema: ClassVar[type[BaseModel]] = MailReplyInput
     output_schema: ClassVar[type[BaseModel]] = MailReplyOutput
 

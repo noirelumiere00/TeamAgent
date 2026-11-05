@@ -12,8 +12,8 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 BU2_INPUT_FIELDS = frozenset({"plans", "estimate_terms", "simulation", "hearing_items"})
 BU2_REQUEST_VALUES_ONLY = (
-    "利用者が明示した値だけを入れる。出典は依頼文またはその会話で添付・指定した資料に限る。"
-    "無ければ省略する（推測・相場・例の数値を入れない）。"
+    "利用者が明示した値だけ（依頼文・同じ会話で指定した資料）を使い、"
+    "無ければ省略（推測・相場・例の数値を入れない）。"
 )
 PlanName = Literal["Trial", "A", "B", "C"]
 Rate = Annotated[Decimal, Field(ge=0, le=1, max_digits=7, decimal_places=6)]
@@ -54,14 +54,14 @@ class BU2Plan(BaseModel):
 
     name: PlanName
     count: int | None = Field(
-        default=None, strict=True, ge=1, le=9999, description="本数。" + BU2_REQUEST_VALUES_ONLY
+        default=None, strict=True, ge=1, le=9999, description="本数（利用者指定のみ）。"
     )
     views: int | None = Field(
         default=None,
         strict=True,
         ge=1,
         le=1_000_000_000,
-        description="再生数。" + BU2_REQUEST_VALUES_ONLY,
+        description="再生数（利用者指定のみ）。",
     )
     views_kind: Literal["保証", "想定"] = Field(
         default="想定", description="保証の明示がある場合のみ保証を選ぶ。"
@@ -72,17 +72,13 @@ class BU2Plan(BaseModel):
         le=1_000_000,
         max_digits=9,
         decimal_places=2,
-        description="再生単価（円/再生）。" + BU2_REQUEST_VALUES_ONLY,
+        description="円/再生（利用者指定のみ）。",
     )
-    period: str = Field(default="", max_length=20, description="期間。" + BU2_REQUEST_VALUES_ONLY)
+    period: str = Field(default="", max_length=20, description="期間（利用者指定のみ）。")
     assumption: str = Field(
         min_length=1,
         max_length=120,
-        description=(
-            "利用者が明示した料金条件の出典（依頼文/指定資料）。"
-            "仮定と書いて推測値を正当化しない。条件が無ければplansを省略する。"
-            + BU2_REQUEST_VALUES_ONLY
-        ),
+        description=("料金条件の出典（条件なしはplans省略）（利用者指定のみ）。"),
     )
 
 
@@ -90,13 +86,13 @@ class BU2EstimateTerms(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     net_pricing: bool | None = Field(
-        default=None, strict=True, description="ネット表記か。" + BU2_REQUEST_VALUES_ONLY
+        default=None, strict=True, description="ネット表記（利用者指定のみ）。"
     )
     management_fee_rate: Rate | None = Field(
-        default=None, description="管理費率（0〜1）。" + BU2_REQUEST_VALUES_ONLY
+        default=None, description="管理費率（0〜1）（利用者指定のみ）。"
     )
     production_cost_included: bool | None = Field(
-        default=None, strict=True, description="制作費込か。" + BU2_REQUEST_VALUES_ONLY
+        default=None, strict=True, description="制作費込（利用者指定のみ）。"
     )
 
 
@@ -104,25 +100,20 @@ class BU2Simulation(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
     views: int | None = Field(
-        strict=True, ge=1, le=1_000_000_000, description="試算の再生数。" + BU2_REQUEST_VALUES_ONLY
+        strict=True, ge=1, le=1_000_000_000, description="試算再生数（利用者指定のみ）。"
     )
     contacts: Decimal | None = Field(
         ge=1,
         le=1000,
         max_digits=6,
         decimal_places=2,
-        description="接触回数。社内標準の既定値は無い。" + BU2_REQUEST_VALUES_ONLY,
+        description="接触回数（標準値なし）（利用者指定のみ）。",
     )
-    understanding_rate: Rate | None = Field(
-        description="理解率（0〜1）。社内標準の既定値は無い。" + BU2_REQUEST_VALUES_ONLY
-    )
+    understanding_rate: Rate | None = Field(description="理解率（標準値なし）（利用者指定のみ）。")
     assumption: str = Field(
         min_length=1,
         max_length=140,
-        description=(
-            "利用者が指定した接触回数・理解率の出典（依頼文/指定資料）。"
-            "仮定と書いて推測値を正当化しない。" + BU2_REQUEST_VALUES_ONLY
-        ),
+        description=("接触回数・理解率の出典（利用者指定のみ）。"),
     )
     rounding: Literal["floor"] = Field(default="floor", description="人数は各段階で切り捨て。")
 
@@ -133,25 +124,19 @@ class BU2Content(BaseModel):
     plans: list[BU2Plan] = Field(
         default_factory=list,
         max_length=4,
-        description=(
-            "段階見積の本数・再生数・再生単価・期間。"
-            "金額は入力された再生数×再生単価で自動計算する。" + BU2_REQUEST_VALUES_ONLY
-        ),
+        description=("段階見積（再生数×単価で自動計算）（利用者指定のみ）。"),
     )
     estimate_terms: BU2EstimateTerms = Field(
-        default_factory=BU2EstimateTerms, description="見積条件。" + BU2_REQUEST_VALUES_ONLY
+        default_factory=BU2EstimateTerms, description="見積条件（利用者指定のみ）。"
     )
     simulation: BU2Simulation | None = Field(
         default=None,
-        description=(
-            "再生数・接触回数・理解率とその出典を利用者が指定した場合のみ試算する。"
-            "一つでも未指定ならsimulation全体を省略する。" + BU2_REQUEST_VALUES_ONLY
-        ),
+        description=("一つでも未指定ならsimulation全体を省略（利用者指定のみ）。"),
     )
     hearing_items: list[Annotated[str, Field(min_length=1, max_length=80)]] = Field(
         default_factory=list,
         max_length=6,
-        description="次回までに伺いたいこと。未指定または4〜6項目。",
+        description="次回の確認事項（省略または4〜6項目）。",
     )
 
     @field_validator("hearing_items")

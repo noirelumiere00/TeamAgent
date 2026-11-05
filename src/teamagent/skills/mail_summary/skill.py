@@ -115,19 +115,12 @@ class MailSummarySkill(BaseSkill[MailSummaryInput, MailSummaryOutput]):
 
     name: ClassVar[str] = "mail_summary"
     description: ClassVar[str] = (
-        "**『◯◯からのメールをまとめて』『◯◯の件、どうなってる？』"
-        "と言われたらこれ（内容の横断要約）。**"
-        "本人の受信箱（読み取りのみ）から指定クライアント/案件の直近メールを取得し、"
-        "横断要約（論点・依頼・期限・懸念）を返す。生本文は返さない。"
-        "**要返信・返信漏れの抽出は mail_followup**、空き時間は calendar_freebusy、"
-        "予定の一覧は calendar_freebusy(mode='agenda')。"
-        "client_name には依頼文の断片（『今日のメール』『返信必要』等）を入れない。"
-        "顧客名が特定できない依頼では client_name を空にして呼ぶ（サーバが案内を返す）。"
-        "未連携なら error='not_connected' と message を返す（message をそのまま伝え、"
-        "oauth_connect＝@Aico に『連携』へ誘導する）。0 件なら error='no_hits'、"
-        "connection='live'（＝連携は正常）。**0 件の原因を推測して補わないこと**。"
-        + USER_CONTEXT_RULE
-    )
+        "指定顧客・案件のメール内容を横断要約（読み取りのみ、生本文なし）。"
+        "要返信・返信漏れはmail_followup、空き時間はcalendar_freebusy、"
+        "予定一覧はcalendar_freebusy(mode='agenda')。"
+        "client_nameに依頼文の断片は入れず、不明なら空にして呼ぶ。"
+        "no_hitsの原因は推測しない。"
+    ) + USER_CONTEXT_RULE
     input_schema: ClassVar[type[BaseModel]] = MailSummaryInput
     output_schema: ClassVar[type[BaseModel]] = MailSummaryOutput
 

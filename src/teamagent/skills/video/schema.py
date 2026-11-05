@@ -12,16 +12,8 @@ from pydantic import BaseModel, Field
 class VideoAnalysisInput(BaseModel):
     """VideoAnalysis Skill の入力。"""
 
-    url: str = Field(
-        min_length=1,
-        max_length=500,
-        description="分析対象の動画 URL (YouTube/Shorts/TikTok/Instagram)",
-    )
-    focus: str | None = Field(
-        default=None,
-        max_length=200,
-        description="分析の着眼点 (任意。例: 『フックとCTAを重点的に』)",
-    )
+    url: str = Field(min_length=1, max_length=500)
+    focus: str | None = Field(default=None, max_length=200)
 
 
 class VideoAnalysisOutput(BaseModel):

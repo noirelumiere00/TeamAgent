@@ -63,13 +63,9 @@ class ScheduleProposeSkill(BaseSkill[ScheduleProposeInput, ScheduleProposeOutput
 
     name: ClassVar[str] = "schedule_propose"
     description: ClassVar[str] = (
-        "朝ダイジェストの『🗓 日程候補を提案』ボタン押下を処理するツール。"
-        "Slack の interaction で action='schedule_propose' を受け取ったら、"
-        "その value（署名トークン）を schedule_token に渡して呼ぶ。"
-        "本人カレンダーの空き枠から候補日を計算し、候補入りの返信下書きを Gmail に作成"
-        "（送信はしない）、カレンダーに仮予定（他予定を邪魔しない透明ホールド）を置く。"
-        "自由文の日程調整相談は対象外（このツールはボタン専用）。" + USER_CONTEXT_RULE
-    )
+        "朝ダイジェストの日程候補ボタン専用。本人の空き枠から候補入りGmail下書き（送"
+        "信なし）と透明な仮予定を作る。自由文の日程相談には使わない。"
+    ) + USER_CONTEXT_RULE
     input_schema: ClassVar[type[BaseModel]] = ScheduleProposeInput
     output_schema: ClassVar[type[BaseModel]] = ScheduleProposeOutput
 

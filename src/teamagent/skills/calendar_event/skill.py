@@ -112,20 +112,11 @@ class CalendarEventSkill(BaseSkill[CalendarEventInput, CalendarEventOutput]):
 
     name: ClassVar[str] = "calendar_event"
     description: ClassVar[str] = (
-        "本人のカレンダーに予定を登録するツール（相手への招待は送らない・本人のカレンダーのみ）。"
-        "入口は2つ。①朝ダイジェストの『📅 カレンダーに登録』ボタン押下: Slack の interaction で "
-        "action='calendar_event' を受け取ったら、その value（署名トークン）を event_token に"
-        "渡して呼ぶ。②自由文の依頼（『カレンダーに追加して』『予定入れといて』『◯日◯時で登録』）: "
-        "title（予定名）と start（開始日時 ISO 8601、例 2026-08-20T15:00:00+09:00）を渡す。"
-        "end（終了）と location（場所）は任意で、end 省略時は 60 分。"
-        "日付や時刻が曖昧なとき（『来週あたり』等）は推測せず利用者に確認してから呼ぶ。"
-        "カレンダーで開くリンク(event_url)と案内文(message)を返す。"
-        "参加者の招待・他人のカレンダーへの登録・予定の変更/削除はできない（引数が存在しない）。"
-        "空き時間の照会は calendar_freebusy、相手との日程調整は schedule_propose を使う。"
-        "**予定の確認・一覧（『明日の予定は？』『今日なにがある？』）は "
-        "calendar_freebusy(mode='agenda')**＝このツールは登録専用で、読み取りには使わない。"
-        + USER_CONTEXT_RULE
-    )
+        "本人カレンダーへの予定登録専用（招待・変更・削除なし）。"
+        "ボタンか自由文で登録し、曖昧な日時は確認する。空き時間はcalendar_freebusy、"
+        "予定確認・一覧はcalendar_freebusy(mode='agenda')、"
+        "日程調整ボタンはschedule_propose。"
+    ) + USER_CONTEXT_RULE
     input_schema: ClassVar[type[BaseModel]] = CalendarEventInput
     output_schema: ClassVar[type[BaseModel]] = CalendarEventOutput
 

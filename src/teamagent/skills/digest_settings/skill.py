@@ -192,14 +192,9 @@ class DigestSettingsSkill(BaseSkill[DigestSettingsInput, DigestSettingsOutput]):
 
     name: ClassVar[str] = "digest_settings"
     description: ClassVar[str] = (
-        "View or change the user's own morning summary DM (朝のサマリー/朝ダイジェスト) and the "
-        "pre-event reminder DMs (予定の直前の通知). Use for requests like "
-        "朝のサマリーを止めて・来週まで休み・Slack の欄はいらない・メールは3件・"
-        "下書きは作らないで・タスクの通知を止めて・朝の設定を見せて・元に戻して. "
-        "Settings persist until changed. DM only. "
-        "Pass only the fields the user mentioned; convert relative dates to pause_until. "
-        "Return `message` verbatim. " + USER_CONTEXT_RULE
-    )
+        "朝のサマリー/朝ダイジェストと予定直前の通知DMの設定確認・変更・停止・再開。"
+        "指定された項目だけ渡す。DM only。"
+    ) + USER_CONTEXT_RULE
     input_schema: ClassVar[type[BaseModel]] = DigestSettingsInput
     output_schema: ClassVar[type[BaseModel]] = DigestSettingsOutput
 

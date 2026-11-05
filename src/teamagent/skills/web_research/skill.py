@@ -70,17 +70,12 @@ class WebResearchSkill(BaseSkill[WebResearchInput, WebResearchOutput]):
 
     name: ClassVar[str] = "web_research"
     description: ClassVar[str] = (
-        "公開Webを Google 検索して、市場規模・トレンド・競合の一般情報・製品仕様・"
-        "ニュースなどを日本語要約＋出典URL付きで返す読み取り専用ツール。"
-        "天気・イベント・祝日・為替や株価の現況・話題の出来事など、"
-        "公開Webで分かる日常の一般質問にもこのツールを使う（天気専用ツールは無い。"
-        "『今日の東京の天気は？』のような質問はこのツールで検索して答える）。"
-        "**社内資料・案件・顧客情報の照会には絶対に使わない**（それらは search / clientkarte）。"
-        "X（旧Twitter）の生活者の声は x_voice_search、TikTok/Instagram の検索面は "
-        "search_surface_check を使う。"
-        "⚠️ クエリは外部の検索サービスへ送信されるため、社外秘の文言・顧客名・案件名を"
-        "そのまま query に入れないこと。" + USER_CONTEXT_RULE
-    )
+        "公開Webを検索し日本語要約と出典URLを返す。"
+        "市場・競合・製品仕様・ニュース・天気・イベント・祝日・為替・株価などの一般質"
+        "問に使う。社内資料・顧客情報はsearch/clientkarte、Xの声はx_voice_search、"
+        "TikTok/Instagram面はsearch_surface_check。"
+        "queryは外部送信されるため社外秘・顧客名・案件名を入れない。"
+    ) + USER_CONTEXT_RULE
     input_schema: ClassVar[type[BaseModel]] = WebResearchInput
     output_schema: ClassVar[type[BaseModel]] = WebResearchOutput
 

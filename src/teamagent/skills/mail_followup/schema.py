@@ -24,31 +24,11 @@ class MailFollowupInput(BaseModel):
         default="",
         max_length=100,
         examples=["花王", "アサヒ飲料", "森ビル"],
-        description=(
-            "対象クライアント/案件名。**顧客名・案件名だけ**を入れる。"
-            "『今日のメール』『返信必要』『今週の空き時間』のような"
-            "依頼文の断片・期間・状態は入れない。"
-            "顧客が特定できない依頼では**空のまま**呼ぶ（サーバが正しい案内を返す）。"
-        ),
+        description=("顧客/案件名のみ（不明は空、依頼断片・期間・状態は不可）。"),
     )
-    lookback_days: int = Field(
-        default=14,
-        ge=1,
-        le=90,
-        description="遡る期間（日）。直近の放置メールに絞る",
-    )
-    idle_days: int | None = Field(
-        default=None,
-        ge=1,
-        le=90,
-        description="この日数以上『相手から来たまま動いていない』ものだけに絞る（任意）",
-    )
-    max_messages: int = Field(
-        default=30,
-        ge=1,
-        le=50,
-        description="走査する最大メール数（コスト/レイテンシ上限）",
-    )
+    lookback_days: int = Field(default=14, ge=1, le=90)
+    idle_days: int | None = Field(default=None, ge=1, le=90)
+    max_messages: int = Field(default=30, ge=1, le=50)
 
 
 class FollowupItem(BaseModel):

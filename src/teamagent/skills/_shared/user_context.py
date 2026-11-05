@@ -34,9 +34,7 @@ FORBIDDEN_WRAPPER_PHRASES: Final[tuple[str, ...]] = (
 )
 
 USER_CONTEXT_RULE: Final[str] = (
-    "呼び出し時は `_user_context: {slack_user_id: '<いま話している相手のuser_id>'}` を、"
-    "他の引数と同じ**トップレベル**に並べて必ず渡す"
-    "（本人解決鍵。入れ子のオブジェクトで包み直さない）。"
+    "_user_context:{slack_user_id:相手のuser_id}をトップレベルに必ず渡す（包み直さない）。"
 )
 
 __all__ = ["FORBIDDEN_WRAPPER_PHRASES", "USER_CONTEXT_RULE"]

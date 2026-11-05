@@ -20,21 +20,9 @@ class MailSummaryInput(BaseModel):
     空・断片のいずれも run() 冒頭のガードが受信箱を 1 回も叩かずに案内文へ落とす。
     """
 
-    client_name: str = Field(
-        default="",
-        max_length=100,
-        examples=["花王", "アサヒ飲料", "森ビル"],
-        description=(
-            "対象クライアント/案件名。**顧客名・案件名だけ**を入れる。"
-            "『今日のメール』『返信必要』『今週の空き時間』のような"
-            "依頼文の断片・期間・状態は入れない。"
-            "顧客が特定できない依頼では**空のまま**呼ぶ（サーバが正しい案内を返す）。"
-        ),
-    )
-    lookback_days: int = Field(default=14, ge=1, le=90, description="遡る期間（日）")
-    max_messages: int = Field(
-        default=15, ge=1, le=40, description="走査する最大メール数（コスト/レイテンシ上限）"
-    )
+    client_name: str = Field(default="", max_length=100, examples=["花王", "アサヒ飲料", "森ビル"])
+    lookback_days: int = Field(default=14, ge=1, le=90)
+    max_messages: int = Field(default=15, ge=1, le=40)
 
 
 class MailHighlight(BaseModel):

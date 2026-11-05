@@ -13,34 +13,11 @@ from pydantic import BaseModel, Field
 class MailInternalContextInput(BaseModel):
     """メール×社内ナレッジ横断の入力。G5: client_name 必須（無差別走査を構造的に禁止）。"""
 
-    client_name: str = Field(
-        min_length=1,
-        max_length=100,
-        description="対象クライアント/案件名（メール検索と社内検索の核・必須）",
-    )
-    topic_hint: str | None = Field(
-        default=None,
-        max_length=200,
-        description="案件テーマ（社内検索の文脈に足す任意キーワード）",
-    )
-    lookback_days: int = Field(
-        default=90,
-        ge=1,
-        le=365,
-        description="メール側で遡る期間（日）",
-    )
-    max_messages: int = Field(
-        default=10,
-        ge=1,
-        le=30,
-        description="メール側で走査する最大件数（メタデータのみ・コスト/レイテンシ上限）",
-    )
-    top_k_internal: int = Field(
-        default=6,
-        ge=1,
-        le=20,
-        description="社内ナレッジから突き合わせる参照の上限",
-    )
+    client_name: str = Field(min_length=1, max_length=100)
+    topic_hint: str | None = Field(default=None, max_length=200)
+    lookback_days: int = Field(default=90, ge=1, le=365)
+    max_messages: int = Field(default=10, ge=1, le=30)
+    top_k_internal: int = Field(default=6, ge=1, le=20)
 
 
 class MailSignal(BaseModel):

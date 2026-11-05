@@ -188,15 +188,12 @@ class SearchSurfaceCheckSkill(BaseSkill[SearchSurfaceCheckInput, SearchSurfaceCh
     name: ClassVar[str] = "search_surface_check"
     description: ClassVar[str] = (
         "検索上位チェックを明示的に依頼されたときだけ使う。"
-        "提案書・フルのPPTX作成の前処理や並行処理として呼ばない。資料作成は omiyage_report_submit。"
-        "検索KW群のTikTok/Instagramの検索面（誰のどんな投稿が上位に出るか）を取得し、"
-        "面の勢力図（ニュース/グルメ/一般/公式/インフルエンサーの割合）とクライアント動画の"
-        "在圏判定つきの媒体比較レポート(HTML署名URL)を作る。"
-        "KW数に関係なく、まず本ツールを confirmed なしで呼ぶ。status=needs_input なら確認文を"
-        "そのまま返して答えを待ち、答えたら confirmed=true・max_videos・competitor_accounts を"
-        "付けて進める。そのうえで TikTok面が3KW以上なら tiktok_acquire(videos_per_kw=0) を"
-        "実行して acquire_job_id を渡して呼び直す（1〜2KWの即席チェックのみ直接取得可）。"
-        "動画の中身分析は video_algorithm、X(Twitter)の声集めは x_voice_search。"
+        "提案書・フルのPPTX作成の前処理や並行処理として呼ばない（資料作成は"
+        "omiyage_report_submit）。TikTok/"
+        "Instagramの検索面の勢力図・媒体比較・自社在圏判定レポート。"
+        "まずconfirmedなしで呼びneeds_inputに回答後confirmed=trueで再実行。"
+        "TikTokが3KW以上ならtiktok_acquire(videos_per_kw=0)のacquire_job_idを渡す。"
+        "中身分析はvideo_algorithm、Xの声はx_voice_search。"
     )
     input_schema: ClassVar[type[BaseModel]] = SearchSurfaceCheckInput
     output_schema: ClassVar[type[BaseModel]] = SearchSurfaceCheckOutput

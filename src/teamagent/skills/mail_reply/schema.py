@@ -34,56 +34,20 @@ class MailReplyInput(BaseModel):
     client_name: str = Field(
         default="",
         max_length=100,
-        description=(
-            "返信対象を探すクライアント/案件名（会社名・案件名）。"
-            "target_message_id / thread_id で対象を明示するときは空でよい"
-        ),
+        description=("顧客/案件名（ID指定時は空で可）。"),
     )
-    instructions: str | None = Field(
-        default=None, max_length=500, description="返信の方針・盛り込みたい点（任意・トーン等）"
-    )
-    lookback_days: int = Field(default=30, ge=1, le=90, description="対象メールを探す期間（日）")
-    target_message_id: str | None = Field(
-        default=None, description="返信対象メールを明示指定する場合の messageId（任意）"
-    )
-    subject_contains: str = Field(
-        default="",
-        max_length=200,
-        description=(
-            "利用者が件名で指したときの手がかり。【…】や「…の件」の中身をそのまま入れる"
-            "（例:「日本教育財団様_PR関連のご提案について」）。件名に含まれる語で候補を絞る"
-        ),
-    )
+    instructions: str | None = Field(default=None, max_length=500)
+    lookback_days: int = Field(default=30, ge=1, le=90)
+    target_message_id: str | None = Field(default=None)
+    subject_contains: str = Field(default="", max_length=200)
     from_contains: str = Field(
         default="",
         max_length=200,
-        description=(
-            "利用者が差出人で指したときの手がかり。氏名（姓）かメールアドレスの一部"
-            "（例:「徳野」「tokuno@」）。会社名は client_name に入れる"
-        ),
+        description=("差出人の氏名/メール部分（会社名はclient_name）。"),
     )
-    received_after: str = Field(
-        default="",
-        pattern=r"^(\d{4}-\d{2}-\d{2})?$",
-        description="この日付以降に届いたメールに限る（YYYY-MM-DD・任意）",
-    )
-    thread_id: str = Field(
-        default="",
-        max_length=64,
-        description=(
-            "ambiguous_threads から利用者が番号で選んだ候補の thread_id を**そのまま**入れる"
-            "（自分で作らない・利用者には見せない）。指定時は検索せずそのスレッドに作る"
-        ),
-    )
-    discard_draft_id: str = Field(
-        default="",
-        max_length=128,
-        description=(
-            "利用者が「それじゃない」と言ったとき、直前の結果の gmail_draft_id を入れる。"
-            "その下書きを削除してから正しいスレッドで作り直す（削除できるのは本ツールが"
-            "作った下書きだけ・送信はしない）"
-        ),
-    )
+    received_after: str = Field(default="", pattern="^(\\d{4}-\\d{2}-\\d{2})?$")
+    thread_id: str = Field(default="", max_length=64)
+    discard_draft_id: str = Field(default="", max_length=128)
 
 
 class ReplyThreadCandidate(BaseModel):

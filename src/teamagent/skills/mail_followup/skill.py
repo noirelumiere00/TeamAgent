@@ -250,25 +250,14 @@ class MailFollowupSkill(BaseSkill[MailFollowupInput, MailFollowupOutput]):
 
     name: ClassVar[str] = "mail_followup"
     description: ClassVar[str] = (
-        "**『要返信』『返信が必要』『返信漏れ』『返信待ち』『放置しているメール』"
-        "と言われたらこれ。**"
-        "本人の受信箱から、指定クライアントについて『相手から最後に来たまま動いていない』"
-        "メールスレッドを放置日数つきで列挙する。本文は読まず件名・相手はマスク。"
-        "スレッド末尾が本人の返信なら候補から除外する。"
-        "メール内容の横断要約は mail_summary、空き時間は calendar_freebusy、"
-        "予定の一覧は calendar_freebusy(mode='agenda')。"
-        "顧客名が特定できない依頼では client_name を**空のまま呼ぶ**。"
-        "サーバが受信箱全体をメタデータだけで見て候補を数件返し（error='inbox_triage'）、"
-        "**message をそのまま出して番号で選んでもらう**（聞き返しの文面を自作しない）。"
-        "その返事（『1番で』『1と3、丁寧めで』等）が来たら **mail_draft を呼ぶ**"
-        "（selection に返事をそのまま・candidate_refs に items[].evidence_ref を表示順のまま・"
-        "lookback_days に本ツールが返した lookback_days をそのまま）。"
-        "**candidate_refs を省くと番号は解釈されない**（別のお客様宛に作らないため）。"
-        "未連携なら error='not_connected' と message を返す（message をそのまま伝え、"
-        "oauth_connect＝@Aico に『連携』へ誘導する）。0 件なら error='no_hits'、"
-        "connection='live'（＝連携は正常）。**0 件の原因を推測して補わないこと**。"
-        + USER_CONTEXT_RULE
-    )
+        "要返信・返信が必要・返信漏れ・返信待ち・放置メールの候補を列挙（メタデータの"
+        "み）。内容要約はmail_summary、空き時間はcalendar_freebusy、"
+        "予定一覧はcalendar_freebusy(mode='agenda')。顧客不明はclient_name "
+        "を**空のまま呼ぶ**。inbox_triageのmessageで番号を選んでもらい、"
+        "聞き返しの文面を自作しない。返事はmail_draftへ（selection=原文、"
+        "candidate_refs=items[].evidence_refを表示順、lookback_days=返値）。"
+        "no_hitsの原因は推測しない。"
+    ) + USER_CONTEXT_RULE
     input_schema: ClassVar[type[BaseModel]] = MailFollowupInput
     output_schema: ClassVar[type[BaseModel]] = MailFollowupOutput
 

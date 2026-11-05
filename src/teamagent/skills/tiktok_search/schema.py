@@ -16,23 +16,19 @@ class TikTokSearchInput(BaseModel):
     query: str = Field(
         min_length=1,
         max_length=100,
-        description="検索語 (例: '新宿 ランチ')。hashtag のときは '#' 抜きの語 (例: '新宿')",
+        description="検索語（hashtagは#なし）。",
     )
     search_type: str = Field(
         default="keyword",
-        description="keyword | hashtag。hashtag が空振りしたら keyword に自動フォールバック",
+        description="keyword/hashtag（空振り時はkeyword）。",
     )
-    max_videos: int = Field(default=10, ge=1, le=30, description="取得する上位動画の本数 (既定 10)")
-    analyze: bool = Field(
-        default=True, description="取得後に Gemini で横断分析するか (false ならデータのみ)"
-    )
+    max_videos: int = Field(default=10, ge=1, le=30)
+    analyze: bool = Field(default=True)
     outputs: list[str] = Field(
         default_factory=lambda: ["html"],
         description=(
-            "欲しい成果物。'html'(既定・常に作る) / "
-            "'frames'(該当秒の実フレーム。動画を実際に視聴するため数十秒〜数分・課金あり。"
-            "利用者が『どの部分が』『該当箇所』『動画も見せて』と言ったときだけ足す) / "
-            "'pptx'(パワポ。media worker 経由のため数十秒かかる)"
+            "htmlは常時生成、pptxはパワポ、framesは該当箇所・動画表示を本人が求めた時だけ"
+            "追加（待機・課金あり）。"
         ),
     )
 
