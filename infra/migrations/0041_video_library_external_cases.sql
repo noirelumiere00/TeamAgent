@@ -23,6 +23,12 @@ CREATE POLICY vl_video_origin_insert ON vl_video_origin_decisions
         decided_by=current_setting('app.user_email',true)
         OR current_setting('app.user_role',true)='admin');
 
+-- vl_video_is_own() runs per row of the view; without this the account match scanned
+-- vl_accounts for every video (~1s over 2,800 videos locally, 0.18s with the index).
+CREATE INDEX IF NOT EXISTS vl_accounts_own_handle ON vl_accounts
+    (platform, lower(ltrim(handle,'@')))
+    WHERE operator_label IN ('NewsTV','ベクトル（VCL）','ベクトル九州','イニシャル','gracemode');
+
 -- One ownership predicate for the view and employee advertiser-write policies.
 CREATE FUNCTION vl_video_is_own(p_platform TEXT,p_video_id TEXT) RETURNS BOOLEAN
 LANGUAGE sql STABLE SECURITY INVOKER AS $$
