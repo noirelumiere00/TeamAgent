@@ -1000,6 +1000,10 @@ def test_ingest_gdrive_folder_pdf_extracts_chunks_and_resolves_acl(
     assert call["external_id"] == "F1"
     assert call["source_type"] == "gdrive"
 
+    chunks = call["chunks"]
+    assert {chunk.page_num for chunk in chunks} == {1, 2}
+    assert all(chunk.page_num == chunk.metadata["page_num"] for chunk in chunks)
+
 
 def test_ingest_gdrive_folder_non_pdf_uses_title_only(
     monkeypatch: pytest.MonkeyPatch,
@@ -1257,6 +1261,7 @@ def test_ingest_gdrive_folder_pptx_extracts_per_slide(
     )
     assert docs_n == 1
     assert chunks_n == 2  # 2 slides → 2 chunks（小さいので分割なし）
+    assert [chunk.page_num for chunk in repo.upsert_calls[0]["chunks"]] == [1, 2]
 
 
 def test_ingest_gdrive_folder_corrupt_pptx_is_classified_without_overwrite(
@@ -1411,6 +1416,7 @@ def test_ingest_gdrive_folder_xlsx_extracts_per_sheet(
     )
     assert docs_n == 1
     assert chunks_n == 2  # 2 sheets → 2 chunks
+    assert [chunk.page_num for chunk in repo.upsert_calls[0]["chunks"]] == [1, 2]
 
 
 def test_ingest_gdrive_folder_gdoc_uses_gdocs_client(

@@ -53,6 +53,8 @@ def test_embed_page_chunks_batches_with_same_result_and_heartbeat(
     sequential = _embed_page_chunks(page_chunks, embedder=sequential_embedder)
 
     assert batched == sequential
+    assert [chunk.page_num for chunk in batched] == [1, 1, 2, 3, 3]
+    assert all(chunk.page_num == chunk.metadata["page_num"] for chunk in batched)
     assert batch_embedder.batch_calls == [
         ["alpha", "beta"],
         ["gamma", "delta"],
