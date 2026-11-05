@@ -1,0 +1,536 @@
+{
+  "name": "oc35",
+  "description": "OC 便 oc35（oc34 の積み荷＋#713 使い方キャンバス・#714 SOUL 投稿開始日なし）",
+  "checks": [
+    {
+      "label": "dev に #405 の SOUL 追補（block 文の接頭辞規則）が含まれていない",
+      "kind": "grep_regex",
+      "path": "infra/openclaw/SOUL.md",
+      "pattern": "で始まる行はすべて",
+      "phase": "before_mcp"
+    },
+    {
+      "label": "dev に #405 の plugin 修正（申告 ID の正規化）が含まれていない",
+      "kind": "grep_regex",
+      "path": "infra/openclaw/caller-identity-plugin/dist/index.js",
+      "pattern": "normalizeDeclaredSlackUserId",
+      "phase": "before_mcp"
+    },
+    {
+      "label": "dev に #441 の SOUL 修正（YouTube の制限は切り出し限定）が含まれていない",
+      "kind": "grep_fixed",
+      "path": "infra/openclaw/SOUL.md",
+      "pattern": "**切り出し（`video_capture`）に限り**",
+      "phase": "before_mcp"
+    },
+    {
+      "label": "dev に #441 の動画分析の振り先が含まれていない",
+      "kind": "grep_fixed",
+      "path": "infra/openclaw/SOUL.md",
+      "pattern": "→ `video_analysis`（YouTube も URL のまま分析できる＝断らずに呼ぶ）",
+      "phase": "before_mcp"
+    },
+    {
+      "label": "dev に #445 の SOUL 修正（過去の断りを根拠にしない）が含まれていない",
+      "kind": "grep_fixed",
+      "path": "infra/openclaw/SOUL.md",
+      "pattern": "**過去の自分の断りを根拠にしない**",
+      "phase": "before_mcp"
+    },
+    {
+      "label": "dev に #448 のプラグイン（動画 URL × 0 tool call の層2）が含まれていない",
+      "kind": "grep_regex",
+      "path": "infra/openclaw/caller-identity-plugin/dist/index.js",
+      "pattern": "const VIDEO_ZERO_TOOL_RETRY_KEY = \"video-zero-tool\";",
+      "phase": "before_mcp"
+    },
+    {
+      "label": "dev の #448 で before_agent_finalize に動画ガードが登録されていない",
+      "kind": "grep_regex",
+      "path": "infra/openclaw/caller-identity-plugin/dist/index.js",
+      "pattern": "guardVideoZeroTool(event, ctx, api.logger)",
+      "phase": "before_mcp"
+    },
+    {
+      "label": "dev に #456 の SOUL（検索上位チェック・動画分析の slack_summary をそのまま返す）が含まれていない",
+      "kind": "grep_fixed",
+      "path": "infra/openclaw/SOUL.md",
+      "pattern": "**出力規約（X系・`search_surface_check`・`video_algorithm`／厳守）**",
+      "phase": "before_mcp"
+    },
+    {
+      "label": "dev に #456 の「表に作り直さない」が含まれていない",
+      "kind": "grep_fixed",
+      "path": "infra/openclaw/SOUL.md",
+      "pattern": "**表に作り直さない・要約/言い換えしない**",
+      "phase": "before_mcp"
+    },
+    {
+      "label": "dev に #467 の束縛表（ACTION_BINDINGS）が含まれていない",
+      "kind": "grep_regex",
+      "path": "infra/openclaw/caller-identity-plugin/dist/index.js",
+      "pattern": "ACTION_BINDINGS",
+      "phase": "before_mcp"
+    },
+    {
+      "label": "dev に #467 のボタン直接実行が含まれていない",
+      "kind": "grep_regex",
+      "path": "infra/openclaw/caller-identity-plugin/dist/index.js",
+      "pattern": "async function executeButtonAction",
+      "phase": "before_mcp"
+    },
+    {
+      "label": "dev に #467 の起動バナー（button_direct）が含まれていない",
+      "kind": "grep_fixed",
+      "path": "infra/openclaw/caller-identity-plugin/dist/index.js",
+      "pattern": "button_direct=",
+      "phase": "before_mcp"
+    },
+    {
+      "label": "dev に #476（ボタン直接実行の後追い）が含まれていない",
+      "kind": "grep_regex",
+      "path": "infra/openclaw/caller-identity-plugin/dist/index.js",
+      "pattern": "export const BUTTON_ALREADY_PRESSED_TEXT",
+      "phase": "before_mcp"
+    },
+    {
+      "label": "dev に #486 のプラグイン（溢れたときの日本語の案内）が含まれていない",
+      "kind": "grep_regex",
+      "path": "infra/openclaw/caller-identity-plugin/dist/index.js",
+      "pattern": "export function classifyContextOverflowReply",
+      "phase": "before_mcp"
+    },
+    {
+      "label": "dev に #486 の dmHistoryLimit: 2 が含まれていない",
+      "kind": "grep_regex",
+      "path": "infra/openclaw/openclaw.config.json5",
+      "pattern": "^\\s*dmHistoryLimit: 2,",
+      "dialect": "extended",
+      "phase": "before_mcp"
+    },
+    {
+      "label": "dev に #486 の toolResultMaxChars が含まれていない",
+      "kind": "grep_regex",
+      "path": "infra/openclaw/openclaw.config.json5",
+      "pattern": "toolResultMaxChars: 20000",
+      "dialect": "extended",
+      "phase": "before_mcp"
+    },
+    {
+      "label": "dev に #492 の include（slack_search）が含まれていない",
+      "kind": "grep_regex",
+      "path": "infra/openclaw/openclaw.config.json5",
+      "pattern": "^\\s*\"slack_search\",",
+      "dialect": "extended",
+      "phase": "before_mcp"
+    },
+    {
+      "label": "dev に #493 の include（digest_settings）が含まれていない",
+      "kind": "grep_regex",
+      "path": "infra/openclaw/openclaw.config.json5",
+      "pattern": "^\\s*\"digest_settings\",",
+      "dialect": "extended",
+      "phase": "before_mcp"
+    },
+    {
+      "label": "dev に #492 の SOUL（Slack 内の検索）が含まれていない",
+      "kind": "grep_fixed",
+      "path": "infra/openclaw/SOUL.md",
+      "pattern": "## Slack の要約と検索",
+      "phase": "before_mcp"
+    },
+    {
+      "label": "dev に #502（axios 1.20.0）が含まれていない",
+      "kind": "grep_regex",
+      "path": "infra/docker/Dockerfile.openclaw",
+      "pattern": "npm pack axios@1.20.0",
+      "phase": "before_mcp"
+    },
+    {
+      "label": "dev に #668（runtime 土台 node 26.12.1・ca-certificates-bundle r3）が含まれていない",
+      "kind": "grep_regex",
+      "path": "infra/docker/Dockerfile.openclaw",
+      "pattern": "^ARG RUNTIME_ARM64_DIGEST=sha256:4e3acbdfc5647f9c40ee16ad0f3937309847489948d85dbb0a4f4a766fd4360d$",
+      "count": 2,
+      "phase": "before_mcp"
+    },
+    {
+      "label": "plugins-lock の runtime が #668 の digest ではない",
+      "kind": "lock_version",
+      "path": "infra/openclaw/plugins-lock.json",
+      "pattern": "sha256:4e3acbdfc5647f9c40ee16ad0f3937309847489948d85dbb0a4f4a766fd4360d",
+      "format": "json_value",
+      "field": [
+        "runtime",
+        "linuxArm64Digest"
+      ],
+      "phase": "before_mcp"
+    },
+    {
+      "label": "dev に #668 の契約の node probe（6410d7ee…）が含まれていない",
+      "kind": "grep_regex",
+      "path": "infra/codebuild/openclaw_bundle_contract.json",
+      "pattern": "\"sha256\": \"6410d7ee22c666fb81dc671fefeac4370918a554156700a97f6c5af65ffd4501\"",
+      "phase": "before_mcp"
+    },
+    {
+      "label": "OpenClaw の ECR 例外が空ではない（OC r8 で #568 の 16 件を撤去したはず）",
+      "kind": "lock_version",
+      "path": "infra/codebuild/ecr_scan_exceptions_openclaw.json",
+      "pattern": "0",
+      "format": "json_array_length",
+      "field": [
+        "exceptions"
+      ],
+      "phase": "before_mcp"
+    },
+    {
+      "label": "dev に #506（strip-runtime-packages.mjs）が含まれていない",
+      "kind": "grep_regex",
+      "path": "infra/docker/Dockerfile.openclaw",
+      "pattern": "^COPY infra/openclaw/strip-runtime-packages.mjs /tmp/strip-runtime-packages.mjs$",
+      "phase": "before_mcp"
+    },
+    {
+      "label": "#506 の改名前のファイル（strip-runtime-npm.mjs）が残っている",
+      "kind": "file_exists",
+      "path": "infra/openclaw/strip-runtime-npm.mjs",
+      "absent": true,
+      "phase": "before_mcp"
+    },
+    {
+      "label": "dev に #505（FROM scratch の runtime）が含まれていない",
+      "kind": "grep_regex",
+      "path": "infra/docker/Dockerfile.openclaw",
+      "pattern": "^FROM scratch AS runtime",
+      "phase": "before_mcp"
+    },
+    {
+      "label": "dev に #509 の SOUL（#〇〇 も見て → slack_search）が含まれていない",
+      "kind": "grep_fixed",
+      "path": "infra/openclaw/SOUL.md",
+      "pattern": "チャンネル名だけなら `query` に `in:#名前 検索語`（ID やリンクを求めない）",
+      "phase": "before_mcp"
+    },
+    {
+      "label": "dev に #523 の include（meeting_prep）が含まれていない",
+      "kind": "grep_regex",
+      "path": "infra/openclaw/openclaw.config.json5",
+      "pattern": "^\\s*\"meeting_prep\",",
+      "dialect": "extended",
+      "phase": "before_mcp"
+    },
+    {
+      "label": "dev に #523/#544 の SOUL（商談の準備）が含まれていない",
+      "kind": "grep_fixed",
+      "path": "infra/openclaw/SOUL.md",
+      "pattern": "**商談の準備・下調べ・予習**",
+      "phase": "before_mcp"
+    },
+    {
+      "label": "dev に #539 の会話の区切り（atHour 19＝日本時間 04:00）が含まれていない",
+      "kind": "grep_regex",
+      "path": "infra/openclaw/openclaw.config.json5",
+      "pattern": "reset: \\{ mode: \"daily\", atHour: 19, idleMinutes: 60 \\}",
+      "dialect": "extended",
+      "phase": "before_mcp"
+    },
+    {
+      "label": "dev に #539 の userTimezone が含まれていない",
+      "kind": "grep_fixed",
+      "path": "infra/openclaw/openclaw.config.json5",
+      "pattern": "userTimezone: \"Asia/Tokyo\"",
+      "phase": "before_mcp"
+    },
+    {
+      "label": "dev に #540 の評価ボタン（plugin 側）が含まれていない",
+      "kind": "grep_regex",
+      "path": "infra/openclaw/caller-identity-plugin/dist/index.js",
+      "pattern": "TEAMAGENT_ANSWER_FEEDBACK",
+      "phase": "before_mcp"
+    },
+    {
+      "label": "dev に #544 の SOUL（1 通目に答える）が含まれていない",
+      "kind": "grep_fixed",
+      "path": "infra/openclaw/SOUL.md",
+      "pattern": "新しい会話の 1 通目でも依頼の本文があればまず答える",
+      "phase": "before_mcp"
+    },
+    {
+      "label": "dev に #546（1 通目の本文を戻す）が含まれていない",
+      "kind": "grep_regex",
+      "path": "infra/openclaw/caller-identity-plugin/dist/index.js",
+      "pattern": "export const BARE_SESSION_RESET_MARKER",
+      "phase": "before_mcp"
+    },
+    {
+      "label": "dev に #546 の DIAGNOSTIC_ENV 追加が含まれていない",
+      "kind": "grep_regex",
+      "path": "infra/docker/openclaw-entrypoint.mjs",
+      "pattern": "\"TEAMAGENT_FIRST_MESSAGE_RESTORE\"",
+      "phase": "before_mcp"
+    },
+    {
+      "label": "dev に #548 の include（video_algorithm_status）が含まれていない",
+      "kind": "grep_regex",
+      "path": "infra/openclaw/openclaw.config.json5",
+      "pattern": "\"video_algorithm_status\"",
+      "dialect": "extended",
+      "phase": "before_mcp"
+    },
+    {
+      "label": "dev に #555（CVE-2026-90711・CVE-2026-104850 の差し替え）が含まれていない（10-07 a1e0626c が門で落ちた）",
+      "kind": "grep_regex",
+      "path": "infra/docker/Dockerfile.openclaw",
+      "pattern": "npm pack proxy-addr@2.0.8",
+      "phase": "before_mcp"
+    },
+    {
+      "label": "dev に #555（CVE-2026-90711・CVE-2026-104850 の差し替え）が含まれていない（10-07 a1e0626c が門で落ちた）",
+      "kind": "grep_regex",
+      "path": "infra/docker/Dockerfile.openclaw",
+      "pattern": "npm pack @modelcontextprotocol/sdk@1.32.0",
+      "phase": "before_mcp"
+    },
+    {
+      "label": "dev に #555（CVE-2026-90711・CVE-2026-104850 の差し替え）が含まれていない（10-07 a1e0626c が門で落ちた）",
+      "kind": "grep_regex",
+      "path": "infra/docker/Dockerfile.openclaw",
+      "pattern": "npm pack follow-redirects@1.16.1",
+      "phase": "before_mcp"
+    },
+    {
+      "label": "dev に #556（エージェント画面の日本語の提案プロンプト）が含まれていない",
+      "kind": "grep_fixed",
+      "path": "infra/openclaw/patch-slack-home.mjs",
+      "pattern": "title: \"Aico にこう頼めます\",",
+      "phase": "before_mcp"
+    },
+    {
+      "label": "dev に #565 の mcp 側が無い",
+      "kind": "grep_fixed",
+      "path": "src/teamagent/mcp_gateway/answer_feedback.py",
+      "pattern": "MAX_TOOL_NAMES",
+      "phase": "after_mcp"
+    },
+    {
+      "label": "dev に #565 の plugin 側（評価ボタンを返信全部に）が含まれていない",
+      "kind": "grep_fixed",
+      "path": "infra/openclaw/caller-identity-plugin/dist/index.js",
+      "pattern": "k:使用ツール名",
+      "phase": "after_mcp"
+    },
+    {
+      "label": "dev に #566（送る直前の洗浄）が含まれていない",
+      "kind": "grep_fixed",
+      "path": "infra/openclaw/caller-identity-plugin/dist/index.js",
+      "pattern": "export function scrubOutboundReplyText",
+      "phase": "after_mcp"
+    },
+    {
+      "label": "dev に #566 の SOUL（83 枚提案書の扱い）が含まれていない",
+      "kind": "grep_fixed",
+      "path": "infra/openclaw/SOUL.md",
+      "pattern": "依頼されたら呼んでよい。ツールが「準備中」と返したらその文をそのまま伝え",
+      "phase": "after_mcp"
+    },
+    {
+      "label": "dev に #583 の SOUL（📊/📎 の節を一字も変えず写す）が含まれていない",
+      "kind": "grep_fixed",
+      "path": "infra/openclaw/SOUL.md",
+      "pattern": "「📊 動画ごとの数字」「📎」の節は**一字も変えず写す**",
+      "phase": "after_mcp"
+    },
+    {
+      "label": "dev に #572 の plugin（proposal_research を外向きツールに）が含まれていない",
+      "kind": "grep_fixed",
+      "path": "infra/openclaw/caller-identity-plugin/dist/index.js",
+      "pattern": "\"proposal_research\"",
+      "phase": "after_mcp"
+    },
+    {
+      "label": "dev に #599 の SOUL（受付の返事は message のまま）が含まれていない",
+      "kind": "grep_fixed",
+      "path": "infra/openclaw/SOUL.md",
+      "pattern": "受付の返事は、ツールの message をそのまま出す（目安時間も届け先も・「数分」に縮めない",
+      "phase": "after_mcp"
+    },
+    {
+      "label": "dev に #613 の SOUL（統合検索の節を写す）が含まれていない",
+      "kind": "grep_fixed",
+      "path": "infra/openclaw/SOUL.md",
+      "pattern": "search の answer に「探した範囲（まとめて検索）:」があれば:",
+      "phase": "after_mcp"
+    },
+    {
+      "label": "dev に #619（連携リンクの差し戻し）が含まれていない",
+      "kind": "grep_regex",
+      "path": "infra/openclaw/caller-identity-plugin/dist/index.js",
+      "pattern": "CONNECT-Z03",
+      "phase": "after_mcp"
+    },
+    {
+      "label": "dev に #620（打ち直したリンクの差し戻し・比較/社内用語の作り直し）が含まれていない",
+      "kind": "grep_regex",
+      "path": "infra/openclaw/caller-identity-plugin/dist/index.js",
+      "pattern": "CONNECT-Z04",
+      "phase": "after_mcp"
+    },
+    {
+      "label": "dev に #625（空の再パスでも 1 通届ける・数字の照合）が含まれていない",
+      "kind": "grep_regex",
+      "path": "infra/openclaw/caller-identity-plugin/dist/index.js",
+      "pattern": "function revisedReplyFallback",
+      "phase": "after_mcp"
+    },
+    {
+      "label": "dev に #627（出典リンクの補完・数字の照合の見直し）が含まれていない",
+      "kind": "grep_regex",
+      "path": "infra/openclaw/caller-identity-plugin/dist/index.js",
+      "pattern": "function appendMissingSearchSources",
+      "phase": "after_mcp"
+    },
+    {
+      "label": "dev に #629（search の直接実行・直接投稿の取り消し）が含まれていない",
+      "kind": "grep_regex",
+      "path": "infra/openclaw/caller-identity-plugin/dist/index.js",
+      "pattern": "async function executeSearchZeroTool",
+      "phase": "after_mcp"
+    },
+    {
+      "label": "dev に #637（種類ゲート）が含まれていない",
+      "kind": "grep_regex",
+      "path": "infra/openclaw/caller-identity-plugin/dist/index.js",
+      "pattern": "searchDirectKinds",
+      "phase": "after_mcp"
+    },
+    {
+      "label": "dev に #637 の TD 許可（SEARCH_DIRECT_ANSWER_KINDS）が含まれていない",
+      "kind": "grep_regex",
+      "path": "infra/openclaw/harden-task-definition.jq",
+      "pattern": "SEARCH_DIRECT_ANSWER_KINDS",
+      "phase": "after_mcp"
+    },
+    {
+      "label": "dev に #644（DM 追補）が含まれていない",
+      "kind": "grep_regex",
+      "path": "infra/openclaw/caller-identity-plugin/dist/index.js",
+      "pattern": "DM_CATCHUP_ENABLED",
+      "phase": "after_mcp"
+    },
+    {
+      "label": "dev に #644 の TD 許可（DM_CATCHUP_*）が含まれていない",
+      "kind": "grep_regex",
+      "path": "infra/openclaw/harden-task-definition.jq",
+      "pattern": "DM_CATCHUP_ALLOWED_USERS",
+      "phase": "after_mcp"
+    },
+    {
+      "label": "dev に #644 の entrypoint（slack-catchup）が含まれていない",
+      "kind": "grep_regex",
+      "path": "infra/docker/openclaw-entrypoint.mjs",
+      "pattern": "slack-catchup",
+      "phase": "after_mcp"
+    },
+    {
+      "label": "dev に #653（聞き返しの直し）が含まれていない",
+      "kind": "grep_regex",
+      "path": "infra/openclaw/caller-identity-plugin/dist/index.js",
+      "pattern": "const claimsOnly = \\[\"comparison\", \"list\", \"document_followup\", \"source\", \"internal_term\", \"internal_topic\"\\]",
+      "phase": "after_mcp"
+    },
+    {
+      "label": "dev に oc27 の定型文が残っている（#653 未反映）",
+      "kind": "grep_regex",
+      "path": "infra/openclaw/caller-identity-plugin/dist/index.js",
+      "pattern": "数字や説明は search で元資料を確認",
+      "absent": true,
+      "phase": "after_mcp"
+    },
+    {
+      "label": "SOUL に古い雛形「数分かかります。」が残っている",
+      "kind": "grep_fixed",
+      "path": "infra/openclaw/SOUL.md",
+      "pattern": "数分かかります。",
+      "absent": true,
+      "phase": "after_mcp"
+    },
+    {
+      "label": "dev に #676（proposal_builder に依頼文を添える）が含まれていない",
+      "kind": "grep_regex",
+      "path": "infra/openclaw/caller-identity-plugin/dist/index.js",
+      "pattern": "request_text",
+      "phase": "after_mcp"
+    },
+    {
+      "label": "dev に #681 の OC 側（元資料の説明）が含まれていない",
+      "kind": "grep_regex",
+      "path": "infra/openclaw/caller-identity-plugin/dist/index.js",
+      "pattern": "sourceExplanationPattern",
+      "phase": "after_mcp"
+    },
+    {
+      "label": "dev に #683 の OC 側（リンク無しの誘い文）が含まれていない",
+      "kind": "grep_regex",
+      "path": "infra/openclaw/caller-identity-plugin/dist/index.js",
+      "pattern": "見たければ",
+      "phase": "after_mcp"
+    },
+    {
+      "label": "dev に #689（内部名の送信前ガード）が含まれていない",
+      "kind": "grep_regex",
+      "path": "infra/openclaw/caller-identity-plugin/dist/index.js",
+      "pattern": "OUTBOUND_INTERNAL_NAME_RE",
+      "phase": "after_mcp"
+    },
+    {
+      "label": "dev に #692（資料の作成依頼を作り直さない）が含まれていない",
+      "kind": "grep_regex",
+      "path": "infra/openclaw/caller-identity-plugin/dist/index.js",
+      "pattern": "DOCUMENT_GENERATION_TOOLS",
+      "phase": "after_mcp"
+    },
+    {
+      "label": "dev に #702（case_cards の reader）が含まれていない",
+      "kind": "grep_fixed",
+      "path": "infra/openclaw/caller-identity-plugin/dist/index.js",
+      "pattern": "\"video_metrics\", \"case_cards\"",
+      "phase": "after_mcp"
+    },
+    {
+      "label": "dev に #706（誘い文ガードの共通化）が含まれていない",
+      "kind": "grep_regex",
+      "path": "infra/openclaw/caller-identity-plugin/dist/index.js",
+      "pattern": "stripDriveFirstInvitation",
+      "phase": "after_mcp"
+    },
+    {
+      "label": "dev に #708 の SOUL（提案書の振り分け）が含まれていない",
+      "kind": "grep_fixed",
+      "path": "infra/openclaw/SOUL.md",
+      "pattern": "proposal_builder_submit",
+      "phase": "after_mcp"
+    },
+    {
+      "label": "dev に #689（SOUL の社内の話題は必ず search）が含まれていない",
+      "kind": "grep_regex",
+      "path": "infra/openclaw/SOUL.md",
+      "pattern": "社内の話題（「うちも関わってる？」",
+      "phase": "after_mcp"
+    },
+    {
+      "label": "#713 使い方キャンバスのリンク",
+      "kind": "grep_fixed",
+      "path": "infra/openclaw/SOUL.md",
+      "pattern": "F0CCGL1SFPW",
+      "phase": "after_mcp"
+    },
+    {
+      "label": "#714 SOUL 投稿開始日なし",
+      "kind": "grep_fixed",
+      "path": "infra/openclaw/SOUL.md",
+      "pattern": "未定",
+      "phase": "after_mcp"
+    }
+  ]
+}

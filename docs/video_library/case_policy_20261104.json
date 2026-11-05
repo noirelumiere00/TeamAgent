@@ -1,0 +1,14 @@
+{
+  "application_version": "v3",
+  "model": "jp.anthropic.claude-haiku-4-5-20251001-v1:0",
+  "prompt_version": "v1",
+  "prompt_hash": "0f799b9887ac306bc82de86f8a49206ff267b98c54901af992534cf4e912f0d9",
+  "catalog_hash": "d5e00108b32afd4f9446a76a41ba8aa2be469d71924f188f2a3a7dde567c7358",
+  "evaluation_hash": "afa574c0df4615aec6bb02d5c380af5e7014700ee673ec2cc671c5126556aaf6",
+  "existing": {
+    "threshold": 0.0,
+    "selected": 66,
+    "correct": 66
+  },
+  "advertiser_only": null
+}

@@ -1,0 +1,9 @@
+あなたは teamagent リポジトリの開発者。作業場所はこの worktree（origin/dev 起点・branch fix/core-pip-wheel-20261030）。日本語で報告する。
+事態: 本番便 r85 の段 4（image-attestor）が core イメージの Trivy で HIGH 1 件を検出して止まった（ゼロ High の門・例外は契約上作れない）。手元で core の土台 cgr.dev/chainguard/python@sha256:f9552d99…（infra/docker/Dockerfile.teamagent-mcp の PYTHON_RUNTIME_ARM64_DIGEST）を Trivy で見ると、HIGH は ca-certificates-bundle 20260909-r2（既に replace_core_ca_bundle.py で r3 に差し替え済み＝原因ではない）と **py3-pip-wheel 26.2.1-r2（CVE-2026-114613・修正版 26.2.2-r1）**。CRITICAL の brotli は #701 で差し替え済み。よって py3-pip-wheel が原因。
+やること:
+1. 先例 commit 418047ba（ca-certificates-bundle だけ Wolfi 公式 r3 に差し替え・infra/docker/replace_core_ca_bundle.py・core-ca-bundle.lock.json）と #701（brotli の実物固定）を読み、同じ「固定した Wolfi 公式 APK（URL・SHA256・APKINDEX の行）で runtime の 1 パッケージだけを差し替え、apk DB も更新し、fail closed で検証する」方式で、py3-pip-wheel を 26.2.2-r1 に差し替える。共通化できるなら replace_core_ca_bundle.py を汎用化してよいが、差分は小さく。runtime で pip を使っていないことを確認できれば「削除」も選択肢として比較し、より小さく安全な方を選んで理由を書く。
+2. Wolfi の公式 APK（https://packages.wolfi.dev/os/aarch64/py3-pip-wheel-26.2.2-r1.apk と APKINDEX）を取得して SHA256 を固定（ネットワーク可）。
+3. Dockerfile・lock・テスト（tests/infra の core 関連・smoke_core.py）を追随。
+4. Dockerfile.teamagent-mcp 等が世代の入力なら、~/Documents/Claude/Artifacts/aico-inputs-20260911/ffmpeg813-20261030-run（derive.py ほか）を写して pipwheel-20261030-run を作り、同じ方法で再導出する。OLD 世代は live の CodeBuild と同じ値（= ffmpeg813-20261030-run/aico-base-bump-new.env の NEW_* を OLD_* として使う。ffmpeg813-fromlive-20261030-run で公開済み）。`LC_ALL=C PYTHONPATH=src uv run --no-sync python infra/deploy/verify_generation_inputs.py --manifest infra/deploy/buildspec_generation_inputs.json --repo-root .` が fresh になること。
+5. `uv run --extra dev --extra mcp --extra media pytest -q -n auto tests/infra tests/codebuild tests/scripts` と ruff を通す。
+禁止: AWS への書き込み・CodeBuild 起動・S3 公開、git commit・push、.env・secrets・~/.aws の読み取り。最後に変更ファイル・固定した SHA・世代の新値・テスト結果・残る懸念を短くまとめる。

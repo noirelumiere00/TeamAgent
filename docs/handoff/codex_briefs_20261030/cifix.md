@@ -1,0 +1,4 @@
+あなたは teamagent リポジトリの開発者。作業場所はこの worktree（origin/dev 起点）。日本語で報告する。
+dev の CI で「pytest latest (Python 3.11)」ジョブだけ、tests/skills/first_visit/test_concrete.py の 4 件（test_real_concrete_build・test_actual_cli_failure_stops_pipeline[pptx]・[research]・test_preflight_major_is_incomplete）が失敗している（run 41027669434）。他の Python では通る。子プロセスで動かすキットのスクリプト（tools/first_visit のキット・src/teamagent/skills/first_visit/concrete.py）が 3.11 で動かない構文・標準ライブラリを使っている疑い。
+やること: `uv run --python 3.11 --extra dev --extra mcp --extra media pytest -q tests/skills/first_visit/test_concrete.py` で再現し、原因を特定して直す。キット（固定版・SHA で封印された tar）自体を変えるのは不可なので、キットが 3.12 以上を要るなら、本番（3.14）と同じ前提をテストに明示して 3.11 では理由付きで skip する（pyproject の requires-python は >=3.11 のまま）。キットの外の自分たちのコードが原因なら、そちらを 3.11 互換に直す。3.14 でも通ること。ruff。
+禁止: git commit・push、AWS の実行、.env・secrets の読み取り。最後に原因・直し方・テスト結果を短く。
