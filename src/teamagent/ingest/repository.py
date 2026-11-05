@@ -512,7 +512,10 @@ class IngestRepository:
 
         from teamagent.ingest import case_state_evidence as evidence
 
-        if not evidence.enabled(doc.owner_email):
+        if not (
+            evidence.enabled(doc.owner_email)
+            or evidence.has_review(doc.source_type, doc.external_id)
+        ):
             return False
         version = evidence.input_version()
         with self._document_connection(doc) as conn:
