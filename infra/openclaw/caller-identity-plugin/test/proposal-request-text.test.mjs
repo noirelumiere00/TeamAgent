@@ -36,7 +36,7 @@ function setup({now = () => 1000} = {}) {
   return {hooks, logs, receive, bind, call};
 }
 
-for (const tool of ['proposal_builder', 'proposal_builder_submit']) {
+for (const tool of ['proposal_builder', 'proposal_builder_submit', 'clientkarte']) {
   test(`${tool} injects the run's DM request and overwrites model text before signing`, () => {
     const p = setup();
     const content = '見積は３本・１０万再生・単価５円／回でお願いします。';
@@ -87,13 +87,15 @@ test('other tools receive no request text even if the model supplies it', () => 
 });
 
 test('missing DM body and non-DM messages never accept model-provided request text', () => {
-  for (const [content, conversationId] of [[undefined, DM], ['予算100万円', 'C12345678']]) {
-    const p = setup();
-    p.receive(content, {conversationId});
-    const result = p.call('proposal_builder', {channelId: conversationId,
-      params: {_user_context: {request_text: 'モデルの予算200万円'}}});
-    assert.notEqual(result?.block, true);
-    assert.equal(Object.hasOwn(result.params._user_context, 'request_text'), false);
+  for (const tool of ['proposal_builder', 'proposal_builder_submit', 'clientkarte']) {
+    for (const [content, conversationId] of [[undefined, DM], ['予算100万円', 'C12345678']]) {
+      const p = setup();
+      p.receive(content, {conversationId});
+      const result = p.call(tool, {channelId: conversationId,
+        params: {_user_context: {request_text: 'モデルの予算200万円'}}});
+      assert.notEqual(result?.block, true);
+      assert.equal(Object.hasOwn(result.params._user_context, 'request_text'), false);
+    }
   }
 });
 

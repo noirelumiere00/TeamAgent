@@ -22,6 +22,7 @@ from pydantic import BaseModel
 
 from teamagent.adapters.bedrock_client import BedrockClient
 from teamagent.adapters.pgvector_client import PgVectorClient, SearchHit
+from teamagent.case_state import enabled as case_state_enabled
 from teamagent.prompts.loader import load_prompt
 from teamagent.skills._shared.client_name_guard import classify_client_name
 from teamagent.skills._shared.drive_slack_delivery import (
@@ -50,6 +51,9 @@ from teamagent.skills.clientkarte.schema import (
     ClientKarteOutput,
     KarteEvent,
 )
+from teamagent.skills.clientkarte.status import case_state_lines, dated_answer
+from teamagent.skills.morning_digest.calendar_window import now_jst
+from teamagent.skills.search import timeline_status
 
 logger = structlog.get_logger(__name__)
 
@@ -440,6 +444,9 @@ class ClientKarteSkill(BaseSkill[ClientKarteInput, ClientKarteOutput]):
         user_groups_raw = ctx.metadata.get("user_groups")
         user_groups = list(user_groups_raw) if isinstance(user_groups_raw, (list, tuple)) else None
         user_role = ctx.metadata.get("user_role")
+        check_status = case_state_enabled(user_email) and timeline_status.asks_status(
+            ctx.metadata.get("request_text", "")
+        )
 
         # kill switch は「関連資料機能まるごと」に効く（H1 裁定）。OFF なら資料を
         # **引かない**（リンク一覧も出ない・DB も叩かない）＝本機能追加前の出力に戻る。
@@ -476,9 +483,35 @@ class ClientKarteSkill(BaseSkill[ClientKarteInput, ClientKarteOutput]):
                 if docs_enabled
                 else []
             )
+            state_hits = []
+            if check_status and classify_client_name(input.client_name).verdict == "ok":
+                try:
+                    state_hits = self._pgvector.search_drive_by_client_names(
+                        conn,
+                        [input.client_name],
+                        limit=_DOCS_FETCH_LIMIT,
+                        request_id=ctx.request_id,
+                    )
+                except Exception:
+                    log.warning("clientkarte_case_state_lookup_failed")
+                state_hits = [
+                    h
+                    for h in state_hits
+                    if all(
+                        belongs_to_client(d, input.client_name)
+                        for d in to_docs(
+                            [{**h.metadata, "title": h.metadata.get("title") or input.client_name}]
+                        )
+                    )
+                ]
 
         events = [self._to_event(h) for h in hits]
         answer, cost_usd = self._synthesize(input.client_name, hits, ctx.request_id)
+        answer = dated_answer(answer, hits, input.client_name, now_jst().date())
+        if check_status:
+            state_lines = case_state_lines([*hits, *state_hits])
+            if state_lines:
+                answer += "\n" + state_lines
         # 出典 URL は LLM に書かせず、イベントに解決済みの URL をサーバ側で末尾へ付ける
         # （slack_summary A10 と同じ流儀）。重複を除き最大 3 件まで。
         answer = _with_source_links(answer, events)
