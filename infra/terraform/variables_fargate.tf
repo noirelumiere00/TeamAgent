@@ -652,6 +652,18 @@ variable "direct_summary_post_allowed_emails" {
   default     = ""
 }
 
+variable "use_direct_karte_post" {
+  description = "カルテの完成した回答を検証済み DM へ直接投稿する（USE_DIRECT_KARTE_POST）。既定 OFF。TD で変更したら正本 tfvars にも反映する。"
+  type        = string
+  default     = "0"
+}
+
+variable "direct_karte_post_allowed_emails" {
+  description = "カルテの直接投稿の本人メール許可リスト（DIRECT_KARTE_POST_ALLOWED_EMAILS）。空は全員拒否、* は本人確認済みの全員。"
+  type        = string
+  default     = ""
+}
+
 variable "search_direct_answer" {
   description = "MCP の検索確定回答を直接配信する（SEARCH_DIRECT_ANSWER）。既定 OFF。OC の抑止を先に ON にする。TD で変更したら正本 tfvars にも反映する。"
   type        = string
