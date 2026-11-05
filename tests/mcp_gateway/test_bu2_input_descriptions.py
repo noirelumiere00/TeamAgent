@@ -39,11 +39,12 @@ def test_tool_description_requires_user_supplied_bu2_values(tool) -> None:
 def test_nested_bu2_descriptions_survive_mcp_schema_projection(tool, model, fields) -> None:
     properties = tool.inputSchema["$defs"][model]["properties"]
     for field in fields:
-        _assert_request_only(properties[field].get("description", ""))
+        assert "利用者指定のみ" in properties[field]["description"]
+        assert "推測・相場・例の数値を入れない" not in properties[field]["description"]
 
 
 def test_bu2_container_descriptions_allow_omission_without_filling_assumptions(tool) -> None:
     properties = tool.inputSchema["properties"]
     for field in ("plans", "estimate_terms", "simulation"):
-        _assert_request_only(properties[field].get("description", ""))
+        assert "利用者指定のみ" in properties[field]["description"]
     assert "一つでも未指定ならsimulation全体を省略" in properties["simulation"]["description"]

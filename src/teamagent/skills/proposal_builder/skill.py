@@ -1577,17 +1577,12 @@ class ProposalBuilderSubmitSkill(
 
     name: ClassVar[str] = "proposal_builder_submit"
     description: ClassVar[str] = (
-        "86枚の統合FMTから提案書を作成する。商材名・与件を渡す。公式URL・投稿開始日は省略可。"
-        "PROPOSAL_RESEARCH_AUTOが有効なときはresearch_briefで調査から作成でき、JSONは不要。"
-        "従来のGemini v3 JSONからの作成にも対応し、どちらか一方を指定する。"
-        "投稿開始日が未指定なら日付を補完せず未定と表示して作成する。"
-        "重い処理を待たずにjob_idを返す。"
-        "生成はMCP内のバックグラウンドthreadで継続するため、返された秒数後に"
-        "proposal_builder_statusで同じjob_idを照会する。queued/running中は再submitしない。"
-        "利用者へは調査・作成の状況と返されたmessageを伝え、ツール名や内部語は出さない。"
-        "BU2の段階見積（本数・再生数・単価・期間・見積条件）と試算の仮定は、"
-        + BU2_REQUEST_VALUES_ONLY
-    )
+        "86枚の統合FMTの提案書を非同期作成。商材名・与件を渡す（公式URL・投稿開始日は"
+        "省略可）。PROPOSAL_RESEARCH_AUTO有効時はresearch_briefで調査から作成しJSONは"
+        "不要、他はgemini_jsonの一方だけを指定。投稿開始日は日付を補完せず未定。"
+        "返された秒数後にproposal_builder_statusで照会し、queued/"
+        "running中は再submitしない。BU2見積・試算は、"
+    ) + BU2_REQUEST_VALUES_ONLY
     input_schema: ClassVar[type[BaseModel]] = ProposalBuilderSubmitInput
     output_schema: ClassVar[type[BaseModel]] = ProposalBuilderSubmitOutput
     version: ClassVar[str] = "1.0"
@@ -1933,9 +1928,8 @@ class ProposalBuilderStatusSkill(
 
     name: ClassVar[str] = "proposal_builder_status"
     description: ClassVar[str] = (
-        "proposal_builder_submitが返したjob_idのqueued/running/done/failedを照会する。"
-        "doneならPPTX URL、Slack添付済みフラグ、ready/draft等の安全な結果サマリを返す。"
-        "番号省略時は本人の直近を照会する。実行中は再submitしない。"
+        "proposal_builder_submitの状態とPPTX・Slack添付・ready/"
+        "draftを照会（番号省略=本人の直近）。実行中は再submitしない。"
     )
     input_schema: ClassVar[type[BaseModel]] = ProposalBuilderStatusInput
     output_schema: ClassVar[type[BaseModel]] = ProposalBuilderStatusOutput

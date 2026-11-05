@@ -216,7 +216,7 @@ def _record_usage(
 
 
 def _strip_schema_titles(node: Any, *, names: bool = False) -> Any:
-    """JSON Schema から ``title``（pydantic が付ける表示名）だけを再帰的に落とす。
+    """JSON Schema から表示名と null・空文字の default 注釈を再帰的に落とす。
 
     ``names=True`` は「キーが引数名の辞書」（properties・$defs）を表し、キーはそのまま残す
     （``title`` という名前の引数＝calendar_event など を消さないため）。
@@ -230,6 +230,8 @@ def _strip_schema_titles(node: Any, *, names: bool = False) -> Any:
     out: dict[str, Any] = {}
     for k, v in node.items():
         if k == "title" and isinstance(v, str):
+            continue
+        if k == "default" and (v is None or v == ""):
             continue
         out[k] = _strip_schema_titles(v, names=k in ("properties", "$defs", "definitions"))
     return out

@@ -20,8 +20,8 @@ class WorkspaceSearchInput(BaseModel):
     service: Literal["calendar", "people"] = Field(
         description="検索対象: 'calendar'（予定）| 'people'（連絡先）"
     )
-    query: str = Field(min_length=1, max_length=200, description="クライアント名・人名などの検索語")
-    limit: int = Field(default=10, ge=1, le=50, description="返す最大件数")
+    query: str = Field(min_length=1, max_length=200)
+    limit: int = Field(default=10, ge=1, le=50)
 
 
 class WorkspaceHit(BaseModel):

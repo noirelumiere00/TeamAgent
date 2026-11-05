@@ -506,29 +506,15 @@ class OmiyageReportSubmitSkill(BaseSkill[OmiyageReportSubmitInput, OmiyageReport
 
     name: ClassVar[str] = "omiyage_report_submit"
     description: ClassVar[str] = (
-        "お土産資料の最終成果物（PPTX）はこのツールでのみ生成する。調査ツール（x_voice_search / "
-        "search_surface_check / web_research / tiktok_acquire）で裏取りした材料は research_notes "
-        "に添えること（任意・1行1要点+出典URL・「生活者の声」「検索面の勢力図」の章に反映）。"
-        "「◯◯のお土産資料つくって。競合は△△」を受け付ける。競合は依頼者が名前を出した"
-        "ものだけを入れる（推測で埋めない。親会社・飲食店・小売は競合にしない）。"
-        "本人限定sales25では自社名だけでsubmitしてよい。未指定・お任せの条件は"
-        "ツールが候補を補完して受付文に明示するので、利用者に埋めさせずそのまま呼ぶ。"
-        "商材カテゴリ（category・例: スパイス・調味料）が分かれば入れる。"
-        "対象ブランド・競合(1社以上)・"
-        "一般検索キーワード(1つ以上)がそろえば job_id を即返し、TikTok検索実測→決定論集計"
-        "（露出シェア/キーワード登場率/#PR比較）→PPTX生成→依頼元スレッド添付まで"
-        "バックグラウンドで進める。不足時は status=needs_input で不足リストと補完候補・"
-        "回答欄を返す（ジョブは作らない）ので、営業の回答で埋めて再submitする。"
-        "一般KWを『おまかせ』『任せる』と言われたら聞き返さず、商材カテゴリと依頼文から"
-        "ブランド名を含まない一般KWを3語選んで再submitする（選んだ語は受付文に出る）。"
-        "同時実行の上限に達している時は status=busy（順番待ち・ジョブは作らない）を返す。"
-        "message に『順番待ち N 番目・目安あと約 M 分』が入っているのでそのまま営業へ伝え、"
-        "retry_after_seconds（≈M分）を置いてから同じ入力でそのまま再submitする。"
-        "進行確認は omiyage_report_status。queued/running中は再submitしない。"
-        "所要目安（約M分・依頼内容から算出）は message に書いてあるので、営業へは message を"
-        "そのまま伝える（ツール名や見込み時間を自分で作らない）。queued時の retry_after_seconds は"
-        "status再照会の間隔であって完成予定ではない。『まだ？』には"
-        "番号省略でstatusを照会する。"
+        "お土産資料の最終成果物（PPTX）はこのツールでのみ生成する。x_voice_search / "
+        "search_surface_check / web_research / "
+        "tiktok_acquireの先行調査はresearch_notesへ（生活者の声・検索面の勢力図、"
+        "出典URL付き）。競合は本人指定のみ（親会社・飲食店・小売を推測しない）。"
+        "sales25は自社名だけでsubmit可（未指定条件はサーバ補完）、"
+        "通常はブランド・競合・一般KWが必要。needs_inputに回答し再submit。"
+        "KWがおまかせなら聞き返さずカテゴリからブランド名なしの3語を選ぶ。"
+        "busyは指定秒数後に再submit。queued/running中は再submitせず"
+        "omiyage_report_statusで照会、retry_after_secondsは完成予定ではない。"
     )
     input_schema: ClassVar[type[BaseModel]] = OmiyageReportSubmitInput
     output_schema: ClassVar[type[BaseModel]] = OmiyageReportSubmitOutput
@@ -1625,10 +1611,8 @@ class OmiyageReportStatusSkill(BaseSkill[OmiyageReportStatusInput, OmiyageReport
 
     name: ClassVar[str] = "omiyage_report_status"
     description: ClassVar[str] = (
-        "omiyage_report_submitが返したjob_id（omy_...）のqueued/running/done/failedを照会する。"
-        "doneなら要点3行・次の一手・スレッド添付済みフラグ・検索軸ごとの取得状況を返す。"
-        "番号省略時は本人の直近を照会する。実行中は再submitしない。"
-        "「もう一度作って」「作り直して」は照会せずomiyage_report_submitを呼ぶ。"
+        "お土産資料の状態・完成物・検索軸の取得状況を照会（番号省略=本人の直近）。"
+        "実行中は再submitせず、作り直しはomiyage_report_submit。"
     )
     input_schema: ClassVar[type[BaseModel]] = OmiyageReportStatusInput
     output_schema: ClassVar[type[BaseModel]] = OmiyageReportStatusOutput

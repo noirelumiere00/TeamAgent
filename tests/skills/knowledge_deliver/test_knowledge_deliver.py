@@ -69,6 +69,7 @@ def _slack_mock(
     m.lookup_user_id_by_email = AsyncMock(return_value=user_id)
     m.open_dm = AsyncMock(return_value=dm)
     m.upload_file = AsyncMock(return_value=upload)
+    m.upload_files = AsyncMock(return_value="posted" if upload else "failed")
     return m
 
 
@@ -115,9 +116,10 @@ def test_delivers_file_to_dm_happy_path() -> None:
     assert out.references[0].delivered is True
     # 本人 DM で頼まれた → その DM へそのまま添付（email → user_id 解決は使わない）
     slack.lookup_user_id_by_email.assert_not_awaited()
-    assert slack.upload_file.await_args.args[0] == "D0SELF"
+    assert slack.upload_files.await_args.args[0] == "D0SELF"
     # 要約が最初の添付の initial_comment に乗る
-    assert slack.upload_file.await_args.kwargs.get("initial_comment") == "要約です"
+    assert slack.upload_files.await_args.kwargs["initial_comment"] == out.answer
+    assert out.answer.startswith("要約です\n\n")
 
 
 def test_channel_request_goes_to_dm_and_reveals_nothing_in_channel() -> None:
@@ -134,8 +136,8 @@ def test_channel_request_goes_to_dm_and_reveals_nothing_in_channel() -> None:
         _ctx(channel_id="C123", thread_ts="111.222"),
     )
     assert out.delivered_count == 1
-    assert slack.upload_file.await_args.args[0] == "D1"  # 本人 DM を開いて送る
-    assert all(c.args[0] != "C123" for c in slack.upload_file.await_args_list)
+    assert slack.upload_files.await_args.args[0] == "D1"  # 本人 DM を開いて送る
+    assert all(c.args[0] != "C123" for c in slack.upload_files.await_args_list)
     assert out.answer == "" and out.references == []
     assert "DM にお送りしました" in out.note and "価格表" not in out.note
 
@@ -162,7 +164,7 @@ def test_dedup_same_file_id() -> None:
     skill = KnowledgeDeliverSkill(search=_search_mock(hits), slack=slack, gdrive=_gdrive_mock())
     out = skill.run(KnowledgeDeliverInput(query="a"), _ctx())
     assert out.delivered_count == 1
-    assert slack.upload_file.await_count == 1
+    slack.upload_files.assert_awaited_once()
 
 
 def test_respects_top_k_limit() -> None:
@@ -174,7 +176,156 @@ def test_respects_top_k_limit() -> None:
     skill = KnowledgeDeliverSkill(search=_search_mock(hits), slack=slack, gdrive=_gdrive_mock())
     out = skill.run(KnowledgeDeliverInput(query="x", top_k=2), _ctx())
     assert out.delivered_count == 2
-    assert slack.upload_file.await_count == 2
+    slack.upload_files.assert_awaited_once()
+    assert len(slack.upload_files.await_args.args[1]) == 2
+
+
+@pytest.mark.parametrize(("extension", "unit"), [("pdf", "ページ"), ("pptx", "スライド")])
+@pytest.mark.parametrize("source_type", ["gdrive", None])
+def test_hit_pages_are_deduplicated_and_limited_per_file(
+    extension: str, unit: str, source_type: str | None
+) -> None:
+    hits = [
+        _hit(
+            chunk_id=i,
+            source_type=source_type,
+            source_uri="gdrive://F1" if source_type else None,
+            drive_url="https://drive.google.com/file/d/F1/view",
+            title=f"提案.{extension}",
+            page_num=page,
+        )
+        for i, page in enumerate([12, 12, 13, 14, 15])
+    ]
+    slack = _slack_mock()
+    skill = KnowledgeDeliverSkill(search=_search_mock(hits), slack=slack, gdrive=_gdrive_mock())
+
+    out = skill.run(KnowledgeDeliverInput(query="資料出して"), _ctx())
+
+    assert out.delivered_count == 1
+    assert out.answer == (
+        f"要約です\n\n提案.{extension}\n原本: https://drive.google.com/file/d/F1/view"
+        f"\n該当: 12・13・14 {unit}"
+    )
+    assert all(ref.pages == [12, 13, 14] for ref in out.references)
+    assert out.references[0].model_dump()["pages"] == [12, 13, 14]
+    slack.upload_files.assert_awaited_once()
+    assert slack.upload_files.await_args.kwargs["initial_comment"] == out.answer
+    slack.upload_file.assert_not_awaited()
+    assert out.delivery is not None
+
+
+def test_page_line_is_omitted_without_hit_page_number() -> None:
+    hits = [_hit(source_type="gdrive", source_uri="gdrive://F1", title="提案.pdf")]
+    slack = _slack_mock()
+    skill = KnowledgeDeliverSkill(search=_search_mock(hits), slack=slack, gdrive=_gdrive_mock())
+
+    out = skill.run(KnowledgeDeliverInput(query="資料出して"), _ctx())
+
+    assert out.references[0].pages == []
+    assert out.answer == "要約です\n\n提案.pdf\n原本: https://drive.google.com/file/d/F1/view"
+    assert slack.upload_files.await_args.kwargs["initial_comment"] == out.answer
+
+
+def test_pages_and_original_links_stay_with_their_files() -> None:
+    hits = [
+        _hit(source_type="gdrive", source_uri="gdrive://F1", title="提案.pdf", page_num=12),
+        _hit(
+            chunk_id=2,
+            source_type="gdrive",
+            source_uri="gdrive://F2",
+            title="報告.pdf",
+            page_num=3,
+        ),
+    ]
+    slack = _slack_mock()
+    skill = KnowledgeDeliverSkill(search=_search_mock(hits), slack=slack, gdrive=_gdrive_mock())
+
+    out = skill.run(KnowledgeDeliverInput(query="資料出して"), _ctx())
+
+    assert "提案.pdf\n原本: https://drive.google.com/file/d/F1/view\n該当: 12 ページ" in out.answer
+    assert "報告.pdf\n原本: https://drive.google.com/file/d/F2/view\n該当: 3 ページ" in out.answer
+    assert [ref.pages for ref in out.references] == [[12], [3]]
+    slack.upload_files.assert_awaited_once()
+    assert len(slack.upload_files.await_args.args[1]) == 2
+
+
+@pytest.mark.parametrize("failure", ["download", "failed", "uncertain", "exception"])
+def test_attachment_failure_keeps_original_link_and_hit_pages(failure: str) -> None:
+    hits = [_hit(source_type="gdrive", source_uri="gdrive://F1", title="提案.pdf", page_num=12)]
+    slack = _slack_mock(upload=False)
+    gdrive = _gdrive_mock()
+    if failure == "download":
+        gdrive.download_file_bytes.side_effect = RuntimeError("unavailable")
+    elif failure == "exception":
+        slack.upload_files.side_effect = RuntimeError("unavailable")
+    else:
+        slack.upload_files.return_value = failure
+    skill = KnowledgeDeliverSkill(search=_search_mock(hits), slack=slack, gdrive=gdrive)
+
+    out = skill.run(KnowledgeDeliverInput(query="資料出して"), _ctx())
+
+    assert out.delivered_count == 0 and out.delivery is None
+    assert out.answer == (
+        "要約です\n\n提案.pdf\n原本: https://drive.google.com/file/d/F1/view\n該当: 12 ページ"
+    )
+    assert out.references[0].url == "https://drive.google.com/file/d/F1/view"
+    assert out.references[0].pages == [12] and not out.references[0].delivered
+    assert "お送りしました" not in out.note
+    slack.upload_file.assert_not_awaited()
+    if failure == "download":
+        slack.upload_files.assert_not_awaited()
+    else:
+        slack.upload_files.assert_awaited_once()
+        assert slack.upload_files.await_args.kwargs["initial_comment"] == out.answer
+
+
+@pytest.mark.parametrize("top_k", [3, 5])
+def test_four_hits_deliver_at_most_three_files_in_one_post(top_k: int) -> None:
+    hits = [
+        _hit(
+            chunk_id=i,
+            source_type="gdrive",
+            source_uri=f"gdrive://F{i}",
+            title=f"提案{i}.pdf",
+            page_num=i + 1,
+        )
+        for i in range(4)
+    ]
+    slack = _slack_mock()
+    gdrive = _gdrive_mock()
+    skill = KnowledgeDeliverSkill(search=_search_mock(hits), slack=slack, gdrive=gdrive)
+
+    out = skill.run(KnowledgeDeliverInput(query="資料出して", top_k=top_k), _ctx())
+
+    assert out.delivered_count == 3
+    assert gdrive.download_file_bytes.call_count == 3
+    slack.upload_files.assert_awaited_once()
+    assert len(slack.upload_files.await_args.args[1]) == 3
+    assert slack.upload_files.await_args.kwargs["initial_comment"] == out.answer
+    assert out.answer.count("原本:") == 3 and out.answer.count("該当:") == 3
+    assert "提案3.pdf" not in out.answer
+    slack.upload_file.assert_not_awaited()
+
+
+def test_resolved_sheet_hit_does_not_supply_original_document_pages() -> None:
+    hits = [
+        _hit(
+            source_type="gsheets",
+            source_uri="https://docs.google.com/spreadsheets/d/SHEET1/edit",
+            url="https://docs.google.com/spreadsheets/d/SHEET1/edit",
+            drive_url="https://drive.google.com/file/d/F1/view",
+            title="提案.pdf",
+            page_num=1,
+        )
+    ]
+    slack = _slack_mock()
+    skill = KnowledgeDeliverSkill(search=_search_mock(hits), slack=slack, gdrive=_gdrive_mock())
+
+    out = skill.run(KnowledgeDeliverInput(query="資料出して"), _ctx())
+
+    assert out.delivered_count == 1 and out.references[0].pages == []
+    assert out.answer == "要約です\n\n提案.pdf\n原本: https://drive.google.com/file/d/F1/view"
+    assert slack.upload_files.await_args.kwargs["initial_comment"] == out.answer
 
 
 def _compact_pdf_skill(
@@ -206,7 +357,8 @@ def test_compact_pdf_delivery_is_one_post_with_verified_receipt() -> None:
     call = slack.upload_files.await_args
     assert call.args[0] == "D0SELF" and len(call.args[1]) == 2
     assert call.kwargs["thread_ts"] == "111.222"
-    assert call.kwargs["initial_comment"] == "提案書を2件見つけました。"
+    assert call.kwargs["initial_comment"] == out.answer
+    assert out.answer.startswith("提案書を2件見つけました。\n\n")
     assert "小池" not in out.answer and "営業" not in out.answer
     assert out.delivery is not None
     assert out.delivery.model_dump() == {
@@ -229,8 +381,8 @@ def test_compact_pdf_removes_only_punt_sentence_and_keeps_summary_and_source(ans
     skill._search.run.return_value.answer = answer + source
     out = skill.run(KnowledgeDeliverInput(query="提案書を出して", top_k=2), ctx)
     expected = "要点は完成形の先出しです。" + source
-    assert out.answer == expected
-    assert slack.upload_files.await_args.kwargs["initial_comment"] == expected
+    assert out.answer.startswith(expected + "\n\n")
+    assert slack.upload_files.await_args.kwargs["initial_comment"] == out.answer
     assert out.delivery is not None
 
 
@@ -243,8 +395,8 @@ def test_compact_pdf_removes_recorded_required_handoff_and_keeps_summary() -> No
         "最新の案件ステータスを見る必要があります。" + source
     )
     out = skill.run(KnowledgeDeliverInput(query="提案書を出して", top_k=2), ctx)
-    assert out.answer == summary + source
-    assert slack.upload_files.await_args.kwargs["initial_comment"] == summary + source
+    assert out.answer.startswith(summary + source + "\n\n")
+    assert slack.upload_files.await_args.kwargs["initial_comment"] == out.answer
     assert out.delivery is not None
 
 
@@ -259,8 +411,8 @@ def test_compact_pdf_keeps_completed_internal_confirmation(answer: str) -> None:
     skill, slack, ctx = _compact_pdf_skill()
     skill._search.run.return_value.answer = answer
     out = skill.run(KnowledgeDeliverInput(query="提案書を出して", top_k=2), ctx)
-    assert out.answer == answer
-    assert slack.upload_files.await_args.kwargs["initial_comment"] == answer
+    assert out.answer.startswith(answer.rstrip() + "\n\n")
+    assert slack.upload_files.await_args.kwargs["initial_comment"] == out.answer
 
 
 def test_compact_pdf_respects_no_punt_disable_flag(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -269,8 +421,8 @@ def test_compact_pdf_respects_no_punt_disable_flag(monkeypatch: pytest.MonkeyPat
     answer = "営業 DB で確認する必要があります。"
     skill._search.run.return_value.answer = answer
     out = skill.run(KnowledgeDeliverInput(query="提案書を出して", top_k=2), ctx)
-    assert out.answer == answer
-    assert slack.upload_files.await_args.kwargs["initial_comment"] == answer
+    assert out.answer.startswith(answer.rstrip() + "\n\n")
+    assert slack.upload_files.await_args.kwargs["initial_comment"] == out.answer
 
 
 @pytest.mark.parametrize(
@@ -280,15 +432,16 @@ def test_compact_pdf_respects_no_punt_disable_flag(monkeypatch: pytest.MonkeyPat
         "小池さんへ直接確認するか営業 DB で最新の案件ステータスを見る必要があります。",
     ],
 )
-def test_legacy_pdf_does_not_change_sentence_spacing_or_punt_text(punt: str) -> None:
+def test_noncompact_pdf_keeps_punt_text_in_single_post(punt: str) -> None:
     skill, slack, ctx = _compact_pdf_skill()
     ctx.metadata.pop("_search_compact_answer")
     answer = " 要点は完成形の先出しです。" + punt + "\n"
     skill._search.run.return_value.answer = answer
     out = skill.run(KnowledgeDeliverInput(query="提案書を出して", top_k=2), ctx)
-    assert out.answer == answer
-    assert slack.upload_file.await_args_list[0].kwargs["initial_comment"] == answer
-    slack.upload_files.assert_not_awaited()
+    assert out.answer.startswith(answer.rstrip() + "\n\n")
+    assert slack.upload_files.await_args_list[0].kwargs["initial_comment"] == out.answer
+    slack.upload_files.assert_awaited_once()
+    slack.upload_file.assert_not_awaited()
 
 
 @pytest.mark.parametrize("status", ["failed", "uncertain"])
@@ -337,6 +490,7 @@ def test_no_gdrive_hits_returns_answer_only() -> None:
     # 落ちた段を明示する（FB はあるが Drive 実ファイルに紐づかない）。
     assert "Drive の実ファイルに紐づきませんでした" in out.note
     slack.upload_file.assert_not_awaited()
+    slack.upload_files.assert_not_awaited()
 
 
 _ROW_LINK = "https://docs.google.com/spreadsheets/d/SHEETID99/edit?gid=278#gid=278&range=126:126"
@@ -401,6 +555,7 @@ def test_row_hit_without_resolution_never_attaches_the_sheet_itself() -> None:
     assert out.delivered_count == 0
     gdrive.download_file_bytes.assert_not_called()
     slack.upload_file.assert_not_awaited()
+    slack.upload_files.assert_not_awaited()
 
 
 def test_slack_permalink_url_is_not_a_candidate() -> None:
@@ -421,6 +576,7 @@ def test_no_channel_no_email_skips_delivery() -> None:
     assert out.delivered_count == 0
     slack.lookup_user_id_by_email.assert_not_awaited()
     slack.upload_file.assert_not_awaited()
+    slack.upload_files.assert_not_awaited()
     # 会話が分からない＝共有面扱い。要約もその場には返さず DM へ誘導する。
     assert out.answer == "" and "DM でもう一度" in out.note
 
@@ -430,7 +586,7 @@ def test_dm_request_without_email_still_delivers_to_that_dm() -> None:
     slack = _slack_mock()
     skill = KnowledgeDeliverSkill(search=_search_mock(hits), slack=slack, gdrive=_gdrive_mock())
     out = skill.run(KnowledgeDeliverInput(query="x"), _ctx(email=None))
-    assert out.delivered_count == 1 and out.answer == "要約です"
+    assert out.delivered_count == 1 and out.answer.startswith("要約です\n\n")
 
 
 def test_dm_resolution_failure_is_failopen() -> None:
@@ -442,6 +598,7 @@ def test_dm_resolution_failure_is_failopen() -> None:
     assert out.delivered_count == 0
     assert "DM でもう一度" in out.note and out.answer == ""
     slack.upload_file.assert_not_awaited()
+    slack.upload_files.assert_not_awaited()
 
 
 def test_download_failure_skips_that_file() -> None:
@@ -467,6 +624,7 @@ def test_low_score_hits_not_delivered() -> None:
     # 落ちた段を明示する（実ファイルには紐づいたが関連度基準に届かない）。
     assert "配信の関連度基準に届きませんでした" in out.note
     slack.upload_file.assert_not_awaited()
+    slack.upload_files.assert_not_awaited()
 
 
 def test_score_gate_threshold_env() -> None:
@@ -499,6 +657,7 @@ def test_low_confidence_hit_not_delivered() -> None:
     out = skill.run(KnowledgeDeliverInput(query="x"), _ctx())
     assert out.delivered_count == 0
     slack.upload_file.assert_not_awaited()
+    slack.upload_files.assert_not_awaited()
 
 
 def test_industry_mismatch_not_delivered() -> None:
@@ -509,6 +668,7 @@ def test_industry_mismatch_not_delivered() -> None:
     out = skill.run(KnowledgeDeliverInput(query="化粧品の提案資料出して"), _ctx())
     assert out.delivered_count == 0
     slack.upload_file.assert_not_awaited()
+    slack.upload_files.assert_not_awaited()
 
 
 def test_industry_match_delivered() -> None:
@@ -569,6 +729,7 @@ def test_explicit_filter_industry_overrides_query_for_mismatch() -> None:
     )
     assert out.delivered_count == 0
     slack.upload_file.assert_not_awaited()
+    slack.upload_files.assert_not_awaited()
 
 
 def test_explicit_filter_industry_match_delivers() -> None:
@@ -694,7 +855,7 @@ def test_gsheet_row_hit_with_resolved_url_delivers() -> None:
     assert out.delivered_count == 1
     gdrive.download_file_bytes.assert_called_once()
     assert gdrive.download_file_bytes.call_args.kwargs["file_id"] == "RESOLVED1"
-    assert slack.upload_file.await_args.kwargs["title"] == (
+    assert slack.upload_files.await_args.args[1][0][1] == (
         "社内共有情報_花王株式会社__縦型提案.pdf"
     )
     assert out.references[0].delivered is True
@@ -758,7 +919,7 @@ def test_gsheet_resolved_dedups_with_gdrive_hit() -> None:
 
     assert out.delivered_count == 1
     assert gdrive.download_file_bytes.call_count == 1
-    assert slack.upload_file.await_count == 1
+    slack.upload_files.assert_awaited_once()
     assert all(ref.delivered for ref in out.references)
 
 
@@ -783,13 +944,16 @@ def test_same_filename_different_files_do_not_overwrite_each_other() -> None:
     uploaded_bytes: list[bytes] = []
     uploaded_paths: list[str] = []
 
-    async def _capture(channel: str, path: str, request_id: str, **kwargs: object) -> bool:
-        uploaded_paths.append(path)
-        uploaded_bytes.append(Path(path).read_bytes())
-        return True
+    async def _capture(
+        channel: str, files: list[tuple[str, str]], request_id: str, **kwargs: object
+    ) -> str:
+        for path, _ in files:
+            uploaded_paths.append(path)
+            uploaded_bytes.append(Path(path).read_bytes())
+        return "posted"
 
     slack = _slack_mock()
-    slack.upload_file = AsyncMock(side_effect=_capture)
+    slack.upload_files = AsyncMock(side_effect=_capture)
     gdrive = MagicMock()
     gdrive.download_file_bytes.side_effect = lambda *, file_id, request_id: (
         b"%PDF-1.4 " + file_id.encode()

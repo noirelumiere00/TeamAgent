@@ -16,8 +16,7 @@ class WebResearchInput(BaseModel):
     query: str = Field(
         min_length=1,
         max_length=200,
-        description="調べたいこと（例『2026年 国内 ショート動画広告 市場規模』）。"
-        "社内資料・案件名・顧客名は入れない（外部検索サービスへ送信されるため）。",
+        description="公開情報の検索語（社外秘・顧客名・案件名は不可）。",
     )
     max_results: int = Field(
         default=5, ge=1, le=8, description="message に載せる出典の最大数（1〜8・既定5）"
@@ -26,8 +25,7 @@ class WebResearchInput(BaseModel):
         default=0,
         ge=0,
         le=365,
-        description="直近何日の情報を優先するか（0〜365・既定0＝期間指定なし）。"
-        "Google 検索の after: 演算子でサーバがクエリに機械付与するベストエフォート。",
+        description="直近何日を優先するか（0=指定なし）。",
     )
 
 

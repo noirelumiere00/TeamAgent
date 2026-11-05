@@ -12,14 +12,8 @@ from pydantic import BaseModel, Field
 class ProposalReviewInput(BaseModel):
     """ProposalReview Skill の入力。"""
 
-    proposal_text: str = Field(
-        min_length=1,
-        max_length=8000,
-        description="レビュー対象の提案テキスト (骨子・本文・要約いずれも可)",
-    )
-    industry: str | None = Field(
-        default=None, max_length=100, description="業界 (任意、過去事例の絞り込み用)"
-    )
+    proposal_text: str = Field(min_length=1, max_length=8000)
+    industry: str | None = Field(default=None, max_length=100)
 
 
 class ReviewSource(BaseModel):

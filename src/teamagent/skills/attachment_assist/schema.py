@@ -35,29 +35,20 @@ class AttachmentAssistInput(BaseModel):
     mode: AttachmentMode = Field(
         default="summary",
         description=(
-            "処理の種類。summary=要約 / revise=修正案 / minutes=議事録フォーマット化 / "
-            "aggregate=集計の概観 / translate=英訳。"
+            "summary=要約、revise=修正案、minutes=議事録、aggregate=集計、translate=英訳。"
         ),
     )
-    instruction: str = Field(
-        default="",
-        max_length=1000,
-        description="依頼者の具体的な要望（例『先方向けに3行で』『敬体に直して』）。省略可。",
-    )
+    instruction: str = Field(default="", max_length=1000)
     file_name: str = Field(
         default="",
         max_length=255,
-        description=(
-            "対象ファイル名（会話に複数添付があるときの指定用・部分一致可）。"
-            "省略時は会話内の最新の対応ファイルを使う。"
-        ),
+        description=("添付名の部分一致（省略=最新の対応ファイル）。"),
     )
     permalink: str = Field(
         default="",
         max_length=500,
         description=(
-            "Slack 投稿のリンク（https://<ws>.slack.com/archives/…）の先の**添付ファイル**を"
-            "読む・添付してと頼まれたときだけ渡す（スレッドの要約は slack_summary）。"
+            "添付を読む・取り寄せる依頼の投稿リンクだけ指定（スレッド要約はslack_summary）。"
         ),
     )
 

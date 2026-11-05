@@ -480,11 +480,9 @@ class VideoAlgorithmSkill(BaseSkill[VideoAlgorithmInput, VideoAlgorithmOutput]):
 
     name: ClassVar[str] = "video_algorithm"
     description: ClassVar[str] = (
-        "TikTok で競合・市場の上位動画を新しく取得・分析する依頼のときだけ使う。"
-        "既知の取引先・施策の結果や何が効いたかは対象外。"
-        "search で施策実績・動画ごとの数字・資料を探す。"
-        "検索KWの上位動画を取得し、各動画をGeminiで時刻付き構造分析（テロップ/ブランド認識/"
-        "フック/CTA）→ 上位の共通点と1本ずつの構成を読み解き、HTMLレポートとスライドを生成"
+        "TikTok競合・市場の上位動画を新しく取得・分析する依頼のときだけ使う（構成・テ"
+        "ロップ・ブランド認識・フック・CTAと共通点をレポート化）。"
+        "既知施策の何が効いたかはsearchで施策実績・動画ごとの数字・資料を探す。"
     )
     input_schema: ClassVar[type[BaseModel]] = VideoAlgorithmInput
     output_schema: ClassVar[type[BaseModel]] = VideoAlgorithmOutput

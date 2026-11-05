@@ -95,11 +95,7 @@ class KnowledgeSearchUrlSkill(BaseSkill[KnowledgeSearchUrlInput, KnowledgeSearch
 
     name: ClassVar[str] = "knowledge_search_url"
     description: ClassVar[str] = (
-        "社内ナレッジをブラウザで検索・グラフ閲覧できる Web UI の URL を返す。"
-        "『検索ページ教えて』『ブラウザでナレッジ探したい』『検索画面のURL』"
-        "『社内ナレッジ検索のリンク』『資料検索のページ』等を言われたら呼ぶ。"
-        "引数は不要で、対象は常に話しかけている本人。"
-        "返した URL を本人に提示すること（Google ログインが必要）。"
+        "社内ナレッジの検索ページ・グラフ画面のURLを本人へ返す（Googleログインが必要）。"
     )
     input_schema: ClassVar[type[BaseModel]] = KnowledgeSearchUrlInput
     output_schema: ClassVar[type[BaseModel]] = KnowledgeSearchUrlOutput

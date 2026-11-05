@@ -333,74 +333,29 @@ class ProposalBuilderInput(_StrictModel, BU2Content):
     # 残り、MCP 経由の全呼び出しが date 文字列で必ず ValidationError になる（実測）。
     model_config = ConfigDict(extra="forbid", strict=False)
 
-    gemini_json: dict[str, Any] | str | None = Field(
-        default=None,
-        description=(
-            "Gemini v3の統合JSONオブジェクト、またはそのJSON文字列。"
-            "文字列は構文のみ限定修復し、内容は補完しない。"
-            "調査からの自動作成が有効なときはresearch_briefを渡せば不要。両方の指定は不可。"
-        ),
-    )
-    research_brief: ResearchBrief | None = Field(
-        default=None,
-        description=(
-            "商材名・公式URL・与件から調査して提案書を作る入力。"
-            "PROPOSAL_RESEARCH_AUTOが有効なときのみ利用でき、gemini_jsonとの同時指定は不可。"
-        ),
-    )
-    posting_start_date: date | None = Field(
-        default=None, description="投稿開始日D（YYYY-MM-DD）。省略・nullは未定。日付を補完しない。"
-    )
-    proposal_date: date = Field(
-        default_factory=proposal_today, description="提案書の作成日。未指定時は日本時間の受付日。"
-    )
+    gemini_json: dict[str, Any] | str | None = Field(default=None)
+    research_brief: ResearchBrief | None = Field(default=None)
+    posting_start_date: date | None = Field(default=None)
+    proposal_date: date = Field(default_factory=proposal_today)
     business_unit: Literal["BU1", "BU2"] = Field(
-        default="BU2", description="業務区分。BU2は施策メニュー型、BU1は従来のPR戦略型。"
+        default="BU2", description="BU2=施策メニュー、BU1=PR戦略。"
     )
-    client_name: str = Field(
-        default="クライアント",
-        min_length=1,
-        max_length=200,
-        description="統合FMTの宛名。未指定時は汎用表記「クライアント」。",
-    )
+    client_name: str = Field(default="クライアント", min_length=1, max_length=200)
     category_term: str = Field(
         default="",
         max_length=200,
-        description="守秘案件で商品名の代わりに使うカテゴリ語",
+        description="守秘時の商品名代替カテゴリ。",
     )
-    target_persona: str = Field(
-        default="",
-        max_length=1000,
-        description="Gemini target_categoriesを補足する主・拡張ターゲット",
-    )
-    proposal_brief: str = Field(
-        default="",
-        max_length=4000,
-        description="訴求の核、キーロジック、案件固有の与件",
-    )
-    constraints: list[str] = Field(
-        default_factory=list,
-        max_length=20,
-        description="守秘、薬機・景表、同時展開禁止等の制約",
-    )
-    official_urls: list[str] = Field(
-        default_factory=list,
-        max_length=10,
-        description="公式サイト/LP等、Composerが証拠として利用可能なHTTP(S) URL",
-    )
+    target_persona: str = Field(default="", max_length=1000)
+    proposal_brief: str = Field(default="", max_length=4000)
+    constraints: list[str] = Field(default_factory=list, max_length=20)
+    official_urls: list[str] = Field(default_factory=list, max_length=10)
     confidential_product_name: bool = Field(
         default=False,
-        description="Trueなら本文中の商品名をカテゴリ語/本商品へ置き換える",
+        description="商品名をカテゴリ語/本商品へ置換するか。",
     )
-    case_limit: int = Field(default=3, ge=1, le=3, description="RAGから採用する事例数")
-    max_repair: int = Field(
-        default=4,
-        ge=0,
-        le=4,
-        description=(
-            "Composerの全体修復回数。文字数は別途、枠単位で最大2回・追加0.10 USD/デッキ。"
-        ),
-    )
+    case_limit: int = Field(default=3, ge=1, le=3)
+    max_repair: int = Field(default=4, ge=0, le=4)
 
     @field_validator("gemini_json")
     @classmethod
