@@ -26,7 +26,7 @@
 
 ## ECS Fargate（クラスタ `teamagent-dev`）
 - サービス: `openclaw`（Slack 受け口）、`mcp`（MCP Gateway :8787）、`connect-web`（connect.newstv.co.jp）、`ingest`（毎日 18:00 のシート同期→動画アーカイブ同期→サムネ→事例推定→URL 取り込み）、`morning-digest`、`canary`、`media`（動画処理のジョブ）。
-- image/env の差し替えは **Terraform でなく CLI**（register-task-definition → update-service）。`infra/terraform/apply_mcp.sh` と `scripts/aws/release/` を参照。Terraform 側は `ignore_changes = [task_definition, desired_count]`。
+- image の反映は便（`scripts/aws/release_mcp.sh` → `apply_mcp_tds.sh`、`scripts/aws/release/` に実例）。**タスク定義を CLI で直接登録するのは禁止**（CLAUDE.md B9。`tests/scripts/test_legacy_image_helpers.py` などの契約テストが `infra/` 配下のそういうシェルを弾く）。env の変更は Terraform の guarded apply（`-var-file`）。
 - Terraform apply は guarded apply（`infra/deploy/terraform_runtime_guard.sh`）で、必ず `-var-file`。plain apply は過去にドリフトで事故。
 - CodeBuild の起動は `require-teamagent-codebuild-launcher-role` で Aico 専用ロールに縛られている（統制側の設定）。
 
