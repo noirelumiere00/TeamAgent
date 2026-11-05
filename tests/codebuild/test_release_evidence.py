@@ -529,7 +529,7 @@ def _subject(name: str, *, channel: str) -> dict[str, Any]:
                 "path": "/app/src/teamagent/connect_web/static/app.html",
                 "sha256": BAKED_APP_HTML_SHA256,
             },
-            {"path": "/usr/bin/python3.14", "sha256": _hex("core-python")},
+            {"path": "/usr/bin/python3.15", "sha256": _hex("core-python")},
         ]
     else:
         quarantine = "teamagent-media-worker-quarantine"

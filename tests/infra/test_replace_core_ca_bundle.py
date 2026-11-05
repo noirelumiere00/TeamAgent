@@ -14,10 +14,10 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = ROOT / "infra/docker/replace_core_ca_bundle.py"
-APK = ROOT / "infra/docker/vendor/ca-certificates-bundle-20260909-r3.apk"
+APK = ROOT / "infra/docker/vendor/ca-certificates-bundle-20261020-r0.apk"
 LOCK = ROOT / "infra/docker/core-ca-bundle.lock.json"
-SHA256 = "4f57ebd7dc21d78ecce228f397d0a4ee46b5cfc777ac5f292821d41a97bfd896"
-VERSION = "20260909-r3"
+SHA256 = "d2a458ae71b3f6f65302a8dd61c35f75f3eef87aeb5583a3f97523e99698cf49"
+VERSION = "20261020-r0"
 DB = "usr/lib/apk/db/installed"
 CERT = "etc/ssl/certs/ca-certificates.crt"
 OLD_SBOM = "var/lib/db/sbom/ca-certificates-bundle-20260909-r2.spdx.json"
@@ -33,6 +33,17 @@ def _module():
     spec = importlib.util.spec_from_file_location("replace_core_ca_bundle", SCRIPT)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
+    # Keep legacy-base upgrade fixtures alongside the same-version runtime checks.
+    load = module.load_package
+
+    def load_legacy(apk, lock, digest, version):
+        package = load(apk, lock, digest, version)
+        package["lock"]["base_version"] = (
+            "20260909-r2" if package["lock"]["apkindex"]["P"] == module.NAME else "26.2.1-r2"
+        )
+        return package
+
+    module.load_package = load_legacy
     return module
 
 
@@ -66,13 +77,13 @@ def test_pinned_apk_payload_and_complete_package_record(tmp_path):
     assert result[0] == BEFORE.split(b"\n\n")[0]
     assert result[2:] == BEFORE.split(b"\n\n")[2:]
     for field in (
-        "V:20260909-r3",
-        "C:Q12NXUp1YSrgDFsj3YmYoLOz7Pngg=",
-        "S:119164",
+        "V:20261020-r0",
+        "C:Q1Uxft6BYfAMq8F4Gi9M7Q2XromUs=",
+        "S:118573",
         "I:229626",
-        "t:1792505521",
-        "c:34903eac7b8592ab9906e3aba6b3aa1ad96023df",
-        "R:ca-certificates-bundle-20260909-r3.spdx.json",
+        "t:1793012842",
+        "c:8061afafa65af5a9026707a8880e14120dd6f4a0",
+        "R:ca-certificates-bundle-20261020-r0.spdx.json",
     ):
         assert field.encode() in result[1].splitlines()
     assert result[1].count(b"Z:Q1") == 5
@@ -93,7 +104,7 @@ def test_rejects_wrong_apk_sha_before_writing(tmp_path):
 
 
 def test_lock_bytes_are_pinned_in_dockerfile():
-    expected = "0533366dfd74a1df3c01286ed6bbdff9c6977b03b62a360c755a131168c3d3a1"
+    expected = "86723ddeaf4263db18ae1ce6ad2865d5680eded14522b0c8c3dbad2e1ff6084c"
     assert hashlib.sha256(LOCK.read_bytes()).hexdigest() == expected
     assert (
         f"{expected} /tmp/core-ca/lock.json | sha256sum -c -"
@@ -132,6 +143,12 @@ def test_final_exec_form_rechecks_copied_payload_and_removes_stale_sbom(tmp_path
     (final / OLD_SBOM).write_bytes(b"base layer SBOM")
     before = tmp_path / "base-installed"
     before.write_bytes(BEFORE)
+    import json
+
+    data = json.loads(LOCK.read_text())
+    data["base_version"] = "20260909-r2"
+    fixture_lock = tmp_path / "fixture.lock.json"
+    fixture_lock.write_text(json.dumps(data))
     result = subprocess.run(
         [
             sys.executable,
@@ -142,7 +159,7 @@ def test_final_exec_form_rechecks_copied_payload_and_removes_stale_sbom(tmp_path
             "--apk",
             str(APK),
             "--lock",
-            str(LOCK),
+            str(fixture_lock),
             "--base-db",
             str(before),
         ],
@@ -174,7 +191,7 @@ def test_verification_rejects_changes(tmp_path, change):
     elif change == "certificate":
         (base / CERT).write_bytes(b"different certificate")
     else:
-        (base / "var/lib/db/sbom/ca-certificates-bundle-20260909-r3.spdx.json").write_bytes(b"{}")
+        (base / "var/lib/db/sbom/ca-certificates-bundle-20261020-r0.spdx.json").write_bytes(b"{}")
     with pytest.raises(ValueError):
         module.verify(base, BEFORE, [package])
 
@@ -191,10 +208,10 @@ def test_refuses_unexpected_base_version_without_changing_db(tmp_path):
     assert db.read_bytes() == old
 
 
-PIP_APK = ROOT / "infra/docker/vendor/py3-pip-wheel-26.2.2-r1.apk"
+PIP_APK = ROOT / "infra/docker/vendor/py3-pip-wheel-26.2.2-r2.apk"
 PIP_LOCK = ROOT / "infra/docker/core-pip-wheel.lock.json"
-PIP_SHA256 = "3481499c46ac5ae2b7e10ee50ff80f5c4c0e55501e0d096c8c06437f51283c93"
-PIP_VERSION = "26.2.2-r1"
+PIP_SHA256 = "6dcca154f23de54db689ec2006bb65c67de74d556f55f8836bf5d438da8b8ee1"
+PIP_VERSION = "26.2.2-r2"
 OLD_WHEEL = "usr/share/python-wheels/pip-26.2.1-py3-none-any.whl"
 OLD_PIP_SBOM = "var/lib/db/sbom/py3-pip-wheel-26.2.1-r2.spdx.json"
 PIP_BEFORE = BEFORE + b"P:py3-pip-wheel\nV:26.2.1-r2\n\n"
@@ -259,7 +276,7 @@ def test_pip_final_verification_fails_closed(tmp_path, change):
     module.prepare(base, packages)
     paths = {
         "wheel": "usr/share/python-wheels/pip-26.2.2-py3-none-any.whl",
-        "sbom": "var/lib/db/sbom/py3-pip-wheel-26.2.2-r1.spdx.json",
+        "sbom": "var/lib/db/sbom/py3-pip-wheel-26.2.2-r2.spdx.json",
         "old-wheel": OLD_WHEEL,
         "old-sbom": OLD_PIP_SBOM,
     }
@@ -277,6 +294,15 @@ def test_combined_cli_finalizes_the_docker_copy_without_stale_files(tmp_path):
     packages = _packages(module)
     base = _pip_base(tmp_path)
     before = tmp_path / "base-installed"
+    fixture_locks = []
+    for source, version in ((LOCK, "20260909-r2"), (PIP_LOCK, "26.2.1-r2")):
+        import json
+
+        data = json.loads(source.read_text())
+        data["base_version"] = version
+        target = tmp_path / source.name
+        target.write_text(json.dumps(data))
+        fixture_locks.append(target)
     command = [
         sys.executable,
         str(SCRIPT),
@@ -287,8 +313,8 @@ def test_combined_cli_finalizes_the_docker_copy_without_stale_files(tmp_path):
         str(before),
     ]
     for apk, lock, digest, version in (
-        (APK, LOCK, SHA256, VERSION),
-        (PIP_APK, PIP_LOCK, PIP_SHA256, PIP_VERSION),
+        (APK, fixture_locks[0], SHA256, VERSION),
+        (PIP_APK, fixture_locks[1], PIP_SHA256, PIP_VERSION),
     ):
         command += [
             "--apk",
@@ -320,3 +346,22 @@ def test_pip_rejects_unexpected_base_before_changing_either_package(tmp_path):
         module.prepare(base, _packages(module))
     assert db.read_bytes() == before
     assert (base / CERT).read_bytes() == b"old certificates"
+
+
+@pytest.mark.parametrize("base_version", ["26.2.2-r1", "26.2.2-r2"])
+def test_same_wheel_filename_is_retained_on_revision_or_identical_base(tmp_path, base_version):
+    module = _module()
+    package = module.load_package(PIP_APK, PIP_LOCK, PIP_SHA256, PIP_VERSION)
+    package["lock"]["base_version"] = base_version
+    base = _pip_base(tmp_path)
+    (base / OLD_WHEEL).unlink()
+    (base / OLD_PIP_SBOM).unlink()
+    before = PIP_BEFORE.replace(b"V:26.2.1-r2", f"V:{base_version}".encode())
+    (base / DB).write_bytes(before)
+    sbom = base / module.old_sbom(package)
+    sbom.write_bytes(b"base sbom")
+    wheel = base / module.wheel_path(base_version)
+    wheel.write_bytes(b"base wheel")
+    module.prepare(base, [package])
+    module.verify(base, before, [package])
+    assert wheel.read_bytes() == package["files"][str(wheel.relative_to(base))]

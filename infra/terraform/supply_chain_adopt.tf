@@ -231,6 +231,11 @@ locals {
       content_type                  = "text/yaml"
       object_lock_retain_until_date = "2099-12-31T00:00:00Z"
     }
+    # 2026-10-30 core Python 3.15 offline derivation (unpublished); retain the old generation.
+    "a589318b08328028e2f9fa6e494c049141583bff9f63e80ecbe26692dad3fa52" = {
+      content_type                  = "text/yaml"
+      object_lock_retain_until_date = "2099-12-31T00:00:00Z"
+    }
   }
 
   image_attestor_buildspec_generations = {
@@ -428,6 +433,11 @@ locals {
       content_type                  = "text/yaml"
       object_lock_retain_until_date = "2099-12-31T00:00:00Z"
     }
+    # 2026-10-30 core Python 3.15 offline derivation (unpublished); retain the old generation.
+    "5112b09c4a7366cc415b98bec2071567535f297b9c23f25d95dc892c8ea312c9" = {
+      content_type                  = "text/yaml"
+      object_lock_retain_until_date = "2099-12-31T00:00:00Z"
+    }
   }
 
   image_promoter_buildspec_generations = {
@@ -615,6 +625,11 @@ locals {
       content_type                  = "text/yaml"
       object_lock_retain_until_date = "2099-12-31T00:00:00Z"
     }
+    # 2026-10-30 core Python 3.15 offline derivation (unpublished); retain the old generation.
+    "cd7a201323ebc101fedbe8112532a272c562688551899a6343929c5d118c615b" = {
+      content_type                  = "text/yaml"
+      object_lock_retain_until_date = "2099-12-31T00:00:00Z"
+    }
   }
 
   approval_publisher_resolved_source_buildspec_generations = {
@@ -622,6 +637,11 @@ locals {
     # （他世代の 00:00:00Z と異なる。ここを共通定数で潰さないこと）
     "33e2a64353969f75e941a9524fcd76919c2dfcc7d192aabb67ecc09c9921ddf4" = {
       content_type                  = "binary/octet-stream"
+      object_lock_retain_until_date = "2099-12-31T23:59:59Z"
+    }
+    # 2026-10-30 core Python 3.15 offline derivation (unpublished); retain the old generation.
+    "1fba5b9c87c65bff6dc7a5e46b20cbd63ab064ce7dfa06d77b0fe12099583e9f" = {
+      content_type                  = "text/yaml"
       object_lock_retain_until_date = "2099-12-31T23:59:59Z"
     }
   }
@@ -810,21 +830,21 @@ removed {
 }
 
 import {
-  to = aws_s3_object.mcp_source_publisher_buildspec_generation["bc60c0e17b9b0533dd2dbe0764a80493fd1c0f25f78beba7e99fa19365972b52"]
-  id = "teamagent-dev-image-release-evidence/codebuild-buildspecs/teamagent-dev-mcp-source-publisher/bc60c0e17b9b0533dd2dbe0764a80493fd1c0f25f78beba7e99fa19365972b52.yml"
+  to = aws_s3_object.mcp_source_publisher_buildspec_generation["a589318b08328028e2f9fa6e494c049141583bff9f63e80ecbe26692dad3fa52"]
+  id = "teamagent-dev-image-release-evidence/codebuild-buildspecs/teamagent-dev-mcp-source-publisher/a589318b08328028e2f9fa6e494c049141583bff9f63e80ecbe26692dad3fa52.yml"
 }
 
 import {
-  to = aws_s3_object.image_attestor_buildspec_generation["217e29f079c1e8ca23271813fcbc184280039a94802661d65c355bdc3fb43866"]
-  id = "teamagent-dev-image-release-evidence/codebuild-buildspecs/teamagent-dev-image-attestor/217e29f079c1e8ca23271813fcbc184280039a94802661d65c355bdc3fb43866.yml"
+  to = aws_s3_object.image_attestor_buildspec_generation["5112b09c4a7366cc415b98bec2071567535f297b9c23f25d95dc892c8ea312c9"]
+  id = "teamagent-dev-image-release-evidence/codebuild-buildspecs/teamagent-dev-image-attestor/5112b09c4a7366cc415b98bec2071567535f297b9c23f25d95dc892c8ea312c9.yml"
 }
 
 import {
-  to = aws_s3_object.image_promoter_buildspec_generation["29be59e2adb649cb86c0a44f06299c151b3047a1b6ef7f5dda66be091bae433d"]
-  id = "teamagent-dev-image-release-evidence/codebuild-buildspecs/teamagent-dev-image-promoter/29be59e2adb649cb86c0a44f06299c151b3047a1b6ef7f5dda66be091bae433d.yml"
+  to = aws_s3_object.image_promoter_buildspec_generation["cd7a201323ebc101fedbe8112532a272c562688551899a6343929c5d118c615b"]
+  id = "teamagent-dev-image-release-evidence/codebuild-buildspecs/teamagent-dev-image-promoter/cd7a201323ebc101fedbe8112532a272c562688551899a6343929c5d118c615b.yml"
 }
 
 import {
-  to = aws_s3_object.approval_publisher_resolved_source_buildspec_generation["33e2a64353969f75e941a9524fcd76919c2dfcc7d192aabb67ecc09c9921ddf4"]
-  id = "teamagent-dev-image-release-evidence/codebuild-buildspecs/teamagent-dev-approval-publisher/33e2a64353969f75e941a9524fcd76919c2dfcc7d192aabb67ecc09c9921ddf4.yml"
+  to = aws_s3_object.approval_publisher_resolved_source_buildspec_generation["1fba5b9c87c65bff6dc7a5e46b20cbd63ab064ce7dfa06d77b0fe12099583e9f"]
+  id = "teamagent-dev-image-release-evidence/codebuild-buildspecs/teamagent-dev-approval-publisher/1fba5b9c87c65bff6dc7a5e46b20cbd63ab064ce7dfa06d77b0fe12099583e9f.yml"
 }

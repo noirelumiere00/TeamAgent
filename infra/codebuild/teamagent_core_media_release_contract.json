@@ -13,7 +13,7 @@
   },
   "source_runtime_contract": {
     "path": "infra/codebuild/teamagent_runtime_contract.json",
-    "sha256": "e4b6780592e12a94b84298338512c1c7f3784fcd857554afafbfaff42681fa63"
+    "sha256": "f265e02f4eecdeec8677b2d9aecc80be4679a57dd50c7ff9fd902de919506fe4"
   },
   "app_html": {
     "bucket": "teamagent-dev-raw-files",
@@ -80,41 +80,41 @@
         },
         {
           "key": "binary.python.sha256",
-          "path": "/usr/bin/python3.14",
-          "sha256": "775bf454e5816503fe56f81c9b9e0d3f03790694bdce576cbbefd60971fc88ca"
+          "path": "/usr/bin/python3.15",
+          "sha256": "016d42a0bdd7464730b5154c2b4f1df8cd0f8cb67b67406e6f10c8c0c1ce3faa"
         }
       ],
       "source_assertions": [
         {
           "key": "artifact.brotli-common-apk-sha256",
-          "value": "1801ba6f752b201c5d52fadd98a3698a672a5695ad18d2321169b9e1c9fabe3e",
+          "value": "5a71e1e2255f6e85cf501b60a34584e097fe743a91bf0e60338376ddc5a24090",
           "build_arg": "BROTLI_COMMON_APK_SHA256",
           "oci_label": "io.teamagent.contract.brotli-common-apk-sha256",
           "dockerfile_uses": [
-            "printf '%s  %s\\n' \"$BROTLI_COMMON_APK_SHA256\" /tmp/core-brotli/libbrotlicommon1-1.2.1-r0.apk | sha256sum -c -"
+            "printf '%s  %s\\n' \"$BROTLI_COMMON_APK_SHA256\" /tmp/core-brotli/libbrotlicommon1-1.2.1-r2.apk | sha256sum -c -"
           ]
         },
         {
           "key": "artifact.brotli-dec-apk-sha256",
-          "value": "a5a25fb6a8238af95af1c21f039ecb4cb1a32fadd040ac276d73532ffd72fb1c",
+          "value": "29b9fcc4d55fea32dbe590a2e3de0459109c8103b6dc568e650e0e6395280a82",
           "build_arg": "BROTLI_DEC_APK_SHA256",
           "oci_label": "io.teamagent.contract.brotli-dec-apk-sha256",
           "dockerfile_uses": [
-            "printf '%s  %s\\n' \"$BROTLI_DEC_APK_SHA256\" /tmp/core-brotli/libbrotlidec1-1.2.1-r0.apk | sha256sum -c -"
+            "printf '%s  %s\\n' \"$BROTLI_DEC_APK_SHA256\" /tmp/core-brotli/libbrotlidec1-1.2.1-r2.apk | sha256sum -c -"
           ]
         },
         {
           "key": "artifact.brotli-enc-apk-sha256",
-          "value": "d15c3aaa157a5fa281768fe5e69ae3da9357d3e58668ca47aa7bf2c3442d09b8",
+          "value": "14ba019e5e959d8f4ae06f6a6c9e1014842b730d2a10a2fbb66fb780523910f7",
           "build_arg": "BROTLI_ENC_APK_SHA256",
           "oci_label": "io.teamagent.contract.brotli-enc-apk-sha256",
           "dockerfile_uses": [
-            "printf '%s  %s\\n' \"$BROTLI_ENC_APK_SHA256\" /tmp/core-brotli/libbrotlienc1-1.2.1-r0.apk | sha256sum -c -"
+            "printf '%s  %s\\n' \"$BROTLI_ENC_APK_SHA256\" /tmp/core-brotli/libbrotlienc1-1.2.1-r2.apk | sha256sum -c -"
           ]
         },
         {
           "key": "artifact.brotli-package-version",
-          "value": "1.2.1-r0",
+          "value": "1.2.1-r2",
           "build_arg": "BROTLI_PACKAGE_VERSION",
           "oci_label": "io.teamagent.contract.brotli-package-version",
           "dockerfile_uses": [
@@ -125,7 +125,7 @@
         },
         {
           "key": "artifact.pip-wheel-apk-sha256",
-          "value": "3481499c46ac5ae2b7e10ee50ff80f5c4c0e55501e0d096c8c06437f51283c93",
+          "value": "6dcca154f23de54db689ec2006bb65c67de74d556f55f8836bf5d438da8b8ee1",
           "build_arg": "PIP_WHEEL_APK_SHA256",
           "oci_label": "io.teamagent.contract.pip-wheel-apk-sha256",
           "dockerfile_uses": [
@@ -134,7 +134,7 @@
         },
         {
           "key": "package.pip-wheel.version",
-          "value": "26.2.2-r1",
+          "value": "26.2.2-r2",
           "build_arg": "PIP_WHEEL_VERSION",
           "oci_label": "io.teamagent.contract.pip-wheel-version",
           "dockerfile_uses": [
