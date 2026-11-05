@@ -95,7 +95,7 @@ def _slack_mock() -> MagicMock:
     m = MagicMock()
     m.lookup_user_id_by_email = AsyncMock(return_value="U1")
     m.open_dm = AsyncMock(return_value="D1")
-    m.upload_file = AsyncMock(return_value=True)
+    m.upload_files = AsyncMock(return_value="posted")
     return m
 
 
@@ -129,9 +129,8 @@ def _run(
 
 def _uploaded_names(slack: MagicMock) -> list[str]:
     names: list[str] = []
-    for call in slack.upload_file.await_args_list:
-        # upload_file(channel, path, request_id, title=<添付ファイル名>, ...)
-        names.append(str(call.kwargs.get("title")))
+    for call in slack.upload_files.await_args_list:
+        names.extend(filename for _, filename in call.args[1])
     return names
 
 
@@ -147,7 +146,7 @@ def test_incident_other_clients_pdfs_are_not_attached() -> None:
     out, slack, gdrive = _run(_incident_hits(), query_client="日本コカ・コーラ")
 
     assert out.delivered_count == 0
-    slack.upload_file.assert_not_awaited()
+    slack.upload_files.assert_not_awaited()
     gdrive.download_file_bytes.assert_not_called()
     assert "日本コカ・コーラの資料のファイル本体は見つかりませんでした" in out.note
     assert "別の取引先の資料" in out.note
@@ -168,7 +167,8 @@ def test_incident_reproduces_with_guard_off(monkeypatch: pytest.MonkeyPatch) -> 
     out, slack, _ = _run(_incident_hits(), query_client="日本コカ・コーラ")
 
     assert out.delivered_count == 3
-    assert slack.upload_file.await_count == 3
+    slack.upload_files.assert_awaited_once()
+    assert len(slack.upload_files.await_args.args[1]) == 3
     assert len(out.references) == 4
 
 
@@ -179,7 +179,7 @@ def test_incident_detects_nakaguro_client_from_hits_without_search_value() -> No
     out, slack, _ = _run(_incident_hits(top1_project="日本コカ・コーラ株式会社"))
 
     assert out.delivered_count == 0
-    slack.upload_file.assert_not_awaited()
+    slack.upload_files.assert_not_awaited()
     assert "日本コカ・コーラの資料のファイル本体は見つかりませんでした" in out.note
 
 
@@ -266,7 +266,7 @@ def test_unknown_client_hit_is_not_attached_when_client_is_named() -> None:
     hits = [_hit(source_type="gdrive", source_uri="gdrive://X1", title="a.pdf")]
     out, slack, _ = _run(hits, query_client="日本コカ・コーラ")
     assert out.delivered_count == 0
-    slack.upload_file.assert_not_awaited()
+    slack.upload_files.assert_not_awaited()
     assert "日本コカ・コーラの資料のファイル本体は見つかりませんでした" in out.note
 
 
@@ -275,7 +275,8 @@ def test_query_without_client_keeps_previous_behaviour() -> None:
     hits = _incident_hits()[1:]
     out, slack, _ = _run(hits, query="食品業界のショート動画事例ある？")
     assert out.delivered_count == 3
-    assert slack.upload_file.await_count == 3
+    slack.upload_files.assert_awaited_once()
+    assert len(slack.upload_files.await_args.args[1]) == 3
     assert len(out.references) == 3
 
 
@@ -299,7 +300,7 @@ def test_not_found_attaches_nothing() -> None:
         found=False,
     )
     assert out.delivered_count == 0
-    slack.upload_file.assert_not_awaited()
+    slack.upload_files.assert_not_awaited()
     gdrive.download_file_bytes.assert_not_called()
     assert out.references == []
     assert "見つかりませんでした" in out.note
@@ -308,7 +309,7 @@ def test_not_found_attaches_nothing() -> None:
 def test_not_found_with_client_says_client_files_are_missing() -> None:
     out, slack, _ = _run(_incident_hits(), found=False, query_client="日本コカ・コーラ")
     assert out.delivered_count == 0
-    slack.upload_file.assert_not_awaited()
+    slack.upload_files.assert_not_awaited()
     assert out.references == []
     assert "日本コカ・コーラの資料のファイル本体は見つかりませんでした" in out.note
 
@@ -349,7 +350,7 @@ def test_other_client_links_are_removed_from_answer_links_block() -> None:
     assert "OTHER0" not in out.answer and "OTHER1" not in out.answer
     assert "📎 *資料リンク*" in out.answer
     # 添付に乗せる要約（initial_comment）も同じ
-    comment = slack.upload_file.await_args.kwargs.get("initial_comment")
+    comment = slack.upload_files.await_args.kwargs.get("initial_comment")
     assert comment == out.answer
 
 
@@ -455,7 +456,7 @@ def test_end_to_end_search_detects_client_and_deliver_attaches_nothing() -> None
     skill = KnowledgeDeliverSkill(search=search, slack=slack, gdrive=_gdrive_mock())
     out = skill.run(KnowledgeDeliverInput(query=INCIDENT_QUERY), _ctx())
     assert out.delivered_count == 0
-    slack.upload_file.assert_not_awaited()
+    slack.upload_files.assert_not_awaited()
     assert "添付できる Drive の実ファイルに紐づきませんでした" in out.note
     assert [ref.title for ref in out.references] == [
         "紅茶花伝 無糖 アールグレイ サンリオ限定ボトル"
@@ -485,7 +486,7 @@ def test_unknown_client_other_company_report_is_not_attached() -> None:
     """取引先（日本コカ・コーラ）が語彙に無く名指しを検出できなくても、問いの固有名詞
     （コーラ・アールグレイアイスティー・サンリオ）を含まない別会社の報告書は添付しない。"""
     out, slack, _ = _run([_itoen_report()])
-    assert slack.upload_file.await_count == 0
+    assert slack.upload_files.await_count == 0
     assert out.delivered_count == 0
     assert out.references == []
     assert "伊藤園" not in out.note
@@ -500,11 +501,11 @@ def test_unknown_client_report_that_mentions_the_subject_is_attached() -> None:
         content="日本コカ・コーラ 紅茶花伝 サンリオ限定ボトルのショート動画施策",
     )
     out, slack, _ = _run([hit])
-    assert slack.upload_file.await_count == 1
+    assert slack.upload_files.await_count == 1
     assert out.delivered_count == 1
 
 
 def test_unknown_client_guard_follows_the_flag(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv(GUARD_ENV, "0")
     _, slack, _ = _run([_itoen_report()])
-    assert slack.upload_file.await_count == 1
+    assert slack.upload_files.await_count == 1

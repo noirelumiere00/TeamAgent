@@ -16,6 +16,7 @@ class KnowledgeRef(BaseModel):
     industry: str | None = Field(default=None, description="業界（自動分類）")
     score: float = Field(default=0.0, description="関連度スコア")
     delivered: bool = Field(default=False, description="実ファイルを DM に添付したか")
+    pages: list[int] = Field(default_factory=list)
 
 
 class KnowledgeDeliverInput(BaseModel):

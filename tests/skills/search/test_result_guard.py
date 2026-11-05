@@ -819,7 +819,7 @@ def test_knowledge_deliver_fukuda_initial_comment_has_no_client_warning(
     slack = MagicMock()
     slack.lookup_user_id_by_email = AsyncMock(return_value="U1")
     slack.open_dm = AsyncMock(return_value="D1")
-    slack.upload_file = AsyncMock(return_value=True)
+    slack.upload_files = AsyncMock(return_value="posted")
     gdrive = MagicMock()
     gdrive.download_file_bytes.return_value = b"%PDF-1.4 fake"
     out = KnowledgeDeliverSkill(search=search, slack=slack, gdrive=gdrive).run(
@@ -827,6 +827,6 @@ def test_knowledge_deliver_fukuda_initial_comment_has_no_client_warning(
         SkillContext(metadata={"user_email": "u@vectorinc.co.jp"}),
     )
     assert out.delivered_count == 1
-    comment = slack.upload_file.await_args.kwargs.get("initial_comment") or ""
+    comment = slack.upload_files.await_args.kwargs.get("initial_comment") or ""
     assert not comment.startswith("⚠️ ご指定")
     assert not out.answer.startswith("⚠️ ご指定")
