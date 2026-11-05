@@ -118,8 +118,13 @@ def test_runner_with_no_sources_returns_empty_stats() -> None:
     assert isinstance(result, IngestResult)
     assert result.total_documents() == 0
     assert result.total_errors() == 0
-    # 既定 kinds = ['slack','gdrive','gsheets','shared_drives'] すべて key として作られる
-    assert set(result.by_kind.keys()) == {"slack", "gdrive", "gsheets", "shared_drives"}
+    assert set(result.by_kind.keys()) == {
+        "slack",
+        "slack_public_files",
+        "gdrive",
+        "gsheets",
+        "shared_drives",
+    }
 
 
 def test_runner_filters_by_kinds() -> None:

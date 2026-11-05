@@ -322,6 +322,13 @@ case_corpus_decks:
       case_external_use: "ng"
       case_external_use_note: "クライアント展開NG（社内のみ）"
 
+slack_public_files:
+  token_owners: all
+  filetypes: ["pdf", "pptx", "ppt"]
+  max_files_per_run: 2000
+  extra_metadata:
+    topic: "Slack 共有資料"
+
 shared_drives_crawl:
   # 2026-08-17 ユーザー裁定: 全共有ドライブ横断は停止する。
   # ナレッジの実体（01_提案〜08_AI活用）は gdrive_folders の
@@ -379,6 +386,7 @@ gdrive_exclude_folder_name_re: "^\\s*99[_＿]|一次倉庫|検索対象外|ナ�
 # Adapter ↔ source_type マッピング
 # ============================================================
 # slack_channels  → adapters/slack_channel_ingest_client.py → source_type='slack'
+# slack_public_files → adapters/slack_client.py             → source_type='other'
 # gdrive_folders  → adapters/gdrive_client.py                → source_type='gdrive'
 # gsheets         → adapters/gsheets_client.py (PR-5 で実装)→ source_type='other' 暫定
 #                   （or migration 0003 で gsheets を ENUM に追加）

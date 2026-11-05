@@ -273,6 +273,17 @@ class SlackTokenStore:
     def _norm(email: str) -> str:
         return email.strip().lower()
 
+    def list_file_reader_emails(self) -> list[str]:
+        """取込ジョブ用。既存 admin RLS で files:read の連携者だけ読む（復号なし）。"""
+        with self._pgvector.connection(app_role=self._app_role, user_role="admin") as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT user_email FROM slack_oauth_tokens "
+                    "WHERE %s = ANY(scopes) ORDER BY user_email",
+                    ("files:read",),
+                )
+                return [str(row["user_email"]) for row in cur.fetchall()]
+
     def slack_user_id(self, user_email: str) -> str | None:
         """保存済み Slack user ID だけを返す（xoxp の KMS 復号は行わない）。"""
         email = self._norm(user_email)

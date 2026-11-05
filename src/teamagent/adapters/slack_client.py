@@ -517,6 +517,31 @@ class SlackClient:
         logger.info("slack_file_downloaded", request_id=request_id, size_mb=round(size_mb, 2))
         return data
 
+    @classmethod
+    def for_bulk_read(cls, token: str) -> SlackClient:
+        """全件列挙用。連携者が多いと files.list（Tier 3）が 429 になるので待って再試行する。"""
+        from slack_sdk.http_retry.builtin_async_handlers import (
+            AsyncRateLimitErrorRetryHandler,
+            async_default_handlers,
+        )
+
+        handlers = [*async_default_handlers(), AsyncRateLimitErrorRetryHandler(max_retry_count=5)]
+        return cls(bot_token=token, client=AsyncWebClient(token=token, retry_handlers=handlers))
+
+    async def list_files(self, *, cursor: str | None = None, page: int = 1) -> dict[str, Any]:
+        """本人 token でも利用できる files.list。全期間・全種類を列挙する。"""
+        kwargs: dict[str, Any] = {"types": "all", "count": 1000}
+        if cursor:
+            kwargs["cursor"] = cursor
+        else:
+            kwargs["page"] = page
+        response = await self._client.files_list(**kwargs)
+        return {
+            "files": response.get("files", []) or [],
+            "response_metadata": response.get("response_metadata", {}) or {},
+            "paging": response.get("paging", {}) or {},
+        }
+
     async def download_file_guarded(
         self,
         url_private: str,

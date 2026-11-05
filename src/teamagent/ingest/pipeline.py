@@ -16,6 +16,7 @@ Usage (CLI):
 
 from __future__ import annotations
 
+import asyncio
 import dataclasses
 import datetime as _dt
 import hashlib
@@ -57,6 +58,7 @@ from teamagent.ingest.loader import (
     SharedDriveCrawlSpec,
     SlackChannelPrefixSpec,
     SlackChannelSpec,
+    SlackPublicFilesSpec,
 )
 from teamagent.ingest.ops_alert import IngestOpsAlerter
 from teamagent.ingest.repository import (
@@ -1396,6 +1398,7 @@ def _collect_all_member_ids(
     """conversations.members を全 page 集めて user_id list を返す。"""
     all_ids: list[str] = []
     cursor: str | None = None
+    seen_cursors: set[str] = set()
     for _ in range(max_pages):
         ids, cursor = client.list_channel_members(
             channel_id=channel_id, request_id=request_id, cursor=cursor
@@ -1403,6 +1406,11 @@ def _collect_all_member_ids(
         all_ids.extend(ids)
         if not cursor:
             break
+        if cursor in seen_cursors:
+            raise ValueError("repeated conversations.members cursor")
+        seen_cursors.add(cursor)
+    if cursor:
+        raise ValueError("incomplete conversations.members pagination")
     return all_ids
 
 
@@ -5310,6 +5318,290 @@ def _retire_missing_deck_cases(
     return retired
 
 
+def _ingest_slack_public_files(
+    spec: SlackPublicFilesSpec,
+    *,
+    embedder: _EmbedderProto,
+    repository: IngestRepository,
+    owner_email: str,
+    dry_run: bool,
+    request_id: str,
+    warning_collector: _IngestWarningCollector,
+    unchanged_collector: _IngestUnchangedCollector,
+) -> tuple[int, int]:
+    from slack_sdk.errors import SlackApiError
+
+    from teamagent.adapters.oauth_token_store import KmsCipher, SlackTokenStore
+    from teamagent.adapters.pgvector_client import PgVectorClient
+    from teamagent.adapters.slack_channel_ingest_client import SlackChannelIngestClient
+    from teamagent.adapters.slack_client import SlackClient
+    from teamagent.adapters.slack_file_guard import is_external_file
+    from teamagent.ingest.office_extract import (
+        MAX_OFFICE_COMPRESSED_BYTES,
+        PPTX_MIME,
+        extract_office_pages,
+    )
+    from teamagent.ingest.pdf_extract import extract_pdf_pages
+    from teamagent.slack2drive.job import slack_credential
+
+    kind = "slack_public_files"
+
+    def warn(reason: str, exc: Exception) -> None:
+        warning_collector.add(kind, kind, reason)
+        logger.warning(reason, request_id=request_id, error_type=type(exc).__name__)
+
+    try:
+        store = SlackTokenStore(
+            PgVectorClient.from_env(),
+            KmsCipher(os.environ.get("OAUTH_KMS_KEY_ID", "alias/teamagent-oauth-tokens")),
+        )
+        token_owners = store.list_file_reader_emails()
+        if not token_owners:
+            raise ValueError("no files:read token owners")
+    except Exception as exc:
+        warn("slack_public_files_token_unavailable", exc)
+        return 0, 0
+
+    files: dict[str, dict[str, Any]] = {}
+    file_clients: dict[str, list[SlackClient]] = {}
+    public_shares: dict[str, set[str]] = {}
+    private_shares: dict[str, set[str]] = {}
+    channel_readers: dict[str, list[SlackChannelIngestClient]] = {}
+    enumerated = skipped = 0
+    owners_processed = 0
+    for email in token_owners:
+        try:
+            token = slack_credential(email, "user")
+            client = SlackClient.for_bulk_read(token)
+            channel_client = SlackChannelIngestClient(token)
+        except Exception as exc:
+            warn("slack_public_files_token_unavailable", exc)
+            continue
+        owned_files: list[dict[str, Any]] = []
+        cursor: str | None = None
+        seen_cursors: set[str] = set()
+        page = 1
+        try:
+            while True:
+                response = asyncio.run(client.list_files(cursor=cursor, page=page))
+                owned_files.extend(response.get("files", []) or [])
+                next_cursor = (response.get("response_metadata") or {}).get("next_cursor")
+                if next_cursor:
+                    if next_cursor in seen_cursors:
+                        raise ValueError("repeated files.list cursor")
+                    seen_cursors.add(next_cursor)
+                    cursor = next_cursor
+                elif cursor or page >= int((response.get("paging") or {}).get("pages", 1)):
+                    break
+                else:
+                    # files.list の本番契約は paging。cursor を返す応答にも対応する。
+                    page += 1
+        except Exception as exc:
+            auth_error = isinstance(exc, SlackApiError) and exc.response.get("error") in {
+                "not_authed",
+                "invalid_auth",
+                "token_revoked",
+                "token_expired",
+                "account_inactive",
+                "missing_scope",
+            }
+            warn(
+                "slack_public_files_token_unavailable"
+                if auth_error
+                else "slack_public_files_list_failed",
+                exc,
+            )
+            continue
+        owners_processed += 1
+        checked_private: dict[str, bool] = {}
+        for f in owned_files:
+            enumerated += 1
+            if (
+                f.get("filetype") not in spec.filetypes
+                or f.get("filetype") not in ("pdf", "pptx", "ppt")
+                or is_external_file(f)
+                or not f.get("id")
+            ):
+                skipped += 1
+                continue
+            shares = f.get("shares") or {}
+            public = set(f.get("channels") or []) | set(shares.get("public") or {})
+            private: set[str] = set()
+            for cid in set(f.get("groups") or []) | set(shares.get("private") or {}):
+                if cid not in checked_private:
+                    try:
+                        info = channel_client.get_conversation(cid)
+                        checked_private[cid] = (
+                            info.get("is_private") is True
+                            and not info.get("is_im")
+                            and not info.get("is_mpim")
+                            and info.get("is_member") is not False
+                        )
+                    except Exception as exc:
+                        checked_private[cid] = False
+                        warn("slack_public_files_channel_unavailable", exc)
+                if checked_private[cid]:
+                    private.add(cid)
+                    readers = channel_readers.setdefault(cid, [])
+                    if channel_client not in readers:
+                        readers.append(channel_client)
+            if not public and not private:
+                skipped += 1
+                continue
+            file_id = str(f["id"])
+            if file_id in files:
+                skipped += 1
+            previous = files.get(file_id)
+            if previous is None or (
+                _slack_message_modified_at(f.get("updated") or f.get("timestamp")) or ""
+            ) > (
+                _slack_message_modified_at(previous.get("updated") or previous.get("timestamp"))
+                or ""
+            ):
+                files[file_id] = f
+            clients = file_clients.setdefault(file_id, [])
+            if client not in clients:
+                clients.append(client)
+            public_shares.setdefault(file_id, set()).update(public)
+            private_shares.setdefault(file_id, set()).update(private)
+
+    limit = int(os.environ.get("SLACK_FILES_MAX_PER_RUN") or spec.max_files_per_run)
+    stored_hashes = _load_stored_content_hashes(
+        repository, "other", list(files), request_id=request_id
+    )
+    channel_emails: dict[str, list[str]] = {}
+    email_client: SlackChannelIngestClient | None = None
+    processed = unchanged = remaining = docs_n = chunks_n = 0
+    for file_id, f in files.items():
+        try:
+            public = public_shares[file_id]
+            private = private_shares[file_id]
+            channels = sorted(public | private)
+            acl_emails: list[str] = []
+            if not public:
+                for cid in sorted(private):
+                    if cid not in channel_emails:
+                        channel_emails[cid] = []
+                        for reader in channel_readers[cid]:
+                            try:
+                                member_ids = _collect_all_member_ids(reader, cid, request_id)
+                                if email_client is None:
+                                    email_client = SlackChannelIngestClient.from_env()
+                                emails = _resolve_member_emails(
+                                    email_client, member_ids, request_id
+                                )
+                                if emails:
+                                    channel_emails[cid] = emails
+                                    break
+                            except Exception as exc:
+                                warn("slack_public_files_acl_unavailable", exc)
+                    acl_emails.extend(channel_emails[cid])
+                acl_emails = sorted(set(acl_emails))
+                if not acl_emails:
+                    raise ValueError("no private channel member emails resolved")
+            metadata = {
+                **spec.extra_metadata,
+                "channel_id": channels[0],
+                "channel_ids": channels,
+                "public_channel_ids": sorted(public),
+                "private_channel_ids": sorted(private),
+                "filetype": f["filetype"],
+                "slack_file_version": {
+                    "updated": f.get("updated"),
+                    "size": f.get("size"),
+                    "timestamp": f.get("timestamp"),
+                    "created": f.get("created"),
+                },
+            }
+            doc = DocumentUpsert(
+                source_type="other",  # 既存 enum。Slack スレッド取込とは別のファイル文書。
+                external_id=file_id,
+                source_uri=f.get("permalink"),
+                title=f.get("name") or f.get("title") or file_id,
+                # owner にも閲覧権があるので、非公開は必ずメンバーから選ぶ。
+                owner_email=owner_email if public else acl_emails[0],
+                acl_emails=acl_emails,
+                acl_groups=_company_acl_groups() if public else [],
+                modified_at=_slack_message_modified_at(
+                    f.get("updated") or f.get("timestamp") or f.get("created")
+                ),
+                metadata=metadata,
+            )
+            content_hash = compute_document_content_hash(
+                source_type=doc.source_type,
+                external_id=file_id,
+                text="",
+                title=doc.title,
+                source_uri=doc.source_uri,
+                owner_email=doc.owner_email,
+                acl_emails=doc.acl_emails,
+                acl_groups=doc.acl_groups,
+                metadata=metadata,
+                modified_at=doc.modified_at,
+                pipeline_config={"extractor": "slack-channel-files-v2"},
+            )
+            if stored_hashes.get(file_id) == content_hash:
+                unchanged += 1
+                skipped += 1
+                continue
+            # 初回の全期間取込だけ SLACK_FILES_MAX_PER_RUN=0（上限なし）の単独実行で一気に進める。
+            if limit and docs_n >= limit:
+                remaining += 1
+                continue
+            processed += 1
+            # 旧 ppt の本文は Slack の PDF 変換を利用し、新しい変換器は持たない。
+            url = f.get("office_pdf") if f["filetype"] == "ppt" else f.get("url_private")
+            if not url:
+                raise ValueError("download URL unavailable")
+            for downloader in file_clients[file_id]:
+                try:
+                    data = asyncio.run(
+                        downloader.download_file_guarded(
+                            url, request_id=request_id, max_bytes=MAX_OFFICE_COMPRESSED_BYTES
+                        )
+                    )
+                    break
+                except Exception:
+                    if downloader is file_clients[file_id][-1]:
+                        raise
+            if f["filetype"] == "pptx":
+                pages = extract_office_pages(
+                    data,
+                    mime_type=PPTX_MIME,
+                    expected_size=f.get("size"),
+                    max_extracted_chars=MAX_INGEST_EXTRACTED_CHARACTERS,
+                )
+            else:
+                pages = extract_pdf_pages(data, max_total_chars=MAX_INGEST_EXTRACTED_CHARACTERS)
+            page_chunks = _bounded_chunk_pages(pages)
+            if not page_chunks:
+                raise ValueError("empty extracted text")
+            chunks = _embed_page_chunks(page_chunks, embedder=embedder)
+            metadata[INGEST_CONTENT_HASH_KEY] = content_hash
+            if not dry_run:
+                repository.upsert_document_with_chunks(doc, chunks, request_id=request_id)
+            docs_n += 1
+            chunks_n += len(chunks)
+        except Exception as exc:
+            skipped += 1
+            warn("slack_public_files_file_failed", exc)
+
+    unchanged_collector.add(kind, unchanged)
+    logger.info(
+        "slack_public_files_complete",
+        request_id=request_id,
+        owners=len(token_owners),
+        owners_processed=owners_processed,
+        enumerated=enumerated,
+        processed=processed,
+        documents=docs_n,
+        remaining=remaining,
+        skipped=skipped,
+        unchanged=unchanged,
+    )
+    return docs_n, chunks_n
+
+
 class IngestRunner:
     """ingest_sources.yaml に基づく 3 source 取り込みのオーケストレータ。"""
 
@@ -5337,9 +5629,9 @@ class IngestRunner:
     ) -> IngestResult:
         """指定 kinds の source を取り込む。
 
-        kinds: ['slack','gdrive','gsheets'] のサブセット。None なら全部。
+        kinds: slack / slack_public_files / gdrive / gsheets 等。None なら全部。
         """
-        kinds = kinds or ["slack", "gdrive", "gsheets", "shared_drives"]
+        kinds = kinds or ["slack", "slack_public_files", "gdrive", "gsheets", "shared_drives"]
         result = IngestResult()
         request_id = f"ingest-{uuid.uuid4().hex[:12]}"
 
@@ -5372,7 +5664,6 @@ class IngestRunner:
             request_id=request_id,
             kinds=kinds,
             dry_run=self._dry_run,
-            owner_email=self._owner_email,
         )
 
         # ルート検査 preflight: gdrive kind 実行の冒頭・yaml でルート指定時のみ。
@@ -5392,6 +5683,19 @@ class IngestRunner:
                 _ingest_slack_channel,
                 request_id=request_id,
                 extra_kwargs={"unchanged_collector": unchanged_collector},
+            )
+        if "slack_public_files" in kinds or (
+            "slack" in kinds and sources.slack_public_files is not None
+        ):
+            result.by_kind["slack_public_files"] = self._run_kind(
+                "slack_public_files",
+                (sources.slack_public_files,) if sources.slack_public_files is not None else (),
+                _ingest_slack_public_files,
+                request_id=request_id,
+                extra_kwargs={
+                    "warning_collector": warning_collector,
+                    "unchanged_collector": unchanged_collector,
+                },
             )
         if "gdrive" in kinds:
             result.by_kind["gdrive"] = self._run_kind(

@@ -114,11 +114,13 @@ def test_migration_0004_is_idempotent() -> None:
 
 
 def test_pipeline_uses_gsheets_source_type() -> None:
-    """ingest/pipeline.py が 'gsheets' source_type を使っている（'other' fallback ではない）。"""
-    pipeline_py = PROJECT_ROOT / "src" / "teamagent" / "ingest" / "pipeline.py"
-    code = pipeline_py.read_text(encoding="utf-8")
-    assert 'source_type="gsheets"' in code, "pipeline.py が gsheets source_type を使っていない"
-    # 古い 'other' fallback コメントが残っていない
+    """Sheets 取込が 'gsheets' を使い、'other' fallback に戻らない。"""
+    from inspect import getsource
+
+    from teamagent.ingest.pipeline import _ingest_gsheet
+
+    code = getsource(_ingest_gsheet)
+    assert 'source_type="gsheets"' in code, "Sheets 取込が gsheets source_type を使っていない"
     assert 'source_type="other"' not in code, "'other' fallback が残っています"
 
 
