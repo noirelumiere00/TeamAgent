@@ -247,7 +247,9 @@ locals {
     # 解決不能になるため media-apk.lock と契約 artifact.apk-lock.sha256 を追随させた再レンダリング（apply_apklock.sh）。
     # 2026-11-06 publish 世代（apk lock 再生成）。実ビルドで lock 差分 -1 +1（240→240 行）、削除: musl-utils-1.2.6-r3 / 追加: musl-utils-1.2.6-r2 を検出したため
     # media-apk.lock と契約 artifact.apk-lock.sha256 を追随させた再レンダリング（apply_apklock.sh）。
-    "ed663c44b95731c4fba7b877c3ca53a072635d57a598827acc0bd35044ed1c91" = {
+    # 2026-11-06 publish 世代（apk ロック追随）。Alpine 上流の入替（musl-utils 1.2.6-r2→1.2.6-r3）で段 3 の media ビルドが
+    # 解決不能になるため media-apk.lock と契約 artifact.apk-lock.sha256 を追随させた再レンダリング（apply_apklock.sh）。
+    "a0b8ab142d18d4f4026175e9ddfa71ef7eac6af4b1ca6f9865362504cdad7e45" = {
       content_type                  = "text/yaml"
       object_lock_retain_until_date = "2099-12-31T00:00:00Z"
     }
@@ -464,7 +466,9 @@ locals {
     # 解決不能になるため media-apk.lock と契約 artifact.apk-lock.sha256 を追随させた再レンダリング（apply_apklock.sh）。
     # 2026-11-06 publish 世代（apk lock 再生成）。実ビルドで lock 差分 -1 +1（240→240 行）、削除: musl-utils-1.2.6-r3 / 追加: musl-utils-1.2.6-r2 を検出したため
     # media-apk.lock と契約 artifact.apk-lock.sha256 を追随させた再レンダリング（apply_apklock.sh）。
-    "8b0ba86c102edb994a60bd44c38a00a77592523338738d648e164523ead4431a" = {
+    # 2026-11-06 publish 世代（apk ロック追随）。Alpine 上流の入替（musl-utils 1.2.6-r2→1.2.6-r3）で段 3 の media ビルドが
+    # 解決不能になるため media-apk.lock と契約 artifact.apk-lock.sha256 を追随させた再レンダリング（apply_apklock.sh）。
+    "b3176055e96033e1747525b1a2074f25678a0ab10daabd9ba9e787dcb1be4253" = {
       content_type                  = "text/yaml"
       object_lock_retain_until_date = "2099-12-31T00:00:00Z"
     }
@@ -671,7 +675,9 @@ locals {
     # 解決不能になるため media-apk.lock と契約 artifact.apk-lock.sha256 を追随させた再レンダリング（apply_apklock.sh）。
     # 2026-11-06 publish 世代（apk lock 再生成）。実ビルドで lock 差分 -1 +1（240→240 行）、削除: musl-utils-1.2.6-r3 / 追加: musl-utils-1.2.6-r2 を検出したため
     # media-apk.lock と契約 artifact.apk-lock.sha256 を追随させた再レンダリング（apply_apklock.sh）。
-    "e01d761e38cc0593407043708cb62676edcfa469e328216b627adb3f50bb6917" = {
+    # 2026-11-06 publish 世代（apk ロック追随）。Alpine 上流の入替（musl-utils 1.2.6-r2→1.2.6-r3）で段 3 の media ビルドが
+    # 解決不能になるため media-apk.lock と契約 artifact.apk-lock.sha256 を追随させた再レンダリング（apply_apklock.sh）。
+    "993eeca9619a6590063857f37ad6d0b0e7666ff6266b335651b68fb24751e7c0" = {
       content_type                  = "text/yaml"
       object_lock_retain_until_date = "2099-12-31T00:00:00Z"
     }
@@ -870,18 +876,18 @@ removed {
 }
 
 import {
-  to = aws_s3_object.mcp_source_publisher_buildspec_generation["ed663c44b95731c4fba7b877c3ca53a072635d57a598827acc0bd35044ed1c91"]
-  id = "teamagent-dev-image-release-evidence/codebuild-buildspecs/teamagent-dev-mcp-source-publisher/ed663c44b95731c4fba7b877c3ca53a072635d57a598827acc0bd35044ed1c91.yml"
+  to = aws_s3_object.mcp_source_publisher_buildspec_generation["a0b8ab142d18d4f4026175e9ddfa71ef7eac6af4b1ca6f9865362504cdad7e45"]
+  id = "teamagent-dev-image-release-evidence/codebuild-buildspecs/teamagent-dev-mcp-source-publisher/a0b8ab142d18d4f4026175e9ddfa71ef7eac6af4b1ca6f9865362504cdad7e45.yml"
 }
 
 import {
-  to = aws_s3_object.image_attestor_buildspec_generation["8b0ba86c102edb994a60bd44c38a00a77592523338738d648e164523ead4431a"]
-  id = "teamagent-dev-image-release-evidence/codebuild-buildspecs/teamagent-dev-image-attestor/8b0ba86c102edb994a60bd44c38a00a77592523338738d648e164523ead4431a.yml"
+  to = aws_s3_object.image_attestor_buildspec_generation["b3176055e96033e1747525b1a2074f25678a0ab10daabd9ba9e787dcb1be4253"]
+  id = "teamagent-dev-image-release-evidence/codebuild-buildspecs/teamagent-dev-image-attestor/b3176055e96033e1747525b1a2074f25678a0ab10daabd9ba9e787dcb1be4253.yml"
 }
 
 import {
-  to = aws_s3_object.image_promoter_buildspec_generation["e01d761e38cc0593407043708cb62676edcfa469e328216b627adb3f50bb6917"]
-  id = "teamagent-dev-image-release-evidence/codebuild-buildspecs/teamagent-dev-image-promoter/e01d761e38cc0593407043708cb62676edcfa469e328216b627adb3f50bb6917.yml"
+  to = aws_s3_object.image_promoter_buildspec_generation["993eeca9619a6590063857f37ad6d0b0e7666ff6266b335651b68fb24751e7c0"]
+  id = "teamagent-dev-image-release-evidence/codebuild-buildspecs/teamagent-dev-image-promoter/993eeca9619a6590063857f37ad6d0b0e7666ff6266b335651b68fb24751e7c0.yml"
 }
 
 import {
