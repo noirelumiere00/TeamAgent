@@ -112,7 +112,7 @@ def test_load_falls_back_to_default_on_failure_or_broken_row() -> None:
     assert got.delivery is False
 
 
-def test_describe_lists_every_item() -> None:
+def test_describe_lists_summary_settings_without_removed_reminders() -> None:
     p = prefs_mod.DigestPreferences(
         paused_until=TUE,
         weekdays=(0, 2),
@@ -122,20 +122,18 @@ def test_describe_lists_every_item() -> None:
         reminder_lead_minutes=10,
         reminder_skip_keywords=("タスク",),
     )
-    text = prefs_mod.describe(p, MON, default_lead_minutes=5)
+    text = prefs_mod.describe(p, MON)
     assert "10/6(火) まで休み" in text and "10/7(水) 以降の月・水曜に再開" in text
     assert "要返信メール（最大3件）" in text
     assert "載せない欄: Slack 返信漏れ" in text
     assert "自動では作りません" in text
-    assert "開始 10 分前" in text and "「タスク」" in text
+    assert "リマインド" not in text and "分前" not in text and "「タスク」" not in text
 
 
 def test_describe_default_and_stopped() -> None:
-    text = prefs_mod.describe(prefs_mod.DEFAULT_PREFERENCES, MON, default_lead_minutes=5)
+    text = prefs_mod.describe(prefs_mod.DEFAULT_PREFERENCES, MON)
     assert "平日（月〜金）の朝に届きます" in text
-    assert "載せない欄: なし" in text and "開始 5 分前" in text
-    stopped = prefs_mod.describe(
-        prefs_mod.DigestPreferences(delivery=False, reminders=False), MON, default_lead_minutes=5
-    )
+    assert "載せない欄: なし" in text and "リマインド" not in text
+    stopped = prefs_mod.describe(prefs_mod.DigestPreferences(delivery=False, reminders=False), MON)
     assert "止めています（「朝のサマリーを再開して」" in stopped
-    assert "予定の直前リマインド: 止めています" in stopped
+    assert "リマインド" not in stopped

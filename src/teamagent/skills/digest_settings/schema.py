@@ -1,6 +1,6 @@
 """digest_settings の I/O スキーマ（Pydantic v2）。
 
-指定の無い項目（None）は「変えない」。範囲外の件数・分は拒否せず上下限へ丸め、丸めたことを
+指定の無い項目（None）は「変えない」。範囲外の件数は拒否せず上下限へ丸め、丸めたことを
 返答に書く（「20 件にして」で失敗させない）。
 
 description は短く保つ（ツール定義は毎リクエストの固定トークンに載り、日本語は英語の
@@ -48,15 +48,11 @@ class DigestSettingsInput(BaseModel):
     limit_calendar: int | None = Field(default=None, description="1〜15件。")
     auto_drafts: bool | None = Field(default=None)
     reminders: bool | None = Field(default=None)
-    reminder_lead_minutes: int | None = Field(default=None, description="1〜60分前。")
-    reminder_personal_blocks: bool | None = Field(
-        default=None,
-        description=("参加者・会議リンクなしの個人タスクも通知するか。"),
-    )
+    reminder_lead_minutes: int | None = Field(default=None)
+    reminder_personal_blocks: bool | None = Field(default=None)
     reminder_skip_add: list[str] | None = Field(
         default=None,
         max_length=MAX_SKIP_KEYWORDS,
-        description="件名に含むと通知を除外する語を追加。",
     )
     reminder_skip_remove: list[str] | None = Field(default=None, max_length=MAX_SKIP_KEYWORDS)
 
@@ -67,5 +63,7 @@ class DigestSettingsOutput(BaseModel):
     error: str = Field(
         default="",
         max_length=32,
-        description='"" / "dm_only" / "no_change" / "invalid" / "conflict" / "store_failed"',
+        description=(
+            '"" / "dm_only" / "no_change" / "invalid" / "unavailable" / "conflict" / "store_failed"'
+        ),
     )

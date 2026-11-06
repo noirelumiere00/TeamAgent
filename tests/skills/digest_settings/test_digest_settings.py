@@ -118,18 +118,15 @@ def test_update_persists_and_reports_the_full_list() -> None:
         action="update",
         hide_sections=["slack"],
         limit_reply=3,
-        reminder_skip_add=["タスク"],
     )
     assert out.error == ""
-    assert set(out.changed) == {"hidden_sections", "limits", "reminder_skip_keywords"}
+    assert set(out.changed) == {"hidden_sections", "limits"}
     saved = from_storage(store.row)
     assert saved.hidden_sections == ("slack",)
     assert saved.limit("reply") == 3
-    assert saved.reminder_skip_keywords == ("タスク",)
     assert store.saves[0][1] == 0  # 新規作成は版 0 で書く
     assert "✅ 変えました" in out.message and "次の朝のサマリーから反映" in out.message
-    assert "今日すでに登録済みの予定リマインドは" in out.message
-    assert "「タスク」" in out.message
+    assert "リマインド" not in out.message
 
 
 def test_update_builds_on_the_existing_row() -> None:
@@ -161,7 +158,6 @@ def test_resume_clears_stop_and_pause() -> None:
         ({"pause_until": _dt.date(2026, 10, 1)}, "過去"),
         ({"pause_until": _dt.date(2027, 6, 1)}, "180 日先まで"),
         ({"hide_sections": ["slack"], "show_sections": ["slack"]}, "両方"),
-        ({"reminder_skip_add": ["あ" * 21]}, "1〜20 文字"),
     ],
 )
 def test_invalid_requests_are_explained_and_not_saved(kw: dict[str, Any], expect: str) -> None:
@@ -174,10 +170,10 @@ def test_invalid_requests_are_explained_and_not_saved(kw: dict[str, Any], expect
 
 def test_out_of_range_counts_are_clamped_with_a_note() -> None:
     store = _Store()
-    out = _run(store, action="update", limit_unread=30, reminder_lead_minutes=0)
+    out = _run(store, action="update", limit_unread=30)
     saved = from_storage(store.row)
-    assert saved.limit("unread") == 10 and saved.reminder_lead_minutes == 1
-    assert "10 件にしました" in out.message and "1 分前にしました" in out.message
+    assert saved.limit("unread") == 10
+    assert "10 件にしました" in out.message
 
 
 def test_no_change_does_not_write() -> None:
@@ -187,10 +183,44 @@ def test_no_change_does_not_write() -> None:
     assert store.saves == []
 
 
-def test_removing_a_skip_word_matches_loosely() -> None:
-    store = _Store({"reminder_skip_keywords": ["タスク", "社内"]}, 1)
-    _run(store, action="update", reminder_skip_remove=["ﾀｽｸ"])
-    assert from_storage(store.row).reminder_skip_keywords == ("社内",)
+@pytest.mark.parametrize("action", ["show", "update", "reset"])
+@pytest.mark.parametrize(
+    "kw",
+    [
+        {"reminders": True},
+        {"reminders": False},
+        {"reminder_lead_minutes": 0},
+        {"reminder_personal_blocks": False},
+        {"reminder_skip_add": ["タスク"]},
+        {"reminder_skip_add": []},
+        {"reminder_skip_remove": ["ﾀｽｸ"]},
+        {"reminder_skip_remove": []},
+    ],
+)
+def test_removed_reminder_requests_never_read_or_write(action: str, kw: dict[str, Any]) -> None:
+    store = _Store({"reminders": False, "reminder_skip_keywords": ["タスク"]}, 1)
+    store.fail_get = True  # DB 障害でも同じ定型文。併記されたサマリー変更も保存しない。
+    original = store.row.copy()
+    out = _run(store, action=action, delivery=False, **kw)
+    assert out.message == "予定のリマインドは今は提供していません"
+    assert out.error == "unavailable" and out.changed == []
+    assert store.row == original and store.saves == [] and store.deleted == 0
+
+
+@pytest.mark.parametrize("action", ["show", "update", "reset"])
+def test_summary_settings_preserve_stored_reminder_values(action: str) -> None:
+    reminders = {
+        "reminders": False,
+        "reminder_lead_minutes": 15,
+        "reminder_personal_blocks": False,
+        "reminder_skip_keywords": ["タスク", "社内"],
+    }
+    store = _Store({"delivery": False, **reminders}, 1)
+    out = _run(store, action=action, auto_drafts=False)
+    assert out.error == "" and "リマインド" not in out.message and "分前" not in out.message
+    assert store.row is not None
+    assert {k: store.row[k] for k in reminders} == reminders
+    assert store.deleted == 0
 
 
 def test_conflict_is_retried_once_on_the_fresh_row() -> None:
@@ -200,10 +230,10 @@ def test_conflict_is_retried_once_on_the_fresh_row() -> None:
     """
     store = _Store()
     store.race = [({"auto_drafts": False}, 1)]
-    out = _run(store, action="update", reminders=False)
+    out = _run(store, action="update", delivery=False)
     assert out.error == ""
     saved = from_storage(store.row)
-    assert saved.auto_drafts is False and saved.reminders is False
+    assert saved.auto_drafts is False and saved.delivery is False
     assert [v for _, v in store.saves] == [0, 1]
 
 
@@ -214,7 +244,7 @@ def test_repeated_conflict_gives_up_honestly() -> None:
             return None
 
     store = _Always()
-    out = _run(store, action="update", reminders=False)
+    out = _run(store, action="update", delivery=False)
     assert out.error == "conflict"
     assert "変えられませんでした" in out.message
     assert len(store.saves) == 2
@@ -232,17 +262,17 @@ def test_store_failure_never_claims_success(which: str) -> None:
 # --- 戻す ------------------------------------------------------------------
 
 
-def test_reset_deletes_the_row() -> None:
+def test_reset_restores_summary_defaults_without_deleting_the_row() -> None:
     store = _Store({"delivery": False}, 3)
     out = _run(store, action="reset")
-    assert store.deleted == 1 and out.error == ""
+    assert store.row == {} and store.deleted == 0 and out.error == ""
     assert out.changed == ["delivery"]
     assert "既定の設定に戻しました" in out.message and "平日（月〜金）" in out.message
 
 
 def test_reset_failure_is_reported() -> None:
     store = _Store({"delivery": False}, 3)
-    store.fail_delete = True
+    store.fail_save = True
     assert _run(store, action="reset").error == "store_failed"
 
 
