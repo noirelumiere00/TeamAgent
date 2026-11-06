@@ -1,7 +1,7 @@
 """digest_settings Skill 本体 — 朝ダイジェストの本人ごとの設定を見る/変える/既定に戻す。
 
-利用者が Aico の DM で「朝のサマリー、Slack の欄はいらない」「来週まで止めて」「タスクって
-付く予定はリマインドしないで」と言ったときに呼ばれ、migration 0030 の ``digest_preferences``
+利用者が Aico の DM で「朝のサマリー、Slack の欄はいらない」「来週まで止めて」
+と言ったときに呼ばれ、migration 0030 の ``digest_preferences``
 に本人の設定として保存する。毎朝の配信（scripts/run_morning_digest_fargate.py）がそれを読む。
 本人が変えるか戻すまで、ずっと効く。
 
@@ -18,7 +18,6 @@
 from __future__ import annotations
 
 import datetime as _dt
-import os
 from typing import Any, ClassVar
 
 from pydantic import BaseModel, ValidationError
@@ -31,14 +30,11 @@ from teamagent.skills.morning_digest.preferences import (
     DEFAULT_PREFERENCES,
     LIMIT_BOUNDS,
     MAX_PAUSE_DAYS,
-    MAX_SKIP_KEYWORD_LEN,
-    MAX_SKIP_KEYWORDS,
     SECTION_LABELS,
     WEEKDAY_KEYS,
     DigestPreferences,
     describe,
     from_storage,
-    normalize_keyword,
 )
 
 _MSG_DM_ONLY = (
@@ -53,7 +49,14 @@ _FOOTER = (
     "（例:「Slack の欄はいらない」「来週まで止めて」）。"
 )
 _APPLY_NOTE = "次の朝のサマリーから反映されます。"
-_REMINDER_NOTE = "今日すでに登録済みの予定リマインドは、そのまま届きます。"
+_MSG_REMINDERS_UNAVAILABLE = "予定のリマインドは今は提供していません"
+_REMINDER_INPUT_FIELDS = (
+    "reminders",
+    "reminder_lead_minutes",
+    "reminder_personal_blocks",
+    "reminder_skip_add",
+    "reminder_skip_remove",
+)
 
 #: 変更点の表示名（ログにも鍵だけ出す＝設定内容は出さない）。
 _FIELD_LABELS: dict[str, str] = {
@@ -63,10 +66,6 @@ _FIELD_LABELS: dict[str, str] = {
     "hidden_sections": "載せる欄",
     "limits": "件数",
     "auto_drafts": "返信の下書き",
-    "reminders": "直前リマインド",
-    "reminder_lead_minutes": "リマインドの時間",
-    "reminder_skip_keywords": "リマインドしない予定",
-    "reminder_personal_blocks": "タスク枠へのリマインド",
 }
 
 _LIMIT_FIELDS: dict[str, str] = {
@@ -81,19 +80,16 @@ class _InvalidRequestError(ValueError):
     """本人に理由を返して止める入力エラー（message は本人向けの日本語）。"""
 
 
-def _default_lead_minutes() -> int:
-    """配信側と同じ env（REMINDER_LEAD_MINUTES・既定 5）。表示にだけ使う。"""
-    try:
-        n = int(os.environ.get("REMINDER_LEAD_MINUTES", "5"))
-    except ValueError:
-        n = 5
-    return min(60, max(1, n))
-
-
 def _apply(
     current: DigestPreferences, req: DigestSettingsInput, today: _dt.date
 ) -> tuple[DigestPreferences, list[str]]:
     """変更を当てた新しい設定と、本人に添える注記（丸めた等）を返す。"""
+    if req.action == "reset":
+        # 廃止したリマインドの保存値は、サマリーを既定に戻しても残す。
+        reminder_values = {
+            k: v for k, v in current.model_dump().items() if k.startswith("reminder")
+        }
+        return DEFAULT_PREFERENCES.model_copy(update=reminder_values), []
     data: dict[str, Any] = current.model_dump()
     notes: list[str] = []
 
@@ -149,31 +145,6 @@ def _apply(
 
     if req.auto_drafts is not None:
         data["auto_drafts"] = req.auto_drafts
-    if req.reminders is not None:
-        data["reminders"] = req.reminders
-    if req.reminder_personal_blocks is not None:
-        data["reminder_personal_blocks"] = req.reminder_personal_blocks
-    if req.reminder_lead_minutes is not None:
-        lead = min(60, max(1, int(req.reminder_lead_minutes)))
-        if lead != req.reminder_lead_minutes:
-            notes.append(f"リマインドは 1〜60 分前なので {lead} 分前にしました。")
-        data["reminder_lead_minutes"] = lead
-        data["reminders"] = True if req.reminders is None else req.reminders
-
-    words = list(current.reminder_skip_keywords)
-    for raw in req.reminder_skip_add or ():
-        word = " ".join(str(raw).split())
-        if not word or len(word) > MAX_SKIP_KEYWORD_LEN:
-            raise _InvalidRequestError(
-                f"リマインドしない予定の語は 1〜{MAX_SKIP_KEYWORD_LEN} 文字で指定してください。"
-            )
-        words.append(word)
-    remove = {normalize_keyword(w) for w in (req.reminder_skip_remove or ())}
-    words = [w for w in words if normalize_keyword(w) not in remove]
-    if len({normalize_keyword(w) for w in words}) > MAX_SKIP_KEYWORDS:
-        raise _InvalidRequestError(f"リマインドしない予定の語は {MAX_SKIP_KEYWORDS} 個までです。")
-    data["reminder_skip_keywords"] = tuple(words)
-
     try:
         return DigestPreferences.model_validate(data), notes
     except ValidationError as exc:
@@ -192,8 +163,7 @@ class DigestSettingsSkill(BaseSkill[DigestSettingsInput, DigestSettingsOutput]):
 
     name: ClassVar[str] = "digest_settings"
     description: ClassVar[str] = (
-        "朝のサマリー/朝ダイジェストと予定直前の通知DMの設定確認・変更・停止・再開。"
-        "指定された項目だけ渡す。DM only。"
+        "朝のサマリー/朝ダイジェストの設定確認・変更・停止・再開。指定された項目だけ渡す。DM only。"
     ) + USER_CONTEXT_RULE
     input_schema: ClassVar[type[BaseModel]] = DigestSettingsInput
     output_schema: ClassVar[type[BaseModel]] = DigestSettingsOutput
@@ -234,11 +204,13 @@ class DigestSettingsSkill(BaseSkill[DigestSettingsInput, DigestSettingsOutput]):
             log.info("digest_settings_not_dm")
             return DigestSettingsOutput(message=_MSG_DM_ONLY, error="dm_only")
 
+        if any(getattr(input, field) is not None for field in _REMINDER_INPUT_FIELDS):
+            return DigestSettingsOutput(message=_MSG_REMINDERS_UNAVAILABLE, error="unavailable")
+
         today = _calwin.now_jst().date()
-        lead = _default_lead_minutes()
 
         def _render(prefs: DigestPreferences, head: str = "") -> str:
-            body = describe(prefs, today, default_lead_minutes=lead)
+            body = describe(prefs, today)
             return "\n\n".join(p for p in (head, body, _FOOTER) if p)
 
         try:
@@ -251,20 +223,7 @@ class DigestSettingsSkill(BaseSkill[DigestSettingsInput, DigestSettingsOutput]):
             log.info("digest_settings_shown", custom=not current.is_default())
             return DigestSettingsOutput(message=_render(current))
 
-        if input.action == "reset":
-            try:
-                self._get_store().delete(requester, request_id=ctx.request_id)
-            except Exception as exc:
-                log.warning("digest_settings_reset_failed", error=type(exc).__name__)
-                return DigestSettingsOutput(message=_MSG_STORE_FAILED, error="store_failed")
-            changed = _changed_fields(current, DEFAULT_PREFERENCES)
-            log.info("digest_settings_reset", changed=changed)
-            return DigestSettingsOutput(
-                message=_render(DEFAULT_PREFERENCES, f"↩︎ 既定の設定に戻しました。{_APPLY_NOTE}"),
-                changed=changed,
-            )
-
-        # update: 読んだ版に当てて書く。途中で他が書いていたら 1 回だけ読み直して当て直す。
+        # update/reset: 読んだ版に当てて書く。途中で他が書いていたら 1 回だけ読み直して当て直す。
         for attempt in range(2):
             try:
                 new, notes = _apply(current, input, today)
@@ -272,7 +231,7 @@ class DigestSettingsSkill(BaseSkill[DigestSettingsInput, DigestSettingsOutput]):
                 log.info("digest_settings_invalid")
                 return DigestSettingsOutput(message=_render(current, f"⚠️ {exc}"), error="invalid")
             changed = _changed_fields(current, new)
-            if not changed:
+            if not changed and input.action != "reset":
                 log.info("digest_settings_no_change")
                 head = "\n".join([*notes, "設定は今のままです（変わった項目はありません）。"])
                 return DigestSettingsOutput(message=_render(current, head), error="no_change")
@@ -285,10 +244,12 @@ class DigestSettingsSkill(BaseSkill[DigestSettingsInput, DigestSettingsOutput]):
                 return DigestSettingsOutput(message=_MSG_STORE_FAILED, error="store_failed")
             if saved is not None:
                 labels = "・".join(_FIELD_LABELS[k] for k in changed)
-                extra = [_APPLY_NOTE]
-                if any(k.startswith("reminder") for k in changed):
-                    extra.append(_REMINDER_NOTE)
-                head = "\n".join([f"✅ 変えました（{labels}）。", *notes, " ".join(extra)])
+                title = (
+                    "↩︎ 既定の設定に戻しました。"
+                    if input.action == "reset"
+                    else f"✅ 変えました（{labels}）。"
+                )
+                head = "\n".join([title, *notes, _APPLY_NOTE])
                 log.info("digest_settings_saved", changed=changed, attempt=attempt)
                 return DigestSettingsOutput(message=_render(new, head), changed=changed)
             try:

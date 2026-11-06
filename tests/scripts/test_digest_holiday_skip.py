@@ -1,7 +1,7 @@
 """朝ダイジェストの祝日スキップ（F0・PR-0c）の runner テスト。
 
 受け入れ条件（mailauto_plan.md §3 の 0c）:
-  - 2026-10-12（スポーツの日）で skill.run を呼ばず DM も送らず、予定リマインドは登録する
+  - 2026-10-12（スポーツの日）で skill.run を呼ばず DM も送らず、予定リマインドも登録しない
   - 10/13 の走査範囲が 4 日
   - 会社休日を足せる・表の範囲外なら配信を続けて警告・期限の 60 日前に警告
   - フラグ OFF（既定）なら今と同じ（祝日も配信・走査 3 日・表を見ない）
@@ -405,7 +405,7 @@ def _holiday_events(day: _dt.date) -> list[CalendarEvent]:
     ]
 
 
-# ── 祝日: skill.run を呼ばず・DM を送らず・リマインドだけ登録 ────────────────
+# ── 祝日: skill.run を呼ばず・DM もリマインドも送らない ────────────────
 
 
 @pytest.mark.parametrize(
@@ -416,11 +416,11 @@ def _holiday_events(day: _dt.date) -> list[CalendarEvent]:
         (_D(2027, 1, 1), "元日"),
     ],
 )
-def test_holiday_skips_the_digest_but_registers_reminders(
+def test_holiday_skips_digest_and_removed_reminders_even_with_flag_on(
     monkeypatch: pytest.MonkeyPatch, day: _dt.date, holiday: str
 ) -> None:
     """変異: 祝日の早期 return を消す → skill.run と DM が走って赤。
-    リマインドの経路を消す → 登録 0 件で赤。"""
+    リマインドは廃止済み。旧フラグが ON でもカレンダーを読まず登録しない。"""
     _freeze(monkeypatch, day)
     monkeypatch.setenv("MORNING_DIGEST_HOLIDAY_SKIP", "true")
     monkeypatch.setenv("MORNING_DIGEST_REMINDERS", "1")
@@ -431,16 +431,12 @@ def test_holiday_skips_the_digest_but_registers_reminders(
     assert w.run_calls == []  # skill.run を呼ばない
     assert w.delivered == [] and w.posted == []  # DM は 1 通も送らない
     assert w.gmail.queries == []  # メールにも触れない
-    assert w.calendar_only_calls == [U1, U2]
-    assert len(w.reminders) == 1
-    rem = w.reminders[0]
-    assert rem["channel"] == "D0HOLIDAY"
-    assert rem["start_iso"] == f"{day.isoformat()}T10:00:00+09:00"
-    assert rem["fire_at"] == _dt.datetime(day.year, day.month, day.day, 9, 55, tzinfo=_JST)
-    assert rem["url"] == "https://meet.google.com/abc-defg-hij"
+    assert w.calendar_only_calls == [] and w.gcal.calls == 0
+    assert w.reminders == [] and w.slack_lookups == []
     (skip,) = w.log.named("morning_digest_holiday_skip")
     assert skip["reason"] == dc.SKIP_JP_HOLIDAY and skip["holiday"] == holiday
-    assert (skip["users"], skip["reminded"], skip["reminders"], skip["skipped"]) == (2, 1, 1, 1)
+    assert skip["users"] == 2 and skip["reminders_enabled"] is False
+    assert (skip["reminded"], skip["reminders"], skip["errors"]) == (0, 0, 0)
     # 件数だけ。メールアドレスも予定のタイトルもログに出さない。
     dumped = json.dumps(w.log.events, ensure_ascii=False, default=str)
     assert "komata" not in dumped and "定例" not in dumped
@@ -459,10 +455,8 @@ def test_holiday_without_reminders_touches_nothing(monkeypatch: pytest.MonkeyPat
     assert skip["reminders_enabled"] is False
 
 
-def test_holiday_reminders_go_only_to_a_one_to_one_dm(monkeypatch: pytest.MonkeyPatch) -> None:
-    """conversations.open が DM 以外（C/G）を返したらリマインドを向けない。
-
-    変異: ``_open_dm_channel`` の D 始まりの確認を外す → チャンネルに登録されて赤。"""
+def test_holiday_never_opens_a_dm_for_removed_reminders(monkeypatch: pytest.MonkeyPatch) -> None:
+    """リマインド廃止で、通知先の解決自体を行わない。"""
     _freeze(monkeypatch, _D(2026, 10, 12))
     monkeypatch.setenv("MORNING_DIGEST_HOLIDAY_SKIP", "1")
     monkeypatch.setenv("MORNING_DIGEST_REMINDERS", "1")
@@ -472,7 +466,7 @@ def test_holiday_reminders_go_only_to_a_one_to_one_dm(monkeypatch: pytest.Monkey
     assert mod.main() == 0
     assert w.reminders == []
     (skip,) = w.log.named("morning_digest_holiday_skip")
-    assert skip["errors"] == 1
+    assert skip["errors"] == 0 and w.slack_lookups == []
 
 
 # ── 祝日: 1 人の失敗で全体を落とさない（本番の失敗の形） ─────────────────────
@@ -519,15 +513,10 @@ def _assert_no_pii(text: str) -> None:
     ],
     ids=["refresh_invalid_grant", "refresh_invalid_client", "http_403", "http_503"],
 )
-def test_one_users_calendar_failure_does_not_stop_the_others_reminders(
+def test_holiday_never_fetches_calendar_for_removed_reminders_even_if_api_would_fail(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], failure: BaseException
 ) -> None:
-    """先頭の人の予定取得が本番の失敗の形で落ちても、その人だけ error に数え、
-    後ろの人のリマインドは登録し、タスクは 0 で終わる。
-
-    変異: ``_register_holiday_reminders`` の予定取得の ``except Exception`` を外す →
-    例外が ``_run_holiday`` を抜けて後ろの人が登録されず赤。error を skipped に数える → 赤。
-    WARN 行のメールアドレスのマスクを外す → 赤。"""
+    """リマインド廃止で予定取得もしない。API 障害の有無に関係なく静かにスキップ。"""
     day = _D(2026, 10, 12)
     _freeze(monkeypatch, day)
     monkeypatch.setenv("MORNING_DIGEST_HOLIDAY_SKIP", "true")
@@ -538,31 +527,19 @@ def test_one_users_calendar_failure_does_not_stop_the_others_reminders(
     assert mod.main() == 0
 
     assert w.run_calls == [] and w.delivered == [] and w.posted == []
-    assert w.calendar_only_calls == [U1, U3]  # 失敗する人が先＝後ろの人まで届くかを見る
-    assert len(services[U1].calls) == 1 and len(services[U3].calls) == 1
-    assert w.slack_lookups == [U3]  # 予定を取れなかった人の DM は開かない
-    (rem,) = w.reminders
-    assert rem["channel"] == "D0HOLIDAY"
-    assert rem["start_iso"] == "2026-10-12T10:00:00+09:00"
-    assert rem["fire_at"] == _dt.datetime(2026, 10, 12, 9, 55, tzinfo=_JST)
-    assert rem["url"] == "https://meet.google.com/abc-defg-hij"
+    assert w.calendar_only_calls == []
+    assert services[U1].calls == [] and services[U3].calls == []
+    assert w.slack_lookups == [] and w.reminders == []
     (skip,) = w.log.named("morning_digest_holiday_skip")
-    assert (skip["users"], skip["reminded"], skip["reminders"]) == (2, 1, 1)
-    assert (skip["skipped"], skip["errors"]) == (0, 1)
-    err = capsys.readouterr().err
-    assert "k***@vectorinc.co.jp 祝日の予定取得失敗" in err
-    assert type(failure).__name__ in err
-    _assert_no_pii(err)
+    assert (skip["users"], skip["reminded"], skip["reminders"], skip["errors"]) == (2, 0, 0, 0)
+    assert capsys.readouterr().err == ""
     _assert_no_pii(json.dumps(w.log.events, ensure_ascii=False, default=str))
 
 
-def test_one_users_slack_lookup_failure_does_not_stop_the_others_reminders(
+def test_holiday_never_looks_up_slack_for_removed_reminders_even_if_api_would_fail(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """users.lookupByEmail が本番の失敗の形（slack_sdk の ``SlackApiError``・
-    users_not_found）で落ちても、その人だけ error に数え、後ろの人のリマインドは登録する。
-
-    変異: DM を開けなかった人を skipped に数える → 赤。WARN 行のマスクを外す → 赤。"""
+    """リマインド廃止で Slack に触れない。旧フラグが残っていても通知は登録しない。"""
     from slack_sdk.errors import SlackApiError
 
     day = _D(2026, 10, 12)
@@ -579,16 +556,10 @@ def test_one_users_slack_lookup_failure_does_not_stop_the_others_reminders(
     assert mod.main() == 0
 
     assert w.delivered == [] and w.posted == []
-    assert w.slack_lookups == [U1, U3]
-    (rem,) = w.reminders  # U3 の 10:00 の予定だけ
-    assert rem["channel"] == "D0HOLIDAY"
-    assert rem["start_iso"] == "2026-10-12T10:00:00+09:00"
+    assert w.slack_lookups == [] and w.calendar_only_calls == [] and w.reminders == []
     (skip,) = w.log.named("morning_digest_holiday_skip")
-    assert (skip["users"], skip["reminded"], skip["reminders"]) == (2, 1, 1)
-    assert (skip["skipped"], skip["errors"]) == (0, 1)
-    err = capsys.readouterr().err
-    assert "lookupByEmail 失敗 k***@vectorinc.co.jp SlackApiError" in err
-    _assert_no_pii(err)
+    assert (skip["users"], skip["reminded"], skip["reminders"], skip["errors"]) == (2, 0, 0, 0)
+    assert capsys.readouterr().err == ""
     _assert_no_pii(json.dumps(w.log.events, ensure_ascii=False, default=str))
 
 

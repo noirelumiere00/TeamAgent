@@ -140,7 +140,7 @@ def is_personal_block(attendees: object, meeting_url: object) -> bool:
     （Meet / Zoom 等）があれば相手がいる前提で会議として扱う。場所は判定に使わない
     （会議室を押さえた一人作業もあり、場所だけでは会議と言えない）。
     """
-    if attendees is None:  # 参加者が分からない＝会議扱い（リマインドを黙って消さない）
+    if attendees is None:  # 参加者が分からない＝会議扱い
         return False
     has_guests = bool(attendees) if not isinstance(attendees, str) else bool(attendees.strip())
     return not has_guests and not str(meeting_url or "").strip()

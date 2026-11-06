@@ -212,17 +212,28 @@ def test_unlock_matches_the_committed_declaration() -> None:
     unlock = _freeze_doc()["unlock"]
     assert unlock["active"] is True
     assert unlock["scope_paths"] == [
-        "infra/codebuild/teamagent_runtime_contract.json",
         "infra/codebuild/teamagent_core_media_release_contract.json",
     ]
     assert (
         unlock["reason"]
-        == "human gate 2026-11-03（小俣さん承認: connect-web 置き換えの便 r94 が段 3 の ECR 脆弱性ゲートで core の expat 2.9.0-r0（CVE-2026-113351・CVE-2026-115506 HIGH）を拒否。土台の digest は変えず Wolfi 公式の修正版 expat を固定 APK/SHA/APKINDEX で差し替え、runtime/release 契約・世代・凍結をオフライン更新。AWS 書き込み・CodeBuild 起動・S3 公開・git commit・push は行わない）"
+        == '【media の apk ロック追随】 【2026-11-06 apk ロック追随】Alpine v3.24 / edge の索引で musl 1.2.6-r2→1.2.6-r3 に入れ替わり、Dockerfile の明示 pin が "unable to select packages" で解決不能になる。apk 段の実ビルドで lock 差分 -2 +2（240→240 行）。lock の sha256 が動くため契約の artifact.apk-lock.sha256 と release 契約の sha が動き、世代 publish を再度強制する。scope は core_media 契約 1 path のまま。 【2026-11-06 apk ロック追随】Alpine v3.24 / edge の索引で font-noto 2026.10.01-r0→2026.11.01-r0 に入れ替わり、Dockerfile の明示 pin が "unable to select packages" で解決不能になる。apk 段の実ビルドで lock 差分 -4 +4（240→240 行）。lock の sha256 が動くため契約の artifact.apk-lock.sha256 と release 契約の sha が動き、世代 publish を再度強制する。scope は core_media 契約 1 path のまま。'
     )
     assert (
         unlock["gate"]
-        == "human gate 2026-11-03（小俣さん承認: connect-web 置き換えの便 r94 が段 3 の ECR 脆弱性ゲートで core の expat 2.9.0-r0（CVE-2026-113351・CVE-2026-115506 HIGH）を拒否。土台の digest は変えず Wolfi 公式の修正版 expat を固定 APK/SHA/APKINDEX で差し替え、runtime/release 契約・世代・凍結をオフライン更新。AWS 書き込み・CodeBuild 起動・S3 公開・git commit・push は行わない）"
+        == "human gate 2026-11-06（小俣さん OK・r105 の発射前在庫確認で font-noto 2026.10.01-r0 が上流索引から消えた・2026.11.01-r0 へ追随）"
     )
+    assert unlock[
+        "previous_scope_20261106_teamagent_runtime_contract_teamagent_core_media_release_contract"
+    ] == {
+        "active": True,
+        "scope_paths": [
+            "infra/codebuild/teamagent_runtime_contract.json",
+            "infra/codebuild/teamagent_core_media_release_contract.json",
+        ],
+        "reason": "human gate 2026-11-03（小俣さん承認: connect-web 置き換えの便 r94 が段 3 の ECR 脆弱性ゲートで core の expat 2.9.0-r0（CVE-2026-113351・CVE-2026-115506 HIGH）を拒否。土台の digest は変えず Wolfi 公式の修正版 expat を固定 APK/SHA/APKINDEX で差し替え、runtime/release 契約・世代・凍結をオフライン更新。AWS 書き込み・CodeBuild 起動・S3 公開・git commit・push は行わない）",
+        "gate": "human gate 2026-11-03（小俣さん承認: connect-web 置き換えの便 r94 が段 3 の ECR 脆弱性ゲートで core の expat 2.9.0-r0（CVE-2026-113351・CVE-2026-115506 HIGH）を拒否。土台の digest は変えず Wolfi 公式の修正版 expat を固定 APK/SHA/APKINDEX で差し替え、runtime/release 契約・世代・凍結をオフライン更新。AWS 書き込み・CodeBuild 起動・S3 公開・git commit・push は行わない）",
+        "note": "dev 取り込み済みで本 PR では触らないため scope から外す（過剰 unlock の禁止）。human gate 2026-11-06（小俣さん承認: r105 が段 3 の ECR 脆弱性ゲートで media の musl 1.2.6-r2（CVE-2026-107891 HIGH）により停止。凍結宣言の scope を 11-03 の 2 path から core_media 契約 1 path へ切り替え、musl を 1.2.6-r3 に pin する）",
+    }
     assert unlock[
         "previous_scope_20261103_teamagent_runtime_contract_teamagent_core_media_release_contract"
     ] == {

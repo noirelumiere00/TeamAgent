@@ -332,6 +332,37 @@ def test_pptx_real_extraction(setup: Any, monkeypatch: pytest.MonkeyPatch) -> No
     assert repo.chunks["FPPTX"][0].content == "Sales proposal"
 
 
+def test_pptx_keeps_tables_notes_and_short_slides(
+    setup: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from pptx import Presentation
+    from pptx.util import Inches
+
+    api, _, _ = setup
+    deck = Presentation()
+    slide = deck.slides.add_slide(deck.slide_layouts[6])
+    table = slide.shapes.add_table(2, 2, Inches(1), Inches(1), Inches(4), Inches(1)).table
+    table.cell(0, 0).text = "再生数"
+    table.cell(1, 0).text = "1,234,567"
+    slide.notes_slide.notes_text_frame.text = "CPV 2.1 円"
+    deck.slides.add_slide(deck.slide_layouts[5]).shapes.title.text = "OK"
+    buf = BytesIO()
+    deck.save(buf)
+    data = buf.getvalue()
+    api.pages = [{"files": [file("FRAW", "pptx", size=len(data))]}]
+
+    async def download(self: Any, url: str, **kwargs: Any) -> bytes:
+        return data
+
+    monkeypatch.setattr(
+        "teamagent.adapters.slack_client.SlackClient.download_file_guarded", download
+    )
+    repo = Repository()
+    assert run(repo).total_documents() == 1
+    text = "\n".join(c.content for c in repo.chunks["FRAW"])
+    assert "1,234,567" in text and "CPV 2.1 円" in text and "OK" in text
+
+
 def test_two_owners_deduplicate_and_union_public_and_private_shares(setup: Any) -> None:
     api, store, downloaded = setup
     other = second_user(api, store)

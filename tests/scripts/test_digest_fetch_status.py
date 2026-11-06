@@ -328,14 +328,15 @@ def test_partially_unreadable_threads(monkeypatch: pytest.MonkeyPatch, renderer:
 
 
 @pytest.mark.parametrize("renderer", RENDERERS)
-def test_reminder_clause_only_when_reminders_are_on(
+def test_removed_reminder_clause_never_changes_digest_body(
     monkeypatch: pytest.MonkeyPatch, renderer: str
 ) -> None:
     monkeypatch.setenv("MORNING_DIGEST_FETCH_STATUS_EMAILS", "*")
     d = _digest(cal="token_expired")
-    assert "リマインド" not in _all_text(RENDERERS[renderer](d))
-    monkeypatch.setenv("MORNING_DIGEST_REMINDERS", "1")
-    assert "本日の予定リマインドもお送りできません" in _all_text(RENDERERS[renderer](d))
+    original = RENDERERS[renderer](d)
+    assert "リマインド" not in _all_text(original)
+    monkeypatch.setenv("MORNING_DIGEST_REMINDERS", "true")
+    assert RENDERERS[renderer](d) == original
 
 
 # ── 50 ブロックの最終ガード ─────────────────────────────────────────────────

@@ -341,48 +341,25 @@ def _events_digest() -> MorningDigestOutput:
     )
 
 
-def test_skip_words_drop_matching_reminders(monkeypatch: pytest.MonkeyPatch) -> None:
-    """「タスク」を含む予定だけ登録しない（依頼の発端のケース）。
-
-    変異: reminder_allowed の確認を外すと 2 件登録されて赤。
-    """
+@pytest.mark.parametrize("flag", [None, "true", "1", "false"])
+@pytest.mark.parametrize("row", [None, {"delivery": False}, {"paused_until": "2026-10-06"}])
+def test_removed_reminders_are_never_scheduled_even_when_enabled_or_paused(
+    monkeypatch: pytest.MonkeyPatch, flag: str | None, row: dict[str, Any] | None
+) -> None:
+    # 旧フィルタ・何分前のテストは、全員のリマインド廃止に伴い登録ゼロの回帰へ置き換え。
+    if flag is None:
+        monkeypatch.delenv("MORNING_DIGEST_REMINDERS", raising=False)
+    else:
+        monkeypatch.setenv("MORNING_DIGEST_REMINDERS", flag)
     sched = _patch_scheduler(monkeypatch)
-    prefs = DigestPreferences(reminder_skip_keywords=("ﾀｽｸ",))
-    assert mod._schedule_event_reminders(_events_digest(), "D0", prefs) == 1
-    assert [c["title"] for c in sched.calls] == ["クライアント定例"]
-
-
-def test_reminders_off_registers_nothing(monkeypatch: pytest.MonkeyPatch) -> None:
-    sched = _patch_scheduler(monkeypatch)
-    prefs = DigestPreferences(reminders=False)
-    assert mod._schedule_event_reminders(_events_digest(), "D0", prefs) == 0
-    assert sched.calls == []
-
-
-def test_lead_minutes_override(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("REMINDER_LEAD_MINUTES", "5")
-    sched = _patch_scheduler(monkeypatch)
-    prefs = DigestPreferences(reminder_lead_minutes=15)
-    mod._schedule_event_reminders(_events_digest(), "D0", prefs)
-    fires = sorted(c["fire_at"] for c in sched.calls)
-    assert fires[0] == _dt.datetime(2026, 10, 5, 10, 15, tzinfo=calwin.JST)
-
-
-def test_default_prefs_keep_every_reminder(monkeypatch: pytest.MonkeyPatch) -> None:
-    sched = _patch_scheduler(monkeypatch)
-    assert mod._schedule_event_reminders(_events_digest(), "D0") == 2
-    assert len(sched.calls) == 2
-
-
-def test_holiday_path_respects_reminders_off() -> None:
-    class _NeverSkill:
-        def collect_calendar_events(self, *_a: Any) -> Any:
-            raise AssertionError("リマインドを止めた人の予定は取りに行かない")
-
-    state, n = mod._register_holiday_reminders(
-        _NeverSkill(), MorningDigestInput(), USER, DigestPreferences(reminders=False)
+    sent = _patch_delivery(monkeypatch)
+    skill = _Skill(_events_digest())
+    result = mod._process_user(
+        skill, MorningDigestInput(), USER, day=MON, prefs_store=_PrefStore(row)
     )
-    assert (state, n) == ("skipped", 0)
+    assert result == ("delivered" if row is None else "skipped")
+    assert len(sent) == (1 if row is None else 0)
+    assert sched.calls == []
 
 
 # --- 読み込み口 --------------------------------------------------------------
