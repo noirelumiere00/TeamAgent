@@ -5318,6 +5318,33 @@ def _retire_missing_deck_cases(
     return retired
 
 
+def _classify_slack_file(
+    classifier: DocClassifier,
+    *,
+    title: str,
+    text: str,
+    metadata: Mapping[str, Any],
+    channel_name: str,
+    request_id: str,
+) -> dict[str, str]:
+    """Drive と同じ分類・決定論ルールを使い、失敗時も資料は残す。"""
+    try:
+        classification = classifier.classify(
+            title=title, text=text, folder_name=channel_name, request_id=request_id
+        )
+        if classification is None:
+            return {}
+        # Drive と同じキーだけ。カルテは cls_project でも引くので client_name は推測で足さない。
+        return classification.as_metadata()
+    except Exception as exc:
+        logger.warning(
+            "slack_public_files_classify_failed",
+            request_id=request_id,
+            error_type=type(exc).__name__,
+        )
+        return {}
+
+
 def _ingest_slack_public_files(
     spec: SlackPublicFilesSpec,
     *,
@@ -5334,6 +5361,8 @@ def _ingest_slack_public_files(
     新しく連携した人の古いファイルは日曜 JST の週次全期間取得で拾う。
     connector_state(slack, files:list) の oldest は成功した一覧の開始時刻。
     上限で未処理が残った場合は次回も全期間取得し、取りこぼしを防ぐ。
+    USE_DOC_CLASSIFY=1 なら保存済み未分類資料も再埋め込みせず補完する。
+    SLACK_FILES_CLASSIFY_BACKFILL_MAX は 1 run の上限（既定 500、0 で補完停止）。
     """
     from pypdf.errors import FileNotDecryptedError, WrongPasswordError
     from slack_sdk.errors import SlackApiError
@@ -5343,6 +5372,7 @@ def _ingest_slack_public_files(
     from teamagent.adapters.slack_channel_ingest_client import SlackChannelIngestClient
     from teamagent.adapters.slack_client import SlackClient
     from teamagent.adapters.slack_file_guard import SlackFileGuardError, is_external_file
+    from teamagent.ingest.classify import build_classifier_from_env
     from teamagent.ingest.office_extract import (
         MAX_OFFICE_COMPRESSED_BYTES,
         PPTX_MIME,
@@ -5364,6 +5394,71 @@ def _ingest_slack_public_files(
         if failure_reason:
             details["failure_reason"] = failure_reason
         logger.warning(reason, request_id=request_id, error_type=type(exc).__name__, **details)
+
+    classifier = build_classifier_from_env()
+    channel_names: dict[str, str] = {}
+    email_client: SlackChannelIngestClient | None = None
+
+    def public_channel_context(metadata: Mapping[str, Any]) -> str:
+        nonlocal email_client
+        names: list[str] = []
+        for cid in sorted(metadata.get("public_channel_ids") or []):
+            if cid not in channel_names:
+                channel_names[cid] = ""
+                try:
+                    if email_client is None:
+                        email_client = SlackChannelIngestClient.from_env()
+                    info = email_client.get_conversation(cid)
+                    # 保存済み ID だけで公開とみなさず、現在の公開状態を確認する。
+                    if (
+                        info.get("is_private") is False
+                        and not info.get("is_im")
+                        and not info.get("is_mpim")
+                    ):
+                        channel_names[cid] = str(info.get("name") or "")
+                except Exception as exc:
+                    logger.warning(
+                        "slack_public_files_classify_channel_unavailable",
+                        request_id=request_id,
+                        error_type=type(exc).__name__,
+                    )
+            if channel_names[cid]:
+                names.append(channel_names[cid])
+        return " / ".join(names)
+
+    if classifier is not None:
+        backfill_updated = 0
+        backfill_limit = max(0, int(os.environ.get("SLACK_FILES_CLASSIFY_BACKFILL_MAX") or "500"))
+        try:
+            candidates = repository.get_unclassified_slack_files(limit=backfill_limit)
+            for row in candidates:
+                try:
+                    patch = _classify_slack_file(
+                        classifier,
+                        title=row["title"] or "",
+                        text="\n".join(row["contents"]),
+                        metadata=row["metadata"],
+                        channel_name=public_channel_context(row["metadata"]),
+                        request_id=request_id,
+                    )
+                    if patch and not dry_run:
+                        backfill_updated += repository.refresh_slack_file_classification(
+                            row["external_id"],
+                            expected_row_version=row["row_version"],
+                            classification_metadata=patch,
+                            request_id=request_id,
+                        )
+                except Exception as exc:
+                    warn("slack_public_files_classify_backfill_failed", exc)
+            logger.info(
+                "slack_public_files_classify_backfill_complete",
+                request_id=request_id,
+                candidates=len(candidates),
+                updated=backfill_updated,
+                dry_run=dry_run,
+            )
+        except Exception as exc:
+            warn("slack_public_files_classify_backfill_failed", exc)
 
     listed_at = _dt.datetime.now(_dt.UTC)
     state = repository.load_connector_state("slack", "files:list")
@@ -5506,7 +5601,6 @@ def _ingest_slack_public_files(
         repository, "other", list(files), request_id=request_id
     )
     channel_emails: dict[str, list[str]] = {}
-    email_client: SlackChannelIngestClient | None = None
     processed = unchanged = remaining = docs_n = chunks_n = failed = 0
     for file_index, (file_id, f) in enumerate(files.items()):
         attempted = False
@@ -5633,6 +5727,17 @@ def _ingest_slack_public_files(
                 raise ValueError("empty extracted text")
             failure_reason = "embed_failed"
             chunks = _embed_page_chunks(page_chunks, embedder=embedder)
+            if classifier is not None:
+                metadata.update(
+                    _classify_slack_file(
+                        classifier,
+                        title=doc.title or "",
+                        text="\n".join(c.content for c in chunks[:8]),
+                        metadata=metadata,
+                        channel_name=public_channel_context(metadata),
+                        request_id=request_id,
+                    )
+                )
             metadata[INGEST_CONTENT_HASH_KEY] = content_hash
             if not dry_run:
                 failure_reason = "write_failed"

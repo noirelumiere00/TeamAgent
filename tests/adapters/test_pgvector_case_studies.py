@@ -221,3 +221,26 @@ def test_product_cases_cross_industry_keep_corpus_and_escape_like():
     assert params["product_like"] == "%ベビー\\%\\_%"
     assert "industry" not in params
     assert params["limit"] == 5
+
+
+def test_advertiser_finds_slack_file_by_client_name_without_company_in_title() -> None:
+    conn = _Conn(
+        rows=[
+            {
+                "chunk_id": -1,
+                "document_id": "slack-file",
+                "title": "施策提案.pdf",
+                "source_type": "other",
+                "source_uri": "https://example.slack.com/files/U1/F1",
+                "metadata": {"topic": "Slack 共有資料", "client_name": "架空食品"},
+            }
+        ]
+    )
+    hits = _client().find_documents_for_advertiser(conn, "架空食品", drive_only=True)  # type: ignore[arg-type]
+    assert "OR d.metadata->>'client_name' ILIKE %s" in conn.sql[0]
+    assert "AND d.source_type IN ('gdrive', 'other')" in conn.sql[0]
+    assert conn.params[0] == ["%架空食品%"] * 3 + [8]
+    assert len(hits) == 1
+    assert hits[0].metadata["source_type"] == "other"
+    assert hits[0].metadata["client_name"] == "架空食品"
+    assert "架空食品" not in hits[0].metadata["title"]
