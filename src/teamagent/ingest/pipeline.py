@@ -5538,7 +5538,12 @@ def _ingest_slack_public_files(
                 acl_groups=doc.acl_groups,
                 metadata=metadata,
                 modified_at=doc.modified_at,
-                pipeline_config={"extractor": "slack-channel-files-v3"},
+                # v3 で変わったのは PowerPoint の抽出だけ。PDF は読み直さない。
+                pipeline_config={
+                    "extractor": "slack-channel-files-v3"
+                    if f["filetype"] == "pptx"
+                    else "slack-channel-files-v2"
+                },
             )
             if stored_hashes.get(file_id) == content_hash:
                 unchanged += 1
