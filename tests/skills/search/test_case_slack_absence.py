@@ -29,7 +29,7 @@ def slack_item(text: str, name: str) -> SlackItem:
             channel="#sales",
             posted_on="2026-10-19",
             excerpt=text,
-            permalink=f"https://example.test/slack/{name}",
+            permalink=f"https://example.slack.com/archives/C{name.upper()}/p1759200000000100",
         ),
         text=text,
     )
@@ -75,11 +75,8 @@ def test_absent_delivery_cases_never_publish_unrelated_slack_candidates(
     assert bool(out.found) is related
     assert len(out.slack_hits) == int(related)
     if related:
-        assert "https://example.test/slack/delivery" in out.answer
-        if fanout_enabled:
-            summary.assert_not_called()
-        else:
-            summary.assert_called_once()
+        assert "https://example.slack.com/archives/CDELIVERY/p1759200000000100" in out.answer
+        summary.assert_not_called()
     else:
         assert "事例は見つかりませんでした" in out.answer
         summary.assert_not_called()

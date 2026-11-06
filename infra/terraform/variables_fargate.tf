@@ -670,6 +670,18 @@ variable "search_direct_answer" {
   default     = "0"
 }
 
+variable "use_search_file_delivery" {
+  description = "検索一覧の直接投稿・Slack資料添付（USE_SEARCH_FILE_DELIVERY）。既定 OFF。knowledge_deliver の Slack 添付も同じ段階公開で制御する。"
+  type        = string
+  default     = "0"
+}
+
+variable "search_file_delivery_allowed_emails" {
+  description = "資料配信の本人メール許可リスト（SEARCH_FILE_DELIVERY_ALLOWED_EMAILS）。カンマ区切り。空は全員拒否、* は本人確認済みの全員。"
+  type        = string
+  default     = ""
+}
+
 variable "openclaw_inbound_router" {
   description = "OC の受信規則。off は現行、shadow は判定のみ、enforce は本人確認済み allowlist の DM で検索を先行。既定 OFF。"
   type        = string

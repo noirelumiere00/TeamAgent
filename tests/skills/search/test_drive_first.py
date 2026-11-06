@@ -79,7 +79,7 @@ def test_unresolved_slack_attachment_is_explicitly_unread(setup_search, monkeypa
     )
     monkeypatch.setattr(fanout, "build_summary_client", lambda: skill._bedrock)
     out = skill.run(SearchInput(query="食品の資料を探して"), SkillContext(metadata=META))
-    assert "Slack にだけある資料（本文未読）" in out.answer
+    assert "Slack にだけある" not in out.answer
     assert "本文未読" in out.answer
     assert "[資料]" not in out.answer
     assert out.slack_hits[0].reference.unread
@@ -288,7 +288,7 @@ def test_compact_slack_uses_canonical_link_and_unread_provenance(setup_search):
     sources = compact.source_map([], items, lambda h: None)
     title, url, content = sources["slack0"]
     assert url == DRIVE
-    assert "Drive資料" in title and "添付本文未読" in title
+    assert "資料" in title and "本文未読" in title and "Drive" not in title
     assert content == "紹介投稿"
 
 

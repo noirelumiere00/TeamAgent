@@ -80,6 +80,7 @@ class DocumentReference(BaseModel):
     drive_file_id: str | None = None
     slack_file_id: str | None = None
     slack_file_ids: list[str] = Field(default_factory=list)
+    slack_file_metadata: dict[str, Any] = Field(default_factory=dict, exclude=True)
     file_record_number: str | None = None
     file_record_branch: str | None = None
     unread: bool = False
@@ -136,6 +137,8 @@ class SearchHitOut(BaseModel):
         ),
         exclude=True,
     )
+    external_id: str | None = Field(default=None, exclude=True)
+    slack_file_metadata: dict[str, Any] = Field(default_factory=dict, exclude=True)
     resolved_file_name: str | None = Field(
         default=None,
         description=(
@@ -288,6 +291,7 @@ class SlackHitOut(BaseModel):
     permalink: str = Field(default="", description="投稿へのリンク")
     file_names: list[str] = Field(default_factory=list, description="添付ファイル名（あれば）")
     file_ids: list[str] = Field(default_factory=list, exclude=True)
+    files: list[dict[str, Any]] = Field(default_factory=list, exclude=True)
     reference: DocumentReference | None = None
     case_state_evidence: CaseStateEvidence | None = Field(
         default=None,
@@ -336,6 +340,7 @@ class SearchOutput(BaseModel):
     answer: str = Field(description="Claude による要約（引用付き）")
     case_state_answer: str | None = None
     displayed_refs: list[DocumentReference] | None = None
+    attachment_refs: list[DocumentReference] = Field(default_factory=list, exclude=True)
     answer_format: Literal["compact", "list"] | None = None
     direct_answer: str | None = Field(default=None, exclude=True)
     direct_answer_kind: SearchDirectAnswerKind | None = Field(default=None, exclude=True)

@@ -70,14 +70,13 @@ def test_date_is_never_filled_from_current_time(source_date: str | None) -> None
     assert _render([_hit(updated_at=source_date)]).startswith("*匿名案件*（日付不明）")
 
 
-def test_slack_only_attachment_is_unread_and_links_only_to_the_conversation() -> None:
+def test_slack_attachment_uses_same_material_link_without_provenance() -> None:
     ref = DocumentReference(
         kind="slack_attachment", unread=True, url=POST, source_uri=POST, slack_file_ids=["F0ALPHA"]
     )
     text = _render([_hit(source_type="slack", source_uri=POST, **{REFERENCE_KEY: ref})])
-    assert "Slack にだけある資料（本文未読）" in text
-    assert f"\n• <{POST}|会話の記録>" in text
-    assert "資料を見る" not in text
+    assert "Slack" not in text and "本文未読" not in text
+    assert f"\n• <{POST}|資料を見る>" in text
 
 
 @pytest.mark.parametrize(
@@ -157,7 +156,7 @@ def test_link_and_mention_metadata_do_not_replace_the_two_proposal_sentences() -
 def test_length_budget_keeps_only_the_references_of_retained_cards() -> None:
     hits = []
     for index in range(1, 8):
-        url = f"{POST}?note={index}" + "a" * 350
+        url = f"{POST}?note={index}" + "a" * 420
         ref = DocumentReference(
             document_id=f"doc-{index}",
             kind="slack_attachment",
@@ -178,7 +177,7 @@ def test_length_budget_keeps_only_the_references_of_retained_cards() -> None:
     answer = _render(hits, refs)
     assert len(answer) <= 2500
     assert 0 < len(refs) < 5
-    assert answer.count("|会話の記録>") == len(refs)
+    assert answer.count("|資料を見る>") == len(refs)
     for index in range(1, 8):
         assert (f"*匿名案件{index}*" in answer) == any(
             ref.document_id == f"doc-{index}" for ref in refs

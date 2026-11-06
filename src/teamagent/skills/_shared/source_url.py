@@ -22,6 +22,41 @@ _SLACK_CHANNEL_ID_RE = re.compile(r"^[A-Za-z0-9]+$")
 _SLACK_TS_RE = re.compile(r"^\d+(?:\.\d+)?$")
 
 
+def slack_file_permalink(value: str | None) -> str | None:
+    """Slack ファイルの HTTPS 原本 URL だけを許す（偽装ホスト・認証情報は拒否）。"""
+    uri = (value or "").strip()
+    if re.search(r"[\x00-\x20<>|\\]", uri):
+        return None
+    try:
+        parsed = urlsplit(uri)
+        host = parsed.hostname or ""
+        if (
+            parsed.scheme == "https"
+            and (host == "slack.com" or host.endswith(".slack.com"))
+            and not parsed.username
+            and not parsed.password
+            and parsed.port in (None, 443)
+            and parsed.path.startswith("/files/")
+            and parsed.path.removeprefix("/files/")
+        ):
+            return uri
+    except ValueError:
+        pass
+    return None
+
+
+def ingested_slack_file_id(meta: Mapping[str, Any]) -> str | None:
+    """取込済み Slack 資料だけを識別する。会話・他ソースの ID は流用しない。"""
+    fid = str(meta.get("external_id") or "")
+    return (
+        fid
+        if meta.get("source_type") == "other"
+        and re.fullmatch(r"F[A-Z0-9]+", fid)
+        and slack_file_permalink(meta.get("source_uri"))
+        else None
+    )
+
+
 def slack_workspace_domain() -> str:
     """permalink のサブドメイン（例 ``vectorinc``）。取れなければ空文字。
 

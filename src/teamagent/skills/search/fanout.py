@@ -22,6 +22,8 @@ from teamagent.adapters.pgvector_client import SearchHit
 from teamagent.adapters.retry import RetryPolicy
 from teamagent.case_state import enabled as case_state_enabled
 from teamagent.mcp_gateway.allowlist import email_allowed
+from teamagent.skills._shared.slack_file_delivery import file_metadata
+from teamagent.skills._shared.source_url import ingested_slack_file_id
 from teamagent.skills.base import SkillContext
 from teamagent.skills.search import compact, drive_first, timeline_status, visit_cases
 from teamagent.skills.search.answer_mode import classify_answer_mode, is_case_list, strip_advice
@@ -86,6 +88,7 @@ from teamagent.skills.search.schema import (
     SearchInput,
     SearchOutput,
 )
+from teamagent.skills.search.source_attribution import without_source_attribution
 
 logger = structlog.get_logger(__name__)
 
@@ -991,8 +994,21 @@ def run_fanout(skill: Any, input: SearchInput, ctx: SkillContext) -> SearchOutpu
                 scope += "・Slack" if slack.status == "ok" else "（Slackは検索未完了）"
                 answer = build_scoped_not_found_answer(case_target, scope=scope, complete=complete)
     case_listing = (
-        drive_case_listing or is_case_list(input.query) or bool(compact_fallback_cards)
+        drive_case_listing
+        or is_case_list(input.query)
+        or bool(compact_fallback_cards)
+        or (
+            compact.explicit_list(input.query)
+            and (
+                any(i.hit.file_names or i.hit.file_ids for i in slack.items)
+                or any(
+                    h.metadata.get("source_type") == "slack" or ingested_slack_file_id(h.metadata)
+                    for h in summary_hits
+                )
+            )
+        )
     ) and input.include_answer
+    attachment_refs: list[DocumentReference] = []
     if case_listing and not visit:
         from teamagent.skills.search.case_list import EMPTY_DRIVE_CASES, render, slack_cases
 
@@ -1005,14 +1021,19 @@ def run_fanout(skill: Any, input: SearchInput, ctx: SkillContext) -> SearchOutpu
         ]
         if drive_case_listing:
             listing_hits = scope_by_industry(listing_hits, asked_industry, soft=True)
+        from teamagent.skills.search.material_files import prepare_list_hits
+
+        listing_hits = prepare_list_hits(skill, listing_hits, ctx)
         listed = render(
             listing_hits,
             case_target,
             lambda h: skill._hit_url(h, file_urls=file_urls),
-            displayed_refs=displayed_refs,
+            displayed_refs=attachment_refs,
             cards=skill._direct_answer_allowed(ctx, "case_cards") or bool(compact_fallback_cards),
             drive_only=drive_case_listing and recovery is None,
         )
+        if displayed_refs is not None:
+            displayed_refs.extend(attachment_refs)
         if listed:
             answer, found, visible_found = listed, True, True
             if skill._direct_answer_allowed(ctx, "case_cards"):
@@ -1188,6 +1209,7 @@ def run_fanout(skill: Any, input: SearchInput, ctx: SkillContext) -> SearchOutpu
         )
         if status:
             answer = status + ("\n\n" + answer if answer else "")
+    answer = without_source_attribution(answer)
     return SearchOutput(
         answer=answer,
         case_state_answer=case_answer,
@@ -1208,6 +1230,7 @@ def run_fanout(skill: Any, input: SearchInput, ctx: SkillContext) -> SearchOutpu
             state_hits=state_hits,
         ),
         displayed_refs=displayed_refs,
+        attachment_refs=attachment_refs,
         found=found,
         total_cost_usd=summary_cost + expanded.cost_usd + vault_cost,
         slack_hits=[]
@@ -1276,6 +1299,8 @@ def _output_hits(
                 drive_url=(str(meta.get("drive_url")) if meta.get("drive_url") else None),
                 url=url,
                 source_uri=(str(meta["source_uri"]) if meta.get("source_uri") else None),
+                external_id=(str(meta["external_id"]) if meta.get("external_id") else None),
+                slack_file_metadata=file_metadata(meta),
                 resolved_file_name=(resolved_file_ref[0] if resolved_file_ref else None),
                 source_type=(str(meta["source_type"]) if meta.get("source_type") else None),
                 channel_name=(str(meta["channel_name"]) if meta.get("channel_name") else None),
