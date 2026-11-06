@@ -94,6 +94,11 @@ def page_client() -> httpx.Client:
 
 
 def page_is_challenge(page: str) -> bool:
+    # Real TikTok pages (including deleted/private ones) ship the rehydration data and mention
+    # "captcha" in their bundled scripts; only a page without that data is a challenge page.
+    # A loose match paused all fetching after one cover-less video (11/05 18:00 run).
+    if "__UNIVERSAL_DATA_FOR_REHYDRATION__" in page:
+        return False
     return any(
         marker in page.lower() for marker in ("captcha", "verify to continue", "security challenge")
     )

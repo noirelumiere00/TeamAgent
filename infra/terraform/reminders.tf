@@ -1,9 +1,9 @@
 # ============================================================
-# 予定リマインド（v0.3 Task 5）— EventBridge Scheduler → SQS FIFO → Lambda → Slack DM
+# 個人別サマリー配信の共用基盤 — EventBridge Scheduler → SQS FIFO → Lambda → ECS
 # ============================================================
-# フロー: 朝ダイジェスト(runner)が当日予定の「開始 N 分前」ワンタイム schedule を登録
-#   （ActionAfterCompletion=DELETE＝自動掃除・冪等名＝再実行安全・payload に PII 無し）
-#   → 発火時に SQS へ → Lambda consumer が Slack DM へ chat.postMessage。
+# フロー: planner が個人別サマリーのワンタイム schedule を登録（kind=digest）。
+#   → 発火時に SQS へ → reminder_notify Lambda が単一ユーザーの ECS タスクを起動。
+# 予定リマインドの新規登録は廃止。共用基盤は個人別配信のために維持する。
 # 権限設計（tiktok_acquire.tf の敵対レビュー原則を踏襲）:
 #   - アプリ(morning_digest task)へは scheduler:CreateSchedule + 専用ロールの PassRole のみ
 #     （sqs:SendMessage も Slack 通知権限も持たせない）
@@ -11,13 +11,13 @@
 # 全リソースは enable_reminders（既定 false）でゲート（§10 E1-2）。
 
 variable "enable_reminders" {
-  description = "予定リマインド基盤（Scheduler group/SQS FIFO/Lambda）を有効化。既定 false。ON 後に morning_digest 側の morning_digest_reminders=true にする。"
+  description = "個人別サマリー配信と共用する Scheduler group/SQS FIFO/Lambda を有効化。既定 false。"
   type        = bool
   default     = false
 }
 
 variable "morning_digest_reminders" {
-  description = "朝ダイジェスト実行時に当日予定のリマインドを登録する（runner 側フラグ）。enable_reminders=true が前提。"
+  description = "互換用の旧フラグ。予定リマインドは廃止済みで runner は値に関係なく登録しない。"
   type        = bool
   default     = false
 }
