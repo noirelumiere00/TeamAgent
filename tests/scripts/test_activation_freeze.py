@@ -216,11 +216,11 @@ def test_unlock_matches_the_committed_declaration() -> None:
     ]
     assert (
         unlock["reason"]
-        == '【media の apk ロック追随】 【2026-11-06 apk ロック追随】Alpine v3.24 / edge の索引で musl 1.2.6-r2→1.2.6-r3 に入れ替わり、Dockerfile の明示 pin が "unable to select packages" で解決不能になる。apk 段の実ビルドで lock 差分 -2 +2（240→240 行）。lock の sha256 が動くため契約の artifact.apk-lock.sha256 と release 契約の sha が動き、世代 publish を再度強制する。scope は core_media 契約 1 path のまま。 【2026-11-06 apk ロック追随】Alpine v3.24 / edge の索引で font-noto 2026.10.01-r0→2026.11.01-r0 に入れ替わり、Dockerfile の明示 pin が "unable to select packages" で解決不能になる。apk 段の実ビルドで lock 差分 -4 +4（240→240 行）。lock の sha256 が動くため契約の artifact.apk-lock.sha256 と release 契約の sha が動き、世代 publish を再度強制する。scope は core_media 契約 1 path のまま。'
+        == '【media の apk ロック追随】 【2026-11-06 apk ロック追随】Alpine v3.24 / edge の索引で musl 1.2.6-r2→1.2.6-r3 に入れ替わり、Dockerfile の明示 pin が "unable to select packages" で解決不能になる。apk 段の実ビルドで lock 差分 -2 +2（240→240 行）。lock の sha256 が動くため契約の artifact.apk-lock.sha256 と release 契約の sha が動き、世代 publish を再度強制する。scope は core_media 契約 1 path のまま。 【2026-11-06 apk ロック追随】Alpine v3.24 / edge の索引で font-noto 2026.10.01-r0→2026.11.01-r0 に入れ替わり、Dockerfile の明示 pin が "unable to select packages" で解決不能になる。apk 段の実ビルドで lock 差分 -4 +4（240→240 行）。lock の sha256 が動くため契約の artifact.apk-lock.sha256 と release 契約の sha が動き、世代 publish を再度強制する。scope は core_media 契約 1 path のまま。 【2026-11-06 apk lock 再生成】apk 段の実ビルドで固定 lock と異なる実インベントリを検出した。lock 差分 -1 +1（240→240 行）、削除: musl-utils-1.2.6-r3 / 追加: musl-utils-1.2.6-r2。lock の sha256 が動くため契約の artifact.apk-lock.sha256 と release 契約の sha が動き、世代 publish を再度強制する。scope は core_media 契約 1 path のまま。'
     )
     assert (
         unlock["gate"]
-        == "human gate 2026-11-06（小俣さん OK・r105 の発射前在庫確認で font-noto 2026.10.01-r0 が上流索引から消えた・2026.11.01-r0 へ追随）"
+        == "human gate 2026-11-06（小俣さん OK・r105 の段 3 で実インベントリと lock が不一致: musl-utils は 1.2.6-r2 のまま・lock を実物に合わせる）"
     )
     assert unlock[
         "previous_scope_20261106_teamagent_runtime_contract_teamagent_core_media_release_contract"
