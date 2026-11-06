@@ -9,6 +9,7 @@ import pytest
 from structlog.testing import capture_logs
 
 from teamagent.mcp_gateway import detached_jobs, direct_karte, direct_summary, server
+from teamagent.skills._shared.slack_mrkdwn import markdown_bold_to_mrkdwn
 from teamagent.skills.base import SkillContext
 from teamagent.skills.clientkarte.schema import ClientKarteInput
 from teamagent.skills.clientkarte.skill import ClientKarteSkill
@@ -23,6 +24,8 @@ from tests.mcp_gateway.test_surface_video_followup import (
     _spec,
     _Verifier,
 )
+from tests.skills.clientkarte.test_clientkarte_short import CLIENT
+from tests.skills.clientkarte.test_clientkarte_short import short_skill as short_skill
 from tests.skills.clientkarte.test_clientkarte_status import status_skill as status_skill
 from tests.skills.search.test_case_state_evidence import jtb_state_record as jtb_state_record
 
@@ -84,16 +87,14 @@ async def test_posts_complete_answer_without_model_material(
         result = await _dispatch(skill)
     answer = baseline["answer"]
     assert "（8/24 時点）" in answer
-    assert "予定だった（結果は未確認）" in answer
+    assert "予定していた（結果は未確認）" in answer
     assert "\n状態:" in answer and "根拠日: 2026-09-11" in answer
     assert slack.posts == [
         {
             "channel": DM,
             "thread_ts": None,
             "blocks": None,
-            "text": detached_jobs.slack_escape(
-                answer.replace("### JTB（8/24 時点）", "*JTB（8/24 時点）*")
-            ),
+            "text": detached_jobs.slack_escape(answer.replace("**", "*")),
         }
     ]
     assert result["status"] == "posted" and result["delivered"] is True
@@ -120,12 +121,13 @@ async def test_direct_post_removes_internal_citations_and_formats_slack_headings
     assert result["status"] == "posted"
     assert "chunk_id" not in text
     assert "#" not in text.split("https://", 1)[0]
-    assert text.startswith("*JTB クライアント・カルテ*\n")
-    assert "*次の動き*\n" in text and "*確認事項*\n" in text
-    assert "*企業広報案件*（8/24 時点）\n" in text
-    assert "*代理店案件*（8/10 時点）\n" in text
+    assert text.startswith("JTB 企業広報の提案は失注（9/11 時点）\n")
+    assert "*次の動き（時点不明）*\n" in text
+    assert "*確認事項（時点不明）*\n" in text
+    assert "*企業広報案件（8/24 時点）*\n" in text
+    assert "*代理店案件（8/10 時点）*\n" in text
     assert "https://example.test/doc" in text and "時点の記録" not in text
-    assert "# JTB" in baseline and "[chunk_id: 1]" in baseline
+    assert "chunk_id" not in baseline and "**企業広報案件（8/24 時点）**" in baseline
 
 
 @pytest.mark.parametrize("case", ["off", "outside", "empty", "channel"])
@@ -211,3 +213,37 @@ def test_policy_defaults_are_independent(monkeypatch: pytest.MonkeyPatch) -> Non
     monkeypatch.setenv(direct_karte.ENABLED_ENV, "true")
     monkeypatch.setenv(direct_karte.ALLOWED_EMAILS_ENV, f" {ME.upper()} ,,{OTHER}")
     assert direct_karte.load_policy() == direct_summary.DirectPolicy(True, frozenset({ME, OTHER}))
+
+
+@pytest.mark.parametrize("direct", [False, True])
+async def test_karte_short_answer_is_shared_by_model_and_direct_paths(
+    short_skill: ClientKarteSkill,
+    slack: _FakeSlack,
+    monkeypatch: pytest.MonkeyPatch,
+    direct: bool,
+) -> None:
+    monkeypatch.setenv(direct_karte.ENABLED_ENV, "1" if direct else "0")
+    monkeypatch.setenv("CASE_STATE_EVIDENCE_ALLOWED_EMAILS", ME)
+    request = f"{CLIENT}の案件って今どうなってる？"
+    baseline = short_skill.run(
+        ClientKarteInput(client_name=CLIENT),
+        SkillContext(metadata={"user_email": ME, "channel_id": DM, "request_text": request}),
+    ).answer
+    contents = await server.dispatch_tool(
+        _spec(short_skill, "clientkarte"),
+        "clientkarte",
+        {"client_name": CLIENT, server.USER_CONTEXT_KEY: {"request_text": request}},
+        identity_resolver=_resolver_for(ME),
+        caller_claim_verifier=_Verifier(_claim(channel=DM)),  # type: ignore[arg-type]
+    )
+    result = json.loads(contents[0].text)
+    assert len(baseline) <= 600
+    assert baseline.startswith(CLIENT + ":") and "ほか 2 件" in baseline
+    if direct:
+        assert result["status"] == "posted"
+        assert slack.posts[0]["text"] == detached_jobs.slack_escape(
+            markdown_bold_to_mrkdwn(baseline)
+        )
+    else:
+        assert result["answer"] == baseline
+        assert slack.posts == []

@@ -67,7 +67,7 @@ from teamagent.skills.clientkarte.skill import (
 )
 
 RAW_KARTE_BODY = "### 1. 一行サマリ\n提案中"
-KARTE_BODY = "### 1. 一行サマリ\n提案中\n（5/10 時点の記録）"
+KARTE_BODY = "花王: 提案中（5/10 時点）\n\n**花王（5/10 時点）**\n提案中\n追加の経過は未確認。"
 ME = "u@vectorinc.co.jp"
 # ⚠️ 面のフィクスチャは **実在する Slack ID の形**でなければ意味が無い。
 # 本番の channel_id は mcp_gateway/caller_claim.py の ``^[CDG][A-Z0-9]{8,}$`` を
@@ -1034,8 +1034,9 @@ def test_client_name_cannot_inject_slack_markup_into_the_dm_forward() -> None:
     dm = _dm_text(slack)
     assert "<@U0EVIL" not in dm  # 本人 DM に装飾リンクを描画させない
     assert f"🗂️ 「{LINK_INJECTION_ESCAPED}」のカルテの関連資料です。" in dm
-    # チャンネル側は件数だけ（顧客名すら出さない）
-    assert "U0EVIL" not in out.answer
+    # 本文先頭の取引先名も安全に表示し、資料通知には名前を出さない。
+    assert "<@U0EVIL" not in out.answer
+    assert "U0EVIL" not in out.answer.split("📎")[-1]
 
 
 def test_client_name_with_an_operator_colon_never_reaches_the_documents_path() -> None:
@@ -1839,7 +1840,7 @@ def test_request_fragments_never_deliver_documents(fragment: str) -> None:
         SkillContext(request_id="r", metadata=_dm_meta()),
     )
 
-    assert out.answer == KARTE_BODY  # カルテ本文は従来どおり返す（fail-open）
+    assert out.answer == KARTE_BODY.replace("花王", fragment)  # 本文は必ず返す
     assert "📎" not in out.answer
     assert out.document_count == 0
     assert out.attached_count == 0

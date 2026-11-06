@@ -18,8 +18,8 @@ _DATE = re.compile(
     r"(?:[〜～~–-](?:(?P<endmonth>\d{1,2})[月/])?"
     r"(?:(?P<endday>\d{1,2})日?|(?P<endperiod>上旬|中旬|下旬)))?"
 )
-_PLAN = re.compile(r"予定|期日|期限|締[め切]|決定時期|コンペ決定")
-_PAST_PLAN = "予定だった（結果は未確認）"
+_PLAN = re.compile(r"予定|期日|期限|締[め切]|決定")
+_PAST_PLAN = "予定していた（結果は未確認）"
 
 
 def _deadline(match: re.Match[str], as_of: date) -> date | None:
@@ -47,13 +47,18 @@ def _past_plans(text: str, as_of: date, today: date) -> str:
             and _PAST_PLAN not in line
         ):
             # 結果の記載がある行は未確認に戻さない。
-            if not re.search(r"実施済|提出済|提案済|決定済|結果[:：]|見送り|中止|延期", line):
+            if not re.search(
+                r"実施済|提出済|提案済|決定済|決定した|決定しました|結果[:：]|見送り|中止|延期",
+                line,
+            ):
                 if re.search(r"予定(?!日)", line):
                     line = re.sub(
                         r"(?:を)?予定(?!日)(?:していた|している|だった|でした|です)?",
-                        lambda m: ("の" if m[0].startswith("を") else "") + _PAST_PLAN,
+                        lambda m: ("を" if m[0].startswith("を") else "") + _PAST_PLAN,
                         line,
                     )
+                elif re.search(r"決定(?:する)?$", line.strip()):
+                    line = re.sub(r"決定(?:する)?(?=\s*$)", "決定を" + _PAST_PLAN, line)
                 else:
                     last = dates[-1]
                     line = line[: last.end()] + " " + _PAST_PLAN + line[last.end() :]
@@ -88,6 +93,7 @@ def dated_answer(answer: str, hits: list[SearchHit], client_name: str, today: da
         if re.fullmatch(r"\s*(?:#{1,3} +.+|(\*{1,2})[^*]+\1)\s*", line)
     ]
     assigned: set[int] = set()
+    rewritten: set[int] = set()
 
     def fold(text: str) -> str:
         return re.sub(r"[\s・、,，()（）*#]", "", unicodedata.normalize("NFKC", text)).casefold()
@@ -115,6 +121,13 @@ def dated_answer(answer: str, hits: list[SearchHit], client_name: str, today: da
         lines[start] = lines[start].rstrip() + f"（{current.month}/{current.day} 時点）"
         for index in range(start + 1, end):
             lines[index] = _past_plans(lines[index], current, today)
+            rewritten.add(index)
+
+    # 冒頭の要約や案件に紐付かない段落にも、同じ期限の規則を適用する。
+    latest = max(item[2] for item in dated)
+    for index, line in enumerate(lines):
+        if index not in rewritten and index not in headings:
+            lines[index] = _past_plans(line, latest, today)
 
     remaining = [item[2] for item in dated if item[0] not in assigned]
     if remaining:
