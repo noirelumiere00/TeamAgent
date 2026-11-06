@@ -152,8 +152,8 @@ variable "morning_digest_schedule_expression" {
 
 # ---------- 祝日スキップ（F0・PR-0c・既定 false＝祝日も配信する今と同じ） ----------
 # cron は MON-FRI のまま。祝日の判定はアプリ側（src/teamagent/jp_holidays.py の内閣府の表
-# 2026〜2027・振替休日を含む）で行い、祝日は Fargate が起きても DM を送らず、予定リマインド
-# だけ登録して終わる。2026-09-29 裁定: 11/3（文化の日）から休む＝11/2 に TD で true にする。
+# 2026〜2027・振替休日を含む）で行い、祝日は Fargate が起きても DM を送らずに終わる。
+# 2026-09-29 裁定: 11/3（文化の日）から休む＝11/2 に TD で true にする。
 # ⚠️ TD 差し替えで ON/変更したら、activation 版 tfvars（正本・
 #    ~/dev/worktrees/teamagent-activation/infra/terraform/terraform.tfvars）へ同じ値を必ず追記する。
 #    追記し忘れると tfvars 側は既定（false・空）のままで live の TD と食い違う。guard 経由の plan は
@@ -164,13 +164,13 @@ variable "morning_digest_schedule_expression" {
 #    経由で plan すると「足された env」として止まるので、TD 差し替えのときに OFF でも 2 キーとも
 #    入れておく（または config 移行の allowed_env_changes.morning に載せる）。
 variable "morning_digest_holiday_skip" {
-  description = "祝日と会社休日は朝ダイジェストを休む（MORNING_DIGEST_HOLIDAY_SKIP）。祝日は skill を呼ばず DM も送らないが、予定リマインド（morning_digest_reminders）は登録を続ける。祝日明けはメールの走査範囲を前の配信日まで広げる（最低 3 日）。表の期限の 60 日前から jp_holiday_table_stale を出す。既定 false＝今と同じ（祝日も配信・走査 3 日）。⚠️ TD で ON/変更したら activation 版 tfvars（正本・~/dev/worktrees/teamagent-activation/infra/terraform/terraform.tfvars）へ同じ値を必ず追記。忘れると guard 経由の plan が live との env 差分で止まる（config 移行で allowed_env_changes.morning に載せた場合と guard を通さない apply では既定に黙って戻る）。"
+  description = "祝日と会社休日は朝ダイジェストを休む（MORNING_DIGEST_HOLIDAY_SKIP）。祝日は skill を呼ばず DM も送らない。祝日明けはメールの走査範囲を前の配信日まで広げる（最低 3 日）。表の期限の 60 日前から jp_holiday_table_stale を出す。既定 false＝今と同じ（祝日も配信・走査 3 日）。⚠️ TD で ON/変更したら activation 版 tfvars（正本・~/dev/worktrees/teamagent-activation/infra/terraform/terraform.tfvars）へ同じ値を必ず追記。忘れると guard 経由の plan が live との env 差分で止まる（config 移行で allowed_env_changes.morning に載せた場合と guard を通さない apply では既定に黙って戻る）。"
   type        = bool
   default     = false
 }
 
 variable "morning_digest_remind_personal_blocks" {
-  description = "自分だけの作業枠（ゲストも会議リンクも無い予定）にも直前リマインドを送るか（MORNING_DIGEST_REMIND_PERSONAL_BLOCKS・全員の既定。本人は digest_settings の reminder_personal_blocks で上書きできる）。既定 true＝今と同じ。2026-10-05 小俣さん裁定で本番は false（タスクをカレンダーに入れている人への通知が多すぎるため）。⚠️ TD で変えたら activation 版 tfvars（正本・~/dev/worktrees/teamagent-activation/infra/terraform/terraform.tfvars）へ同じ値を必ず追記。"
+  description = "互換用の旧フラグ（MORNING_DIGEST_REMIND_PERSONAL_BLOCKS）。予定リマインドは廃止済み。⚠️ TD で変えたら activation 版 tfvars（正本・~/dev/worktrees/teamagent-activation/infra/terraform/terraform.tfvars）へ同じ値を必ず追記。"
   type        = bool
   default     = true
 }
@@ -624,7 +624,7 @@ resource "aws_ecs_task_definition" "morning_digest" {
       # 密度優先描画（2026-07-13 パイロットFB「見づらい」対応・env のみで切替可）。
       { name = "MORNING_DIGEST_COMPACT", value = var.morning_digest_compact ? "true" : "false" },
       # 本人ごとの設定（digest_preferences・migration 0030）を読んで、止める/休む/曜日/欄/件数/
-      # 下書き/直前リマインドを本人ごとに変える（既定OFF）。設定を書く digest_settings tool とセット。
+      # サマリーを本人ごとに変える（既定OFF）。設定を書く digest_settings tool とセット。
       # OFF の間は表を 1 度も読まない＝今までどおりの配信。10-01 から本番 true（CLI の TD 差し替え）。
       # ここを本番の実態に合わせる（false のまま apply すると本人設定が効かなくなる）。
       { name = "MORNING_DIGEST_PREFERENCES", value = "true" },
@@ -636,7 +636,7 @@ resource "aws_ecs_task_definition" "morning_digest" {
       { name = "MORNING_DIGEST_ACK_BUTTON", value = var.morning_digest_ack_button ? "true" : "false" },
       # 確認済み項目の除外＋☑️トークン発行（既定OFF）。ボタンより先に ON にしてよい。
       { name = "MORNING_DIGEST_ACK_FILTER", value = var.morning_digest_ack_filter ? "true" : "false" },
-      # 予定リマインド（v0.3 Task5・既定OFF）。enable_reminders=true で基盤を建ててから ON。
+      # 予定リマインドの旧フラグ（廃止済み・runner は無視）。
       { name = "MORNING_DIGEST_REMINDERS", value = (var.enable_reminders && var.morning_digest_reminders) ? "true" : "false" },
       { name = "REMINDER_LEAD_MINUTES", value = tostring(var.reminder_lead_minutes) },
       { name = "REMINDER_SCHEDULER_GROUP", value = var.enable_reminders ? aws_scheduler_schedule_group.reminders[0].name : "" },
@@ -651,7 +651,7 @@ resource "aws_ecs_task_definition" "morning_digest" {
       { name = "MORNING_DIGEST_DEFAULT_TIME", value = var.morning_digest_default_time },
       # 本人メモの退職・ゲスト化の掃除（M6・既定 OFF）。planner の実行時に 1 日 1 回。
       { name = "PERSONAL_MEMORY_RETIRE_SWEEP", value = var.personal_memory_retire_sweep ? "true" : "false" },
-      # 作業枠（ゲスト・会議リンク無し）への直前リマインド（全員の既定・本人設定が優先）。
+      # 作業枠への直前リマインドの旧フラグ（廃止済み）。
       { name = "MORNING_DIGEST_REMIND_PERSONAL_BLOCKS", value = var.morning_digest_remind_personal_blocks ? "true" : "false" },
       # F0 連携切れの見える化（既定 空＝OFF）。TD で変えたら activation 版 tfvars（正本）へ同じ値を追記。
       { name = "MORNING_DIGEST_FETCH_STATUS_EMAILS", value = var.morning_digest_fetch_status_emails },
