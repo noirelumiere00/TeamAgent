@@ -253,3 +253,15 @@ def test_thumbnail_challenge_persists_shared_pause() -> None:
         }
         assert pg.paused
         assert thumbs.fill_thumbnails(pg, MagicMock(), client, limit=2) == {"fetch_paused": 1}
+
+
+def test_a_real_page_without_cover_is_not_a_challenge() -> None:
+    from teamagent.adapters.video_library_page import page_is_challenge
+
+    real = (
+        '<script id="__UNIVERSAL_DATA_FOR_REHYDRATION__" type="application/json">'
+        '{"__DEFAULT_SCOPE__":{"webapp.video-detail":{"statusCode":10204}}}</script>'
+        "<script>loadCaptchaSdk()</script>"
+    )
+    assert not page_is_challenge(real)
+    assert page_is_challenge("<html><title>Security Check</title>captcha verify to continue</html>")
