@@ -241,7 +241,9 @@ locals {
     }
     # 2026-11-03 オフライン導出（未公開）。base digest は維持し、core expat/libexpat1 の Wolfi 公式修正版 APK 差し替えへ追随。
     # SHA 確認済み live 本文の runtime/core_media 契約各1か所を置換し、逆置換で一致を確認。
-    "2be0d0d4c18b1dbebae1964e7765ef09d225491c8ac7221a0c65df92e34165d6" = {
+    # 2026-11-06 publish 世代（apk ロック追随）。Alpine 上流の入替（musl 1.2.6-r2→1.2.6-r3）で段 3 の media ビルドが
+    # 解決不能になるため media-apk.lock と契約 artifact.apk-lock.sha256 を追随させた再レンダリング（apply_apklock.sh）。
+    "48403ed15db8bde785515175a09e64c1468b38fc4a275d5662e173345fb80451" = {
       content_type                  = "text/yaml"
       object_lock_retain_until_date = "2099-12-31T00:00:00Z"
     }
@@ -452,7 +454,9 @@ locals {
     }
     # 2026-11-03 オフライン導出（未公開）。base digest は維持し、core expat/libexpat1 の Wolfi 公式修正版 APK 差し替えへ追随。
     # SHA 確認済み live 本文の runtime/core_media 契約各1か所を置換し、逆置換で一致を確認。
-    "38fdf95065b764dd1a967a960f12b6dbf556775555f103a271d0be0790dc3f56" = {
+    # 2026-11-06 publish 世代（apk ロック追随）。Alpine 上流の入替（musl 1.2.6-r2→1.2.6-r3）で段 3 の media ビルドが
+    # 解決不能になるため media-apk.lock と契約 artifact.apk-lock.sha256 を追随させた再レンダリング（apply_apklock.sh）。
+    "965cdbed51e9e1cf8fb719fb181ac5116a042681cdd44709edce7b492914dc8e" = {
       content_type                  = "text/yaml"
       object_lock_retain_until_date = "2099-12-31T00:00:00Z"
     }
@@ -653,7 +657,9 @@ locals {
     }
     # 2026-11-03 オフライン導出（未公開）。base digest は維持し、core expat/libexpat1 の Wolfi 公式修正版 APK 差し替えへ追随。
     # SHA 確認済み live 本文の runtime/core_media 契約各1か所を置換し、逆置換で一致を確認。
-    "88911d792b6ffba50390a9279f584f6a96194a1fce62975c4de80b677a6119f2" = {
+    # 2026-11-06 publish 世代（apk ロック追随）。Alpine 上流の入替（musl 1.2.6-r2→1.2.6-r3）で段 3 の media ビルドが
+    # 解決不能になるため media-apk.lock と契約 artifact.apk-lock.sha256 を追随させた再レンダリング（apply_apklock.sh）。
+    "3acb0d8eaf90a8f3c80bd8374f50c08d1908321218905f6c748bc3ccd4d29e68" = {
       content_type                  = "text/yaml"
       object_lock_retain_until_date = "2099-12-31T00:00:00Z"
     }
@@ -852,18 +858,18 @@ removed {
 }
 
 import {
-  to = aws_s3_object.mcp_source_publisher_buildspec_generation["2be0d0d4c18b1dbebae1964e7765ef09d225491c8ac7221a0c65df92e34165d6"]
-  id = "teamagent-dev-image-release-evidence/codebuild-buildspecs/teamagent-dev-mcp-source-publisher/2be0d0d4c18b1dbebae1964e7765ef09d225491c8ac7221a0c65df92e34165d6.yml"
+  to = aws_s3_object.mcp_source_publisher_buildspec_generation["48403ed15db8bde785515175a09e64c1468b38fc4a275d5662e173345fb80451"]
+  id = "teamagent-dev-image-release-evidence/codebuild-buildspecs/teamagent-dev-mcp-source-publisher/48403ed15db8bde785515175a09e64c1468b38fc4a275d5662e173345fb80451.yml"
 }
 
 import {
-  to = aws_s3_object.image_attestor_buildspec_generation["38fdf95065b764dd1a967a960f12b6dbf556775555f103a271d0be0790dc3f56"]
-  id = "teamagent-dev-image-release-evidence/codebuild-buildspecs/teamagent-dev-image-attestor/38fdf95065b764dd1a967a960f12b6dbf556775555f103a271d0be0790dc3f56.yml"
+  to = aws_s3_object.image_attestor_buildspec_generation["965cdbed51e9e1cf8fb719fb181ac5116a042681cdd44709edce7b492914dc8e"]
+  id = "teamagent-dev-image-release-evidence/codebuild-buildspecs/teamagent-dev-image-attestor/965cdbed51e9e1cf8fb719fb181ac5116a042681cdd44709edce7b492914dc8e.yml"
 }
 
 import {
-  to = aws_s3_object.image_promoter_buildspec_generation["88911d792b6ffba50390a9279f584f6a96194a1fce62975c4de80b677a6119f2"]
-  id = "teamagent-dev-image-release-evidence/codebuild-buildspecs/teamagent-dev-image-promoter/88911d792b6ffba50390a9279f584f6a96194a1fce62975c4de80b677a6119f2.yml"
+  to = aws_s3_object.image_promoter_buildspec_generation["3acb0d8eaf90a8f3c80bd8374f50c08d1908321218905f6c748bc3ccd4d29e68"]
+  id = "teamagent-dev-image-release-evidence/codebuild-buildspecs/teamagent-dev-image-promoter/3acb0d8eaf90a8f3c80bd8374f50c08d1908321218905f6c748bc3ccd4d29e68.yml"
 }
 
 import {
