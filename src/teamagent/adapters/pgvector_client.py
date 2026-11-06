@@ -225,6 +225,26 @@ def _connect_pg(dsn: str) -> psycopg.Connection[dict[str, Any]]:
     return conn
 
 
+# 資料の添付判定に使うキーだけを検索結果へ運ぶ（全 metadata は根拠束などで大きい）。
+_FILE_METADATA_KEYS = (
+    "size",
+    "md5_checksum",
+    "slack_file_version",
+    "filetype",
+    "public_channel_ids",
+    "private_channel_ids",
+    "channel_ids",
+    "channel_type",
+    "is_im",
+    "is_mpim",
+)
+_FILE_METADATA_SQL = (
+    "jsonb_strip_nulls(jsonb_build_object("
+    + ", ".join(f"'{k}', d.metadata->'{k}'" for k in _FILE_METADATA_KEYS)
+    + "))"
+)
+
+
 @dataclass(frozen=True)
 class SearchHit:
     """ベクトル検索の1ヒット。
@@ -830,7 +850,10 @@ class PgVectorClient:
                 c.page_num,
                 c.metadata->>'page_num' AS metadata_page_num,
                 d.id AS document_id,
-                d.source_uri, d.external_id, d.metadata AS file_metadata,
+                d.source_uri,
+                d.external_id,
+                -- 全 metadata（根拠束など大きい）を毎ヒット運ばず、添付の判定に使うキーだけ。
+                {_FILE_METADATA_SQL} AS file_metadata,
                 d.source_type::text AS source_type,
                 d.title{_industry_columns()},
                 d.metadata->>'channel_name' AS channel_name,
