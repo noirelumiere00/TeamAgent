@@ -175,3 +175,27 @@ def test_postgres_ingest_tables_exclude_human_settings(
     ]
     assert repository.save(batch, request_id="second", started_at=NOW) == 0
     assert conn.execute("SELECT is_pr FROM vl_videos").fetchone() == {"is_pr": True}
+
+
+def test_postgres_unlabelled_account_keeps_existing_labels(
+    db: tuple[Any, VideoLibraryRepository],
+) -> None:
+    conn, repository = db
+    batch = seed_batch()
+    batch.accounts[0].classification = "UGC"
+    repository.save(batch, request_id="first", started_at=NOW)
+    # A handle found only in a video row arrives without 運営 and must not blank the saved one.
+    batch.accounts = [Account(platform="tiktok", handle="test", display_name="新しい名前")]
+    repository.save(batch, request_id="second", started_at=NOW)
+    assert conn.execute(
+        "SELECT display_name, operator_label, classification FROM vl_accounts"
+    ).fetchone() == {
+        "display_name": "新しい名前",
+        "operator_label": "NewsTV",
+        "classification": "UGC",
+    }
+    batch.accounts = [Account(platform="tiktok", handle="test", operator_label="ベクトル九州")]
+    repository.save(batch, request_id="third", started_at=NOW)
+    assert conn.execute("SELECT operator_label FROM vl_accounts").fetchone() == {
+        "operator_label": "ベクトル九州"
+    }
