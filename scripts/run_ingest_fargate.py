@@ -177,6 +177,14 @@ def main() -> int:
         logger.error("video_library_failed", error=type(exc).__name__)
     if not dry_run:
         try:
+            from teamagent.ingest.video_library_account_fetch import main as fetch_video_accounts
+
+            code = fetch_video_accounts([])
+            if code:
+                logger.error("video_library_account_fetch_failed", exit_code=code)
+        except (Exception, SystemExit) as exc:
+            logger.error("video_library_account_fetch_failed", error=type(exc).__name__)
+        try:
             from teamagent.ingest.video_library_thumbs import main as fill_video_thumbnails
 
             code = fill_video_thumbnails([])
