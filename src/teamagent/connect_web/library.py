@@ -358,7 +358,34 @@ def _campaign_totals_cte(admin: bool) -> str:
         GROUP BY v.advertiser, v.campaign)"""  # nosec B608
 
 
-def search_videos(conn: Any, params: Mapping[str, str], *, admin: bool) -> dict[str, Any]:
+def library_connection(pg: Any, email: str, *, admin: bool) -> Any:
+    """Keep HTTP and MCP reads on the same application role and user context."""
+    return pg.connection(
+        app_role="teamagent_app",
+        user_email=email,
+        user_groups=[email.split("@")[-1]],
+        user_role="admin" if admin else "user",
+    )
+
+
+def read_video(conn: Any, platform: str, video_id: str, *, admin: bool) -> Any:
+    # Identifiers and visibility are always bound parameters, including for MCP.
+    sql = f"SELECT v.*, {_METRIC_SELECT}, m.captured_on FROM vl_videos_effective v {_METRICS_JOIN} WHERE v.platform=%s AND v.video_id=%s AND (%s OR NOT v.is_private)"  # noqa: E501  # nosec B608
+    row = conn.execute(sql, (platform, video_id, admin)).fetchone()
+    if row is None:
+        raise HTTPException(404)
+    return row
+
+
+def search_videos(
+    conn: Any,
+    params: Mapping[str, str],
+    *,
+    admin: bool,
+    page_size: int = PAGE_SIZE,
+) -> dict[str, Any]:
+    if type(page_size) is not int or not 1 <= page_size <= PAGE_SIZE:
+        raise ValueError("Invalid page size")
     where, values, page, order = _where(params, admin)
     count = conn.execute(
         # 固定の句と許可リストの並び順だけを連結し、利用者の値は全て %s で渡す
@@ -369,14 +396,14 @@ def search_videos(conn: Any, params: Mapping[str, str], *, admin: bool) -> dict[
     list_sql = f"{_campaign_totals_cte(admin)} SELECT v.*, {_METRIC_SELECT}, m.captured_on, ct.campaign_total_plays FROM vl_videos_effective v {_METRICS_JOIN} {_CAMPAIGN_TOTALS_JOIN} WHERE {where} ORDER BY {order} DESC NULLS LAST, v.platform, v.video_id LIMIT %s OFFSET %s"  # noqa: E501  # nosec B608
     rows = conn.execute(
         list_sql,
-        [*values, PAGE_SIZE, (page - 1) * PAGE_SIZE],
+        [*values, page_size, (page - 1) * page_size],
     ).fetchall()
     for row in rows:
         row["rates"] = _rates(row)
         row["post_url"] = post_url(row)
         row["has_thumbnail"] = bool(row.pop("thumbnail_s3_key", None))
         row.pop("video_s3_key", None)
-    return {"videos": rows, "total": count, "page": page, "page_size": PAGE_SIZE}
+    return {"videos": rows, "total": count, "page": page, "page_size": page_size}
 
 
 def _category_nav(category: str, *, current: str, footer: bool = False) -> str:
@@ -766,14 +793,18 @@ def _card(
     )
 
 
+def video_title(row: Mapping[str, Any]) -> str:
+    return next(
+        (line.strip() for line in str(row.get("caption") or "").splitlines() if line.strip()),
+        str(row.get("account_name") or row.get("account_handle") or "動画"),
+    )
+
+
 def _video_card(row: Mapping[str, Any], *, selectable: bool = False) -> str:
     path = "/".join(quote(str(row[key]), safe="") for key in ("platform", "video_id"))
     url = post_url(row)
     account = str(row.get("account_name") or row.get("account_handle") or "動画")
-    title = next(
-        (line.strip() for line in str(row.get("caption") or "").splitlines() if line.strip()),
-        account,
-    )
+    title = video_title(row)
     flags = " · ".join(
         name for field, name in (("is_pr", "PR"), ("is_private", "非公開")) if row.get(field)
     )
@@ -1271,12 +1302,7 @@ def register_library_routes(
         return email.strip().lower() in admins()
 
     def connection(email: str) -> Any:
-        return get_pg().connection(
-            app_role="teamagent_app",
-            user_email=email,
-            user_groups=[email.split("@")[-1]],
-            user_role="admin" if is_admin(email) else "user",
-        )
+        return library_connection(get_pg(), email, admin=is_admin(email))
 
     def admin_identity(request: Request) -> str:
         email = identity(request)
@@ -1450,15 +1476,7 @@ def register_library_routes(
         return JSONResponse(jsonable_encoder(data))
 
     def video(conn: Any, platform: str, video_id: str, email: str) -> Any:
-        # 列名と JOIN はコード内の固定値。識別子と権限は %s で渡す
-        detail_sql = f"SELECT v.*, {_METRIC_SELECT}, m.captured_on FROM vl_videos_effective v {_METRICS_JOIN} WHERE v.platform=%s AND v.video_id=%s AND (%s OR NOT v.is_private)"  # noqa: E501  # nosec B608
-        row = conn.execute(
-            detail_sql,
-            (platform, video_id, is_admin(email)),
-        ).fetchone()
-        if row is None:
-            raise HTTPException(404)
-        return row
+        return read_video(conn, platform, video_id, admin=is_admin(email))
 
     @router.get("/v/{platform}/{video_id}")
     def detail(platform: str, video_id: str, email: str = Depends(identity)) -> HTMLResponse:

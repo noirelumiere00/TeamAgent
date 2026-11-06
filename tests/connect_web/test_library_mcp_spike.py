@@ -105,7 +105,7 @@ def _consent_form(client: TestClient, target: str) -> str:
     assert page.status_code == 200
     assert page.headers["referrer-policy"] == "same-origin"
     soup = BeautifulSoup(page.text, "html.parser")
-    assert soup.select_one("button").text == "Claude に接続を許可"
+    assert soup.select_one("button").text == "Claude に読み取り接続を許可"
     return str(soup.select_one('input[name="csrf"]')["value"])
 
 
@@ -230,7 +230,11 @@ def test_dcr_consent_code_token_ping(client: TestClient, path: str) -> None:
     listing = client.post(
         path, headers=headers, json={"jsonrpc": "2.0", "id": 2, "method": "tools/list"}
     )
-    assert [tool["name"] for tool in listing.json()["result"]["tools"]] == ["ping"]
+    assert [tool["name"] for tool in listing.json()["result"]["tools"]] == [
+        "ping",
+        "search_videos",
+        "get_video",
+    ]
     ping = client.post(
         path,
         headers=headers,
@@ -243,7 +247,7 @@ def test_dcr_consent_code_token_ping(client: TestClient, path: str) -> None:
     )
     assert ping.status_code == 200, ping.text
     assert ping.json()["result"]["content"] == [
-        {"type": "text", "text": "s***@vectorinc.co.jp: Claude との接続を確認しました。"}
+        {"type": "text", "text": "s***@vectorinc.co.jp: 動画ライブラリとの接続を確認しました。"}
     ]
     assert _EMAIL not in ping.text
     assert (
@@ -454,7 +458,11 @@ async def test_sdk_streamable_client_roundtrip(enabled: None) -> None:
             ClientSession(read, write) as session,
         ):
             await session.initialize()
-            assert [tool.name for tool in (await session.list_tools()).tools] == ["ping"]
+            assert [tool.name for tool in (await session.list_tools()).tools] == [
+                "ping",
+                "search_videos",
+                "get_video",
+            ]
             result = await session.call_tool("ping", {})
             assert not result.isError
             assert "s***@vectorinc.co.jp" in result.model_dump_json()
