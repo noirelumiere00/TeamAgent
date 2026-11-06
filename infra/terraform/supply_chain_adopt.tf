@@ -243,7 +243,9 @@ locals {
     # SHA 確認済み live 本文の runtime/core_media 契約各1か所を置換し、逆置換で一致を確認。
     # 2026-11-06 publish 世代（apk ロック追随）。Alpine 上流の入替（musl 1.2.6-r2→1.2.6-r3）で段 3 の media ビルドが
     # 解決不能になるため media-apk.lock と契約 artifact.apk-lock.sha256 を追随させた再レンダリング（apply_apklock.sh）。
-    "48403ed15db8bde785515175a09e64c1468b38fc4a275d5662e173345fb80451" = {
+    # 2026-11-06 publish 世代（apk ロック追随）。Alpine 上流の入替（font-noto 2026.10.01-r0→2026.11.01-r0）で段 3 の media ビルドが
+    # 解決不能になるため media-apk.lock と契約 artifact.apk-lock.sha256 を追随させた再レンダリング（apply_apklock.sh）。
+    "a0b8ab142d18d4f4026175e9ddfa71ef7eac6af4b1ca6f9865362504cdad7e45" = {
       content_type                  = "text/yaml"
       object_lock_retain_until_date = "2099-12-31T00:00:00Z"
     }
@@ -456,7 +458,9 @@ locals {
     # SHA 確認済み live 本文の runtime/core_media 契約各1か所を置換し、逆置換で一致を確認。
     # 2026-11-06 publish 世代（apk ロック追随）。Alpine 上流の入替（musl 1.2.6-r2→1.2.6-r3）で段 3 の media ビルドが
     # 解決不能になるため media-apk.lock と契約 artifact.apk-lock.sha256 を追随させた再レンダリング（apply_apklock.sh）。
-    "965cdbed51e9e1cf8fb719fb181ac5116a042681cdd44709edce7b492914dc8e" = {
+    # 2026-11-06 publish 世代（apk ロック追随）。Alpine 上流の入替（font-noto 2026.10.01-r0→2026.11.01-r0）で段 3 の media ビルドが
+    # 解決不能になるため media-apk.lock と契約 artifact.apk-lock.sha256 を追随させた再レンダリング（apply_apklock.sh）。
+    "b3176055e96033e1747525b1a2074f25678a0ab10daabd9ba9e787dcb1be4253" = {
       content_type                  = "text/yaml"
       object_lock_retain_until_date = "2099-12-31T00:00:00Z"
     }
@@ -659,7 +663,9 @@ locals {
     # SHA 確認済み live 本文の runtime/core_media 契約各1か所を置換し、逆置換で一致を確認。
     # 2026-11-06 publish 世代（apk ロック追随）。Alpine 上流の入替（musl 1.2.6-r2→1.2.6-r3）で段 3 の media ビルドが
     # 解決不能になるため media-apk.lock と契約 artifact.apk-lock.sha256 を追随させた再レンダリング（apply_apklock.sh）。
-    "3acb0d8eaf90a8f3c80bd8374f50c08d1908321218905f6c748bc3ccd4d29e68" = {
+    # 2026-11-06 publish 世代（apk ロック追随）。Alpine 上流の入替（font-noto 2026.10.01-r0→2026.11.01-r0）で段 3 の media ビルドが
+    # 解決不能になるため media-apk.lock と契約 artifact.apk-lock.sha256 を追随させた再レンダリング（apply_apklock.sh）。
+    "993eeca9619a6590063857f37ad6d0b0e7666ff6266b335651b68fb24751e7c0" = {
       content_type                  = "text/yaml"
       object_lock_retain_until_date = "2099-12-31T00:00:00Z"
     }
@@ -858,18 +864,18 @@ removed {
 }
 
 import {
-  to = aws_s3_object.mcp_source_publisher_buildspec_generation["48403ed15db8bde785515175a09e64c1468b38fc4a275d5662e173345fb80451"]
-  id = "teamagent-dev-image-release-evidence/codebuild-buildspecs/teamagent-dev-mcp-source-publisher/48403ed15db8bde785515175a09e64c1468b38fc4a275d5662e173345fb80451.yml"
+  to = aws_s3_object.mcp_source_publisher_buildspec_generation["a0b8ab142d18d4f4026175e9ddfa71ef7eac6af4b1ca6f9865362504cdad7e45"]
+  id = "teamagent-dev-image-release-evidence/codebuild-buildspecs/teamagent-dev-mcp-source-publisher/a0b8ab142d18d4f4026175e9ddfa71ef7eac6af4b1ca6f9865362504cdad7e45.yml"
 }
 
 import {
-  to = aws_s3_object.image_attestor_buildspec_generation["965cdbed51e9e1cf8fb719fb181ac5116a042681cdd44709edce7b492914dc8e"]
-  id = "teamagent-dev-image-release-evidence/codebuild-buildspecs/teamagent-dev-image-attestor/965cdbed51e9e1cf8fb719fb181ac5116a042681cdd44709edce7b492914dc8e.yml"
+  to = aws_s3_object.image_attestor_buildspec_generation["b3176055e96033e1747525b1a2074f25678a0ab10daabd9ba9e787dcb1be4253"]
+  id = "teamagent-dev-image-release-evidence/codebuild-buildspecs/teamagent-dev-image-attestor/b3176055e96033e1747525b1a2074f25678a0ab10daabd9ba9e787dcb1be4253.yml"
 }
 
 import {
-  to = aws_s3_object.image_promoter_buildspec_generation["3acb0d8eaf90a8f3c80bd8374f50c08d1908321218905f6c748bc3ccd4d29e68"]
-  id = "teamagent-dev-image-release-evidence/codebuild-buildspecs/teamagent-dev-image-promoter/3acb0d8eaf90a8f3c80bd8374f50c08d1908321218905f6c748bc3ccd4d29e68.yml"
+  to = aws_s3_object.image_promoter_buildspec_generation["993eeca9619a6590063857f37ad6d0b0e7666ff6266b335651b68fb24751e7c0"]
+  id = "teamagent-dev-image-release-evidence/codebuild-buildspecs/teamagent-dev-image-promoter/993eeca9619a6590063857f37ad6d0b0e7666ff6266b335651b68fb24751e7c0.yml"
 }
 
 import {
