@@ -12,6 +12,12 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 
 from teamagent.connect_web.library import _e, _select
+from teamagent.ingest.video_library_account_repository import (
+    OWN_ACCOUNT_OPERATORS,
+    AccountAddError,
+    AccountAddRepository,
+    AccountAddResult,
+)
 from teamagent.ingest.video_library_url_import import submit_import
 from teamagent.ingest.video_library_url_models import URLImportError, inspect_input
 from teamagent.ingest.video_library_url_repository import RETRYABLE, URLImportRepository
@@ -53,6 +59,93 @@ ERRORS = {
     "fetch_paused": "取得を停止しています。",
     "processing_recovered": "処理を再開します。",
 }
+ACCOUNT_ERRORS = {
+    "empty_input": "TikTok アカウントを入力してください。",
+    "too_many_lines": "1回50件までです。",
+    "invalid_operator": "運営を選択してください。",
+    "invalid_user_email": "利用者を確認できません。ログインし直してください。",
+}
+
+
+def account_section(
+    form: dict[str, str],
+    rows: list[AccountAddResult] | None = None,
+    *,
+    submitted: bool = False,
+    error: str = "",
+) -> str:
+    text = form.get("accounts", "")
+    input_error = error and error != "invalid_operator"
+    body = (
+        '<section id="import-accounts" aria-labelledby="import-accounts-title">'
+        '<h2 id="import-accounts-title">アカウントを追加</h2>'
+        "<p>追加すると、このアカウントの動画（取り込み済みのものも含む）は自社の動画として扱われます</p>"
+        '<p class="muted">新しい投稿の毎日の自動取り込みは準備中です</p>'
+        '<form method="post" action="/library/import/accounts">'
+        '<label for="import-accounts-input">'
+        "TikTok アカウント（URL か @ID・1行1件・50件まで）</label>"
+        '<textarea id="import-accounts-input" name="accounts" rows="5" required'
+        + (' aria-invalid="true" aria-describedby="import-accounts-error"' if input_error else "")
+        + f">{_e(text)}</textarea>"
+    )
+    if input_error:
+        body += f'<p id="import-accounts-error" role="alert">{_e(ACCOUNT_ERRORS[error])}</p>'
+    body += (
+        '<label for="import-accounts-operator">運営</label>'
+        '<select id="import-accounts-operator" name="operator_label" required'
+        + (
+            ' aria-invalid="true" aria-describedby="import-accounts-operator-error"'
+            if error == "invalid_operator"
+            else ""
+        )
+        + '><option value="">運営を選択してください</option>'
+        + "".join(
+            f'<option value="{_e(operator)}"'
+            + (" selected" if operator == form.get("operator_label") else "")
+            + f">{_e(operator)}</option>"
+            for operator in OWN_ACCOUNT_OPERATORS
+        )
+        + "</select>"
+    )
+    if error == "invalid_operator":
+        body += (
+            '<p id="import-accounts-operator-error" role="alert">' + ACCOUNT_ERRORS[error] + "</p>"
+        )
+    body += '<button name="action" value="check">アカウントを確認</button>'
+    if rows is not None:
+        counts = Counter(row.status for row in rows)
+        summary = (
+            f"{counts['added']} 件追加しました／{counts['exists']} 件は登録済みでした"
+            if submitted
+            else f"追加予定 {counts['added']} 件／登録済み {counts['exists']} 件"
+        )
+        body += (
+            f'<p role="status">{summary}／読めません {counts["invalid"]} 件'
+            f"／重複 {counts['duplicate']} 件</p>"
+            '<div class="import-table"><table><thead><tr>'
+            '<th scope="col">行</th><th scope="col">アカウント</th><th scope="col">結果</th>'
+            "</tr></thead><tbody>"
+        )
+        lines = text.splitlines()
+        for row in rows:
+            account = (
+                f'<a href="https://www.tiktok.com/@{_e(row.handle)}">@{_e(row.handle)}</a>'
+                if row.handle
+                else _e(lines[row.line_no - 1])
+            )
+            if row.status == "exists":
+                result = f"登録済み（運営: {row.operator_label or '運営なし'}）"
+            elif row.status == "duplicate":
+                result = f"{row.duplicate_of} 行目と同じ"
+            elif row.status == "invalid":
+                result = "読めません"
+            else:
+                result = "追加しました" if submitted else "追加します"
+            body += f"<tr><td>{row.line_no}</td><td>{account}</td><td>{_e(result)}</td></tr>"
+        body += "</tbody></table></div>"
+        if not submitted and counts["added"]:
+            body += '<button name="action" value="submit" class="primary">追加する</button>'
+    return body + "</form></section>"
 
 
 def reason(code: str | None) -> str:
@@ -94,7 +187,12 @@ def register_import_routes(
         raise HTTPException(400, reason("campaign_unavailable"))
 
     def screen(
-        email: str, form: dict[str, str], *, preview: bool = False, notice: str = ""
+        email: str,
+        form: dict[str, str],
+        *,
+        preview: bool = False,
+        notice: str = "",
+        account_content: str = "",
     ) -> HTMLResponse:
         text = form.get("urls", "")
         inspected = inspect_input(text) if preview else []
@@ -228,6 +326,7 @@ def register_import_routes(
             "</form>"
             "</details>"
         )
+        body += account_content or account_section({})
         body += (
             f'<p class="muted">全員合算の日次上限は {settings()[0]:,} 回のページ取得です。'
             "超過分は翌日以降の処理待ちになります。</p><h2>自分の取り込み</h2><ul>"
@@ -286,6 +385,33 @@ def register_import_routes(
                 409 if str(exc) == "idempotency_conflict" else 400, reason(str(exc))
             ) from None
         return RedirectResponse(f"/library/import/{batch}", 303)
+
+    @router.post("/import/accounts")
+    async def add_accounts(request: Request, email: str = Depends(identity)) -> HTMLResponse:
+        form = await form_data(request, import_form=True)
+        action = form.get("action")
+        if action not in {"check", "submit"}:
+            raise HTTPException(400)
+        try:
+            lines = form.get("accounts", "").splitlines()
+            if not any(line.strip() for line in lines):
+                raise AccountAddError("empty_input")
+            repository = AccountAddRepository(get_pg())
+            operation = repository.add if action == "submit" else repository.preview
+            rows = operation(
+                lines,
+                operator_label=form.get("operator_label", ""),
+                user_email=email,
+                user_role="admin" if is_admin(email) else "user",
+                request_id=str(uuid.uuid4()),
+            )
+        except AccountAddError as exc:
+            return screen(email, {}, account_content=account_section(form, error=str(exc)))
+        return screen(
+            email,
+            {},
+            account_content=account_section(form, rows, submitted=action == "submit"),
+        )
 
     @router.post("/import/campaign")
     async def add_campaign(request: Request, email: str = Depends(identity)) -> HTMLResponse:

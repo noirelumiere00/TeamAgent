@@ -37,6 +37,7 @@ class ImportPg(Pg):
         self.resumed_at: Any = None
         self.consecutive_failures = 5
         self.events: list[str] = []
+        self.accounts: dict[str, dict[str, Any]] = {}
 
     def execute(self, query: str, params: Any = None) -> MagicMock:
         result = super().execute(query, params)
@@ -123,6 +124,20 @@ class ImportPg(Pg):
             result.fetchall.return_value = [{"video_id": "123"}]
         elif "SELECT 1 FROM vl_videos" in query:
             result.fetchone.return_value = {"exists": True} if params[0] == "123" else None
+        elif "SELECT operator_label FROM vl_accounts" in query:
+            result.fetchone.return_value = next(
+                (
+                    row.copy()
+                    for handle, row in sorted(self.accounts.items())
+                    if handle.lstrip("@").lower() == params[0]
+                ),
+                None,
+            )
+        elif "INSERT INTO vl_accounts" in query:
+            handle, operator, email = params
+            if handle not in self.accounts:
+                self.accounts[handle] = dict(operator_label=operator, added_by=email)
+                result.fetchone.return_value = {"handle": handle}
         return result
 
 
@@ -213,6 +228,7 @@ def test_all_import_endpoints_require_authentication(intake: tuple[TestClient, I
         ("GET", "/library/import"),
         ("POST", "/library/import"),
         ("POST", "/library/import/campaign"),
+        ("POST", "/library/import/accounts"),
         ("GET", f"/library/import/{BATCH}"),
         ("POST", f"/library/import/{BATCH}/retry"),
     ]:
