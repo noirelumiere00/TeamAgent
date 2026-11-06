@@ -27,9 +27,6 @@ from teamagent.ingest.video_library_url_repository import JST
 from teamagent.observability.logging_config import configure_logging
 
 logger = structlog.get_logger(__name__)
-_TARGET = """platform='tiktok' AND operator_label=ANY(%s)
-    AND coalesce(classification,'') NOT LIKE %s
-    AND lower(ltrim(handle,'@')) ~ '^[a-z0-9_.]{2,24}$'"""
 
 
 class FetchResult(BaseModel):
@@ -144,10 +141,13 @@ def run(
     session: dict[str, Any] = dict(app_role="teamagent_app", user_email=None, user_role="admin")
     with pg.connection(**session) as conn:
         rows = conn.execute(
-            f"""SELECT lower(ltrim(handle,'@')) AS handle,
+            """SELECT lower(ltrim(handle,'@')) AS handle,
                 bool_or(last_fetched_on IS NULL) AS initial,
                 min(coalesce(last_fetched_on - 1, DATE '2026-01-01')) AS oldest
-                FROM vl_accounts WHERE {_TARGET} GROUP BY lower(ltrim(handle,'@'))
+                FROM vl_accounts WHERE platform='tiktok' AND operator_label=ANY(%s)
+                AND coalesce(classification,'') NOT LIKE %s
+                AND lower(ltrim(handle,'@')) ~ '^[a-z0-9_.]{2,24}$'
+                GROUP BY lower(ltrim(handle,'@'))
                 ORDER BY handle""",
             (list(OWN_ACCOUNT_OPERATORS), "%未稼働%"),
         ).fetchall()
@@ -245,7 +245,9 @@ def run(
                         )
                         counts["metrics"] += cur.rowcount
                     conn.execute(
-                        f"""UPDATE vl_accounts SET last_fetched_on=%s WHERE {_TARGET}
+                        """UPDATE vl_accounts SET last_fetched_on=%s WHERE platform='tiktok'
+                            AND operator_label=ANY(%s) AND coalesce(classification,'') NOT LIKE %s
+                            AND lower(ltrim(handle,'@')) ~ '^[a-z0-9_.]{2,24}$'
                             AND lower(ltrim(handle,'@'))=ANY(%s)""",
                         (today, list(OWN_ACCOUNT_OPERATORS), "%未稼働%", part),
                     )
