@@ -10,6 +10,7 @@ from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
+import structlog.testing
 
 from teamagent.adapters.bedrock_client import ConverseResponse, TokenUsage
 from teamagent.ingest.video_library_case_evaluation import (
@@ -878,3 +879,43 @@ def test_external_unknown_does_not_apply_an_advertiser() -> None:
     )
     assert counts["unknown"] == 1
     assert repository.save.call_args.args[1].advertiser is None
+
+
+@pytest.mark.parametrize(
+    "failure,reason",
+    [
+        (ValueError("nonexistent_case"), "nonexistent_case"),
+        (ValueError("private customer"), "other"),
+        (TimeoutError("nonexistent_case"), "other"),
+    ],
+)
+def test_failure_reason_logs_only_fixed_codes(failure: Exception, reason: str) -> None:
+    fake = client()
+    fake.converse.side_effect = failure
+    with structlog.testing.capture_logs() as logs:
+        run(
+            repo(),
+            Inference(fake, max_cost_usd=1),
+            policy=None,
+            limit=1,
+            dry_run=False,
+            request_id="r",
+        )
+    failed = [e for e in logs if e["event"] == "case_inference_failed"]
+    assert [e["reason"] for e in failed] == [reason]
+    assert "private customer" not in repr(logs)
+
+
+def test_malformed_json_reason_is_schema_code() -> None:
+    with structlog.testing.capture_logs() as logs:
+        run(
+            repo(),
+            Inference(client("bad json", "end_turn"), max_cost_usd=1),
+            policy=None,
+            limit=1,
+            dry_run=False,
+            request_id="r",
+        )
+    assert [e["reason"] for e in logs if e["event"] == "case_inference_failed"] == [
+        "invalid_json_invalid"
+    ]

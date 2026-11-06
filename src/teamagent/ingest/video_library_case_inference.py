@@ -12,6 +12,7 @@ from collections import Counter
 from pathlib import Path
 
 import structlog
+from pydantic import ValidationError
 
 from teamagent.adapters.bedrock_client import BedrockClient, _estimate_cost
 from teamagent.adapters.pgvector_client import PgVectorClient
@@ -96,6 +97,31 @@ class Inference:
         return response.text
 
 
+# Only our own fixed rejection codes are logged; other messages may carry model or customer text.
+_REASONS = frozenset(
+    {
+        "campaign_without_advertiser",
+        "incomplete_response",
+        "invalid_new_case",
+        "known_advertiser_conflict",
+        "missing_evidence",
+        "nonexistent_case",
+        "ungrounded_advertiser",
+        "ungrounded_quote",
+        "unknown_case",
+    }
+)
+
+
+def failure_reason(exc: Exception) -> str:
+    if isinstance(exc, ValidationError):
+        errors = exc.errors()
+        # Pydantic type codes are schema names, never input values.
+        return "invalid_" + (errors[0]["type"] if errors else "json").replace(".", "_")
+    message = str(exc)
+    return message if type(exc) is ValueError and message in _REASONS else "other"
+
+
 def run(
     repository: CaseRepository,
     inference: Inference,
@@ -174,7 +200,10 @@ def run(
             except Exception as exc:
                 counts["failed"] += 1
                 logger.warning(
-                    "case_inference_failed", request_id=request_id, error_code=type(exc).__name__
+                    "case_inference_failed",
+                    request_id=request_id,
+                    error_code=type(exc).__name__,
+                    reason=failure_reason(exc),
                 )
     return counts
 
