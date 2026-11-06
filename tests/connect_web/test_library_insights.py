@@ -129,7 +129,7 @@ def test_chart_labels_do_not_scale_and_drop_is_highlighted(setup: tuple[TestClie
     )
     css = "".join(page.select_one("style").text.split())
     assert ".chart-label{position:absolute;font-size:12px;" in css
-    assert ".retention-chart{position:relative;width:100%;height:200px}" in css
+    assert ".retention-chart{position:relative;width:100%;height:200px;margin-bottom:28px}" in css
     assert ".retention-plot{position:absolute;top:10px;right:6px;bottom:20px;left:40px}" in css
     assert ".chart-top{top:0%}.chart-middle{top:50%}.chart-bottom{top:100%}" in css
     assert ".chart-x{top:100%;margin-top:4px}" in css
