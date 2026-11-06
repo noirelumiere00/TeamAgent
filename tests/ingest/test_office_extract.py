@@ -674,6 +674,179 @@ def test_pptx_include_tables_true_picks_up_cells() -> None:
 
 
 # -----------------------------------------------------------
+# pptx: chart caches (include_tables)
+# -----------------------------------------------------------
+def _build_pptx_with_charts(*, with_body: bool = True) -> bytes:
+    from pptx import Presentation
+    from pptx.chart.data import CategoryChartData
+    from pptx.enum.chart import XL_CHART_TYPE
+    from pptx.util import Inches
+
+    prs = Presentation()
+    slide = prs.slides.add_slide(prs.slide_layouts[6])
+    if with_body:
+        slide.shapes.add_textbox(0, 0, Inches(4), Inches(1)).text = "本文は残る"
+    for index, (chart_type, title) in enumerate(
+        [(XL_CHART_TYPE.COLUMN_CLUSTERED, "売上推移"), (XL_CHART_TYPE.PIE, "売上構成")]
+    ):
+        data = CategoryChartData(number_format="0.00%")
+        data.categories = ["東日本", "西日本"]
+        data.add_series("売上", [0.125, 0.375])
+        if index == 0:
+            data.add_series("前年", [0.25, 0.5])
+        chart = slide.shapes.add_chart(
+            chart_type, Inches(index * 4), Inches(1), Inches(4), Inches(3), data
+        ).chart
+        chart.has_title = True
+        chart.chart_title.text_frame.text = title
+    buf = BytesIO()
+    prs.save(buf)
+    return buf.getvalue()
+
+
+def test_pptx_include_tables_extracts_bar_and_pie_chart_caches() -> None:
+    pages = extract_office_pages(
+        _build_pptx_with_charts(), mime_type=PPTX_MIME, include_tables=True
+    )
+    assert pages == [
+        (
+            1,
+            "本文は残る グラフ: 売上推移 売上: 東日本=0.125, 西日本=0.375 (formatCode: 0.00%) "
+            "前年: 東日本=0.25, 西日本=0.5 (formatCode: 0.00%) "
+            "グラフ: 売上構成 売上: 東日本=0.125, 西日本=0.375 (formatCode: 0.00%)",
+        )
+    ]
+
+
+def test_pptx_chart_only_slide_is_searchable_with_include_tables() -> None:
+    data = _build_pptx_with_charts(with_body=False)
+    assert extract_pptx_pages(data) == []
+    assert "東日本=0.125" in extract_pptx_pages(data, include_tables=True)[0][1]
+
+
+@pytest.mark.parametrize("include_notes", [False, True])
+def test_pptx_include_tables_false_keeps_chart_slide_body_unchanged(include_notes: bool) -> None:
+    data = _build_pptx_with_charts()
+    assert extract_pptx_pages(data, include_notes=include_notes) == [(1, "本文は残る")]
+    assert extract_office_pages(data, mime_type=PPTX_MIME, include_tables=False) == [
+        (1, "本文は残る")
+    ]
+
+
+def test_pptx_broken_chart_preserves_body_and_other_chart() -> None:
+    data = _replace_zip_member(_build_pptx_with_charts(), "ppt/charts/chart1.xml", b"<broken-chart")
+    for pages in (
+        extract_pptx_pages(data, include_tables=True),
+        extract_office_pages(data, mime_type=PPTX_MIME, include_tables=True),
+    ):
+        assert "本文は残る" in pages[0][1]
+        assert "グラフ: 売上構成 売上: 東日本=0.125, 西日本=0.375" in pages[0][1]
+        assert "売上推移" not in pages[0][1]
+    # 既定の事前検証は従来どおり壊れたXMLを拒否する。
+    with pytest.raises(OfficePayloadError) as raised:
+        extract_office_pages(data, mime_type=PPTX_MIME)
+    assert raised.value.category == "corrupt_zip"
+
+
+def test_pptx_chart_cache_preserves_raw_values_and_matches_sparse_point_indices() -> None:
+    data = _build_pptx_with_charts()
+    ns = {"c": "http://schemas.openxmlformats.org/drawingml/2006/chart"}
+    with zipfile.ZipFile(BytesIO(data)) as package:
+        root = ElementTree.fromstring(package.read("ppt/charts/chart1.xml"))
+    values = root.findall(".//c:ser/c:val/c:numRef/c:numCache/c:pt/c:v", ns)
+    values[0].text = "1.2500E-01"
+    cache = root.find(".//c:ser/c:cat/c:strRef/c:strCache", ns)
+    assert cache is not None
+    point = cache.find("c:pt", ns)
+    assert point is not None
+    cache.remove(point)
+    data = _replace_zip_member(data, "ppt/charts/chart1.xml", ElementTree.tostring(root))
+    text = extract_pptx_pages(data, include_tables=True)[0][1]
+    assert "売上: 1.2500E-01, 西日本=0.375" in text
+    assert "西日本=1.2500E-01" not in text
+
+
+def test_pptx_chart_cached_title_numeric_categories_and_literal_series_name() -> None:
+    data = _build_pptx_with_charts()
+    ns = {"c": "http://schemas.openxmlformats.org/drawingml/2006/chart"}
+    tag = f"{{{ns['c']}}}"
+    with zipfile.ZipFile(BytesIO(data)) as package:
+        root = ElementTree.fromstring(package.read("ppt/charts/chart1.xml"))
+    title = root.find("./c:chart/c:title/c:tx", ns)
+    assert title is not None
+    title.clear()
+    reference = ElementTree.SubElement(title, f"{tag}strRef")
+    cache = ElementTree.SubElement(reference, f"{tag}strCache")
+    point = ElementTree.SubElement(cache, f"{tag}pt", idx="0")
+    ElementTree.SubElement(point, f"{tag}v").text = "キャッシュタイトル"
+    series = root.find(".//c:ser", ns)
+    assert series is not None
+    name = series.find("c:tx", ns)
+    assert name is not None
+    name.clear()
+    ElementTree.SubElement(name, f"{tag}v").text = "直書き系列"
+    reference = series.find("c:cat/c:strRef", ns)
+    assert reference is not None
+    reference.tag = f"{tag}numRef"
+    cache = reference.find("c:strCache", ns)
+    assert cache is not None
+    cache.tag = f"{tag}numCache"
+    for node, value in zip(cache.findall("c:pt/c:v", ns), ["202601.00", "202602.00"], strict=True):
+        node.text = value
+    data = _replace_zip_member(data, "ppt/charts/chart1.xml", ElementTree.tostring(root))
+    text = extract_pptx_pages(data, include_tables=True)[0][1]
+    assert "グラフ: キャッシュタイトル 直書き系列: 202601.00=0.125, 202602.00=0.375" in text
+
+
+def test_pptx_chart_text_obeys_shared_character_budget() -> None:
+    data = _build_pptx_with_charts()
+    pages = extract_pptx_pages(data, include_tables=True)
+    max_chars = len(pages[0][1])
+    assert extract_pptx_pages(data, include_tables=True, max_chars=max_chars) == pages
+    with pytest.raises(office_extract._OfficeTextLimitExceededError):
+        extract_pptx_pages(data, include_tables=True, max_chars=max_chars - 1)
+    with pytest.raises(OfficePayloadError) as raised:
+        extract_office_pages(
+            data, mime_type=PPTX_MIME, include_tables=True, max_extracted_chars=max_chars - 1
+        )
+    assert raised.value.category == "unsafe_content_volume"
+
+
+def test_pptx_chart_progress_callback_errors_propagate(monkeypatch: pytest.MonkeyPatch) -> None:
+    original = office_extract._xml_root
+    in_chart = False
+
+    def read_xml(package: zipfile.ZipFile, member: str, **kwargs: object) -> ElementTree.Element:
+        nonlocal in_chart
+        in_chart = member.startswith("ppt/charts/")
+        return original(package, member, **kwargs)
+
+    def heartbeat() -> None:
+        if in_chart:
+            raise RuntimeError("chart lease lost")
+
+    monkeypatch.setattr(office_extract, "_xml_root", read_xml)
+    with pytest.raises(RuntimeError, match="chart lease lost"):
+        extract_office_pages(
+            _build_pptx_with_charts(),
+            mime_type=PPTX_MIME,
+            include_tables=True,
+            progress_callback=heartbeat,
+        )
+
+
+def test_pptx_chart_dtd_is_still_rejected_in_rich_extraction() -> None:
+    data = _replace_zip_member(
+        _build_pptx_with_charts(),
+        "ppt/charts/chart1.xml",
+        b'<!DOCTYPE chart [<!ENTITY xxe SYSTEM "file:///definitely-not-readable">]><chart/>',
+    )
+    with pytest.raises(OfficePayloadError) as raised:
+        extract_office_pages(data, mime_type=PPTX_MIME, include_tables=True)
+    assert raised.value.category == "unsafe_archive"
+
+
+# -----------------------------------------------------------
 # pptx: group shape 再帰
 # -----------------------------------------------------------
 def _build_pptx_with_group() -> bytes:
