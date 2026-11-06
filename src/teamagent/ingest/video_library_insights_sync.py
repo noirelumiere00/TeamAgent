@@ -11,6 +11,7 @@ import unicodedata
 import uuid
 from collections import Counter
 from datetime import datetime
+from typing import Annotated
 
 import structlog
 from psycopg.types.json import Jsonb
@@ -59,13 +60,14 @@ class AgeBand(BaseModel):
 class InsightRow(BaseModel):
     video: Video
     captured_at: datetime
-    public_metrics: list[int | None]
-    reach: int | None
-    completion_rate: float | None
-    avg_watch_seconds: float | None
-    profile_views: int | None
-    male_ratio: float | None
-    female_ratio: float | None
+    # Bounds mirror 0043's CHECKs so one bad cell skips its row instead of aborting the night.
+    public_metrics: list[Annotated[int, Field(ge=0)] | None]
+    reach: Annotated[int, Field(ge=0)] | None
+    completion_rate: Annotated[float, Field(ge=0, le=1)] | None
+    avg_watch_seconds: Annotated[float, Field(ge=0)] | None
+    profile_views: Annotated[int, Field(ge=0)] | None
+    male_ratio: Annotated[float, Field(ge=0, le=1)] | None
+    female_ratio: Annotated[float, Field(ge=0, le=1)] | None
     age_bands: list[AgeBand]
     retention: list[int]
     has_insights: bool
