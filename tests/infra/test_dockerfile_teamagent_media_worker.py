@@ -58,7 +58,8 @@ UV_DIGEST = "9941e2d8e06ff884d328905091eac0a6bc1e40e5ce12e6dd0de4ef4ee26baac4"
 # 2026-10-30: 署名検証済み索引 + apk-tools 3.0.6 で ffmpeg 8.1.3-r0 と ffmpeg8 副パッケージを再導出（240 行不変）。
 # 2026-11-03: Alpine 上流への追随（libexpat 2.9.0-r0→2.10.0-r0）。apk 段の実ビルドで lock 差分 -1 +1（240→240 行）。
 # 2026-11-06: Alpine 上流への追随（musl 1.2.6-r2→1.2.6-r3）。apk 段の実ビルドで lock 差分 -2 +2（240→240 行）。
-APK_LOCK_SHA256 = "a211e3c3ef95f7efcde7c5c9d2348827e1a4ce8e84cbcc77c138f5326c018669"
+# 2026-11-06: Alpine 上流への追随（font-noto 2026.10.01-r0→2026.11.01-r0）。apk 段の実ビルドで lock 差分 -4 +4（240→240 行）。
+APK_LOCK_SHA256 = "5ac9dcf6ed1eb10f6290df29a0e849fb672ffd4e0876099a8a3dd97c10bc5c13"
 CHROMIUM_PATH = "/usr/lib/chromium/chromium"
 
 
