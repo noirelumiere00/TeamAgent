@@ -15,6 +15,9 @@ border:1px solid var(--line);border-radius:8px}
 border-bottom:1px solid var(--line);vertical-align:top}
 .import-table td{overflow-wrap:anywhere;min-width:70px}
 .import-table td:nth-child(2){min-width:160px;max-width:420px}
+#import-accounts table{table-layout:fixed}
+#import-accounts th,#import-accounts td{min-width:0;max-width:none;overflow-wrap:anywhere}
+#import-accounts th:first-child{width:3.5em}
 
 [data-autoload] [hidden]{display:none!important}
 [data-load-status]{font-size:13px;color:var(--muted);margin:20px 0 12px}

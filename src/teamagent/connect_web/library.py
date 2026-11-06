@@ -1594,6 +1594,8 @@ def register_library_routes(
         if any(len(values) != 1 for values in parsed.values()):
             raise HTTPException(400)
         if import_form and set(parsed) - {
+            "accounts",
+            "operator_label",
             "urls",
             "case",
             "action",
