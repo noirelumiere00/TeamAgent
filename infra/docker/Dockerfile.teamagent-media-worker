@@ -103,6 +103,9 @@ ARG LIBSSL3_PACKAGE_VERSION=3.5.9-r0
 ARG LIBBLKID_PACKAGE_VERSION=2.42.3-r1
 ARG LIBMOUNT_PACKAGE_VERSION=2.42.3-r1
 ARG LIBUUID_PACKAGE_VERSION=2.42.3-r1
+# ECR 脆弱性ゲートが musl-utils 1.2.6-r2 を musl の CVE-2026-107891（HIGH）として検出・v3.24 で 1.2.6-r3
+# 対象: CVE-2026-107891
+ARG MUSL_UTILS_PACKAGE_VERSION=1.2.6-r3
 # chromium-headless ベース同梱の musl に CVE-2026-107891（HIGH）・v3.24 secdb で 1.2.6-r3 修正
 # 対象: CVE-2026-107891
 ARG MUSL_PACKAGE_VERSION=1.2.6-r3
@@ -164,6 +167,7 @@ RUN --mount=type=cache,id=teamagent-media-apk-arm64-v3,target=/var/cache/apk,sha
       "libxtst=$LIBXTST_PACKAGE_VERSION" \
       "mbedtls3=$MBEDTLS3_PACKAGE_VERSION" \
       "musl=$MUSL_PACKAGE_VERSION" \
+      "musl-utils=$MUSL_UTILS_PACKAGE_VERSION" \
       "nodejs=$NODE_PACKAGE_VERSION" \
       "pcre2=$PCRE2_PACKAGE_VERSION" \
       "pyc=$PYTHON_PACKAGE_VERSION" \

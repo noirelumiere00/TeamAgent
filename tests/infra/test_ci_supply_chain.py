@@ -1,13 +1,108 @@
 from __future__ import annotations
 
 import re
+import subprocess
 from pathlib import Path
 
+import pytest
 import yaml
 
 ROOT = Path(__file__).resolve().parents[2]
 WORKFLOWS = ROOT / ".github" / "workflows"
 FULL_COMMIT_SHA = re.compile(r"^[0-9a-f]{40}$")
+
+
+def test_ci_limits_push_and_experimental_runs() -> None:
+    workflow = yaml.safe_load((WORKFLOWS / "ci.yml").read_text())
+    events = workflow.get("on", workflow.get(True))  # PyYAML interprets unquoted on as True.
+    assert events["push"]["branches"] == ["main"]
+    assert events["pull_request"]["branches"] == ["main", "dev"]
+    assert "workflow_dispatch" in events
+    jobs = workflow["jobs"]
+    condition = "github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'"
+    assert jobs["python315-pytest"]["if"] == condition
+    inventory = next(
+        s
+        for s in jobs["pytest-summary"]["steps"]
+        if s.get("name") == "Verify experimental Python 3.15 shard inventory"
+    )
+    assert inventory["if"] == condition
+
+
+def test_locked_pytest_requires_dependency_or_ci_changes() -> None:
+    jobs = yaml.safe_load((WORKFLOWS / "ci.yml").read_text())["jobs"]
+    locked = jobs["lockfile-pytest"]
+    assert locked["needs"] == ["deps-changed"]
+    assert locked["if"] == "needs.deps-changed.outputs.changed == 'true'"
+    detector = jobs["deps-changed"]
+    assert detector["name"] == "依存・CI 変更の検出"
+    assert detector["runs-on"] == "ubuntu-latest"
+    assert detector["timeout-minutes"] == 5
+    checkout, changes = detector["steps"]
+    assert checkout["uses"] == jobs["lint-and-test"]["steps"][0]["uses"]
+    assert checkout["with"]["fetch-depth"] == 0
+    assert detector["outputs"]["changed"] == f"${{{{ steps.{changes['id']}.outputs.changed }}}}"
+    assert changes["env"]["BASE_SHA"] == "${{ github.event.pull_request.base.sha }}"
+    assert changes["env"]["EVENT_NAME"] == "${{ github.event_name }}"
+    run = changes["run"]
+    assert "set -euo pipefail" in run
+    assert "${{" not in run
+    assert 'git diff --name-only "$(git merge-base "$BASE_SHA" HEAD)" HEAD' in run
+    assert r"^(uv\.lock|pyproject\.toml|\.github/workflows/ci\.yml)$" in run
+    assert 'echo "changed=$changed" >> "$GITHUB_OUTPUT"' in run
+    summary = jobs["pytest-summary"]
+    assert set(summary["needs"]) == {
+        "lint-and-test",
+        "lockfile-pytest",
+        "python315-pytest",
+        "deps-changed",
+    }
+    inventory = next(
+        s
+        for s in summary["steps"]
+        if s.get("name") == "Verify collection union and exactly-once execution"
+    )
+    assert inventory["env"]["DEPS_CHANGED"] == "${{ needs.deps-changed.outputs.changed }}"
+    assert (
+        'if [ "$DEPS_CHANGED" = true ]; then\n'
+        "  python tests/pytest_shard.py artifacts/pytest-lock-3.14-shard-*/manifest.json\n"
+        "fi"
+    ) in inventory["run"]
+    assert "needs.deps-changed.result" in summary["steps"][-1]["run"]
+
+
+@pytest.mark.parametrize(
+    ("latest", "detector", "locked", "changed", "succeeds"),
+    [
+        ("success", "success", "success", "true", True),
+        ("success", "success", "success", "false", True),
+        ("success", "success", "skipped", "false", True),
+        ("success", "success", "skipped", "true", False),
+        ("success", "success", "skipped", "", False),
+        ("success", "success", "failure", "false", False),
+        ("success", "success", "cancelled", "false", False),
+        ("success", "failure", "success", "true", False),
+        ("success", "cancelled", "skipped", "false", False),
+        ("success", "skipped", "skipped", "false", False),
+        ("failure", "success", "skipped", "false", False),
+        ("cancelled", "success", "success", "true", False),
+        ("skipped", "success", "success", "true", False),
+    ],
+)
+def test_pytest_summary_gate_fails_closed(
+    latest: str, detector: str, locked: str, changed: str, succeeds: bool
+) -> None:
+    jobs = yaml.safe_load((WORKFLOWS / "ci.yml").read_text())["jobs"]
+    gate = jobs["pytest-summary"]["steps"][-1]["run"]
+    for expression, value in {
+        "needs.lint-and-test.result": latest,
+        "needs.deps-changed.result": detector,
+        "needs.lockfile-pytest.result": locked,
+        "needs.deps-changed.outputs.changed": changed,
+    }.items():
+        gate = gate.replace("${{ " + expression + " }}", value)
+    result = subprocess.run(["bash", "-c", gate], capture_output=True, text=True)
+    assert (result.returncode == 0) is succeeds, result.stdout + result.stderr
 
 
 def test_python315_pytest_is_non_blocking_and_checks_all_three_locked_shards() -> None:

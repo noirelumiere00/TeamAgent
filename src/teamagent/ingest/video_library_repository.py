@@ -10,7 +10,7 @@ from psycopg.types.json import Jsonb
 from pydantic import BaseModel
 
 from teamagent.adapters.pgvector_client import PgVectorClient
-from teamagent.ingest.video_library import SyncBatch
+from teamagent.ingest.video_library import Account, SyncBatch
 
 
 def _upsert(
@@ -51,6 +51,33 @@ def _upsert(
     return conn.execute(query, list(values.values())).rowcount
 
 
+_ACCOUNT_LABELS = ("display_name", "operator_label", "classification")
+
+
+def _save_account(conn: Connection[dict[str, Any]], account: Account) -> None:
+    # Accounts seen only in video rows carry no labels; NULL must not erase a ledger/manual 運営
+    # (11/06: 110 NewsTV accounts were blanked nightly this way).
+    # shortcut: the ledger can no longer clear a label by emptying it; clear by hand if ever needed.
+    kept = [
+        sql.SQL("COALESCE(EXCLUDED.{c}, {t}.{c})").format(
+            c=sql.Identifier(c), t=sql.Identifier("vl_accounts")
+        )
+        for c in _ACCOUNT_LABELS
+    ]
+    conn.execute(
+        sql.SQL("""
+            INSERT INTO vl_accounts (platform, handle, {cols}) VALUES (%s, %s, %s, %s, %s)
+            ON CONFLICT (platform, handle) DO UPDATE SET ({cols}) = ({kept})
+            WHERE ({old}) IS DISTINCT FROM ({kept})
+        """).format(
+            cols=sql.SQL(", ").join(map(sql.Identifier, _ACCOUNT_LABELS)),
+            kept=sql.SQL(", ").join(kept),
+            old=sql.SQL(", ").join(sql.Identifier("vl_accounts", c) for c in _ACCOUNT_LABELS),
+        ),
+        (account.platform, account.handle, *(getattr(account, c) for c in _ACCOUNT_LABELS)),
+    )
+
+
 class VideoLibraryRepository:
     def __init__(self, pg: PgVectorClient) -> None:
         self.pg = pg
@@ -66,7 +93,7 @@ class VideoLibraryRepository:
             for campaign in batch.campaigns:
                 _upsert(conn, "vl_campaigns", campaign, ("advertiser", "campaign"))
             for account in batch.accounts:
-                _upsert(conn, "vl_accounts", account, ("platform", "handle"))
+                _save_account(conn, account)
             changed = 0
             for video in batch.videos:
                 changed += _upsert(conn, "vl_videos", video, ("platform", "video_id"))
