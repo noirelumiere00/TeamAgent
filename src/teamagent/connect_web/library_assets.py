@@ -155,11 +155,21 @@ border-radius:8px;padding:20px;margin-bottom:20px}.metric-group h2{font-size:18p
 .video-insights{overflow-wrap:anywhere}.video-insights .stats{
 grid-template-columns:repeat(2,minmax(0,1fr))}.video-insights .stats div{padding:12px}
 .video-insights .stats dd{font-size:23px}
-.retention-chart{display:block;width:100%;height:auto}
-.retention-chart text{fill:var(--muted);font-size:14px}
+.retention-chart{position:relative;width:100%;height:200px;margin-bottom:28px}
+.retention-plot{position:absolute;top:10px;right:6px;bottom:20px;left:40px}
+.retention-plot svg{display:block;overflow:hidden}
+.chart-label{position:absolute;font-size:12px;line-height:16px;color:var(--muted);white-space:nowrap}
+.chart-y{right:100%;margin-right:6px;transform:translateY(-50%)}
+.chart-top{top:0%}.chart-middle{top:50%}.chart-bottom{top:100%}
+.chart-x{top:100%;margin-top:4px}.chart-start{left:0}.chart-end{right:0}
+.chart-seconds{left:50%;transform:translateX(-50%)}
 .chart-axis,.chart-half{fill:none;stroke:var(--line)}.chart-half{stroke-dasharray:4 4}
 .chart-line{fill:none;stroke:var(--blue);stroke-width:3;stroke-linejoin:round}
-.chart-marker,.ratio-fill{fill:var(--blue)}.ratio-track{fill:var(--line)}
+.chart-marker{position:absolute;width:10px;height:10px;border-radius:50%;
+background:var(--blue);transform:translate(-50%,-50%)}
+.ratio-fill{fill:var(--blue)}.ratio-track{fill:var(--line)}
+.video-insights .retention-highlight{font-size:18px;font-weight:650;color:var(--blue)}
+.retention-highlight strong{font-size:26px;font-weight:750}
 .audience-ratios>div{display:grid;grid-template-columns:1fr auto;gap:4px;margin:12px 0}
 .audience-ratios dd{margin:0}.audience-ratios svg{grid-column:1/-1;width:100%;height:8px}
 table{width:100%;border-collapse:collapse;font-variant-numeric:tabular-nums;font-size:13px}
@@ -202,6 +212,7 @@ h1{font-size:28px}h2{font-size:21px}
 .stats{grid-template-columns:repeat(2,minmax(0,1fr))}
 .stats div{padding:16px}.stats dd{font-size:23px}.detail-layout{grid-template-columns:1fr;gap:20px}
 .detail-layout .preview{max-width:360px;margin:auto}
+.retention-chart{height:160px}
 .tag-groups{grid-template-columns:repeat(2,minmax(0,1fr))}
 .analysis{padding:16px}.segment-content dl{grid-template-columns:1fr}.timeline{gap:2px}
 .segment span{font-size:9px}.segment strong{font-size:11px}.tooltip{width:150px}

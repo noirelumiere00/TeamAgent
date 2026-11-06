@@ -70,17 +70,23 @@ def test_latest_numbers_chart_audience_and_single_bounded_query(
         "12.34秒",
         "1,234",
     ]
-    chart = section.select_one('svg.retention-chart[role="img"]')
+    chart = section.select_one('div.retention-chart[role="img"]')
     assert chart is not None
     assert len(chart.select_one("polyline")["points"].split()) == 5
-    assert chart.select_one("circle")["cx"] == "354.00"
-    assert chart.select_one("circle")["cy"] == "101.40"
+    assert chart.select_one("style").text == "#retention-marker{left:75.00%;top:51.00%}"
     description = section.find(id=chart["aria-describedby"])
     assert description.text == (
         "0秒の視聴者数を100%とした残っている割合。"
         "0秒: 100.0%、1秒: 80.0%、2秒: 50.0%、3秒: 49.0%、4秒: 20.0%"
     )
-    for text in ("3秒で半分が離脱", "男性", "29.2%", "女性", "70.8%", "取得日時: 2026/11/06 01:30"):
+    for text in (
+        "3秒で半分以上が離脱",
+        "男性",
+        "29.2%",
+        "女性",
+        "70.8%",
+        "取得日時: 2026/11/06 01:30",
+    ):
         assert text in section.text
     assert [node["width"] for node in section.select(".ratio-fill")] == ["29.24", "70.76"]
     assert [node.text for node in section.select("ol li")] == [
@@ -96,6 +102,67 @@ def test_latest_numbers_chart_audience_and_single_bounded_query(
     assert params == ("tiktok", "123")
     assert pg.sessions[0]["app_role"] == "teamagent_app"
     assert pg.sessions[0]["user_role"] == "user"
+
+
+def test_chart_labels_do_not_scale_and_drop_is_highlighted(setup: tuple[TestClient, Pg]) -> None:
+    client, pg = setup
+    pg.insights = [insight()]
+    page = detail(client)
+    chart = page.select_one(".retention-chart")
+    assert [label.text for label in chart.select(".chart-label")] == [
+        "100%",
+        "50%",
+        "0%",
+        "0",
+        "4",
+        "秒",
+    ]
+    plot = chart.select_one(".retention-plot")
+    assert plot.name == "div"
+    assert plot.svg["preserveaspectratio"] == "none"
+    assert plot.svg["viewbox"] == "0 0 100 100"
+    assert plot.svg["width"] == plot.svg["height"] == "100%"
+    assert not plot.svg.select("text, .chart-label, .chart-marker")
+    assert all(label.parent == plot for label in plot.select(".chart-label, .chart-marker"))
+    assert all(
+        shape["vector-effect"] == "non-scaling-stroke" for shape in plot.svg.select("path,polyline")
+    )
+    css = "".join(page.select_one("style").text.split())
+    assert ".chart-label{position:absolute;font-size:12px;" in css
+    assert ".retention-chart{position:relative;width:100%;height:200px}" in css
+    assert ".retention-plot{position:absolute;top:10px;right:6px;bottom:20px;left:40px}" in css
+    assert ".chart-top{top:0%}.chart-middle{top:50%}.chart-bottom{top:100%}" in css
+    assert ".chart-x{top:100%;margin-top:4px}" in css
+    assert ".retention-chart{height:160px}" in css
+    assert ".retention-highlightstrong{font-size:26px;font-weight:750}" in css
+    highlight = page.select_one(".retention-highlight")
+    assert highlight.text == "3秒で半分以上が離脱"
+    assert highlight.select_one("strong").text == "3秒"
+    assert highlight.find_previous_sibling().text == "視聴を続けている人の割合"
+
+
+@pytest.mark.parametrize("retention", [[1000, 800, 500, 490, 0], [1000, 1200, -10], [1000, 499]])
+def test_chart_points_half_line_and_html_marker_share_coordinates(
+    setup: tuple[TestClient, Pg], retention: list[int]
+) -> None:
+    client, pg = setup
+    pg.insights = [insight(retention=retention)]
+    page = detail(client)
+    plot = page.select_one(".retention-plot")
+    assert plot.select_one(".chart-half")["d"] == "M0 50H100"
+    points = [tuple(map(float, point.split(","))) for point in plot.polyline["points"].split()]
+    assert all(0 <= x <= 100 and 0 <= y <= 100 for x, y in points)
+    assert points[0] == (0, 0)
+    assert points[-1][0] == 100
+    if retention == [1000, 1200, -10]:
+        assert points == [(0, 0), (50, 0), (100, 100)]
+    half = next(second for second, count in enumerate(retention) if count / retention[0] < 0.5)
+    x, y = points[half]
+    marker = plot.select_one(".chart-marker")
+    assert marker.name == "span" and marker.parent == plot
+    assert plot.style.text == f"#retention-marker{{left:{x:.2f}%;top:{y:.2f}%}}"
+    assert plot.style["nonce"] == page.select_one("head style")["nonce"]
+    assert not page.select("[style]")
 
 
 @pytest.mark.parametrize("previous,expected", [(10000, "+2,345"), (13000, "-655"), (12345, "+0")])
@@ -119,7 +186,8 @@ def test_insufficient_retention_is_text_only(
     section = detail(client).select_one(".video-insights")
     assert "データ不足" in section.text
     assert not section.select(".retention-chart")
-    assert "半分が離脱" not in section.text
+    assert "半分以上が離脱" not in section.text
+    assert not section.select(".retention-highlight")
     assert "12,345" in section.text
 
 
@@ -133,7 +201,7 @@ def test_no_half_drop_and_increasing_counts(
     assert "半分以上が視聴を続けています" in section.text
     assert not section.select(".chart-marker")
     points = section.select_one("polyline")["points"].split()
-    assert all(30 <= float(point.split(",")[1]) <= 170 for point in points)
+    assert all(0 <= float(point.split(",")[1]) <= 100 for point in points)
 
 
 def test_missing_values_are_not_zero_and_band_text_is_escaped(setup: tuple[TestClient, Pg]) -> None:
@@ -200,6 +268,32 @@ def test_insights_fit_viewport_with_real_csp(setup: tuple[TestClient, Pg], width
             )
             page.goto("https://library.test/library/v/tiktok/123")
             assert page.locator(".retention-chart").is_visible()
+            assert page.locator(".retention-chart").evaluate(
+                "el => el.getBoundingClientRect().height"
+            ) == (160 if width == 375 else 200)
+            assert page.locator(".chart-label").evaluate_all(
+                "labels => labels.every(el => getComputedStyle(el).fontSize === '12px')"
+            )
+            assert page.locator(".retention-plot").evaluate("""plot => {
+                const box = plot.getBoundingClientRect(), svg = plot.querySelector('svg');
+                const matrix = svg.getScreenCTM();
+                const position = point => new DOMPoint(point.x, point.y).matrixTransform(matrix);
+                const points = Array.from(plot.querySelector('polyline').points, position);
+                const marker = plot.querySelector('.chart-marker').getBoundingClientRect();
+                const half = position(plot.querySelector('.chart-half').getPointAtLength(0));
+                const close = (a, b) => Math.abs(a - b) < 1;
+                return points.every(p => p.y >= box.top - 0.1 && p.y <= box.bottom + 0.1)
+                    && close(points[0].y, box.top)
+                    && close(points[3].x, marker.left + marker.width / 2)
+                    && close(points[3].y, marker.top + marker.height / 2)
+                    && marker.width === 10 && marker.height === 10
+                    && close(half.y, box.top + box.height / 2)
+                    && ['top', 'middle', 'bottom'].every((name, i) => {
+                        const label = plot.querySelector('.chart-' + name).getBoundingClientRect();
+                        return close(label.top + label.height / 2, box.top + box.height * i / 2);
+                    })
+                    && plot.querySelector('.chart-seconds').getBoundingClientRect().top >= box.bottom;
+            }""")
             assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
             assert page.locator(".video-insights").evaluate(
                 "el => el.scrollWidth <= el.clientWidth"

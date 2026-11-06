@@ -107,41 +107,46 @@ def _day(value: Any) -> str:
 def _retention_chart(counts: list[int]) -> str:
     if len(counts) < 2 or counts[0] <= 0:
         return "<p>データ不足：視聴の推移を表示できません。</p>"
-    ratios = [count / counts[0] * 100 for count in counts]
-    ceiling = max(100, max(ratios))
+    ratios = [min(1, max(0, count / counts[0])) for count in counts]
     points = [
-        (48 + second / (len(counts) - 1) * 408, 170 - ratio / ceiling * 140)
-        for second, ratio in enumerate(ratios)
+        (second / (len(counts) - 1) * 100, 100 - ratio * 100) for second, ratio in enumerate(ratios)
     ]
-    half = next((second for second, ratio in enumerate(ratios) if ratio < 50), None)
+    half = next((second for second, ratio in enumerate(ratios) if ratio < 0.5), None)
     description = "0秒の視聴者数を100%とした残っている割合。" + "、".join(
-        f"{second:,}秒: {ratio:,.1f}%" for second, ratio in enumerate(ratios)
+        f"{second:,}秒: {ratio:.1%}" for second, ratio in enumerate(ratios)
     )
-    body = (
-        '<svg class="retention-chart" viewBox="0 0 480 220" role="img" '
-        'aria-labelledby="retention-title" aria-describedby="retention-description">'
-        '<title id="retention-title">視聴を続けている人の割合</title>'
-        f'<desc id="retention-description">{_e(description)}</desc>'
-        '<path class="chart-axis" d="M48 30V170H456"/>'
-        f'<path class="chart-half" d="M48 {170 - 50 / ceiling * 140:.2f}H456"/>'
-        f'<text x="42" y="34" text-anchor="end">{ceiling:,.0f}%</text>'
-        '<text x="42" y="174" text-anchor="end">0%</text>'
-        '<text x="48" y="192" text-anchor="middle">0</text>'
-        f'<text x="456" y="192" text-anchor="end">{len(counts) - 1:,}</text>'
-        '<text x="252" y="214" text-anchor="middle">秒</text>'
-        '<polyline class="chart-line" points="'
+    body = ""
+    if half is not None:
+        body += f'<p class="retention-highlight"><strong>{half:,}秒</strong>で半分以上が離脱</p>'
+    else:
+        body += "<p>記録された範囲では半分以上が視聴を続けています。</p>"
+    body += (
+        "<p>0秒の視聴者数を100%として表示</p>"
+        '<div class="retention-chart" role="img" aria-label="視聴を続けている人の割合" '
+        'aria-describedby="retention-description">'
+        f'<span class="sr-only" id="retention-description">{_e(description)}</span>'
+        '<div class="retention-plot" aria-hidden="true">'
+        '<svg viewBox="0 0 100 100" preserveAspectRatio="none" width="100%" height="100%">'
+        '<path class="chart-axis" d="M0 0V100H100" vector-effect="non-scaling-stroke"/>'
+        '<path class="chart-half" d="M0 50H100" vector-effect="non-scaling-stroke"/>'
+        '<polyline class="chart-line" vector-effect="non-scaling-stroke" points="'
         + " ".join(f"{x:.2f},{y:.2f}" for x, y in points)
-        + '"/>'
+        + '"/></svg>'
+        '<span class="chart-label chart-y chart-top">100%</span>'
+        '<span class="chart-label chart-y chart-middle">50%</span>'
+        '<span class="chart-label chart-y chart-bottom">0%</span>'
+        '<span class="chart-label chart-x chart-start">0</span>'
+        f'<span class="chart-label chart-x chart-end">{len(counts) - 1:,}</span>'
+        '<span class="chart-label chart-x chart-seconds">秒</span>'
     )
     if half is not None:
         x, y = points[half]
-        body += f'<circle class="chart-marker" cx="{x:.2f}" cy="{y:.2f}" r="5"/>'
-    body += "</svg>"
-    if half is not None:
-        body += f"<p>{half:,}秒で半分が離脱</p>"
-    else:
-        body += "<p>記録された範囲では半分以上が視聴を続けています。</p>"
-    return body
+        # The HTML renderer adds the CSP nonce to style elements; style attributes are blocked.
+        body += (
+            f"<style>#retention-marker{{left:{x:.2f}%;top:{y:.2f}%}}</style>"
+            '<span class="chart-marker" id="retention-marker"></span>'
+        )
+    return body + "</div></div>"
 
 
 def _insights(rows: list[Mapping[str, Any]]) -> str:
@@ -161,7 +166,7 @@ def _insights(rows: list[Mapping[str, Any]]) -> str:
         value = latest[field]
         display = format(value, spec) + suffix if value is not None else "データなし"
         body += f"<div><dt>{_e(label)}</dt><dd>{_e(display)}</dd></div>"
-    body += "</dl><h3>視聴を続けている人の割合</h3><p>0秒の視聴者数を100%として表示</p>"
+    body += "</dl><h3>視聴を続けている人の割合</h3>"
     body += _retention_chart(latest["retention"])
     body += '<h3>男女比</h3><dl class="audience-ratios">'
     for field, label in (("male_ratio", "男性"), ("female_ratio", "女性")):
