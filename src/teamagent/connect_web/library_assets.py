@@ -152,6 +152,16 @@ border-radius:8px;padding:20px;margin-bottom:20px}.metric-group h2{font-size:18p
 .paid{grid-column:1/-1}.paid summary{cursor:pointer}.paid summary h2{display:inline}
 .paid summary span{display:block;margin-top:8px;font-size:14px;color:var(--muted)}
 .metric-group td{white-space:nowrap}
+.video-insights{overflow-wrap:anywhere}.video-insights .stats{
+grid-template-columns:repeat(2,minmax(0,1fr))}.video-insights .stats div{padding:12px}
+.video-insights .stats dd{font-size:23px}
+.retention-chart{display:block;width:100%;height:auto}
+.retention-chart text{fill:var(--muted);font-size:14px}
+.chart-axis,.chart-half{fill:none;stroke:var(--line)}.chart-half{stroke-dasharray:4 4}
+.chart-line{fill:none;stroke:var(--blue);stroke-width:3;stroke-linejoin:round}
+.chart-marker,.ratio-fill{fill:var(--blue)}.ratio-track{fill:var(--line)}
+.audience-ratios>div{display:grid;grid-template-columns:1fr auto;gap:4px;margin:12px 0}
+.audience-ratios dd{margin:0}.audience-ratios svg{grid-column:1/-1;width:100%;height:8px}
 table{width:100%;border-collapse:collapse;font-variant-numeric:tabular-nums;font-size:13px}
 th,td{text-align:left;padding:8px 4px;border-bottom:1px solid var(--line);overflow-wrap:anywhere}
 th{font-weight:500}td{text-align:right}.metric-group p{font-size:12px;margin-top:12px}
