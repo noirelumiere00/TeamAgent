@@ -3,7 +3,7 @@
   "url": "https://packages.wolfi.dev/os/aarch64/py3-pip-wheel-26.2.2-r2.apk",
   "archive": "py3-pip-wheel-26.2.2-r2.apk",
   "archive_sha256": "6dcca154f23de54db689ec2006bb65c67de74d556f55f8836bf5d438da8b8ee1",
-  "base_version": "26.2.1-r2",
+  "base_version": "26.2.2-r2",
   "apkindex": {
     "C": "Q1IIJLbmzKSh5E82XTLoLHHgIvv5A=",
     "P": "py3-pip-wheel",

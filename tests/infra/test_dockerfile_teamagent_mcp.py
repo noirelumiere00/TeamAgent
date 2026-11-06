@@ -15,13 +15,13 @@ PYPROJECT = ROOT / "pyproject.toml"
 LOCK = ROOT / "uv.lock"
 TEXT = DOCKERFILE.read_text(encoding="utf-8")
 
-PYTHON_BUILDER_DIGEST = "2c8414a1ab05655dc3a88e88f4cac4fde9db3342daab7772f1b45f2b937b2fd5"
-PYTHON_RUNTIME_DIGEST = "f9552d99b5fcf870d9cd1d285e0086ae90aa2f0758aeff8d1f80dc9346fb52c5"
+PYTHON_BUILDER_DIGEST = "16f91a476698cf7b53dc4789d8e6252ddec297a429f9ee726a4078fddbc2deba"
+PYTHON_RUNTIME_DIGEST = "b75f25f6c278e21d5e3569d8e3171deb4a06b7ceffdcaef0e3a908aca3d6bf47"
 UV_DIGEST = "9941e2d8e06ff884d328905091eac0a6bc1e40e5ce12e6dd0de4ef4ee26baac4"
-PYTHON_BINARY_SHA256 = "81060a4e37f0e6746c7f53468dcd28c200053b4a2bb377a3fe2169edf3f770ac"
+PYTHON_BINARY_SHA256 = "016d42a0bdd7464730b5154c2b4f1df8cd0f8cb67b67406e6f10c8c0c1ce3faa"
 UV_BINARY_SHA256 = "f32f61ced7feb20342032cdac4d0825cebbda61911554f5de5231ec72821812e"
-TORCH_WHEEL_SHA256 = "ca021f9eb2f8345c83fa03e3a04587308afb8df71bd472670b3ece00df58621c"
-CA_BUNDLE_APK_SHA256 = "4f57ebd7dc21d78ecce228f397d0a4ee46b5cfc777ac5f292821d41a97bfd896"
+TORCH_WHEEL_SHA256 = "8eb5002ca81af00ae69b57540f615b58b8ae922b6d4848176b366a52bd2196e6"
+CA_BUNDLE_APK_SHA256 = "d2a458ae71b3f6f65302a8dd61c35f75f3eef87aeb5583a3f97523e99698cf49"
 E5_MODEL_REVISION = "3d7cfbdacd47fdda877c5cd8a79fbcc4f2a574f3"
 BAKED_APP_HTML_SHA256 = "716ac25a96516efd6443277c903102d514f3f86729f8706baea41ee48f0ecdeb"
 APP_HTML_SHA256 = "fd62e56e51d3cee25c3d3a87085048fae08ce3babc82480411c61df36e467e28"
@@ -47,7 +47,7 @@ def test_core_uses_exact_arm64_child_digests_and_binary_hashes() -> None:
     assert f"ARG UV_ARM64_DIGEST=sha256:{UV_DIGEST}" in TEXT
     assert f"ARG PYTHON_BINARY_SHA256={PYTHON_BINARY_SHA256}" in TEXT
     assert f"ARG UV_BINARY_SHA256={UV_BINARY_SHA256}" in TEXT
-    assert "ARG PYTHON_VERSION=3.14.10" in TEXT
+    assert "ARG PYTHON_VERSION=3.15.1" in TEXT
     assert "cgr.dev/chainguard/python:latest-dev@${PYTHON_BUILDER_ARM64_DIGEST}" in TEXT
     assert "cgr.dev/chainguard/python:latest@${PYTHON_RUNTIME_ARM64_DIGEST}" in TEXT
     assert "ghcr.io/astral-sh/uv:latest@${UV_ARM64_DIGEST}" in TEXT
@@ -115,7 +115,7 @@ def test_core_contains_e5_mcp_db_aws_but_no_media_or_js_runtime() -> None:
 def test_core_model_torch_and_app_html_are_content_addressed() -> None:
     assert f"ARG E5_MODEL_REVISION={E5_MODEL_REVISION}" in TEXT
     assert f"ARG TORCH_ARM64_WHEEL_SHA256={TORCH_WHEEL_SHA256}" in TEXT
-    assert "torch-2.13.0%2Bcpu-cp314-cp314-manylinux_2_28_aarch64.whl" in TEXT
+    assert "torch-2.13.0%2Bcpu-cp315-cp315-manylinux_2_28_aarch64.whl" in TEXT
     assert "revision=os.environ['TEAMAGENT_E5_MODEL_REVISION']" in TEXT
     assert TEXT.count("local_files_only=True") >= 2
     assert "HF_HUB_OFFLINE=1" in TEXT
@@ -144,8 +144,8 @@ def test_core_model_torch_and_app_html_are_content_addressed() -> None:
 def test_core_ca_bundle_uses_the_official_fixed_apk_without_changing_python() -> None:
     builder = _stage("builder", "final")
     assert f"ARG CA_CERTIFICATES_BUNDLE_APK_SHA256={CA_BUNDLE_APK_SHA256}" in TEXT
-    assert "ARG CA_CERTIFICATES_BUNDLE_VERSION=20260909-r3" in TEXT
-    assert "COPY infra/docker/vendor/ca-certificates-bundle-20260909-r3.apk " in builder
+    assert "ARG CA_CERTIFICATES_BUNDLE_VERSION=20261020-r0" in TEXT
+    assert "COPY infra/docker/vendor/ca-certificates-bundle-20261020-r0.apk " in builder
     assert "COPY infra/docker/core-ca-bundle.lock.json " in builder
     assert "COPY infra/docker/replace_core_ca_bundle.py " in builder
     assert '--apk-sha256 "$CA_CERTIFICATES_BUNDLE_APK_SHA256"' in builder
@@ -155,14 +155,14 @@ def test_core_ca_bundle_uses_the_official_fixed_apk_without_changing_python() ->
 def test_core_brotli_apks_are_pinned_glibc_arm64_libraries() -> None:
     builder = _stage("builder", "final")
     final = _stage("final")
-    assert "ARG BROTLI_PACKAGE_VERSION=1.2.1-r0" in TEXT
+    assert "ARG BROTLI_PACKAGE_VERSION=1.2.1-r2" in TEXT
     assert "apk --root /tmp/core-ca/root --no-network --no-scripts --allow-untrusted add" in builder
     for part, digest in {
-        "common": "1801ba6f752b201c5d52fadd98a3698a672a5695ad18d2321169b9e1c9fabe3e",
-        "dec": "a5a25fb6a8238af95af1c21f039ecb4cb1a32fadd040ac276d73532ffd72fb1c",
-        "enc": "d15c3aaa157a5fa281768fe5e69ae3da9357d3e58668ca47aa7bf2c3442d09b8",
+        "common": "5a71e1e2255f6e85cf501b60a34584e097fe743a91bf0e60338376ddc5a24090",
+        "dec": "29b9fcc4d55fea32dbe590a2e3de0459109c8103b6dc568e650e0e6395280a82",
+        "enc": "14ba019e5e959d8f4ae06f6a6c9e1014842b730d2a10a2fbb66fb780523910f7",
     }.items():
-        relative = f"infra/docker/vendor/libbrotli{part}1-1.2.1-r0.apk"
+        relative = f"infra/docker/vendor/libbrotli{part}1-1.2.1-r2.apk"
         assert hashlib.sha256((ROOT / relative).read_bytes()).hexdigest() == digest
         assert f"ARG BROTLI_{part.upper()}_APK_SHA256={digest}" in TEXT
         assert f"!{relative}" in DOCKERIGNORE.read_text()
@@ -170,7 +170,7 @@ def test_core_brotli_apks_are_pinned_glibc_arm64_libraries() -> None:
         with tarfile.open(ROOT / relative) as archive:
             metadata = archive.extractfile(".PKGINFO").read().decode()
             assert f"pkgname = libbrotli{part}1\n" in metadata
-            assert "pkgver = 1.2.1-r0\n" in metadata
+            assert "pkgver = 1.2.1-r2\n" in metadata
             assert "arch = aarch64\n" in metadata
             library = archive.extractfile(f"usr/lib/libbrotli{part}.so.1.2.1").read()
             assert library[:5] == b"\x7fELF\x02"
@@ -178,8 +178,6 @@ def test_core_brotli_apks_are_pinned_glibc_arm64_libraries() -> None:
             assert b"libc.so.6\x00" in library
     assert "BrotliDecoderVersion() == 0x1002001" in final
     assert "BrotliEncoderVersion() == 0x1002001" in final
-    assert "libbrotli'+part+'.so.1.2.0').unlink()" in final
-    assert "libbrotli'+part+'1-1.2.0-r5.spdx.json').unlink()" in final
 
 
 def test_core_runtime_is_uid_10001_read_only_ready_and_python_health_checked() -> None:
@@ -230,7 +228,7 @@ def test_core_dockerignore_is_deny_by_default_and_excludes_sensitive_state() -> 
         "!infra/docker/core-ca-bundle.lock.json",
         "!infra/docker/core-pip-wheel.lock.json",
         "!infra/docker/vendor/py3-pip-wheel-26.2.2-r2.apk",
-        "!infra/docker/vendor/ca-certificates-bundle-20260909-r3.apk",
+        "!infra/docker/vendor/ca-certificates-bundle-20261020-r0.apk",
     ):
         assert allowed in text
     assert "scripts/ingest_media_cases.py" in _stage("builder", "final")
@@ -266,7 +264,7 @@ def test_core_pip_wheel_is_pinned_and_verified_in_both_stages() -> None:
     apk = ROOT / "infra/docker/vendor/py3-pip-wheel-26.2.2-r2.apk"
     assert hashlib.sha256(apk.read_bytes()).hexdigest() == digest
     assert hashlib.sha256(lock.read_bytes()).hexdigest() == (
-        "90de1897152e745869e5953cf359cd2ecfd4afb993a4451560f0ac4c617479a0"
+        "750b8873999ca94d18117d22fc40c39b99add3739de1e58f5799664cfad3afd4"
     )
     assert (
         f"{hashlib.sha256(lock.read_bytes()).hexdigest()} /tmp/core-ca/pip-wheel.lock.json | sha256sum -c -"
@@ -299,32 +297,10 @@ def test_core_pip_wheel_is_pinned_and_verified_in_both_stages() -> None:
         assert all(use in builder for use in assertion["dockerfile_uses"])
 
 
-def test_python_apks_are_pinned_in_both_builder_and_final_runtime() -> None:
-    import json
-
-    builder, final = _stage("builder", "final"), _stage("final")
-    for part in ("", "-base", "-runtime", "-base-dev", "-dev"):
-        name = "python-3.14" + part
-        lock = ROOT / f"infra/docker/core-{name}.lock.json"
-        data = json.loads(lock.read_bytes())
-        apk = ROOT / "infra/docker/vendor" / data["archive"]
-        assert hashlib.sha256(apk.read_bytes()).hexdigest() == data["archive_sha256"]
-        assert data["apkindex"]["V"] == "3.14.10_git20261028-r0"
-        assert (
-            f"{hashlib.sha256(lock.read_bytes()).hexdigest()} /tmp/core-python/{lock.name} | sha256sum -c -"
-            in builder
-        )
-        for path in (apk, lock):
-            assert f"COPY {path.relative_to(ROOT)} " in builder
-            assert f"!{path.relative_to(ROOT)}" in DOCKERIGNORE.read_text()
-        assert "--root / --base-db /tmp/core-python/builder-installed" in builder
-        if part not in ("-base-dev", "-dev"):
-            assert f'"--apk-sha256", "{data["archive_sha256"]}"' in final
-    assert "COPY --from=builder /tmp/core-ca/root/usr/lib/python3.14/ /usr/lib/python3.14/" in final
-    assert (
-        "COPY --from=builder /tmp/core-ca/root/usr/lib/libpython3.14.so.1.0 /usr/lib/libpython3.14.so.1.0"
-        in final
-    )
+def test_python_315_uses_the_pinned_base_without_314_overlays() -> None:
+    assert "python3.14" not in TEXT
+    assert "/tmp/core-python" not in TEXT
+    assert "/usr/bin/python3.15 | sha256sum -c -" in _stage("builder", "final")
 
 
 def test_expat_is_pinned_and_verified_in_builder_and_final_runtime() -> None:

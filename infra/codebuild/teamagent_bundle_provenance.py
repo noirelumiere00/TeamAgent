@@ -86,7 +86,7 @@ RELEASE_APPROVAL_LABEL = "io.teamagent.build.release-approval-sha256"
 EXPECTED_PROBE_PATHS = {
     "core": {
         "app.baked-fallback.sha256": "/app/src/teamagent/connect_web/static/app.html",
-        "binary.python.sha256": "/usr/bin/python3.14",
+        "binary.python.sha256": "/usr/bin/python3.15",
     },
     "media": {
         "binary.chromium.sha256": "/usr/lib/chromium/chromium",
@@ -1097,7 +1097,7 @@ def validate_contract_pair(
     core_probes = {probe["key"]: probe for probe in _subject(contract, "core")["binary_probes"]}
     core_python_probe = core_probes["binary.python.sha256"]
     if (
-        core_python_probe["path"] != "/usr/bin/python3.14"
+        core_python_probe["path"] != "/usr/bin/python3.15"
         or core_python_probe["sha256"] != core_python["value"]
     ):
         raise ProvenanceError(

@@ -116,7 +116,7 @@ class ShardRun:
 
     @pytest.hookimpl(optionalhook=True)
     def pytest_testnodedown(self, node: Any, error: Any) -> None:
-        manifest = node.workeroutput.get("ci_shard")
+        manifest = getattr(node, "workeroutput", {}).get("ci_shard")
         if manifest is not None:
             if self.manifest is not None and self.manifest != manifest:
                 raise pytest.UsageError("xdist workers collected different shard inventories")

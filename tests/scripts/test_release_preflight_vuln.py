@@ -167,8 +167,10 @@ def test_core_build_reuses_real_replacements_without_app_stages() -> None:
     source = (ROOT / "infra/docker/Dockerfile.teamagent-mcp").read_text()
     recipe = preflight.core_dockerfile(source)
     assert "cgr.dev/chainguard/python:latest@${PYTHON_RUNTIME_ARM64_DIGEST}" in recipe
-    for lock in (ROOT / "infra/docker").glob("core-*.lock.json"):
-        assert f"infra/docker/{lock.name}" in recipe
+    for lock in ("core-ca-bundle", "core-libexpat1", "core-pip-wheel"):
+        assert f"infra/docker/{lock}.lock.json" in recipe
+    assert "core-python-3.14" not in recipe
+    assert '"$PYTHON_BINARY_SHA256" /usr/bin/python3.15 | sha256sum -c -' in recipe
     assert "--no-network --no-scripts" in recipe
     assert "replace_core_ca_bundle.py prepare" in recipe
     assert "COPY --from=builder /tmp/core-ca/root/ /" in recipe
