@@ -65,6 +65,7 @@ _OPERATIONS = {
     "acquire",
     "sales25_media",
     "sales25_pptx",
+    "concrete_pptx",
     "tiktok_acquire",
     "proxy",
     "frame",
@@ -450,6 +451,20 @@ def _validate_operation(value: Any) -> None:
             or operation["source"]["size"] < 1
         ):
             raise ValueError("sales25 owner or ZIP source is invalid")
+    elif kind == "concrete_pptx":
+        operation = _exact_keys(
+            value, {"kind", "source", "owner_id", "request_id"}, "concrete PPTX operation"
+        )
+        _validate_s3_ref(operation["source"])
+        for field in ("owner_id", "request_id"):
+            text = _bounded_string(operation[field], minimum=1, maximum=200, name=field)
+            if not text.strip():
+                raise ValueError("concrete owner/request is invalid")
+        if (
+            operation["source"]["content_type"] != "application/zip"
+            or operation["source"]["size"] < 1
+        ):
+            raise ValueError("concrete ZIP source is invalid")
     elif kind == "pdf":
         operation = _exact_keys(value, {"kind", "html"}, "PDF operation")
         _validate_s3_ref(operation["html"])
@@ -1181,6 +1196,14 @@ def _operation_output_slots(spec: dict[str, Any], attempt: dict[str, Any]) -> li
                 ("sales25-qa.zip", "sales25-qa.zip", 16 * 1024 * 1024),
             )
         )
+    elif kind == "concrete_pptx":
+        slots.extend(
+            (
+                ("concrete.pptx", "concrete.pptx", _MAX_OUTPUT_BYTES),
+                ("concrete-preflight.json", "concrete-preflight.json", 1024 * 1024),
+                ("concrete-result.json", "concrete-result.json", 1024 * 1024),
+            )
+        )
     elif kind == "pdf":
         slots.append(("document.pdf", "document.pdf", _MAX_OUTPUT_BYTES))
     else:
@@ -1195,6 +1218,8 @@ def _operation_output_slots(spec: dict[str, Any], attempt: dict[str, Any]) -> li
 
 def _required_output_names(spec: dict[str, Any]) -> set[str]:
     kind = spec["operation"]["kind"]
+    if kind == "concrete_pptx":
+        return {"concrete-result.json"}
     if kind == "tiktok_acquire":
         names = {"posts.json"}
         if spec["operation"].get("edition") == "sales25":
