@@ -5538,7 +5538,7 @@ def _ingest_slack_public_files(
                 acl_groups=doc.acl_groups,
                 metadata=metadata,
                 modified_at=doc.modified_at,
-                pipeline_config={"extractor": "slack-channel-files-v2"},
+                pipeline_config={"extractor": "slack-channel-files-v3"},
             )
             if stored_hashes.get(file_id) == content_hash:
                 unchanged += 1
@@ -5570,6 +5570,11 @@ def _ingest_slack_public_files(
                     mime_type=PPTX_MIME,
                     expected_size=f.get("size"),
                     max_extracted_chars=MAX_INGEST_EXTRACTED_CHARACTERS,
+                    # 利用者は数字・表の原文を求める。Drive の rich 取込と同じくノート・表・
+                    # group 配下も拾う。短いスライドも落とさない（min_chars は使わない）。
+                    include_notes=True,
+                    include_tables=True,
+                    formula_fallback=True,
                 )
             else:
                 pages = extract_pdf_pages(data, max_total_chars=MAX_INGEST_EXTRACTED_CHARACTERS)
