@@ -310,3 +310,74 @@ def test_ingest_channel_config_defaults() -> None:
     assert c.oldest_days == 90
     assert c.extra_acl_emails == ()
     assert c.extra_metadata == {}
+
+
+@pytest.mark.parametrize("header", ["2", ["2"]])
+def test_get_conversation_retries_429_with_retry_after(
+    monkeypatch: pytest.MonkeyPatch,
+    header: Any,
+) -> None:
+    from unittest.mock import AsyncMock, Mock
+
+    from slack_sdk.errors import SlackApiError
+    from slack_sdk.web.async_slack_response import AsyncSlackResponse
+    from structlog.testing import capture_logs
+
+    error = SlackApiError(
+        "private message must not be logged",
+        AsyncSlackResponse(
+            client=None,
+            http_verb="GET",
+            api_url="https://slack.com/api/conversations.info",
+            req_args={},
+            data={"ok": False, "error": "ratelimited"},
+            headers={"Retry-After": header},
+            status_code=429,
+        ),
+    )
+    fake = Mock()
+    fake.conversations_info = AsyncMock(
+        side_effect=[error, {"channel": {"id": "G1", "is_private": True}}]
+    )
+    sleep = Mock()
+    monkeypatch.setattr("teamagent.adapters.slack_channel_ingest_client.time.sleep", sleep)
+    client = SlackChannelIngestClient("xoxp-test", client=fake)
+    with capture_logs() as logs:
+        assert client.get_conversation("G1") == {"id": "G1", "is_private": True}
+    assert fake.conversations_info.call_count == 2
+    sleep.assert_called_once_with(2)
+    assert logs[0]["error_code"] == "ratelimited"
+    assert "private message" not in str(logs)
+
+
+@pytest.mark.parametrize("status", [200, 429])
+def test_get_conversation_propagates_non429_or_exhausted_retries(
+    monkeypatch: pytest.MonkeyPatch,
+    status: int,
+) -> None:
+    from unittest.mock import AsyncMock, Mock
+
+    from slack_sdk.errors import SlackApiError
+    from slack_sdk.web.async_slack_response import AsyncSlackResponse
+
+    error = SlackApiError(
+        "not available",
+        AsyncSlackResponse(
+            client=None,
+            http_verb="GET",
+            api_url="https://slack.com/api/conversations.info",
+            req_args={},
+            data={"error": "ratelimited" if status == 429 else "not_in_channel"},
+            headers={},
+            status_code=status,
+        ),
+    )
+    fake = Mock()
+    fake.conversations_info = AsyncMock(side_effect=error)
+    sleep = Mock()
+    monkeypatch.setattr("teamagent.adapters.slack_channel_ingest_client.time.sleep", sleep)
+    with pytest.raises(SlackApiError) as exc:
+        SlackChannelIngestClient("xoxp-test", client=fake).get_conversation("G1")
+    assert exc.value is error
+    assert fake.conversations_info.call_count == (6 if status == 429 else 1)
+    assert sleep.call_count == (5 if status == 429 else 0)

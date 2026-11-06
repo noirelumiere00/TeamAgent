@@ -5329,16 +5329,24 @@ def _ingest_slack_public_files(
     warning_collector: _IngestWarningCollector,
     unchanged_collector: _IngestUnchangedCollector,
 ) -> tuple[int, int]:
+    """連携者の共有ファイルを増分取得する。
+
+    新しく連携した人の古いファイルは日曜 JST の週次全期間取得で拾う。
+    connector_state(slack, files:list) の oldest は成功した一覧の開始時刻。
+    上限で未処理が残った場合は次回も全期間取得し、取りこぼしを防ぐ。
+    """
+    from pypdf.errors import FileNotDecryptedError, WrongPasswordError
     from slack_sdk.errors import SlackApiError
 
     from teamagent.adapters.oauth_token_store import KmsCipher, SlackTokenStore
     from teamagent.adapters.pgvector_client import PgVectorClient
     from teamagent.adapters.slack_channel_ingest_client import SlackChannelIngestClient
     from teamagent.adapters.slack_client import SlackClient
-    from teamagent.adapters.slack_file_guard import is_external_file
+    from teamagent.adapters.slack_file_guard import SlackFileGuardError, is_external_file
     from teamagent.ingest.office_extract import (
         MAX_OFFICE_COMPRESSED_BYTES,
         PPTX_MIME,
+        OfficePayloadError,
         extract_office_pages,
     )
     from teamagent.ingest.pdf_extract import extract_pdf_pages
@@ -5346,9 +5354,29 @@ def _ingest_slack_public_files(
 
     kind = "slack_public_files"
 
-    def warn(reason: str, exc: Exception) -> None:
+    def warn(reason: str, exc: Exception, *, failure_reason: str | None = None) -> None:
         warning_collector.add(kind, kind, reason)
-        logger.warning(reason, request_id=request_id, error_type=type(exc).__name__)
+        details: dict[str, Any] = {}
+        if isinstance(exc, SlackApiError):
+            details["error_code"] = exc.response.get("error") or (
+                "ratelimited" if exc.response.status_code == 429 else "unknown_error"
+            )
+        if failure_reason:
+            details["failure_reason"] = failure_reason
+        logger.warning(reason, request_id=request_id, error_type=type(exc).__name__, **details)
+
+    listed_at = _dt.datetime.now(_dt.UTC)
+    state = repository.load_connector_state("slack", "files:list")
+    full_list = (
+        os.environ.get("SLACK_FILES_FULL_LIST") == "1"
+        or listed_at.astimezone(_dt.timezone(_dt.timedelta(hours=9))).weekday() == 6
+        or (state is not None and state.metadata.get("full_list_pending") is True)
+    )
+    ts_from = (
+        max(0, int(state.oldest) - 2 * 86400)
+        if state is not None and state.oldest is not None and not full_list
+        else None
+    )
 
     try:
         store = SlackTokenStore(
@@ -5369,7 +5397,7 @@ def _ingest_slack_public_files(
     channel_readers: dict[str, list[SlackChannelIngestClient]] = {}
     enumerated = skipped = 0
     owners_processed = 0
-    for email in token_owners:
+    for owner_index, email in enumerate(token_owners, 1):
         try:
             token = slack_credential(email, "user")
             client = SlackClient.for_bulk_read(token)
@@ -5383,7 +5411,7 @@ def _ingest_slack_public_files(
         page = 1
         try:
             while True:
-                response = asyncio.run(client.list_files(cursor=cursor, page=page))
+                response = asyncio.run(client.list_files(cursor=cursor, page=page, ts_from=ts_from))
                 owned_files.extend(response.get("files", []) or [])
                 next_cursor = (response.get("response_metadata") or {}).get("next_cursor")
                 if next_cursor:
@@ -5412,6 +5440,14 @@ def _ingest_slack_public_files(
                 exc,
             )
             continue
+        logger.info(
+            "slack_public_files_list_complete",
+            request_id=request_id,
+            owner_index=owner_index,
+            owners=len(token_owners),
+            files=len(owned_files),
+            ts_from=ts_from,
+        )
         owners_processed += 1
         checked_private: dict[str, bool] = {}
         for f in owned_files:
@@ -5471,9 +5507,21 @@ def _ingest_slack_public_files(
     )
     channel_emails: dict[str, list[str]] = {}
     email_client: SlackChannelIngestClient | None = None
-    processed = unchanged = remaining = docs_n = chunks_n = 0
-    for file_id, f in files.items():
+    processed = unchanged = remaining = docs_n = chunks_n = failed = 0
+    for file_index, (file_id, f) in enumerate(files.items()):
+        attempted = False
+        failure_reason = "acl_unavailable"
+        version = {key: f.get(key) for key in ("updated", "size", "timestamp", "created")}
         try:
+            rejected = repository.load_connector_state("slack", f"files:file:{file_id}")
+            if (
+                rejected is not None
+                and rejected.metadata.get("failed_version") == version
+                and rejected.metadata.get("failure_reason")
+                in {"encrypted", "empty_text", "too_large"}
+            ):
+                skipped += 1
+                continue
             public = public_shares[file_id]
             private = private_shares[file_id]
             channels = sorted(public | private)
@@ -5506,12 +5554,7 @@ def _ingest_slack_public_files(
                 "public_channel_ids": sorted(public),
                 "private_channel_ids": sorted(private),
                 "filetype": f["filetype"],
-                "slack_file_version": {
-                    "updated": f.get("updated"),
-                    "size": f.get("size"),
-                    "timestamp": f.get("timestamp"),
-                    "created": f.get("created"),
-                },
+                "slack_file_version": version,
             }
             doc = DocumentUpsert(
                 source_type="other",  # 既存 enum。Slack スレッド取込とは別のファイル文書。
@@ -5549,6 +5592,11 @@ def _ingest_slack_public_files(
                 remaining += 1
                 continue
             processed += 1
+            attempted = True
+            failure_reason = "download_failed"
+            if int(f.get("size") or 0) > MAX_OFFICE_COMPRESSED_BYTES:
+                failure_reason = "too_large"
+                raise ValueError("file exceeds extraction size limit")
             # 旧 ppt の本文は Slack の PDF 変換を利用し、新しい変換器は持たない。
             url = f.get("office_pdf") if f["filetype"] == "ppt" else f.get("url_private")
             if not url:
@@ -5564,6 +5612,7 @@ def _ingest_slack_public_files(
                 except Exception:
                     if downloader is file_clients[file_id][-1]:
                         raise
+            failure_reason = "extract_failed"
             if f["filetype"] == "pptx":
                 pages = extract_office_pages(
                     data,
@@ -5580,16 +5629,64 @@ def _ingest_slack_public_files(
                 pages = extract_pdf_pages(data, max_total_chars=MAX_INGEST_EXTRACTED_CHARACTERS)
             page_chunks = _bounded_chunk_pages(pages)
             if not page_chunks:
+                failure_reason = "empty_text"
                 raise ValueError("empty extracted text")
+            failure_reason = "embed_failed"
             chunks = _embed_page_chunks(page_chunks, embedder=embedder)
             metadata[INGEST_CONTENT_HASH_KEY] = content_hash
             if not dry_run:
+                failure_reason = "write_failed"
                 repository.upsert_document_with_chunks(doc, chunks, request_id=request_id)
             docs_n += 1
             chunks_n += len(chunks)
         except Exception as exc:
+            if not attempted:
+                processed += 1
+                attempted = True
+            failed += 1
             skipped += 1
-            warn("slack_public_files_file_failed", exc)
+            if isinstance(exc, (FileNotDecryptedError, WrongPasswordError)) or (
+                isinstance(exc, OfficePayloadError) and exc.category == "encrypted_office"
+            ):
+                failure_reason = "encrypted"
+            elif isinstance(exc, SlackFileGuardError) and str(exc).startswith(
+                "SLACK_FILE_TOO_LARGE:"
+            ):
+                failure_reason = "too_large"
+            elif isinstance(exc, _IngestContentVolumeError) or (
+                isinstance(exc, OfficePayloadError) and exc.category == "unsafe_content_volume"
+            ):
+                failure_reason = "too_large"
+            elif isinstance(exc, OfficePayloadError):
+                failure_reason = exc.category
+            warn("slack_public_files_file_failed", exc, failure_reason=failure_reason)
+            if failure_reason in {"encrypted", "empty_text", "too_large"}:
+                if not dry_run:
+                    repository.save_connector_state(
+                        "slack",
+                        f"files:file:{file_id}",
+                        success=False,
+                        error=failure_reason,
+                        metadata={"failed_version": version, "failure_reason": failure_reason},
+                    )
+        finally:
+            if attempted and processed % 50 == 0:
+                logger.info(
+                    "slack_public_files_progress",
+                    request_id=request_id,
+                    processed=processed,
+                    documents=docs_n,
+                    failed=failed,
+                    remaining=len(files) - file_index - 1 + remaining,
+                )
+
+    if not dry_run and owners_processed == len(token_owners):
+        repository.save_connector_state(
+            "slack",
+            "files:list",
+            oldest=listed_at.timestamp(),
+            metadata={"full_list_pending": remaining > 0},
+        )
 
     unchanged_collector.add(kind, unchanged)
     logger.info(
@@ -5600,6 +5697,7 @@ def _ingest_slack_public_files(
         enumerated=enumerated,
         processed=processed,
         documents=docs_n,
+        failed=failed,
         remaining=remaining,
         skipped=skipped,
         unchanged=unchanged,

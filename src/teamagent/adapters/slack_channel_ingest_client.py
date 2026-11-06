@@ -37,6 +37,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 import structlog
+from slack_sdk.errors import SlackApiError
 from slack_sdk.web.async_client import AsyncWebClient
 
 logger = structlog.get_logger(__name__)
@@ -278,8 +279,26 @@ class SlackChannelIngestClient:
 
     def get_conversation(self, channel_id: str) -> dict[str, Any]:
         """user token で private channel と im / mpim を区別する。"""
-        response = asyncio.run(self._client.conversations_info(channel=channel_id))
-        return dict(response.get("channel", {}) or {})
+        for attempt in range(6):
+            try:
+                response = asyncio.run(self._client.conversations_info(channel=channel_id))
+                return dict(response.get("channel", {}) or {})
+            except SlackApiError as exc:
+                if exc.response.status_code != 429 or attempt == 5:
+                    raise
+                headers = {k.lower(): v for k, v in exc.response.headers.items()}
+                retry_after = headers.get("retry-after", "1")
+                if isinstance(retry_after, list):
+                    retry_after = retry_after[0]
+                delay = max(1, int(retry_after))
+                logger.warning(
+                    "slack_conversation_rate_limited",
+                    error_code="ratelimited",
+                    retry_after=delay,
+                    attempt=attempt + 1,
+                )
+                time.sleep(delay)
+        raise AssertionError("unreachable")
 
     def list_channel_members(
         self,

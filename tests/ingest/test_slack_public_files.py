@@ -23,6 +23,7 @@ from teamagent.ingest.loader import (
     load_ingest_sources,
 )
 from teamagent.ingest.pipeline import IngestRunner
+from teamagent.ingest.repository import ConnectorState
 
 TOKEN = "xoxp-fake-for-test"
 TOKEN2 = "xoxp-second-for-test"
@@ -36,6 +37,19 @@ class Repository:
     def __init__(self) -> None:
         self.documents: dict[str, Any] = {}
         self.chunks: dict[str, list[Any]] = {}
+        self.states: dict[tuple[str, str], ConnectorState] = {}
+
+    def load_connector_state(self, kind: str, source_id: str) -> ConnectorState | None:
+        return self.states.get((kind, source_id))
+
+    def save_connector_state(self, kind: str, source_id: str, **kwargs: Any) -> None:
+        previous = self.states.get((kind, source_id))
+        self.states[kind, source_id] = ConnectorState(
+            kind,
+            source_id,
+            oldest=kwargs.get("oldest", previous.oldest if previous else None),
+            metadata={**(previous.metadata if previous else {}), **kwargs.get("metadata", {})},
+        )
 
     def get_document_content_hashes(self, source_type: str, ids: list[str]) -> dict[str, str]:
         assert source_type == "other"
@@ -479,6 +493,9 @@ def test_empty_files_do_not_use_success_cap(setup: Any) -> None:
     summary = next(e for e in logs if e["event"] == "slack_public_files_complete")
     assert summary["processed"] == 302 and summary["remaining"] == 1
     assert summary["skipped"] == 301
+    progress = [e for e in logs if e["event"] == "slack_public_files_progress"]
+    assert [e["processed"] for e in progress] == [50, 100, 150, 200, 250, 300]
+    assert all(e["failed"] == e["processed"] and e["documents"] == 0 for e in progress)
 
 
 @pytest.mark.parametrize(
@@ -605,6 +622,7 @@ def test_dry_run_does_not_write(setup: Any) -> None:
     repo = Repository()
     assert run(repo, dry_run=True).total_documents() == 1
     assert not repo.documents
+    assert not repo.states
 
 
 def test_download_host_guard_and_pagination_failure_do_not_leak(setup: Any) -> None:
@@ -650,3 +668,212 @@ def test_loader_rejects_invalid_config(tmp_path: Path, override: dict[str, Any])
     path.write_text(yaml.safe_dump({"slack_public_files": override}))
     with pytest.raises(ValueError):
         load_ingest_sources(path)
+
+
+def freeze_time(monkeypatch: pytest.MonkeyPatch, iso: str) -> Any:
+    import datetime
+    from types import SimpleNamespace
+
+    instant = datetime.datetime.fromisoformat(iso)
+
+    class Clock(datetime.datetime):
+        @classmethod
+        def now(cls, tz: Any = None) -> Any:
+            return instant.astimezone(tz)
+
+    monkeypatch.setattr(
+        "teamagent.ingest.pipeline._dt",
+        SimpleNamespace(
+            datetime=Clock,
+            UTC=datetime.UTC,
+            timezone=datetime.timezone,
+            timedelta=datetime.timedelta,
+        ),
+    )
+    return instant
+
+
+@pytest.mark.parametrize(
+    ("iso", "full", "expected_incremental"),
+    [
+        ("2026-11-06T16:00:00+00:00", False, True),
+        ("2026-11-07T14:59:00+00:00", False, True),
+        ("2026-11-07T15:00:00+00:00", False, False),
+        ("2026-11-08T15:00:00+00:00", False, True),
+        ("2026-11-06T00:00:00+00:00", True, False),
+    ],
+)
+def test_incremental_ts_from_sunday_jst_and_full_override(
+    setup: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    iso: str,
+    full: bool,
+    expected_incremental: bool,
+) -> None:
+    api, _, _ = setup
+    instant = freeze_time(monkeypatch, iso)
+    monkeypatch.setenv("SLACK_FILES_FULL_LIST", "1" if full else "0")
+    repo = Repository()
+    previous = instant.timestamp() - 86400
+    repo.save_connector_state("slack", "files:list", oldest=previous)
+    api.pages = [
+        {"files": [], "response_metadata": {"next_cursor": "1"}},
+        {"files": []},
+    ]
+    run(repo)
+    expected = int(previous) - 2 * 86400
+    for call in api.calls:
+        assert call.get("ts_from") == (expected if expected_incremental else None)
+    assert repo.states["slack", "files:list"].oldest == instant.timestamp()
+
+
+def test_partial_listing_and_dry_run_do_not_advance_checkpoint(
+    setup: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    api, store, _ = setup
+    freeze_time(monkeypatch, "2026-11-06T00:00:00+00:00")
+    other = second_user(api, store)
+    other.pages = [api_error("missing_scope")]
+    repo = Repository()
+    run(repo)
+    assert ("slack", "files:list") not in repo.states
+    other.pages = [{"files": []}]
+    run(repo, dry_run=True)
+    assert not repo.states
+
+
+def test_cap_keeps_old_backlog_in_next_listing(setup: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    api, _, _ = setup
+    freeze_time(monkeypatch, "2026-11-06T00:00:00+00:00")
+    repo = Repository()
+    api.pages = [{"files": [file("FA"), file("FB")]}]
+    run(repo, dataclasses.replace(SPEC, max_files_per_run=1))
+    assert repo.states["slack", "files:list"].metadata["full_list_pending"] is True
+    run(repo)
+    assert all("ts_from" not in call for call in api.calls)
+    assert repo.states["slack", "files:list"].metadata["full_list_pending"] is False
+
+
+def test_progress_every_50_and_owner_listing_logs(setup: Any) -> None:
+    api, store, _ = setup
+    other = second_user(api, store)
+    api.pages = [{"files": [file(f"F{i}") for i in range(101)]}]
+    other.pages = [{"files": []}]
+    with capture_logs() as logs:
+        run(Repository())
+    progress = [e for e in logs if e["event"] == "slack_public_files_progress"]
+    assert [(e["processed"], e["documents"], e["failed"], e["remaining"]) for e in progress] == [
+        (50, 50, 0, 51),
+        (100, 100, 0, 1),
+    ]
+    listings = [e for e in logs if e["event"] == "slack_public_files_list_complete"]
+    assert [(e["owner_index"], e["owners"], e["files"]) for e in listings] == [
+        (1, 2, 101),
+        (2, 2, 0),
+    ]
+    assert OWNER not in str(logs) and OWNER2 not in str(logs)
+    assert "Company shared presentation" not in str(logs) and "F0.pdf" not in str(logs)
+
+
+@pytest.mark.parametrize("reason", ["encrypted", "empty_text", "too_large"])
+def test_permanent_failure_is_durable_until_version_changes(
+    setup: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    reason: str,
+) -> None:
+    from pypdf import PdfReader, PdfWriter
+
+    from teamagent.ingest.office_extract import MAX_OFFICE_COMPRESSED_BYTES
+
+    api, _, _ = setup
+    api.pages = [{"files": [file("FPRIVATE", name="private-filename.pdf")]}]
+    data = pdf("")
+    if reason == "encrypted":
+        writer = PdfWriter()
+        writer.append(PdfReader(BytesIO(pdf())))
+        writer.encrypt("secret")
+        buffer = BytesIO()
+        writer.write(buffer)
+        data = buffer.getvalue()
+    if reason == "too_large":
+        api.pages[0]["files"][0]["size"] = MAX_OFFICE_COMPRESSED_BYTES + 1
+    downloads: list[str] = []
+
+    async def download(self: Any, url: str, **kwargs: Any) -> bytes:
+        downloads.append(url)
+        return data
+
+    monkeypatch.setattr(
+        "teamagent.adapters.slack_client.SlackClient.download_file_guarded", download
+    )
+    repo = Repository()
+    with capture_logs() as logs:
+        run(repo)
+    failure = next(e for e in logs if e["event"] == "slack_public_files_file_failed")
+    assert failure["failure_reason"] == reason
+    assert "private-filename" not in str(logs) and OWNER not in str(logs)
+    assert repo.states["slack", "files:file:FPRIVATE"].metadata["failure_reason"] == reason
+    assert not repo.documents
+    # 新しい runner/repository インスタンスでも DB フェイクの保存状態からスキップ。
+    reloaded = Repository()
+    reloaded.states = dict(repo.states)
+    with capture_logs() as logs:
+        run(reloaded)
+    assert not [e for e in logs if e["event"] == "slack_public_files_file_failed"]
+    assert len(downloads) == (0 if reason == "too_large" else 1)
+    api.pages[0]["files"][0]["updated"] += 1
+    with capture_logs() as logs:
+        run(reloaded)
+    assert any(e.get("failure_reason") == reason for e in logs)
+    assert len(downloads) == (0 if reason == "too_large" else 2)
+
+
+def test_slack_errors_and_download_failure_have_safe_reasons(setup: Any) -> None:
+    api, store, _ = setup
+    other = second_user(api, store)
+    api.pages = [api_error("missing_scope")]
+    other.conversations["GPRIVATE"] = api_error("not_in_channel")
+    other.pages = [{"files": [private_file("FCHANNEL"), file("FAIL")]}]
+    with capture_logs() as logs:
+        run(Repository())
+    assert {e.get("error_code") for e in logs} >= {"missing_scope", "not_in_channel"}
+    assert any(e.get("failure_reason") == "download_failed" for e in logs)
+    assert OWNER not in str(logs) and TOKEN not in str(logs)
+    assert "private response" not in str(logs) and "FAIL.pdf" not in str(logs)
+
+
+def test_transient_download_failure_is_retried(setup: Any) -> None:
+    api, _, downloaded = setup
+    api.pages = [{"files": [file("FAIL")]}]
+    repo = Repository()
+    run(repo)
+    run(repo)
+    assert downloaded == ["FAIL", "FAIL"]
+    assert ("slack", "files:file:FAIL") not in repo.states
+
+
+@pytest.mark.parametrize(
+    ("category", "reason"),
+    [("encrypted_office", "encrypted"), ("unsafe_content_volume", "too_large")],
+)
+def test_office_permanent_failure_is_not_reextracted(
+    setup: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    category: str,
+    reason: str,
+) -> None:
+    from teamagent.ingest.office_extract import PPTX_MIME, OfficePayloadError
+
+    api, _, downloaded = setup
+    api.pages = [{"files": [file("FOFFICE", "pptx")]}]
+    extract = MagicMock(
+        side_effect=OfficePayloadError(category, mime_type=PPTX_MIME, actual_bytes=100)
+    )
+    monkeypatch.setattr("teamagent.ingest.office_extract.extract_office_pages", extract)
+    repo = Repository()
+    with capture_logs() as logs:
+        run(repo)
+        run(repo)
+    assert extract.call_count == 1 and downloaded == ["FOFFICE"]
+    assert any(e.get("failure_reason") == reason for e in logs)
