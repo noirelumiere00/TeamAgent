@@ -57,7 +57,8 @@ UV_DIGEST = "9941e2d8e06ff884d328905091eac0a6bc1e40e5ce12e6dd0de4ef4ee26baac4"
 # 2026-10-27: Python / pyc 3.14.10-r0→r1、署名検証済み APKINDEX + apk-tools 3.0.6 で再導出（240 行不変、ELF SHA 不変）。
 # 2026-10-30: 署名検証済み索引 + apk-tools 3.0.6 で ffmpeg 8.1.3-r0 と ffmpeg8 副パッケージを再導出（240 行不変）。
 # 2026-11-03: Alpine 上流への追随（libexpat 2.9.0-r0→2.10.0-r0）。apk 段の実ビルドで lock 差分 -1 +1（240→240 行）。
-APK_LOCK_SHA256 = "6fe82f1df0c5050550f16f830533d9e66757844312fa1b8b21c0c62f6194bba4"
+# 2026-11-06: Alpine 上流への追随（musl 1.2.6-r2→1.2.6-r3）。apk 段の実ビルドで lock 差分 -2 +2（240→240 行）。
+APK_LOCK_SHA256 = "a211e3c3ef95f7efcde7c5c9d2348827e1a4ce8e84cbcc77c138f5326c018669"
 CHROMIUM_PATH = "/usr/lib/chromium/chromium"
 
 
@@ -179,6 +180,8 @@ def test_base_bundled_cve_packages_are_pinned_to_the_fixed_versions() -> None:
         "LIBXRENDER_PACKAGE_VERSION": ("libxrender", "0.9.13-r0"),
         # chromium base 同梱の libxtst に HIGH。r64 段3 の ECR ゲート（f853c140）
         "LIBXTST_PACKAGE_VERSION": ("libxtst", "1.2.6-r0"),
+        # chromium-headless ベース同梱の musl に CVE-2026-107891（HIGH）・v3.24 secdb で 1.2.6-r3 修正
+        "MUSL_PACKAGE_VERSION": ("musl", "1.2.6-r3"),
         "LIBSSL3_PACKAGE_VERSION": ("libssl3", "3.5.9-r0"),
     }
     lock = APK_LOCK.read_text(encoding="utf-8").splitlines()
