@@ -60,7 +60,8 @@ UV_DIGEST = "9941e2d8e06ff884d328905091eac0a6bc1e40e5ce12e6dd0de4ef4ee26baac4"
 # 2026-11-06: Alpine 上流への追随（musl 1.2.6-r2→1.2.6-r3）。apk 段の実ビルドで lock 差分 -2 +2（240→240 行）。
 # 2026-11-06: Alpine 上流への追随（font-noto 2026.10.01-r0→2026.11.01-r0）。apk 段の実ビルドで lock 差分 -4 +4（240→240 行）。
 # 2026-11-06: Alpine 上流への追随（削除: musl-utils-1.2.6-r3 / 追加: musl-utils-1.2.6-r2）。apk 段の実ビルドで lock 差分 -1 +1（240→240 行）。
-APK_LOCK_SHA256 = "fe36d61221d1e9b17bc93b54a6f9919bfc439a30a7a1ad230851b99f93e6acb0"
+# 2026-11-06: Alpine 上流への追随（musl-utils 1.2.6-r2→1.2.6-r3）。apk 段の実ビルドで lock 差分 -1 +1（240→240 行）。
+APK_LOCK_SHA256 = "5ac9dcf6ed1eb10f6290df29a0e849fb672ffd4e0876099a8a3dd97c10bc5c13"
 CHROMIUM_PATH = "/usr/lib/chromium/chromium"
 
 
@@ -184,6 +185,8 @@ def test_base_bundled_cve_packages_are_pinned_to_the_fixed_versions() -> None:
         "LIBXTST_PACKAGE_VERSION": ("libxtst", "1.2.6-r0"),
         # chromium-headless ベース同梱の musl に CVE-2026-107891（HIGH）・v3.24 secdb で 1.2.6-r3 修正
         "MUSL_PACKAGE_VERSION": ("musl", "1.2.6-r3"),
+        # ECR 脆弱性ゲートが musl-utils 1.2.6-r2 を musl の CVE-2026-107891（HIGH）として検出・v3.24 で 1.2.6-r3
+        "MUSL_UTILS_PACKAGE_VERSION": ("musl-utils", "1.2.6-r3"),
         "LIBSSL3_PACKAGE_VERSION": ("libssl3", "3.5.9-r0"),
     }
     lock = APK_LOCK.read_text(encoding="utf-8").splitlines()
