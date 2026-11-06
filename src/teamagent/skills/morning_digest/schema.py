@@ -167,7 +167,7 @@ class CalendarEventItem(BaseModel):
         default=False,
         description=(
             "ゲストも会議リンクも無い＝本人が入れた作業枠（タスク）か（calendar_window."
-            "is_personal_block）。既定 False＝会議扱い（判らない予定のリマインドを黙って消さない）"
+            "is_personal_block）。既定 False＝会議扱い"
         ),
     )
     # --- 事例ブリーフ用の派生値（pre_meeting_brief/signals.build_signal_input の出力）---

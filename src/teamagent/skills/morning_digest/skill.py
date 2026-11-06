@@ -115,8 +115,7 @@ def _brief_enabled() -> bool:
 # events.list の取得上限。20 では「20 件超の日に午後のアポが丸ごと落ちる」欠陥が残る
 # （個人別配信は最初の 1 件で送信時刻が決まるため、取りこぼしは時刻の狂いに直結する）。
 # ⚠️ ただし引き上げは **事例ブリーフと同じ env ゲートの内側**。100 は見出しの
-#   「📅{件数}」「残り N 件」の数字を変え、MORNING_DIGEST_REMINDERS=1 の環境では
-#   21 件目以降にも予定リマインド DM の予約を作る＝「env 未設定なら利用者の画面は
+#   「📅{件数}」「残り N 件」の数字を変え、「env 未設定なら利用者の画面は
 #   1 バイトも変わらない」が崩れる。恒久的な引き上げは別便・別フラグで行う。
 _CALENDAR_MAX_RESULTS = 100
 #: ゲート OFF のときの従来値（この便より前の挙動）。
@@ -593,10 +592,10 @@ class MorningDigestSkill(BaseSkill[MorningDigestInput, MorningDigestOutput]):
     def collect_calendar_events(
         self, input: MorningDigestInput, ctx: SkillContext
     ) -> list[CalendarEventItem]:
-        """当日の予定 **だけ** を取る（祝日の予定リマインド登録用・F0 祝日スキップ）。
+        """当日の予定 **だけ** を取る。
 
         メール・Bedrock・Slack・下書きには一切触れない。取得窓と項目は ``run()`` の
-        カレンダー節と同じ ``_collect_calendar``（リマインドの対象が平日と食い違わない）。
+        カレンダー節と同じ ``_collect_calendar``。
         本人確認は ``run()`` と同じ fail-closed（本人 email が無い・未連携は PermissionError）。
         """
         requester = ctx.metadata.get("user_email")
@@ -951,7 +950,7 @@ class MorningDigestSkill(BaseSkill[MorningDigestInput, MorningDigestOutput]):
         # ⚠️ max_results は 20 → 100 だが **ゲートの内側**。20 件の日に「午後のアポが
         #   丸ごと落ちる」のは欠陥であり、事例ブリーフ（最初の予定の 1 時間前に配る）は
         #   最初の 1 件を取り違えると配信時刻そのものが狂う。とはいえ OFF の環境で
-        #   件数・リマインド対象が変わってはならないので、OFF は従来の 20 のまま。
+        #   件数が変わってはならないので、OFF は従来の 20 のまま。
         #   want_description も同じ（OFF の間は description を 1 度も取りに行かない）。
         brief_on = _brief_enabled()
         max_results = _CALENDAR_MAX_RESULTS if brief_on else _CALENDAR_MAX_RESULTS_LEGACY

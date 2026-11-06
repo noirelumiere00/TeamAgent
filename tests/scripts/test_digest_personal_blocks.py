@@ -4,10 +4,7 @@
 - 判定（calendar_window.is_personal_block）: ゲストも会議リンクも無い予定＝タスク枠。
   ゲストがいる・会議リンクがある・参加者が分からない（None）は会議扱い
 - 朝のサマリーの送信時刻（planner と早出の注記）は、タスク枠を「最初の予定」に数えない
-- 直前リマインドは、全体の既定（MORNING_DIGEST_REMIND_PERSONAL_BLOCKS・未設定は送る）と
-  本人の設定（reminder_personal_blocks）でタスク枠を止められる。会議のリマインドは残る
 - 予定を写すとき（morning_digest skill）に本番の CalendarEvent から判定が乗る
-- digest_settings で本人が切り替えられ、リマインド自体の ON/OFF は変えない
 """
 
 from __future__ import annotations
@@ -22,7 +19,6 @@ import pytest
 
 from teamagent.adapters.gcalendar_client import CalendarEvent
 from teamagent.skills.morning_digest import calendar_window as calwin
-from teamagent.skills.morning_digest.preferences import DigestPreferences, describe
 from teamagent.skills.morning_digest.schema import CalendarEventItem, MorningDigestOutput
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
@@ -126,66 +122,7 @@ def test_early_notice_ignores_task_blocks(monkeypatch: pytest.MonkeyPatch) -> No
     assert mod._early_notice(digest) is False
 
 
-# ── 直前リマインド ─────────────────────────────────────────
-
-
-class _Scheduler:
-    def __init__(self) -> None:
-        self.calls: list[dict[str, Any]] = []
-
-    def schedule_reminder(self, **kw: Any) -> bool:
-        self.calls.append(kw)
-        return True
-
-
-@pytest.fixture
-def sched(monkeypatch: pytest.MonkeyPatch) -> _Scheduler:
-    import teamagent.adapters.scheduler_client as sc
-
-    s = _Scheduler()
-    monkeypatch.setattr(sc.SchedulerClient, "from_env", classmethod(lambda cls: s))
-    return s
-
-
-def _digest() -> MorningDigestOutput:
-    return MorningDigestOutput(
-        user_email_masked="k***@vectorinc.co.jp",
-        calendar_events=[
-            CalendarEventItem(
-                summary_display="タスク確認",
-                start_at="2026-10-05T10:30:00+09:00",
-                personal_block=True,
-            ),
-            CalendarEventItem(
-                summary_display="クライアント定例", start_at="2026-10-05T14:00:00+09:00"
-            ),
-        ],
-    )
-
-
-def test_default_still_reminds_task_blocks(sched: _Scheduler) -> None:
-    """全体の既定を変えるまでは今までどおり全部送る（本番の振る舞いを黙って変えない）。"""
-    assert mod._schedule_event_reminders(_digest(), "D0") == 2
-
-
-def test_fleet_default_off_drops_only_task_blocks(
-    sched: _Scheduler, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """変異: reminder_allowed に personal_block を渡さないと 2 件のままで赤。"""
-    monkeypatch.setenv("MORNING_DIGEST_REMIND_PERSONAL_BLOCKS", "false")
-    assert mod._schedule_event_reminders(_digest(), "D0") == 1
-    assert [c["title"] for c in sched.calls] == ["クライアント定例"]
-
-
-def test_personal_setting_beats_fleet_default(
-    sched: _Scheduler, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setenv("MORNING_DIGEST_REMIND_PERSONAL_BLOCKS", "false")
-    prefs = DigestPreferences(reminder_personal_blocks=True)
-    assert mod._schedule_event_reminders(_digest(), "D0", prefs) == 2
-    monkeypatch.setenv("MORNING_DIGEST_REMIND_PERSONAL_BLOCKS", "true")
-    prefs = DigestPreferences(reminder_personal_blocks=False)
-    assert mod._schedule_event_reminders(_digest(), "D0", prefs) == 1
+# 直前リマインドの選別テストは廃止。登録ゼロは test_digest_preferences_runner.py で確認。
 
 
 # ── 予定を写すときに判定が乗る（本番の CalendarEvent から）─────────────
@@ -243,24 +180,3 @@ def test_digest_items_carry_personal_block_from_real_events(
         ("クライアント定例", False),
         ("1on1", False),
     ]
-
-
-# ── digest_settings ─────────────────────────────────────────
-
-
-def test_settings_turn_off_task_blocks_without_touching_reminders() -> None:
-    from teamagent.skills.digest_settings.schema import DigestSettingsInput
-    from teamagent.skills.digest_settings.skill import _apply
-
-    off = DigestPreferences(reminders=False)
-    new, _ = _apply(off, DigestSettingsInput(action="update", reminder_personal_blocks=False), DAY)
-    assert new.reminder_personal_blocks is False
-    assert new.reminders is False  # リマインド全体を止めている人を勝手に戻さない
-    on, _ = _apply(
-        DigestPreferences(),
-        DigestSettingsInput(action="update", reminder_personal_blocks=False),
-        DAY,
-    )
-    assert on.reminders is True and on.remind_personal_blocks() is False
-    text = describe(on, DAY, default_lead_minutes=5)
-    assert "タスク枠" in text
