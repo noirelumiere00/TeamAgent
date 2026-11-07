@@ -528,9 +528,13 @@ class SlackClient:
         handlers = [*async_default_handlers(), AsyncRateLimitErrorRetryHandler(max_retry_count=5)]
         return cls(bot_token=token, client=AsyncWebClient(token=token, retry_handlers=handlers))
 
-    async def list_files(self, *, cursor: str | None = None, page: int = 1) -> dict[str, Any]:
-        """本人 token でも利用できる files.list。全期間・全種類を列挙する。"""
+    async def list_files(
+        self, *, cursor: str | None = None, page: int = 1, ts_from: int | None = None
+    ) -> dict[str, Any]:
+        """本人 token の files.list。ts_from 未指定なら全期間を列挙する。"""
         kwargs: dict[str, Any] = {"types": "all", "count": 1000}
+        if ts_from is not None:
+            kwargs["ts_from"] = ts_from
         if cursor:
             kwargs["cursor"] = cursor
         else:
