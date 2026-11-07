@@ -90,7 +90,7 @@ def test_clientkarte_synthesizes_timeline(
 
     assert out.client_name == "日本ガイシ"
     assert out.event_count == 2
-    assert "一行サマリ" in out.answer
+    assert out.answer.startswith("日本ガイシ: ヒアリング進行中（5/22 時点）")
     assert out.total_cost_usd == pytest.approx(0.005)
     # 時系列イベントに構造化メタが乗る
     assert out.events[0].deal_phase == "ケイパ"
