@@ -1,0 +1,94 @@
+# A dedicated inventory probe; Terraform embeds these bytes with NO_SOURCE.
+version: 0.2
+env:
+  shell: bash
+phases:
+  build:
+    commands:
+      - |
+        set -euo pipefail
+        umask 077
+        export AWS_IGNORE_CONFIGURED_ENDPOINT_URLS=true
+        while IFS= read -r endpoint_variable; do
+          unset "$endpoint_variable"
+        done < <(compgen -A variable AWS_ENDPOINT_URL)
+        export AWS_DEFAULT_REGION=ap-northeast-1 AWS_REGION=ap-northeast-1 AWS_PAGER=""
+        [ "${APK_PROBE_BUCKET:-}" = "teamagent-dev-apk-probe-718959508629" ] || { echo "FATAL: unexpected probe bucket"; exit 2; }
+        [ "${APK_PROBE_REGISTRY:-}" = "718959508629.dkr.ecr.ap-northeast-1.amazonaws.com" ] || { echo "FATAL: unexpected probe registry"; exit 2; }
+        [[ "${APK_PROBE_RUN_ID:-}" =~ ^[0-9]{8}-[0-9]{6}-[0-9a-f]{12}$ ]] || { echo "FATAL: invalid APK_PROBE_RUN_ID"; exit 2; }
+        probe_work_dir="$(mktemp -d)"
+        trap 'rm -rf "$probe_work_dir"' EXIT
+        input_prefix="s3://$APK_PROBE_BUCKET/inputs/$APK_PROBE_RUN_ID"
+        output_prefix="s3://$APK_PROBE_BUCKET/outputs/$APK_PROBE_RUN_ID"
+        # Keep the complete failed command output before publishing the log.
+        set +e
+        (
+          set -euo pipefail
+          [ "$(uname -m)" = aarch64 ] || { echo "FATAL: probe must run on native arm64"; exit 1; }
+          aws s3 cp "$input_prefix/repo.tar.gz" "$probe_work_dir/repo.tar.gz" --only-show-errors
+          aws s3 cp "$input_prefix/build-args.txt" "$probe_work_dir/build-args.txt" --only-show-errors
+          python3 - "$probe_work_dir" <<'PY'
+        import pathlib
+        import tarfile
+        import sys
+
+        work = pathlib.Path(sys.argv[1])
+        expected = "infra/docker/Dockerfile.teamagent-media-worker"
+        with tarfile.open(work / "repo.tar.gz", "r:gz") as archive:
+            members = archive.getmembers()
+            if len(members) != 1 or members[0].name != expected:
+                raise SystemExit("FATAL: probe tar must contain only the media Dockerfile")
+            member = members[0]
+            if not member.isfile() or not 0 < member.size <= 1024 * 1024:
+                raise SystemExit("FATAL: probe Dockerfile must be a nonempty regular file <= 1 MiB")
+            source = archive.extractfile(member)
+            assert source is not None
+            destination = work / "repo" / expected
+            destination.parent.mkdir(parents=True)
+            destination.write_bytes(source.read())
+        PY
+          build_args=()
+          while IFS= read -r kv || [ -n "$kv" ]; do
+            [[ "$kv" =~ ^[A-Z0-9_]+_PACKAGE_VERSION=[0-9A-Za-z._+-]+$ ]] || { echo "FATAL: invalid build argument: $kv"; exit 2; }
+            case "${kv%%=*}" in
+              FFMPEG_PACKAGE_VERSION|NODE_PACKAGE_VERSION|PYTHON_PACKAGE_VERSION)
+                echo "FATAL: ${kv%%=*} requires the separate binary/contract update procedure"
+                exit 2
+                ;;
+            esac
+            build_args+=(--build-arg "$kv")
+          done < "$probe_work_dir/build-args.txt"
+          docker info >/dev/null
+          docker buildx version
+          # The native Docker driver needs no additional private BuildKit image.
+          [ "$(docker buildx inspect default --format '{{.Driver}}')" = docker ] || { echo "FATAL: default buildx driver must be docker"; exit 1; }
+          docker buildx prune --builder default --filter type=exec.cachemount --force >/dev/null
+          aws ecr get-login-password --region "$AWS_REGION" | docker login --username AWS --password-stdin "$APK_PROBE_REGISTRY"
+          (
+            cd "$probe_work_dir/repo"
+            # teamagent_ca is optional; the base image already supplies public CAs.
+            docker buildx build --builder default --platform linux/arm64 \
+              --file infra/docker/Dockerfile.teamagent-media-worker --target runtime-packages \
+              --no-cache-filter runtime-packages --progress plain \
+              "${build_args[@]}" --load -t "media-apk-probe:$APK_PROBE_RUN_ID" .
+          )
+          docker run --rm --platform linux/arm64 --entrypoint cat "media-apk-probe:$APK_PROBE_RUN_ID" \
+            /usr/share/teamagent/provenance/apk-installed.lock > "$probe_work_dir/apk-installed.lock"
+          python3 - "$probe_work_dir/apk-installed.lock" <<'PY'
+        import pathlib
+        import sys
+
+        lock = pathlib.Path(sys.argv[1]).read_bytes()
+        if not lock.endswith(b"\n") or len(lock.splitlines()) <= 100:
+            raise SystemExit("FATAL: invalid generated apk-installed.lock")
+        PY
+          aws s3 cp "$probe_work_dir/apk-installed.lock" "$output_prefix/apk-installed.lock" --only-show-errors --sse AES256
+        ) 2>&1 | tee "$probe_work_dir/apk-build.log"
+        probe_pipeline_status=("${PIPESTATUS[@]}")
+        probe_status=${probe_pipeline_status[0]}
+        if [ "$probe_status" -eq 0 ]; then
+          probe_status=${probe_pipeline_status[1]}
+        fi
+        set -e
+        aws s3 cp "$probe_work_dir/apk-build.log" "$output_prefix/apk-build.log" --only-show-errors --sse AES256
+        exit "$probe_status"
