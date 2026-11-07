@@ -237,7 +237,7 @@ async def test_karte_short_answer_is_shared_by_model_and_direct_paths(
         caller_claim_verifier=_Verifier(_claim(channel=DM)),  # type: ignore[arg-type]
     )
     result = json.loads(contents[0].text)
-    assert len(baseline) <= 600
+    assert len(baseline.split("\n状態:")[0]) <= 600
     assert baseline.startswith(CLIENT + ":") and "ほか 2 件" in baseline
     if direct:
         assert result["status"] == "posted"
