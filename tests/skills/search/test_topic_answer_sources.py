@@ -253,5 +253,6 @@ def test_compact_prompt_does_not_receive_conflicting_source_format(
     )
     kw = bedrock.converse.call_args.kwargs
     text = kw["system"] + str(kw["messages"])
-    assert ("（Slack: #チャンネル名 投稿日）" in text) is not drive_mode
-    assert ("出典は（金庫: 資料名）" in text) is not drive_mode
+    # 11-06 方針: 出所（Slack／金庫）を答えに書かせない。どちらのモードでも指示しない。
+    assert "（Slack: #チャンネル名 投稿日）" not in text
+    assert "出典は（金庫: 資料名）" not in text

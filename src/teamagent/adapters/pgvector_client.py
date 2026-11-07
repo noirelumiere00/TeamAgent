@@ -225,6 +225,26 @@ def _connect_pg(dsn: str) -> psycopg.Connection[dict[str, Any]]:
     return conn
 
 
+# 資料の添付判定に使うキーだけを検索結果へ運ぶ（全 metadata は根拠束などで大きい）。
+_FILE_METADATA_KEYS = (
+    "size",
+    "md5_checksum",
+    "slack_file_version",
+    "filetype",
+    "public_channel_ids",
+    "private_channel_ids",
+    "channel_ids",
+    "channel_type",
+    "is_im",
+    "is_mpim",
+)
+_FILE_METADATA_SQL = (
+    "jsonb_strip_nulls(jsonb_build_object("
+    + ", ".join(f"'{k}', d.metadata->'{k}'" for k in _FILE_METADATA_KEYS)
+    + "))"
+)
+
+
 @dataclass(frozen=True)
 class SearchHit:
     """ベクトル検索の1ヒット。
@@ -831,6 +851,9 @@ class PgVectorClient:
                 c.metadata->>'page_num' AS metadata_page_num,
                 d.id AS document_id,
                 d.source_uri,
+                d.external_id,
+                -- 全 metadata（根拠束など大きい）を毎ヒット運ばず、添付の判定に使うキーだけ。
+                {_FILE_METADATA_SQL} AS file_metadata,
                 d.source_type::text AS source_type,
                 d.title{_industry_columns()},
                 d.metadata->>'channel_name' AS channel_name,
@@ -867,9 +890,27 @@ class PgVectorClient:
         hits: list[SearchHit] = []
         for r in rows:
             meta: dict[str, Any] = {
+                **{
+                    key: value
+                    for key, value in (r.get("file_metadata") or {}).items()
+                    if key
+                    in {
+                        "size",
+                        "md5_checksum",
+                        "slack_file_version",
+                        "filetype",
+                        "public_channel_ids",
+                        "private_channel_ids",
+                        "channel_ids",
+                        "channel_type",
+                        "is_im",
+                        "is_mpim",
+                    }
+                },
                 **_timeline_metadata(r),
                 **_industry_metadata(r),
                 "source_uri": r.get("source_uri"),
+                "external_id": r.get("external_id"),
                 "source_type": r.get("source_type"),
                 "title": r.get("title"),
                 "channel_name": r.get("channel_name"),
@@ -1969,7 +2010,7 @@ class PgVectorClient:
                 1 - (c.{embedding_col} <=> %s::vector) AS score,
                 c.page_num,
                 c.metadata->>'page_num' AS metadata_page_num,
-                d.source_uri,
+                d.source_uri, d.external_id,
                 d.source_type::text AS source_type,
                 d.title,
                 d.metadata AS doc_metadata,
@@ -1994,6 +2035,7 @@ class PgVectorClient:
             meta.update(
                 {
                     "source_uri": r.get("source_uri"),
+                    "external_id": r.get("external_id"),
                     "source_type": r.get("source_type"),
                     "title": r.get("title"),
                 }
@@ -2196,7 +2238,8 @@ class PgVectorClient:
         )
         sql = f"""
             SELECT -(abs(hashtext(d.id::text)::bigint) + 1) AS chunk_id,
-                   d.id AS document_id, d.title, d.source_uri, d.source_type::text AS source_type,
+                   d.id AS document_id, d.title, d.source_uri, d.external_id,
+                   d.source_type::text AS source_type,
                    d.metadata{chunk_columns},
                    to_char(d.modified_at AT TIME ZONE 'Asia/Tokyo', 'YYYY-MM-DD') AS updated_at
             FROM documents d
@@ -2230,7 +2273,7 @@ class PgVectorClient:
                 "document_id": str(row["document_id"]),
                 **{
                     key: row.get(key)
-                    for key in ("title", "source_uri", "source_type", "updated_at")
+                    for key in ("title", "source_uri", "source_type", "external_id", "updated_at")
                 },
             }
             if embedding is not None:

@@ -10,7 +10,8 @@ from typing import Any
 from urllib.parse import parse_qs, urlsplit
 
 from teamagent.mcp_gateway.allowlist import email_allowed
-from teamagent.skills._shared.source_url import hit_doc_url
+from teamagent.skills._shared.slack_file_delivery import file_metadata
+from teamagent.skills._shared.source_url import hit_doc_url, ingested_slack_file_id
 from teamagent.skills.search.saved_file_refs import resolve_saved_files
 from teamagent.skills.search.schema import DocumentReference, ReferenceKind
 
@@ -128,6 +129,9 @@ def canonical_reference(
     source_type = str(meta.get("source_type") or "") or None
     names = list(file_names) or candidate_names(meta, content)
     ids = list(dict.fromkeys(file_ids or meta.get("slack_file_ids", ())))
+    ingested_id = ingested_slack_file_id(meta)
+    if ingested_id:
+        ids = [ingested_id]
     title = str(meta.get("title") or meta.get("file_name") or (names[0] if names else "記録"))
     direct = str(meta.get("drive_url") or "")
     # 記録シート（自動保管の台帳・事例シート等）の URL は資料そのものではないので原本に使わない。
@@ -148,6 +152,8 @@ def canonical_reference(
         or drive_file_id(direct)
         or (next(iter(resolved)) if complete_match and len(resolved) == 1 else None)
     )
+    if ingested_id:
+        fid = None
     url = f"https://drive.google.com/file/d/{fid}/view" if fid else hit_doc_url({"source_uri": uri})
     if not fid and drive_file_id(uri) and source_type != "gsheets":
         url = None
@@ -161,7 +167,7 @@ def canonical_reference(
     ):
         kind = (
             "slack_attachment"
-            if file_names or meta.get("file_names") or ids
+            if file_names or meta.get("file_names") or ids or names
             else "slack_conversation"
         )
     elif source_type == "gsheets" or "/spreadsheets/" in (uri or ""):
@@ -175,10 +181,14 @@ def canonical_reference(
         drive_file_id=fid,
         slack_file_id=ids[0] if len(ids) == 1 else None,
         slack_file_ids=ids,
+        slack_file_metadata=file_metadata(meta),
         file_record_number=meta.get("file_record_number"),
         file_record_branch=meta.get("file_record_branch"),
-        unread=kind == "slack_attachment"
-        or (source_type == "slack" and bool(meta.get("file_names") or ids)),
+        unread=not ingested_id
+        and (
+            kind == "slack_attachment"
+            or (source_type == "slack" and bool(meta.get("file_names") or ids))
+        ),
         title=title,
         url=url,
         source_uri=uri,
@@ -188,12 +198,8 @@ def canonical_reference(
 
 
 def label(ref: DocumentReference) -> str:
-    if ref.kind == "drive" and ref.source_type == "slack":
-        return (
-            "Drive資料（紹介投稿の記録・添付本文未読）"
-            if ref.unread
-            else "Drive資料（会話からの参照）"
-        )
+    if ref.source_type == "slack" or ref.kind in {"slack_attachment", "slack_conversation"}:
+        return "資料（本文未読）" if ref.unread else "資料"
     return {
         "drive": "Drive資料",
         "slack_conversation": "Slackの会話記録",
@@ -215,8 +221,15 @@ def slack_hit(item: Any, index: int = 0) -> Any:
             "title": item.text.splitlines()[0][:100] if item.text else "Slackの記録",
             "source_uri": item.hit.permalink,
             "source_type": "slack",
+            "channel_type": "im"
+            if item.hit.channel == "DM"
+            else "mpim"
+            if item.hit.channel == "グループDM"
+            else None,
             "file_names": list(item.original_file_names or item.hit.file_names),
             "slack_file_ids": item.hit.file_ids,
+            "files": item.hit.files,
+            "updated_at": item.hit.posted_on,
             "explicit_drive_urls": item.explicit_drive_urls,
             **(
                 {

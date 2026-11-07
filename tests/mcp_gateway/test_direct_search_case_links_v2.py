@@ -75,7 +75,6 @@ def test_other_links_and_mentions_remain_escaped(slack: _FakeSlack) -> None:
     [
         "https://drive.google.com.evil.test/file/d/ALPHA/view",
         "https://user@drive.google.com/file/d/ALPHA/view",
-        "https://example.slack.com/archives/C0PUBLIC/p1234567890123456",
         "http://drive.google.com/file/d/ALPHA/view",
     ],
 )

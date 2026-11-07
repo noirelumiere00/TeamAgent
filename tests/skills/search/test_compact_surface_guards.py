@@ -29,7 +29,7 @@ def test_compact_slack_only_answer_has_cited_body_without_inventory(monkeypatch,
     )
     assert "連携はアプリから開始できます。" in out.answer
     assert "出典:" in out.answer
-    assert "https://example.test/slack/connect" in out.answer
+    assert "https://example.slack.com/archives/CCONNECT/p1759200000000100" in out.answer
     assert "見つかりません" not in out.answer
     assert "💬" not in out.answer and "探した範囲" not in out.answer
     assert "[S:" not in out.answer

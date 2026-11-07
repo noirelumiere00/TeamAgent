@@ -7,6 +7,7 @@
 - 検索＋要約は SearchSkill をそのまま再利用（Phase1 の自動分類フィルタも効く）。
 - gdrive ヒットは source_uri、gsheets/slack ヒットは search が資料名解決した
   Drive 実ファイル URL（h.url）から file_id を解決し download_file_bytes で実体取得。
+- 取込済み Slack 資料は依頼者の user token で files.info → guarded download する。
 - 依頼者本人（ctx.metadata["user_email"]）の DM を開いて upload_file で添付する。
 - skill.run は同期だが dispatch が thread 実行するため、Slack 非同期呼び出しは asyncio.run で駆動。
 - どこで失敗しても要約テキストは返す（fail-open）。
@@ -38,6 +39,8 @@ from teamagent.skills._shared.drive_slack_delivery import (
 )
 from teamagent.skills._shared.google_connection import google_connection_guard
 from teamagent.skills._shared.private_surface import is_private_surface
+from teamagent.skills._shared.slack_file_delivery import prepare_slack_files
+from teamagent.skills._shared.source_url import ingested_slack_file_id
 from teamagent.skills._shared.user_context import USER_CONTEXT_RULE
 from teamagent.skills.base import BaseSkill, SkillContext, register
 from teamagent.skills.knowledge_deliver.schema import (
@@ -205,11 +208,14 @@ class KnowledgeDeliverSkill(BaseSkill[KnowledgeDeliverInput, KnowledgeDeliverOut
     input_schema: ClassVar[type[BaseModel]] = KnowledgeDeliverInput
     output_schema: ClassVar[type[BaseModel]] = KnowledgeDeliverOutput
 
-    def __init__(self, *, search: Any = None, slack: Any = None, gdrive: Any = None) -> None:
+    def __init__(
+        self, *, search: Any = None, slack: Any = None, gdrive: Any = None, slack_store: Any = None
+    ) -> None:
         # search は factory が共有 SearchSkill を注入する（埋め込み二重ロード回避）。
         self._search = search
         self._slack = slack
         self._gdrive = gdrive
+        self._slack_store = slack_store
 
     @google_connection_guard(lambda input: KnowledgeDeliverOutput(answer=""))
     def run(self, input: KnowledgeDeliverInput, ctx: SkillContext) -> KnowledgeDeliverOutput:
@@ -277,6 +283,8 @@ class KnowledgeDeliverSkill(BaseSkill[KnowledgeDeliverInput, KnowledgeDeliverOut
         candidates: list[tuple[str, str]] = []  # (file_id, filename)
         seen_ids: set[str] = set()
         resolved_candidates = 0
+        slack_ids: set[str] = set()
+        slack_metadata: dict[str, dict[str, Any]] = {}
         for h in s_out.hits:
             if (
                 wanted_type
@@ -284,7 +292,23 @@ class KnowledgeDeliverSkill(BaseSkill[KnowledgeDeliverInput, KnowledgeDeliverOut
                 != wanted_type
             ):
                 continue
-            if h.source_type == "gdrive":
+            slack_id = ingested_slack_file_id(
+                {
+                    "source_type": h.source_type,
+                    "source_uri": h.source_uri,
+                    "external_id": h.external_id,
+                }
+            )
+            file_id: str | None
+            if slack_id:
+                file_id = slack_id
+                slack_ids.add(slack_id)
+                slack_metadata[slack_id] = {
+                    **h.slack_file_metadata,
+                    "source_uri": h.source_uri,
+                    **({"channel_type": h.channel_type} if h.channel_type else {}),
+                }
+            elif h.source_type == "gdrive":
                 file_id = extract_drive_file_id(h.source_uri)
             else:
                 # gsheets 行 / slack ヒット: search が資料名→Drive 実ファイルに
@@ -295,7 +319,9 @@ class KnowledgeDeliverSkill(BaseSkill[KnowledgeDeliverInput, KnowledgeDeliverOut
                     file_id = extract_drive_binary_file_id(h.drive_url)
             ref = KnowledgeRef(
                 title=h.title or h.file_name,
-                url=(
+                url=h.source_uri
+                if slack_id
+                else (
                     h.url
                     if extract_drive_binary_file_id(h.url) == file_id
                     else f"https://drive.google.com/file/d/{file_id}/view"
@@ -324,7 +350,11 @@ class KnowledgeDeliverSkill(BaseSkill[KnowledgeDeliverInput, KnowledgeDeliverOut
                 evidence_refs.append(ref)
                 kept_urls |= hit_urls
                 # 解決元のシート行等の番号を、Drive 原本のページ番号として扱わない。
-                if file_id and h.source_type in (None, "gdrive") and h.page_num is not None:
+                if (
+                    file_id
+                    and (slack_id or h.source_type in (None, "gdrive"))
+                    and h.page_num is not None
+                ):
                     pages = pages_by_fid.setdefault(file_id, [])
                     if h.page_num not in pages and len(pages) < 3:
                         pages.append(h.page_num)
@@ -346,9 +376,16 @@ class KnowledgeDeliverSkill(BaseSkill[KnowledgeDeliverInput, KnowledgeDeliverOut
                     continue
                 seen_ids.add(file_id)
                 candidates.append(
-                    (file_id, safe_filename(h.resolved_file_name or h.title or h.file_name))
+                    (
+                        file_id,
+                        safe_filename(
+                            (h.title or h.file_name)
+                            if slack_id
+                            else (h.resolved_file_name or h.title or h.file_name)
+                        ),
+                    )
                 )
-                if h.source_type != "gdrive":
+                if h.source_type != "gdrive" and not slack_id:
                     resolved_candidates += 1
 
         # 根拠に使わない（別取引先の）リンクを回答末尾の「📎 資料リンク」から外す。
@@ -377,7 +414,11 @@ class KnowledgeDeliverSkill(BaseSkill[KnowledgeDeliverInput, KnowledgeDeliverOut
                 ref = ref_by_fid[fid][0]
                 # 検索の答えに同じリンクがもう出ていれば、原本の行を重ねない。
                 already_linked = bool(ref.url) and ref.url in answer
-                detail = filename if already_linked else f"{filename}\n原本: {ref.url}"
+                detail = (
+                    filename
+                    if already_linked and fid not in slack_ids
+                    else f"{filename}\n原本: {ref.url}"
+                )
                 if ref.pages:
                     numbers = "・".join(str(page) for page in ref.pages)
                     unit = "スライド" if filename.lower().endswith(".pptx") else "ページ"
@@ -388,7 +429,7 @@ class KnowledgeDeliverSkill(BaseSkill[KnowledgeDeliverInput, KnowledgeDeliverOut
         # 「名指しの取引先の資料は無い」とそのまま言う。
         guard_emptied = not candidates and (not_found_block or client_excluded > 0)
 
-        # 3. 候補ファイルを Drive から取得 → 一時ファイル化（_shared の共通部品）。
+        # 3. 候補を Drive / 本人権限の Slack から取得し、同じ配信経路へ検索順で渡す。
         #    tmpdir の後始末は呼び出し側の責務（_shared/drive_slack_delivery の契約）。
         #    常駐 ECS タスクの /tmp に最大 256MB × top_k が残り続けるのを防ぐため、
         #    添付が終わったら（失敗しても）必ず消す。
@@ -401,19 +442,32 @@ class KnowledgeDeliverSkill(BaseSkill[KnowledgeDeliverInput, KnowledgeDeliverOut
         )
         prepared: list[PreparedFile] = []
         tmpdir: str | None = None
+        slack_tmpdir: str | None = None
         delivered_ids: set[str] = set()
         where = ""
         try:
-            if candidates:
+            drive_candidates = [c for c in candidates if c[0] not in slack_ids]
+            if drive_candidates:
                 gdrive = self._gdrive or self._build_gdrive()
                 tmpdir, prepared = prepare_drive_files(
                     gdrive,
-                    candidates,
+                    drive_candidates,
                     request_id=ctx.request_id,
                     log=log,
                     log_prefix="knowledge_deliver",
                     tmp_prefix="aila_knowledge_",
                 )
+            if slack_ids:
+                slack_tmpdir, slack_prepared = asyncio.run(
+                    prepare_slack_files(
+                        [c for c in candidates if c[0] in slack_ids],
+                        ctx,
+                        slack_store=self._slack_store,
+                        metadata_by_id=slack_metadata,
+                    )
+                )
+                by_id = {p[0]: p for p in [*prepared, *slack_prepared]}
+                prepared = [by_id[fid] for fid, _ in candidates if fid in by_id]
 
             # 4. 配信。聞かれたチャンネル/スレッドがあればそこに添付
             #    （メール以外は基本チャンネル完結）。無ければ依頼者本人の DM に
@@ -520,6 +574,8 @@ class KnowledgeDeliverSkill(BaseSkill[KnowledgeDeliverInput, KnowledgeDeliverOut
         finally:
             if tmpdir:
                 shutil.rmtree(tmpdir, ignore_errors=True)
+            if slack_tmpdir:
+                shutil.rmtree(slack_tmpdir, ignore_errors=True)
 
         # 配信できたファイルに対応する ref を delivered=True に。
         for fid in delivered_ids:

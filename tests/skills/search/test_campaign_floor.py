@@ -91,6 +91,8 @@ _FIXED_COLUMNS: dict[str, Callable[[_Doc, _Chunk], Any]] = {
     "metadata_page_num": lambda d, c: None,
     "document_id": lambda d, c: d.document_id,
     "source_uri": lambda d, c: d.source_uri,
+    "external_id": lambda d, c: None,
+    "file_metadata": lambda d, c: d.metadata,
     "source_type": lambda d, c: d.source_type,
     "title": lambda d, c: d.title,
     "updated_at": lambda d, c: None,

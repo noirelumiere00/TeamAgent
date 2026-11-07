@@ -10,6 +10,7 @@ from urllib.parse import urlsplit
 from teamagent.adapters.pgvector_client import SearchHit
 from teamagent.prompts.loader import load_prompt
 from teamagent.skills._shared.grounding import NumberGrounder
+from teamagent.skills._shared.source_url import slack_file_permalink
 from teamagent.skills.search import drive_first, timeline_status
 from teamagent.skills.search.campaign_files import (
     VIDEO_METRICS_HEADING,
@@ -132,8 +133,13 @@ def append_used_drive_links(
             continue
         meta = hit.metadata or {}
         ref = drive_first.canonical_reference(meta, hit.content)
-        conversation = ref.kind in {"slack_conversation", "slack_attachment"}
-        if (ref.kind != "drive" and not conversation) or ref.url in seen:
+        conversation = ref.kind in {
+            "slack_conversation",
+            "slack_attachment",
+        } and not slack_file_permalink(ref.url)
+        if (
+            ref.kind != "drive" and not conversation and not slack_file_permalink(ref.url)
+        ) or ref.url in seen:
             continue
         names = [
             ref.title,
@@ -189,7 +195,7 @@ def append_used_drive_links(
         link = case_link(ref.url, "会話の記録" if conversation else "資料を見る")
         if not used or link is None or "/spreadsheets/" in (ref.url or ""):
             continue
-        if not conversation and authorize_drive is not None and not authorize_drive(ref):
+        if ref.kind == "drive" and authorize_drive is not None and not authorize_drive(ref):
             continue
         seen.add(ref.url)
         if not conversation:
@@ -209,7 +215,9 @@ def _material_link(match: re.Match[str]) -> str:
     except ValueError:
         return match[0]
     if (parsed.hostname or "").endswith(".slack.com") and parsed.path.startswith("/archives/"):
-        return match[0] if label == "会話の記録" else label
+        from teamagent.skills.search.case_list import case_link
+
+        return match[0] if case_link(url, label) else label
     return match[0]
 
 
@@ -601,7 +609,12 @@ def build(
         ref = references.get(key)
         # 公開の会話を根拠にした説明には、資料とは区別して元投稿へのリンクを残す。
         if ref is not None and ref.kind in {"slack_conversation", "slack_attachment"}:
-            if "slack.com/archives/" in (ref.url or ""):
+            if slack_file_permalink(ref.url):
+                link = case_link(ref.url, "資料を見る")
+                if link and link not in links:
+                    links.append(link)
+                    displayed_refs.append(ref)
+            elif "slack.com/archives/" in (ref.url or ""):
                 link = case_link(ref.url, "会話の記録")
                 if link and link not in links:
                     links.append(link)

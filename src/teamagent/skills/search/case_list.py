@@ -6,6 +6,7 @@ from datetime import date
 from urllib.parse import urlsplit
 
 from teamagent.adapters.pgvector_client import SearchHit
+from teamagent.skills._shared.source_url import ingested_slack_file_id, slack_file_permalink
 from teamagent.skills.search import drive_first
 from teamagent.skills.search.answer_mode import strip_advice
 from teamagent.skills.search.answer_sections import (
@@ -19,6 +20,7 @@ from teamagent.skills.search.campaign_files import video_footer_urls
 from teamagent.skills.search.composite import SlackItem
 from teamagent.skills.search.not_found import case_target_hits
 from teamagent.skills.search.schema import DocumentReference
+from teamagent.skills.search.source_attribution import without_source_attribution
 
 # shortcut: 候補の既定幅は30件、Drive事例の取りこぼしが続く場合はページングへ拡張する。
 CANDIDATE_LIMIT = 30
@@ -39,11 +41,13 @@ def case_link(url: str | None, label: str) -> str | None:
             or parsed.port not in (None, 443)
         ):
             return None
-        allowed = (label == "資料を見る" and drive_first.drive_file_id(safe)) or (
-            label == "会話の記録"
-            and (parsed.hostname or "").endswith(".slack.com")
-            and re.fullmatch(r"/archives/[CDG][A-Z0-9]+/p[0-9]{16}", parsed.path)
-        )
+        message = (
+            (parsed.hostname or "") == "slack.com" or (parsed.hostname or "").endswith(".slack.com")
+        ) and re.fullmatch(r"/archives/[CDG][A-Z0-9]+/p[0-9]{16}", parsed.path)
+        allowed = (
+            label == "資料を見る"
+            and (drive_first.drive_file_id(safe) or slack_file_permalink(safe) or message)
+        ) or (label == "会話の記録" and message)
     except ValueError:
         return None
     return f"<{safe.replace('&', '&amp;')}|{label}>" if allowed else None
@@ -61,7 +65,7 @@ def _source_text(text: str) -> str:
     return re.sub(
         r"\[[^\]\n]*\]\(<?https?://[^)\n]*>?\)|<https?://[^>]+>|https?://[^\s<>]+|<[@!][^>\n]*>",
         "",
-        text,
+        without_source_attribution(text),
         flags=re.IGNORECASE,
     )
 
@@ -117,11 +121,16 @@ def render(
         url = _safe_url(entry.url)
         link_label = "資料"
         ref = (hit.metadata or {}).get(drive_first.REFERENCE_KEY)
-        if (cards or drive_only) and ref is None:
+        if (
+            cards
+            or drive_only
+            or meta.get("source_type") == "slack"
+            or ingested_slack_file_id(meta)
+        ) and ref is None:
             ref = drive_first.canonical_reference(hit.metadata or {}, hit.content)
         if drive_only and (
             ref is None
-            or ref.kind != "drive"
+            or (ref.kind not in {"drive", "slack_attachment"})
             or not case_link(ref.url, "資料を見る")
             or entry.kind in {"karte", "research", "deal"}
             or str(meta.get("is_sales_fb") or "").lower() in {"true", "1", "yes"}
@@ -168,9 +177,8 @@ def render(
             if ref.kind == "drive":
                 card.append("• " + (case_link(url, "資料を見る") or "資料URL未確認"))
             elif ref.kind in {"slack_attachment", "slack_conversation"}:
-                if ref.kind == "slack_attachment":
-                    card.append("• Slack にだけある資料（本文未読）")
-                card.append("• " + (case_link(url, "会話の記録") or "会話のURL未確認"))
+                label = "資料を見る" if ref.kind == "slack_attachment" else "会話の記録"
+                card.append("• " + (case_link(url, label) or "資料URL未確認"))
             else:
                 card.append(f"• {drive_first.label(ref)}（資料URL未確認）")
             line = "\n".join(card)
@@ -197,19 +205,7 @@ def render(
 
 def slack_cases(items: Sequence[SlackItem], *, drive_only: bool = False) -> list[SearchHit]:
     return [
-        SearchHit(
-            chunk_id=-10000 - i,
-            content=item.text,
-            score=1.0,
-            metadata={
-                "title": item.text.splitlines()[0][:100] if item.text else "Slackの事例記録",
-                "source_uri": item.hit.permalink,
-                "source_type": "slack",
-                "file_names": list(item.original_file_names or item.hit.file_names),
-                "slack_file_ids": item.hit.file_ids,
-                **({drive_first.REFERENCE_KEY: item.hit.reference} if item.hit.reference else {}),
-            },
-        )
+        drive_first.slack_hit(item, i)
         for i, item in enumerate(items)
         if not drive_only or not re.search(r"営業フィードバック|営業FB", item.hit.channel)
     ]

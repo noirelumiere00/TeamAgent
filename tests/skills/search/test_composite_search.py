@@ -275,11 +275,10 @@ def test_dm_returns_top5_short_excerpts_and_cites_both_sources() -> None:
     q = client.search_messages.call_args.kwargs["query"]
     assert q == "日本ガイシ ケイパ提案"
     msg = _user_message(b)
-    assert "# 参考資料（金庫の資料）" in msg
+    assert "# 参考資料\n" in msg
     assert "# Slack の投稿（依頼者本人の Slack 検索・5 件）" in msg
-    assert "（金庫: 資料名）" in msg and "（Slack: #チャンネル名 投稿日）" in msg
-    assert "金庫の資料には無く、Slack の投稿にあります" in msg
-    assert out.answer.startswith("要約（金庫: 提案書A）")
+    assert "回答に保管場所・取得元を書かない" in msg
+    assert out.answer.startswith("要約") and "（金庫:" not in out.answer
 
 
 def test_channel_request_uses_public_matches_only() -> None:
@@ -478,9 +477,9 @@ def test_vault_empty_slack_only_says_so() -> None:
     )
     assert out.found is True and out.slack_status == "ok"
     assert not out.answer.startswith(NOT_FOUND_HEAD)
-    assert "Slack の投稿にあります" in out.answer
+    assert "Slack の投稿にあります" not in out.answer
     msg = _user_message(b)
-    assert "（金庫に該当する資料はありません）" in msg
+    assert "（追加の資料はありません）" in msg
     assert "東芝 半導体の提案の相談" in msg
     assert out.total_cost_usd == pytest.approx(0.003)
 

@@ -44,7 +44,8 @@ from teamagent.skills._shared.next_step import (
     suggestions_enabled,
     tool_enabled,
 )
-from teamagent.skills._shared.source_url import hit_doc_url
+from teamagent.skills._shared.slack_file_delivery import file_metadata
+from teamagent.skills._shared.source_url import hit_doc_url, ingested_slack_file_id
 from teamagent.skills.base import BaseSkill, SkillContext, register
 from teamagent.skills.search import compact, drive_first, timeline_status, visit_cases
 from teamagent.skills.search.aggregation import extract_aggregation_filter
@@ -129,6 +130,7 @@ from teamagent.skills.search.schema import (
     SearchInput,
     SearchOutput,
 )
+from teamagent.skills.search.source_attribution import without_source_attribution
 from teamagent.skills.search.two_stage import (
     TWO_STAGE_CTX_KEY,
     TWO_STAGE_NOTICE,
@@ -912,6 +914,15 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
         if compact_mode and slack_items:
             found = True
         case_miss = bool(case_target and not found)
+        if (is_case_list(input.query) or compact.explicit_list(input.query)) and (
+            (is_case_list(input.query) and slack_items)
+            or any(i.hit.file_names or i.hit.file_ids for i in slack_items)
+            or any(
+                h.metadata.get("source_type") == "slack" or ingested_slack_file_id(h.metadata)
+                for h in summary_hits
+            )
+        ):
+            case_listing = True
 
         # 3. Bedrock で要約（chunk が 0 件のときはスキップ）。
         #    include_answer=False（二段レスポンスの fast path）は要約そのものを
@@ -943,7 +954,7 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
             answer, cost_usd = build_not_found_answer(hits), 0.0
             if slack_items:
                 # 複合検索で Slack にだけ有る: 金庫の資料は渡さず、Slack の投稿だけで要約する
-                # （要約器には「金庫には無い」と明示し、「Slack にだけある」と書かせる）。
+                # 取得できた根拠だけを要約し、保管場所は回答に出さない。
                 _t = time.perf_counter()
                 slack_answer, cost_usd = self._summarize(
                     input.query, [], ctx.request_id, slack_items=slack_items
@@ -1265,6 +1276,8 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
                     drive_url=(str(meta.get("drive_url")) if meta.get("drive_url") else None),
                     url=url,
                     source_uri=(str(meta["source_uri"]) if meta.get("source_uri") else None),
+                    external_id=(str(meta["external_id"]) if meta.get("external_id") else None),
+                    slack_file_metadata=file_metadata(meta),
                     resolved_file_name=(resolved_file_ref[0] if resolved_file_ref else None),
                     source_type=(str(meta["source_type"]) if meta.get("source_type") else None),
                     channel_name=(str(meta["channel_name"]) if meta.get("channel_name") else None),
@@ -1302,18 +1315,27 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
                     scope += "・Slack" if slack_lookup.status == "ok" else "（Slackは検索未完了）"
                 answer = build_scoped_not_found_answer(case_target, scope=scope, complete=complete)
 
+        attachment_refs: list[DocumentReference] = []
         if case_listing and input.include_answer and not visit:
             from teamagent.skills.search.case_list import EMPTY_DRIVE_CASES, render, slack_cases
+            from teamagent.skills.search.material_files import prepare_list_hits
 
+            list_refs: list[DocumentReference] = []
+            listing_hits = prepare_list_hits(
+                self, [*summary_hits, *slack_cases(slack_items, drive_only=drive_case_listing)], ctx
+            )
             listed = render(
-                [*summary_hits, *slack_cases(slack_items, drive_only=drive_case_listing)],
+                listing_hits,
                 case_target,
                 lambda h: self._hit_url(h, file_urls=file_urls),
-                displayed_refs=displayed_refs,
+                displayed_refs=list_refs,
                 cards=self._direct_answer_allowed(ctx, "case_cards")
                 or bool(compact_fallback_cards),
                 drive_only=drive_case_listing,
             )
+            attachment_refs = list_refs
+            if displayed_refs is not None:
+                displayed_refs.extend(list_refs)
             if listed:
                 answer = listed
                 if drive_case_listing:
@@ -1389,10 +1411,12 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
             )
             if status:
                 answer = status + ("\n\n" + answer if answer else "")
+        answer = without_source_attribution(answer)
         output = SearchOutput(
             answer=answer,
             case_state_answer=case_answer,
             displayed_refs=displayed_refs,
+            attachment_refs=attachment_refs,
             answer_format="list" if case_listing else "compact" if compact_mode else None,
             direct_answer=answer if direct_kind is not None else None,
             direct_answer_kind=direct_kind,
@@ -3143,8 +3167,8 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
             for h in primary_hits
         )
         if slack_items:
-            vault_block = primary_block or "（金庫に該当する資料はありません）"
-            sections = [f"# 質問\n{query}\n\n# 参考資料（金庫の資料）\n{vault_block}"]
+            vault_block = primary_block or "（追加の資料はありません）"
+            sections = [f"# 質問\n{query}\n\n# 参考資料\n{vault_block}"]
         else:
             sections = [f"# 質問\n{query}\n\n# 参考資料\n{primary_block}"]
         comparison = (

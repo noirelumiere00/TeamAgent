@@ -86,6 +86,7 @@ class SlackSearchMatch:
     file_names: tuple[str, ...] = ()
     thread_ts: str = ""
     file_ids: tuple[str, ...] = ()
+    files: tuple[dict[str, Any], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -160,6 +161,7 @@ def _search_match_from_raw(m: dict[str, Any]) -> SlackSearchMatch:
         channel_is_channel=_opt_bool(ch.get("is_channel")),
         file_names=_file_names_from_raw(m),
         file_ids=_file_ids_from_raw(m),
+        files=tuple(f for f in m.get("files", []) or [] if isinstance(f, dict)),
         thread_ts=str(
             m.get("thread_ts")
             or (parse_qs(urlsplit(str(m.get("permalink") or "")).query).get("thread_ts") or [""])[0]

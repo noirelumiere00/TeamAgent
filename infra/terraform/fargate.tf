@@ -651,6 +651,8 @@ resource "aws_ecs_task_definition" "mcp" {
       { name = "SEARCH_DIRECT_ANSWER", value = var.search_direct_answer },
       { name = "SEARCH_DIRECT_ANSWER_ALLOWED_EMAILS", value = var.search_direct_answer_allowed_emails },
       { name = "SEARCH_DIRECT_ANSWER_KINDS", value = var.search_direct_answer_kinds },
+      { name = "USE_SEARCH_FILE_DELIVERY", value = var.use_search_file_delivery },
+      { name = "SEARCH_FILE_DELIVERY_ALLOWED_EMAILS", value = var.search_file_delivery_allowed_emails },
       { name = "SEARCH_DRIVE_FIRST", value = var.search_drive_first },
       { name = "SEARCH_DRIVE_FIRST_ALLOWED_EMAILS", value = var.search_drive_first_allowed_emails },
       # Conditional PutItemでrolling taskを跨いだnonce one-useを保証。障害時は認可fail-closed。

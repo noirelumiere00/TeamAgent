@@ -16,6 +16,7 @@ v3 では質問の種類をここで決め、user message に回答モードと�
 from __future__ import annotations
 
 import re
+import unicodedata
 from typing import Literal
 
 AnswerMode = Literal["fact", "list", "insight"]
@@ -46,6 +47,7 @@ _DOC_NAME_NOUN_RE = re.compile(
 # （「全部の中で最新の提案書は？」は 1 件を求める事実の質問）。
 _LIST_RE = re.compile(
     r"一覧|リスト|何件|いくつ|洗い出|列挙|まとめて(?:出|見せ)|"
+    r"(?:案件|施策|事例|実績)(?:を)?\s*\d+\s*件(?:出して|見せて|教えて)|"
     r"(?:全部|すべて|全て)(?:を|の(?:資料|案件|提案書?|事例)を?)?"
     r"(?:出|見せ|教え|挙げ|並べ|リスト)|"
     # 案件・施策・事例を（複数ありうる前提で）知りたい依頼。10-01 杉浦さん
@@ -58,7 +60,7 @@ _LIST_RE = re.compile(
 
 def classify_answer_mode(query: str) -> AnswerMode:
     """質問文から回答モードを決める。"""
-    text = query or ""
+    text = unicodedata.normalize("NFKC", query or "")
     if _INSIGHT_RE.search(_DOC_NAME_NOUN_RE.sub("", text)):
         return "insight"
     if _LIST_RE.search(text):
