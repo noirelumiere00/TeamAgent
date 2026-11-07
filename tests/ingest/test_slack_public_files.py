@@ -646,7 +646,7 @@ def test_download_host_guard_and_pagination_failure_do_not_leak(setup: Any) -> N
 
 def test_loader_real_yaml_and_optional_section() -> None:
     sources = load_ingest_sources(Path(__file__).resolve().parents[2] / "data/ingest_sources.yaml")
-    assert sources.slack_public_files == dataclasses.replace(SPEC, max_files_per_run=2000)
+    assert sources.slack_public_files == dataclasses.replace(SPEC, max_files_per_run=500)
     assert IngestSources(1, (), (), ()).slack_public_files is None
 
 
