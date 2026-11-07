@@ -61,7 +61,8 @@ UV_DIGEST = "9941e2d8e06ff884d328905091eac0a6bc1e40e5ce12e6dd0de4ef4ee26baac4"
 # 2026-11-06: Alpine 上流への追随（font-noto 2026.10.01-r0→2026.11.01-r0）。apk 段の実ビルドで lock 差分 -4 +4（240→240 行）。
 # 2026-11-06: Alpine 上流への追随（削除: musl-utils-1.2.6-r3 / 追加: musl-utils-1.2.6-r2）。apk 段の実ビルドで lock 差分 -1 +1（240→240 行）。
 # 2026-11-06: Alpine 上流への追随（musl-utils 1.2.6-r2→1.2.6-r3）。apk 段の実ビルドで lock 差分 -1 +1（240→240 行）。
-APK_LOCK_SHA256 = "5ac9dcf6ed1eb10f6290df29a0e849fb672ffd4e0876099a8a3dd97c10bc5c13"
+# 2026-11-07: Alpine 上流への追随（zlib 1.3.2-r1→1.4-r0）。apk 段の実ビルドで lock 差分 -4 +4（240→240 行）。
+APK_LOCK_SHA256 = "295eb1528a274912c0928f2e89cf141d5906b34c40105d35403e6edb313428f2"
 CHROMIUM_PATH = "/usr/lib/chromium/chromium"
 
 
@@ -174,7 +175,7 @@ def test_base_bundled_cve_packages_are_pinned_to_the_fixed_versions() -> None:
         # 2026-10-02 便 r43 段3: base(v3.24)同梱の pcre2 10.47-r1 に公開済み CVE 8 件（HIGH 4）。secdb v3.24 main で 10.48-r0 が 7 件・10.49-r0 が CVE-2026-103111 を fixed。glib 等の依存で外せないため修正版を明示 pin。
         "PCRE2_PACKAGE_VERSION": ("pcre2", "10.49-r0"),
         # Alpine v3.24 の base 同梱 zlib 1.3.2-r0 に CVE-2026-85091（ECR は HIGH・Trivy は MEDIUM）。Alpine secdb v3.24 main が 1.3.2-r1 を fixed とする。r51 撃ち直し（4c5811a6）の段3 で media が停止
-        "ZLIB_PACKAGE_VERSION": ("zlib", "1.3.2-r1"),
+        "ZLIB_PACKAGE_VERSION": ("zlib", "1.4-r0"),
         # chromium base 同梱の libx11 に HIGH。r64 段3 の ECR ゲート（f853c140）
         "LIBX11_PACKAGE_VERSION": ("libx11", "1.8.14-r0"),
         # chromium base 同梱の libxi に HIGH。r64 段3 の ECR ゲート（f853c140）

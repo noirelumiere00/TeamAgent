@@ -36,9 +36,9 @@ ffmpeg-libavcodec-8.1.2-r0
 ffmpeg-libavformat-8.1.2-r0
 ffmpeg-libavutil-8.1.2-r0
 ffmpeg-libswresample-8.1.2-r0
-ffmpeg8-libavdevice-8.1.3-r0
-ffmpeg8-libavfilter-8.1.3-r0
-ffmpeg8-libswscale-8.1.3-r0
+ffmpeg8-libavdevice-8.1.3-r1
+ffmpeg8-libavfilter-8.1.3-r1
+ffmpeg8-libswscale-8.1.3-r1
 file-5.47-r2
 font-liberation-2.1.5-r2
 font-noto-2026.11.01-r0
@@ -236,5 +236,5 @@ xz-libs-5.8.3-r0
 yaml-0.2.5-r2
 zimg-3.0.6-r0
 zix-libs-0.8.2-r0
-zlib-1.3.2-r1
+zlib-1.4-r0
 zstd-libs-1.5.7-r2
