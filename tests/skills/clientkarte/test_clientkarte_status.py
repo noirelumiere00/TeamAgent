@@ -44,40 +44,40 @@ def status_skill(monkeypatch: pytest.MonkeyPatch) -> tuple[karte.ClientKarteSkil
 def test_old_karte_is_dated_and_past_plans_are_not_current(status_skill: tuple) -> None:
     skill, _ = status_skill
     out = skill.run(ClientKarteInput(client_name="JTB"), SkillContext())
-    assert out.answer.startswith("### JTB（8/24 時点）\n- 宿題:")
-    assert out.answer.count("（8/24 時点）") == 1
-    assert "8/26 に自主提案の予定だった（結果は未確認）" in out.answer
-    assert "10月中旬〜下旬 予定だった（結果は未確認）" in out.answer
-    assert "9月下旬退職予定だった（結果は未確認）" in out.answer
+    assert out.answer.startswith("JTB: 宿題:")
+    assert out.answer.count("（8/24 時点）") == 2
+    assert "8/26 に自主提案を予定していた（結果は未確認）" in out.answer
+    assert "10月中旬〜下旬 予定していた（結果は未確認）" in out.answer
+    assert "9月下旬退職予定していた（結果は未確認）" in out.answer
     assert "11/10 に提案予定" in out.answer
-    assert out.answer.count("予定だった（結果は未確認）") == 3
+    assert out.answer.count("予定していた（結果は未確認）") == 3
 
 
 @pytest.mark.parametrize(
     "text,expected",
     [
-        ("提案予定日: 8/26", "提案予定日: 8/26 予定だった（結果は未確認）"),
-        ("期日: 2026-08-26", "期日: 2026-08-26 予定だった（結果は未確認）"),
-        ("決定時期: 10月", "決定時期: 10月 予定だった（結果は未確認）"),
-        ("8月26日提案予定", "8月26日提案予定だった（結果は未確認）"),
-        ("7/26 提案予定", "7/26 提案予定だった（結果は未確認）"),
+        ("提案予定日: 8/26", "提案予定日: 8/26 予定していた（結果は未確認）"),
+        ("期日: 2026-08-26", "期日: 2026-08-26 予定していた（結果は未確認）"),
+        ("決定時期: 10月", "決定時期: 10月 予定していた（結果は未確認）"),
+        ("8月26日提案予定", "8月26日提案予定していた（結果は未確認）"),
+        ("7/26 提案予定", "7/26 提案予定していた（結果は未確認）"),
         ("提案予定: 11/5", "提案予定: 11/5"),
         ("決定時期: 11月上旬", "決定時期: 11月上旬"),
         ("提案予定: 2/30", "提案予定: 2/30"),
         ("8/26 提案済み（当初予定）", "8/26 提案済み（当初予定）"),
-        ("8/26 予定だった（結果は未確認）", "8/26 予定だった（結果は未確認）"),
+        ("8/26 予定していた（結果は未確認）", "8/26 予定していた（結果は未確認）"),
         ("8/26 に提案した", "8/26 に提案した"),
         ("提案日: 8/26", "提案日: 8/26"),
         ("2027/1/10 提案予定", "2027/1/10 提案予定"),
-        ("2025/8/26 提案予定", "2025/8/26 提案予定だった（結果は未確認）"),
+        ("2025/8/26 提案予定", "2025/8/26 提案予定していた（結果は未確認）"),
         ("予定は未定（8/24 時点）", "予定は未定（8/24 時点）"),
         (
             "8/26 提案予定。11/10 再提案予定",
-            "8/26 提案予定だった（結果は未確認）。11/10 再提案予定",
+            "8/26 提案予定していた（結果は未確認）。11/10 再提案予定",
         ),
         (
             "8/26 提案予定、11/10 再提案予定",
-            "8/26 提案予定だった（結果は未確認）、11/10 再提案予定",
+            "8/26 提案予定していた（結果は未確認）、11/10 再提案予定",
         ),
     ],
 )
@@ -101,7 +101,7 @@ def test_each_case_keeps_its_own_latest_contact_date() -> None:
     )
     assert "### 企業広報（8/24 時点）" in answer
     assert "### 採用広報（9/1 時点）" in answer
-    assert answer.count("予定だった（結果は未確認）") == 2
+    assert answer.count("予定していた（結果は未確認）") == 2
     assert answer.count("時点）") == 2
 
 
@@ -179,7 +179,7 @@ def test_existing_asof_is_not_repeated_in_the_heading() -> None:
         date(2026, 11, 5),
     )
     assert answer.count("（8/24 時点）") == 1
-    assert "8/26 提案予定だった（結果は未確認）" in answer
+    assert "8/26 提案予定していた（結果は未確認）" in answer
 
 
 @pytest.mark.parametrize(

@@ -21,6 +21,7 @@ class Pg:
     def __init__(self) -> None:
         self.calls: list[tuple[str, Any]] = []
         self.sessions: list[Any] = []
+        self.insights: list[dict[str, Any]] = []
         self.row: dict[str, Any] = {
             "platform": "tiktok",
             "video_id": "123",
@@ -59,7 +60,9 @@ class Pg:
         result = MagicMock()
         result.fetchone.return_value = {"n": 1}
         result.fetchall.return_value = []
-        if "SELECT v.*" in query and not query.startswith("WITH categorized AS ("):
+        if "FROM vl_video_insights" in query:
+            result.fetchall.return_value = self.insights
+        elif "SELECT v.*" in query and not query.startswith("WITH categorized AS ("):
             result.fetchone.return_value = self.row.copy()
             result.fetchall.return_value = [self.row.copy()]
         elif "SELECT * FROM vl_business_categories" in query:

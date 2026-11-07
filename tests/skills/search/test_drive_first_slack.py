@@ -42,9 +42,9 @@ def test_drive_first_slack_keeps_identifiers_before_display_clipping() -> None:
     assert "original123" not in item.text
 
 
-def test_drive_first_off_does_not_keep_or_serialize_resolution_material() -> None:
+def test_drive_first_off_keeps_internal_attachment_ids_without_serializing_them() -> None:
     item = _to_item(_match())
-    assert item.hit.file_ids == []
+    assert item.hit.file_ids == ["F012ABC"]
     assert item.original_file_names == ()
     assert item.explicit_drive_urls == ()
     assert set(item.hit.model_dump()) == {
@@ -85,7 +85,7 @@ def test_lookup_gates_identifiers_after_private_matches_are_removed(
     assert result.status == "ok"
     assert result.hidden_count == 1
     assert len(result.items) == 1
-    assert result.items[0].hit.file_ids == (["F0PUBLIC"] if active else [])
+    assert result.items[0].hit.file_ids == ["F0PUBLIC"]
     assert result.items[0].original_file_names == (("公開資料.pdf",) if active else ())
 
 

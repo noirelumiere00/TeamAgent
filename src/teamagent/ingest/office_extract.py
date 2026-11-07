@@ -234,6 +234,7 @@ def _validate_office_payload(
     mime_type: str,
     expected_size: int | None,
     expected_md5: str | None,
+    include_tables: bool = False,
     progress_callback: Callable[[], None] | None = None,
 ) -> None:
     """OOXMLを開く前に、payload同一性・ZIP integrity・必須構造を有界検証する。"""
@@ -448,6 +449,13 @@ def _validate_office_payload(
                                 progress_callback=progress_callback,
                             )
                     except ElementTree.ParseError as exc:
+                        # rich PPTXでは壊れたグラフだけを抽出時に飛ばす。安全制限は緩めない。
+                        if (
+                            mime_type == PPTX_MIME
+                            and include_tables
+                            and re.fullmatch(r"ppt/charts/[^/]+\.xml", info.filename)
+                        ):
+                            continue
                         raise OfficePayloadError(
                             "corrupt_zip",
                             mime_type=mime_type,
@@ -512,10 +520,12 @@ _XLSX_MAX_CELLS_PER_SHEET = 10000
 
 _PRESENTATION_NS = "http://schemas.openxmlformats.org/presentationml/2006/main"
 _DRAWING_NS = "http://schemas.openxmlformats.org/drawingml/2006/main"
+_CHART_NS = "http://schemas.openxmlformats.org/drawingml/2006/chart"
 _REL_NS = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
 _PACKAGE_REL_NS = "http://schemas.openxmlformats.org/package/2006/relationships"
 _NS = {
     "a": _DRAWING_NS,
+    "c": _CHART_NS,
     "p": _PRESENTATION_NS,
     "r": _REL_NS,
     "pr": _PACKAGE_REL_NS,
@@ -786,6 +796,88 @@ def _append_notes_text(
         _append_text_nodes(shape, parts, budget=budget)
 
 
+def _chart_cache_points(
+    element: ElementTree.Element | None,
+    *,
+    budget: _TextBudget,
+) -> dict[str, str]:
+    if element is None:
+        return {}
+    points = {}
+    for cache in element:
+        for point in cache.findall("./c:strCache/c:pt", _NS) + cache.findall(
+            "./c:numCache/c:pt", _NS
+        ):
+            _report_progress(budget.progress_callback)
+            points[point.get("idx", "")] = point.findtext("c:v", "", _NS)
+    return points
+
+
+def _chart_text(root: ElementTree.Element, *, budget: _TextBudget) -> str:
+    fragments: list[str] = []
+
+    def append(text: str) -> None:
+        budget.charge(text)
+        fragments.append(text)
+
+    title = root.find("./c:chart/c:title/c:tx", _NS)
+    title_text = (
+        " ".join(node.text or "" for node in title.findall(".//a:t", _NS))
+        if title is not None
+        else ""
+    )
+    if not title_text:
+        title_text = " ".join(_chart_cache_points(title, budget=budget).values())
+    append(f"グラフ: {title_text}")
+    for series in root.findall("./c:chart/c:plotArea/*/c:ser", _NS):
+        _report_progress(budget.progress_callback)
+        name_node = series.find("c:tx", _NS)
+        name = " ".join(_chart_cache_points(name_node, budget=budget).values())
+        if not name and name_node is not None:
+            name = name_node.findtext("c:v", "", _NS)
+        append(f"\n{name}: ")
+        categories = _chart_cache_points(series.find("c:cat", _NS), budget=budget)
+        values = _chart_cache_points(series.find("c:val", _NS), budget=budget)
+        for index, (point_id, value) in enumerate(values.items()):
+            category = categories.get(point_id, "")
+            append(f"{', ' if index else ''}{category + '=' if category else ''}{value}")
+        format_code = series.findtext("./c:val/c:numRef/c:numCache/c:formatCode", "", _NS)
+        if format_code:
+            append(f" (formatCode: {format_code})")
+    return "".join(fragments)
+
+
+def _append_chart_text(
+    package: zipfile.ZipFile,
+    slide_path: str,
+    slide: ElementTree.Element,
+    parts: list[str],
+    *,
+    budget: _TextBudget,
+) -> None:
+    charts = slide.findall(".//p:graphicFrame/a:graphic/a:graphicData/c:chart", _NS)
+    if not charts:
+        return
+    try:
+        relationships = _relationships(
+            package, slide_path, progress_callback=budget.progress_callback
+        )
+    except zipfile.BadZipFile:
+        return
+    for chart in charts:
+        _report_progress(budget.progress_callback)
+        target = relationships.get(chart.get(f"{{{_REL_NS}}}id", ""))
+        if target is None or target[1] != f"{_REL_NS}/chart":
+            continue
+        try:
+            root = _xml_root(package, target[0], progress_callback=budget.progress_callback)
+        except zipfile.BadZipFile:
+            continue
+        if parts:
+            budget.charge("\n")
+        parts.append(_chart_text(root, budget=budget))
+
+
 def extract_pptx_pages(
     data: bytes,
     *,
@@ -798,7 +890,7 @@ def extract_pptx_pages(
 
     既定（両 flag False）では従来挙動（本文 run のみ・非再帰）と完全一致。
     ``include_notes=True`` で各 slide のノート（``slide.notes_slide``）本文を、
-    ``include_tables=True`` で表セル文字列を追加で拾う。
+    ``include_tables=True`` で表セル・グラフのタイトルとキャッシュ値を追加で拾う。
     いずれかの flag が True のときだけ group shape を再帰し、子 shape の
     テキスト/表も拾う（従来は group 配下を取りこぼしていた）。
     """
@@ -828,6 +920,8 @@ def extract_pptx_pages(
                         recurse_groups=recurse_groups,
                         budget=budget,
                     )
+                if include_tables:
+                    _append_chart_text(package, slide_path, slide, parts, budget=budget)
                 if include_notes:
                     _append_notes_text(
                         package,
@@ -1098,7 +1192,7 @@ def extract_office_pages(
 
     * ``expected_size`` — Drive metadata の size。実バイト数との差を途中切れとして分類する。
     * ``expected_md5`` — Drive metadata の MD5。本文が metadata と同一 payload か検証する。
-    * ``include_notes`` / ``include_tables`` — pptx のノート・表セルも拾う
+    * ``include_notes`` / ``include_tables`` — pptx のノート・表セル・グラフも拾う
       （mime が pptx 以外なら無視）。
     * ``formula_fallback`` — xlsx でキャッシュ値が無い式 sheet の式文字列を拾う
       （mime が xlsx 以外なら無視）。
@@ -1117,6 +1211,7 @@ def extract_office_pages(
         mime_type=mime_type,
         expected_size=expected_size,
         expected_md5=expected_md5,
+        include_tables=include_tables,
         progress_callback=progress_callback,
     )
 

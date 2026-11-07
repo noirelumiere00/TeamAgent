@@ -9,8 +9,6 @@ JSON）。DB は「object であること」しか縛らないので、項目の
   - 配信: 止める / 日付まで休止 / 送る曜日（平日のうち）
   - 欄: 要返信・未確認メール・Slack 返信漏れ・予定・事例ブリーフ の表示/非表示と件数
   - 返信の下書きを自動で作るか
-  - 予定の直前リマインド: 止める / 何分前 / 予定名に特定の語を含むものは送らない /
-    ゲストも会議リンクも無い予定（本人が入れたタスク枠）にも送るか（未設定は全体の既定）
 
 ⚠️ 読めない・壊れているときは **既定（＝今までどおりの配信）** に倒す（fail-open）。
    止めたはずの人に 1 通届くのは「うるさい」で済むが、設定表の障害で誰にも届かないのは
@@ -229,7 +227,7 @@ def _weekday_text(days: tuple[int, ...]) -> str:
     return "・".join(_WEEKDAY_JA[d] for d in days) + "曜"
 
 
-def describe(prefs: DigestPreferences, today: _dt.date, *, default_lead_minutes: int) -> str:
+def describe(prefs: DigestPreferences, today: _dt.date) -> str:
     """いまの設定を本人向けの箇条書きで返す（DM にそのまま出す文）。"""
     if not prefs.delivery:
         delivery = "止めています（「朝のサマリーを再開して」で戻せます）"
@@ -249,17 +247,6 @@ def describe(prefs: DigestPreferences, today: _dt.date, *, default_lead_minutes:
         shown.append(f"{label}（最大{prefs.limit(key)}件）" if key in LIMIT_BOUNDS else label)
     hidden = [SECTION_LABELS[k] for k in prefs.hidden_sections]
 
-    if prefs.reminders:
-        lead = prefs.reminder_lead_minutes or default_lead_minutes
-        reminder = f"開始 {lead} 分前に届きます"
-        if prefs.reminder_skip_keywords:
-            words = "・".join(f"「{w}」" for w in prefs.reminder_skip_keywords)
-            reminder += f"（予定名に {words} を含む予定は送りません）"
-        if not prefs.remind_personal_blocks():
-            reminder += "。ゲストも会議リンクも無い予定（タスク枠）には送りません"
-    else:
-        reminder = "止めています"
-
     drafts = "重要なメールには自動で作ります" if prefs.auto_drafts else "自動では作りません"
     lines = [
         "🛠 *朝のサマリーの設定*",
@@ -267,7 +254,6 @@ def describe(prefs: DigestPreferences, today: _dt.date, *, default_lead_minutes:
         f"• 載せる欄: {'・'.join(shown) if shown else 'なし'}",
         f"• 載せない欄: {'・'.join(hidden) if hidden else 'なし'}",
         f"• 返信の下書き: {drafts}",
-        f"• 予定の直前リマインド: {reminder}",
     ]
     return "\n".join(lines)
 

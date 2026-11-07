@@ -46,6 +46,7 @@ from teamagent.skills.clientkarte.documents import (
     slack_label,
     to_docs,
 )
+from teamagent.skills.clientkarte.formatting import short_answer
 from teamagent.skills.clientkarte.schema import (
     ClientKarteInput,
     ClientKarteOutput,
@@ -521,6 +522,7 @@ class ClientKarteSkill(BaseSkill[ClientKarteInput, ClientKarteOutput]):
         answer, cost_usd = self._synthesize(input.client_name, hits, ctx.request_id)
         answer = dated_answer(answer, hits, input.client_name, now_jst().date())
         asof_lines = len(re.findall(r"（\d{1,2}/\d{1,2} 時点）", answer))
+        narrative = answer
         state_lines = ""
         if check_status:
             state_lines = case_state_lines([*hits, *state_hits])
@@ -549,6 +551,18 @@ class ClientKarteSkill(BaseSkill[ClientKarteInput, ClientKarteOutput]):
                 ctx=ctx,
                 log=log,
             )
+
+        suffix = answer[len(narrative) :]
+        answer = (
+            short_answer(
+                narrative,
+                hits,
+                input.client_name,
+                budget=600 - len(suffix),
+                state_lines=state_lines,
+            )
+            + suffix
+        )
 
         log.info(
             "clientkarte_done",
@@ -916,7 +930,7 @@ class ClientKarteSkill(BaseSkill[ClientKarteInput, ClientKarteOutput]):
     ) -> tuple[str, float]:
         """時系列 FB を Bedrock でカルテに合成する。FB が無ければ Bedrock を呼ばない。"""
         if not hits:
-            return (f"「{client_name}」の営業 FB 記録が見つかりませんでした。", 0.0)
+            return (f"「{slack_label(client_name)}」の記録が見つかりませんでした。", 0.0)
 
         system = load_prompt("clientkarte", self._prompt_version, "system")
 
@@ -949,6 +963,7 @@ class ClientKarteSkill(BaseSkill[ClientKarteInput, ClientKarteOutput]):
 
         timeline_block = "\n\n".join(lines)
         user_message = (
+            f"# 今日（日本時間）\n{now_jst().date().isoformat()}\n\n"
             f"# 対象クライアント\n{client_name}\n\n"
             f"# 時系列の営業 FB（古い順、{len(hits)} 件）\n{timeline_block}\n\n"
             "上記を、フォーマットに従ってクライアント・カルテに束ねてください。"

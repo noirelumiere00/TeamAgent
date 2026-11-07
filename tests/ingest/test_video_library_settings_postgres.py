@@ -30,6 +30,8 @@ def prepare(conn: Any, repository: Any) -> None:
         "0039_video_library_import_ui.sql",
         "0040_video_library_fetch_resume.sql",
         "0041_video_library_external_cases.sql",
+        "0042_video_library_account_add.sql",
+        "0043_video_library_insights.sql",
     ):
         conn.execute((MIGRATION.parent / later).read_text())
     batch = seed_batch()

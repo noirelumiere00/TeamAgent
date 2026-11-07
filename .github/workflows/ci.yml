@@ -2,11 +2,12 @@ name: CI
 
 on:
   push:
+    branches: [main]
+  pull_request:
     # dev を含めないと「実開発 PR（dev ベース）で CI が一切発火しない」罠になる
     # （branches フィルタは PR の base branch 基準。2026-07-10 の v0.3 監査で発覚・是正）。
     branches: [main, dev]
-  pull_request:
-    branches: [main, dev]
+  workflow_dispatch:
   schedule:
     - cron: "30 18 * * *" # 毎日 03:30 JST。schedule は default branch の HEAD を検証する。
 
@@ -16,6 +17,32 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  deps-changed:
+    name: 依存・CI 変更の検出
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      changed: ${{ steps.changes.outputs.changed }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - id: changes
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          set -euo pipefail
+          changed=true
+          if [ "$EVENT_NAME" = pull_request ]; then
+            changed_files="$(git diff --name-only "$(git merge-base "$BASE_SHA" HEAD)" HEAD)"
+            changed=false
+            if printf '%s\n' "$changed_files" | grep -E '^(uv\.lock|pyproject\.toml|\.github/workflows/ci\.yml)$' > /dev/null; then
+              changed=true
+            fi
+          fi
+          echo "changed=$changed" >> "$GITHUB_OUTPUT"
+
   lint-and-test:
     name: pytest latest (Python ${{ matrix.python-version }}, shard ${{ matrix.shard }}/3)
     runs-on: ubuntu-latest
@@ -171,6 +198,8 @@ jobs:
   # 2026-09-24 の anyio バンプ時に、CI が lock の 4.14.2 ではなく 4.15.1 を使った件の再発防止。
   lockfile-pytest:
     name: pytest uv.lock (Python 3.14, shard ${{ matrix.shard }}/3)
+    needs: [deps-changed]
+    if: needs.deps-changed.outputs.changed == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     strategy:
@@ -291,6 +320,7 @@ jobs:
   # 3.15 の frozen install / pytest は移行中の観測用。既存の必須ゲートを維持する。
   python315-pytest:
     name: pytest uv.lock experimental (Python 3.15, shard ${{ matrix.shard }}/3)
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     continue-on-error: true
@@ -401,7 +431,7 @@ jobs:
     name: pytest 全件照合 + combined coverage
     runs-on: ubuntu-latest
     timeout-minutes: 20
-    needs: [lint-and-test, lockfile-pytest, python315-pytest]
+    needs: [lint-and-test, lockfile-pytest, python315-pytest, deps-changed]
     if: ${{ always() && !cancelled() }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -415,13 +445,17 @@ jobs:
       - name: Verify collection union and exactly-once execution
         env:
           PYTHON_VERSIONS: ${{ github.event_name == 'pull_request' && '3.14' || '3.11 3.13 3.14' }}
+          DEPS_CHANGED: ${{ needs.deps-changed.outputs.changed }}
         run: |
           pip install pytest coverage
           for version in $PYTHON_VERSIONS; do
             python tests/pytest_shard.py artifacts/pytest-latest-$version-shard-*/manifest.json
           done
-          python tests/pytest_shard.py artifacts/pytest-lock-3.14-shard-*/manifest.json
+          if [ "$DEPS_CHANGED" = true ]; then
+            python tests/pytest_shard.py artifacts/pytest-lock-3.14-shard-*/manifest.json
+          fi
       - name: Verify experimental Python 3.15 shard inventory
+        if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
         continue-on-error: true
         run: python tests/pytest_shard.py artifacts/pytest-lock-3.15-shard-*/manifest.json
 
@@ -432,7 +466,14 @@ jobs:
           coverage report --include='src/teamagent/*' --show-missing
 
       - name: Require all pytest shards and checks to succeed
-        run: test '${{ needs.lint-and-test.result }}' = success && test '${{ needs.lockfile-pytest.result }}' = success
+        run: |
+          set -euo pipefail
+          test '${{ needs.lint-and-test.result }}' = success
+          test '${{ needs.deps-changed.result }}' = success
+          if [ '${{ needs.lockfile-pytest.result }}' = skipped ] && [ '${{ needs.deps-changed.outputs.changed }}' = false ]; then
+            exit 0
+          fi
+          test '${{ needs.lockfile-pytest.result }}' = success
 
   activation-freeze:
     name: activation freeze (frozen surface)

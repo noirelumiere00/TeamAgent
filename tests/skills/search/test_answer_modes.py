@@ -239,7 +239,8 @@ def test_clientkarte_v2_prompt_contract() -> None:
     assert "必ず抽象化" not in system
     assert "受注・失注は断定しない" in system
     assert "BANT C は「検討止まり」の評価であって失注ではない" in system
-    assert "「最新の営業 FB（日付）では〜」" in system
+    # 11-06 A3: 冒頭は「取引先名: 状態（M/D 時点）」の結論 1 行（「FB」は内部語なので出さない）。
+    assert "「取引先名: 最新の記録で分かっている状態（M/D 時点）」" in system
     assert "chunk_id や技術的な ID は書かない" in system
 
 

@@ -236,8 +236,8 @@ def _to_item(match: Any, *, drive_first: bool = False, case_state: bool = False)
         permalink=safe_permalink(match),
         file_names=_clip_file_names(names),
     )
-    if drive_first:
-        hit.file_ids = list(getattr(match, "file_ids", ()) or ())
+    hit.file_ids = list(getattr(match, "file_ids", ()) or ())
+    hit.files = list(getattr(match, "files", ()) or ())
     if case_state:
         import hashlib
 

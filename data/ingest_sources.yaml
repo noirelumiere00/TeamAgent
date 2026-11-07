@@ -325,7 +325,9 @@ case_corpus_decks:
 slack_public_files:
   token_owners: all
   filetypes: ["pdf", "pptx", "ppt"]
-  max_files_per_run: 2000
+  # 毎晩（4 vCPU・約 85 件/時）は 500 件で 6 時間以内に収める。まとめて進めるときは
+  # SLACK_FILES_MAX_PER_RUN=0・OMP_NUM_THREADS=16 の単独実行（16 vCPU）で。
+  max_files_per_run: 500
   extra_metadata:
     topic: "Slack 共有資料"
 

@@ -104,6 +104,105 @@ def _day(value: Any) -> str:
     return value.astimezone(JST).strftime("%Y-%m-%d") if isinstance(value, datetime) else "不明"
 
 
+def _retention_chart(counts: list[int]) -> str:
+    if len(counts) < 2 or counts[0] <= 0:
+        return "<p>データ不足：視聴の推移を表示できません。</p>"
+    ratios = [min(1, max(0, count / counts[0])) for count in counts]
+    points = [
+        (second / (len(counts) - 1) * 100, 100 - ratio * 100) for second, ratio in enumerate(ratios)
+    ]
+    half = next((second for second, ratio in enumerate(ratios) if ratio < 0.5), None)
+    description = "0秒の視聴者数を100%とした残っている割合。" + "、".join(
+        f"{second:,}秒: {ratio:.1%}" for second, ratio in enumerate(ratios)
+    )
+    body = ""
+    if half is not None:
+        body += f'<p class="retention-highlight"><strong>{half:,}秒</strong>で半分以上が離脱</p>'
+    else:
+        body += "<p>記録された範囲では半分以上が視聴を続けています。</p>"
+    body += (
+        "<p>0秒の視聴者数を100%として表示</p>"
+        '<div class="retention-chart" role="img" aria-label="視聴を続けている人の割合" '
+        'aria-describedby="retention-description">'
+        f'<span class="sr-only" id="retention-description">{_e(description)}</span>'
+        '<div class="retention-plot" aria-hidden="true">'
+        '<svg viewBox="0 0 100 100" preserveAspectRatio="none" width="100%" height="100%">'
+        '<path class="chart-axis" d="M0 0V100H100" vector-effect="non-scaling-stroke"/>'
+        '<path class="chart-half" d="M0 50H100" vector-effect="non-scaling-stroke"/>'
+        '<polyline class="chart-line" vector-effect="non-scaling-stroke" points="'
+        + " ".join(f"{x:.2f},{y:.2f}" for x, y in points)
+        + '"/></svg>'
+        '<span class="chart-label chart-y chart-top">100%</span>'
+        '<span class="chart-label chart-y chart-middle">50%</span>'
+        '<span class="chart-label chart-y chart-bottom">0%</span>'
+        '<span class="chart-label chart-x chart-start">0</span>'
+        f'<span class="chart-label chart-x chart-end">{len(counts) - 1:,}</span>'
+        '<span class="chart-label chart-x chart-seconds">秒</span>'
+    )
+    if half is not None:
+        x, y = points[half]
+        # The HTML renderer adds the CSP nonce to style elements; style attributes are blocked.
+        body += (
+            f"<style>#retention-marker{{left:{x:.2f}%;top:{y:.2f}%}}</style>"
+            '<span class="chart-marker" id="retention-marker"></span>'
+        )
+    return body + "</div></div>"
+
+
+def _insights(rows: list[Mapping[str, Any]]) -> str:
+    if not rows:
+        return ""
+    latest = rows[0]
+    body = (
+        '<section class="metric-group video-insights" aria-labelledby="insights-title">'
+        '<h2 id="insights-title">視聴データ（TikTok 分析）</h2><dl class="stats">'
+    )
+    for field, label, spec, suffix in (
+        ("reach", "リーチ", ",.0f", ""),
+        ("completion_rate", "完了率", ".1%", ""),
+        ("avg_watch_seconds", "平均視聴時間", ",.2f", "秒"),
+        ("profile_views", "プロフィール閲覧", ",.0f", ""),
+    ):
+        value = latest[field]
+        display = format(value, spec) + suffix if value is not None else "データなし"
+        body += f"<div><dt>{_e(label)}</dt><dd>{_e(display)}</dd></div>"
+    body += "</dl><h3>視聴を続けている人の割合</h3>"
+    body += _retention_chart(latest["retention"])
+    body += '<h3>男女比</h3><dl class="audience-ratios">'
+    for field, label in (("male_ratio", "男性"), ("female_ratio", "女性")):
+        ratio = latest[field]
+        display = f"{ratio:.1%}" if ratio is not None else "データなし"
+        body += f"<div><dt>{_e(label)}</dt><dd>{_e(display)}</dd>"
+        if ratio is not None:
+            body += (
+                '<svg viewBox="0 0 100 8" preserveAspectRatio="none" aria-hidden="true">'
+                '<rect class="ratio-track" width="100" height="8"/>'
+                f'<rect class="ratio-fill" width="{ratio * 100:.2f}" height="8"/></svg>'
+            )
+        body += "</div>"
+    body += "</dl><h3>年齢の上位</h3>"
+    ages = sorted(latest["age_bands"], key=lambda age: age["ratio"], reverse=True)[:3]
+    if ages:
+        body += (
+            "<ol>"
+            + "".join(f"<li>{_e(age['band'])}：{age['ratio']:.1%}</li>" for age in ages)
+            + "</ol>"
+        )
+    else:
+        body += "<p>データなし</p>"
+    captured = latest["captured_at"].astimezone(JST).strftime("%Y/%m/%d %H:%M")
+    body += f'<p class="muted">取得日時: {_e(captured)}</p>'
+    if len(rows) > 1:
+        previous = rows[1]
+        day = previous["captured_at"].astimezone(JST).strftime("%Y/%m/%d")
+        if latest["reach"] is not None and previous["reach"] is not None:
+            delta = latest["reach"] - previous["reach"]
+            body += f"<p>前回（{_e(day)}）から リーチ {delta:+,}</p>"
+        else:
+            body += f"<p>前回（{_e(day)}）からのリーチ差: データ不足</p>"
+    return body + "</section>"
+
+
 def parse_search(params: Mapping[str, str]) -> tuple[list[str], bool | None]:
     """Share word/hashtag interpretation between SQL, filters and result labels."""
     query = params.get("q", "").strip()
@@ -259,7 +358,34 @@ def _campaign_totals_cte(admin: bool) -> str:
         GROUP BY v.advertiser, v.campaign)"""  # nosec B608
 
 
-def search_videos(conn: Any, params: Mapping[str, str], *, admin: bool) -> dict[str, Any]:
+def library_connection(pg: Any, email: str, *, admin: bool) -> Any:
+    """Keep HTTP and MCP reads on the same application role and user context."""
+    return pg.connection(
+        app_role="teamagent_app",
+        user_email=email,
+        user_groups=[email.split("@")[-1]],
+        user_role="admin" if admin else "user",
+    )
+
+
+def read_video(conn: Any, platform: str, video_id: str, *, admin: bool) -> Any:
+    # Identifiers and visibility are always bound parameters, including for MCP.
+    sql = f"SELECT v.*, {_METRIC_SELECT}, m.captured_on FROM vl_videos_effective v {_METRICS_JOIN} WHERE v.platform=%s AND v.video_id=%s AND (%s OR NOT v.is_private)"  # noqa: E501  # nosec B608
+    row = conn.execute(sql, (platform, video_id, admin)).fetchone()
+    if row is None:
+        raise HTTPException(404)
+    return row
+
+
+def search_videos(
+    conn: Any,
+    params: Mapping[str, str],
+    *,
+    admin: bool,
+    page_size: int = PAGE_SIZE,
+) -> dict[str, Any]:
+    if type(page_size) is not int or not 1 <= page_size <= PAGE_SIZE:
+        raise ValueError("Invalid page size")
     where, values, page, order = _where(params, admin)
     count = conn.execute(
         # 固定の句と許可リストの並び順だけを連結し、利用者の値は全て %s で渡す
@@ -270,14 +396,14 @@ def search_videos(conn: Any, params: Mapping[str, str], *, admin: bool) -> dict[
     list_sql = f"{_campaign_totals_cte(admin)} SELECT v.*, {_METRIC_SELECT}, m.captured_on, ct.campaign_total_plays FROM vl_videos_effective v {_METRICS_JOIN} {_CAMPAIGN_TOTALS_JOIN} WHERE {where} ORDER BY {order} DESC NULLS LAST, v.platform, v.video_id LIMIT %s OFFSET %s"  # noqa: E501  # nosec B608
     rows = conn.execute(
         list_sql,
-        [*values, PAGE_SIZE, (page - 1) * PAGE_SIZE],
+        [*values, page_size, (page - 1) * page_size],
     ).fetchall()
     for row in rows:
         row["rates"] = _rates(row)
         row["post_url"] = post_url(row)
         row["has_thumbnail"] = bool(row.pop("thumbnail_s3_key", None))
         row.pop("video_s3_key", None)
-    return {"videos": rows, "total": count, "page": page, "page_size": PAGE_SIZE}
+    return {"videos": rows, "total": count, "page": page, "page_size": page_size}
 
 
 def _category_nav(category: str, *, current: str, footer: bool = False) -> str:
@@ -667,14 +793,18 @@ def _card(
     )
 
 
+def video_title(row: Mapping[str, Any]) -> str:
+    return next(
+        (line.strip() for line in str(row.get("caption") or "").splitlines() if line.strip()),
+        str(row.get("account_name") or row.get("account_handle") or "動画"),
+    )
+
+
 def _video_card(row: Mapping[str, Any], *, selectable: bool = False) -> str:
     path = "/".join(quote(str(row[key]), safe="") for key in ("platform", "video_id"))
     url = post_url(row)
     account = str(row.get("account_name") or row.get("account_handle") or "動画")
-    title = next(
-        (line.strip() for line in str(row.get("caption") or "").splitlines() if line.strip()),
-        account,
-    )
+    title = video_title(row)
     flags = " · ".join(
         name for field, name in (("is_pr", "PR"), ("is_private", "非公開")) if row.get(field)
     )
@@ -1172,12 +1302,7 @@ def register_library_routes(
         return email.strip().lower() in admins()
 
     def connection(email: str) -> Any:
-        return get_pg().connection(
-            app_role="teamagent_app",
-            user_email=email,
-            user_groups=[email.split("@")[-1]],
-            user_role="admin" if is_admin(email) else "user",
-        )
+        return library_connection(get_pg(), email, admin=is_admin(email))
 
     def admin_identity(request: Request) -> str:
         email = identity(request)
@@ -1351,20 +1476,18 @@ def register_library_routes(
         return JSONResponse(jsonable_encoder(data))
 
     def video(conn: Any, platform: str, video_id: str, email: str) -> Any:
-        # 列名と JOIN はコード内の固定値。識別子と権限は %s で渡す
-        detail_sql = f"SELECT v.*, {_METRIC_SELECT}, m.captured_on FROM vl_videos_effective v {_METRICS_JOIN} WHERE v.platform=%s AND v.video_id=%s AND (%s OR NOT v.is_private)"  # noqa: E501  # nosec B608
-        row = conn.execute(
-            detail_sql,
-            (platform, video_id, is_admin(email)),
-        ).fetchone()
-        if row is None:
-            raise HTTPException(404)
-        return row
+        return read_video(conn, platform, video_id, admin=is_admin(email))
 
     @router.get("/v/{platform}/{video_id}")
     def detail(platform: str, video_id: str, email: str = Depends(identity)) -> HTMLResponse:
         with connection(email) as conn:
             row = video(conn, platform, video_id, email)
+            insights = conn.execute(
+                "SELECT captured_at, reach, completion_rate, avg_watch_seconds, profile_views, "
+                "male_ratio, female_ratio, age_bands, retention FROM vl_video_insights "
+                "WHERE platform=%s AND video_id=%s ORDER BY captured_at DESC LIMIT 2",
+                (platform, video_id),
+            ).fetchall()
             analyses = conn.execute(
                 "SELECT kind, version, payload FROM vl_video_analysis "
                 "WHERE platform=%s AND video_id=%s ORDER BY analyzed_at DESC",
@@ -1467,7 +1590,7 @@ def register_library_routes(
                     f"{_rate(rates['engagement_rate'], rates['is_reference'])}</p>"
                 )
             body += "</details>" if family == "ad" else "</section>"
-        body += "</div></div></div>"
+        body += "</div>" + _insights(insights) + "</div></div>"
         payload = next(
             (
                 a["payload"]
@@ -1594,6 +1717,8 @@ def register_library_routes(
         if any(len(values) != 1 for values in parsed.values()):
             raise HTTPException(400)
         if import_form and set(parsed) - {
+            "accounts",
+            "operator_label",
             "urls",
             "case",
             "action",

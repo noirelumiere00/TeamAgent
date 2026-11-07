@@ -5802,7 +5802,12 @@ def create_app(
         from teamagent.connect_web.library_mcp_spike import install_spike
 
         install_spike(
-            app, authenticate=_search_email, safe_next=_safe_next, request_id=_request_id_of
+            app,
+            authenticate=_search_email,
+            safe_next=_safe_next,
+            request_id=_request_id_of,
+            get_pg=_get_admin_pg,
+            admins=_admin_emails,
         )
 
     return app

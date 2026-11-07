@@ -52,6 +52,7 @@ from teamagent.mcp_gateway import (
     direct_summary,
     direct_video_metrics,
     document_followup,
+    search_file_delivery,
     surface_video_followup,
 )
 from teamagent.mcp_gateway.caller_claim import (
@@ -1765,6 +1766,10 @@ async def dispatch_tool(
         name == SEARCH_TOOL_NAME
         and isinstance(data, dict)
         and search_direct_destination is not None
+        and (
+            not search_file_delivery.is_slack_list(output)
+            or search_file_delivery.enabled(ctx.metadata)
+        )
     ):
         direct_answer = getattr(output, "direct_answer", None)
         direct_kind = getattr(output, "direct_answer_kind", None)
@@ -1797,6 +1802,9 @@ async def dispatch_tool(
                 ),
             )
             if posted is not None and posted.get("delivered") is True:
+                await asyncio.to_thread(
+                    search_file_delivery.attach, output, ctx, search_direct_destination
+                )
                 posted["direct_delivery"] = candidate
                 if data.get("case_state_answer") is not None:
                     posted["case_state_answer"] = data["case_state_answer"]
@@ -1805,6 +1813,14 @@ async def dispatch_tool(
                 return [TextContent(type="text", text=json.dumps(posted, ensure_ascii=False))]
             if posted is not None:
                 data["delivery"] = posted["delivery"]
+    if name == SEARCH_TOOL_NAME and isinstance(data, dict) and not search_direct_attempted:
+        posted_list = await asyncio.to_thread(
+            search_file_delivery.post_list, output, ctx, verified_caller=verified_caller
+        )
+        if posted_list is not None and posted_list.get("delivered") is True:
+            if followup_available is not None:
+                posted_list["document_followup_available"] = followup_available
+            return [TextContent(type="text", text=json.dumps(posted_list, ensure_ascii=False))]
     if (
         name == SEARCH_TOOL_NAME
         and isinstance(data, dict)

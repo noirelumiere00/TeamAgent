@@ -1,4 +1,4 @@
-"""PR0 only: in-memory OAuth + ping. Run one process/replica; restart loses all grants.
+"""Limited trial: in-memory OAuth + read-only library tools. Restart loses all grants.
 
 Enable with CONNECT_MCP_ENABLED=true and CONNECT_MCP_PUBLIC_BASE_URL=https://… .
 CONNECT_MCP_SPIKE_REDIRECT_ALLOW adds comma-separated exact callback URIs for the trial.
@@ -14,6 +14,7 @@ from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
+from typing import Any
 from urllib.parse import quote, urlsplit
 
 import structlog
@@ -41,6 +42,7 @@ from mcp.server.auth.settings import AuthSettings, ClientRegistrationOptions, Re
 from mcp.server.fastmcp import FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
 from mcp.shared.auth import OAuthClientInformationFull, OAuthToken
+from mcp.types import ToolAnnotations
 from pydantic import AnyHttpUrl
 from starlette.requests import Request
 from starlette.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
@@ -196,6 +198,8 @@ def install_spike(
     authenticate: Callable[[Request], str | None],
     safe_next: Callable[[str | None], str],
     request_id: Callable[[Request], str | None],
+    get_pg: Callable[[], Any],
+    admins: Callable[[], frozenset[str]],
 ) -> None:
     base = os.environ.get("CONNECT_MCP_PUBLIC_BASE_URL", "").rstrip("/")
     parsed = urlsplit(base)
@@ -215,7 +219,7 @@ def install_spike(
     )
     issuer, resource = AnyHttpUrl(base), AnyHttpUrl(provider.resource)
     mcp = FastMCP(
-        "Connect MCP spike",
+        "動画ライブラリ",
         stateless_http=True,
         json_response=True,
         streamable_http_path="/",
@@ -227,17 +231,25 @@ def install_spike(
             required_scopes=[_SCOPE],
         ),
         transport_security=TransportSecuritySettings(
-            allowed_hosts=[parsed.netloc], allowed_origins=[base, "https://claude.ai"]
+            allowed_hosts=[parsed.netloc],
+            allowed_origins=[base, "https://claude.ai", "https://chatgpt.com"],
         ),
     )
 
-    @mcp.tool()
+    @mcp.tool(
+        annotations=ToolAnnotations(
+            readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False
+        )
+    )
     def ping() -> str:
         access = get_access_token()
         if access is None or access.subject is None:
             raise ValueError("Authentication required")
-        return f"{mask_email(access.subject)}: Claude との接続を確認しました。"
+        return f"{mask_email(access.subject)}: 動画ライブラリとの接続を確認しました。"
 
+    from teamagent.connect_web.library_mcp_tools import install_tools
+
+    install_tools(mcp, base=base, get_pg=get_pg, admins=admins)
     child = mcp.streamable_http_app()
     child.router.redirect_slashes = False
     child.router.default = JSONResponse({"detail": "Not Found"}, status_code=404)
@@ -282,13 +294,26 @@ def install_spike(
                 return JSONResponse({"error": "unauthorized"}, status_code=401)
             return RedirectResponse("/search/login?next=" + quote(target, safe=""), status_code=303)
         if request.method == "GET":
+            callback_host = urlsplit(str(pending.params.redirect_uri)).hostname or ""
+            service = (
+                "ChatGPT"
+                if callback_host == "chatgpt.com"
+                else "Claude"
+                if callback_host in {"claude.ai", "claude.com"}
+                else "MCPクライアント"
+            )
             pending.email, pending.csrf = email, secrets.token_urlsafe(32)
             return HTMLResponse(
-                '<!doctype html><html lang="ja"><meta charset="utf-8"><title>Claude 接続</title>'
-                "<h1>Claude との接続確認</h1><p>メールの一部と接続確認だけを返します。</p>"
+                '<!doctype html><html lang="ja"><meta charset="utf-8">'
+                "<title>動画ライブラリ 接続</title>"
+                f"<h1>動画ライブラリを {service} に接続</h1>"
+                f"<p>ログイン中: {html.escape(mask_email(email))}</p>"
+                "<p>本人の閲覧権限で動画を検索・参照します。広告費・動画ファイルは返しません。変更・削除はできません。</p>"
+                f"<p>戻り先: {html.escape(callback_host)}。"
+                "この試作の接続は10分で失効し、再起動でも再認証が必要です。</p>"
                 f'<form method="post" action="{html.escape(target, quote=True)}">'
                 f'<input type="hidden" name="csrf" value="{pending.csrf}">'
-                '<button type="submit">Claude に接続を許可</button></form></html>',
+                f'<button type="submit">{service} に読み取り接続を許可</button></form></html>',
                 headers={"Referrer-Policy": "same-origin"},
             )
         form = await request.form()

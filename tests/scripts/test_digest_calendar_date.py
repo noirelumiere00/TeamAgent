@@ -183,25 +183,4 @@ def test_fmt_event_time_zulu_all_day_is_not_mistaken_for_time() -> None:
     )
 
 
-def test_all_day_events_are_not_scheduled_as_reminders(monkeypatch: pytest.MonkeyPatch) -> None:
-    """終日は開始 N 分前リマインドの対象外（"…T00:00:00Z" 形でも all_day フラグで弾く）。"""
-    import teamagent.adapters.scheduler_client as sc
-
-    calls: list[str] = []
-
-    class _Scheduler:
-        def schedule_reminder(self, **kwargs: Any) -> bool:
-            calls.append(str(kwargs.get("start_iso")))
-            return True
-
-    monkeypatch.setattr(sc.SchedulerClient, "from_env", classmethod(lambda cls: _Scheduler()))
-    d = _digest(
-        CalendarEventItem(
-            summary_display="終日(Z形)",
-            start_at="2026-08-21T00:00:00Z",
-            end_at="2026-08-22T00:00:00Z",
-            all_day=True,
-        )
-    )
-    assert runner._schedule_event_reminders(d, "D0") == 0
-    assert calls == []
+# 終日のリマインド選別テストは全員のリマインド廃止で削除。登録ゼロは preferences_runner。

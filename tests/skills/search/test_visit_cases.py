@@ -273,7 +273,10 @@ def test_final_guard_unlinks_material_titles_but_keeps_conversation(
         f"資料: {link}\n<{POST}|会話の記録>\n正式社名を確認してみてください。\n"
         f"商材名を確認すると見つかるかもしれません。\n<{DRIVE}|資料を見る>"
     )
-    assert f"資料: {label}" in text
+    if label == "資料を見る":
+        assert f"資料: {link}" in text
+    else:
+        assert f"資料: {label}" in text
     assert f"<{POST}|会話の記録>" in text
     assert f"<{DRIVE}|資料を見る>" in text
     assert "確認して" not in text and "確認すると" not in text

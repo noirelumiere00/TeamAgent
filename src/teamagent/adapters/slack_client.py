@@ -546,6 +546,22 @@ class SlackClient:
             "paging": response.get("paging", {}) or {},
         }
 
+    async def file_info(self, file_id: str) -> dict[str, Any]:
+        """現在の token の権限でファイル情報を取得する。拒否は呼び出し側へ伝える。"""
+        response = await self._client.files_info(file=file_id)
+        return dict(response.get("file") or {})
+
+    async def message_files(self, channel: str, ts: str) -> list[dict[str, Any]]:
+        """本人が読める投稿・スレッドの添付を取得する（本文は返さない）。"""
+        response = await self._client.conversations_replies(channel=channel, ts=ts, limit=100)
+        messages: list[dict[str, Any]] = response.get("messages", []) or []
+        return [
+            dict(file)
+            for message in messages
+            for file in message.get("files", []) or []
+            if isinstance(file, dict)
+        ]
+
     async def download_file_guarded(
         self,
         url_private: str,

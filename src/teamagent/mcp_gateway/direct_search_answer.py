@@ -71,6 +71,18 @@ def deliver(
     """投稿成功だけを抑止の根拠にする。失敗時は元のツール結果を返す。"""
     if (kind != "case_state" and kind not in allowed_kinds()) or not answer.strip():
         return None
+    return post(answer, kind, destination, request_id=request_id, allow_case_links=allow_case_links)
+
+
+def post(
+    answer: str,
+    kind: str,
+    destination: detached_jobs.Destination,
+    *,
+    request_id: str,
+    allow_case_links: bool = False,
+) -> dict[str, Any]:
+    """宛先・対象を確認済みの回答を投稿する。一覧＋添付でも同じ経路を使う。"""
     # URL を Markdown の括弧から外し、共通の Slack エスケープを 1 回だけ掛ける。
     text = markdown_bold_to_mrkdwn(_MARKDOWN_LINK.sub(r"\1 \2", answer))
     rich = (

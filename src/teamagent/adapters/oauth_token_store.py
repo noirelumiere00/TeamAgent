@@ -123,6 +123,11 @@ class InMemorySlackTokenStore:
     def has(self, user_email: str) -> bool:
         return self._norm(user_email) in self._tokens
 
+    def list_file_reader_emails(self) -> list[str]:
+        return sorted(
+            email for email, token in self._tokens.items() if "files:read" in token.scopes
+        )
+
     def slack_user_id(self, user_email: str) -> str | None:
         """保存済み Slack user ID だけを返す（行なしは None）。"""
         token = self._tokens.get(self._norm(user_email))

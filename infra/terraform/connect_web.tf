@@ -23,6 +23,27 @@ variable "enable_connect_web" {
   default     = false
 }
 
+variable "enable_connect_library_mcp" {
+  description = "動画ライブラリMCPの限定試用を有効化。認証は10分で失効し、再起動時は再認証が必要。"
+  type        = bool
+  default     = false
+}
+
+variable "connect_mcp_redirect_uris" {
+  description = "承認済みMCPクライアントの正確なOAuth戻り先。パターン・ワイルドカードは使わない。"
+  type        = list(string)
+  default     = []
+
+  validation {
+    condition = alltrue([for uri in var.connect_mcp_redirect_uris :
+      can(regex("^https://chatgpt\\.com/connector/oauth/[A-Za-z0-9_-]+$", uri)) ||
+      contains(["https://claude.ai/api/mcp/auth_callback", "https://claude.com/api/mcp/auth_callback"], uri) ||
+      can(regex("^http://localhost:[0-9]{1,5}/callback$", uri))
+    ])
+    error_message = "正確なChatGPT /connector/oauth/<id>、既存Claudeのコールバック、試用localhostの戻り先を指定してください。"
+  }
+}
+
 variable "connect_admin_emails" {
   description = "利用状況・品質・動画管理（/admin・/admin/analyze・/admin/quality・/library/admin/*）の管理者（CONNECT_ADMIN_EMAILS）。v1 は小俣さん 1 名。空＝誰も管理者でない。⚠️ TD で変えたら activation 版 tfvars（正本）へ同じ値を追記。"
   type        = string
@@ -493,6 +514,9 @@ resource "aws_ecs_task_definition" "connect_web" {
       # Slack出典の内部識別子を開けるpermalinkへ変換するworkspace名。空ならURLを出さない。
       { name = "SLACK_WORKSPACE", value = var.slack_workspace },
       { name = "CONNECT_BASE_URL", value = var.connect_base_url },
+      { name = "CONNECT_MCP_ENABLED", value = var.enable_connect_library_mcp ? "true" : "false" },
+      { name = "CONNECT_MCP_PUBLIC_BASE_URL", value = var.connect_base_url },
+      { name = "CONNECT_MCP_SPIKE_REDIRECT_ALLOW", value = join(",", var.connect_mcp_redirect_uris) },
       { name = "CONNECT_GOOGLE_CLIENT_ID", value = var.connect_google_client_id },
       # /app・/search を @vectorinc.co.jp の社員全員に開放（email_verified + 会社ドメイン hd 許可）。
       # HD・email allowlist ともに未設定ならログイン不可。2026-07-07 ユーザー承認（全社ナレッジ共有）。

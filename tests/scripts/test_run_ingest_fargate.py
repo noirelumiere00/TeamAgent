@@ -12,6 +12,8 @@ from unittest.mock import MagicMock, call
 import pytest
 
 from scripts import run_ingest_fargate as fargate
+from teamagent.ingest import video_library_account_fetch as account_fetch
+from teamagent.ingest import video_library_insights_sync as insights
 from teamagent.ingest import video_library_sync as sync
 from teamagent.ingest import video_library_thumbs as thumbs
 
@@ -38,9 +40,13 @@ def runner(monkeypatch: pytest.MonkeyPatch) -> MagicMock:
     events = MagicMock()
     events.ingest.return_value = {}
     events.sync.return_value = 0
+    events.insights.return_value = 0
+    events.accounts.return_value = 0
     events.thumbs.return_value = 0
     monkeypatch.setattr(runpy, "run_path", events.ingest)
     monkeypatch.setattr(sync, "main", events.sync)
+    monkeypatch.setattr(insights, "main", events.insights)
+    monkeypatch.setattr(account_fetch, "main", events.accounts)
     monkeypatch.setattr(thumbs, "main", events.thumbs)
     return events
 
@@ -60,6 +66,8 @@ def test_ingest_success_runs_sync_after_ingest_with_resolved_yaml(
     assert runner.mock_calls == [
         call.ingest("scripts/ingest_sources.py", run_name="__main__"),
         call.sync([], sources_path=expected),
+        call.insights([]),
+        call.accounts([]),
         call.thumbs([]),
     ]
     if yaml_override:
@@ -112,6 +120,8 @@ def test_ingest_dry_run_is_passed_to_video_sync(
     assert "--commit" not in sys.argv
     runner.sync.assert_called_once_with(["--dry-run"], sources_path=fargate._BAKED_YAML)
     runner.thumbs.assert_not_called()
+    runner.accounts.assert_not_called()
+    runner.insights.assert_not_called()
 
 
 def test_fargate_expands_oauth_before_ingest(
@@ -149,6 +159,52 @@ def test_thumbnail_failure_preserves_ingest_status(
     runner.thumbs.assert_called_once_with([])
     assert fargate.logger.error.call_args.args == ("video_library_thumbnails_failed",)
     assert "do-not-log" not in str(fargate.logger.mock_calls)
+
+
+@pytest.mark.parametrize("outcome", [1, RuntimeError("private caption/url/email"), SystemExit(7)])
+def test_insights_failure_does_not_stop_later_steps(
+    runner: MagicMock, outcome: int | BaseException
+) -> None:
+    if isinstance(outcome, int):
+        runner.insights.return_value = outcome
+    else:
+        runner.insights.side_effect = outcome
+    assert fargate.main() == 0
+    assert runner.mock_calls == [
+        call.ingest("scripts/ingest_sources.py", run_name="__main__"),
+        call.sync([], sources_path=fargate._BAKED_YAML),
+        call.insights([]),
+        call.accounts([]),
+        call.thumbs([]),
+    ]
+    assert fargate.logger.error.call_args.args == ("video_library_insights_failed",)
+    assert "private caption/url/email" not in str(fargate.logger.mock_calls)
+
+
+@pytest.mark.parametrize("outcome", [1, RuntimeError("private caption/url/email"), SystemExit(7)])
+def test_account_fetch_failure_does_not_stop_later_steps(
+    runner: MagicMock, monkeypatch: pytest.MonkeyPatch, outcome: int | BaseException
+) -> None:
+    from teamagent.ingest import video_library_case_inference as inference
+
+    monkeypatch.setenv("VIDEO_LIBRARY_CASE_INFERENCE_ENABLED", "1")
+    runner.inference.return_value = 0
+    monkeypatch.setattr(inference, "main", runner.inference)
+    if isinstance(outcome, int):
+        runner.accounts.return_value = outcome
+    else:
+        runner.accounts.side_effect = outcome
+    assert fargate.main() == 0
+    assert runner.mock_calls == [
+        call.ingest("scripts/ingest_sources.py", run_name="__main__"),
+        call.sync([], sources_path=fargate._BAKED_YAML),
+        call.insights([]),
+        call.accounts([]),
+        call.thumbs([]),
+        call.inference([]),
+    ]
+    assert fargate.logger.error.call_args.args == ("video_library_account_fetch_failed",)
+    assert "private caption/url/email" not in str(fargate.logger.mock_calls)
 
 
 @pytest.mark.parametrize("outcome", [0, 1, RuntimeError("private customer"), SystemExit(7)])
