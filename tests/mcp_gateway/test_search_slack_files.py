@@ -12,10 +12,18 @@ from teamagent.adapters.gdrive_client import GDriveClient
 from teamagent.adapters.oauth_token_store import InMemorySlackTokenStore, SlackOAuthToken
 from teamagent.adapters.pgvector_client import SearchHit
 from teamagent.adapters.slack_client import SlackClient
-from teamagent.mcp_gateway import detached_jobs, server
+from teamagent.mcp_gateway import detached_jobs, direct_search_answer, search_file_delivery, server
+from teamagent.skills.base import BaseSkill, SkillContext
 from teamagent.skills.search import fanout
 from teamagent.skills.search.composite import SlackLookup
 from teamagent.skills.search.expand import ExpansionResult
+from teamagent.skills.search.schema import (
+    DocumentReference,
+    SearchHitOut,
+    SearchInput,
+    SearchOutput,
+    SlackHitOut,
+)
 from tests.mcp_gateway.test_surface_video_followup import (
     DM,
     ME,
@@ -30,6 +38,103 @@ from tests.skills.search.test_fanout import make
 POST = "https://example.slack.com/archives/C0SHARED/p1784424000000001"
 FILE = "https://example.slack.com/files/U0OWNER/F0ONLY/proposal.pdf"
 THREAD = "1784424000.000001"
+
+
+def file_ref(fid):
+    return DocumentReference(
+        kind="slack_attachment",
+        title=f"飲料提案{fid}.pdf",
+        url=FILE.replace("F0ONLY", fid),
+        source_uri=FILE.replace("F0ONLY", fid),
+        slack_file_ids=[fid],
+    )
+
+
+class _OutputSearch(BaseSkill[SearchInput, SearchOutput]):
+    input_schema = SearchInput
+    output_schema = SearchOutput
+
+    def __init__(self, output):
+        self.output = output
+
+    def run(self, input: SearchInput, ctx: SkillContext) -> SearchOutput:
+        return self.output
+
+
+@pytest.mark.parametrize("answer_format", ["compact", "list", None])
+def test_attach_candidates_only_use_answer_links_and_citations_in_answer_order(answer_format):
+    first, second, unused = [file_ref(fid) for fid in ("F0FIRST", "F0SECOND", "F0UNUSED")]
+    output = SearchOutput(
+        answer=f"先に <{second.url}|資料を見る>、次に事例 [S:11]。再掲 {second.url}",
+        answer_format=answer_format,
+        total_cost_usd=0,
+        attachment_refs=[unused, first, second],
+        hits=[
+            SearchHitOut(chunk_id=i, content="架空の事例", score=0.9, reference=ref)
+            for i, ref in ((10, unused), (11, first), (12, second))
+        ],
+    )
+    assert search_file_delivery.candidates(output) == [
+        ("F0SECOND", second.title),
+        ("F0FIRST", first.title),
+    ]
+
+
+def test_compact_attach_excludes_drive_copy_and_post_only_without_file_id():
+    slack = file_ref("F0COPY")
+    drive = slack.model_copy(update={"kind": "drive", "drive_file_id": "DRIVE1"})
+    post_only = DocumentReference(kind="slack_attachment", title="架空資料.pdf", url=POST)
+    output = SearchOutput(
+        answer=f"資料 {slack.url}、投稿 {POST}",
+        answer_format="compact",
+        attachment_refs=[slack, post_only],
+        displayed_refs=[drive],
+        total_cost_usd=0,
+    )
+    assert search_file_delivery.candidates(output) == []
+
+
+def test_compact_attach_legacy_hits_and_slack_citations_limit_to_three():
+    refs = [file_ref(f"F0FILE{i}") for i in range(5)]
+    output = SearchOutput(
+        answer=f"[S:slack0]、{refs[3].url}、[S:2]、{refs[1].url}、{refs[0].url}",
+        answer_format="compact",
+        total_cost_usd=0,
+        hits=[
+            SearchHitOut(
+                chunk_id=i,
+                content="架空の資料",
+                score=0.9,
+                source_type="other",
+                source_uri=ref.url,
+                external_id=ref.slack_file_ids[0],
+                title=ref.title,
+            )
+            for i, ref in enumerate(refs[:4])
+        ],
+        slack_hits=[
+            SlackHitOut(
+                permalink=POST,
+                file_ids=refs[4].slack_file_ids,
+                file_names=[refs[4].title],
+            )
+        ],
+    )
+    assert [fid for fid, _ in search_file_delivery.candidates(output)] == [
+        "F0FILE4",
+        "F0FILE3",
+        "F0FILE2",
+    ]
+
+
+def test_compact_attach_does_not_match_url_or_citation_prefix():
+    ref = file_ref("F0ONE")
+    output = SearchOutput(
+        answer=f"資料 {ref.url}.other [S:110]",
+        total_cost_usd=0,
+        hits=[SearchHitOut(chunk_id=11, content="架空資料", score=0.9, reference=ref)],
+    )
+    assert search_file_delivery.candidates(output) == []
 
 
 def drive_hit(index=1, title=None, size=100):
@@ -435,3 +540,154 @@ async def test_public_file_import_without_owner_token_uses_other_reader_after_li
     assert services.events == ["post", "download", "upload"]
     services.reader_factory.assert_called_once_with("xoxp-other")
     services.bot.upload_files.assert_awaited_once()
+
+
+@pytest.mark.parametrize("direct", [False, True])
+@pytest.mark.parametrize("file_delivery", [False, True])
+@pytest.mark.parametrize("answer_format", ["compact", None])
+async def test_compact_answer_attaches_only_two_used_files_once(
+    monkeypatch, services, direct, file_delivery, answer_format
+):
+    first, second, unused = [file_ref(fid) for fid in ("F0FIRST", "F0SECOND", "F0UNUSED")]
+    answer = f"事例B <{second.url}|資料を見る>、事例A [S:11]、再掲 {second.url}"
+    output = SearchOutput(
+        answer=answer,
+        direct_answer=answer if direct else None,
+        direct_answer_kind="comparison" if direct else None,
+        answer_format=answer_format,
+        total_cost_usd=0,
+        hits=[
+            SearchHitOut(chunk_id=i, content="架空の事例", score=0.9, reference=ref)
+            for i, ref in ((10, unused), (11, first), (12, second))
+        ],
+    )
+    monkeypatch.setenv("SEARCH_DIRECT_ANSWER", str(int(direct)))
+    monkeypatch.setenv("SEARCH_DIRECT_ANSWER_ALLOWED_EMAILS", ME)
+    monkeypatch.setenv("SEARCH_DIRECT_ANSWER_KINDS", "comparison")
+    monkeypatch.setenv("USE_SEARCH_FILE_DELIVERY", str(int(file_delivery)))
+    template = services.api.files_info.return_value["file"]
+    services.api.files_info.side_effect = lambda *, file: {
+        "ok": True,
+        "file": {**template, "id": file},
+    }
+    contents = await server.dispatch_tool(
+        _spec(_OutputSearch(output), "search"),
+        "search",
+        {"query": "飲料の施策を比較して"},
+        identity_resolver=_resolver_for(ME),
+        caller_claim_verifier=_Verifier(_claim(channel=DM, thread_ts=THREAD)),
+    )
+    result = json.loads(contents[0].text)
+    if direct or file_delivery:
+        assert result["delivered"] is True
+        assert result["status"] == "posted"
+        assert result["answer"] == direct_search_answer.POSTED_TEXT
+        assert "hits" not in result
+        assert len(services.bot.posts) == 1
+    else:
+        assert result["answer"] == answer
+        assert services.bot.posts == []
+    events = ["post"] if direct or file_delivery else []
+    if file_delivery:
+        assert services.events == [*events, "download", "download", "upload"]
+        services.bot.upload_files.assert_awaited_once()
+        assert [name for _, name in services.bot.upload_files.await_args.args[1]] == [
+            second.title,
+            first.title,
+        ]
+        assert [call.kwargs["file"] for call in services.api.files_info.await_args_list] == [
+            "F0SECOND",
+            "F0FIRST",
+        ]
+    else:
+        assert services.events == events
+        services.bot.upload_files.assert_not_awaited()
+        services.reader.download_file_guarded.assert_not_awaited()
+
+
+@pytest.mark.parametrize(
+    "channel,verified,emails",
+    [("C0PUBLIC", True, "*"), (DM, False, "*"), (DM, True, ""), (DM, True, "other@example.test")],
+)
+async def test_compact_tool_result_attachment_keeps_destination_guards(
+    monkeypatch, services, channel, verified, emails
+):
+    ref = file_ref("F0ONLY")
+    output = SearchOutput(
+        answer=f"架空資料 <{ref.url}|資料を見る>",
+        answer_format="compact",
+        attachment_refs=[ref],
+        total_cost_usd=0,
+    )
+    monkeypatch.setenv("SEARCH_FILE_DELIVERY_ALLOWED_EMAILS", emails)
+    await server.dispatch_tool(
+        _spec(_OutputSearch(output), "search"),
+        "search",
+        {"query": "架空資料の内容"},
+        identity_resolver=_resolver_for(ME),
+        caller_claim_verifier=_Verifier(_claim(channel=channel, thread_ts=THREAD))
+        if verified
+        else None,
+    )
+    assert services.events == []
+    services.bot.upload_files.assert_not_awaited()
+    services.reader_factory.assert_not_called()
+
+
+@pytest.mark.parametrize("reason", ["empty", "unused", "drive_copy", "post_only"])
+async def test_compact_without_attachment_candidates_does_not_post(monkeypatch, services, reason):
+    ref = file_ref("F0ONLY")
+    if reason == "drive_copy":
+        ref = ref.model_copy(update={"kind": "drive", "drive_file_id": "DRIVE1"})
+    elif reason == "post_only":
+        ref = ref.model_copy(update={"url": POST, "source_uri": POST, "slack_file_ids": []})
+    answer = "架空の回答" if reason in {"empty", "unused"} else f"架空資料 {ref.url}"
+    output = SearchOutput(
+        answer=answer,
+        answer_format="compact",
+        attachment_refs=[] if reason == "empty" else [ref],
+        total_cost_usd=0,
+    )
+    assert search_file_delivery.candidates(output) == []
+    contents = await server.dispatch_tool(
+        _spec(_OutputSearch(output), "search"),
+        "search",
+        {"query": "架空資料の内容"},
+        identity_resolver=_resolver_for(ME),
+        caller_claim_verifier=_Verifier(_claim(channel=DM, thread_ts=THREAD)),
+    )
+    result = json.loads(contents[0].text)
+    assert result["answer"] == answer
+    assert result.get("delivered") is not True
+    assert services.events == []
+    services.bot.upload_files.assert_not_awaited()
+    services.reader_factory.assert_not_called()
+
+
+@pytest.mark.parametrize("status", ["failed", "uncertain"])
+async def test_compact_failed_text_post_does_not_attach_or_suppress_answer(
+    monkeypatch, services, status
+):
+    ref = file_ref("F0ONLY")
+    output = SearchOutput(
+        answer=f"架空資料 <{ref.url}|資料を見る>",
+        answer_format="compact",
+        attachment_refs=[ref],
+        total_cost_usd=0,
+    )
+    post = MagicMock(return_value=status)
+    monkeypatch.setattr(detached_jobs, "post_to_origin_status", post)
+    contents = await server.dispatch_tool(
+        _spec(_OutputSearch(output), "search"),
+        "search",
+        {"query": "架空資料の内容"},
+        identity_resolver=_resolver_for(ME),
+        caller_claim_verifier=_Verifier(_claim(channel=DM, thread_ts=THREAD)),
+    )
+    result = json.loads(contents[0].text)
+    assert result["answer"] == output.answer
+    assert result.get("delivered") is not True
+    post.assert_called_once()
+    assert services.events == []
+    services.bot.upload_files.assert_not_awaited()
+    services.reader_factory.assert_not_called()
