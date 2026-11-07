@@ -88,6 +88,7 @@ def db(monkeypatch: pytest.MonkeyPatch) -> Iterator[tuple[PgVectorClient, URLImp
                     "0040_video_library_fetch_resume.sql",
                     "0041_video_library_external_cases.sql",
                     "0042_video_library_account_add.sql",
+                    "0043_video_library_insights.sql",
                 ):
                     owner.execute((MIGRATIONS / name).read_text())
             pg = SchemaPg(make_conninfo(_DSN, options=f"-csearch_path={schema},public"))

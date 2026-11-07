@@ -104,6 +104,105 @@ def _day(value: Any) -> str:
     return value.astimezone(JST).strftime("%Y-%m-%d") if isinstance(value, datetime) else "不明"
 
 
+def _retention_chart(counts: list[int]) -> str:
+    if len(counts) < 2 or counts[0] <= 0:
+        return "<p>データ不足：視聴の推移を表示できません。</p>"
+    ratios = [min(1, max(0, count / counts[0])) for count in counts]
+    points = [
+        (second / (len(counts) - 1) * 100, 100 - ratio * 100) for second, ratio in enumerate(ratios)
+    ]
+    half = next((second for second, ratio in enumerate(ratios) if ratio < 0.5), None)
+    description = "0秒の視聴者数を100%とした残っている割合。" + "、".join(
+        f"{second:,}秒: {ratio:.1%}" for second, ratio in enumerate(ratios)
+    )
+    body = ""
+    if half is not None:
+        body += f'<p class="retention-highlight"><strong>{half:,}秒</strong>で半分以上が離脱</p>'
+    else:
+        body += "<p>記録された範囲では半分以上が視聴を続けています。</p>"
+    body += (
+        "<p>0秒の視聴者数を100%として表示</p>"
+        '<div class="retention-chart" role="img" aria-label="視聴を続けている人の割合" '
+        'aria-describedby="retention-description">'
+        f'<span class="sr-only" id="retention-description">{_e(description)}</span>'
+        '<div class="retention-plot" aria-hidden="true">'
+        '<svg viewBox="0 0 100 100" preserveAspectRatio="none" width="100%" height="100%">'
+        '<path class="chart-axis" d="M0 0V100H100" vector-effect="non-scaling-stroke"/>'
+        '<path class="chart-half" d="M0 50H100" vector-effect="non-scaling-stroke"/>'
+        '<polyline class="chart-line" vector-effect="non-scaling-stroke" points="'
+        + " ".join(f"{x:.2f},{y:.2f}" for x, y in points)
+        + '"/></svg>'
+        '<span class="chart-label chart-y chart-top">100%</span>'
+        '<span class="chart-label chart-y chart-middle">50%</span>'
+        '<span class="chart-label chart-y chart-bottom">0%</span>'
+        '<span class="chart-label chart-x chart-start">0</span>'
+        f'<span class="chart-label chart-x chart-end">{len(counts) - 1:,}</span>'
+        '<span class="chart-label chart-x chart-seconds">秒</span>'
+    )
+    if half is not None:
+        x, y = points[half]
+        # The HTML renderer adds the CSP nonce to style elements; style attributes are blocked.
+        body += (
+            f"<style>#retention-marker{{left:{x:.2f}%;top:{y:.2f}%}}</style>"
+            '<span class="chart-marker" id="retention-marker"></span>'
+        )
+    return body + "</div></div>"
+
+
+def _insights(rows: list[Mapping[str, Any]]) -> str:
+    if not rows:
+        return ""
+    latest = rows[0]
+    body = (
+        '<section class="metric-group video-insights" aria-labelledby="insights-title">'
+        '<h2 id="insights-title">視聴データ（TikTok 分析）</h2><dl class="stats">'
+    )
+    for field, label, spec, suffix in (
+        ("reach", "リーチ", ",.0f", ""),
+        ("completion_rate", "完了率", ".1%", ""),
+        ("avg_watch_seconds", "平均視聴時間", ",.2f", "秒"),
+        ("profile_views", "プロフィール閲覧", ",.0f", ""),
+    ):
+        value = latest[field]
+        display = format(value, spec) + suffix if value is not None else "データなし"
+        body += f"<div><dt>{_e(label)}</dt><dd>{_e(display)}</dd></div>"
+    body += "</dl><h3>視聴を続けている人の割合</h3>"
+    body += _retention_chart(latest["retention"])
+    body += '<h3>男女比</h3><dl class="audience-ratios">'
+    for field, label in (("male_ratio", "男性"), ("female_ratio", "女性")):
+        ratio = latest[field]
+        display = f"{ratio:.1%}" if ratio is not None else "データなし"
+        body += f"<div><dt>{_e(label)}</dt><dd>{_e(display)}</dd>"
+        if ratio is not None:
+            body += (
+                '<svg viewBox="0 0 100 8" preserveAspectRatio="none" aria-hidden="true">'
+                '<rect class="ratio-track" width="100" height="8"/>'
+                f'<rect class="ratio-fill" width="{ratio * 100:.2f}" height="8"/></svg>'
+            )
+        body += "</div>"
+    body += "</dl><h3>年齢の上位</h3>"
+    ages = sorted(latest["age_bands"], key=lambda age: age["ratio"], reverse=True)[:3]
+    if ages:
+        body += (
+            "<ol>"
+            + "".join(f"<li>{_e(age['band'])}：{age['ratio']:.1%}</li>" for age in ages)
+            + "</ol>"
+        )
+    else:
+        body += "<p>データなし</p>"
+    captured = latest["captured_at"].astimezone(JST).strftime("%Y/%m/%d %H:%M")
+    body += f'<p class="muted">取得日時: {_e(captured)}</p>'
+    if len(rows) > 1:
+        previous = rows[1]
+        day = previous["captured_at"].astimezone(JST).strftime("%Y/%m/%d")
+        if latest["reach"] is not None and previous["reach"] is not None:
+            delta = latest["reach"] - previous["reach"]
+            body += f"<p>前回（{_e(day)}）から リーチ {delta:+,}</p>"
+        else:
+            body += f"<p>前回（{_e(day)}）からのリーチ差: データ不足</p>"
+    return body + "</section>"
+
+
 def parse_search(params: Mapping[str, str]) -> tuple[list[str], bool | None]:
     """Share word/hashtag interpretation between SQL, filters and result labels."""
     query = params.get("q", "").strip()
@@ -1383,6 +1482,12 @@ def register_library_routes(
     def detail(platform: str, video_id: str, email: str = Depends(identity)) -> HTMLResponse:
         with connection(email) as conn:
             row = video(conn, platform, video_id, email)
+            insights = conn.execute(
+                "SELECT captured_at, reach, completion_rate, avg_watch_seconds, profile_views, "
+                "male_ratio, female_ratio, age_bands, retention FROM vl_video_insights "
+                "WHERE platform=%s AND video_id=%s ORDER BY captured_at DESC LIMIT 2",
+                (platform, video_id),
+            ).fetchall()
             analyses = conn.execute(
                 "SELECT kind, version, payload FROM vl_video_analysis "
                 "WHERE platform=%s AND video_id=%s ORDER BY analyzed_at DESC",
@@ -1485,7 +1590,7 @@ def register_library_routes(
                     f"{_rate(rates['engagement_rate'], rates['is_reference'])}</p>"
                 )
             body += "</details>" if family == "ad" else "</section>"
-        body += "</div></div></div>"
+        body += "</div>" + _insights(insights) + "</div></div>"
         payload = next(
             (
                 a["payload"]

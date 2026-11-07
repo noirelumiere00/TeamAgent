@@ -179,7 +179,8 @@ def test_related_video_query_is_scoped_private_safe_and_bounded(
     pg.calls.clear()
     pg.row.update(advertiser=None, campaign=None)
     client.get("/library/v/tiktok/123", cookies=_auth_cookie())
-    assert len(pg.calls) == 2
+    assert len(pg.calls) == 3
+    assert not any("AND NOT (v.platform=%s" in query for query, _ in pg.calls)
 
 
 def test_card_labels_hide_unset_and_separate_known_categories() -> None:
