@@ -499,6 +499,74 @@ class IngestRepository:
             str(row["external_id"]): str(row["content_hash"]) for row in rows if row["content_hash"]
         }
 
+    def get_unclassified_slack_files(self, *, limit: int) -> list[dict[str, Any]]:
+        """Slack 資料の分類用に、保存済みの先頭 8 chunk だけを読む。"""
+        with self._ops_connection() as conn:
+            with conn.cursor(row_factory=dict_row) as cur:
+                cur.execute(
+                    """
+                    SELECT d.external_id, d.title, d.metadata, d.xmin::text AS row_version,
+                           ARRAY(
+                               SELECT c.content FROM chunks c
+                               WHERE c.document_id = d.id
+                               ORDER BY c.chunk_idx LIMIT 8
+                           ) AS contents
+                    FROM documents d
+                    WHERE d.source_type = 'other'
+                      AND d.metadata->>'topic' = 'Slack 共有資料'
+                      AND NOT EXISTS (
+                          SELECT 1 FROM jsonb_object_keys(d.metadata) AS k(key)
+                          WHERE left(k.key, 4) = 'cls_'
+                      )
+                    ORDER BY d.id
+                    LIMIT %s
+                    """,
+                    (max(0, limit),),
+                )
+                return list(cur.fetchall())
+
+    def refresh_slack_file_classification(
+        self,
+        external_id: str,
+        *,
+        expected_row_version: str,
+        classification_metadata: dict[str, str],
+        request_id: str,
+    ) -> bool:
+        """未分類・内容不変の Slack 資料へ分類だけを合成し、chunks・ACL を保持する。"""
+        import json
+
+        if not classification_metadata:
+            return False
+        with self._ops_connection() as conn:
+            self._lock_source(conn, "other", external_id)
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE documents SET metadata = metadata || %s::jsonb
+                    WHERE source_type = 'other' AND external_id = %s
+                      AND xmin::text = %s
+                      AND metadata->>'topic' = 'Slack 共有資料'
+                      AND NOT EXISTS (
+                          SELECT 1 FROM jsonb_object_keys(metadata) AS k(key)
+                          WHERE left(k.key, 4) = 'cls_'
+                      )
+                    """,
+                    (
+                        json.dumps(_sanitize_metadata(classification_metadata), ensure_ascii=False),
+                        _strip_nul(external_id),
+                        expected_row_version,
+                    ),
+                )
+                updated = bool(cur.rowcount > 0)
+        if updated:
+            logger.info(
+                "ingest_slack_file_classification_updated",
+                request_id=request_id,
+                external_id_ref=_external_id_ref(external_id),
+            )
+        return updated
+
     def refresh_case_state_evidence(
         self,
         doc: DocumentUpsert,

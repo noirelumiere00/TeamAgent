@@ -64,6 +64,32 @@ class Repository:
         self.chunks[doc.external_id] = chunks
         return doc.external_id
 
+    def get_unclassified_slack_files(self, *, limit: int) -> list[dict[str, Any]]:
+        return [
+            {
+                "external_id": fid,
+                "title": doc.title,
+                "metadata": dict(doc.metadata),
+                "row_version": str(id(doc)),
+                "contents": [c.content for c in self.chunks[fid][:8]],
+            }
+            for fid, doc in sorted(self.documents.items())
+            if doc.source_type == "other"
+            and doc.metadata.get("topic") == "Slack 共有資料"
+            and not any(key.startswith("cls_") for key in doc.metadata)
+        ][:limit]
+
+    def refresh_slack_file_classification(
+        self, external_id: str, *, expected_row_version: str, classification_metadata: Any, **_: Any
+    ) -> bool:
+        doc = self.documents[external_id]
+        if str(id(doc)) != expected_row_version or any(k.startswith("cls_") for k in doc.metadata):
+            return False
+        self.documents[external_id] = dataclasses.replace(
+            doc, metadata={**doc.metadata, **classification_metadata}
+        )
+        return True
+
 
 class FakeApi:
     def __init__(self) -> None:
@@ -219,6 +245,8 @@ def setup(monkeypatch: pytest.MonkeyPatch) -> tuple[FakeApi, MagicMock, list[str
     monkeypatch.setenv("DOC_DEDUP_DETECT", "0")
     monkeypatch.setenv("BOILERPLATE_DETECT", "0")
     monkeypatch.setenv("INGEST_MARK_STALE", "0")
+    monkeypatch.setattr("teamagent.ingest.classify.build_classifier_from_env", lambda: None)
+    monkeypatch.delenv("SLACK_FILES_CLASSIFY_BACKFILL_MAX", raising=False)
     monkeypatch.setattr(IngestRunner, "_maybe_check_freshness", lambda *a, **k: None)
     monkeypatch.setattr("teamagent.ingest.pipeline._send_ops_warning_summary", lambda *a, **k: True)
     from teamagent.ingest.pipeline import _USER_EMAIL_CACHE
@@ -253,9 +281,11 @@ def run(
     *,
     dry_run: bool = False,
     kinds: list[str] | None = None,
+    embedder: Any = None,
 ) -> Any:
-    embedder = MagicMock(spec=["embed_passage"])
-    embedder.embed_passage.return_value = [0.1] * 1024
+    if embedder is None:
+        embedder = MagicMock(spec=["embed_passage"])
+        embedder.embed_passage.return_value = [0.1] * 1024
     return IngestRunner(
         repository=repo,  # type: ignore[arg-type]
         embedder=embedder,
@@ -877,3 +907,192 @@ def test_office_permanent_failure_is_not_reextracted(
         run(repo)
     assert extract.call_count == 1 and downloaded == ["FOFFICE"]
     assert any(e.get("failure_reason") == reason for e in logs)
+
+
+@pytest.fixture
+def classifier(monkeypatch: pytest.MonkeyPatch) -> MagicMock:
+    from teamagent.ingest.classify import DocClassification
+
+    fake = MagicMock()
+    fake.classify.return_value = DocClassification(
+        project="架空食品", industry="食品", doc_type="提案書", phase="提案", solution="動画広告"
+    )
+    monkeypatch.setattr("teamagent.ingest.classify.build_classifier_from_env", lambda: fake)
+    return fake
+
+
+def test_slack_new_file_classification_uses_drive_metadata_and_public_context(
+    setup: Any, classifier: MagicMock
+) -> None:
+    api, _, _ = setup
+    api.pages = [{"files": [file("FA", groups=["GPRIVATE"])]}]
+    api.conversations["GPRIVATE"]["name"] = "秘密の取引先"
+    api.peers[BOT].conversations["CPUBLIC"] = {"is_private": False, "name": "公開_食品案件"}
+    repo = Repository()
+    assert run(repo).total_documents() == 1
+    metadata = repo.documents["FA"].metadata
+    expected = classifier.classify.return_value.as_metadata()
+    assert {k: metadata[k] for k in expected} == expected
+    assert metadata["cls_project"] == "架空食品" and "client_name" not in metadata
+    call = classifier.classify.call_args.kwargs
+    assert call["title"] == "FA.pdf" and "Company shared presentation" in call["text"]
+    assert call["folder_name"] == "公開_食品案件"
+    assert "秘密の取引先" not in str(classifier.mock_calls)
+    assert run(repo).total_documents_unchanged() == 1
+    assert classifier.classify.call_count == 1
+
+
+@pytest.mark.parametrize("public_info", [None, {"is_private": True, "name": "秘密の名前"}])
+def test_slack_classification_never_passes_private_channel_name(
+    setup: Any, classifier: MagicMock, public_info: Any
+) -> None:
+    api, _, _ = setup
+    api.conversations["GPRIVATE"]["name"] = "秘密の名前"
+    api.pages = [{"files": [private_file("FA") if public_info is None else file("FA")]}]
+    if public_info is not None:
+        api.peers[BOT].conversations["CPUBLIC"] = public_info
+    repo = Repository()
+    assert run(repo).total_documents() == 1
+    assert classifier.classify.call_args.kwargs["folder_name"] == ""
+    assert "秘密の名前" not in str(classifier.mock_calls)
+
+
+@pytest.mark.parametrize("raises", [False, True])
+def test_slack_classifier_failure_keeps_ingesting(
+    setup: Any, classifier: MagicMock, raises: bool
+) -> None:
+    api, _, _ = setup
+    api.pages = [{"files": [file("FA"), file("FB")]}]
+    classifier.classify.return_value = None
+    if raises:
+        classifier.classify.side_effect = RuntimeError(f"must not log {TOKEN}")
+    repo = Repository()
+    with capture_logs() as logs:
+        assert run(repo).total_documents() == 2
+    assert set(repo.documents) == {"FA", "FB"}
+    assert all(not any(k.startswith("cls_") for k in d.metadata) for d in repo.documents.values())
+    assert TOKEN not in str(logs)
+
+
+def test_slack_classification_backfill_caps_and_resumes_without_embedding(
+    setup: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from teamagent.ingest.classify import DocClassification
+    from teamagent.ingest.repository import ChunkUpsert
+
+    api, _, downloaded = setup
+    api.pages = [{"files": [file(f"F{i}") for i in range(4)]}]
+    repo = Repository()
+    assert run(repo).total_documents() == 4
+    repo.documents["F0"].metadata["cls_doc_type"] = "その他"
+    repo.documents["F1"].metadata.update({"suppressed": True, "client_name": "人手の社名"})
+    repo.chunks["F1"] = [ChunkUpsert(i, f"Stored chunk {i}", []) for i in range(10)]
+    original = dict(repo.documents)
+    original_chunks = dict(repo.chunks)
+    api.pages = [{"files": []}]  # 増分一覧に載らない古い資料も DB から拾う。
+    downloaded.clear()
+    fake = MagicMock()
+    fake.classify.return_value = DocClassification(
+        project="架空食品", industry="食品", doc_type="提案書"
+    )
+    monkeypatch.setattr("teamagent.ingest.classify.build_classifier_from_env", lambda: fake)
+    monkeypatch.setenv("SLACK_FILES_CLASSIFY_BACKFILL_MAX", "1")
+    embedder = MagicMock(spec=["embed_passage"])
+    repo.upsert_document_with_chunks = MagicMock()  # type: ignore[method-assign]
+    for expected_calls in (1, 2, 3, 3):
+        assert run(repo, embedder=embedder).total_documents() == 0
+        assert fake.classify.call_count == expected_calls
+    assert fake.classify.call_args_list[0].kwargs["text"] == "\n".join(
+        f"Stored chunk {i}" for i in range(8)
+    )
+    assert [c.kwargs["title"] for c in fake.classify.call_args_list] == [
+        "F1.pdf",
+        "F2.pdf",
+        "F3.pdf",
+    ]
+    assert repo.documents["F0"] is original["F0"]
+    assert repo.documents["F1"].metadata["client_name"] == "人手の社名"
+    assert repo.documents["F1"].metadata["suppressed"] is True
+    for fid in ("F1", "F2", "F3"):
+        assert repo.documents[fid].metadata["cls_industry"] == "食品"
+        assert (
+            repo.documents[fid].metadata[INGEST_CONTENT_HASH_KEY]
+            == original[fid].metadata[INGEST_CONTENT_HASH_KEY]
+        )
+        assert (
+            dataclasses.replace(repo.documents[fid], metadata=original[fid].metadata)
+            == original[fid]
+        )
+        assert repo.chunks[fid] is original_chunks[fid]
+    assert repo.documents["F2"].metadata["cls_project"] == "架空食品"
+    repo.upsert_document_with_chunks.assert_not_called()
+    embedder.embed_passage.assert_not_called()
+    assert not downloaded
+
+
+@pytest.mark.parametrize("dry_run,limit", [(True, "500"), (False, "0")])
+def test_slack_classification_backfill_dry_run_and_zero_limit_do_not_write(
+    setup: Any, monkeypatch: pytest.MonkeyPatch, dry_run: bool, limit: str
+) -> None:
+    api, _, _ = setup
+    api.pages = [{"files": [file("FA")]}]
+    repo = Repository()
+    run(repo)
+    original = repo.documents["FA"]
+    fake = MagicMock()
+    from teamagent.ingest.classify import DocClassification
+
+    fake.classify.return_value = DocClassification(project="架空食品")
+    monkeypatch.setattr("teamagent.ingest.classify.build_classifier_from_env", lambda: fake)
+    monkeypatch.setenv("SLACK_FILES_CLASSIFY_BACKFILL_MAX", limit)
+    api.pages = [{"files": []}]
+    run(repo, dry_run=dry_run)
+    assert repo.documents["FA"] is original
+    assert fake.classify.call_count == (1 if dry_run else 0)
+
+
+def test_slack_classification_backfill_default_cap_and_failed_file_retry(
+    setup: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from teamagent.ingest.classify import DocClassification
+
+    api, _, _ = setup
+    api.pages = [{"files": [file("FA"), file("FB")]}]
+    repo = Repository()
+    run(repo)
+    original = repo.documents["FA"]
+    repo.get_unclassified_slack_files = MagicMock(wraps=repo.get_unclassified_slack_files)  # type: ignore[method-assign]
+    api.pages = [{"files": []}]
+    fake = MagicMock()
+    fake.classify.side_effect = [RuntimeError("failed"), DocClassification(project="架空食品")]
+    monkeypatch.setattr("teamagent.ingest.classify.build_classifier_from_env", lambda: fake)
+    run(repo)
+    repo.get_unclassified_slack_files.assert_called_once_with(limit=500)
+    assert repo.documents["FA"] is original
+    assert repo.documents["FB"].metadata["cls_project"] == "架空食品"
+    fake.classify.side_effect = None
+    fake.classify.return_value = DocClassification(project="架空食品")
+    run(repo)
+    assert fake.classify.call_count == 3
+    assert repo.documents["FA"].metadata["cls_project"] == "架空食品"
+
+
+def test_slack_backfill_uses_verified_public_context_even_without_file_reader_tokens(
+    setup: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from teamagent.ingest.classify import DocClassification
+
+    api, store, _ = setup
+    api.pages = [{"files": [file("FA"), private_file("FB")]}]
+    repo = Repository()
+    run(repo)
+    api.peers[BOT].conversations["CPUBLIC"] = {"is_private": False, "name": "公開案件"}
+    api.conversations["GPRIVATE"]["name"] = "秘密の名前"
+    store.list_file_reader_emails.return_value = []
+    fake = MagicMock()
+    fake.classify.return_value = DocClassification(project="架空食品")
+    monkeypatch.setattr("teamagent.ingest.classify.build_classifier_from_env", lambda: fake)
+    run(repo)
+    assert [call.kwargs["folder_name"] for call in fake.classify.call_args_list] == ["公開案件", ""]
+    assert all(doc.metadata["cls_project"] == "架空食品" for doc in repo.documents.values())
+    assert "秘密の名前" not in str(fake.mock_calls)
