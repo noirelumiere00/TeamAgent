@@ -74,7 +74,8 @@ def test_karte_caps_long_body_sorts_five_cases_and_keeps_state_and_original(
         ),
     )
     answer = out.answer
-    assert len(answer) <= 600
+    # 600 字は本文の枠。状態の行・原本リンクは別枠（11-07）。
+    assert len(answer.split("\n状態:")[0]) <= 600
     conclusion = answer.splitlines()[0]
     assert conclusion.startswith(CLIENT + ":")
     assert conclusion == f"{CLIENT}: 架空商品7は失注（11/1 時点）"
@@ -155,3 +156,31 @@ def test_karte_summary_rewrites_past_plans_with_fixed_now(
     assert conclusion.endswith("（10/7 時点）")
     assert "8/26に提案予定していた（結果は未確認）" in conclusion
     assert "10月中旬に決定を予定していた（結果は未確認）" in conclusion
+
+
+def test_long_related_docs_do_not_collapse_case_bodies(
+    short_skill: karte.ClientKarteSkill, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """11-07 本番: 関連資料の一覧が長いと本文の枠が負になり、案件が「…」だけになった。"""
+    monkeypatch.setenv("KARTE_ATTACH_DOCS_MAX", "6")
+    short_skill._pgvector.list_documents_for_client.return_value = [
+        {
+            "title": f"架空商品{n}_とても長い提案書の名前_" + "あ" * 80 + ".pptx",
+            "source_type": "gdrive",
+            "source_uri": f"https://drive.google.com/file/d/fictional-{n}/view",
+            "modified_at": "2026-11-01",
+            "client_name": CLIENT,
+        }
+        for n in range(6)
+    ]
+    out = short_skill.run(
+        ClientKarteInput(client_name=CLIENT),
+        SkillContext(metadata={"user_email": "owner@example.test", "channel_id": "D01ABCDEFGH"}),
+    )
+    body = out.answer.split("\n\n")[1:6]
+    assert body, out.answer
+    for block in body:
+        lines = block.splitlines()
+        assert lines[0].startswith("**架空商品")
+        assert all(line.strip() != "…" for line in lines[1:]), block
+        assert any("回答待ち" in line for line in lines[1:]), block

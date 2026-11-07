@@ -558,7 +558,8 @@ class ClientKarteSkill(BaseSkill[ClientKarteInput, ClientKarteOutput]):
                 narrative,
                 hits,
                 input.client_name,
-                budget=600 - len(suffix),
+                # 原本リンク・関連資料（suffix）は別枠。差し引くと本文が「…」になる（11-07）。
+                budget=600,
                 state_lines=state_lines,
             )
             + suffix
