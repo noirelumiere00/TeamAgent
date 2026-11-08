@@ -40,6 +40,8 @@ class ProposalDraftSkill(BaseSkill[ProposalDraftInput, ProposalDraftOutput]):
         "例: 伊藤ハムの提案の骨子を作って。"
         "似た・類似の・近い・参考になる過去の提案書／資料を探して、は recommend。"
         "迷ったら recommend を優先して資料を見せ、骨子は求められてから。"
+        "完成品のPPTX資料は作らない（TikTok調査のお土産資料はomiyage_report_submit・"
+        "86枚の提案書はproposal_builder_submit）。"
     )
     input_schema: ClassVar[type[BaseModel]] = ProposalDraftInput
     output_schema: ClassVar[type[BaseModel]] = ProposalDraftOutput

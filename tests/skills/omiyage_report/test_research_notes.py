@@ -266,7 +266,9 @@ def test_research_notes_is_optional_bounded_and_normalized() -> None:
 
 def test_description_routes_final_pptx_here_and_asks_for_research_notes() -> None:
     description = OmiyageReportSubmitSkill.description
-    assert description.startswith("お土産資料の最終成果物（PPTX）はこのツールでのみ生成する")
+    assert description.startswith(
+        "初対面の営業先へ持っていくTikTok調査のお土産資料（PPTX）を作る依頼で使う"
+    )
     assert "research_notes" in description
     for tool in ("x_voice_search", "search_surface_check", "web_research", "tiktok_acquire"):
         assert tool in description
