@@ -134,7 +134,7 @@ jobs:
 
       - name: Ruff (format check)
         if: matrix.shard == 1
-        run: ruff format --check src/ tests/ scripts/
+        run: ruff format --check --diff src/ tests/ scripts/
 
       - name: Import layering (import-linter)
         if: matrix.shard == 1
