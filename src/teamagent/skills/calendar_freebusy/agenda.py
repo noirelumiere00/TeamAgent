@@ -45,6 +45,8 @@ class AgendaEntry:
     title: str  # マスク済み・短縮済み・改行除去済み
     all_day: bool
     label: str  # 「8/21(金) 10:00〜11:00 定例MTG」
+    location: str = ""
+    appointment: bool = False
 
 
 def _is_utc_midnight(value: str) -> _dt.datetime | None:
@@ -154,7 +156,13 @@ def _timed_span(event: Any) -> tuple[_dt.datetime, _dt.datetime] | None:
     return start, end
 
 
-def entries_for_day(events: Iterable[Any], *, day: _dt.date) -> list[AgendaEntry]:
+def entries_for_day(
+    events: Iterable[Any],
+    *,
+    day: _dt.date,
+    requester: str = "",
+    internal_domains: frozenset[str] = frozenset(),
+) -> list[AgendaEntry]:
     """対象日に「かかっている」予定だけを、終日→開始時刻の順で返す。
 
     日跨ぎ（前夜22:00〜当日10:00 の出張枠等）も当日側に出す。当日にかからない部分は
@@ -166,9 +174,19 @@ def entries_for_day(events: Iterable[Any], *, day: _dt.date) -> list[AgendaEntry
     all_day_items: list[AgendaEntry] = []
     timed_items: list[tuple[_dt.datetime, AgendaEntry]] = []
     label = day_label_ja(day)
+    internal_domains = internal_domains | {requester.strip().lower().partition("@")[2]}
 
     for ev in events:
         title = display_title(str(getattr(ev, "summary", "") or ""))
+        raw_location = str(getattr(ev, "location", "") or "").strip()
+        location = display_title(raw_location) if raw_location else ""
+        suffix = f" / {location}" if location else ""
+        appointment = bool(requester) and any(
+            "@" in email
+            and email.strip().lower().partition("@")[2] not in internal_domains
+            and not email.strip().lower().endswith(".calendar.google.com")
+            for email in getattr(ev, "attendees", ())
+        )
         raw_start = str(getattr(ev, "start", "") or "")
         raw_end = str(getattr(ev, "end", "") or "")
         if is_all_day(ev):
@@ -181,7 +199,9 @@ def entries_for_day(events: Iterable[Any], *, day: _dt.date) -> list[AgendaEntry
                     end=raw_end,
                     title=title,
                     all_day=True,
-                    label=f"{label} 終日 {title}",
+                    label=f"{label} 終日 {title}{suffix}",
+                    location=location,
+                    appointment=appointment,
                 )
             )
             continue
@@ -204,7 +224,9 @@ def entries_for_day(events: Iterable[Any], *, day: _dt.date) -> list[AgendaEntry
                     end=raw_end,
                     title=title,
                     all_day=False,
-                    label=f"{label} {start_txt}〜{end_txt} {title}",
+                    label=f"{label} {start_txt}〜{end_txt} {title}{suffix}",
+                    location=location,
+                    appointment=appointment,
                 ),
             )
         )
@@ -232,11 +254,8 @@ def format_agenda_ja(day: _dt.date, entries: list[AgendaEntry], note: str) -> st
         return "\n".join(lines)
     lines.append(f"📅 {label} の予定（{len(entries)}件・本人カレンダー primary）:")
     for e in entries:
-        if e.all_day:
-            lines.append(f"・終日 {e.title}")
-        else:
-            # label は「8/21(金) 10:00〜11:00 タイトル」形式。日付部分を落として時刻から出す。
-            lines.append("・" + e.label[len(label) + 1 :])
+        # 日付は見出しにあるので、各行は時刻・件名・場所だけにする。
+        lines.append("・" + e.label[len(label) + 1 :])
     lines.append(THIRD_PARTY_TITLE_NOTE)
     return "\n".join(lines)
 

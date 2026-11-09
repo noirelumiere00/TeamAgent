@@ -89,7 +89,12 @@ def _apply(
         reminder_values = {
             k: v for k, v in current.model_dump().items() if k.startswith("reminder")
         }
-        return DEFAULT_PREFERENCES.model_copy(update=reminder_values), []
+        return DEFAULT_PREFERENCES.model_copy(
+            update={
+                **reminder_values,
+                "daily_schedule_template": current.daily_schedule_template,
+            }
+        ), []
     data: dict[str, Any] = current.model_dump()
     notes: list[str] = []
 

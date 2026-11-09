@@ -7,6 +7,8 @@ read-only（freebusy / events.list の読み取りのみ・書込 API 無し）�
 mode で 2 面を持つ:
   - ``free``   （既定）: 空きウィンドウ + 開始候補（freebusy）
   - ``agenda`` : その日の予定一覧（events.list・同じ calendar.readonly スコープ）
+  - ``report`` : 今日の予定を本人が保存した報告の型へ挿入
+  - ``save_template`` : 報告の型だけを既存の本人設定 JSON へ保存（Google API は呼ばない）
 新規ツールを足さないのは、OpenClaw の toolFilter/ツール定義を変えずに済ませるため
 （＝OC イメージ再ビルドと再連携を発生させない）。
 """
@@ -21,7 +23,12 @@ from pydantic import BaseModel, Field
 class CalendarFreeBusyInput(BaseModel):
     """「空いてる時間ある？」「明日の予定は？」等の自由文照会の入力（全項目省略可）。"""
 
-    mode: Literal["free", "agenda"] = Field(default="free")
+    mode: Literal["free", "agenda", "report", "save_template"] = Field(default="free")
+    report_template: str = Field(
+        default="",
+        max_length=6000,
+        description="貼った型の見出し・固定行を保持し、可変行だけ{appointments}/{work}、日付は{date}に置換。",
+    )
     date: str = Field(
         default="",
         pattern=r"^(\d{4}-\d{2}-\d{2})?$",
@@ -56,6 +63,7 @@ class AgendaItem(BaseModel):
         ),
     )
     all_day: bool = Field(default=False, description="終日予定か")
+    location: str = ""
     label: str = Field(
         default="",
         description=(

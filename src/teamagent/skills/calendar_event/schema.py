@@ -39,6 +39,10 @@ class CalendarEventInput(BaseModel):
         description="終了日時ISO 8601（省略時60分後、最大8時間）。",
     )
     location: str = Field(default="", max_length=200)
+    bulk_text: str = Field(
+        default="", max_length=12000, description="一括依頼の原文（共通時刻＋日付と件名の各行）。"
+    )
+    confirm_bulk: bool = Field(default=False, description="一括一覧を本人に提示後trueで登録。")
 
 
 class CalendarEventOutput(BaseModel):
