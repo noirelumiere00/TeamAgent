@@ -251,6 +251,21 @@ def test_search_direct_answer_rollout_is_ordered_and_denied_by_default() -> None
             assert _rendered_default(block, variables, env_name) == default
 
 
+def test_inbound_router_has_independent_allowlists_denied_by_default() -> None:
+    variables = (TF_ROOT / "variables_fargate.tf").read_text(encoding="utf-8")
+    block = _block(TF_ROOT / "fargate.tf", "aws_ecs_task_definition", "openclaw")
+    for env_name, variable, default in (
+        ("TEAMAGENT_INBOUND_ROUTER", "openclaw_inbound_router", "off"),
+        ("TEAMAGENT_INBOUND_ROUTER_ALLOWED_EMAILS", "openclaw_inbound_router_allowed_emails", ""),
+        ("TEAMAGENT_INBOUND_ROUTER_ALLOWED_RULES", "openclaw_inbound_router_allowed_rules", ""),
+    ):
+        assert f'{{ name = "{env_name}", value = var.{variable} }}' in block
+        assert _rendered_default(block, variables, env_name) == default
+    for variable in ("openclaw_inbound_router_allowed_emails", "openclaw_inbound_router_allowed_rules"):
+        start = variables.index(f'variable "{variable}" {{')
+        assert "validation {" in variables[start : variables.index("\n}\n", start)]
+
+
 def test_search_drive_first_is_independent_and_denied_by_default() -> None:
     variables = (TF_ROOT / "variables_fargate.tf").read_text(encoding="utf-8")
     for task in ("mcp", "openclaw"):

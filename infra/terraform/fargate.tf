@@ -1168,6 +1168,8 @@ resource "aws_ecs_task_definition" "openclaw" {
       # メンバー追加は本 var を編集 + apply（task 再デプロイ）だけ＝image rebuild 不要・15名まで可動。
       { name = "SLACK_DM_ALLOWLIST", value = var.slack_dm_allowlist },
       { name = "TEAMAGENT_INBOUND_ROUTER", value = var.openclaw_inbound_router },
+      { name = "TEAMAGENT_INBOUND_ROUTER_ALLOWED_EMAILS", value = var.openclaw_inbound_router_allowed_emails },
+      { name = "TEAMAGENT_INBOUND_ROUTER_ALLOWED_RULES", value = var.openclaw_inbound_router_allowed_rules },
       { name = "TEAMAGENT_ROUTE_CLASSIFIER", value = var.openclaw_route_classifier },
       { name = "SEARCH_DIRECT_ANSWER", value = var.openclaw_search_direct_answer },
       { name = "SEARCH_DIRECT_ANSWER_ALLOWED_EMAILS", value = var.search_direct_answer_allowed_emails },

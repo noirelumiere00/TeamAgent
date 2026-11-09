@@ -692,6 +692,32 @@ variable "openclaw_inbound_router" {
   }
 }
 
+variable "openclaw_inbound_router_allowed_emails" {
+  description = "入口専用の本人メール許可リスト。カンマ区切り、* は本人確認済みの全員。空は全員拒否。直接回答の許可リストとは独立。"
+  type        = string
+  default     = ""
+  validation {
+    condition = var.openclaw_inbound_router_allowed_emails == "" || alltrue([
+      for email in split(",", var.openclaw_inbound_router_allowed_emails) :
+      trimspace(email) == "*" || can(regex("^[^\\s@,*]+@[^\\s@,*]+\\.[^\\s@,*]+$", trimspace(email)))
+    ])
+    error_message = "Use empty, * or comma-separated email addresses for openclaw_inbound_router_allowed_emails."
+  }
+}
+
+variable "openclaw_inbound_router_allowed_rules" {
+  description = "入口専用の rule_id 許可リスト（カンマ区切り）。空は全拒否。fallback=false の route だけ先行実行する。"
+  type        = string
+  default     = ""
+  validation {
+    condition = var.openclaw_inbound_router_allowed_rules == "" || alltrue([
+      for rule in split(",", var.openclaw_inbound_router_allowed_rules) :
+      can(regex("^[a-z][a-z0-9_]*$", trimspace(rule)))
+    ])
+    error_message = "Use empty or comma-separated rule_ids (no wildcard) for openclaw_inbound_router_allowed_rules."
+  }
+}
+
 variable "openclaw_route_classifier" {
   description = "分類モデルは PR6 まで未実装。OC は 0 のみ受理する。"
   type        = string
