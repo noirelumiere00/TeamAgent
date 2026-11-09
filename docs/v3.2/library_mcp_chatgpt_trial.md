@@ -26,7 +26,7 @@ OAuth状態はDBに保存され、アプリ再起動後も引き継ぐ。code／
 2. [ChatGPT Plugins](https://chatgpt.com/plugins) → **＋ → Add custom MCP server**。名前「動画ライブラリ」、Server URL `https://connect.newstv.co.jp/mcp`、OAuth、自動登録（DCR）、scope欄があれば `library:read` を設定する。
 3. 実クライアントが要求する**正確なcallback**を管理画面または安全な `mcp_spike_redirect_observed` イベントのhost／pathから確認する。ワイルドカード・類似ホスト・任意URLを許可しない。フォームを作り直すとcallback IDが変わる場合がある。
 4. 稼働中の設定を確認し、既存Claude／Claude Codeの承認済みcallbackをすべて保持して対象ChatGPTのcallbackを追加する。Terraformの `enable_connect_library_mcp=true`、`connect_mcp_redirect_uris`、現行の `connect_base_url` を使う。
-5. 正本の署名付きimage公開とTerraform runtime guardの完全saved planで、レビュー済みアプリ・callback設定を反映する。直接task definition登録、直接service更新、部分plan、ingest停止、guardのfingerprint検査を外す操作はしない。guardが通常taskの交代を検知した場合も失敗を無視しない。
+5. 署名付きimageを公開した後、[反映経路の確認](library_mcp_clients.md#反映とロールバック)を完了してからアプリ・callbackを反映する。現在はTerraform apply禁止の運用記録とguard必須の旧手順が混在し、完成済みのconnect-web限定executorも確認できていない。既存の全体更新helperを部分実行せず、実稼働baseline・署名証跡・排他・対象限定を保つ経路をレビューする。ingest停止、部分plan、guardのfingerprint検査除外で回避しない。
 6. 同じChatGPTフォームで作成を再開し、会社Googleアカウント・戻り先・本人の動画閲覧権限を確認して同意する。作成したプラグインをインストールし、会話で **@動画ライブラリ** を選ぶ。
 7. `ping` → 上限1件の検索 → その動画の詳細を確認する。access期限後のrefresh、アプリ再起動後の継続、本人の解除後の拒否も確認する。
 

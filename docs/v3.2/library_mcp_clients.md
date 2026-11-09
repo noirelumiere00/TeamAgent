@@ -28,7 +28,7 @@
 2. **アプリ反映前に** [`0044_library_mcp_oauth.sql`](../../infra/migrations/0044_library_mcp_oauth.sql) を既存forward-only runnerで適用する。先に `python scripts/migrate.py --dry-run`、予定外の未適用migrationがなければ `python scripts/migrate.py`。runnerがtransaction／checksumを管理する。本番で `--rerun` は使わない。
 3. `schema_migrations` の0044とACLを確認。所有者は **library_mcp_definer**（NOLOGIN／NOBYPASSRLS／NOINHERIT）。5テーブルはRLS ENABLE／FORCE＋所有者policy。`library_mcp_owner`はpolicy名で、role名ではない。
 4. `teamagent_app`は固定SECURITY DEFINER関数の必要なEXECUTEだけを持ち、直接SELECT／DML・ownerへのSET ROLE・非公開helper実行は不可。`teamagent_dashboard`にも直接権限を与えない。migration時の一時owner membershipは終了時にrevokeされる。
-5. 正本の署名付きimage公開・Terraform runtime guardの**完全saved plan**でアプリと正確なcallback設定を反映。既存画像・無関係な設定・全callbackを保持し、直接task definition登録／service更新／部分applyは使わない。既存env名 `CONNECT_MCP_SPIKE_REDIRECT_ALLOW` は互換のため残る。
+5. 署名付きimageの公開までは現行releaseスクリプトを使える。**アプリ反映の実行経路は別途レビューが必要**。最新の[運用記録](../handoff/aws_resources_and_ops_20261105.md)はTerraform apply禁止・直接AWS操作を記録する一方、既存README／CLAUDE.mdにはguard必須が残る。どちらかを推測で選んで実行しない。既存の全体更新helperは他サービスも更新するため、connect-web限定の代わりに使わない。署名証跡、実稼働bindingからの完全差分、排他制御、対象限定を満たすレビュー済み経路でアプリと正確なcallbackだけを反映する。Terraform経路を再整備して使う場合は完全saved planを維持する。既存env名 `CONNECT_MCP_SPIKE_REDIRECT_ALLOW` は互換のため残る。
 6. ingestの通常task交代でもlive fingerprintは変わる。receipt／planが失効したら停止する。ingest停止、schedule変更、fingerprint検査除外で回避しない。安定した通常運用枠か、正規の反映経路が整うまで保留する。
 7. 本番でmetadata→登録→実Google→tools/list→上限1件検索／詳細→access期限後refresh→再起動継続→本人解除後拒否を確認。コード／専用DBテストは実Google・クラウド接続の代替ではない。code／Bearer／Cookie／token hash／DB行を証跡へ保存しない。
 

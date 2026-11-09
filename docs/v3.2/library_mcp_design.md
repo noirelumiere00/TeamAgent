@@ -7,7 +7,7 @@
 > - refreshはrotationし、消費済みrefreshの再利用でgrant全体を失効。本人の `/mcp-auth/connections` からも解除できます。新規grantごとにtransaction／ブラウザnonceを使ったfresh Google確認と明示同意を行います。
 > - 既存Claude ai／com・承認済みlocalhostのcallbackを保持し、ChatGPTの実callbackは完全一致で正規の設定リリースに追加します。接続ガイド `/mcp/setup` は新アプリ反映後に公開します。
 > - 実テーブルは `public.library_mcp_grants.subject`、専用NOLOGIN所有者は `library_mcp_definer`。`library_mcp_owner` はpolicy名です。Googleログアウト／アカウント無効化だけでは検証済みHDの既存grantは失効せず、退職時は運用担当が明示revokeします。
-> - 0044をアプリより先に適用。旧アプリへ戻す場合もDB状態を削除しません。ingest停止・直接ECS更新・guard迂回は行いません。本番配備と実Googleを含むChatGPT／Claude E2Eは未確認で、コードテストの成功と区別します。
+> - 0044をアプリより先に適用。旧アプリへ戻す場合もDB状態を削除しません。配備の運用記録が混在しているため、対象限定・署名証跡・排他を保つ経路のレビューまで本番実行を保留します。ingest停止・全体helperの部分実行・guard迂回は行いません。本番配備と実Googleを含むChatGPT／Claude E2Eは未確認で、コードテストの成功と区別します。
 
 作成日: 2026-11-04。対象: `feat/library-mcp`、調査時 HEAD `2329f40b`。
 状態: 設計のみ。コード変更、migration 実行、インフラ変更、コミット、push は行わない。
