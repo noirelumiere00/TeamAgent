@@ -88,6 +88,14 @@ def resolve_period(period: str, *, now: datetime | None = None) -> tuple[str, st
     elif period == "先月":
         end = _month_start(today)
         start = _month_start(end - timedelta(days=1))
+    elif period in ("過去全部", "全部", "全期間", "すべて", "全て"):
+        start, end = datetime.fromtimestamp(0, JST), now
+    elif match := re.fullmatch(r"(?:(\d{4})年)?(\d{1,2})月", period):
+        year = int(match[1]) if match[1] else today.year
+        start = _date(year, int(match[2]), 1)
+        if not match[1] and start > today:
+            start = _date(year - 1, int(match[2]), 1)
+        end = (start.replace(day=28) + timedelta(days=4)).replace(day=1)
     elif match := re.fullmatch(r"(?:直近|過去)(\d{1,3})日(?:間)?", period):
         days = int(match[1])
         if not 1 <= days <= _RECENT_MAX_DAYS:

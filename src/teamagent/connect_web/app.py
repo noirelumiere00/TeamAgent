@@ -350,7 +350,8 @@ class RedactMCPAccessLog(logging.Filter):
             path = args[2].split("?", 1)[0]
             login = path == "/search/login" and "mcp-auth" in args[2]
             if (
-                path in {"/authorize", "/token", "/register", "/mcp-auth/consent", "/mcp", "/mcp/"}
+                path in {"/authorize", "/token", "/register", "/revoke", "/mcp", "/mcp/"}
+                or path.startswith("/mcp-auth/")
                 or login
             ):
                 record.args = (*args[:2], path, *args[3:])
@@ -716,7 +717,7 @@ def _safe_next(raw: str | None) -> str:
     if candidate in {"/", "/app", "/search", "/admin", "/app/history", "/admin/history"}:
         return candidate
     if os.environ.get("CONNECT_MCP_ENABLED", "").lower() in {"1", "true"} and re.fullmatch(
-        r"/mcp-auth/consent\?tx=[A-Za-z0-9_-]{43}", candidate
+        r"/mcp-auth/(?:consent\?tx=[A-Za-z0-9_-]{43}|connections)", candidate
     ):
         return candidate
     if candidate == "/search/graph/focus":
@@ -4918,7 +4919,7 @@ def create_app(
         nxt = _safe_next(str(form.get("next", "")))
         ok, email = authenticate_id_token(credential, search_cfg, verifier=search_verifier)
         if not ok or email is None:
-            if nxt.startswith("/mcp-auth/consent?"):
+            if nxt.startswith("/mcp-auth/"):
                 logger.warning(
                     "mcp_spike_login_denied", request_id=_request_id_of(request), count=1
                 )
@@ -4932,7 +4933,7 @@ def create_app(
                 ),
                 status_code=403,
             )
-        if nxt.startswith("/mcp-auth/consent?"):
+        if nxt.startswith("/mcp-auth/"):
             logger.info("mcp_spike_login_ok", request_id=_request_id_of(request), count=1)
         else:
             logger.info("search_login_ok", user_email=email, next=nxt)
@@ -5808,6 +5809,9 @@ def create_app(
             request_id=_request_id_of,
             get_pg=_get_admin_pg,
             admins=_admin_emails,
+            auth_config=search_cfg,
+            content_security_policy=_CONTENT_SECURITY_POLICY,
+            google_verifier=search_verifier,
         )
 
     return app

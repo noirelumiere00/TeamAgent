@@ -141,3 +141,20 @@ test('DM alias binding preserves the request, and expired runs cannot reuse it',
   nowMs += 10 * 60 * 1000 + 1;
   assert.equal(p.call().block, true);
 });
+
+for (const tool of ['slack_search', 'slack_summary']) {
+  for (const channelId of [DM, 'C12345678', 'G12345678']) {
+    test(`${tool} preserves the original list request on ${channelId} before signing`, () => {
+      const p = setup();
+      const content = '10月に募集された案件を全部見て、誰が応募したか一覧にして';
+      p.receive(content, {conversationId: channelId});
+      const result = p.call(tool, {channelId, params: {query: '募集',
+        _user_context: {request_text: 'モデルの要約'}}});
+      assert.notEqual(result?.block, true);
+      assert.equal(result.params._user_context.request_text, content);
+      const claim = JSON.parse(Buffer.from(result.params._user_context.caller_claim.split('.')[0],
+        'base64url').toString());
+      assert.equal(claim.arguments_sha256, canonicalRequestSha256(result.params));
+    });
+  }
+}

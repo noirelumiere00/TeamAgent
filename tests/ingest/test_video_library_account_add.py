@@ -3,6 +3,7 @@
 from unittest.mock import MagicMock
 
 import pytest
+from structlog.testing import capture_logs
 
 from teamagent.adapters.pgvector_client import PgVectorClient
 from teamagent.ingest.video_library_account_repository import (
@@ -150,19 +151,19 @@ def test_preview_selects_only_unique_valid_accounts() -> None:
     assert all(call.args[0].startswith("SELECT ") for call in conn.execute.call_args_list)
 
 
-def test_conflict_returns_actual_operator_and_logs_only_counts(
-    capsys: pytest.CaptureFixture[str],
-) -> None:
+def test_conflict_returns_actual_operator_and_logs_only_counts() -> None:
     pg = MagicMock(spec=PgVectorClient)
     conn = pg.connection.return_value.__enter__.return_value
     conn.execute.return_value.fetchone.side_effect = [None, None, {"operator_label": "existing"}]
-    rows = AccountAddRepository(pg).add(
-        ["secret_handle"],
-        operator_label="NewsTV",
-        user_email="member@example.test",
-        user_role="viewer",
-        request_id="conflict",
-    )
+    # capsys は structlog のキャッシュ済みロガーの出力先次第で空になる（テスト順依存）ため capture_logs。
+    with capture_logs() as logs:
+        rows = AccountAddRepository(pg).add(
+            ["secret_handle"],
+            operator_label="NewsTV",
+            user_email="member@example.test",
+            user_role="viewer",
+            request_id="conflict",
+        )
     assert [(r.status, r.operator_label) for r in rows] == [("exists", "existing")]
     pg.connection.assert_called_once_with(
         app_role="teamagent_app",
@@ -170,7 +171,7 @@ def test_conflict_returns_actual_operator_and_logs_only_counts(
         user_role="viewer",
         application_name="teamagent-account-add",
     )
-    output = capsys.readouterr().out
+    output = str(logs)
     assert "conflict" in output and "exists" in output
     assert "secret_handle" not in output and "member@example.test" not in output
 

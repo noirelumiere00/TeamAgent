@@ -80,3 +80,26 @@ async def test_request_text_is_bound_to_the_signature(tool: str) -> None:
     args["_user_context"]["request_text"] = "単価999円"
     with pytest.raises(CallerClaimError):
         await make_verifier().verify(tool=tool, arguments=args)
+
+
+@pytest.mark.parametrize("tool", ["slack_search", "slack_summary"])
+@pytest.mark.parametrize("channel", ["D0123456789", "C0123456789", "G0123456789"])
+@pytest.mark.parametrize("shared", [False, True])
+async def test_slack_signed_list_request_survives_all_surfaces(tool, channel, shared) -> None:
+    text = "2026年10月の投稿を全部一覧。自分が投稿したURLがほしい"
+    args = sign_arguments(tool, {}, channel_id=channel, declared_context={"request_text": text})
+    claim = await make_verifier().verify(tool=tool, arguments=args)
+    metadata, error = await _resolve_metadata(
+        args["_user_context"],
+        verified_caller=claim,
+        require_rls=True,
+        identity_resolver=_resolver,
+        allowed_domains=None,
+        company_shared_groups=frozenset({"example.com"}) if shared else None,
+        tool=tool,
+    )
+    assert error is None and metadata["request_text"] == text
+    assert metadata["verified_slack_user_id"] == claim.slack_user_id
+    args["_user_context"]["request_text"] = "改ざん"
+    with pytest.raises(CallerClaimError):
+        await make_verifier().verify(tool=tool, arguments=args)

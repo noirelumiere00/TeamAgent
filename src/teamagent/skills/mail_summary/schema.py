@@ -6,7 +6,11 @@
 
 from __future__ import annotations
 
+from typing import Literal
+
 from pydantic import BaseModel, Field
+
+from teamagent.skills.mail_followup.schema import FollowupItem
 
 
 class MailSummaryInput(BaseModel):
@@ -21,6 +25,12 @@ class MailSummaryInput(BaseModel):
     """
 
     client_name: str = Field(default="", max_length=100, examples=["花王", "アサヒ飲料", "森ビル"])
+    mode: Literal["summary", "ball"] = Field(
+        default="summary", description="ballはボールの所在を列挙"
+    )
+    period: Literal["", "今日", "昨日", "今週", "先週", "今月"] = Field(
+        default="", description="ballの期間（JST暦日・月曜始まり）"
+    )
     lookback_days: int = Field(default=14, ge=1, le=90)
     max_messages: int = Field(default=15, ge=1, le=40)
 
@@ -45,6 +55,12 @@ class MailSummaryOutput(BaseModel):
 
     client_name: str
     summary: str = Field(default="", description="LLM による横断要約（DLP マスク後の本文に基づく）")
+    waiting_on_external: list[FollowupItem] = Field(
+        default_factory=list, description="相手待ち（社外）"
+    )
+    waiting_on_self: list[FollowupItem] = Field(
+        default_factory=list, description="自分待ち（自社）"
+    )
     highlights: list[MailHighlight] = Field(default_factory=list)
     scanned_count: int = Field(ge=0, description="走査したメール数")
     inbox_owner_masked: str = Field(default="", description="参照した受信箱（マスク）")

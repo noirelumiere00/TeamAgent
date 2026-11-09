@@ -180,19 +180,24 @@ class SlackSummarySkill(BaseSkill[SlackSummaryInput, SlackSummaryOutput]):
 
         origin = str(ctx.metadata.get("channel_id", "") or "").strip()
 
+        from teamagent.skills.slack_search.listing import list_query, run_listing, wants_list
+
+        request = str(ctx.metadata.get("request_text", "") or "")
+        intent = " ".join((request, input.focus))
+        list_mode = wants_list(intent) or input.period in ("過去全部", "全期間", "全部")
         period_mode = bool(input.channel_name.strip() or input.period.strip())
-        if period_mode and not tool_enabled("SLACK_SUMMARY_NAMED_PERIOD_ENABLED"):
+        if period_mode and not list_mode and not tool_enabled("SLACK_SUMMARY_NAMED_PERIOD_ENABLED"):
             return SlackSummaryOutput(
                 error="feature_disabled", message=_ERR_MSG["feature_disabled"]
             )
         bounds: tuple[str, str] | None = None
-        if period_mode:
+        if period_mode and not list_mode:
             try:
                 bounds = resolve_period(input.period or "今週")
             except ValueError:
                 return SlackSummaryOutput(error="bad_period", message=_ERR_MSG["bad_period"])
         # 名前指定は常にチャンネル単位。DM 自身を暗黙の要約対象にはしない。
-        if input.scope == "channel" or period_mode:
+        if input.scope == "channel" or period_mode or (list_mode and input.scope != "thread"):
             target_channel = input.channel_id.strip() or ("" if input.channel_name else origin)
             target_ts = ""
             has_target = bool(target_channel or input.channel_name.strip())
@@ -243,6 +248,40 @@ class SlackSummarySkill(BaseSkill[SlackSummaryInput, SlackSummaryOutput]):
         if _is_channel_surface(origin) and target_channel != origin:
             return SlackSummaryOutput(
                 error="cross_channel_blocked", message=_ERR_MSG["cross_channel_blocked"]
+            )
+
+        if list_mode:
+            try:
+                query, bounds = list_query(
+                    "",
+                    intent,
+                    channel=target_channel,
+                    period=input.period,
+                    user_id=str(ctx.metadata.get("verified_slack_user_id", "") or ""),
+                )
+            except ValueError as exc:
+                return SlackSummaryOutput(
+                    error="bad_conditions",
+                    message=_ERR_MSG["bad_period"] if str(exc) == "bad_period" else str(exc),
+                )
+            listing = run_listing(
+                reader,
+                query,
+                intent,
+                ctx,
+                dm_surface=True,
+                requester=requester,
+                bounds=bounds,
+                thread_ts=target_ts,
+            )
+            if listing.error:
+                key = "not_found" if listing.error in _UNIFORM_DENY_CODES else "read_failed"
+                return SlackSummaryOutput(error=key, message=_ERR_MSG[key])
+            return SlackSummaryOutput(
+                message=listing.message,
+                message_count=listing.match_count,
+                scope="thread" if target_ts else "channel",
+                truncated=listing.truncated,
             )
 
         # ── A7: 読み取りのみ（各 API 1 ページ）。auto は単発スレッドなら channel へ切替。

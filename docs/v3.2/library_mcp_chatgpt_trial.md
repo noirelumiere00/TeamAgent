@@ -1,30 +1,41 @@
-# ChatGPT向け動画ライブラリMCPの限定試用
+# ChatGPT向け動画ライブラリMCPの接続手順
 
-既存の試作はClaude向けの認証とpingのみだったため、ChatGPTから登録するとコールバックの完全一致検証で拒否されていた。ChatGPTのOriginを許可し、登録済みの戻り先ホストに応じた同意画面と、既存ライブラリを読む2ツールを追加する。
+既存リンクとの互換のためファイル名に `trial` を残す。現在の実装はPostgreSQLによる永続OAuthとrefresh tokenに対応し、旧来の「単一プロセス内・10分で再接続が必要」という試作制約を置き換える。全体の運用・Claudeの接続・退職時の失効は [接続と運用](library_mcp_clients.md) を参照する。
+
+**本番migration・アプリ反映と、実Google認証を含むChatGPT検索E2Eは未確認。** ローカルのSDK／ASGI／DBテストを本番疎通の証明にはしない。
 
 ## 機能と境界
 
 - `ping`: 伏せたメールと固定の接続確認文。
-- `search_videos`: キーワード、PR、種別、業種、目的、広告主、施策で検索。既定は総再生数順。最大20件/回、100ページ。保存順は保存率。入力はstrictなPydanticモデルで追加キーを拒否。
+- `search_videos`: キーワード、PR、種別、業種、目的、広告主、施策で検索。最大20件／回、100ページ。strictな入力モデルで追加キーを拒否する。
 - `get_video`: 検索結果のプラットフォームと動画IDから1件取得。
 
-全ツールはreadOnlyHint=true。画面と同じ`teamagent_app`の本人コンテキスト、現在の管理者設定、`NOT v.is_private`を共用する。出力は固定モデルへの明示代入とし、広告費、広告指標、S3キー、署名URL、動画本体、自由形式のDB行を返さない。投稿文はタイトル相当の先頭行200字まで。投稿URLは既存検証器を通す。DBエラーの詳細をクライアントへ反射しない。
+全ツールは読み取り専用。画面と同じ本人コンテキスト、現在の管理者設定、非公開除外条件を共用する。固定の出力モデルを使い、広告費、広告指標、S3キー、署名URL、動画本体、自由形式のDB行を返さない。投稿文はタイトル相当の先頭行200字まで。DBエラーの詳細をクライアントへ返さない。
 
-## 認証の制約
+## 認証と接続管理
 
-これは**限定試用版**であり、OAuthクライアント・コード・トークンは引き続き単一プロセス内に置く。access tokenは10分、refresh tokenは未実装。再起動・期限切れ後は再接続が必要。多重レプリカや常用の無人接続は対象外。既存の永続OAuth設計は`library_mcp_design.md`のPR1を参照。この制約は同意画面にも表示する。
+scopeは `library:read` だけ、OAuth public client／DCRを使う。利用者用APIキーやOAuth client secretの作成・配布は不要。
+
+access tokenは10分、refreshは毎回rotationする。code交換／refresh成功時にgrantとrefreshの期限を**その時点から90日後**へ更新する。90日は未使用期限であり、初回同意からの絶対期限ではない。通常はクライアントが自動更新し、解除・長期未使用・refresh再利用検知などで失効した場合にGoogle認証をやり直す。
+
+OAuth状態はDBに保存され、アプリ再起動後も引き継ぐ。code／access／refresh本体は保存しない。新規grantには既存Cookieに依存しないfresh Google本人確認と明示同意が必要。[接続の管理](https://connect.newstv.co.jp/mcp-auth/connections)で本人の接続を解除できる。これらの画面・動作は新アプリ反映後に利用可能になる。
 
 ## 登録と反映
 
-1. ChatGPT Webのプラグイン→追加→カスタムMCP。名前「動画ライブラリ」、サーバーURL `https://connect.newstv.co.jp/mcp`、OAuth、DCR、scope `library:read`。
-2. 実クライアントが要求した**正確な**コールバックを安全な`mcp_spike_redirect_observed`イベントのhost/pathから確認する。任意のURL、ワイルドカード、類似ホストは許可しない。ChatGPTのフォームを開き直すとcallback IDが変わる場合がある。
-3. 稼働中のMCP設定を取得し、既存Claude/Claude Codeの正確な戻り先を保持したうえで、対象ChatGPTの戻り先を追加する。Terraformの`enable_connect_library_mcp=true`と`connect_mcp_redirect_uris`に設定し、`connect_base_url`は現行originを維持する。
-4. 既定OFFを維持したコードをレビューし、正本`infra/deploy/`の署名付きimage公開とTerraform runtime guardの完全saved planで反映する。task definitionの直接登録、update-serviceの直打ち、部分planは使わない。新しいimageはconnect-webだけに反映し、無関係なruntime・設定変更を混ぜない。
-5. 同じChatGPTフォームから作成し、会社Googleアカウント、戻り先、`library:read`と10分の制約を確認して許可。クライアントsecretやGoogle/DB credentialの手入力は不要。
-6. ChatGPTのツールカタログで3ツールを確認し、`ping`→上限1件の検索→その動画詳細を試す。書き込みツールがないことを確認。10分後の再認証と、将来の常用化は別途確認する。
+1. アプリ反映前に [`0044_library_mcp_oauth.sql`](../../infra/migrations/0044_library_mcp_oauth.sql) を正規のmigration runnerで適用し、role／ACLを確認する。詳細は [運用手順](library_mcp_clients.md#反映とロールバック)。
+2. [ChatGPT Plugins](https://chatgpt.com/plugins) → **＋ → Add custom MCP server**。名前「動画ライブラリ」、Server URL `https://connect.newstv.co.jp/mcp`、OAuth、自動登録（DCR）、scope欄があれば `library:read` を設定する。
+3. 実クライアントが要求する**正確なcallback**を管理画面または安全な `mcp_spike_redirect_observed` イベントのhost／pathから確認する。ワイルドカード・類似ホスト・任意URLを許可しない。フォームを作り直すとcallback IDが変わる場合がある。
+4. 稼働中の設定を確認し、既存Claude／Claude Codeの承認済みcallbackをすべて保持して対象ChatGPTのcallbackを追加する。Terraformの `enable_connect_library_mcp=true`、`connect_mcp_redirect_uris`、現行の `connect_base_url` を使う。
+5. 署名付きimageを公開した後、[反映経路の確認](library_mcp_clients.md#反映とロールバック)を完了してからアプリ・callbackを反映する。現在はTerraform apply禁止の運用記録とguard必須の旧手順が混在し、完成済みのconnect-web限定executorも確認できていない。既存の全体更新helperを部分実行せず、実稼働baseline・署名証跡・排他・対象限定を保つ経路をレビューする。ingest停止、部分plan、guardのfingerprint検査除外で回避しない。
+6. 同じChatGPTフォームで作成を再開し、会社Googleアカウント・戻り先・本人の動画閲覧権限を確認して同意する。作成したプラグインをインストールし、会話で **@動画ライブラリ** を選ぶ。
+7. `ping` → 上限1件の検索 → その動画の詳細を確認する。access期限後のrefresh、アプリ再起動後の継続、本人の解除後の拒否も確認する。
 
-## 検証
+リリース後は [HTML接続ガイド](https://connect.newstv.co.jp/mcp/setup) から設定画面を開ける。配布用の `newstv-mcp-setup.html` は別のプレビュー成果物であり、開くだけでは登録や接続許可を実行しない。
 
-実SDKのOAuth handlers/ASGI transportによる登録→同意→code→token→initialize→tools/list→検索→詳細をローカルで確認する。fake DBを使い、本番データはテストへ持ち込まない。禁止callback、Origin、PKCE、期限切れ、管理者解除、非公開/不存在、ページ上限、広告費・保存先情報の除外、DBエラーの秘匿、既存画面の回帰を含む。
+## 検証と運用上の注意
 
-本番の登録・Google認証・ChatGPTでの実検索が成功するまでは、利用可能とは報告しない。
+テストでは実SDKのOAuth handlers／ASGI transportとfake store／専用DBを使い、登録・fresh Google nonce・同意・code・token・refresh・initialize・tools/list・検索・詳細・失効を検査する。本番データをテストへ持ち込まない。禁止callback、Origin、PKCE、期限切れ、並行消費、refresh replay、管理者解除、非公開／不存在、ページ上限、機密出力の除外、DB障害時の秘匿も対象とする。
+
+Googleのログアウト・アカウント無効化だけでは既存MCP grantは失効しない。退職等では [運用担当によるgrant失効](library_mcp_clients.md#退職アカウント停止時の失効) を別途実施する。アプリのロールバック時も0044のテーブルや接続状態を削除しない。
+
+旧案との違いは [設計書冒頭の実装優先事項](library_mcp_design.md) を参照。本番の登録・Google認証・実検索が成功するまでは、利用可能とは報告しない。
