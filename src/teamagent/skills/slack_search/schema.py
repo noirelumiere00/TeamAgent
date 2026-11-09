@@ -37,7 +37,7 @@ class SlackSearchInput(BaseModel):
     focus: str = Field(
         default="",
         max_length=200,
-        description="依頼の原文・観点。全部/一覧/遡って/誰が/URLは一覧、それ以外は要約。",
+        description="依頼の原文・観点",
     )
 
     @field_validator("query", mode="before")
@@ -90,7 +90,7 @@ class SlackSearchOutput(BaseModel):
         description="Slack が申告した総ヒット数（DM での依頼のときだけ。チャンネルでは 0）",
     )
     summary: str = Field(default="", description="focus 指定時だけの要約（一覧の範囲だけ）")
-    truncated: bool = Field(default=False, description="一覧や返信が取得上限・取得失敗で一部のみ")
+    truncated: bool = Field(default=False, description="一部のみ取得")
     error: str = Field(
         default="",
         description=(

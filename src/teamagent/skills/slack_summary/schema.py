@@ -107,7 +107,7 @@ class SlackSummaryInput(BaseModel):
     focus: str = Field(
         default="",
         max_length=200,
-        description="依頼の原文・観点（全部/一覧/遡って/誰が/URLは一覧）。",
+        description="依頼の原文・観点",
     )
 
 

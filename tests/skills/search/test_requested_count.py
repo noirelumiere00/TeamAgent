@@ -4,6 +4,7 @@ from dataclasses import replace
 from unittest.mock import MagicMock
 
 import pytest
+from structlog.testing import capture_logs
 
 from teamagent.mcp_gateway.search_file_delivery import candidates
 from teamagent.skills._shared.input_policy import requested_item_count
@@ -103,7 +104,7 @@ def test_case_count_lists_cases_and_materials_without_asking(
 @pytest.mark.parametrize("drive_mode", [False, True])
 @pytest.mark.parametrize("available", [2, 6])
 def test_missing_citations_fallback_count_has_links_and_delivery_candidates(
-    monkeypatch, fanout_enabled, drive_mode, available, capsys
+    monkeypatch, fanout_enabled, drive_mode, available
 ):
     monkeypatch.setenv("USE_SEARCH_FANOUT", str(int(fanout_enabled)))
     monkeypatch.setenv("SEARCH_DRIVE_FIRST", str(int(drive_mode)))
@@ -113,11 +114,12 @@ def test_missing_citations_fallback_count_has_links_and_delivery_candidates(
     skill, _ = make(_hits()[:available])
     monkeypatch.setattr(skill, "_collect_slack_lookup", lambda *a: SlackLookup("ok", "ok"))
     skill._summarize = MagicMock(return_value=("架空資料を紹介します。", 0.0))
-    out = run(skill, query="飲料資料を５件見せて", meta={**META, compact.CTX_KEY: True})
+    with capture_logs() as logs:  # capsys はテスト順で空になる
+        out = run(skill, query="飲料資料を５件見せて", meta={**META, compact.CTX_KEY: True})
     assert out.found and out.answer_format == "list"
     assert out.answer.count("https://") == min(available, 5)
     assert "資料URL未確認" not in out.answer
-    assert "missing_citations" in capsys.readouterr().out
+    assert "missing_citations" in str(logs)
     assert "ください" not in out.answer and "？" not in out.answer
     assert ("見つかったのは 2 件です。" in out.answer) == (available == 2)
     if available >= 5:
