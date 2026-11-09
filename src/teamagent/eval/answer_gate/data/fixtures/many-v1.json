@@ -1,0 +1,270 @@
+{
+  "refs": [
+    {
+      "ref": "ref-1",
+      "item_id": "item-1",
+      "title": "架空星雲飲料資料1",
+      "url": "https://example.test/records/1"
+    },
+    {
+      "ref": "ref-2",
+      "item_id": "item-2",
+      "title": "架空星雲飲料資料2",
+      "url": "https://example.test/records/2"
+    },
+    {
+      "ref": "ref-3",
+      "item_id": "item-3",
+      "title": "架空星雲飲料資料3",
+      "url": "https://example.test/records/3"
+    },
+    {
+      "ref": "ref-4",
+      "item_id": "item-4",
+      "title": "架空星雲飲料資料4",
+      "url": "https://example.test/records/4"
+    },
+    {
+      "ref": "ref-5",
+      "item_id": "item-5",
+      "title": "架空星雲飲料資料5",
+      "url": "https://example.test/records/5"
+    }
+  ],
+  "vault": [
+    {
+      "ref": "ref-1",
+      "item_id": "item-1",
+      "title": "架空星雲飲料資料1",
+      "url": "https://example.test/records/1",
+      "content": "架空星雲飲料資料1。架空の飲料の店頭動画を配信した。準備中の企画を確認した。",
+      "source_type": "other",
+      "lane": "vault",
+      "case_corpus": "true"
+    },
+    {
+      "ref": "ref-2",
+      "item_id": "item-2",
+      "title": "架空星雲飲料資料2",
+      "url": "https://example.test/records/2",
+      "content": "架空星雲飲料資料2。架空の飲料の店頭動画を配信した。準備中の企画を確認した。",
+      "source_type": "other",
+      "lane": "vault",
+      "case_corpus": "true"
+    },
+    {
+      "ref": "ref-3",
+      "item_id": "item-3",
+      "title": "架空星雲飲料資料3",
+      "url": "https://example.test/records/3",
+      "content": "架空星雲飲料資料3。架空の飲料の店頭動画を配信した。準備中の企画を確認した。",
+      "source_type": "other",
+      "lane": "vault",
+      "case_corpus": "true"
+    },
+    {
+      "ref": "ref-4",
+      "item_id": "item-4",
+      "title": "架空星雲飲料資料4",
+      "url": "https://example.test/records/4",
+      "content": "架空星雲飲料資料4。架空の飲料の店頭動画を配信した。準備中の企画を確認した。",
+      "source_type": "other",
+      "lane": "vault",
+      "case_corpus": "true"
+    },
+    {
+      "ref": "ref-5",
+      "item_id": "item-5",
+      "title": "架空星雲飲料資料5",
+      "url": "https://example.test/records/5",
+      "content": "架空星雲飲料資料5。架空の飲料の店頭動画を配信した。準備中の企画を確認した。",
+      "source_type": "other",
+      "lane": "vault",
+      "case_corpus": "true"
+    }
+  ],
+  "slack": [
+    {
+      "ref": "ref-1",
+      "item_id": "item-1",
+      "title": "架空星雲飲料資料1",
+      "url": "https://example.test/records/1",
+      "content": "架空星雲飲料資料1。架空の飲料の店頭動画を配信した。準備中の企画を確認した。",
+      "source_type": "other",
+      "lane": "slack"
+    },
+    {
+      "ref": "ref-2",
+      "item_id": "item-2",
+      "title": "架空星雲飲料資料2",
+      "url": "https://example.test/records/2",
+      "content": "架空星雲飲料資料2。架空の飲料の店頭動画を配信した。準備中の企画を確認した。",
+      "source_type": "other",
+      "lane": "slack"
+    },
+    {
+      "ref": "ref-3",
+      "item_id": "item-3",
+      "title": "架空星雲飲料資料3",
+      "url": "https://example.test/records/3",
+      "content": "架空星雲飲料資料3。架空の飲料の店頭動画を配信した。準備中の企画を確認した。",
+      "source_type": "other",
+      "lane": "slack"
+    },
+    {
+      "ref": "ref-4",
+      "item_id": "item-4",
+      "title": "架空星雲飲料資料4",
+      "url": "https://example.test/records/4",
+      "content": "架空星雲飲料資料4。架空の飲料の店頭動画を配信した。準備中の企画を確認した。",
+      "source_type": "other",
+      "lane": "slack"
+    },
+    {
+      "ref": "ref-5",
+      "item_id": "item-5",
+      "title": "架空星雲飲料資料5",
+      "url": "https://example.test/records/5",
+      "content": "架空星雲飲料資料5。架空の飲料の店頭動画を配信した。準備中の企画を確認した。",
+      "source_type": "other",
+      "lane": "slack"
+    },
+    {
+      "ref": "ref-1",
+      "item_id": "item-1",
+      "title": "架空星雲飲料資料1",
+      "url": "https://example.test/records/1",
+      "content": "架空星雲飲料資料1。架空の飲料の店頭動画を配信した。準備中の企画を確認した。",
+      "source_type": "other",
+      "lane": "slack"
+    },
+    {
+      "ref": "ref-2",
+      "item_id": "item-2",
+      "title": "架空星雲飲料資料2",
+      "url": "https://example.test/records/2",
+      "content": "架空星雲飲料資料2。架空の飲料の店頭動画を配信した。準備中の企画を確認した。",
+      "source_type": "other",
+      "lane": "slack"
+    },
+    {
+      "ref": "ref-3",
+      "item_id": "item-3",
+      "title": "架空星雲飲料資料3",
+      "url": "https://example.test/records/3",
+      "content": "架空星雲飲料資料3。架空の飲料の店頭動画を配信した。準備中の企画を確認した。",
+      "source_type": "other",
+      "lane": "slack"
+    },
+    {
+      "ref": "ref-4",
+      "item_id": "item-4",
+      "title": "架空星雲飲料資料4",
+      "url": "https://example.test/records/4",
+      "content": "架空星雲飲料資料4。架空の飲料の店頭動画を配信した。準備中の企画を確認した。",
+      "source_type": "other",
+      "lane": "slack"
+    },
+    {
+      "ref": "ref-5",
+      "item_id": "item-5",
+      "title": "架空星雲飲料資料5",
+      "url": "https://example.test/records/5",
+      "content": "架空星雲飲料資料5。架空の飲料の店頭動画を配信した。準備中の企画を確認した。",
+      "source_type": "other",
+      "lane": "slack"
+    },
+    {
+      "ref": "ref-1",
+      "item_id": "item-1",
+      "title": "架空星雲飲料資料1",
+      "url": "https://example.test/records/1",
+      "content": "架空星雲飲料資料1。架空の飲料の店頭動画を配信した。準備中の企画を確認した。",
+      "source_type": "other",
+      "lane": "slack"
+    },
+    {
+      "ref": "ref-2",
+      "item_id": "item-2",
+      "title": "架空星雲飲料資料2",
+      "url": "https://example.test/records/2",
+      "content": "架空星雲飲料資料2。架空の飲料の店頭動画を配信した。準備中の企画を確認した。",
+      "source_type": "other",
+      "lane": "slack"
+    },
+    {
+      "ref": "ref-3",
+      "item_id": "item-3",
+      "title": "架空星雲飲料資料3",
+      "url": "https://example.test/records/3",
+      "content": "架空星雲飲料資料3。架空の飲料の店頭動画を配信した。準備中の企画を確認した。",
+      "source_type": "other",
+      "lane": "slack"
+    },
+    {
+      "ref": "ref-4",
+      "item_id": "item-4",
+      "title": "架空星雲飲料資料4",
+      "url": "https://example.test/records/4",
+      "content": "架空星雲飲料資料4。架空の飲料の店頭動画を配信した。準備中の企画を確認した。",
+      "source_type": "other",
+      "lane": "slack"
+    },
+    {
+      "ref": "ref-5",
+      "item_id": "item-5",
+      "title": "架空星雲飲料資料5",
+      "url": "https://example.test/records/5",
+      "content": "架空星雲飲料資料5。架空の飲料の店頭動画を配信した。準備中の企画を確認した。",
+      "source_type": "other",
+      "lane": "slack"
+    },
+    {
+      "ref": "ref-1",
+      "item_id": "item-1",
+      "title": "架空星雲飲料資料1",
+      "url": "https://example.test/records/1",
+      "content": "架空星雲飲料資料1。架空の飲料の店頭動画を配信した。準備中の企画を確認した。",
+      "source_type": "other",
+      "lane": "slack"
+    },
+    {
+      "ref": "ref-2",
+      "item_id": "item-2",
+      "title": "架空星雲飲料資料2",
+      "url": "https://example.test/records/2",
+      "content": "架空星雲飲料資料2。架空の飲料の店頭動画を配信した。準備中の企画を確認した。",
+      "source_type": "other",
+      "lane": "slack"
+    }
+  ],
+  "case": [
+    {
+      "ref": "ref-1",
+      "item_id": "item-1",
+      "title": "架空星雲飲料資料1",
+      "url": "https://example.test/records/1",
+      "content": "架空星雲飲料資料1。架空の飲料の店頭動画を配信した。準備中の企画を確認した。",
+      "source_type": "other",
+      "lane": "case"
+    },
+    {
+      "ref": "ref-2",
+      "item_id": "item-2",
+      "title": "架空星雲飲料資料2",
+      "url": "https://example.test/records/2",
+      "content": "架空星雲飲料資料2。架空の飲料の店頭動画を配信した。準備中の企画を確認した。",
+      "source_type": "other",
+      "lane": "case"
+    },
+    {
+      "ref": "ref-3",
+      "item_id": "item-3",
+      "title": "架空星雲飲料資料3",
+      "url": "https://example.test/records/3",
+      "content": "架空星雲飲料資料3。架空の飲料の店頭動画を配信した。準備中の企画を確認した。",
+      "source_type": "other",
+      "lane": "case"
+    }
+  ]
+}

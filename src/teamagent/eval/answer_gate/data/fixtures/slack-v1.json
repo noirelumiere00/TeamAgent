@@ -1,0 +1,53 @@
+{
+  "refs": [
+    {
+      "ref": "ref-1",
+      "item_id": "item-1",
+      "title": "架空星雲飲料資料1",
+      "url": "https://fixture-answer-gate.slack.com/archives/CFIXTURE/p1794186000000000"
+    },
+    {
+      "ref": "ref-2",
+      "item_id": "item-2",
+      "title": "架空星雲飲料資料2",
+      "url": "https://fixture-answer-gate.slack.com/archives/CFIXTURE/p1794186001000000"
+    },
+    {
+      "ref": "ref-3",
+      "item_id": "item-3",
+      "title": "架空星雲飲料資料3",
+      "url": "https://fixture-answer-gate.slack.com/archives/CFIXTURE/p1794186002000000"
+    }
+  ],
+  "vault": [],
+  "slack": [
+    {
+      "ref": "ref-1",
+      "item_id": "item-1",
+      "title": "架空星雲飲料資料1",
+      "url": "https://fixture-answer-gate.slack.com/archives/CFIXTURE/p1794186000000000",
+      "content": "架空星雲飲料資料1。架空の飲料の店頭動画を配信した。準備中の企画を確認した。",
+      "source_type": "other",
+      "lane": "slack"
+    },
+    {
+      "ref": "ref-2",
+      "item_id": "item-2",
+      "title": "架空星雲飲料資料2",
+      "url": "https://fixture-answer-gate.slack.com/archives/CFIXTURE/p1794186001000000",
+      "content": "架空星雲飲料資料2。架空の飲料の店頭動画を配信した。準備中の企画を確認した。",
+      "source_type": "other",
+      "lane": "slack"
+    },
+    {
+      "ref": "ref-3",
+      "item_id": "item-3",
+      "title": "架空星雲飲料資料3",
+      "url": "https://fixture-answer-gate.slack.com/archives/CFIXTURE/p1794186002000000",
+      "content": "架空星雲飲料資料3。架空の飲料の店頭動画を配信した。準備中の企画を確認した。",
+      "source_type": "other",
+      "lane": "slack"
+    }
+  ],
+  "case": []
+}
