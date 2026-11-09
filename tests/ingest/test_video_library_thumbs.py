@@ -280,3 +280,13 @@ def test_real_pages_without_cover_do_not_pause_fetching() -> None:
     ) as client:
         counts = thumbs.fill_thumbnails(pg, storage, client, limit=6, sleep=lambda _: None)
     assert counts == {"attempted": 6, "cover_missing": 6}
+
+
+def test_webp_covers_are_accepted_and_served_with_their_type() -> None:
+    from teamagent.adapters.video_library_page import image_media_type
+
+    webp = b"RIFF\x24\x00\x00\x00WEBPVP8 "
+    assert image_media_type(webp) == "image/webp"
+    assert image_media_type(b"\xff\xd8\xff\xe0") == "image/jpeg"
+    assert image_media_type(b"\x00\x00\x00\x18ftypheic") is None
+    assert image_media_type(b"<html>") is None
