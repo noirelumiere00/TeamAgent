@@ -6161,14 +6161,14 @@ class IngestRunner:
         if self._dry_run or not _envflag("DOC_DEDUP_DETECT"):
             return
         jaccard_threshold = _envfloat("DOC_DEDUP_JACCARD", 0.7)
-        # H2: OOM/timeout 回避の上限（doc 数・per-doc 文字数）。env で上書き可。
-        max_docs = _envint("DOC_DEDUP_MAX_DOCS", 5000)
+        # 全件が既定。上限指定時は新しい取り込み順。本文はページ単位で読み捨てる。
+        max_docs = _envint("DOC_DEDUP_MAX_DOCS", 0)
         max_chars = _envint("DOC_DEDUP_MAX_CHARS", 500_000)
         try:
             # repository が ingest_jobs / connector_state 用に持つ admin role 接続を再利用。
             # documents の UPDATE policy は user_role='admin' で bypass される（boilerplate 同様）。
             with self._repo._ops_connection() as conn:
-                # 全文ロード後のPython比較中は接続がidle-in-txになるため、boilerplateと同じ
+                # 署名生成・Python比較中は接続がidle-in-txになるため、boilerplateと同じ
                 # transaction限定helperでstatement/idle-in-txの双方を無制限にする。
                 _disable_corpus_scan_timeouts(conn)
                 affected = mark_duplicate_documents(
