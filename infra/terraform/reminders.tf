@@ -3,7 +3,7 @@
 # ============================================================
 # フロー: planner が個人別サマリーのワンタイム schedule を登録（kind=digest）。
 #   → 発火時に SQS へ → reminder_notify Lambda が単一ユーザーの ECS タスクを起動。
-# 予定リマインドの新規登録は廃止。共用基盤は個人別配信のために維持する。
+# 予定リマインドは全体フラグ ON かつ本人の明示 opt-in がある場合だけ同じ基盤で登録する。
 # 権限設計（tiktok_acquire.tf の敵対レビュー原則を踏襲）:
 #   - アプリ(morning_digest task)へは scheduler:CreateSchedule + 専用ロールの PassRole のみ
 #     （sqs:SendMessage も Slack 通知権限も持たせない）
@@ -17,7 +17,7 @@ variable "enable_reminders" {
 }
 
 variable "morning_digest_reminders" {
-  description = "互換用の旧フラグ。予定リマインドは廃止済みで runner は値に関係なく登録しない。"
+  description = "予定リマインドの登録を許可する全体フラグ。true でも本人の明示 opt-in がある人だけ登録。既定 false。"
   type        = bool
   default     = false
 }
