@@ -40,21 +40,29 @@ def _past_plans(text: str, as_of: date, today: date) -> str:
         line = match[0]
         dates = [m for m in _DATE.finditer(line) if not re.match(r"\s*時点", line[m.end() :])]
         deadlines = [_deadline(m, as_of) for m in dates]
-        if (
-            _PLAN.search(line)
-            and deadlines
-            and all(d is not None and d < today for d in deadlines)
-            and _PAST_PLAN not in line
-        ):
+        if _PLAN.search(line) and deadlines and all(d is not None and d < today for d in deadlines):
             # 結果の記載がある行は未確認に戻さない。
             if not re.search(
                 r"実施済|提出済|提案済|決定済|決定した|決定しました|結果[:：]|見送り|中止|延期",
                 line,
             ):
                 if re.search(r"予定(?!日)", line):
+
+                    def past_plan(plan: re.Match[str]) -> str:
+                        particle = plan["particle"] or ""
+                        before = line[: plan.start()]
+                        if particle == "の" or re.search(r"[ぁ-ゖ]$", before):
+                            return particle + "予定だった（結果は未確認）"
+                        if particle == "を" or re.search(r"[一-龥々ァ-ヶー]$", before):
+                            return "を" + _PAST_PLAN
+                        return _PAST_PLAN
+
                     line = re.sub(
-                        r"(?:を)?予定(?!日)(?:していた|している|だった|でした|です)?",
-                        lambda m: ("を" if m[0].startswith("を") else "") + _PAST_PLAN,
+                        r"(?P<particle>を|の)?予定(?!日)"
+                        r"(?:していた|している|だった|でした|です|だ)?"
+                        r"(?:\s*(?:[（(]結果(?:は)?未確認[）)]|"
+                        r"(?:だが|が|ものの)結果(?:は)?未確認))*",
+                        past_plan,
                         line,
                     )
                 elif re.search(r"決定(?:する)?$", line.strip()):
@@ -81,12 +89,33 @@ def dated_answer(answer: str, hits: list[SearchHit], client_name: str, today: da
         found, _ = timeline_status.evidence_date(hit)
         if found:
             dated.append((hit.chunk_id, label, date.fromisoformat(found)))
-    if not dated:
-        return answer
-
     # LLM の既存注記も一度外し、案件の見出し末尾にまとめる。
-    answer = re.sub(r"（\d{1,2}/\d{1,2} 時点(?:の記録)?）", "", answer)
+    answer = re.sub(r"（\d{1,2}/\d{1,2}\s*時点(?:の記録)?）", "", answer) if dated else answer
     lines = answer.splitlines()
+
+    def fold(text: str) -> str:
+        return re.sub(r"[\s・、,，()（）*#]", "", unicodedata.normalize("NFKC", text)).casefold()
+
+    case_names = {
+        fold(str((hit.metadata or {}).get(key) or ""))
+        for hit in hits
+        for key in ("campaign", "case_product")
+    } - {"", fold(client_name)}
+    for index, line in enumerate(lines):
+        label = line.strip()
+        if (
+            (index == 0 or not lines[index - 1].strip())
+            and (index == len(lines) - 1 or not lines[index + 1].strip())
+            and re.fullmatch(r"(?![-・])[^。！？!?：:*#<>\n]{1,45}", label)
+            and (
+                fold(label) in case_names
+                or re.search(r"(?:案件|プロジェクト)(?:[（(][^()（）]+[）)])?$", label)
+            )
+        ):
+            lines[index] = "### " + label
+    if not dated:
+        return "\n".join(lines)
+
     headings = [
         i
         for i, line in enumerate(lines)
@@ -94,9 +123,6 @@ def dated_answer(answer: str, hits: list[SearchHit], client_name: str, today: da
     ]
     assigned: set[int] = set()
     rewritten: set[int] = set()
-
-    def fold(text: str) -> str:
-        return re.sub(r"[\s・、,，()（）*#]", "", unicodedata.normalize("NFKC", text)).casefold()
 
     for pos, start in enumerate(headings):
         end = headings[pos + 1] if pos + 1 < len(headings) else len(lines)
