@@ -12,6 +12,7 @@
 #   撃ち直すには新しいコミットが要る。本スクリプトは発射前にその衝突を検査して止める。
 #
 set -euo pipefail
+RELEASE_PROFILE="${RELEASE_PROFILE:-aiiadev-mfa}"
 
 # 検査器もこの型の承認対象。便データを source/eval しない。
 release_data() {
@@ -257,15 +258,15 @@ OLD_CORE=$(release_data field mcp "$RELEASE_DATA" OLD_CORE)
 printf '== %s: %s\n' "$RELEASE_NAME" "$(release_data field mcp "$RELEASE_DATA" description)"
 
 
-S=/Users/s-komata/Documents/Claude/Scheduled/aico-release-tools   # 雛形（oc-release/release-consumer-manifest-0904e.json）の正本。09-14 r23 で session 一時領域を指していて STEP 6 が落ちた
+S="${RELEASE_TOOLS_DIR:-/Users/s-komata/Documents/Claude/Scheduled/aico-release-tools}"   # 雛形（oc-release/release-consumer-manifest-0904e.json）の正本。09-14 r23 で session 一時領域を指していて STEP 6 が落ちた
 B=teamagent-dev-image-release-evidence
 R=ap-northeast-1
-PAD=/Users/s-komata/dev/worktrees/teamagent-build
+PAD="${RELEASE_PAD:-/Users/s-komata/dev/worktrees/teamagent-build}"
 OUT=/private/tmp/r67-fire
 
 export SSL_CERT_FILE="/opt/homebrew/lib/python3.14/site-packages/certifi/cacert.pem"
 export AWS_CA_BUNDLE="$SSL_CERT_FILE"
-export AWS_PROFILE=aiiadev-mfa
+export AWS_PROFILE="${RELEASE_PROFILE}"
 export AWS_REGION="$R"
 export AWS_PAGER=""
 export AWS_RETRY_MODE=adaptive AWS_MAX_ATTEMPTS=10  # 09-24: 一時的な接続失敗（r26 で段 3 待ち中に落ちた）で鎖ごと落ちないように
@@ -347,20 +348,22 @@ fi
 echo
 echo "== STEP 5: 発射（既存の MFA セッションを再利用）"
 PATCHED=/tmp/release_mcp_r45_session.sh
-python3 - "$PAD/scripts/aws/release_mcp.sh" "$PATCHED" "$PAD" <<'PY'
+python3 - "$PAD/scripts/aws/release_mcp.sh" "$PATCHED" "$PAD" "$RELEASE_PROFILE" <<'PY'
+import shlex
 import sys
 
-src, dst, launch = sys.argv[1:4]
+src, dst, launch, profile = sys.argv[1:5]
 s = open(src, encoding="utf-8").read()
 start = s.index('read -r -s -p "MFAコード')
 end_marker = 'BASE_TK="$(echo "$BASE" | cut -f3)"\n'
 end = s.index(end_marker) + len(end_marker)
 repl = (
-  'info "MFA 付きセッション（aiiadev-mfa プロファイル）を再利用"\n'
-  'BASE_AK="$(aws configure get aws_access_key_id --profile aiiadev-mfa)"\n'
-  'BASE_SK="$(aws configure get aws_secret_access_key --profile aiiadev-mfa)"\n'
-  'BASE_TK="$(aws configure get aws_session_token --profile aiiadev-mfa)"\n'
-  '[ -n "$BASE_AK" ] && [ -n "$BASE_SK" ] && [ -n "$BASE_TK" ] || die "aiiadev-mfa の認証情報が読めない"\n'
+  f'RELEASE_PROFILE={shlex.quote(profile)}\n'
+  'info "MFA 付きセッション（${RELEASE_PROFILE} プロファイル）を再利用"\n'
+  'BASE_AK="$(aws configure get aws_access_key_id --profile "${RELEASE_PROFILE}")"\n'
+  'BASE_SK="$(aws configure get aws_secret_access_key --profile "${RELEASE_PROFILE}")"\n'
+  'BASE_TK="$(aws configure get aws_session_token --profile "${RELEASE_PROFILE}")"\n'
+  '[ -n "$BASE_AK" ] && [ -n "$BASE_SK" ] && [ -n "$BASE_TK" ] || die "${RELEASE_PROFILE} の認証情報が読めない"\n'
 )
 s = s[:start] + repl + s[end:]
 s = s.replace('REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"', f'REPO_ROOT="{launch}"')
@@ -372,7 +375,7 @@ chmod 700 "$PATCHED"
 # 2026-09-16: 免除 gate JSON は「前回ビルドから写す」と旧期限（9/22）を引き継ぎ、段 2 の
 # 'forced rollback evidence mismatch' になる。#419 で期限を 10/22 へ延長したので、
 # 新 release_evidence.py が期待する gate をそのまま渡す（frj.json は _initial_release_exemption_gate の出力）。
-FRJ_FILE=/Users/s-komata/Documents/Claude/Artifacts/aico-inputs-20260911/frj_exemption_gate_20261222.json
+FRJ_FILE="${RELEASE_FRJ_FILE:-/Users/s-komata/Documents/Claude/Artifacts/aico-inputs-20260911/frj_exemption_gate_20261222.json}"
 [ -s "$FRJ_FILE" ] || { echo "FATAL: $FRJ_FILE が無い（derive → gate 生成を先に）"; exit 1; }
 python3 - "$PATCHED" "$FRJ_FILE" <<'PY2'
 import pathlib, sys
@@ -386,7 +389,7 @@ PY2
 FIRE_LOG="/tmp/release_mcp_r45_$(date +%Y%m%d-%H%M%S).log"
 echo "  ログ: $FIRE_LOG"
 cd "$PAD"
-RELEASE_MCP_PROFILE=aiiadev-mfa bash "$PATCHED" "$APPROVAL" 2>&1 | tee "$FIRE_LOG" \
+RELEASE_MCP_PROFILE="${RELEASE_PROFILE}" bash "$PATCHED" "$APPROVAL" 2>&1 | tee "$FIRE_LOG" \
   | grep -E "SUCCEEDED|FAILED|FATAL|完走|レシート|承認レコード|段[0-9]" || true
 
 grep -q "5 段完走" "$FIRE_LOG" || { echo "FATAL: 完走していません（${FIRE_LOG}）"; exit 1; }
@@ -459,9 +462,9 @@ PY
 
 source "$OUT/args.env"
 
-export AWS_ACCESS_KEY_ID="$(aws configure get aws_access_key_id --profile aiiadev-mfa)"
-export AWS_SECRET_ACCESS_KEY="$(aws configure get aws_secret_access_key --profile aiiadev-mfa)"
-export AWS_SESSION_TOKEN="$(aws configure get aws_session_token --profile aiiadev-mfa)"
+export AWS_ACCESS_KEY_ID="$(aws configure get aws_access_key_id --profile "${RELEASE_PROFILE}")"
+export AWS_SECRET_ACCESS_KEY="$(aws configure get aws_secret_access_key --profile "${RELEASE_PROFILE}")"
+export AWS_SESSION_TOKEN="$(aws configure get aws_session_token --profile "${RELEASE_PROFILE}")"
 rm -f "$OUT/gate-vars.tfvars.json"
 AUTH_LOG="/tmp/mcp_authorize_r45_$(date +%Y%m%d-%H%M%S).log"
 echo "  ログ: $AUTH_LOG"
@@ -484,4 +487,4 @@ aws ecr describe-images --repository-name teamagent-mcp --image-ids imageDigest=
 
 echo
 echo "完了。次はタスク定義の差し替えです（mcp＋consumer 4＋ingest env＋media を 1 本で）:"
-echo "  bash ~/Documents/Claude/Artifacts/aico-inputs-20260911/apply_mcp_tds.sh $CORE_DIGEST $MEDIA_DIGEST"
+echo "  bash ${RELEASE_INPUTS_DIR:-~/Documents/Claude/Artifacts/aico-inputs-20260911}/apply_mcp_tds.sh $CORE_DIGEST $MEDIA_DIGEST"

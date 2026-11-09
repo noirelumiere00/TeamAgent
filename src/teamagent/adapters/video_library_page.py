@@ -117,6 +117,16 @@ def fetch_page(client: httpx.Client, url: str) -> str:
         return body.decode("utf-8", errors="replace")
 
 
+def image_media_type(head: bytes) -> str | None:
+    if head.startswith(b"\xff\xd8\xff"):
+        return "image/jpeg"
+    if head[:4] == b"RIFF" and head[8:12] == b"WEBP":
+        return "image/webp"
+    if head.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "image/png"
+    return None
+
+
 def save_cover(
     client: httpx.Client, storage: VideoLibraryStorage, platform: str, video_id: str, url: str
 ) -> str:
@@ -129,7 +139,8 @@ def save_cover(
             body.extend(chunk)
             if len(body) > MAX_IMAGE_BYTES:
                 raise ValueError("cover_too_large")
-    if not body.startswith(b"\xff\xd8\xff"):
+    # Apify's coverUrl is often PNG (453 of 807 on 11/09); JPEG/WebP/PNG all render in browsers.
+    if image_media_type(bytes(body[:12])) is None:
         raise ValueError("invalid_cover_image")
     return storage.put(platform, video_id, bytes(body))
 
