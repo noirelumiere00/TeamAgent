@@ -342,7 +342,7 @@ def test_covers_save_independently_after_batch_commit(
         vid = request.url.params["id"]
         requested.append(vid)
         if vid == "4":
-            return httpx.Response(200, content=b"\x89PNG\r\n\x1a\nnot jpeg")
+            return httpx.Response(200, content=b"<html>not an image")
         if vid == "5":
             return httpx.Response(403, text="Forbidden")
         if vid == "6":
