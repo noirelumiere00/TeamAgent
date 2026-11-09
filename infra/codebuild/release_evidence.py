@@ -2376,15 +2376,15 @@ def _parse_terraform_gate_query(
         label="Terraform gate query",
     )
     try:
-        # These three carry one entry per consumer, so the 2048-byte default is far
-        # too small: the exact-8 manifest measures ~13KB and a catalog holding a
-        # distinct claim per consumer measures ~4KB. The bounds stay explicit and
-        # finite -- they cap untrusted gate input, they are not a correctness knob.
+        # The exact-eight manifest includes full live/before/after task payloads;
+        # real environments exceed 100K serialized characters. Keep a finite
+        # 256K manifest bound; catalog and binding bounds remain independently
+        # smaller. All structural, signature and authorization checks still run.
         consumer_manifest = json.loads(
             _string(
                 query["consumer_manifest_json"],
                 label="consumer_manifest_json",
-                maximum=65536,
+                maximum=262144,
             ),
             object_pairs_hook=_reject_duplicate_keys,
         )
