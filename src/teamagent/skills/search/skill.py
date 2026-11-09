@@ -15,6 +15,7 @@ CLAUDE.md 6-bis ルール準拠：
 from __future__ import annotations
 
 import asyncio
+import json
 import math
 import os
 import re
@@ -57,6 +58,7 @@ from teamagent.skills.search.answer_mode import (
     requested_count,
     strip_advice,
 )
+from teamagent.skills.search.answer_sections import entry_from_hit
 from teamagent.skills.search.campaign_files import (
     VIDEO_ROWS_FOOTER_HEADING,
     advertiser_pattern,
@@ -699,12 +701,13 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
     def _run_once(self, input: SearchInput, ctx: SkillContext) -> SearchOutput:
         """検索 Skill のメインフロー。"""
         count = requested_count(input.query)
+        counted_cases = count is not None and is_case_list(input.query)
         if count is not None:
             input = input.model_copy(update={"top_k": max(input.top_k, min(count, 50))})
         drive_mode = drive_first.enabled(ctx.metadata) or (
             self._direct_answer_allowed(ctx, "case_cards") and is_case_list(input.query)
         )
-        if drive_mode and input.filter_doc_type == "事例":
+        if (drive_mode or counted_cases) and input.filter_doc_type == "事例":
             # 事例は検索の目的で、提案書・報告書を横断する。SQLと後段の両方で絞らせない。
             input = input.model_copy(update={"filter_doc_type": None})
         visit = visit_cases.parse(input.query) if drive_mode else None
@@ -732,16 +735,21 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
                 return output.model_copy(
                     update={"total_cost_usd": output.total_cost_usd + category_cost}
                 )
-        if drive_case_listing:
+        if drive_case_listing or counted_cases:
             from teamagent.skills.search.case_list import CANDIDATE_LIMIT
 
             # Drive 正本で絞る前に候補を5件へ切らない。関連度・RLSの検査は通常どおり通す。
             input = input.model_copy(update={"top_k": max(input.top_k, CANDIDATE_LIMIT)})
-        case_listing = drive_case_listing or (
-            ctx.metadata.get(compact.CTX_KEY) is True and is_case_list(input.query)
+        case_listing = (
+            counted_cases
+            or drive_case_listing
+            or (ctx.metadata.get(compact.CTX_KEY) is True and is_case_list(input.query))
         )
-        compact_mode = (drive_mode and not drive_case_listing) or (
-            ctx.metadata.get(compact.CTX_KEY) is True and not compact.explicit_list(input.query)
+        compact_mode = not counted_cases and (
+            (drive_mode and not drive_case_listing)
+            or (
+                ctx.metadata.get(compact.CTX_KEY) is True and not compact.explicit_list(input.query)
+            )
         )
         case_listing = case_listing or (count is not None and not compact_mode)
         displayed_refs: list[DocumentReference] | None = [] if drive_mode else None
@@ -803,7 +811,7 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
 
             hits = [
                 *hits,
-                *_case_hits(case_probe["case"], drive_mode=drive_mode),
+                *_case_hits(case_probe["case"], drive_mode=drive_mode or counted_cases),
             ]
         timings["retrieve_ms"] = (time.perf_counter() - _t) * 1000
 
@@ -839,11 +847,15 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
             if drive_mode and is_comparison_query(input.query)
             else case_query_target(input.query, asked_industry)
         )
-        summary_hits = case_target_hits(hits, case_target, soft_industry=drive_mode)
+        summary_hits = case_target_hits(
+            hits, case_target, soft_industry=drive_mode or counted_cases
+        )
         if not visit and (
             drive_case_listing or (self._campaign_files and any(is_campaign_hit(h) for h in hits))
         ):
-            summary_hits = scope_by_industry(summary_hits, asked_industry, soft=drive_mode)
+            summary_hits = scope_by_industry(
+                summary_hits, asked_industry, soft=drive_mode or counted_cases
+            )
         if not summary_hits:
             found = False
 
@@ -907,7 +919,8 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
             slack_lookup = self._collect_slack_lookup(slack_pending, ctx)
         slack_items = slack_lookup.items if slack_lookup is not None else ()
         if case_target:
-            slack_items = tuple(i for i in slack_items if target_matches(i.text, case_target))
+            if not (counted_cases and normalize_industry(case_target)):
+                slack_items = tuple(i for i in slack_items if target_matches(i.text, case_target))
             hits = summary_hits
             found = bool((found and summary_hits) or slack_items)
         if drive_first.enabled(ctx.metadata):
@@ -959,7 +972,7 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
         elif input.include_answer and not found:
             # 該当なし: 要約器を呼ばない（無いものを有るように書かせない）。近いものは名前だけ。
             answer, cost_usd = build_not_found_answer(hits), 0.0
-            if slack_items:
+            if slack_items and not counted_cases:
                 # 複合検索で Slack にだけ有る: 金庫の資料は渡さず、Slack の投稿だけで要約する
                 # 取得できた根拠だけを要約し、保管場所は回答に出さない。
                 _t = time.perf_counter()
@@ -992,7 +1005,7 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
             )
             cost_usd = 0.0
             deferred = True
-        elif input.include_answer and case_listing:
+        elif input.include_answer and case_listing and not counted_cases:
             from teamagent.skills.search.case_list import render, slack_cases
 
             answer = render(
@@ -1002,7 +1015,7 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
                 requested_count=count,
             )
             cost_usd = 0.0
-        elif input.include_answer:
+        elif input.include_answer and not counted_cases:
             _t = time.perf_counter()
             code_comparison = (
                 drive_mode
@@ -1333,6 +1346,14 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
             listing_hits = prepare_list_hits(
                 self, [*summary_hits, *slack_cases(slack_items, drive_only=drive_case_listing)], ctx
             )
+
+            def summarize_points(selected: list[SearchHit]) -> str:
+                nonlocal cost_usd
+                text, cost_usd = self._summarize(
+                    input.query, selected, ctx.request_id, case_points=True
+                )
+                return text
+
             listed = render(
                 listing_hits,
                 case_target,
@@ -1342,13 +1363,16 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
                 or bool(compact_fallback_cards),
                 drive_only=drive_case_listing and count is None,
                 requested_count=count,
+                asked_industry=asked_industry,
+                client=input.filter_client or self._asked_client(probe),
+                summarize=summarize_points if counted_cases else None,
             )
             attachment_refs = list_refs
             if displayed_refs is not None:
                 displayed_refs.extend(list_refs)
             if listed:
                 answer = listed
-                if drive_case_listing:
+                if drive_case_listing or counted_cases:
                     found = True
                 if self._direct_answer_allowed(ctx, "case_cards"):
                     direct_kind = "case_cards"
@@ -1370,6 +1394,8 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
                 )
             if count is not None and not listed:
                 answer += "\n\n見つかったのは 0 件です。"
+                if counted_cases:
+                    found = False
             suggested_next = None
         if found and input.include_answer:
             answer = answer.replace(compact.EMPTY_ANSWER, "").strip()
@@ -3128,6 +3154,7 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
         canonical_campaign_totals: str = "",
         compact_sources: compact.Sources | None = None,
         compact_drive_mode: bool = False,
+        case_points: bool = False,
     ) -> tuple[str, float]:
         """Bedrock に system prompt + chunks + query を渡して要約させる。
 
@@ -3277,6 +3304,15 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
             )
             system += "\n" + load_prompt("search", "compact", "normal")
         user_message = "以下の社内資料から質問に答えてください。\n\n" + "\n\n".join(sections)
+        if case_points:
+            system = load_prompt("search", "case_points", "system")
+            user_message = json.dumps(
+                {
+                    str(i): {"title": entry_from_hit(h, url=None).title, "content": h.content}
+                    for i, h in enumerate(hits, 1)
+                },
+                ensure_ascii=False,
+            )
 
         resp = (bedrock if bedrock is not None else self._bedrock).converse(
             messages=[{"role": "user", "content": [{"text": user_message}]}],
@@ -3285,6 +3321,8 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
             cache_system=True,  # 同じ system prompt を頻繁に呼ぶのでキャッシュで input cost 1/10
             max_tokens=self._summary_max_tokens,
         )
+        if case_points:
+            return resp.text, resp.usage.cost_usd
         if bedrock is not None:
             from teamagent.skills.search.fanout import shadow_grounding
 

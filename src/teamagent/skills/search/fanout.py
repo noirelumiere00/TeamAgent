@@ -331,20 +331,22 @@ def run_fanout(skill: Any, input: SearchInput, ctx: SkillContext) -> SearchOutpu
     """並行取得→従来の found 判定→専用要約→コードの節と探した範囲。"""
     started = time.perf_counter()
     requested_limit = requested_count(input.query)
+    counted_cases = requested_limit is not None and is_case_list(input.query)
     recovery = ctx.metadata.get("_search_recovery")
     drive_mode = drive_first.enabled(ctx.metadata) or (
         skill._direct_answer_allowed(ctx, "case_cards") and is_case_list(input.query)
     )
     visit = visit_cases.parse(input.query) if drive_mode else None
     drive_case_listing = drive_mode and (bool(visit) or is_case_list(input.query))
-    if drive_case_listing:
+    if drive_case_listing or counted_cases:
         from teamagent.skills.search.case_list import CANDIDATE_LIMIT
 
         input = input.model_copy(update={"top_k": max(input.top_k, CANDIDATE_LIMIT)})
     expanded_early: ExpansionResult | None = None
     compact_enabled = ctx.metadata.get(compact.CTX_KEY) is True
-    compact_mode = (drive_mode and not drive_case_listing) or (
-        compact_enabled and not compact.explicit_list(input.query)
+    compact_mode = not counted_cases and (
+        (drive_mode and not drive_case_listing)
+        or (compact_enabled and not compact.explicit_list(input.query))
     )
     displayed_refs: list[DocumentReference] | None = [] if drive_mode else None
     log = ctx.bind_logger(skill.name)
@@ -438,7 +440,7 @@ def run_fanout(skill: Any, input: SearchInput, ctx: SkillContext) -> SearchOutpu
         extract_query_industry(input.query) if not visit else None
     )
     cases = extra.get("case", SourceResult(source="case", status="skipped", reason="no_industry"))
-    case_hits = _case_hits(cases, drive_mode=drive_mode)
+    case_hits = _case_hits(cases, drive_mode=drive_mode or counted_cases)
     if recovery is not None:
         solution = input.filter_solution
         if ctx.metadata.get(MCP_SURFACE_CTX_KEY) and is_video_solution(solution):
@@ -491,7 +493,7 @@ def run_fanout(skill: Any, input: SearchInput, ctx: SkillContext) -> SearchOutpu
         topic = re.match(r"^\s*([^の\s？?]{2,80}?)(?:の|って)", input.query)
         if topic:
             scope_target = case_query_target(f"{topic[1]}の事例")
-    summary_hits = case_target_hits(hits, scope_target, soft_industry=drive_mode)
+    summary_hits = case_target_hits(hits, scope_target, soft_industry=drive_mode or counted_cases)
     if drive_mode:
         summary_hits = drive_first.scope_hits(input.query, summary_hits, input.filter_doc_type)
         extra["named"] = drive_first.scope_hits(
@@ -513,17 +515,22 @@ def run_fanout(skill: Any, input: SearchInput, ctx: SkillContext) -> SearchOutpu
         recovery["slack"] = slack
     karte = extra.get("karte", SourceResult(source="karte", status="skipped", reason="no_client"))
     if scope_target:
-        slack = replace(
-            slack, items=tuple(i for i in slack.items if target_matches(i.text, scope_target))
-        )
+        if not (counted_cases and normalize_industry(scope_target)):
+            slack = replace(
+                slack, items=tuple(i for i in slack.items if target_matches(i.text, scope_target))
+            )
         extra["named"] = case_target_hits(
             extra.get("named", []), scope_target, soft_industry=drive_mode
         )
         karte = replace(
             karte,
-            items=tuple(case_target_hits(karte.items, scope_target, soft_industry=drive_mode)),
+            items=tuple(
+                case_target_hits(
+                    karte.items, scope_target, soft_industry=drive_mode or counted_cases
+                )
+            ),
         )
-        if drive_mode:
+        if drive_mode or counted_cases:
             case_hits = case_target_hits(case_hits, scope_target, soft_industry=True)
             kept = {h.chunk_id for h in case_hits}
             cases = replace(
@@ -561,7 +568,7 @@ def run_fanout(skill: Any, input: SearchInput, ctx: SkillContext) -> SearchOutpu
         other_hits = case_target_hits(
             [*extra.get("named", []), *karte.items, *case_hits],
             scope_target,
-            soft_industry=drive_mode,
+            soft_industry=drive_mode or counted_cases,
         )
         other_hits = drive_first.scope_hits(input.query, other_hits, input.filter_doc_type)
         if skill._judge_found(input.query, other_hits, probe).found:
@@ -793,10 +800,16 @@ def run_fanout(skill: Any, input: SearchInput, ctx: SkillContext) -> SearchOutpu
     if extra.get("retried"):
         candidates = hits
     if scope_target:
-        candidates = case_target_hits(candidates, scope_target, soft_industry=drive_mode)
+        candidates = case_target_hits(
+            candidates, scope_target, soft_industry=drive_mode or counted_cases
+        )
         expanded = replace(
             expanded,
-            hits=tuple(case_target_hits(expanded.hits, scope_target, soft_industry=drive_mode)),
+            hits=tuple(
+                case_target_hits(
+                    expanded.hits, scope_target, soft_industry=drive_mode or counted_cases
+                )
+            ),
         )
     show_expanded = (
         not found
@@ -1020,7 +1033,7 @@ def run_fanout(skill: Any, input: SearchInput, ctx: SkillContext) -> SearchOutpu
         from teamagent.skills.search.case_list import EMPTY_DRIVE_CASES, render, slack_cases
 
         listing_hits = [
-            *(case_hits if drive_mode else _case_hits(cases)),
+            *(case_hits if drive_mode else _case_hits(cases, drive_mode=counted_cases)),
             *summary_hits,
             *named,
             *expanded.hits,
@@ -1031,6 +1044,33 @@ def run_fanout(skill: Any, input: SearchInput, ctx: SkillContext) -> SearchOutpu
         from teamagent.skills.search.material_files import prepare_list_hits
 
         listing_hits = prepare_list_hits(skill, listing_hits, ctx)
+
+        def summarize_points(selected: list[SearchHit]) -> str:
+            nonlocal summary_cost, summary_ms, summary_state
+            summary_started = time.perf_counter()
+
+            def summarize() -> tuple[str, float, LaneState]:
+                try:
+                    text, cost = skill._summarize(
+                        input.query,
+                        selected,
+                        ctx.request_id,
+                        bedrock=skill._bedrock if recovery is not None else build_summary_client(),
+                        case_points=True,
+                    )
+                    return text, cost, "ok"
+                except Exception as exc:
+                    return "", 0.0, "timeout" if is_timeout_error(exc) else "error"
+
+            text, summary_cost, summary_state = _collect(
+                _submit(summarize, "case_points"),
+                summary_started,
+                SUMMARY_DEADLINE_S,
+                ("", 0.0, "timeout"),
+            )
+            summary_ms = int((time.perf_counter() - summary_started) * 1000)
+            return text
+
         listed = render(
             listing_hits,
             case_target,
@@ -1039,6 +1079,9 @@ def run_fanout(skill: Any, input: SearchInput, ctx: SkillContext) -> SearchOutpu
             cards=skill._direct_answer_allowed(ctx, "case_cards") or bool(compact_fallback_cards),
             drive_only=drive_case_listing and recovery is None and requested_limit is None,
             requested_count=requested_limit,
+            asked_industry=asked_industry,
+            client=input.filter_client or client,
+            summarize=summarize_points if counted_cases else None,
         )
         if displayed_refs is not None:
             displayed_refs.extend(attachment_refs)

@@ -90,7 +90,9 @@ def is_case_list(query: str) -> bool:
     return (
         classify_answer_mode(query) == "list"
         and not is_comparison_query(query)
-        and not re.search(r"資料|カルテ|議事録|提案書", query)
+        and (
+            not re.search(r"資料|カルテ|議事録|提案書", query) or requested_count(query) is not None
+        )
         and bool(re.search(r"事例|実績|案件|施策", query))
     )
 
