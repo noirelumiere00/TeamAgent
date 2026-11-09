@@ -37,6 +37,7 @@ from teamagent.ingest.industry_taxonomy import (
     INDUSTRY_KEYWORDS,
     normalize_industry,
 )
+from teamagent.skills._shared.input_policy import requested_item_count
 from teamagent.skills.search.client_match import (
     _hit_matches_client,
     aliases,
@@ -149,6 +150,8 @@ def case_query_target(query: str, asked_industry: str | None = None) -> str | No
     target = match[1].strip(" 「」『』\"'")
     # ルーターの業種推定より、利用者が指定した元の対象語を優先する。
     industry_target = re.sub(r"(?:メーカー|業界|業種|企業|会社|業)$", "", target)
+    if requested_item_count(text) is not None:
+        industry_target = industry_target.removesuffix("系")
     industry = normalize_industry(target) or normalize_industry(industry_target)
     if not industry and not aliases(target):
         industry = next(

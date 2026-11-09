@@ -54,6 +54,7 @@ from teamagent.skills.search.answer_mode import (
     MODE_INSTRUCTIONS,
     classify_answer_mode,
     is_case_list,
+    requested_count,
     strip_advice,
 )
 from teamagent.skills.search.campaign_files import (
@@ -699,6 +700,8 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
             answer = output.answer
         words = scope_footer(trace["queries"] or [input.query], slack=None)
         answer += "\n" + trace["scope"] + "／" + words.split(": ", 1)[1]
+        if requested_count(input.query) is not None:
+            answer += "\n\n見つかったのは 0 件です。"
         kind: SearchDirectAnswerKind | None = (
             "not_found"
             if trace["complete"] and self._direct_answer_allowed(ctx, "not_found")
@@ -716,6 +719,9 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
 
     def _run_once(self, input: SearchInput, ctx: SkillContext) -> SearchOutput:
         """検索 Skill のメインフロー。"""
+        count = requested_count(input.query)
+        if count is not None:
+            input = input.model_copy(update={"top_k": max(input.top_k, min(count, 50))})
         drive_mode = drive_first.enabled(ctx.metadata) or (
             self._direct_answer_allowed(ctx, "case_cards") and is_case_list(input.query)
         )
@@ -758,6 +764,7 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
         compact_mode = (drive_mode and not drive_case_listing) or (
             ctx.metadata.get(compact.CTX_KEY) is True and not compact.explicit_list(input.query)
         )
+        case_listing = case_listing or (count is not None and not compact_mode)
         displayed_refs: list[DocumentReference] | None = [] if drive_mode else None
         compact_answer = ""
         compact_fallback_cards = ""
@@ -1013,6 +1020,7 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
                 [*summary_hits, *slack_cases(slack_items)],
                 case_target,
                 lambda h: self._hit_url(h, file_urls=file_urls),
+                requested_count=count,
             )
             cost_usd = 0.0
         elif input.include_answer:
@@ -1067,7 +1075,7 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
                 )
                 if compact.is_empty(compact_answer, notice=guard_header):
                     compact_mode = False
-                    drive_fallback = drive_mode
+                    drive_fallback = drive_mode and count is None
                     if not drive_fallback:
                         compact_fallback_cards = compact.fallback_cards(
                             input.query,
@@ -1337,6 +1345,7 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
                 answer = build_scoped_not_found_answer(case_target, scope=scope, complete=complete)
 
         attachment_refs: list[DocumentReference] = []
+        case_listing = case_listing or (count is not None and not compact_mode)
         if case_listing and input.include_answer and not visit:
             from teamagent.skills.search.case_list import EMPTY_DRIVE_CASES, render, slack_cases
             from teamagent.skills.search.material_files import prepare_list_hits
@@ -1352,7 +1361,8 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
                 displayed_refs=list_refs,
                 cards=self._direct_answer_allowed(ctx, "case_cards")
                 or bool(compact_fallback_cards),
-                drive_only=drive_case_listing,
+                drive_only=drive_case_listing and count is None,
+                requested_count=count,
             )
             attachment_refs = list_refs
             if displayed_refs is not None:
@@ -1379,6 +1389,8 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
                     scope="社内資料・施策実績" + ("・Slack" if slack_lookup is not None else ""),
                     complete=complete,
                 )
+            if count is not None and not listed:
+                answer += "\n\n見つかったのは 0 件です。"
             suggested_next = None
         if found and input.include_answer:
             answer = answer.replace(compact.EMPTY_ANSWER, "").strip()
@@ -3217,6 +3229,13 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
             mode = classify_answer_mode(query)
             sections.insert(0, MODE_INSTRUCTIONS[mode])
             logger.info("search_answer_mode", request_id=request_id, answer_mode=mode)
+        if (count := requested_count(query)) is not None:
+            sections.insert(
+                0,
+                f"# 件数指定\n取得した事例・資料・Slackの候補を最大{count}件、"
+                "原本リンク付きで並べる。足りなければ「見つかったのは M 件です。」と1行添え、"
+                "対象の追加指定は聞き返さない。",
+            )
         # 2段階しきい値の fallback で救出した低信頼 hit がある場合、断定を抑える注意を付す。
         if any((h.metadata or {}).get("is_low_confidence") for h in primary_hits):
             sections.append(

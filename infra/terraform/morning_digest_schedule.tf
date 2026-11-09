@@ -170,7 +170,7 @@ variable "morning_digest_holiday_skip" {
 }
 
 variable "morning_digest_remind_personal_blocks" {
-  description = "互換用の旧フラグ（MORNING_DIGEST_REMIND_PERSONAL_BLOCKS）。予定リマインドは廃止済み。⚠️ TD で変えたら activation 版 tfvars（正本・~/dev/worktrees/teamagent-activation/infra/terraform/terraform.tfvars）へ同じ値を必ず追記。"
+  description = "希望者への作業枠リマインドの全体既定（MORNING_DIGEST_REMIND_PERSONAL_BLOCKS）。本人の設定が優先。⚠️ TD で変えたら activation 版 tfvars（正本・~/dev/worktrees/teamagent-activation/infra/terraform/terraform.tfvars）へ同じ値を必ず追記。"
   type        = bool
   default     = true
 }
@@ -636,7 +636,7 @@ resource "aws_ecs_task_definition" "morning_digest" {
       { name = "MORNING_DIGEST_ACK_BUTTON", value = var.morning_digest_ack_button ? "true" : "false" },
       # 確認済み項目の除外＋☑️トークン発行（既定OFF）。ボタンより先に ON にしてよい。
       { name = "MORNING_DIGEST_ACK_FILTER", value = var.morning_digest_ack_filter ? "true" : "false" },
-      # 予定リマインドの旧フラグ（廃止済み・runner は無視）。
+      # 予定リマインドは全体フラグ ON かつ本人の明示 opt-in がある人だけ登録。
       { name = "MORNING_DIGEST_REMINDERS", value = (var.enable_reminders && var.morning_digest_reminders) ? "true" : "false" },
       { name = "REMINDER_LEAD_MINUTES", value = tostring(var.reminder_lead_minutes) },
       { name = "REMINDER_SCHEDULER_GROUP", value = var.enable_reminders ? aws_scheduler_schedule_group.reminders[0].name : "" },
@@ -651,7 +651,7 @@ resource "aws_ecs_task_definition" "morning_digest" {
       { name = "MORNING_DIGEST_DEFAULT_TIME", value = var.morning_digest_default_time },
       # 本人メモの退職・ゲスト化の掃除（M6・既定 OFF）。planner の実行時に 1 日 1 回。
       { name = "PERSONAL_MEMORY_RETIRE_SWEEP", value = var.personal_memory_retire_sweep ? "true" : "false" },
-      # 作業枠への直前リマインドの旧フラグ（廃止済み）。
+      # 希望者への作業枠リマインドの全体既定（本人の設定が優先）。
       { name = "MORNING_DIGEST_REMIND_PERSONAL_BLOCKS", value = var.morning_digest_remind_personal_blocks ? "true" : "false" },
       # F0 連携切れの見える化（既定 空＝OFF）。TD で変えたら activation 版 tfvars（正本）へ同じ値を追記。
       { name = "MORNING_DIGEST_FETCH_STATUS_EMAILS", value = var.morning_digest_fetch_status_emails },

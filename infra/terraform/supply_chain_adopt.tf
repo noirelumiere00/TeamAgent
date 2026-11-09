@@ -251,7 +251,9 @@ locals {
     # 解決不能になるため media-apk.lock と契約 artifact.apk-lock.sha256 を追随させた再レンダリング（apply_apklock.sh）。
     # 2026-11-07 publish 世代（apk ロック追随）。Alpine 上流の入替（zlib 1.3.2-r1→1.4-r0）で段 3 の media ビルドが
     # 解決不能になるため media-apk.lock と契約 artifact.apk-lock.sha256 を追随させた再レンダリング（apply_apklock.sh）。
-    "709a75ad1120f8d2d7a7e638a5283258255e93beaa122577a43c57f9a2d96e00" = {
+    # 2026-11-09 publish 世代（apk lock 再生成）。実ビルドで lock 差分 -3 +3（240→240 行）、削除: ffmpeg8-libavdevice-8.1.3-r1、ffmpeg8-libavfilter-8.1.3-r1、ffmpeg8-libswscale-8.1.3-r1 / 追加: ffmpeg8-libavdevice-8.1.3-r2、ffmpeg8-libavfilter-8.1.3-r2、ffmpeg8-libswscale-8.1.3-r2 を検出したため
+    # media-apk.lock と契約 artifact.apk-lock.sha256 を追随させた再レンダリング（apply_apklock.sh）。
+    "138e908f4e875aae7d6d466043d80b04daa3a4781eea1904bba4bef1abd7e033" = {
       content_type                  = "text/yaml"
       object_lock_retain_until_date = "2099-12-31T00:00:00Z"
     }
@@ -472,7 +474,9 @@ locals {
     # 解決不能になるため media-apk.lock と契約 artifact.apk-lock.sha256 を追随させた再レンダリング（apply_apklock.sh）。
     # 2026-11-07 publish 世代（apk ロック追随）。Alpine 上流の入替（zlib 1.3.2-r1→1.4-r0）で段 3 の media ビルドが
     # 解決不能になるため media-apk.lock と契約 artifact.apk-lock.sha256 を追随させた再レンダリング（apply_apklock.sh）。
-    "2adaeebfd208a8b751dfebe5c26875bc1c6c966558a5fffd191ee73fcbd90735" = {
+    # 2026-11-09 publish 世代（apk lock 再生成）。実ビルドで lock 差分 -3 +3（240→240 行）、削除: ffmpeg8-libavdevice-8.1.3-r1、ffmpeg8-libavfilter-8.1.3-r1、ffmpeg8-libswscale-8.1.3-r1 / 追加: ffmpeg8-libavdevice-8.1.3-r2、ffmpeg8-libavfilter-8.1.3-r2、ffmpeg8-libswscale-8.1.3-r2 を検出したため
+    # media-apk.lock と契約 artifact.apk-lock.sha256 を追随させた再レンダリング（apply_apklock.sh）。
+    "926e2409e1ef9cde292ec096b686f5d3c991558444208afe6032ec0cdb3d3aaf" = {
       content_type                  = "text/yaml"
       object_lock_retain_until_date = "2099-12-31T00:00:00Z"
     }
@@ -683,7 +687,9 @@ locals {
     # 解決不能になるため media-apk.lock と契約 artifact.apk-lock.sha256 を追随させた再レンダリング（apply_apklock.sh）。
     # 2026-11-07 publish 世代（apk ロック追随）。Alpine 上流の入替（zlib 1.3.2-r1→1.4-r0）で段 3 の media ビルドが
     # 解決不能になるため media-apk.lock と契約 artifact.apk-lock.sha256 を追随させた再レンダリング（apply_apklock.sh）。
-    "c9070e5e20c26adbc5d81187efd917326d3ee1ce7dfe1420f3e350531d922761" = {
+    # 2026-11-09 publish 世代（apk lock 再生成）。実ビルドで lock 差分 -3 +3（240→240 行）、削除: ffmpeg8-libavdevice-8.1.3-r1、ffmpeg8-libavfilter-8.1.3-r1、ffmpeg8-libswscale-8.1.3-r1 / 追加: ffmpeg8-libavdevice-8.1.3-r2、ffmpeg8-libavfilter-8.1.3-r2、ffmpeg8-libswscale-8.1.3-r2 を検出したため
+    # media-apk.lock と契約 artifact.apk-lock.sha256 を追随させた再レンダリング（apply_apklock.sh）。
+    "955f4949da3d38f02be3baca47a990a51f14db6d95f6a1bf02af5bcba2d5ecd9" = {
       content_type                  = "text/yaml"
       object_lock_retain_until_date = "2099-12-31T00:00:00Z"
     }
@@ -882,18 +888,18 @@ removed {
 }
 
 import {
-  to = aws_s3_object.mcp_source_publisher_buildspec_generation["709a75ad1120f8d2d7a7e638a5283258255e93beaa122577a43c57f9a2d96e00"]
-  id = "teamagent-dev-image-release-evidence/codebuild-buildspecs/teamagent-dev-mcp-source-publisher/709a75ad1120f8d2d7a7e638a5283258255e93beaa122577a43c57f9a2d96e00.yml"
+  to = aws_s3_object.mcp_source_publisher_buildspec_generation["138e908f4e875aae7d6d466043d80b04daa3a4781eea1904bba4bef1abd7e033"]
+  id = "teamagent-dev-image-release-evidence/codebuild-buildspecs/teamagent-dev-mcp-source-publisher/138e908f4e875aae7d6d466043d80b04daa3a4781eea1904bba4bef1abd7e033.yml"
 }
 
 import {
-  to = aws_s3_object.image_attestor_buildspec_generation["2adaeebfd208a8b751dfebe5c26875bc1c6c966558a5fffd191ee73fcbd90735"]
-  id = "teamagent-dev-image-release-evidence/codebuild-buildspecs/teamagent-dev-image-attestor/2adaeebfd208a8b751dfebe5c26875bc1c6c966558a5fffd191ee73fcbd90735.yml"
+  to = aws_s3_object.image_attestor_buildspec_generation["926e2409e1ef9cde292ec096b686f5d3c991558444208afe6032ec0cdb3d3aaf"]
+  id = "teamagent-dev-image-release-evidence/codebuild-buildspecs/teamagent-dev-image-attestor/926e2409e1ef9cde292ec096b686f5d3c991558444208afe6032ec0cdb3d3aaf.yml"
 }
 
 import {
-  to = aws_s3_object.image_promoter_buildspec_generation["c9070e5e20c26adbc5d81187efd917326d3ee1ce7dfe1420f3e350531d922761"]
-  id = "teamagent-dev-image-release-evidence/codebuild-buildspecs/teamagent-dev-image-promoter/c9070e5e20c26adbc5d81187efd917326d3ee1ce7dfe1420f3e350531d922761.yml"
+  to = aws_s3_object.image_promoter_buildspec_generation["955f4949da3d38f02be3baca47a990a51f14db6d95f6a1bf02af5bcba2d5ecd9"]
+  id = "teamagent-dev-image-release-evidence/codebuild-buildspecs/teamagent-dev-image-promoter/955f4949da3d38f02be3baca47a990a51f14db6d95f6a1bf02af5bcba2d5ecd9.yml"
 }
 
 import {
