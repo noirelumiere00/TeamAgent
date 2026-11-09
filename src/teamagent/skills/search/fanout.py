@@ -25,7 +25,7 @@ from teamagent.mcp_gateway.allowlist import email_allowed
 from teamagent.skills._shared.slack_file_delivery import file_metadata
 from teamagent.skills._shared.source_url import ingested_slack_file_id
 from teamagent.skills.base import SkillContext
-from teamagent.skills.search import compact, drive_first, timeline_status, visit_cases
+from teamagent.skills.search import compact, drive_first, numeric, timeline_status, visit_cases
 from teamagent.skills.search.answer_mode import (
     classify_answer_mode,
     intent_text,
@@ -1277,7 +1277,7 @@ def run_fanout(skill: Any, input: SearchInput, ctx: SkillContext) -> SearchOutpu
         if drive_case_listing and input.include_answer
         else _output_hits(
             skill,
-            hits,
+            summary_hits if numeric.is_calculation(input.query) else hits,
             file_urls,
             case_state=case_state_enabled(ctx.metadata.get("user_email")),
             state_hits=state_hits,

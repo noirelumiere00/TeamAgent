@@ -109,6 +109,6 @@ def test_summary_receives_original_numeric_question(monkeypatch):
     monkeypatch.setattr(skill, "_collect_slack_lookup", lambda *a: SlackLookup("ok", "ok"))
     summary = MagicMock(return_value=("架空の集計結果です。", 0.0))
     monkeypatch.setattr(skill, "_summarize", summary)
-    request = "飲料の投稿の再生数合計はいくつ？"
+    request = "飲料の投稿の再生数を教えて"
     skill.run(SearchInput(query="飲料"), SkillContext(metadata={**META, "request_text": request}))
     assert summary.call_args.args[0] == request

@@ -89,6 +89,142 @@ def _run(skill: Any, **kw: Any) -> Any:
     )
 
 
+_BULK = """カレンダーに入れて。6:00〜6:30 に設定して
+12月03日(木) 初稿ご提出_架空X社
+12月08日(火) お戻し_架空X社
+12月10日(木) 修正_架空X社
+12月15日(火) 再提出_架空X社
+12月17日(木) 納品_架空X社"""
+
+
+def test_calendar_bulk_previews_once_then_creates_all_five_on_own_calendar() -> None:
+    skill, gcal = _skill()
+    skill._now_factory = lambda: _dt.datetime(2026, 11, 9, 9, tzinfo=_JST)
+    preview = _run(skill, bulk_text=_BULK)
+    assert not preview.error and not preview.created
+    assert "この 5 件を入れます" in preview.message
+    assert preview.message.count("・2026-") == 5
+    assert not gcal.calls
+
+    result = _run(skill, bulk_text=_BULK, confirm_bulk=True, location="架空本社会議室")
+    assert result.created and not result.error
+    assert len(gcal.calls) == 5
+    assert len({c["event_id"] for c in gcal.calls}) == 5
+    assert [c["summary"] for c in gcal.calls] == [
+        "初稿ご提出_架空X社",
+        "お戻し_架空X社",
+        "修正_架空X社",
+        "再提出_架空X社",
+        "納品_架空X社",
+    ]
+    for call in gcal.calls:
+        assert call["start_iso"].endswith("T06:00:00+09:00")
+        assert call["end_iso"].endswith("T06:30:00+09:00")
+        assert call["location"] == "架空本社会議室"
+        assert not {"attendees", "calendar_id", "calendarId"} & call.keys()
+    assert result.message.count("https://calendar.google.com/event?eid=abc") == 5
+    assert "この 5 件を入れます" not in result.message
+
+
+def test_calendar_bulk_warns_on_weekday_mismatch_and_uses_date() -> None:
+    skill, gcal = _skill()
+    raw = "6:00〜6:30\n12月03日(月) 架空原稿提出"
+    assert "曜日は月ではなく木" in _run(skill, bulk_text=raw).message
+    out = _run(skill, bulk_text=raw, confirm_bulk=True)
+    assert out.created and "日付を優先" in out.message
+    assert gcal.calls[0]["start_iso"] == "2026-12-03T06:00:00+09:00"
+
+
+def test_calendar_bulk_resolves_next_year_and_today_in_jst() -> None:
+    skill, gcal = _skill()
+    skill._now_factory = lambda: _dt.datetime(2026, 12, 30, 23, tzinfo=_dt.UTC)
+    out = _run(skill, bulk_text="6:00〜6:30\n12/31 架空本日\n1/2 架空来年", confirm_bulk=True)
+    assert not out.error
+    assert [c["start_iso"][:10] for c in gcal.calls] == ["2026-12-31", "2027-01-02"]
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        "6:00〜6:30\n12/03 正常\n12/32 不正",
+        "6:00〜6:30\n12/32 不正\n12/03 正常",
+        "6:00〜6:30\n12/03 正常\n日付不明の予定",
+        "6:00〜6:30\n12/03 正常\n2126/12/04 遠い未来",
+        "6:00〜6:00\n12/03 不正時間",
+        "25:00〜26:00\n12/03 不正時間",
+        "6:00〜6:30 と 7:00〜7:30\n12/03 共通時刻不明",
+    ],
+)
+def test_calendar_bulk_validates_every_row_before_any_write(raw: str) -> None:
+    skill, gcal = _skill()
+    assert _run(skill, bulk_text=raw, confirm_bulk=True).error
+    assert not gcal.calls
+
+
+@pytest.mark.parametrize("reauth", [False, True])
+def test_calendar_bulk_keeps_success_links_on_partial_api_failure(
+    reauth: bool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from teamagent.skills._shared.google_connection import GoogleConnectionError
+
+    if reauth:
+        monkeypatch.setattr(
+            "teamagent.skills.oauth_connect.skill.start_links_enabled", lambda: True
+        )
+        monkeypatch.setattr(
+            "teamagent.skills._shared.google_connection.reconnect_message",
+            lambda _ctx: "再連携が必要です",
+        )
+
+    class Partial(_FakeGCal):
+        def insert_event(self, request_id: str, **kw: Any) -> InsertedEvent:
+            if kw["summary"] == "お戻し_架空X社":
+                if reauth:
+                    raise GoogleConnectionError("fake expired token")
+                raise RuntimeError("fake API failure")
+            return super().insert_event(request_id, **kw)
+
+    skill, gcal = _skill(Partial())
+    out = _run(skill, bulk_text=_BULK, confirm_bulk=True)
+    assert out.created and out.error == "partial_failure"
+    assert len(gcal.calls) == 4
+    assert out.message.count("https://calendar.google.com/event?eid=abc") == 4
+    assert (
+        "お戻し_架空X社: 再連携が必要です" if reauth else "お戻し_架空X社: カレンダー登録に失敗"
+    ) in out.message
+
+
+def test_calendar_bulk_requires_requester_and_uses_only_requester_token() -> None:
+    skill, gcal = _skill()
+    with pytest.raises(PermissionError):
+        skill.run(CalendarEventInput(bulk_text=_BULK, confirm_bulk=True), SkillContext())
+    emails: list[str] = []
+
+    class OwnStore(_Store):
+        def get(self, email: str) -> Any:
+            emails.append(email)
+            return super().get(email)
+
+    skill._token_store = OwnStore(_Tok())
+    _run(skill, bulk_text=_BULK, confirm_bulk=True)
+    assert emails == [ME] * 5
+    assert len(gcal.calls) == 5
+
+
+def test_calendar_bulk_unconnected_never_writes() -> None:
+    skill, gcal = _skill(tok=None)
+    out = _run(skill, bulk_text=_BULK, confirm_bulk=True)
+    assert not out.created and out.error
+    assert not gcal.calls
+
+
+def test_calendar_bulk_cannot_bypass_signed_button_validation() -> None:
+    skill, gcal = _skill()
+    out = _run(skill, event_token="invalid-signature", bulk_text=_BULK, confirm_bulk=True)
+    assert out.error == "expired"
+    assert not gcal.calls
+
+
 # ── 正常系 ────────────────────────────────────────────────────────────────
 
 
@@ -323,7 +459,15 @@ def test_input_schema_has_no_attendee_or_calendar_field() -> None:
     """引数が無い＝どんな指示があっても招待も他人カレンダー指定も作れない。"""
     fields = set(CalendarEventInput.model_fields)
 
-    assert fields == {"event_token", "title", "start", "end", "location"}
+    assert fields == {
+        "event_token",
+        "title",
+        "start",
+        "end",
+        "location",
+        "bulk_text",
+        "confirm_bulk",
+    }
     for forbidden in ("attendees", "guests", "invitees", "calendar_id", "calendarId", "email"):
         assert forbidden not in fields
 

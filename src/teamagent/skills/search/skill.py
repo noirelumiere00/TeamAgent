@@ -48,7 +48,7 @@ from teamagent.skills._shared.next_step import (
 from teamagent.skills._shared.slack_file_delivery import file_metadata
 from teamagent.skills._shared.source_url import hit_doc_url, ingested_slack_file_id
 from teamagent.skills.base import BaseSkill, SkillContext, register
-from teamagent.skills.search import compact, drive_first, timeline_status, visit_cases
+from teamagent.skills.search import compact, drive_first, numeric, timeline_status, visit_cases
 from teamagent.skills.search.aggregation import extract_aggregation_filter
 from teamagent.skills.search.alias_expansion import resolve_topic_client, retry_inputs, scope_footer
 from teamagent.skills.search.answer_mode import (
@@ -621,6 +621,26 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
                 answer_format="list",
                 direct_answer=history.message if direct else None,
                 direct_answer_kind="list_fast" if direct else None,
+            )
+        if input.include_answer and numeric.is_calculation(intent_text(input, ctx)):
+            # 通常の要約・短文化に計算をさせず、本人の検索結果だけで回答を組む。
+            output = self.run(input.model_copy(update={"include_answer": False}), ctx)
+            if output.error:
+                return output
+            answer, cost, refs = numeric.answer(
+                intent_text(input, ctx),
+                output.hits if output.found else [],
+                self._bedrock,
+                ctx.request_id,
+            )
+            return output.model_copy(
+                update={
+                    "answer": answer,
+                    "total_cost_usd": output.total_cost_usd + cost,
+                    "displayed_refs": refs,
+                    "suggested_next": None,
+                    "answer_format": None,
+                }
             )
         if not self._not_found_recovery:
             return self._run_once(input, ctx)
@@ -1291,7 +1311,7 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
             else []
         )
         state_evidence = timeline_status.resolved_evidence(state_hits) if state_hits else {}
-        for h in hits:
+        for h in summary_hits if numeric.is_calculation(input.query) else hits:
             meta = h.metadata or {}
             resolved_file_ref = self._resolved_file_ref(meta, h.content or "", file_urls)
             url = self._doc_url({"drive_url": meta.get("drive_url")})
