@@ -104,7 +104,11 @@ class SlackSummaryInput(BaseModel):
         pattern=r"^(\d{6,20}\.\d{1,8})?$",
         description=("明示された親ts（省略時は現スレッド、channelでは不要）。"),
     )
-    focus: str = Field(default="", max_length=200)
+    focus: str = Field(
+        default="",
+        max_length=200,
+        description="依頼の原文・観点（全部/一覧/遡って/誰が/URLは一覧）。",
+    )
 
 
 class SlackSummaryOutput(BaseModel):
