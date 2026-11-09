@@ -332,6 +332,7 @@ def _events_digest() -> MorningDigestOutput:
         calendar_events=[
             CalendarEventItem(
                 summary_display="10:30 タスク確認（公式LINE）",
+                personal_block=True,
                 start_at="2026-10-05T10:30:00+09:00",
             ),
             CalendarEventItem(
@@ -341,12 +342,22 @@ def _events_digest() -> MorningDigestOutput:
     )
 
 
-@pytest.mark.parametrize("flag", [None, "true", "1", "false"])
-@pytest.mark.parametrize("row", [None, {"delivery": False}, {"paused_until": "2026-10-06"}])
-def test_removed_reminders_are_never_scheduled_even_when_enabled_or_paused(
+@pytest.mark.parametrize("flag", [None, "true", "1", "false", "0", "off"])
+@pytest.mark.parametrize(
+    "row",
+    [
+        None,
+        {"reminders": True},
+        {"reminders": False},
+        {"reminders_opt_in": False},
+        {"reminders_opt_in": True},
+        {"reminders_opt_in": True, "delivery": False},
+        {"reminders_opt_in": True, "paused_until": "2026-10-06"},
+    ],
+)
+def test_reminders_require_opt_in_and_env_without_changing_digest_delivery(
     monkeypatch: pytest.MonkeyPatch, flag: str | None, row: dict[str, Any] | None
 ) -> None:
-    # 旧フィルタ・何分前のテストは、全員のリマインド廃止に伴い登録ゼロの回帰へ置き換え。
     if flag is None:
         monkeypatch.delenv("MORNING_DIGEST_REMINDERS", raising=False)
     else:
@@ -354,12 +365,107 @@ def test_removed_reminders_are_never_scheduled_even_when_enabled_or_paused(
     sched = _patch_scheduler(monkeypatch)
     sent = _patch_delivery(monkeypatch)
     skill = _Skill(_events_digest())
+    prefs = DigestPreferences.model_validate(row or {})
     result = mod._process_user(
         skill, MorningDigestInput(), USER, day=MON, prefs_store=_PrefStore(row)
     )
-    assert result == ("delivered" if row is None else "skipped")
-    assert len(sent) == (1 if row is None else 0)
-    assert sched.calls == []
+    skipped = prefs.skip_reason(MON) is not None
+    assert result == ("skipped" if skipped else "delivered")
+    assert len(sent) == (0 if skipped else 1)
+    enabled = not skipped and prefs.reminders_opt_in and flag in {"true", "1"}
+    assert len(sched.calls) == (2 if enabled else 0)
+    if not skipped:
+        expected = (
+            mod._format_block_kit_compact(skill.digest, USER)[1]
+            if mod._compact_enabled()
+            else mod._format_block_kit(skill.digest, USER)[1]
+        )
+        assert sent[0] == expected
+
+
+@pytest.mark.parametrize(
+    ("personal", "skip", "titles"),
+    [
+        (True, [], ["10:30 タスク確認（公式LINE）", "クライアント定例"]),
+        (False, [], ["クライアント定例"]),
+        (True, ["ﾀｽｸ"], ["クライアント定例"]),
+    ],
+)
+def test_opted_in_reminders_apply_lead_keywords_and_personal_blocks(
+    monkeypatch: pytest.MonkeyPatch, personal: bool, skip: list[str], titles: list[str]
+) -> None:
+    monkeypatch.setenv("MORNING_DIGEST_REMINDERS", "1")
+    sched = _patch_scheduler(monkeypatch)
+    _patch_delivery(monkeypatch)
+    row = {
+        "reminders_opt_in": True,
+        "reminder_lead_minutes": 10,
+        "reminder_skip_keywords": skip,
+        "reminder_personal_blocks": personal,
+    }
+    assert (
+        mod._process_user(
+            _Skill(_events_digest()),
+            MorningDigestInput(),
+            USER,
+            day=MON,
+            prefs_store=_PrefStore(row),
+        )
+        == "delivered"
+    )
+    assert [c["title"] for c in sched.calls] == titles
+    for call in sched.calls:
+        start = calwin.parse_jst_datetime(call["start_iso"])
+        assert call["fire_at"] == start - _dt.timedelta(minutes=10)
+
+
+def test_reminders_skip_all_day_past_invalid_and_too_soon_events(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("MORNING_DIGEST_REMINDERS", "1")
+    monkeypatch.delenv("REMINDER_LEAD_MINUTES", raising=False)
+    sched = _patch_scheduler(monkeypatch)
+    digest = MorningDigestOutput(
+        user_email_masked="k***@x.jp",
+        calendar_events=[
+            CalendarEventItem(start_at=start, all_day=all_day)
+            for start, all_day in [
+                ("2026-10-05", False),
+                ("2026-10-05T00:00:00Z", True),
+                ("2026-10-05T07:00:00+09:00", False),
+                ("invalid", False),
+                ("2026-10-05T08:06:00+09:00", False),
+                ("2026-10-05T09:00:00", False),
+            ]
+        ],
+    )
+    assert (
+        mod._schedule_event_reminders(digest, "D001", DigestPreferences(reminders_opt_in=True)) == 1
+    )
+    assert sched.calls[0]["fire_at"] == _dt.datetime(2026, 10, 5, 8, 55, tzinfo=calwin.JST)
+
+
+def test_reminder_registration_failure_keeps_digest_delivered(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("MORNING_DIGEST_REMINDERS", "1")
+    sent = _patch_delivery(monkeypatch)
+
+    def fail(*args: Any) -> int:
+        raise RuntimeError("scheduler down")
+
+    monkeypatch.setattr(mod, "_schedule_event_reminders", fail)
+    assert (
+        mod._process_user(
+            _Skill(_events_digest()),
+            MorningDigestInput(),
+            USER,
+            day=MON,
+            prefs_store=_PrefStore({"reminders_opt_in": True}),
+        )
+        == "delivered"
+    )
+    assert len(sent) == 1
 
 
 # --- 読み込み口 --------------------------------------------------------------

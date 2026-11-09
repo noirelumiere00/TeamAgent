@@ -14,12 +14,15 @@ from datetime import date, datetime
 from decimal import Decimal
 from typing import Any
 
+import httpx
 import structlog
 from psycopg.types.json import Jsonb
 from pydantic import BaseModel, Field, ValidationError
 
 from teamagent.adapters.apify_client import ACTOR_TIKTOK_VIDEO, ApifyClient
 from teamagent.adapters.pgvector_client import PgVectorClient
+from teamagent.adapters.video_library_page import page_client, save_cover
+from teamagent.adapters.video_library_storage import VideoLibraryStorage
 from teamagent.ingest.video_library import Video, video_identity
 from teamagent.ingest.video_library_account_repository import OWN_ACCOUNT_OPERATORS
 from teamagent.ingest.video_library_url_models import METRIC_KEYS
@@ -36,6 +39,8 @@ class FetchResult(BaseModel):
     inserted: int = 0
     metrics: int = 0
     skipped: dict[str, int] = Field(default_factory=dict)
+    covers_saved: int = 0
+    covers_skipped: dict[str, int] = Field(default_factory=dict)
     failed_batches: int = 0
     cost_usd: float = 0.0
     reason: str | None = None
@@ -125,6 +130,8 @@ def run(
     client: ApifyClient,
     *,
     request_id: str,
+    storage: VideoLibraryStorage | None = None,
+    http_client: httpx.Client | None = None,
     now: datetime | None = None,
 ) -> FetchResult:
     started = time.perf_counter()
@@ -133,6 +140,8 @@ def run(
     if result.reason:
         log.info("video_library_account_fetch_skipped", **result.model_dump(), latency_ms=0)
         return result
+    if storage is not None and http_client is None:
+        raise ValueError("cover_client_required")
     now = (now or datetime.now(JST)).astimezone(JST)
     today = now.date()
     max_usd = Decimal(os.environ.get("VIDEO_LIBRARY_ACCOUNT_FETCH_MAX_USD", "5.0"))
@@ -157,6 +166,7 @@ def run(
         groups[row["initial"], row["oldest"]].append(row["handle"])
     spent = Decimal(0)
     skipped: Counter[str] = Counter()
+    covers_skipped: Counter[str] = Counter()
     for (initial, oldest), handles in sorted(groups.items()):
         per_account = 30 if initial else 10
         for offset in range(0, len(handles), 20):
@@ -189,6 +199,7 @@ def run(
                 result.cost_usd = float(spent)
                 result.items += len(response.items)
                 counts: Counter[str] = Counter()
+                covers: list[tuple[str, object]] = []
                 with pg.connection(**session) as conn:
                     for item in response.items:
                         try:
@@ -244,6 +255,13 @@ def run(
                             ),
                         )
                         counts["metrics"] += cur.rowcount
+                        meta = item.get("videoMeta")
+                        url = (
+                            (meta.get("coverUrl") or meta.get("originalCoverUrl"))
+                            if isinstance(meta, dict)
+                            else None
+                        )
+                        covers.append((video.video_id, url))
                     conn.execute(
                         """UPDATE vl_accounts SET last_fetched_on=%s WHERE platform='tiktok'
                             AND operator_label=ANY(%s) AND coalesce(classification,'') NOT LIKE %s
@@ -253,6 +271,50 @@ def run(
                     )
                 result.inserted += counts["inserted"]
                 result.metrics += counts["metrics"]
+                # Finish the batch transaction before any image download or S3 upload.
+                for video_id, url in covers:
+                    if storage is None:
+                        covers_skipped["storage_unconfigured"] += 1
+                        continue
+                    assert http_client is not None
+                    try:
+                        with pg.connection(**session) as conn:
+                            cover_row = conn.execute(
+                                """SELECT thumbnail_s3_key FROM vl_videos
+                                   WHERE platform=%s AND video_id=%s""",
+                                ("tiktok", video_id),
+                            ).fetchone()
+                        if cover_row is None or cover_row["thumbnail_s3_key"] is not None:
+                            covers_skipped["already_present"] += 1
+                            continue
+                        if not url:
+                            covers_skipped["cover_missing"] += 1
+                            continue
+                        if not isinstance(url, str):
+                            raise ValueError("invalid_cover_url")
+                        key = save_cover(http_client, storage, "tiktok", video_id, url)
+                        with pg.connection(**session) as conn:
+                            updated = conn.execute(
+                                """UPDATE vl_videos SET thumbnail_s3_key=%s
+                                   WHERE platform=%s AND video_id=%s
+                                   AND thumbnail_s3_key IS NULL""",
+                                (key, "tiktok", video_id),
+                            ).rowcount
+                        if updated == 1:
+                            result.covers_saved += 1
+                        else:
+                            covers_skipped["already_present"] += 1
+                    except httpx.HTTPStatusError as exc:
+                        covers_skipped[f"http_{exc.response.status_code}"] += 1
+                    except Exception as exc:
+                        reason = type(exc).__name__
+                        if isinstance(exc, ValueError) and str(exc) in {
+                            "invalid_cover_url",
+                            "invalid_cover_image",
+                            "cover_too_large",
+                        }:
+                            reason = str(exc)
+                        covers_skipped[reason] += 1
             except Exception as exc:
                 result.failed_batches += 1
                 log.warning(
@@ -265,6 +327,7 @@ def run(
         if result.reason == "cost_limit":
             break
     result.skipped = dict(skipped)
+    result.covers_skipped = dict(covers_skipped)
     log.info(
         "video_library_account_fetch_complete",
         **result.model_dump(),
@@ -293,7 +356,15 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         try:
             pg = PgVectorClient.from_env()
-            result = run(pg, ApifyClient.from_env(), request_id=request_id)
+            storage = VideoLibraryStorage() if os.environ.get("VIDEO_LIBRARY_S3_BUCKET") else None
+            with page_client() as http_client:
+                result = run(
+                    pg,
+                    ApifyClient.from_env(),
+                    request_id=request_id,
+                    storage=storage,
+                    http_client=http_client,
+                )
             return int(result.failed_batches > 0)
         except Exception as exc:
             logger.error(

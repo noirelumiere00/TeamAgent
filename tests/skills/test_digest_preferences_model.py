@@ -24,7 +24,7 @@ def test_default_is_the_current_behaviour() -> None:
         "calendar": 10,
     }
     assert d.skip_reason(MON) is None
-    assert d.reminder_allowed("定例")
+    assert not d.reminder_allowed("定例")
     assert d.to_storage() == {}  # 既定は 1 項目も書かない
 
 
@@ -39,7 +39,9 @@ def test_skip_reasons() -> None:
 
 
 def test_reminder_keywords_match_width_and_case_insensitively() -> None:
-    p = prefs_mod.DigestPreferences(reminder_skip_keywords=("タスク", "todo"))
+    p = prefs_mod.DigestPreferences(
+        reminders_opt_in=True, reminder_skip_keywords=("タスク", "todo")
+    )
     assert not p.reminder_allowed("10:30 タスク確認（公式LINE）")
     assert not p.reminder_allowed("ＴＯＤＯ整理")  # 全角・大文字でも一致
     assert p.reminder_allowed("クライアント定例")
@@ -112,7 +114,7 @@ def test_load_falls_back_to_default_on_failure_or_broken_row() -> None:
     assert got.delivery is False
 
 
-def test_describe_lists_summary_settings_without_removed_reminders() -> None:
+def test_describe_hides_reminder_settings_without_opt_in() -> None:
     p = prefs_mod.DigestPreferences(
         paused_until=TUE,
         weekdays=(0, 2),
@@ -137,3 +139,40 @@ def test_describe_default_and_stopped() -> None:
     stopped = prefs_mod.describe(prefs_mod.DigestPreferences(delivery=False, reminders=False), MON)
     assert "止めています（「朝のサマリーを再開して」" in stopped
     assert "リマインド" not in stopped
+
+
+@pytest.mark.parametrize("legacy", [True, False])
+def test_legacy_reminders_are_not_opt_in(legacy: bool) -> None:
+    p = prefs_mod.from_storage({"reminders": legacy})
+    assert not p.reminders_opt_in and not p.reminder_allowed("定例")
+    opted_in = prefs_mod.from_storage({"reminders": legacy, "reminders_opt_in": True})
+    assert opted_in.reminder_allowed("定例")
+    assert prefs_mod.from_storage(opted_in.to_storage()) == opted_in
+
+
+@pytest.mark.parametrize("value", ["true", 1, None])
+def test_opt_in_requires_a_json_boolean(value: Any) -> None:
+    with pytest.raises(ValueError):
+        prefs_mod.from_storage({"reminders_opt_in": value})
+
+
+def test_describe_lists_opted_in_reminder_settings() -> None:
+    p = prefs_mod.DigestPreferences(
+        reminders_opt_in=True,
+        reminder_lead_minutes=10,
+        reminder_skip_keywords=("タスク",),
+        reminder_personal_blocks=False,
+    )
+    text = prefs_mod.describe(p, MON)
+    assert "開始 10 分前" in text and "「タスク」" in text and "作業枠）: 送りません" in text
+
+
+@pytest.mark.parametrize(("raw", "expected"), [("10", 10), ("bad", 5), ("0", 1), ("90", 60)])
+def test_reminder_lead_uses_the_same_default_for_display_and_scheduling(
+    monkeypatch: pytest.MonkeyPatch, raw: str, expected: int
+) -> None:
+    monkeypatch.setenv("REMINDER_LEAD_MINUTES", raw)
+    p = prefs_mod.DigestPreferences(reminders_opt_in=True)
+    assert p.reminder_lead() == expected
+    assert f"開始 {expected} 分前" in prefs_mod.describe(p, MON)
+    assert p.model_copy(update={"reminder_lead_minutes": 15}).reminder_lead() == 15

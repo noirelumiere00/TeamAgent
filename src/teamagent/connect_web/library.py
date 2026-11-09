@@ -17,6 +17,7 @@ from fastapi import APIRouter, Depends, FastAPI, HTTPException, Request
 from fastapi.encoders import jsonable_encoder
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 
+from teamagent.adapters.video_library_page import image_media_type
 from teamagent.adapters.video_library_storage import VideoLibraryStorage
 from teamagent.connect_web.library_analysis import (
     ANALYSIS_KIND,
@@ -1629,7 +1630,9 @@ def register_library_routes(
         headers = {"Cache-Control": "private, max-age=86400", "ETag": etag, "Vary": "Cookie"}
         if etag in [part.strip() for part in request.headers.get("if-none-match", "").split(",")]:
             return Response(status_code=304, headers=headers)
-        return Response(body, media_type="image/jpeg", headers=headers)
+        return Response(
+            body, media_type=image_media_type(body[:12]) or "image/jpeg", headers=headers
+        )
 
     @router.get("/admin/campaigns")
     def campaigns(request: Request, email: str = Depends(admin_identity)) -> HTMLResponse:
