@@ -19,6 +19,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Resp
 
 from teamagent.adapters.video_library_page import image_media_type
 from teamagent.adapters.video_library_storage import VideoLibraryStorage
+from teamagent.connect_web import library_products as products
 from teamagent.connect_web.library_analysis import (
     ANALYSIS_KIND,
     ANALYSIS_VERSION,
@@ -227,13 +228,16 @@ def parse_search(params: Mapping[str, str]) -> tuple[list[str], bool | None]:
 
 
 def _where(params: Mapping[str, str], admin: bool) -> tuple[str, list[Any], int, str]:
+    params, product_ids = products.normalize(params)
     clauses = [] if admin else ["NOT v.is_private"]
     values: list[Any] = []
     terms, is_pr = parse_search(params)
     for term in terms:
-        clauses.append("""concat_ws(' ', v.caption, array_to_string(v.hashtags, ' '),
+        clauses.append(f"""concat_ws(' ', v.caption, array_to_string(v.hashtags, ' '),
             v.account_name, v.account_handle, v.advertiser, v.campaign,
-            v.industry, v.purpose) ILIKE %s""")
+            v.industry, v.purpose,
+            (SELECT concat_ws(' ',p.payload->>'brand',p.payload->>'product_name')
+             {products.LOOKUP} AND p.payload->>'source'='human')) ILIKE %s""")  # nosec B608
         values.append("%" + term + "%")
     category = params.get("category", "")
     if category == "unset":
@@ -289,6 +293,9 @@ def _where(params: Mapping[str, str], admin: bool) -> tuple[str, list[Any], int,
             WHERE a.platform=v.platform AND a.video_id=v.video_id
             AND a.kind=%s AND a.version=%s ORDER BY a.analyzed_at DESC LIMIT 1) @> %s::jsonb""")
         values.extend([ANALYSIS_KIND, ANALYSIS_VERSION, json.dumps(needle)])
+    product_clauses, product_values = products.clauses(params, product_ids)
+    clauses.extend(product_clauses)
+    values.extend(product_values)
     try:
         page = int(params.get("page", "1"))
         if not 1 <= page <= 1_000_000:
@@ -296,6 +303,7 @@ def _where(params: Mapping[str, str], admin: bool) -> tuple[str, list[Any], int,
     except ValueError:
         raise HTTPException(400, "ページが不正です") from None
     orders = {
+        "relevance": "m.total_plays",
         "new": "v.posted_at",
         "plays": "m.total_plays",
         "saves": "CASE WHEN m.total_plays > 0 THEN m.total_saves / m.total_plays END",
@@ -371,7 +379,7 @@ def library_connection(pg: Any, email: str, *, admin: bool) -> Any:
 
 def read_video(conn: Any, platform: str, video_id: str, *, admin: bool) -> Any:
     # Identifiers and visibility are always bound parameters, including for MCP.
-    sql = f"SELECT v.*, {_METRIC_SELECT}, m.captured_on FROM vl_videos_effective v {_METRICS_JOIN} WHERE v.platform=%s AND v.video_id=%s AND (%s OR NOT v.is_private)"  # noqa: E501  # nosec B608
+    sql = f"SELECT v.*, {products.PROJECTION}, {_METRIC_SELECT}, m.captured_on FROM vl_videos_effective v {_METRICS_JOIN} WHERE v.platform=%s AND v.video_id=%s AND (%s OR NOT v.is_private)"  # noqa: E501  # nosec B608
     row = conn.execute(sql, (platform, video_id, admin)).fetchone()
     if row is None:
         raise HTTPException(404)
@@ -393,11 +401,16 @@ def search_videos(
         f"SELECT count(*) AS n FROM vl_videos_effective v WHERE {where}",  # nosec B608
         values,
     ).fetchone()["n"]
+    rank, rank_values = (
+        products.relevance(params) if params.get("sort") == "relevance" else ("0", [])
+    )
+    if params.get("sort") == "relevance":
+        order = "search_relevance DESC, m.total_plays"
     # 同上: 列名・JOIN・句・並び順はコード内の固定値で、利用者の値は %s で渡す
-    list_sql = f"{_campaign_totals_cte(admin)} SELECT v.*, {_METRIC_SELECT}, m.captured_on, ct.campaign_total_plays FROM vl_videos_effective v {_METRICS_JOIN} {_CAMPAIGN_TOTALS_JOIN} WHERE {where} ORDER BY {order} DESC NULLS LAST, v.platform, v.video_id LIMIT %s OFFSET %s"  # noqa: E501  # nosec B608
+    list_sql = f"{_campaign_totals_cte(admin)} SELECT v.*, {products.PROJECTION}, {rank} AS search_relevance, {_METRIC_SELECT}, m.captured_on, ct.campaign_total_plays FROM vl_videos_effective v {_METRICS_JOIN} {_CAMPAIGN_TOTALS_JOIN} WHERE {where} ORDER BY {order} DESC NULLS LAST, v.platform, v.video_id LIMIT %s OFFSET %s"  # noqa: E501  # nosec B608
     rows = conn.execute(
         list_sql,
-        [*values, page_size, (page - 1) * page_size],
+        [*rank_values, *values, page_size, (page - 1) * page_size],
     ).fetchall()
     for row in rows:
         row["rates"] = _rates(row)
@@ -578,6 +591,14 @@ def _listing(
     if params.get("q", "").strip():
         filters += "<h2>一致した動画</h2>"
     filters += _search_summary(params, data["total"])
+    _, product_ids = products.normalize(params)
+    if product_ids is not None:
+        labels = "・".join(products.CATEGORIES[code] for code in sorted(product_ids))
+        filters += (
+            "<p>確認済みの商品分類: "
+            + _e(labels)
+            + "。未分類は含めません。分類の登録は管理者が動画詳細から行えます。</p>"
+        )
     filters += (
         "<p class=muted>再生・保存率・ENG率と並び順は総計の最新数値です。"
         "カードは丸めた再生数を表示します。正確な数値・保存率は動画詳細で確認できます。</p>"
@@ -710,6 +731,11 @@ def _row_tags(row: Mapping[str, Any]) -> str:
             else '<span class="tag">未設定</span>'
         )
         body += f'<div class="tag-group"><h3>{label}</h3>{tag}</div>'
+    product = products.metadata(row)
+    label = products.CATEGORIES.get(product["product_category"], "未分類")
+    body += (
+        '<div class="tag-group"><h3>商品分類</h3><span class="tag">' + _e(label) + "</span></div>"
+    )
     return body + "</div>"
 
 
@@ -859,7 +885,13 @@ def _workspace(body: str, params: Mapping[str, str], *, current: str, nav: str) 
     sorts = (
         [("plays", "施策の再生数順"), ("new", "新着順"), ("count", "動画の本数順")]
         if catalog
-        else [("new", "新着順"), ("plays", "再生数順"), ("saves", "保存率順"), ("eng", "ENG率順")]
+        else [
+            ("relevance", "関連度順"),
+            ("new", "新着順"),
+            ("plays", "再生数順"),
+            ("saves", "保存率順"),
+            ("eng", "ENG率順"),
+        ]
     )
     sidebar = (
         '<details class="sidebar" open><summary>条件を指定</summary>'
@@ -873,7 +905,18 @@ def _workspace(body: str, params: Mapping[str, str], *, current: str, nav: str) 
             f"<span>{label}</span></label>"
         )
     sidebar += '</div></fieldset><div class="sidebar-fields">'
+    sidebar += (
+        "<label>商品分類（確認済み）"
+        + _select(
+            "product_category",
+            [("", "すべて"), ("cosmetics", "化粧品"), *products.CATEGORIES.items()],
+            params.get("product_category"),
+        )
+        + "</label><small>化粧品はメイク・スキンケア・香水・ネイル。ヘアケアは別です。</small>"
+    )
     for field, label, kind in (
+        ("brand", "ブランド", "text"),
+        ("product_name", "商品名", "text"),
         ("industry", "業種", "text"),
         ("purpose", "目的", "text"),
         ("account", "アカウント", "text"),
@@ -912,6 +955,9 @@ def _workspace(body: str, params: Mapping[str, str], *, current: str, nav: str) 
     labels = {
         "q": "検索語",
         "category": "区分",
+        "product_category": "商品分類",
+        "brand": "ブランド",
+        "product_name": "商品名",
         "industry": "業種",
         "purpose": "目的",
         "account": "アカウント",
@@ -1601,6 +1647,16 @@ def register_library_routes(
             None,
         )
         body += render_analysis(payload)
+        if is_admin(email):
+            product = next(
+                (
+                    a["payload"]
+                    for a in analyses
+                    if a["kind"] == products.KIND and a["version"] == products.VERSION
+                ),
+                None,
+            )
+            body += products.editor(platform, video_id, product)
         if related:
             body += '<section class="archive-section" id="related">' + _section_heading(
                 "RELATED",
@@ -1732,6 +1788,25 @@ def register_library_routes(
         }:
             raise HTTPException(400)
         return {key: values[0] for key, values in parsed.items()}
+
+    @router.post("/v/{platform}/{video_id}/product")
+    async def change_product(
+        request: Request, platform: str, video_id: str, email: str = Depends(admin_identity)
+    ) -> RedirectResponse:
+        from pydantic import ValidationError
+
+        form = await form_data(request)
+        try:
+            product = products.Product.model_validate(
+                {**form, "product_category": form.get("product_category") or None}
+            )
+        except ValidationError:
+            raise HTTPException(400, "商品情報と分類の根拠を確認してください") from None
+        with connection(email) as conn:
+            video(conn, platform, video_id, email)
+            products.save(conn, platform, video_id, product, email)
+        target = f"/library/v/{quote(platform, safe='')}/{quote(video_id, safe='')}"
+        return RedirectResponse(target, 303)
 
     @router.post("/v/{platform}/{video_id}/origin")
     async def change_origin(
