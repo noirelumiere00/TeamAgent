@@ -37,7 +37,7 @@
  },
  {
   "name": "mail_followup",
-  "sha256": "b0148ac490e3faab63921986e6eb641307835da5ccb4c6372372fb9ab26b06fe"
+  "sha256": "2e3d564db2e57b89cf068541aabdc99c82f701e75a152d896bfcc850035242e2"
  },
  {
   "name": "mail_reply",
@@ -45,7 +45,7 @@
  },
  {
   "name": "mail_summary",
-  "sha256": "c8da7a470e42fb20b8d383dce0586d42f08759f217f8d0b7f979782aae06322f"
+  "sha256": "73053250548e1c28a4608e5bd454ed143f8f176c752665a06780b7ba41054cb9"
  },
  {
   "name": "mail_to_internal_context",

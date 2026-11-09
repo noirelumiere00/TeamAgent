@@ -703,9 +703,18 @@ async def _resolve_metadata(
     request_metadata = {}
     request_text = raw.get("request_text")
     if (
-        tool in {"proposal_builder", "proposal_builder_submit", "clientkarte"}
+        tool
+        in {
+            "proposal_builder",
+            "proposal_builder_submit",
+            "clientkarte",
+            "slack_search",
+            "slack_summary",
+        }
         and verified_caller is not None
-        and verified_caller.channel_id.startswith("D")
+        and (
+            verified_caller.channel_id.startswith("D") or tool in {"slack_search", "slack_summary"}
+        )
         and isinstance(request_text, str)
         and 0 < len(request_text) <= 4000
     ):

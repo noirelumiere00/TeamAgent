@@ -3860,7 +3860,8 @@ def test_tool_calls_without_a_declared_user_context_are_signed_not_blocked() -> 
         # 署名済みの `_user_context` は ingress の authoritative 値になる。
         assert outcome["signedUserId"] == "U09CX1CCBLN", case
         assert outcome["claimUser"] == "U09CX1CCBLN", case
-        assert outcome["signedContextKeys"] == [
+        # #864: slack_search / slack_summary は元の質問文（request_text）も署名して渡す。
+        assert [k for k in outcome["signedContextKeys"] if k != "request_text"] == [
             "caller_claim",
             "channel_id",
             "slack_team_id",

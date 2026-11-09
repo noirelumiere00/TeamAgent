@@ -6,20 +6,22 @@ from typing import Any
 from urllib.parse import parse_qs, urlsplit
 
 import pytest
-from bs4 import BeautifulSoup
 from fastapi.testclient import TestClient
 from pydantic import ValidationError
 
 from teamagent.connect_web.app import create_app
 from teamagent.connect_web.library_mcp_tools import VideoSearch, _video
+from tests.connect_web.mcp_store_fake import patch_store
 from tests.connect_web.test_library import Pg
 from tests.connect_web.test_library_mcp_spike import (
     _BASE,
+    _consent_form,
     _params,
     _registration,
     _token_data,
+    _verifier_mcp,
 )
-from tests.connect_web.test_search_routes import _EMAIL, _auth_cookie, _config, _verifier_ok
+from tests.connect_web.test_search_routes import _EMAIL, _config
 
 _CHATGPT = "https://chatgpt.com/connector/oauth/test-callback"
 
@@ -30,10 +32,11 @@ def setup(monkeypatch: pytest.MonkeyPatch) -> Any:
     monkeypatch.setenv("CONNECT_MCP_PUBLIC_BASE_URL", _BASE)
     monkeypatch.setenv("CONNECT_MCP_SPIKE_REDIRECT_ALLOW", _CHATGPT)
     monkeypatch.setenv("CONNECT_ADMIN_EMAILS", "")
+    patch_store(monkeypatch, resource=_BASE + "/mcp")
     pg = Pg()
     pg.row.update(ad_cost=987654321, private_payload="must-not-leak")
     with TestClient(
-        create_app(search_config=_config(), search_verifier=_verifier_ok, admin_pg=pg),
+        create_app(search_config=_config(), search_verifier=_verifier_mcp, admin_pg=pg),
         base_url=_BASE,
         follow_redirects=False,
     ) as client:
@@ -59,12 +62,7 @@ def _chatgpt_token(client: TestClient) -> str:
     response = client.get("/authorize", params=_params(client_id, redirect_uri=_CHATGPT))
     assert response.status_code == 302
     target = response.headers["location"]
-    client.cookies.update(_auth_cookie())
-    consent = client.get(target)
-    assert "ChatGPT に読み取り接続を許可" in consent.text
-    assert "10分" in consent.text and "広告費" in consent.text
-    assert _EMAIL not in consent.text
-    csrf = BeautifulSoup(consent.text, "html.parser").select_one('input[name="csrf"]')["value"]
+    csrf = _consent_form(client, target, service="ChatGPT")
     response = client.post(target, data={"csrf": csrf}, headers={"Origin": _BASE})
     callback = urlsplit(response.headers["location"])
     assert callback.hostname == "chatgpt.com" and callback.path == "/connector/oauth/test-callback"

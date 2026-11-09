@@ -122,7 +122,7 @@ class SlackSearchSkill(BaseSkill[SlackSearchInput, SlackSearchOutput]):
     name: ClassVar[str] = "slack_search"
     description: ClassVar[str] = (
         "「Slack で〜を探して」「誰かが〜と言っていた」「#〇〇 も見て」等に、Slack 全体を"
-        "キーワード検索して一致をリンクつきで返す読み取り専用ツール。チャンネル名だけなら"
+        "検索し一致をリンクつきで返す（読み取り専用）。チャンネル名だけなら"
         " query に in:#名前（ID は求めない）。チャンネルでの依頼は公開チャンネルだけ。"
         "いまいる場所の要約は slack_summary。" + USER_CONTEXT_RULE
     )
@@ -167,6 +167,33 @@ class SlackSearchSkill(BaseSkill[SlackSearchInput, SlackSearchOutput]):
         reader = self._resolve_reader(requester, log)
         if reader is None:
             return SlackSearchOutput(error="not_connected", message=_ERR_MSG["not_connected"])
+
+        from teamagent.skills.slack_search.listing import list_query, run_listing, wants_list
+
+        request = str(ctx.metadata.get("request_text", "") or "")
+        intent = " ".join((request, input.query, input.focus))
+        if wants_list(intent):
+            try:
+                query, bounds = list_query(
+                    input.query,
+                    intent,
+                    user_id=str(ctx.metadata.get("verified_slack_user_id", "") or ""),
+                )
+            except ValueError as exc:
+                return SlackSearchOutput(error="bad_conditions", message=str(exc))
+            output = run_listing(
+                reader,
+                query,
+                intent,
+                ctx,
+                dm_surface=dm_surface,
+                requester=requester,
+                bounds=bounds,
+            )
+            if not output.error:
+                return output
+            key = "reconnect_required" if output.error in _RECONNECT_CODES else "search_failed"
+            return SlackSearchOutput(error=key, message=_ERR_MSG[key])
 
         # ── S3: error code つきで検索。失敗は 0 件にしない。
         result = reader.search_checked(input.query, ctx.request_id, count=input.count)

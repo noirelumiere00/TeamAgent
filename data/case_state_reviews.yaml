@@ -1,3 +1,23 @@
 # 人手で原資料・対象・時点を確認したものだけ追加する。氏名や案件名を照合キーにしない。
+# reviewed_by は確認者 ID（氏名の対応表はリポジトリの外で管理）。review_ref は確認記録 ID。
 version: 1
-reviews: []
+reviews:
+- subject_ref: case:jtb-corporate-branding-20260911
+  record:
+    state: lost
+    authority: official
+    raw_value: 見送り（費用対効果が合わず）
+    source_ref:
+      source_type: gdrive
+      external_id: 1hzRoEBotqN8-lxQMfkapOfeLtOM9zvYN
+      locator: page:1
+      url: https://docs.google.com/presentation/d/1hzRoEBotqN8-lxQMfkapOfeLtOM9zvYN/edit?usp=drivesdk&ouid=116432917831950487696&rtpof=true&sd=true
+      excerpt: 株式会社 JTB 御中 ビジョン 2035 企業ブランディング／ メッセージ理解浸透の施策ご提案 2026 年 9 月 11 日 株式会社ベクトル NewsTV 事業本部
+      content_sha256: f3959b894d89e6cf77ef4da356c987157eb26df32834ec66fc32965282a69e96
+    evidence_date: '2026-09-11'
+    evidence_date_kind: document_issued
+    state_as_of: '2026-11-05'
+    state_as_of_precision: day
+    reviewed_by: reviewer-001
+    reviewed_on: '2026-11-05'
+    review_ref: review:2026-11-05-claude-session-8b3ce7a5
