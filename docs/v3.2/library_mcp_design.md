@@ -1,5 +1,14 @@
 # 動画ライブラリの Claude カスタムコネクタ向け MCP 設計
 
+> **2026-11-09 実装優先事項:** 以下は2026-11-04時点の設計記録です。現在の実装・運用は [接続と運用](library_mcp_clients.md) と [ChatGPT手順](library_mcp_chatgpt_trial.md) を正本とし、旧案にある寿命・scope・callback・テーブル案より次を優先します。
+>
+> - ChatGPT／Claude共通の `/mcp`。public client／DCR、scopeは `library:read` だけで、利用者用APIキーやclient secretを配布しません。ツールは `ping`・`search_videos`・`get_video` の読み取り3本です。
+> - accessは10分で自動更新。grant／refreshは**最後のcode交換・refresh成功から90日の未使用期限**で、refreshごとに延長します。旧案の「初回から絶対7日」は実装していません。OAuth状態は0044でPostgreSQLに永続化し、再起動で消えません。
+> - refreshはrotationし、消費済みrefreshの再利用でgrant全体を失効。本人の `/mcp-auth/connections` からも解除できます。新規grantごとにtransaction／ブラウザnonceを使ったfresh Google確認と明示同意を行います。
+> - 既存Claude ai／com・承認済みlocalhostのcallbackを保持し、ChatGPTの実callbackは完全一致で正規の設定リリースに追加します。接続ガイド `/mcp/setup` は新アプリ反映後に公開します。
+> - 実テーブルは `public.library_mcp_grants.subject`、専用NOLOGIN所有者は `library_mcp_definer`。`library_mcp_owner` はpolicy名です。Googleログアウト／アカウント無効化だけでは検証済みHDの既存grantは失効せず、退職時は運用担当が明示revokeします。
+> - 0044をアプリより先に適用。旧アプリへ戻す場合もDB状態を削除しません。ingest停止・直接ECS更新・guard迂回は行いません。本番配備と実Googleを含むChatGPT／Claude E2Eは未確認で、コードテストの成功と区別します。
+
 作成日: 2026-11-04。対象: `feat/library-mcp`、調査時 HEAD `2329f40b`。
 状態: 設計のみ。コード変更、migration 実行、インフラ変更、コミット、push は行わない。
 
