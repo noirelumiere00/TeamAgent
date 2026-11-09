@@ -160,8 +160,7 @@ def render(
             link_label = drive_first.label(ref)
             if requested_count is not None:
                 if ref.kind in {"drive", "slack_attachment", "slack_conversation"}:
-                    label = "会話の記録" if ref.kind == "slack_conversation" else "資料を見る"
-                    if not case_link(url, label):
+                    if not case_link(url, "資料を見る"):
                         continue
                 else:
                     ref = None
@@ -188,11 +187,7 @@ def render(
             key = (ref.drive_file_id or ref.slack_file_id or url or entry.document_id or "", "")
             project = meta.get("campaign") or meta.get("case_product") or meta.get("case_brand")
             owner = meta.get("advertiser") or meta.get("case_client") or meta.get("client_name")
-            case_key = normalize_client(
-                f"{owner} {project}"
-                if owner and project
-                else re.sub(r"\.[a-z0-9]+$", "", entry.title)
-            )
+            case_key = normalize_client(f"{owner} {project}") if owner and project else ""
             if case_key and case_key in seen_cases:
                 continue
         if (not url and ref is None) or key in seen or entry.kind in {"karte", "research"}:
@@ -225,8 +220,7 @@ def render(
             if ref.kind == "drive":
                 card.append("• " + (case_link(url, "資料を見る") or "資料URL未確認"))
             elif ref.kind in {"slack_attachment", "slack_conversation"}:
-                label = "資料を見る" if ref.kind == "slack_attachment" else "会話の記録"
-                card.append("• " + (case_link(url, label) or "資料URL未確認"))
+                card.append("• " + (case_link(url, "資料を見る") or "資料URL未確認"))
             else:
                 card.append(f"• {drive_first.label(ref)}（資料URL未確認）")
             line = "\n".join(card)

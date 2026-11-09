@@ -54,6 +54,7 @@ from teamagent.skills.search.alias_expansion import resolve_topic_client, retry_
 from teamagent.skills.search.answer_mode import (
     MODE_INSTRUCTIONS,
     classify_answer_mode,
+    intent_text,
     is_case_list,
     requested_count,
     strip_advice,
@@ -602,7 +603,7 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
         from teamagent.skills.search.project_history import run_history
 
         history = run_history(
-            input.query,
+            intent_text(input, ctx),
             ctx,
             pgvector=self._pgvector,
             app_role=self._app_role,
@@ -629,6 +630,7 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
         return request._run_with_recovery(input, ctx)
 
     def _run_with_recovery(self, input: SearchInput, ctx: SkillContext) -> SearchOutput:
+        intent = intent_text(input, ctx)
         output = self._run_once(input, ctx)
         if output.found or not input.include_answer or output.case_state_answer is not None:
             return output
@@ -643,7 +645,7 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
 
         # 常駐インスタンスの設定を変えず、同じ本人・RLS・明示フィルタで再検索する。
         recovery = copy(self)
-        visit = visit_cases.parse(input.query) if drive_first.enabled(ctx.metadata) else None
+        visit = visit_cases.parse(intent) if drive_first.enabled(ctx.metadata) else None
         if visit:
             input = input.model_copy(update={"filter_client": visit.company})
         if drive_first.enabled(ctx.metadata) and input.filter_doc_type == "事例":
@@ -694,7 +696,7 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
                     "total_cost_usd": total_cost,
                 }
             )
-        target = case_query_target(input.query, input.filter_industry)
+        target = case_query_target(intent, input.filter_industry)
         answer = build_scoped_not_found_answer(
             target, scope="金庫・Slack・カルテ・事例", complete=trace["complete"]
         )
@@ -702,7 +704,7 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
             answer = output.answer
         words = scope_footer(trace["queries"] or [input.query], slack=None)
         answer += "\n" + trace["scope"] + "／" + words.split(": ", 1)[1]
-        if requested_count(input.query) is not None:
+        if requested_count(intent) is not None:
             answer += "\n\n見つかったのは 0 件です。"
         kind: SearchDirectAnswerKind | None = (
             "not_found"
@@ -721,17 +723,20 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
 
     def _run_once(self, input: SearchInput, ctx: SkillContext) -> SearchOutput:
         """検索 Skill のメインフロー。"""
-        count = requested_count(input.query)
-        counted_cases = count is not None and is_case_list(input.query)
+        intent = intent_text(input, ctx)
+        if intent != input.query and (industry := extract_query_industry(intent)):
+            input = input.model_copy(update={"filter_industry": industry})
+        count = requested_count(intent)
+        counted_cases = count is not None and is_case_list(intent)
         if count is not None:
             input = input.model_copy(update={"top_k": max(input.top_k, min(count, 50))})
         drive_mode = drive_first.enabled(ctx.metadata) or (
-            self._direct_answer_allowed(ctx, "case_cards") and is_case_list(input.query)
+            self._direct_answer_allowed(ctx, "case_cards") and is_case_list(intent)
         )
         if (drive_mode or counted_cases) and input.filter_doc_type == "事例":
             # 事例は検索の目的で、提案書・報告書を横断する。SQLと後段の両方で絞らせない。
             input = input.model_copy(update={"filter_doc_type": None})
-        visit = visit_cases.parse(input.query) if drive_mode else None
+        visit = visit_cases.parse(intent) if drive_mode else None
         category_cost = 0.0
         if visit:
             industry = normalize_industry(input.filter_industry) or extract_query_industry(
@@ -746,8 +751,8 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
             input = input.model_copy(
                 update={"filter_client": visit.company, "filter_industry": industry}
             )
-        drive_case_listing = drive_mode and (bool(visit) or is_case_list(input.query))
-        drive_comparison = drive_mode and is_comparison_query(input.query)
+        drive_case_listing = drive_mode and (bool(visit) or is_case_list(intent))
+        drive_comparison = drive_mode and is_comparison_query(intent)
         if os.environ.get("USE_SEARCH_FANOUT", "") == "1":
             from teamagent.skills.search.fanout import fanout_active, run_fanout
 
@@ -764,13 +769,11 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
         case_listing = (
             counted_cases
             or drive_case_listing
-            or (ctx.metadata.get(compact.CTX_KEY) is True and is_case_list(input.query))
+            or (ctx.metadata.get(compact.CTX_KEY) is True and is_case_list(intent))
         )
         compact_mode = not counted_cases and (
             (drive_mode and not drive_case_listing)
-            or (
-                ctx.metadata.get(compact.CTX_KEY) is True and not compact.explicit_list(input.query)
-            )
+            or (ctx.metadata.get(compact.CTX_KEY) is True and not compact.explicit_list(intent))
         )
         case_listing = case_listing or (count is not None and not compact_mode)
         displayed_refs: list[DocumentReference] | None = [] if drive_mode else None
@@ -807,6 +810,7 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
                 drive_mode
                 or self._result_guard
                 or self._not_found_answer
+                or intent != input.query
                 or ctx.metadata.get("_search_direct_answer") is True
             )
             else None
@@ -837,7 +841,7 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
         timings["retrieve_ms"] = (time.perf_counter() - _t) * 1000
 
         # 2-a. 「該当なし」の判定（retrieval の実数値とメタだけ・LLM に任せない）。
-        found_decision = self._judge_found(input.query, hits, probe)
+        found_decision = self._judge_found(intent, hits, probe)
         searched_queries = [input.query]
         retries_incomplete = False
         # 「探した範囲」は 1 回目で見つからなかったときだけ付ける（見つかった答えには足さない）。
@@ -848,7 +852,7 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
                 input, ctx, hits, probe
             )
             timings["alias_ms"] = (time.perf_counter() - _t) * 1000
-            found_decision = self._judge_found(input.query, hits, probe)
+            found_decision = self._judge_found(intent, hits, probe)
         found = found_decision.found
 
         # Slack / 管理シートの本文にある資料名は、全ヒット分をまとめて 1 回だけ
@@ -859,14 +863,14 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
 
         # 取引先の分類を補ってから対象を絞り、要約・警告・📊で同じ根拠を使う。
         asked_industry = normalize_industry(input.filter_industry) or (
-            extract_query_industry(input.query) if not visit else None
+            extract_query_industry(intent) if not visit else None
         )
         if self._campaign_files and any(is_campaign_hit(h) for h in hits):
             self._attach_campaign_files(hits, ctx)
         case_target = (
             None
-            if drive_mode and is_comparison_query(input.query)
-            else case_query_target(input.query, asked_industry)
+            if drive_mode and is_comparison_query(intent)
+            else case_query_target(intent, asked_industry)
         )
         summary_hits = case_target_hits(
             hits, case_target, soft_industry=drive_mode or counted_cases
@@ -904,7 +908,7 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
         if self._result_guard:
             guard_decision: dict[str, Any] = {}
             guard_header = build_result_header(
-                query=input.query,
+                query=intent,
                 hits=summary_hits,
                 weak_threshold=self._weak_result_threshold,
                 query_client=(probe or {}).get("query_client"),
@@ -955,8 +959,8 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
         if compact_mode and slack_items:
             found = True
         case_miss = bool(case_target and not found)
-        if (is_case_list(input.query) or compact.explicit_list(input.query)) and (
-            (is_case_list(input.query) and slack_items)
+        if (is_case_list(intent) or compact.explicit_list(intent)) and (
+            (is_case_list(intent) and slack_items)
             or any(i.hit.file_names or i.hit.file_ids for i in slack_items)
             or any(
                 h.metadata.get("source_type") == "slack" or ingested_slack_file_id(h.metadata)
@@ -975,7 +979,7 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
         #    _should_defer_answer が必ず False を返し、以下は 1 バイトも従来と変わらない。
         deferred = False
         direct_kind = (
-            self._direct_answer_kind(input.query, summary_hits, asked_industry=asked_industry)
+            self._direct_answer_kind(intent, summary_hits, asked_industry=asked_industry)
             if ctx.metadata.get("_search_direct_answer") is True and input.include_answer and found
             else None
         )
@@ -998,7 +1002,7 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
                 # 取得できた根拠だけを要約し、保管場所は回答に出さない。
                 _t = time.perf_counter()
                 slack_answer, cost_usd = self._summarize(
-                    input.query, [], ctx.request_id, slack_items=slack_items
+                    intent, [], ctx.request_id, slack_items=slack_items
                 )
                 timings["converse_ms"] = (time.perf_counter() - _t) * 1000
                 answer = f"{answer}\n\n{slack_answer}"
@@ -1041,14 +1045,14 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
             code_comparison = (
                 drive_mode
                 and compact_mode
-                and classify_answer_mode(input.query) != "insight"
-                and bool(compact_comparison(input.query, summary_hits)[0])
+                and classify_answer_mode(intent) != "insight"
+                and bool(compact_comparison(intent, summary_hits)[0])
             )
             answer, cost_usd = (
                 ("", 0.0)
                 if code_comparison
                 else self._summarize(
-                    input.query,
+                    intent,
                     summary_hits,
                     ctx.request_id,
                     slack_items=slack_items,
@@ -1080,7 +1084,7 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
                     summary_hits,
                     slack_items,
                     lambda h: self._hit_url(h, file_urls=file_urls),
-                    query=input.query,
+                    query=intent,
                     asked_industry=asked_industry,
                     notice=guard_header,
                     displayed_refs=displayed_refs,
@@ -1091,7 +1095,7 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
                     drive_fallback = drive_mode and count is None
                     if not drive_fallback:
                         compact_fallback_cards = compact.fallback_cards(
-                            input.query,
+                            intent,
                             summary_hits,
                             slack_items,
                             lambda h: self._hit_url(h, file_urls=file_urls),
@@ -1109,7 +1113,7 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
                         _t = time.perf_counter()
                         try:
                             answer, fallback_cost = self._summarize(
-                                input.query,
+                                intent,
                                 summary_hits,
                                 ctx.request_id,
                                 slack_items=slack_items,
@@ -1190,12 +1194,12 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
         #        knowledge_deliver。その tool が OFF の環境では出来ない約束をしない）。
         #        該当なしのときは近いものの実ファイルを勧めない。
         if found and not compact_mode and not drive_fallback:
-            answer = self._append_next_step(answer, query=input.query, file_urls=file_urls)
+            answer = self._append_next_step(answer, query=intent, file_urls=file_urls)
 
         # 3-quater. 結果に添える次の一手（既存ツールを 1 つだけ・モデルに 2 本目を選ばせる）。
         #           本文に提案が付いていればそれと同じ一手にそろえる（次の一手は 1 個）。
         suggested_next = suggest_next_move(
-            query=input.query,
+            query=intent,
             found=found,
             slack_status=slack_lookup.status if slack_lookup is not None else None,
             slack_shown=len(slack_items),
@@ -1370,9 +1374,7 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
 
             def summarize_points(selected: list[SearchHit]) -> str:
                 nonlocal cost_usd
-                text, cost_usd = self._summarize(
-                    input.query, selected, ctx.request_id, case_points=True
-                )
+                text, cost_usd = self._summarize(intent, selected, ctx.request_id, case_points=True)
                 return text
 
             listed = render(
@@ -1385,7 +1387,7 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
                 drive_only=drive_case_listing and count is None,
                 requested_count=count,
                 asked_industry=asked_industry,
-                client=input.filter_client or self._asked_client(probe),
+                client=self._asked_client(probe) or input.filter_client,
                 summarize=summarize_points if counted_cases else None,
             )
             attachment_refs = list_refs
@@ -1439,7 +1441,7 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
                 and not visit
             ):
                 answer = compact.append_used_drive_links(
-                    strip_advice(answer, input.query),
+                    strip_advice(answer, intent),
                     summary_hits,
                     displayed_refs,
                     slack_items=slack_items,
@@ -1448,7 +1450,7 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
             answer = compact.strip_linkless_invitation(answer)
         case_answer = None
         if case_state_enabled(ctx.metadata.get("user_email")) and timeline_status.asks_status(
-            input.query
+            intent
         ):
             case_answer = timeline_status.render_case_states(
                 state_hits if found or slack_items else []
@@ -1463,7 +1465,7 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
             suggested_next = None
         elif found and input.include_answer and timeline_status.enabled():
             status = timeline_status.status_answer(
-                input.query,
+                intent,
                 summary_hits,
                 lambda h: self._hit_url(h, file_urls=file_urls),
                 displayed_refs,
@@ -1782,7 +1784,7 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
                     incomplete = True
                     continue
                 # 言い換えた問いでなく元の問いで判定。弱い・別取引先の結果は救出しない。
-                if self._judge_found(input.query, retry_hits, probe).found:
+                if self._judge_found(intent_text(input, ctx), retry_hits, probe).found:
                     for hit in retry_hits:
                         if hit.chunk_id not in rescued or hit.score > rescued[hit.chunk_id].score:
                             rescued[hit.chunk_id] = hit
@@ -1988,6 +1990,7 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
         documents + chunks JOIN で横断検索する（Slack 197 件等が対象）。
         """
         # ctx.metadata から RLS GUC 用の値を取得（runtime 層が注入することを想定）
+        intent = intent_text(input, ctx)
         user_email = ctx.metadata.get("user_email")
         user_groups_raw = ctx.metadata.get("user_groups")
         user_groups = list(user_groups_raw) if isinstance(user_groups_raw, (list, tuple)) else None
@@ -1997,7 +2000,7 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
         # （同じ groups/role の別利用者が「本人にしか見えない文書」の名前を共有しない）。
         vocab_key = self._vocab_cache_key(user_groups, user_role, user_email)
         drive_mode = drive_first.enabled(ctx.metadata)
-        visit = visit_cases.parse(input.query) if drive_mode else None
+        visit = visit_cases.parse(intent) if drive_mode else None
 
         with self._pgvector.connection(
             app_role=self._app_role,
@@ -2007,30 +2010,41 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
         ) as conn:
             comparison_clients = (
                 named_comparison_clients(
-                    input.query, self._client_vocabulary(conn, ctx.request_id, vocab_key)
+                    intent, self._client_vocabulary(conn, ctx.request_id, vocab_key)
                 )
-                if drive_mode and is_comparison_query(input.query)
+                if drive_mode and is_comparison_query(intent)
                 else []
             )
             # result_guard 用: 「利用者はどのクライアントの資料を求めたか」をここで確定させる。
-            # 明示 filter_client が最優先、無ければ既知クライアント語彙への **語境界つき**
+            # 元の質問で名指しされた取引先、明示 filter_client、既知語彙の順に **語境界つき**
             # 一致（_match_client strict。「ユニークユーザー数」に「ユニー」を当てない）。
             # boost / sort の緩い substring とは別（あちらは再現率優先・こちらは警告の根拠）。
             # 語彙取得に失敗しても _match_client が握って None を返す＝検索本体は継続。
             if probe is not None:
-                if input.filter_client:
+                original_client = (
+                    self._match_client(
+                        intent, conn, ctx.request_id, strict=True, vocab_key=vocab_key
+                    )
+                    if intent != input.query and not is_comparison_query(intent)
+                    else None
+                )
+                if original_client:
+                    probe["query_client"] = original_client
+                    probe["asked_source"] = "vocab"
+                    input = input.model_copy(update={"filter_client": original_client})
+                elif input.filter_client:
                     probe["query_client"] = input.filter_client
                     probe["asked_source"] = "filter"
                 else:
                     matched_client = self._match_client(
-                        input.query, conn, ctx.request_id, strict=True, vocab_key=vocab_key
+                        intent, conn, ctx.request_id, strict=True, vocab_key=vocab_key
                     )
                     if matched_client:
                         probe["query_client"] = matched_client
                         probe["asked_source"] = "vocab"
                 if drive_mode and not visit:
                     resolved = resolve_topic_client(
-                        input.query,
+                        intent,
                         self._client_vocabulary(conn, ctx.request_id, vocab_key),
                         input.filter_client,
                     )
@@ -2039,6 +2053,9 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
                         probe["query_client"] = canonical
                         if surface != canonical:
                             probe["query_client_alias"] = surface
+                if intent != input.query and not is_comparison_query(intent):
+                    if requested_client := self._asked_client(probe):
+                        input = input.model_copy(update={"filter_client": requested_client})
             if fanout_probe is not None:
                 from teamagent.skills.search.case_list import CANDIDATE_LIMIT
                 from teamagent.skills.search.fanout import bounded_connection, collect_named_sources
@@ -2073,8 +2090,8 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
                                 error=type(exc).__name__,
                             )
 
-                if is_case_list(input.query) or visit:
-                    fanout_probe["case_query"] = input.query
+                if is_case_list(intent) or visit:
+                    fanout_probe["case_query"] = intent
                 if comparison_clients:
                     fanout_probe["comparison_clients"] = comparison_clients
                     if probe is not None:
@@ -2086,7 +2103,7 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
                     ctx,
                     fanout_probe,
                     industry=normalize_industry(input.filter_industry)
-                    or (extract_query_industry(input.query) if not visit else None),
+                    or (extract_query_industry(intent) if not visit else None),
                     comparison_clients=comparison_clients,
                     client_alias=(probe or {}).get("query_client_alias"),
                     embedding=embedding,
@@ -2099,7 +2116,7 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
                 # 意味検索では答えられないため、メタデータフィルタで FB を列挙する。
                 # フィルタが取れたときだけ列挙経路に入り、取れなければ通常の意味検索へ。
                 if self._use_aggregation_mode:
-                    agg_filters = extract_aggregation_filter(input.query)
+                    agg_filters = extract_aggregation_filter(intent)
                     if agg_filters:
                         agg_hits = self._pgvector.list_by_metadata(
                             conn=conn,
@@ -2169,7 +2186,7 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
                 pool_metadata_filters: dict[str, str] | None = None
                 if self._query_planner is not None:
                     # P3: LLM ルーティング + multi-query/HyDE → RRF 融合。
-                    plan = self._query_planner.plan(input.query, ctx.request_id)
+                    plan = self._query_planner.plan(intent, ctx.request_id)
                     # plan 由来のメタフィルタ（業界 / 資料種別）は USE_KNOWLEDGE_FILTERS が
                     # 有効なときのみ適用する（単一クエリ経路の substring ルーティングと同じ
                     # flag に揃える＝一貫性）。OFF なら multi-query/HyDE/RRF だけを使う。
@@ -2243,9 +2260,7 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
                 else:
                     # 従来: substring ルーティング（資料種別・業界）＋単一クエリ検索。
                     knowledge_filters = (
-                        extract_knowledge_filters(input.query)
-                        if self._use_knowledge_filters
-                        else None
+                        extract_knowledge_filters(intent) if self._use_knowledge_filters else None
                     )
                     # 提案書 intent（明示 filter_doc_type 優先・無ければ自動抽出の
                     # cls_doc_type）。pop 前に読む（明示 doc_type 指定時は明示側で判定）。
@@ -2273,7 +2288,7 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
                             allow_unclassified=self._auto_filters_allow_unclassified,
                         )
                     eff_industry = input.filter_industry or (
-                        extract_query_industry(input.query) if self._use_knowledge_filters else None
+                        extract_query_industry(intent) if self._use_knowledge_filters else None
                     )
                     if drive_mode:
                         eff_industry = None
@@ -2304,7 +2319,7 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
                 ):
                     hits = self._apply_client_boost(
                         conn=conn,
-                        query=input.query,
+                        query=intent,
                         hits=hits,
                         embedding=embedding,
                         input=input,
@@ -2340,7 +2355,7 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
                     conn=conn,
                     embedding=embedding,
                     hits=hits,
-                    input=input,
+                    input=input.model_copy(update={"query": intent}),
                     request_id=ctx.request_id,
                     probe=probe,
                     sticky_filters=sticky,
@@ -2352,13 +2367,13 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
                     conn=conn,
                     embedding=embedding,
                     hits=hits,
-                    input=input,
+                    input=input.model_copy(update={"query": intent}),
                     request_id=ctx.request_id,
                     probe=probe,
                 )
                 if drive_mode:
                     wanted_type = input.filter_doc_type or (
-                        extract_knowledge_filters(input.query) or {}
+                        extract_knowledge_filters(intent) or {}
                     ).get("cls_doc_type")
                     if wanted_type and (asked_client := self._asked_client(probe)):
                         # 分類漏れ・競合資料の占有でも、名指しの種類を本人RLS下で取り直す。
@@ -2417,7 +2432,7 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
                             (time.perf_counter() - _t_rerank) * 1000
                         )
                 if drive_first.enabled(ctx.metadata):
-                    hits = drive_first.scope_hits(input.query, hits, input.filter_doc_type)
+                    hits = drive_first.scope_hits(intent, hits, input.filter_doc_type)
                 if fanout_probe is not None:
                     fanout_probe["candidates"] = list(hits)
                 if recovery := ctx.metadata.get("_search_recovery"):
@@ -2475,7 +2490,7 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
                 # を基準にする。env-gate SEARCH_CLIENT_MATCH_SORT（既定 OFF・恒等）。
                 if prefer_same_client and self._client_match_sort and hits:
                     client_for_sort = input.filter_client or self._match_client(
-                        input.query, conn, ctx.request_id, vocab_key=vocab_key
+                        intent, conn, ctx.request_id, vocab_key=vocab_key
                     )
                     if client_for_sort:
                         before_top = hits[0].chunk_id if hits else None
@@ -3030,7 +3045,7 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
         if target is None:  # _should_defer_answer で確認済み。二重ガード（宛先未確定では投げない）
             return TWO_STAGE_NOTICE
         followup_kwargs: dict[str, Any] = {
-            "query": input.query,
+            "query": intent_text(input, ctx),
             "hits": list(hits),
             "file_urls": dict(file_urls),
             "request_id": ctx.request_id,

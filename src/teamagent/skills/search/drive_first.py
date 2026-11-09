@@ -11,7 +11,11 @@ from urllib.parse import parse_qs, urlsplit
 
 from teamagent.mcp_gateway.allowlist import email_allowed
 from teamagent.skills._shared.slack_file_delivery import file_metadata
-from teamagent.skills._shared.source_url import hit_doc_url, ingested_slack_file_id
+from teamagent.skills._shared.source_url import (
+    hit_doc_url,
+    ingested_slack_file_id,
+    slack_file_permalink,
+)
 from teamagent.skills.search.saved_file_refs import resolve_saved_files
 from teamagent.skills.search.schema import DocumentReference, ReferenceKind
 
@@ -129,6 +133,11 @@ def canonical_reference(
     source_type = str(meta.get("source_type") or "") or None
     names = list(file_names) or candidate_names(meta, content)
     ids = list(dict.fromkeys(file_ids or meta.get("slack_file_ids", ())))
+    attached = list(meta.get("files") or [])
+    if not ids:
+        ids = [
+            str(f["id"]) for f in attached if re.fullmatch(r"F[A-Z0-9]+", str(f.get("id") or ""))
+        ]
     ingested_id = ingested_slack_file_id(meta)
     if ingested_id:
         ids = [ingested_id]
@@ -155,6 +164,16 @@ def canonical_reference(
     if ingested_id:
         fid = None
     url = f"https://drive.google.com/file/d/{fid}/view" if fid else hit_doc_url({"source_uri": uri})
+    if source_type == "slack" and not fid:
+        url = next(
+            (
+                link
+                for f in attached
+                if f.get("id") in ids
+                if (link := slack_file_permalink(f.get("permalink")))
+            ),
+            url,
+        )
     if not fid and drive_file_id(uri) and source_type != "gsheets":
         url = None
     kind: ReferenceKind

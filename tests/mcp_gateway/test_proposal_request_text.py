@@ -39,6 +39,7 @@ async def test_signed_request_text_is_forwarded_for_both_identity_modes(
     "tool,channel,text,signed",
     [
         ("search", "D0123456789", "10万円", False),
+        ("search", "C0123456789", "飲料系の事例５件出して", False),
         ("proposal_builder", "C0123456789", "10万円", True),
         ("proposal_builder", "D0123456789", "10万円", False),
         ("proposal_builder", "D0123456789", "x" * 4001, True),

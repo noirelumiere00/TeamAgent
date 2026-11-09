@@ -28,6 +28,7 @@ from teamagent.skills.base import SkillContext
 from teamagent.skills.search import compact, drive_first, timeline_status, visit_cases
 from teamagent.skills.search.answer_mode import (
     classify_answer_mode,
+    intent_text,
     is_case_list,
     requested_count,
     strip_advice,
@@ -72,6 +73,7 @@ from teamagent.skills.search.fanout_sources import (
     reuse_connection,
     rls_connection,
 )
+from teamagent.skills.search.knowledge_query import extract_query_industry, is_video_solution
 from teamagent.skills.search.next_move import suggest_next_move
 from teamagent.skills.search.not_found import (
     NOT_FOUND_HEAD,
@@ -329,15 +331,18 @@ def _case_hits(result: SourceResult[Any], *, drive_mode: bool = False) -> list[S
 
 def run_fanout(skill: Any, input: SearchInput, ctx: SkillContext) -> SearchOutput:
     """並行取得→従来の found 判定→専用要約→コードの節と探した範囲。"""
+    intent = intent_text(input, ctx)
+    if intent != input.query and (industry := extract_query_industry(intent)):
+        input = input.model_copy(update={"filter_industry": industry})
     started = time.perf_counter()
-    requested_limit = requested_count(input.query)
-    counted_cases = requested_limit is not None and is_case_list(input.query)
+    requested_limit = requested_count(intent)
+    counted_cases = requested_limit is not None and is_case_list(intent)
     recovery = ctx.metadata.get("_search_recovery")
     drive_mode = drive_first.enabled(ctx.metadata) or (
-        skill._direct_answer_allowed(ctx, "case_cards") and is_case_list(input.query)
+        skill._direct_answer_allowed(ctx, "case_cards") and is_case_list(intent)
     )
-    visit = visit_cases.parse(input.query) if drive_mode else None
-    drive_case_listing = drive_mode and (bool(visit) or is_case_list(input.query))
+    visit = visit_cases.parse(intent) if drive_mode else None
+    drive_case_listing = drive_mode and (bool(visit) or is_case_list(intent))
     if drive_case_listing or counted_cases:
         from teamagent.skills.search.case_list import CANDIDATE_LIMIT
 
@@ -346,7 +351,7 @@ def run_fanout(skill: Any, input: SearchInput, ctx: SkillContext) -> SearchOutpu
     compact_enabled = ctx.metadata.get(compact.CTX_KEY) is True
     compact_mode = not counted_cases and (
         (drive_mode and not drive_case_listing)
-        or (compact_enabled and not compact.explicit_list(input.query))
+        or (compact_enabled and not compact.explicit_list(intent))
     )
     displayed_refs: list[DocumentReference] | None = [] if drive_mode else None
     log = ctx.bind_logger(skill.name)
@@ -418,14 +423,14 @@ def run_fanout(skill: Any, input: SearchInput, ctx: SkillContext) -> SearchOutpu
         )
         if extra.get("comparison_clients"):
             hits = [*hits, *extra.get("named", [])]
-        decision = skill._judge_found(input.query, hits, probe)
+        decision = skill._judge_found(intent, hits, probe)
         if skill._alias_expansion and (not decision.found or recovery is not None):
             hits, queries, incomplete = skill._retry_aliases(input, ctx, hits, probe)
             if recovery is not None:
                 recovery["queries"].extend(queries)
             extra["incomplete"] = incomplete
             extra["retried"] = True
-        found = skill._judge_found(input.query, hits, probe).found
+        found = skill._judge_found(intent, hits, probe).found
     except Exception as exc:
         vault_status = "timeout" if is_timeout_error(exc) else "error"
         hits, found = [], False
@@ -434,10 +439,9 @@ def run_fanout(skill: Any, input: SearchInput, ctx: SkillContext) -> SearchOutpu
     file_urls = {} if extra.get("incomplete") or drive_mode else skill._resolve_file_urls(hits, ctx)
     summary_hits = hits
     from teamagent.ingest.industry_taxonomy import normalize_industry
-    from teamagent.skills.search.knowledge_query import extract_query_industry, is_video_solution
 
     asked_industry = normalize_industry(input.filter_industry) or (
-        extract_query_industry(input.query) if not visit else None
+        extract_query_industry(intent) if not visit else None
     )
     cases = extra.get("case", SourceResult(source="case", status="skipped", reason="no_industry"))
     case_hits = _case_hits(cases, drive_mode=drive_mode or counted_cases)
@@ -452,7 +456,7 @@ def run_fanout(skill: Any, input: SearchInput, ctx: SkillContext) -> SearchOutpu
             if input.include_unknown_budget:
                 budgets.add("不明")
             return (
-                bool(drive_first.scope_hits(input.query, [hit], input.filter_doc_type))
+                bool(drive_first.scope_hits(intent, [hit], input.filter_doc_type))
                 and (not input.filter_budget or meta.get("cls_budget") in budgets)
                 and (not solution or meta.get("cls_solution") == solution)
             )
@@ -479,8 +483,8 @@ def run_fanout(skill: Any, input: SearchInput, ctx: SkillContext) -> SearchOutpu
         skill._attach_campaign_files(campaign_hits, ctx)
     case_target = (
         None
-        if drive_mode and is_comparison_query(input.query)
-        else case_query_target(input.query, asked_industry)
+        if drive_mode and is_comparison_query(intent)
+        else case_query_target(intent, asked_industry)
     )
     scope_target = case_target or (
         asked_industry
@@ -490,14 +494,14 @@ def run_fanout(skill: Any, input: SearchInput, ctx: SkillContext) -> SearchOutpu
     )
     if recovery is not None and not scope_target:
         # 緩和しても「X の資料」の X を落とさない（漢字の主題も含む）。
-        topic = re.match(r"^\s*([^の\s？?]{2,80}?)(?:の|って)", input.query)
+        topic = re.match(r"^\s*([^の\s？?]{2,80}?)(?:の|って)", intent)
         if topic:
             scope_target = case_query_target(f"{topic[1]}の事例")
     summary_hits = case_target_hits(hits, scope_target, soft_industry=drive_mode or counted_cases)
     if drive_mode:
-        summary_hits = drive_first.scope_hits(input.query, summary_hits, input.filter_doc_type)
+        summary_hits = drive_first.scope_hits(intent, summary_hits, input.filter_doc_type)
         extra["named"] = drive_first.scope_hits(
-            input.query, extra.get("named", []), input.filter_doc_type
+            intent, extra.get("named", []), input.filter_doc_type
         )
         seen = {hit.chunk_id for hit in summary_hits}
         summary_hits = [*summary_hits, *(h for h in extra["named"] if h.chunk_id not in seen)]
@@ -570,8 +574,8 @@ def run_fanout(skill: Any, input: SearchInput, ctx: SkillContext) -> SearchOutpu
             scope_target,
             soft_industry=drive_mode or counted_cases,
         )
-        other_hits = drive_first.scope_hits(input.query, other_hits, input.filter_doc_type)
-        if skill._judge_found(input.query, other_hits, probe).found:
+        other_hits = drive_first.scope_hits(intent, other_hits, input.filter_doc_type)
+        if skill._judge_found(intent, other_hits, probe).found:
             summary_hits = [*summary_hits, *other_hits]
             hits, found = summary_hits, True
         if slack.items:
@@ -621,7 +625,7 @@ def run_fanout(skill: Any, input: SearchInput, ctx: SkillContext) -> SearchOutpu
     )
     guard_header = (
         build_result_header(
-            query=input.query,
+            query=intent,
             hits=summary_hits,
             weak_threshold=skill._weak_result_threshold,
             query_client=client,
@@ -645,7 +649,7 @@ def run_fanout(skill: Any, input: SearchInput, ctx: SkillContext) -> SearchOutpu
     summary_ms = 0
     direct_mode = ctx.metadata.get("_search_direct_answer") is True
     direct_kind = (
-        skill._direct_answer_kind(input.query, summary_hits, asked_industry=asked_industry)
+        skill._direct_answer_kind(intent, summary_hits, asked_industry=asked_industry)
         if direct_mode and input.include_answer and found
         else None
     )
@@ -656,16 +660,16 @@ def run_fanout(skill: Any, input: SearchInput, ctx: SkillContext) -> SearchOutpu
         and found
         and input.include_answer
         and (
-            compact.explicit_list(input.query)
+            compact.explicit_list(intent)
             if compact_enabled
             else (
                 os.environ.get("SEARCH_FANOUT_LIST_FAST", "") == "1"
-                and classify_answer_mode(input.query) == "list"
+                and classify_answer_mode(intent) == "list"
             )
         )
-        and not is_comparison_query(input.query)
+        and not is_comparison_query(intent)
     )
-    if (drive_case_listing or is_case_list(input.query)) and found and input.include_answer:
+    if (drive_case_listing or is_case_list(intent)) and found and input.include_answer:
         list_fast = True
     if list_fast:
         head = LIST_FAST_HEAD
@@ -679,12 +683,12 @@ def run_fanout(skill: Any, input: SearchInput, ctx: SkillContext) -> SearchOutpu
                 if (
                     drive_mode
                     and compact_mode
-                    and classify_answer_mode(input.query) != "insight"
-                    and compact_comparison(input.query, summary_hits)[0]
+                    and classify_answer_mode(intent) != "insight"
+                    and compact_comparison(intent, summary_hits)[0]
                 ):
                     return "", 0.0, "ok"
                 answer, cost = skill._summarize(
-                    input.query,
+                    intent,
                     summary_hits,
                     ctx.request_id,
                     slack_items=slack.items,
@@ -721,9 +725,7 @@ def run_fanout(skill: Any, input: SearchInput, ctx: SkillContext) -> SearchOutpu
         summary_ms = int((time.perf_counter() - summary_started) * 1000)
         if summary_state != "ok" or (
             not head.strip()
-            and not (
-                drive_mode and compact_mode and compact_comparison(input.query, summary_hits)[0]
-            )
+            and not (drive_mode and compact_mode and compact_comparison(intent, summary_hits)[0])
         ):
             direct_kind = None
     compact_answer = ""
@@ -736,7 +738,7 @@ def run_fanout(skill: Any, input: SearchInput, ctx: SkillContext) -> SearchOutpu
             summary_hits,
             slack.items,
             lambda h: skill._hit_url(h, file_urls=file_urls),
-            query=input.query,
+            query=intent,
             asked_industry=asked_industry,
             karte_hits=karte.items,
             notice=guard_header,
@@ -748,7 +750,7 @@ def run_fanout(skill: Any, input: SearchInput, ctx: SkillContext) -> SearchOutpu
             drive_fallback = drive_mode and requested_limit is None
             if not drive_fallback:
                 compact_fallback_cards = compact.fallback_cards(
-                    input.query,
+                    intent,
                     summary_hits,
                     slack.items,
                     lambda h: skill._hit_url(h, file_urls=file_urls),
@@ -873,7 +875,7 @@ def run_fanout(skill: Any, input: SearchInput, ctx: SkillContext) -> SearchOutpu
         if recovery is not None
         else skill._weak_result_threshold,
         karte_client=client or "",
-        expand_subject=input.query,
+        expand_subject=intent,
         url_of=lambda h: skill._hit_url(h, file_urls=file_urls),
     )
     # 名指し一覧は関連度で落とさず先頭へ。資料種別はメタデータの値だけを書く。
@@ -893,7 +895,7 @@ def run_fanout(skill: Any, input: SearchInput, ctx: SkillContext) -> SearchOutpu
     sections = Sections(
         entries=grouped,
         karte_client=client or "",
-        expand_subject=input.query,
+        expand_subject=intent,
         timeline_lines={
             key: tuple(status.line for status in statuses if key in status.sections)
             for key in ("deal", "karte")
@@ -1014,11 +1016,11 @@ def run_fanout(skill: Any, input: SearchInput, ctx: SkillContext) -> SearchOutpu
                 answer = build_scoped_not_found_answer(case_target, scope=scope, complete=complete)
     case_listing = (
         drive_case_listing
-        or is_case_list(input.query)
+        or is_case_list(intent)
         or bool(compact_fallback_cards)
         or (requested_limit is not None and not compact_mode)
         or (
-            compact.explicit_list(input.query)
+            compact.explicit_list(intent)
             and (
                 any(i.hit.file_names or i.hit.file_ids for i in slack.items)
                 or any(
@@ -1052,7 +1054,7 @@ def run_fanout(skill: Any, input: SearchInput, ctx: SkillContext) -> SearchOutpu
             def summarize() -> tuple[str, float, LaneState]:
                 try:
                     text, cost = skill._summarize(
-                        input.query,
+                        intent,
                         selected,
                         ctx.request_id,
                         bedrock=skill._bedrock if recovery is not None else build_summary_client(),
@@ -1080,7 +1082,7 @@ def run_fanout(skill: Any, input: SearchInput, ctx: SkillContext) -> SearchOutpu
             drive_only=drive_case_listing and recovery is None and requested_limit is None,
             requested_count=requested_limit,
             asked_industry=asked_industry,
-            client=input.filter_client or client,
+            client=client or input.filter_client,
             summarize=summarize_points if counted_cases else None,
         )
         if displayed_refs is not None:
@@ -1226,7 +1228,7 @@ def run_fanout(skill: Any, input: SearchInput, ctx: SkillContext) -> SearchOutpu
         assert displayed_refs is not None
         if found and input.include_answer and not compact_mode and not case_listing and not visit:
             answer = compact.append_used_drive_links(
-                strip_advice(answer, input.query),
+                strip_advice(answer, intent),
                 [*summary_hits, *karte.items],
                 displayed_refs,
                 slack_items=slack.items,
@@ -1244,9 +1246,7 @@ def run_fanout(skill: Any, input: SearchInput, ctx: SkillContext) -> SearchOutpu
             *case_hits,
             *(drive_first.slack_hit(i, n) for n, i in enumerate(slack.items)),
         ]
-    if case_state_enabled(ctx.metadata.get("user_email")) and timeline_status.asks_status(
-        input.query
-    ):
+    if case_state_enabled(ctx.metadata.get("user_email")) and timeline_status.asks_status(intent):
         case_answer = timeline_status.render_case_states(state_hits if found or slack.items else [])
         if not complete:
             case_answer += "\n\n検索は一部未確認です。"
@@ -1255,7 +1255,7 @@ def run_fanout(skill: Any, input: SearchInput, ctx: SkillContext) -> SearchOutpu
         direct_kind = "case_state"
     elif found and input.include_answer and timeline_status.enabled():
         status = timeline_status.status_answer(
-            input.query,
+            intent,
             [*summary_hits, *karte.items],
             lambda h: skill._hit_url(h, file_urls=file_urls),
             displayed_refs,
@@ -1298,7 +1298,7 @@ def run_fanout(skill: Any, input: SearchInput, ctx: SkillContext) -> SearchOutpu
         suggested_next=None
         if case_listing or direct_kind == "case_state"
         else suggest_next_move(
-            query=input.query,
+            query=intent,
             found=found,
             slack_status=slack.status,
             slack_shown=len(slack.items),
