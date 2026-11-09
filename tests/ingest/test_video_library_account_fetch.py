@@ -176,9 +176,9 @@ def test_failed_batch_retries_success_updates_and_bad_items_are_counted(
         (False, 10, "0.79", 0),
         (False, 10, "0.80", 1),
         (False, 10, "0.84", 2),
-        (True, 30, "2.39", 0),
-        (True, 30, "2.40", 1),
-        (True, 30, "2.52", 2),
+        (True, 10, "0.79", 0),
+        (True, 10, "0.80", 1),
+        (True, 10, "0.84", 2),
     ],
 )
 def test_budget_uses_actual_spend_and_size_of_next_batch(
@@ -195,8 +195,8 @@ def test_budget_uses_actual_spend_and_size_of_next_batch(
     )
     client = MagicMock(spec=ApifyClient)
     client.run_actor_sync.side_effect = [
-        response(cost_usd=2.4 if initial else 0.8),
-        response(cost_usd=0.12 if initial else 0.04),
+        response(cost_usd=0.8),
+        response(cost_usd=0.04),
     ]
     result = fetch.run(pg, client, request_id="budget", now=NOW)  # type: ignore[arg-type]
     assert client.run_actor_sync.call_count == attempts
@@ -206,14 +206,14 @@ def test_budget_uses_actual_spend_and_size_of_next_batch(
         assert client.run_actor_sync.call_args.kwargs["max_items"] == per_account
 
 
-@pytest.mark.parametrize("cost_usd,attempts", [(0.05, 13), (0.25, 12), (0.8, 6)])
+@pytest.mark.parametrize("cost_usd,attempts", [(0.05, 13), (0.4, 11), (0.8, 6)])
 def test_260_accounts_incremental_first_and_stop_preserves_unfetched_checkpoints(
     enabled: None,
     monkeypatch: pytest.MonkeyPatch,
     cost_usd: float,
     attempts: int,
 ) -> None:
-    monkeypatch.delenv("VIDEO_LIBRARY_ACCOUNT_FETCH_MAX_USD")
+    monkeypatch.setenv("VIDEO_LIBRARY_ACCOUNT_FETCH_MAX_USD", "5.0")
     pg = FakePg(
         [
             {"handle": f"new{i:03}", "oldest": NOW.date().replace(month=1, day=1), "initial": True}
@@ -241,8 +241,8 @@ def test_260_accounts_incremental_first_and_stop_preserves_unfetched_checkpoints
         profiles = call.args[1]["profiles"]
         assert len(profiles) == 20
         assert all(h.startswith("new" if initial else "daily") for h in profiles)
-        assert call.args[1]["resultsPerPage"] == (30 if initial else 10)
-        assert call.kwargs["max_items"] == (600 if initial else 200)
+        assert call.args[1]["resultsPerPage"] == 10
+        assert call.kwargs["max_items"] == 200
         fetched.update(profiles)
     assert len(fetched) == attempts * 20
     assert pg.fetched == {
@@ -421,3 +421,15 @@ def test_main_configures_cover_storage_and_closes_http_client(
     assert storage_factory.call_count == int(bucket is not None)
     http_client.__exit__.assert_called_once()
     pg.close.assert_called_once()
+
+
+def test_default_budget_is_one_dollar_a_night(
+    enabled: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # 11/09: 「毎日全部取ったら金がかかる」— without an override a night stops at $1.
+    monkeypatch.delenv("VIDEO_LIBRARY_ACCOUNT_FETCH_MAX_USD", raising=False)
+    pg = FakePg([{"handle": f"a{i:02}", "oldest": NOW.date(), "initial": False} for i in range(60)])
+    client = MagicMock(spec=ApifyClient)
+    client.run_actor_sync.return_value = response(cost_usd=0.3)
+    result = fetch.run(pg, client, request_id="default-budget", now=NOW)  # type: ignore[arg-type]
+    assert client.run_actor_sync.call_count == 1 and result.reason == "cost_limit"
