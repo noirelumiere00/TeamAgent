@@ -1,10 +1,12 @@
 """mail_followup Skill の I/O スキーマ（Pydantic v2）。
 
-⚠️ 戻り値に生メール本文・生件名・生 From・生 messageId を含めないこと（G3）。
-件名は DLP マスク後・短縮、相手アドレスはマスク、messageId はハッシュのみ。
+戻り値は DLP 済みの件名・相手表示・依頼の要点のみ。本文全体は含めない。
+相手アドレスはマスクし、messageId はハッシュ参照と本人確認用リンクにだけ使う。
 """
 
 from __future__ import annotations
+
+from typing import Literal
 
 from pydantic import BaseModel, Field
 
@@ -26,6 +28,9 @@ class MailFollowupInput(BaseModel):
         examples=["花王", "アサヒ飲料", "森ビル"],
         description=("顧客/案件名のみ（不明は空、依頼断片・期間・状態は不可）。"),
     )
+    period: Literal["", "今日", "昨日", "今週", "先週", "今月"] = Field(
+        default="", description="JST暦日・月曜始まり。未指定はlookback_days。"
+    )
     lookback_days: int = Field(default=14, ge=1, le=90)
     idle_days: int | None = Field(default=None, ge=1, le=90)
     max_messages: int = Field(default=30, ge=1, le=50)
@@ -42,6 +47,10 @@ class FollowupItem(BaseModel):
         max_length=80,
         description="件名（DLP マスク後・短縮。生件名の貼り付け禁止）",
     )
+    counterpart_name: str = Field(default="", description="表示名（会社名・姓は判明分のみ）")
+    company_domain: str = Field(default="", description="会社名不明時の根拠ドメイン")
+    request_summary: str = Field(default="", max_length=120, description="依頼の要点1行（DLP済み）")
+    mail_url: str = Field(default="", description="本人のGmailスレッドへのリンク")
     idle_days: int = Field(ge=0, description="相手から最後に来てからの経過日数")
     occurred_at: str | None = Field(
         default=None,
