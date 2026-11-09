@@ -260,7 +260,14 @@ def test_setup_is_public_and_never_touches_the_database(
 
 
 @pytest.mark.parametrize(
-    "body", ["not-json", "[]", "null", '{"scope":"library:read","scope":"admin"}']
+    "body",
+    [
+        "not-json",
+        "[]",
+        "null",
+        '{"scope":"library:read","scope":"admin"}',
+        pytest.param("[" * 2000 + "0" + "]" * 2000, id="deep-json"),
+    ],
 )
 def test_registration_rejects_invalid_or_duplicate_json(client: TestClient, body: str) -> None:
     response = client.post("/register", content=body, headers={"Content-Type": "application/json"})

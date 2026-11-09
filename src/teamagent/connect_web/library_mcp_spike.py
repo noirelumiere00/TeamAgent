@@ -74,9 +74,9 @@ def _unique_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
 async def _bounded_request(request: Request) -> Request:
     body = bytearray()
     async for chunk in request.stream():
-        body.extend(chunk)
-        if len(body) > 16384:
+        if len(body) + len(chunk) > 16384:
             raise ValueError("Request is too large")
+        body.extend(chunk)
     delivered = False
 
     async def receive() -> dict[str, Any]:
@@ -376,7 +376,7 @@ def install_spike(
                     if not await provider.rate_limit("oauth:" + path, 1000):
                         return _error("temporarily_unavailable", 429)
                 return await handler(request)
-            except (ValueError, UnicodeError):
+            except (ValueError, UnicodeError, RecursionError):
                 return _error("invalid_request")
             except StoreUnavailableError:
                 return _error("temporarily_unavailable", 503)
