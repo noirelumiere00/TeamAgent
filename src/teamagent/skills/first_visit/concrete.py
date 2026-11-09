@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import math
 import os
 import shutil
@@ -15,13 +16,12 @@ import zipfile
 from pathlib import Path
 from typing import Literal
 
-import structlog
 from pydantic import BaseModel, Field
 
 from teamagent.skills.first_visit import contract
 from teamagent.skills.first_visit.kit import ARCHIVE, archive_kit_problems
 
-logger = structlog.get_logger(__name__)
+logger = logging.getLogger(__name__)
 
 
 class CliResult(BaseModel):
@@ -134,7 +134,11 @@ def _run(
         stderr = str(exc)
     elapsed = time.monotonic() - started
     logger.info(
-        "concrete_cli", request_id=request_id, stage=stage, elapsed_seconds=elapsed, returncode=code
+        "concrete_cli request_id=%s stage=%s elapsed_seconds=%.3f returncode=%s",
+        request_id,
+        stage,
+        elapsed,
+        code,
     )
     (work / f"{stage}.stdout").write_text(stdout, encoding="utf-8")
     (work / f"{stage}.stderr").write_text(stderr, encoding="utf-8")
