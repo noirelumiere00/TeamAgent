@@ -51,14 +51,24 @@ from teamagent.skills._shared.mail_connection import (
     resolve_gmail_for_user,
     searched_inbox_prefix,
 )
+from teamagent.skills._shared.mail_tasks import (
+    ball_request,
+    period_bounds,
+    period_query,
+    render_task,
+    task_item,
+)
 from teamagent.skills._shared.timefmt import jst_display_or_none, jst_iso_or_none
 from teamagent.skills._shared.user_context import USER_CONTEXT_RULE
 from teamagent.skills.base import BaseSkill, SkillContext, register
+from teamagent.skills.mail_followup.schema import FollowupItem
+from teamagent.skills.mail_followup.skill import _dedupe_refs_by_thread, _list_inbox_refs
 from teamagent.skills.mail_summary.schema import (
     MailHighlight,
     MailSummaryInput,
     MailSummaryOutput,
 )
+from teamagent.skills.morning_digest.calendar_window import now_jst
 
 logger = structlog.get_logger(__name__)
 
@@ -116,6 +126,7 @@ class MailSummarySkill(BaseSkill[MailSummaryInput, MailSummaryOutput]):
     name: ClassVar[str] = "mail_summary"
     description: ClassVar[str] = (
         "指定顧客・案件のメール内容を横断要約（読み取りのみ、生本文なし）。"
+        "ボールの所在・相手待ち/自分待ちの書き出しはmode='ball'（期間はperiod）。"
         "要返信・返信漏れはmail_followup、空き時間はcalendar_freebusy、"
         "予定一覧はcalendar_freebusy(mode='agenda')。"
         "client_nameに依頼文の断片は入れず、不明なら空にして呼ぶ。"
@@ -132,12 +143,14 @@ class MailSummarySkill(BaseSkill[MailSummaryInput, MailSummaryOutput]):
         bedrock: Any | None = None,
         max_body_chars: int = 2000,
         summary_max_tokens: int = 900,
+        now_ms: int | None = None,
     ) -> None:
         self._token_store = token_store
         self._gmail = gmail
         self._bedrock = bedrock
         self._max_body_chars = max_body_chars
         self._summary_max_tokens = summary_max_tokens
+        self._now_ms = now_ms
 
     @google_connection_guard(
         lambda input: MailSummaryOutput(client_name=input.client_name, scanned_count=0)
@@ -181,6 +194,9 @@ class MailSummarySkill(BaseSkill[MailSummaryInput, MailSummaryOutput]):
                 message=e.message,
                 connection="",
             )
+
+        if input.mode == "ball":
+            return self._ball(gmail, input, ctx, requester, log)
 
         # P0-2: client_name が依頼文の断片（「今日のメール」等）や空なら、**Gmail を
         # 1 回も叩かずに**案内文を返す。無検査で通すと '"今日のメール"' という完全一致
@@ -323,6 +339,66 @@ class MailSummarySkill(BaseSkill[MailSummaryInput, MailSummaryOutput]):
         )
 
     # ── 検索（G5・二段検索）────────────────────────────────────────────────
+
+    def _ball(
+        self,
+        gmail: GmailClient,
+        input: MailSummaryInput,
+        ctx: SkillContext,
+        requester: str,
+        log: Any,
+    ) -> MailSummaryOutput:
+        verdict = classify_client_name(input.client_name)
+        term = to_gmail_phrase(verdict.normalized) if verdict.verdict == "ok" else ""
+        now_ms = self._now_ms if self._now_ms is not None else int(now_jst().timestamp() * 1000)
+        window = period_query(input.period, input.lookback_days, now_ms)
+        try:
+            refs, has_more = _list_inbox_refs(
+                gmail, f"{term} {window}".strip(), ctx.request_id, cap=300
+            )
+            unique = _dedupe_refs_by_thread(refs)
+            inspected = unique[: input.max_messages]
+            external: list[FollowupItem] = []
+            own: list[FollowupItem] = []
+            for ref in inspected:
+                thread = gmail.get_thread(ref.thread_id, ctx.request_id, format="full")
+                classified = ball_request(
+                    thread, requester, period_bounds(input.period, input.lookback_days, now_ms)
+                )
+                if classified is None:
+                    continue
+                anchor, outgoing = classified
+                item = task_item(anchor, requester, now_ms, outgoing=outgoing)
+                (external if outgoing else own).append(item)
+        except Exception as exc:
+            return self._api_failure(
+                exc,
+                log=log,
+                client_display=safe_client_name(input.client_name),
+                inbox=_mask_email(requester),
+            )
+        lines = [f"対象期間: {input.period or f'直近{input.lookback_days}日'}（JST）"]
+        for title, items in (
+            ("相手待ち（相手にボール・社外）", external),
+            ("自分待ち（自社にボール）", own),
+        ):
+            lines.append(f"{title}: {len(items)}件")
+            lines.extend(f"・{render_task(item)}" for item in items)
+        lines.append(
+            "※ 最後の発言の依頼・質問・期限で判定。"
+            "代理店のドメイン名寄せがないため社外と表示します。本文は要点のみです。"
+        )
+        if has_more or len(inspected) < len(unique):
+            lines.append("※ 確認件数の上限に達しました。未確認のスレッドがあります。")
+        return MailSummaryOutput(
+            client_name=safe_client_name(verdict.normalized) if verdict.verdict == "ok" else "",
+            summary="\n".join(lines),
+            waiting_on_external=external,
+            waiting_on_self=own,
+            scanned_count=len(inspected),
+            inbox_owner_masked=_mask_email(requester),
+            connection=CONNECTION_LIVE,
+        )
 
     def _search(
         self,

@@ -107,7 +107,9 @@ def render(
     cards: bool = False,
     drive_only: bool = False,
     max_cases: int = 5,
+    requested_count: int | None = None,
 ) -> str:
+    max_cases = requested_count or max_cases
     lines: list[str] = []
     separator = (
         "\n\n"
@@ -140,6 +142,13 @@ def render(
         if ref is not None:
             url = _safe_url(ref.url)
             link_label = drive_first.label(ref)
+            if requested_count is not None:
+                if ref.kind in {"drive", "slack_attachment", "slack_conversation"}:
+                    label = "会話の記録" if ref.kind == "slack_conversation" else "資料を見る"
+                    if not case_link(url, label):
+                        continue
+                else:
+                    ref = None
         if not url and ref is None:
             url = next(
                 (
@@ -153,6 +162,8 @@ def render(
         key = (entry.document_id or url or "", entry.title)
         if ref is not None and ref.drive_file_id:
             key = (ref.drive_file_id, entry.title if entry.kind == "case" else "")
+        if requested_count is not None and url:
+            key = (url, entry.title if entry.kind == "case" else "")
         if (not url and ref is None) or key in seen or entry.kind in {"karte", "research"}:
             continue
         seen.add(key)
@@ -193,14 +204,17 @@ def render(
                 f"{_clean(entry.title, 100)}（{entry.date or '日付不明'}）— "
                 f"{detail.strip()} {_link(link_label, url)}"
             )
-        if len(separator.join([*lines, line])) > 2500:
+        if requested_count is None and len(separator.join([*lines, line])) > 2500:
             continue
         lines.append(line)
         if displayed_refs is not None and ref is not None:
             displayed_refs.append(ref)
         if len(lines) == max_cases:
             break
-    return separator.join(lines)
+    answer = separator.join(lines)
+    if lines and requested_count is not None and len(lines) < requested_count:
+        answer += f"\n\n見つかったのは {len(lines)} 件です。"
+    return answer
 
 
 def slack_cases(items: Sequence[SlackItem], *, drive_only: bool = False) -> list[SearchHit]:

@@ -8,7 +8,7 @@ EventBridge cron (平日 0:30 UTC = 9:30 JST) が ECS RunTask で本スクリプ
   3. 結果を Slack DM（Block Kit）で本人に配信
   4. CloudWatch Logs に JSON 構造化ログで結果サマリ出力
   5. 祝日スキップ（MORNING_DIGEST_HOLIDAY_SKIP・既定 OFF）が ON なら、祝日・会社休日は
-     DM を送らず、祝日明けはメールの走査範囲を広げる
+     DM を送らず、希望した人の予定リマインドだけ登録し、祝日明けはメールの走査範囲を広げる
 
 ⚠️ 安全規則:
   - 生メール本文・生件名・生 From を一切ログに出さない（masked のみ）
@@ -1709,6 +1709,79 @@ def _load_prefs(store: Any | None, email: str, request_id: str) -> _prefs.Digest
     return _prefs.load_preferences(store, email, request_id=request_id)
 
 
+def _reminders_enabled() -> bool:
+    """MORNING_DIGEST_REMINDERS=1 のときのみ予定リマインドを登録（既定OFF・§10 E1-2）。"""
+    return os.environ.get("MORNING_DIGEST_REMINDERS", "").strip().lower() in {"1", "true", "yes"}
+
+
+def _schedule_event_reminders(
+    digest: Any,
+    im_channel: str,
+    prefs: _prefs.DigestPreferences = _prefs.DEFAULT_PREFERENCES,
+) -> int:
+    """当日予定の「開始 N 分前」リマインドを EventBridge Scheduler に登録する（v0.3 Task5）。
+
+    - 対象: start_at が「今から lead+1 分より先」の予定のみ（過ぎた/直近すぎる予定は skip）
+    - 終日予定（date のみ）は対象外
+    - payload に short title（≤60字）を載せる（2026-07-14・本人の予定を本人 DM に出す用途に
+      限定。「何の予定か分からない」の解消・ユーザー要望）。Lambda はタイトルをログに出さない
+    - schedule 名は channel×開始時刻から決定的＝再実行でも二重登録しない（Conflict→成功扱い）
+    - 本人の設定（digest_settings）: 明示の opt-in が無い人は 1 件も登録しない／何分前かの上書き／
+      予定名に除外語を含む予定（例「タスク」）は登録しない
+    """
+    if not _reminders_enabled() or not prefs.reminders_opt_in:
+        return 0
+    from teamagent.adapters.scheduler_client import SchedulerClient
+
+    try:
+        scheduler = SchedulerClient.from_env()
+    except ValueError as exc:
+        print(f"[run_morning_digest_fargate] WARN: reminder 設定不備 {exc}", file=sys.stderr)
+        return 0
+    lead_min = prefs.reminder_lead()
+
+    # 壁時計は calendar_window.now_jst（skill の取得窓と同じ時刻源・テストで固定できる）。
+    now = _calwin.now_jst()
+    count = 0
+    for ev in list(getattr(digest, "calendar_events", []) or []):
+        start_iso = str(getattr(ev, "start_at", "") or "")
+        # 終日は API 由来フラグを優先（"…T00:00:00Z" 形の終日を時刻付きと誤認しない）。
+        if bool(getattr(ev, "all_day", False)) or "T" not in start_iso:
+            continue  # 終日 or 不明
+        start = _calwin.parse_jst_datetime(start_iso)  # naive は JST とみなす（UTC 誤解釈防止）
+        if start is None:
+            continue
+        # 除外語は表示名（生タイトル）で照合する（本人が見ている名前で「タスク」と言っている）。
+        raw_title = str(
+            getattr(ev, "summary_display", "") or getattr(ev, "summary_scrubbed", "") or ""
+        )
+        if not prefs.reminder_allowed(
+            raw_title, personal_block=bool(getattr(ev, "personal_block", False))
+        ):
+            continue
+        fire_at = start - _dt.timedelta(minutes=lead_min)
+        if fire_at <= now + _dt.timedelta(minutes=1):
+            continue  # もう間に合わない/過去の予定
+        url = str(getattr(ev, "meeting_url", "") or "") or _CALENDAR_URL
+        # 本人の予定タイトル（本人 DM 表示用の display）。空なら通知は従来どおり無題で成立。
+        title = str(getattr(ev, "summary_display", "") or getattr(ev, "summary_scrubbed", "") or "")
+        ok = scheduler.schedule_reminder(
+            channel=im_channel,
+            start_iso=start_iso,
+            fire_at=fire_at,
+            url=url,
+            request_id=f"reminder-{uuid.uuid4().hex[:8]}",
+            title=title,
+            end_iso=str(getattr(ev, "end_at", "") or ""),
+            location=str(
+                getattr(ev, "location_display", "") or getattr(ev, "location_scrubbed", "") or ""
+            ),
+        )
+        if ok:
+            count += 1
+    return count
+
+
 async def _deliver_to_slack(
     user_email: str, text: str, blocks: list[dict[str, Any]]
 ) -> tuple[bool, str | None]:
@@ -1791,6 +1864,30 @@ async def _open_im_channel(slack: Any, user_id: str) -> str | None:
             file=sys.stderr,
         )
         return None
+
+
+async def _open_dm_channel(user_email: str) -> str | None:
+    """本人 DM の channel を **開くだけ**（何も投稿しない）。祝日の予定リマインド登録用。
+
+    ⚠️ 1 対 1 の DM（D 始まり）以外は使わない。チャンネル（C/G）へリマインドを向けない。
+    """
+    from teamagent.adapters.slack_client import SlackClient
+
+    try:
+        slack = SlackClient.from_env()
+    except Exception as exc:
+        print(
+            f"[run_morning_digest_fargate] WARN: SlackClient.from_env 失敗 {type(exc).__name__}",
+            file=sys.stderr,
+        )
+        return None
+    user_id = await _email_to_slack_user_id(slack, user_email)
+    if not user_id:
+        return None
+    channel = await _open_im_channel(slack, user_id)
+    if not channel or not channel.startswith("D"):
+        return None
+    return channel
 
 
 # ===========================================================================
@@ -2081,7 +2178,7 @@ def _digest_day() -> _dt.date:
 # ===========================================================================
 # ON のとき:
 #   - 祝日（内閣府の表）と会社休日（MORNING_DIGEST_EXTRA_SKIP_DATES）は skill.run を呼ばず
-#     DM も送らない。
+#     DM も送らない。希望した人の予定リマインドだけ登録する。
 #   - 祝日明けはメールの走査範囲を「前の配信日から今日まで」に広げる（最低 3 日）。
 #   - 表の期限の 60 日前から / 範囲外の日は jp_holiday_table_stale を出す（配信は止めない）。
 # OFF のとき: 表を 1 度も見ない・MorningDigestInput も今と同じ＝現行動作と 1 バイトも変わらない。
@@ -2121,21 +2218,87 @@ def _warn_if_holiday_table_stale(day: _dt.date) -> bool:
     return True
 
 
+def _register_holiday_reminders(
+    skill: Any,
+    skill_input: Any,
+    email: str,
+    prefs: _prefs.DigestPreferences = _prefs.DEFAULT_PREFERENCES,
+) -> tuple[str, int]:
+    """祝日の 1 人分: 予定を取ってリマインドだけ登録する（DM は送らない）。
+
+    返り値 (状態, 登録数)。状態は "reminded" / "skipped"（未連携・予定なし）/ "error"。
+    例外は内側で封じ込める（1 人の失敗で全体を落とさない・ログはマスク済みのみ）。
+    """
+    from teamagent.skills.base import SkillContext
+    from teamagent.skills.morning_digest.schema import MorningDigestOutput
+
+    if not _reminders_enabled() or not prefs.reminders_opt_in:
+        return ("skipped", 0)  # 本人がリマインドを止めている（予定も取りに行かない）
+    ctx = SkillContext(
+        request_id=f"morning-holiday-{uuid.uuid4().hex[:8]}", metadata={"user_email": email}
+    )
+    try:
+        events = skill.collect_calendar_events(skill_input, ctx)
+    except PermissionError:
+        return ("skipped", 0)  # 未連携
+    except Exception as exc:
+        print(
+            f"[run_morning_digest_fargate] WARN: {_mask_email(email)} 祝日の予定取得失敗 "
+            f"{type(exc).__name__}",
+            file=sys.stderr,
+        )
+        return ("error", 0)
+    if not events:
+        return ("skipped", 0)
+    try:
+        im_channel = asyncio.run(_open_dm_channel(email))
+    except Exception as exc:
+        print(
+            f"[run_morning_digest_fargate] WARN: {_mask_email(email)} 祝日の DM 解決失敗 "
+            f"{type(exc).__name__}",
+            file=sys.stderr,
+        )
+        im_channel = None
+    if not im_channel:
+        return ("error", 0)
+    holder = MorningDigestOutput(user_email_masked=_mask_email(email), calendar_events=events)
+    try:
+        n = _schedule_event_reminders(holder, im_channel, prefs)
+    except Exception as exc:
+        print(
+            f"[run_morning_digest_fargate] WARN: reminder 登録失敗 {type(exc).__name__}",
+            file=sys.stderr,
+        )
+        return ("error", 0)
+    return ("reminded", n)
+
+
 def _run_holiday(users: list[str], day: _dt.date, reason: str) -> int:
-    """祝日・会社休日の実行: ダイジェストを送らずスキップを記録する。"""
+    """祝日・会社休日の実行: ダイジェストは誰にも送らず、予定リマインドだけ登録する。"""
     from teamagent import jp_holidays
 
+    reminders_on = _reminders_enabled()
+    counts = {"reminded": 0, "reminders": 0, "skipped": 0, "errors": 0}
+    if reminders_on:
+        from teamagent.skills.morning_digest.schema import MorningDigestInput
+        from teamagent.skills.morning_digest.skill import MorningDigestSkill
+
+        skill = MorningDigestSkill(token_store=_build_token_store())
+        skill_input = MorningDigestInput()
+        prefs_store = _preferences_store()
+        for email in users:
+            prefs = _load_prefs(prefs_store, email, f"morning-holiday-{uuid.uuid4().hex[:8]}")
+            state, n = _register_holiday_reminders(skill, skill_input, email, prefs)
+            counts[{"reminded": "reminded", "skipped": "skipped"}.get(state, "errors")] += 1
+            counts["reminders"] += n
     # ⚠️ 件数のみ。メールアドレス・予定のタイトルは出さない。
     summary = {
         "day": day.isoformat(),
         "reason": reason,
         "holiday": jp_holidays.holiday_name(day) or "",
         "users": len(users),
-        "reminders_enabled": False,
-        "reminded": 0,
-        "reminders": 0,
-        "skipped": 0,
-        "errors": 0,
+        "reminders_enabled": reminders_on,
+        **counts,
     }
     logger.info("morning_digest_holiday_skip", **summary)
     print(
@@ -2585,7 +2748,7 @@ def _process_user(
             text, blocks = _format_block_kit_compact(digest, email, prefs)
         else:
             text, blocks = _format_block_kit(digest, email)
-        delivered, _im_channel = asyncio.run(_deliver_to_slack(email, text, blocks))
+        delivered, im_channel = asyncio.run(_deliver_to_slack(email, text, blocks))
     except Exception as exc:
         print(
             f"[run_morning_digest_fargate] WARN: {_mask_email(email)} 配信失敗 "
@@ -2597,6 +2760,18 @@ def _process_user(
         return _done("error", "deliver_failed", digest, error=type(exc).__name__)
     if delivered:
         digest.delivered = True
+        # v0.3 Task5: 当日予定の開始前リマインドをワンタイム登録（flag 既定OFF・fail-open＝
+        # 登録失敗してもダイジェスト配信の成功は変えない）。
+        if im_channel and _reminders_enabled() and prefs.reminders_opt_in:
+            try:
+                n = _schedule_event_reminders(digest, im_channel, prefs)
+                if n:
+                    print(f"[run_morning_digest_fargate] reminders scheduled: {n}", flush=True)
+            except Exception as exc:
+                print(
+                    f"[run_morning_digest_fargate] WARN: reminder 登録失敗 {type(exc).__name__}",
+                    file=sys.stderr,
+                )
         return _done("delivered", "", digest)
     if store is not None:
         # Slack が受け付けなかった（未解決・DM 不可等）＝送れていないので印を戻す。
@@ -2693,7 +2868,7 @@ def main() -> int:
         _warn_if_holiday_table_stale(day)
         holiday_reason = holiday_cal.holiday_reason(day)
         if holiday_reason is not None:
-            # 祝日・会社休日: skill.run を呼ばず DM も送らない。
+            # 祝日・会社休日: skill.run を呼ばず、希望した人の予定リマインドだけ登録する。
             return _run_holiday(users, day, holiday_reason)
         lookback_days = holiday_cal.mail_lookback_days(day)
         logger.info(

@@ -47,12 +47,19 @@ class DigestSettingsInput(BaseModel):
     limit_slack: int | None = Field(default=None, description="1〜8件。")
     limit_calendar: int | None = Field(default=None, description="1〜15件。")
     auto_drafts: bool | None = Field(default=None)
-    reminders: bool | None = Field(default=None)
-    reminder_lead_minutes: int | None = Field(default=None)
-    reminder_personal_blocks: bool | None = Field(default=None)
+    reminders: bool | None = Field(
+        default=None, description="明示の希望のみtrue、不要ならfalse。既定OFF。"
+    )
+    reminder_lead_minutes: int | None = Field(
+        default=None, description="1〜60分前。希望のONとは別。"
+    )
+    reminder_personal_blocks: bool | None = Field(
+        default=None, description="ゲスト・会議リンクなしの作業枠も通知するか。"
+    )
     reminder_skip_add: list[str] | None = Field(
         default=None,
         max_length=MAX_SKIP_KEYWORDS,
+        description="予定名に含むと通知を除外する語を追加。",
     )
     reminder_skip_remove: list[str] | None = Field(default=None, max_length=MAX_SKIP_KEYWORDS)
 
@@ -63,7 +70,5 @@ class DigestSettingsOutput(BaseModel):
     error: str = Field(
         default="",
         max_length=32,
-        description=(
-            '"" / "dm_only" / "no_change" / "invalid" / "unavailable" / "conflict" / "store_failed"'
-        ),
+        description=('"" / "dm_only" / "no_change" / "invalid" / "conflict" / "store_failed"'),
     )
