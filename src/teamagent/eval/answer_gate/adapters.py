@@ -63,6 +63,8 @@ class Fixtures:
                 metadata={
                     "title": r["title"],
                     "source_uri": r["url"],
+                    # 本番の金庫ヒットと同じく Drive の資料は drive_url を持つ。
+                    **({"drive_url": r["url"]} if r["source_type"] == "gdrive" else {}),
                     "document_id": r["item_id"],
                     "source_type": r["source_type"],
                     "case_corpus": r.get("case_corpus", "false"),
