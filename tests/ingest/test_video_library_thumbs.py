@@ -265,3 +265,18 @@ def test_a_real_page_without_cover_is_not_a_challenge() -> None:
     )
     assert not page_is_challenge(real)
     assert page_is_challenge("<html><title>Security Check</title>captcha verify to continue</html>")
+
+
+def test_real_pages_without_cover_do_not_pause_fetching() -> None:
+    # Deleted/private posts still ship the rehydration data; five in a row must not stop the run.
+    real_no_cover = (
+        '<script id="__UNIVERSAL_DATA_FOR_REHYDRATION__" type="application/json">'
+        '{"__DEFAULT_SCOPE__":{"webapp.video-detail":{"statusCode":10204}}}</script>'
+    )
+    pg = Pg(6)
+    storage = MagicMock()
+    with httpx.Client(
+        transport=httpx.MockTransport(lambda r: httpx.Response(200, text=real_no_cover))
+    ) as client:
+        counts = thumbs.fill_thumbnails(pg, storage, client, limit=6, sleep=lambda _: None)
+    assert counts == {"attempted": 6, "cover_missing": 6}
