@@ -19,6 +19,8 @@ import re
 import unicodedata
 from typing import Literal
 
+from teamagent.skills._shared.input_policy import requested_item_count
+
 AnswerMode = Literal["fact", "list", "insight"]
 
 # 洞察（パターン抽出・打ち手）を明示的に求める言い回し。
@@ -56,6 +58,7 @@ _LIST_RE = re.compile(
     # 「施策実績」だけでは列挙を求めていない。名詞止めは対象付きに限る。
     r"\S[^\n]*の[^\n]*(?:案件|施策|事例|実績)\s*[？?。]?\s*$|どんな(?:案件|施策|事例|実績)"
 )
+_COUNTED_MATERIAL = re.compile(r"事例|案件|施策|実績|資料|提案書|レポート|スライド|ファイル")
 
 
 def classify_answer_mode(query: str) -> AnswerMode:
@@ -63,9 +66,22 @@ def classify_answer_mode(query: str) -> AnswerMode:
     text = unicodedata.normalize("NFKC", query or "")
     if _INSIGHT_RE.search(_DOC_NAME_NOUN_RE.sub("", text)):
         return "insight"
-    if _LIST_RE.search(text):
+    if _LIST_RE.search(text) or (_COUNTED_MATERIAL.search(text) and requested_item_count(text)):
         return "list"
     return "fact"
+
+
+def requested_count(query: str) -> int | None:
+    """事例・資料の列挙にだけ件数を適用し、洞察・比較の回答は変えない。"""
+    from teamagent.skills.search.comparison import is_comparison_query
+
+    if (
+        not _COUNTED_MATERIAL.search(query)
+        or classify_answer_mode(query) != "list"
+        or is_comparison_query(query)
+    ):
+        return None
+    return requested_item_count(query)
 
 
 def is_case_list(query: str) -> bool:
