@@ -183,6 +183,7 @@ def render(
             key = (url, entry.title if entry.kind == "case" else "")
         case_key = ""
         if summarize is not None:
+            assert ref is not None  # summarize ありで ref なしは上で continue 済み
             # 同じ資料はIDで、別資料になった同じ案件は取引先＋施策名でまとめる。
             key = (ref.drive_file_id or ref.slack_file_id or url or entry.document_id or "", "")
             project = meta.get("campaign") or meta.get("case_product") or meta.get("case_brand")
