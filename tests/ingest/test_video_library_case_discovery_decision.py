@@ -42,10 +42,18 @@ class DecisionPg(FakePg):
         self.campaigns: dict[tuple[str, str], dict[str, str]] = {}
         self.fail_insert = False
         self.stale = False
+        self.internal_clients: list[dict[str, Any]] = []
+        self.internal_failure = False
+        self.internal_queries = 0
 
     def execute(self, sql: str, params: tuple[Any, ...] = ()) -> MagicMock:
         cursor = MagicMock(rowcount=1)
-        if "SELECT DISTINCT COALESCE" in sql:
+        if "FROM documents d" in sql:
+            self.internal_queries += 1
+            if self.internal_failure:
+                raise RuntimeError("private client/caption/URL")
+            cursor.fetchall.return_value = self.internal_clients
+        elif "SELECT DISTINCT COALESCE" in sql:
             cursor.fetchall.return_value = [
                 dict(advertiser=a, campaign=c) for a, c in self.campaigns
             ]

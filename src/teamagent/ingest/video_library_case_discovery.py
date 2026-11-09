@@ -24,6 +24,7 @@ from pydantic import BaseModel, Field, field_validator
 from teamagent.adapters.apify_client import ACTOR_TIKTOK_VIDEO, ApifyClient
 from teamagent.adapters.bedrock_client import BedrockClient
 from teamagent.adapters.pgvector_client import PgVectorClient
+from teamagent.identity import shared_company_domains_from_env
 from teamagent.ingest.video_library import video_identity
 from teamagent.ingest.video_library_case_inference import (
     BudgetExceededError,
@@ -150,7 +151,7 @@ class DiscoveryDecision(StrictModel):
     decision: Literal["new", "existing", "unknown"]
     advertiser: str | None
     campaign: str | None
-    advertiser_source: Literal["text", "knowledge"] | None
+    advertiser_source: Literal["text", "knowledge", "internal"] | None
     confidence: Score
     evidence: list[str] = Field(max_length=10)
 
@@ -164,7 +165,85 @@ class DiscoveryInference(Inference):
     def predict_cluster(self, data: DiscoveryInput, *, request_id: str) -> DiscoveryDecision:
         text = self._response(data, load_prompt("case_discovery", "v1", "system"), request_id)
         fenced = _FENCE.match(text)
-        return DiscoveryDecision.model_validate_json(fenced.group(1) if fenced else text)
+        prediction = DiscoveryDecision.model_validate_json(fenced.group(1) if fenced else text)
+        if prediction.advertiser_source == "internal":
+            raise ValueError("internal_source_requires_documents")
+        return prediction
+
+
+class InternalClient(BaseModel):
+    client_name: str
+    document_count: int = Field(ge=1)
+
+
+def internal_client_key(name: str) -> str:
+    key = unicodedata.normalize("NFKC", name).strip()
+    while True:
+        stripped = re.sub(r"^(?:株式会社|\(株\))|(?:株式会社|\(株\))$", "", key).strip()
+        if stripped == key:
+            return key
+        key = stripped
+
+
+def lookup_internal_clients(
+    pg: PgVectorClient,
+    campaign: str | None,
+    tag: str,
+    *,
+    request_id: str,
+) -> list[InternalClient]:
+    terms = list(dict.fromkeys(term.strip() for term in (campaign or "", tag) if term.strip()))
+    if not terms:
+        return []
+    patterns = [f"%{PgVectorClient._escape_like(term)}%" for term in terms]
+    try:
+        with pg.connection(
+            app_role="teamagent_app",
+            user_email=None,
+            user_role="admin",
+            user_groups=sorted(shared_company_domains_from_env() or ()),
+        ) as conn:
+            # A failed optional lookup must not poison a caller's enclosing transaction.
+            with conn.transaction():
+                rows = conn.execute(
+                    r"""SELECT client_name,count(*) AS document_count FROM (
+                        SELECT coalesce(nullif(btrim(d.metadata->>'client_name'),''),
+                                        nullif(btrim(d.metadata->>'cls_project'),'')) AS client_name
+                        FROM documents d
+                        WHERE d.metadata->>'x_research_tool' IS NULL AND EXISTS (
+                            SELECT 1 FROM unnest(%s::text[]) AS terms(pattern)
+                            WHERE d.title ILIKE pattern ESCAPE '\'
+                            OR EXISTS (SELECT 1 FROM chunks c WHERE c.document_id=d.id
+                                       AND c.content ILIKE pattern ESCAPE '\')
+                        )
+                    ) matched WHERE client_name IS NOT NULL
+                    GROUP BY client_name ORDER BY document_count DESC,client_name LIMIT 5""",
+                    (patterns,),
+                ).fetchall()
+                return [InternalClient.model_validate(row) for row in rows]
+    except Exception:
+        logger.info("case_discovery_internal_lookup_failed", request_id=request_id, failures=1)
+        return []
+
+
+def select_internal_advertiser(matches: list[InternalClient], cases: list[Case]) -> str | None:
+    counts: Counter[str] = Counter()
+    for match in sorted(matches, key=lambda m: (-m.document_count, m.client_name)):
+        key = internal_client_key(match.client_name)
+        if key:
+            counts[key] += match.document_count
+    ranked = counts.most_common()
+    if not ranked or ranked[0][1] < 2 or (len(ranked) > 1 and ranked[0][1] < 2 * ranked[1][1]):
+        return None
+    winner = ranked[0][0]
+    return next(
+        (
+            name
+            for name in sorted({c.advertiser for c in cases})
+            if internal_client_key(name) == winner
+        ),
+        winner,  # 株式会社 etc. stripped, matching the ledger's short names (東洋水産・OVER's)
+    )
 
 
 def decision_status(prediction: DiscoveryDecision, data: DiscoveryInput) -> Status:
@@ -473,7 +552,16 @@ def _save_decision(
     prediction: DiscoveryDecision | None,
     status: Status,
     attempted_at: datetime,
+    internal_clients: list[InternalClient] | None = None,
 ) -> bool:
+    evidence = Jsonb(prediction.evidence) if prediction else None
+    if prediction and internal_clients:
+        evidence = Jsonb(
+            {
+                "quotes": prediction.evidence,
+                "internal_clients": [match.model_dump() for match in internal_clients],
+            }
+        )
     with pg.connection(app_role="teamagent_app", user_email=None, user_role="admin") as conn:
         saved = conn.execute(
             """UPDATE vl_case_discovery SET status=%s,advertiser=%s,campaign=%s,
@@ -484,7 +572,7 @@ def _save_decision(
                 prediction.advertiser if prediction else None,
                 prediction.campaign if prediction else None,
                 prediction.confidence if prediction else None,
-                Jsonb(prediction.evidence) if prediction else None,
+                evidence,
                 data.tag,
                 attempted_at,
             ),
@@ -526,15 +614,23 @@ def decide(
     for row in rows:
         data = DiscoveryInput(tag=row["tag"], samples=row["samples"], existing_cases=cases)
         prediction = None
+        internal_clients: list[InternalClient] = []
         try:
             prediction = inference.predict_cluster(data, request_id=request_id)
+            matches = lookup_internal_clients(
+                pg, prediction.campaign, data.tag, request_id=request_id
+            )
+            if advertiser := select_internal_advertiser(matches, cases):
+                prediction.advertiser = advertiser
+                prediction.advertiser_source = "internal"
+                internal_clients = matches
             status = decision_status(prediction, data)
         except BudgetExceededError:
             counts["budget_stop"] += 1
             break
         except Exception:
             status = "failed"
-        if not _save_decision(pg, data, prediction, status, row["attempted_at"]):
+        if not _save_decision(pg, data, prediction, status, row["attempted_at"], internal_clients):
             counts["stale"] += 1
             continue
         counts[status] += 1
@@ -551,6 +647,8 @@ def decide(
             request_id=request_id,
             tag=data.tag,
             counts={status: 1},
+            advertiser_source=prediction.advertiser_source if prediction else None,
+            internal_documents=sum(match.document_count for match in internal_clients),
             cost_usd=inference.cost_usd,
             reserved_usd=inference.reserved_usd,
         )

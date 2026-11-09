@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterator
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from copy import deepcopy
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -53,6 +53,8 @@ class FakePg:
 
     @contextmanager
     def connection(self, **kwargs: Any) -> Iterator[FakePg]:
+        if "user_groups" in kwargs:
+            assert isinstance(kwargs.pop("user_groups"), list)
         assert kwargs == {"app_role": "teamagent_app", "user_email": None, "user_role": "admin"}
         before = deepcopy(self.rows)
         self.in_connection = True
@@ -63,6 +65,9 @@ class FakePg:
             raise
         finally:
             self.in_connection = False
+
+    def transaction(self) -> nullcontext[None]:
+        return nullcontext()
 
     def execute(self, sql: str, params: tuple[Any, ...] = ()) -> MagicMock:
         cursor = MagicMock()
