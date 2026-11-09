@@ -224,11 +224,12 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
 
     name: ClassVar[str] = "search"
     description: ClassVar[str] = (
-        "資料の検索・列挙、単価・CPV・CPM・あたり・合計・差のコード計算（式・出典付き）。"
-        "既知の取引先・施策の動画実績や効果もまずsearch。"
-        "新規の市場・競合動画はvideo_algorithm。"
-        "日付はupdated_at（更新日）/title_date（資料名の日付）/date_basisの返値のみ。"
-        "date_basis=noneは日付なし"
+        "提案書・議事録・メールを探して/列挙する窓口。"
+        "既知の取引先・施策の動画ごとの結果や何が効いたかは、まず search で"
+        "施策実績・動画ごとの数字・資料を探す。"
+        "新規の市場・競合動画は video_algorithm。"
+        "日付は updated_at（更新日）/ title_date（資料名の日付）/ date_basis の返値のみ。"
+        "date_basis=none は日付なし"
     )
     input_schema: ClassVar[type[BaseModel]] = SearchInput
     output_schema: ClassVar[type[BaseModel]] = SearchOutput
