@@ -6,7 +6,8 @@ G3 マスク / G5 クエリ限定）と放置日数・並び順・返信済み�
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+import base64
+from dataclasses import dataclass, field
 from typing import Any
 
 import pytest
@@ -48,6 +49,14 @@ class _Msg:
     id: str = ""
     thread_id: str = ""
     label_ids: tuple[str, ...] = ()
+    payload: dict[str, Any] = field(
+        default_factory=lambda: {
+            "mimeType": "text/plain",
+            "body": {
+                "data": base64.urlsafe_b64encode("内容のご確認をお願いします。".encode()).decode()
+            },
+        }
+    )
 
 
 class FakeGmail:
@@ -179,7 +188,7 @@ def _msg(
     label_ids: tuple[str, ...] = (),
     extra_headers: dict[str, str] | None = None,
 ) -> _Msg:
-    headers = {"From": sender, "Subject": subject}
+    headers = {"From": sender, "Subject": subject, "To": OWNER}
     headers.update(extra_headers or {})
     return _Msg(
         headers=headers,
@@ -299,7 +308,7 @@ def test_idle_days_filter() -> None:
     assert [it.idle_days for it in out.items] == [9]
 
 
-def test_query_is_client_scoped_and_thread_read_is_metadata_only() -> None:
+def test_query_is_client_scoped_and_thread_body_is_read_only() -> None:
     fake = FakeGmail([_msg("a@x.co.jp", "件名", days_ago=1)])
     skill = MailFollowupSkill(gmail=fake, now_ms=NOW_MS)
     skill.run(MailFollowupInput(client_name="INPEX", lookback_days=7), _ctx())
@@ -308,7 +317,7 @@ def test_query_is_client_scoped_and_thread_read_is_metadata_only() -> None:
     assert "newer_than:7d" in (fake.last_query or "")
     assert "-in:sent" in (fake.last_query or "")
     # G6 構造的: 本文は読まない（metadata のみ）
-    assert fake.last_format == "metadata"
+    assert fake.last_format == "full"
     assert fake.get_message_calls == 0
 
 
@@ -339,7 +348,7 @@ def test_self_reply_last_is_excluded() -> None:
 
     assert out.items == []
     assert fake.thread_calls == ["thread-replied"]
-    assert "返信が最後" in out.note
+    assert "返信済み" in out.note
 
 
 def test_last_external_message_is_used_after_chronological_sort() -> None:
@@ -624,22 +633,19 @@ def test_triage_query_never_carries_the_user_supplied_name() -> None:
         MailFollowupInput(client_name='x" OR from:ceo@example.com "'), _ctx()
     )
 
-    assert fake.queries == [
-        "in:inbox newer_than:14d -in:sent -category:promotions -category:social"
-    ]
+    assert fake.queries == ["newer_than:14d -in:sent"]
     assert "ceo@example.com" not in fake.queries[0]
     assert "ceo@example.com" not in out.message  # エコーは PII マスク後
 
 
-def test_triage_reads_metadata_only_and_never_fetches_a_body() -> None:
+def test_triage_reads_threads_for_requests_without_message_fetches() -> None:
     """裁定A: 一覧段階で本文取得 API を 1 回も呼ばない（呼び出し回数を 0 で固定）。"""
     fake = FakeGmail(_inbox())
 
     MailFollowupSkill(gmail=fake, now_ms=NOW_MS).run(MailFollowupInput(), _ctx())
 
     assert fake.get_message_calls == 0  # messages.get（本文経路）は 0 回
-    assert fake.thread_formats == ["metadata", "metadata", "metadata"]
-    assert "full" not in fake.thread_formats
+    assert fake.thread_formats == ["full", "full", "full"]
 
 
 def test_triage_excludes_replied_and_bulk_threads(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -885,9 +891,7 @@ def test_triage_widens_the_window_for_idle_days_like_the_client_scoped_path() ->
 
     out = MailFollowupSkill(gmail=fake, now_ms=NOW_MS).run(MailFollowupInput(idle_days=30), _ctx())
 
-    assert fake.queries == [
-        "in:inbox newer_than:33d -in:sent -category:promotions -category:social"
-    ]
+    assert fake.queries == ["newer_than:33d -in:sent"]
     assert "直近33日" in out.message  # 実際に見た窓と文言が一致する
 
 
@@ -911,8 +915,8 @@ def test_two_stage_search_retries_with_residual() -> None:
     )
 
     assert fake.queries == [
-        '"花王のメール" newer_than:14d -in:sent in:inbox',
-        '"花王" newer_than:14d -in:sent in:inbox',
+        '"花王のメール" newer_than:14d -in:sent',
+        '"花王" newer_than:14d -in:sent',
     ]
     assert out.scanned_count == 1
     assert len(out.items) == 1
@@ -926,36 +930,36 @@ def test_no_retry_when_first_query_hits() -> None:
         MailFollowupInput(client_name="花王のメール"), _ctx()
     )
 
-    assert fake.queries == ['"花王のメール" newer_than:14d -in:sent in:inbox']
+    assert fake.queries == ['"花王のメール" newer_than:14d -in:sent']
 
 
-def test_query_for_plain_client_name_is_unchanged_from_head() -> None:
+def test_query_for_plain_client_name_includes_archived_mail() -> None:
     """後方互換の固定点: 素のお客様名は HEAD と 1 文字も違わないクエリになる。"""
     fake = FakeGmail([_msg("相手 <a@kao.co.jp>", "件名", 5)])
 
     MailFollowupSkill(gmail=fake, now_ms=NOW_MS).run(MailFollowupInput(client_name="花王"), _ctx())
 
-    assert fake.queries == ['"花王" newer_than:14d -in:sent in:inbox']
+    assert fake.queries == ['"花王" newer_than:14d -in:sent']
 
 
 @pytest.mark.parametrize(
     ("client_name", "kwargs", "expected"),
     [
-        ("花王", {}, ['"花王" newer_than:14d -in:sent in:inbox']),
-        ("森ビル", {"lookback_days": 30}, ['"森ビル" newer_than:30d -in:sent in:inbox']),
-        ("INPEX", {"idle_days": 5}, ['"INPEX" newer_than:14d -in:sent in:inbox']),
-        ("INPEX", {"idle_days": 30}, ['"INPEX" newer_than:33d -in:sent in:inbox']),
+        ("花王", {}, ['"花王" newer_than:14d -in:sent']),
+        ("森ビル", {"lookback_days": 30}, ['"森ビル" newer_than:30d -in:sent']),
+        ("INPEX", {"idle_days": 5}, ['"INPEX" newer_than:14d -in:sent']),
+        ("INPEX", {"idle_days": 30}, ['"INPEX" newer_than:33d -in:sent']),
         (
             "花王のメール",
             {},
             [
-                '"花王のメール" newer_than:14d -in:sent in:inbox',
-                '"花王" newer_than:14d -in:sent in:inbox',
+                '"花王のメール" newer_than:14d -in:sent',
+                '"花王" newer_than:14d -in:sent',
             ],
         ),
     ],
 )
-def test_client_scoped_queries_are_byte_identical_after_the_triage_change(
+def test_client_scoped_queries_keep_period_and_name_scope(
     client_name: str, kwargs: dict[str, int], expected: list[str]
 ) -> None:
     """一覧トリアージの追加で **顧客名ありのクエリ文字列を 1 文字も動かしていない**ことの固定点。
@@ -981,7 +985,7 @@ def test_single_term_never_issues_second_query() -> None:
 
     MailFollowupSkill(gmail=fake, now_ms=NOW_MS).run(MailFollowupInput(client_name="花王"), _ctx())
 
-    assert fake.queries == ['"花王" newer_than:14d -in:sent in:inbox']
+    assert fake.queries == ['"花王" newer_than:14d -in:sent']
 
 
 def test_unconnected_user_gets_connect_guidance_not_guard_message() -> None:
@@ -1015,7 +1019,7 @@ def test_no_hits_states_connection_is_live() -> None:
     assert "「X社」で直近 14 日に" in out.note
     assert "『相手から来たまま止まっている』受信メールは 0 件でした" in out.note
     # 既存の正直な但し書きも失わない（除外ロジックの開示）。
-    assert "返信が最後" in out.note
+    assert "返信済み" in out.note
 
 
 def test_no_hits_message_reports_the_window_actually_searched() -> None:
@@ -1057,8 +1061,8 @@ def test_items_found_reports_connection_live_without_error() -> None:
     assert out.message == ""
     assert out.connection == "live"
     assert out.note == (
-        "※ スレッドの最新メッセージをメタデータで確認し、あなたの返信が最後のものは除外して"
-        "います（読み取りのみ・本文は読みません）。"
+        "※ 本人のTo/Cc・本文の質問/依頼/期限・後続の返信を確認し、自動配信と返信済みを除外しています。"
+        "読み取りのみで、本文は要点1行だけ表示します。"
     )
 
 
@@ -1241,3 +1245,12 @@ def test_thread_fetch_failure_is_also_structured() -> None:
 
     assert out.error == "reauth_needed"  # スコープ不足は再連携で直る
     assert out.items == []
+
+
+def test_client_scoped_scan_discloses_unread_pages() -> None:
+    gmail = PagingGmail([_msg(f"p{i}@outside.example", f"案件{i}", 1) for i in range(3)], page=1)
+    out = MailFollowupSkill(gmail=gmail, now_ms=NOW_MS).run(
+        MailFollowupInput(client_name="架空広告", max_messages=1), _ctx()
+    )
+    assert len(out.items) == 1
+    assert "未確認のメールがあります" in out.note
