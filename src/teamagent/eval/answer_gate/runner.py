@@ -8,19 +8,25 @@ import os
 import socket
 import threading
 import time
-from contextlib import ExitStack, contextmanager
+from collections.abc import Callable, Iterator, Sequence
+from contextlib import AbstractContextManager, ExitStack, contextmanager
+from multiprocessing.connection import Connection
 from pathlib import Path
+from typing import Any, cast
 from unittest.mock import patch
 
 import yaml
 
+from teamagent.adapters.bedrock_client import ConverseResponse
 from teamagent.eval.answer_gate.adapters import FakeLLM, Fixtures
 from teamagent.eval.answer_gate.scorer import score
 from teamagent.skills.base import SkillContext
 
 
 @contextmanager
-def isolated(record, *, fake_llm):
+def isolated(
+    record: dict[str, Any], *, fake_llm: bool
+) -> Iterator[tuple[ExitStack, Callable[[], AbstractContextManager[None]]]]:
     """Capture business side effects and deny unexpected network, including swallowed errors."""
     from teamagent.adapters.slack_client import SlackClient
     from teamagent.mcp_gateway import direct_search_answer, progress_notify
@@ -30,23 +36,23 @@ def isolated(record, *, fake_llm):
     connect = socket.socket.connect
     connect_ex = socket.socket.connect_ex
 
-    def blocked(kind):
-        def sink(*args, **kwargs):
+    def blocked(kind: str) -> Callable[..., None]:
+        def sink(*args: Any, **kwargs: Any) -> None:
             record["side_effects"].append({"kind": kind})
             return None
 
         return sink
 
-    async def async_sink(*args, **kwargs):
+    async def async_sink(*args: Any, **kwargs: Any) -> None:
         blocked("slack_send")()
         return None
 
-    async def progress_sink(*args, **kwargs):
+    async def progress_sink(*args: Any, **kwargs: Any) -> None:
         blocked("progress_notify")()
         return None
 
-    def guard(original):
-        def call(sock, address):
+    def guard(original: Callable[..., Any]) -> Callable[..., Any]:
+        def call(sock: socket.socket, address: Any) -> Any:
             if not getattr(active, "model", False):
                 blocked("network")()
                 raise PermissionError("business network is disabled")
@@ -55,7 +61,7 @@ def isolated(record, *, fake_llm):
         return call
 
     @contextmanager
-    def model_network():
+    def model_network() -> Iterator[None]:
         active.model = not fake_llm
         try:
             yield
@@ -90,7 +96,7 @@ def isolated(record, *, fake_llm):
         stack.enter_context(patch.object(progress_notify, "send_progress", progress_sink))
 
         # Publishing is disabled for this body-only case; an attempted publish is still unsafe.
-        def publish(*args, **kwargs):
+        def publish(*args: Any, **kwargs: Any) -> None:
             if os.environ.get("USE_HTML_REPORTS") == "1":
                 blocked("report_publish")()
             return None
@@ -112,18 +118,23 @@ def isolated(record, *, fake_llm):
 
 
 class Model:
-    def __init__(self, client, model_network, record):
+    def __init__(
+        self,
+        client: Any,
+        model_network: Callable[[], AbstractContextManager[None]],
+        record: dict[str, Any],
+    ) -> None:
         self.client = client
         self.model_network = model_network
         self.record = record
 
-    def rerank(self, **kwargs):
+    def rerank(self, **kwargs: Any) -> Any:
         with self.model_network():
             return self.client.rerank(**kwargs)
 
-    def converse(self, **kwargs):
+    def converse(self, **kwargs: Any) -> ConverseResponse:
         with self.model_network():
-            response = self.client.converse(**kwargs)
+            response: ConverseResponse = self.client.converse(**kwargs)
         self.record["model_calls"].append(
             {
                 "model_id": response.model_id,
@@ -133,7 +144,13 @@ class Model:
         return response
 
 
-def execute(case, fixture, *, fake_llm=False, llm_factory=None):
+def execute(
+    case: dict[str, Any],
+    fixture: dict[str, Any],
+    *,
+    fake_llm: bool = False,
+    llm_factory: Callable[..., Any] | None = None,
+) -> dict[str, Any]:
     from teamagent.adapters.bedrock_client import BedrockClient
     from teamagent.skills.calendar_freebusy.skill import CalendarFreeBusySkill
     from teamagent.skills.mail_summary.skill import MailSummarySkill
@@ -144,7 +161,7 @@ def execute(case, fixture, *, fake_llm=False, llm_factory=None):
     from teamagent.skills.search.skill import SearchSkill
     from teamagent.skills.slack_search.skill import SlackSearchSkill
 
-    record = dict(
+    record: dict[str, Any] = dict(
         id=case["id"],
         answer="",
         tool_calls=[],
@@ -158,29 +175,29 @@ def execute(case, fixture, *, fake_llm=False, llm_factory=None):
     started = time.monotonic()
     try:
         with isolated(record, fake_llm=fake_llm) as (stack, network):
-            adapter = Fixtures(fixture, record)
+            adapter: Any = Fixtures(fixture, record)
             if fake_llm:
-                client = (llm_factory or FakeLLM)(fixture)
+                client: Any = (llm_factory or FakeLLM)(fixture)
             else:
                 with network():
                     client = BedrockClient.from_env()
-            model = Model(client, network, record)
+            model: Any = Model(client, network, record)
             summary_factory = fanout.build_summary_client
-            expansion_factory = fanout.build_expansion_planner
+            expansion_factory = cast(Any, fanout).build_expansion_planner
 
-            def summary_client():
+            def summary_client() -> Any:
                 if fake_llm:
                     return model
                 with network():
                     summary = summary_factory()
                 return Model(summary, network, record)
 
-            def expansion_planner():
+            def expansion_planner() -> ExpansionPlanner:
                 if fake_llm:
                     return ExpansionPlanner(model)
                 with network():
-                    planner = expansion_factory()
-                planner._bedrock = Model(planner.bedrock, network, record)
+                    planner: ExpansionPlanner = expansion_factory()
+                planner._bedrock = cast(Any, Model(planner.bedrock, network, record))
                 return planner
 
             stack.enter_context(patch.object(fanout, "build_summary_client", summary_client))
@@ -209,7 +226,7 @@ def execute(case, fixture, *, fake_llm=False, llm_factory=None):
             tool = case["expected_tools"][0]
             args = case.get("arguments", {})
             if tool == "search":
-                skill = search
+                skill: Any = search
                 args = {"query": case["utterance"], "top_k": 10}
             elif tool == "slack_search":
                 skill = SlackSearchSkill(
@@ -256,14 +273,26 @@ def execute(case, fixture, *, fake_llm=False, llm_factory=None):
     return record
 
 
-def _worker(pipe, case, fixture, fake_llm, llm_factory):
+def _worker(
+    pipe: Connection,
+    case: dict[str, Any],
+    fixture: dict[str, Any],
+    fake_llm: bool,
+    llm_factory: Callable[..., Any] | None,
+) -> None:
     try:
         pipe.send(execute(case, fixture, fake_llm=fake_llm, llm_factory=llm_factory))
     finally:
         pipe.close()
 
 
-def execute_bounded(case, fixture, *, fake_llm, llm_factory):
+def execute_bounded(
+    case: dict[str, Any],
+    fixture: dict[str, Any],
+    *,
+    fake_llm: bool,
+    llm_factory: Callable[..., Any] | None,
+) -> dict[str, Any]:
     # Each case owns its threads and patches; killing a timeout cannot leak them into the next case.
     context = multiprocessing.get_context("spawn")
     receiver, sender = context.Pipe(duplex=False)
@@ -274,7 +303,7 @@ def execute_bounded(case, fixture, *, fake_llm, llm_factory):
     try:
         if not receiver.poll(max(0, deadline - time.monotonic())):
             raise TimeoutError("case time limit exceeded")
-        record = receiver.recv()
+        record: dict[str, Any] = receiver.recv()
         process.join(timeout=max(0, deadline - time.monotonic()))
         if process.is_alive():
             raise TimeoutError("case worker did not finish")
@@ -289,17 +318,24 @@ def execute_bounded(case, fixture, *, fake_llm, llm_factory):
         process.close()
 
 
-def load_cases(path):
+def load_cases(path: str | Path) -> list[dict[str, Any]]:
     data = yaml.safe_load(Path(path).read_text())
     if data.get("version") != "answer-gate-v1" or not data.get("cases"):
         raise ValueError("unsupported or empty cases")
     ids = [c["id"] for c in data["cases"]]
     if len(ids) != len(set(ids)):
         raise ValueError("duplicate case IDs")
-    return data["cases"]
+    cases: list[dict[str, Any]] = data["cases"]
+    return cases
 
 
-def run(cases_path, out_path, *, fake_llm=False, llm_factory=None):
+def run(
+    cases_path: str | Path,
+    out_path: str | Path,
+    *,
+    fake_llm: bool = False,
+    llm_factory: Callable[..., Any] | None = None,
+) -> int:
     cases = load_cases(cases_path)
     failed = False
     with Path(out_path).open("w") as out:
@@ -332,7 +368,7 @@ def run(cases_path, out_path, *, fake_llm=False, llm_factory=None):
     return int(failed)
 
 
-def main(argv=None):
+def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     default_cases = Path(__file__).parent / "data" / "cases_v1.yaml"
     parser.add_argument("--cases", type=Path, default=default_cases)

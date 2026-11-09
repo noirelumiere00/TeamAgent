@@ -1,8 +1,11 @@
 """Read adapters replay fixtures; unimplemented calls fail closed."""
 
+from __future__ import annotations
+
 import base64
 from contextlib import nullcontext
 from types import SimpleNamespace
+from typing import Any
 
 from teamagent.adapters.bedrock_client import ConverseResponse, TokenUsage
 from teamagent.adapters.gmail_client import GmailMessage, GmailMessageRef
@@ -11,46 +14,47 @@ from teamagent.adapters.slack_user_reader import SlackSearchMatch, SlackSearchRe
 
 
 class Fixtures:
-    scopes = ()
+    scopes: tuple[str, ...] = ()
 
-    def __init__(self, fixture, record):
+    def __init__(self, fixture: dict[str, Any], record: dict[str, Any]) -> None:
         self.data = fixture
         self.record = record
 
-    def __getattr__(self, name):
+    def __getattr__(self, name: str) -> Any:
         self.record["side_effects"].append({"kind": "unsupported_adapter_call", "name": name})
         raise AttributeError(name)
 
-    def lane(self, name, args):
+    def lane(self, name: str, args: dict[str, Any]) -> list[dict[str, Any]]:
         self.record["lanes"].append({"name": name, "status": "ok", "arguments": args})
-        return self.data.get(name, [])
+        rows: list[dict[str, Any]] = self.data.get(name, [])
+        return rows
 
-    def embed(self, text):
+    def embed(self, text: str) -> list[float]:
         # Retrieval is replayed, so no model/embedding download is needed.
         return [0.0] * 8
 
-    def get(self, requester):
+    def get(self, requester: str) -> SimpleNamespace:
         return SimpleNamespace(access_token="fixture-only")
 
-    def connection(self, **kwargs):
+    def connection(self, **kwargs: Any) -> nullcontext[Fixtures]:
         return nullcontext(self)
 
-    def transaction(self):
+    def transaction(self) -> nullcontext[Fixtures]:
         return nullcontext(self)
 
-    def cursor(self):
+    def cursor(self) -> nullcontext[Fixtures]:
         return nullcontext(self)
 
-    def execute(self, query, params=None):
+    def execute(self, query: str, params: Any = None) -> None:
         if query.startswith(("SELECT current_setting", "SELECT set_config")):
             return
         self.record["side_effects"].append({"kind": "db_write", "query": query})
         raise PermissionError("unexpected SQL")
 
-    def fetchone(self):
+    def fetchone(self) -> dict[str, str]:
         return {"timeout": "0"}
 
-    def search_similar_new_schema(self, **kwargs):
+    def search_similar_new_schema(self, **kwargs: Any) -> list[SearchHit]:
         return [
             SearchHit(
                 chunk_id=i,
@@ -69,19 +73,19 @@ class Fixtures:
             for i, r in enumerate(self.lane("vault", {"limit": kwargs.get("limit")}), 1)
         ]
 
-    def list_client_names(self, **kwargs):
+    def list_client_names(self, **kwargs: Any) -> list[str]:
         return []
 
-    def list_client_timeline_recent(self, *args, **kwargs):
+    def list_client_timeline_recent(self, *args: Any, **kwargs: Any) -> list[dict[str, Any]]:
         return []
 
-    def find_documents_for_advertiser(self, *args, **kwargs):
+    def find_documents_for_advertiser(self, *args: Any, **kwargs: Any) -> list[dict[str, Any]]:
         return []
 
-    def resolve_file_urls_by_titles(self, *args, **kwargs):
+    def resolve_file_urls_by_titles(self, *args: Any, **kwargs: Any) -> dict[str, str]:
         return {}
 
-    def list_case_studies(self, *args, **kwargs):
+    def list_case_studies(self, *args: Any, **kwargs: Any) -> list[dict[str, Any]]:
         return [
             dict(
                 title=r["title"],
@@ -97,7 +101,7 @@ class Fixtures:
             for r in self.lane("case", kwargs)
         ]
 
-    def search_checked(self, query, request_id, **kwargs):
+    def search_checked(self, query: str, request_id: str, **kwargs: Any) -> SlackSearchRead:
         rows = self.lane("slack", {"query": query, **kwargs})
         matches = tuple(
             SlackSearchMatch(
@@ -115,23 +119,25 @@ class Fixtures:
         )
         return SlackSearchRead(matches=matches, total=len(matches))
 
-    def get_display_name(self, *args, **kwargs):
+    def get_display_name(self, *args: Any, **kwargs: Any) -> None:
         return None
 
-    def list_events(self, request_id, **kwargs):
+    def list_events(self, request_id: str, **kwargs: Any) -> list[SimpleNamespace]:
         self.lane("calendar", {"method": "list_events", **kwargs})
         return [SimpleNamespace(**r) for r in self.data["events"]]
 
-    def freebusy(self, request_id, **kwargs):
+    def freebusy(self, request_id: str, **kwargs: Any) -> list[SimpleNamespace]:
         self.lane("calendar", {"method": "freebusy", **kwargs})
         return [SimpleNamespace(**r) for r in self.data["busy"]]
 
-    def list_messages(self, query, request_id, *, max_results):
+    def list_messages(
+        self, query: str, request_id: str, *, max_results: int
+    ) -> tuple[list[GmailMessageRef], None]:
         rows = self.lane("mail", {"query": query, "max_results": max_results})[:max_results]
         self.mail_rows = rows
         return [GmailMessageRef(r["ref"], r["ref"]) for r in rows], None
 
-    def get_message(self, message_id, request_id):
+    def get_message(self, message_id: str, request_id: str) -> GmailMessage:
         r = next(r for r in self.mail_rows if r["ref"] == message_id)
         body = f"{r['title']}\n{r['content']}\n{r['url']}"
         return GmailMessage(
@@ -151,11 +157,11 @@ class Fixtures:
 class FakeLLM:
     """Fake the model transport only, without consulting the case's expected checks."""
 
-    def __init__(self, fixture, *, one_item=False):
+    def __init__(self, fixture: dict[str, Any], *, one_item: bool = False) -> None:
         self.fixture = fixture
         self.one_item = one_item
 
-    def converse(self, *, messages, **kwargs):
+    def converse(self, *, messages: list[dict[str, Any]], **kwargs: Any) -> ConverseResponse:
         prompt = messages[0]["content"][0]["text"]
         if "広げた検索語と業種" in prompt:
             text = '{"terms": [], "industry": "飲料"}'

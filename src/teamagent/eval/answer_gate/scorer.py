@@ -3,6 +3,7 @@
 import re
 import unicodedata
 from decimal import ROUND_HALF_UP, Decimal
+from typing import Any
 from urllib.parse import urlsplit
 
 from teamagent.skills._shared.slack_mrkdwn import _OUTBOUND_RULES
@@ -29,7 +30,7 @@ INTERNAL = re.compile(
 )
 
 
-def visible_items(answer, refs):
+def visible_items(answer: str, refs: list[dict[str, Any]]) -> list[tuple[dict[str, Any], bool]]:
     """Parse existing one-line lists and multiline cards, binding title to its own URL.
 
     Known list/card formats only; add a parser when a new skill format ships.
@@ -55,7 +56,7 @@ def visible_items(answer, refs):
     return items
 
 
-def score(case, fixture, record):
+def score(case: dict[str, Any], fixture: dict[str, Any], record: dict[str, Any]) -> dict[str, Any]:
     """Return every requested check, plus mandatory completion/safety checks with reasons."""
     answer = record.get("answer", "")
     refs = [r for r in fixture["refs"] if r["ref"] in case["eligible_refs"]]
@@ -66,9 +67,9 @@ def score(case, fixture, record):
         if case.get("requested_count") is not None
         else None
     )
-    checks = {}
+    checks: dict[str, dict[str, Any]] = {}
 
-    def result(name, ok, reason):
+    def result(name: str, ok: bool, reason: str) -> None:
         checks[name] = {"pass": bool(ok), "reason": reason}
 
     for check in case["checks"]:
