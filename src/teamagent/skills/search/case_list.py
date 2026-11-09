@@ -1,7 +1,7 @@
 """事例要求は取得した根拠からコードで件数・出典を確定する。"""
 
-import json
 import re
+import unicodedata
 from collections.abc import Callable, Sequence
 from datetime import date
 from urllib.parse import urlsplit
@@ -20,9 +20,11 @@ from teamagent.skills.search.answer_sections import (
 from teamagent.skills.search.campaign_files import scope_by_industry, video_footer_urls
 from teamagent.skills.search.client_match import normalize_client
 from teamagent.skills.search.composite import SlackItem
+from teamagent.skills.search.dates import extract_title_date
 from teamagent.skills.search.not_found import case_target_hits
 from teamagent.skills.search.schema import DocumentReference
 from teamagent.skills.search.source_attribution import without_source_attribution
+from teamagent.util.json_salvage import salvage_json_object
 
 # shortcut: 候補の既定幅は30件、Drive事例の取りこぼしが続く場合はページングへ拡張する。
 CANDIDATE_LIMIT = 30
@@ -101,6 +103,77 @@ def _details(text: str) -> list[str]:
     return lines[:2]
 
 
+_VERSION = re.compile(r"(?<![a-z0-9])v(?:er(?:sion)?\.?)?\s*(\d+)(?![a-z0-9])", re.I)
+_REVISION = re.compile(r"最終版?|修正版?|改訂版?|最新版?|ご提出|提出用")
+_TITLE_DATE = re.compile(
+    r"(?<!\d)(?:20\d{2}[-/.年]\d{1,2}[-/.月]\d{1,2}日?"
+    r"|20\d{2}年\d{1,2}月|20\d{6}|\d{6})(?!\d)"
+)
+
+
+def _short_title(title: str) -> str:
+    title = unicodedata.normalize("NFKC", title)
+    title = re.sub(r"\.(?:pptx?|pdf|docx?|xlsx?)$", "", title, flags=re.I)
+    title = re.sub(r"【[^】]*】", "", title)
+    title = _TITLE_DATE.sub(lambda m: "" if extract_title_date(m.group()) else m.group(), title)
+    title = _VERSION.sub("", title)
+    title = _REVISION.sub("", title)
+    title = re.sub(r"^(?:[\s_\-]*(?:提案書?|レポート|報告書|結果分析))+", "", title)
+    title = re.sub(r"(?:^|[_\s])結果分析(?=[_\s]|$)", " ", title)
+    return re.sub(r"[_\s]+", " ", title).strip(" -")
+
+
+def _case_title(hit: SearchHit) -> str:
+    meta = hit.metadata or {}
+    owner = (
+        meta.get("advertiser")
+        or meta.get("case_client")
+        or meta.get("case_company")
+        or meta.get("client_name")
+    )
+    project = meta.get("campaign") or meta.get("case_product") or meta.get("case_brand")
+    entry = entry_from_hit(hit, url=None)
+    title = entry.source_title or entry.title
+    if owner and project:
+        return f"{owner} {project}"
+    return _short_title(title)
+
+
+def _case_key(hit: SearchHit) -> tuple[str, str]:
+    meta = hit.metadata or {}
+    owner = (
+        meta.get("advertiser")
+        or meta.get("case_client")
+        or meta.get("case_company")
+        or meta.get("client_name")
+    )
+    key = normalize_client(str(owner or "")), normalize_client(_case_title(hit))
+    # 名前から何も残らない資料は同じ案件と見なさない（資料ごとに別キー）。
+    return key if key[1] else ("", f"doc:{hit.chunk_id}")
+
+
+def _revision_rank(hit: SearchHit) -> tuple[str, int, bool, str]:
+    meta = hit.metadata or {}
+    entry = entry_from_hit(hit, url=None)
+    title = unicodedata.normalize("NFKC", entry.source_title or entry.title)
+    return (
+        extract_title_date(title) or str(meta.get("updated_at") or ""),
+        max((int(m.group(1)) for m in _VERSION.finditer(title)), default=0),
+        bool(_REVISION.search(title)),
+        str(meta.get("updated_at") or ""),
+    )
+
+
+def _prefer_latest(hits: Sequence[SearchHit]) -> list[SearchHit]:
+    # 案件の関連度順を保ち、同じ案件の中だけ新版から試す（リンク不備なら旧版へ戻れる）。
+    groups: dict[tuple[str, str], list[SearchHit]] = {}
+    for hit in hits:
+        groups.setdefault(_case_key(hit), []).append(hit)
+    return [
+        hit for group in groups.values() for hit in sorted(group, key=_revision_rank, reverse=True)
+    ]
+
+
 def render(
     hits: Sequence[SearchHit],
     target: str | None,
@@ -123,7 +196,7 @@ def render(
         else "\n"
     )
     seen: set[tuple[str, str]] = set()
-    seen_cases: set[str] = set()
+    seen_cases: set[tuple[str, str]] = set()
     selected: list[SearchHit] = []
     rendered: list[list[str]] = []
     if summarize is not None:
@@ -133,7 +206,10 @@ def render(
         hits = case_target_hits(hits, client)
         cards = True
         separator = "\n\n"
-    for hit in case_target_hits(hits, target, soft_industry=drive_only or summarize is not None):
+    hits = case_target_hits(hits, target, soft_industry=drive_only or summarize is not None)
+    if summarize is not None:
+        hits = _prefer_latest(hits)
+    for hit in hits:
         meta = hit.metadata or {}
         entry = entry_from_hit(hit, url=url_of(hit))
         url = _safe_url(entry.url)
@@ -181,14 +257,12 @@ def render(
             key = (ref.drive_file_id, entry.title if entry.kind == "case" else "")
         if requested_count is not None and url:
             key = (url, entry.title if entry.kind == "case" else "")
-        case_key = ""
+        case_key = None
         if summarize is not None:
             assert ref is not None  # summarize ありで ref なしは上で continue 済み
             # 同じ資料はIDで、別資料になった同じ案件は取引先＋施策名でまとめる。
             key = (ref.drive_file_id or ref.slack_file_id or url or entry.document_id or "", "")
-            project = meta.get("campaign") or meta.get("case_product") or meta.get("case_brand")
-            owner = meta.get("advertiser") or meta.get("case_client") or meta.get("client_name")
-            case_key = normalize_client(f"{owner} {project}") if owner and project else ""
+            case_key = _case_key(hit)
             if case_key and case_key in seen_cases:
                 continue
         if (not url and ref is None) or key in seen or entry.kind in {"karte", "research"}:
@@ -212,7 +286,9 @@ def render(
             if mark:
                 details = [mark + (" " + details[0] if details else ""), *details[1:]]
             title = (
-                _clean(_source_text(entry.title), 100)
+                _clean(
+                    _source_text(_case_title(hit) if summarize is not None else entry.title), 100
+                )
                 or _clean(_source_text(ref.title), 100)
                 or "案件名不明"
             )
@@ -249,15 +325,19 @@ def render(
     answer = separator.join(lines)
     if selected and summarize is not None:
         try:
-            points = json.loads(summarize(selected))
+            points = salvage_json_object(summarize(selected)) or {}
         except Exception:
             points = {}
-        if not isinstance(points, dict):
-            points = {}
+        points = {
+            unicodedata.normalize("NFKC", key).strip(): value for key, value in points.items()
+        }
         for index, card in enumerate(rendered, 1):
             text = points.get(str(index), "")
             if isinstance(text, str):
-                card[1:1] = [f"• {line}" for line in _details(text)[: 4 - len(card)]]
+                details = _details(text)
+                if details:
+                    mark = card[1] + " " if len(card) > 2 else "• "
+                    card[1:-1] = [mark + details[0], *(f"• {line}" for line in details[1:])]
         answer = separator.join("\n".join(card) for card in rendered)
     if lines and requested_count is not None and len(lines) < requested_count:
         answer += f"\n\n見つかったのは {len(lines)} 件です。"
