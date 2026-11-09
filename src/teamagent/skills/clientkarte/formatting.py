@@ -9,8 +9,8 @@ from teamagent.adapters.pgvector_client import SearchHit
 from teamagent.skills.clientkarte.documents import slack_label
 from teamagent.skills.search.timeline_status import evidence_date
 
-_HEADING = re.compile(r"^(?:#{1,3} +(.+?)|(\*{1,2})(.+?)\2)(（\d+/\d+ 時点）)?$")
-_ASOF = re.compile(r"（\d+/\d+ 時点(?:の記録)?）")
+_HEADING = re.compile(r"^(?:#{1,3} +(.+?)|(\*{1,2})(.+?)\2)(（\d+/\d+\s*時点）)?$")
+_ASOF = re.compile(r"（\d+/\d+\s*時点(?:の記録)?）")
 _CITATION = re.compile(r"[ \t]*[\[(][^\[\]()\n]*chunk_id[^\[\]()\n]*[\])]")
 
 
@@ -26,7 +26,7 @@ def _clip(text: str, limit: int) -> str:
         return text
     end = max(0, limit - 1)
     # 未確認の注記を途中で切ると、過去の予定が現在の状態に見えてしまう。
-    for match in re.finditer(r"予定していた（結果は未確認）", text):
+    for match in re.finditer(r"予定(?:していた|だった)（結果は未確認）", text):
         if match.start() < end < match.end():
             end = match.start()
     return text[:end].rstrip() + "…"

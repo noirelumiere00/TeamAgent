@@ -15,8 +15,8 @@
   無く単語分割できない（PDF/PPTX 抽出ともに 1 巨大トークン化）ため、単語ではなく**文字**
   n-gram を使う（言語非依存・CJK near-dup の定石）。PDF と PPTX で抽出器が違って空白・改行・
   軽い順序差があっても局所の文字列はほぼ一致するので、md5 完全一致ではなく shingle Jaccard を
-  使う（表記揺れ・空白差・軽い順序差に強い）。文書数は数百なので
-  O(n^2) ペア比較で十分だが、MinHash 署名（64 perm）で Jaccard を近似して軽量化する。
+  使う（表記揺れ・空白差・軽い順序差に強い）。MinHash 署名（64 perm）で Jaccard を
+  近似し、LSH のバンドが一致した候補だけ比較する。全文はページ単位で読み捨てる。
 - 正本（残す方）= 本文量が最大の doc（全 chunk content 長の合計が最大）。同点は
   document_id 昇順タイブレーク（決定的）。「どちらを残すか」はユーザー的にどちらでも
   よく、濃い方を既定にする。
@@ -31,7 +31,12 @@
 from __future__ import annotations
 
 import hashlib
+import math
 import re
+import resource
+import sys
+import time
+from collections.abc import Iterator
 from typing import Any
 
 import structlog
@@ -47,13 +52,14 @@ _NUM_PERM = 64
 # Jaccard が割れる）ため、文字 n-gram で shingle する。英語等の空白あり言語でも機能する。
 _SHINGLE_N = 5
 
-# H2: OOM/timeout 回避の既定上限。呼び出し側（pipeline.py）が env で上書きする。
-# - _DEFAULT_MAX_DOCS: 1 回の dedup で読む document 数の上限（全 doc 全文を Python に
-#   ロードするので、無制限だと巨大コーパスで OOM する）。決定性のため id 昇順で先頭から取る。
-# - _DEFAULT_MAX_CHARS: 1 doc あたりの正規化テキスト最大文字数。これを超える分は truncate
-#   してから shingle 化する（per-doc 無制限 shingle で O(文字数) のメモリが爆発するのを防ぐ）。
-_DEFAULT_MAX_DOCS = 5000
+# 全件が既定。上限指定時は ingested_at DESC, id DESC（取り込みの新しい順）。
+_DEFAULT_MAX_DOCS = 0
 _DEFAULT_MAX_CHARS = 500_000
+_PAGE_SIZE = 32
+
+# 21 bands x 3 rows（63 perm を使用、類似度比較には 64 perm 全てを使う）。
+# 0.7 の判定には 45/64 一致が必要。全バンド不一致なら最大 43/64 一致なので漏れない。
+_LSH_ROWS = 3
 
 # MinHash のハッシュ空間（2^61-1 のメルセンヌ素数より十分大きい 2^64 範囲）。
 _MAX_HASH = (1 << 64) - 1
@@ -138,6 +144,33 @@ def _signature_similarity(sig_a: tuple[int, ...], sig_b: tuple[int, ...]) -> flo
     return matches / len(sig_a)
 
 
+def _candidate_pairs(
+    signatures: list[tuple[int, ...]], *, jaccard_threshold: float
+) -> Iterator[tuple[int, int]]:
+    """バンド一致の組を 1 回ずつ返す。全候補をメモリに溜めない。"""
+    rows = _LSH_ROWS
+    # 低いしきい値でも、判定を通る一致数があれば必ず 1 バンドは一致させる。
+    while _NUM_PERM // rows <= _NUM_PERM - math.ceil(jaccard_threshold * _NUM_PERM):
+        rows -= 1
+    bands: list[dict[tuple[int, ...], list[int]]] = [{} for _ in range(_NUM_PERM // rows)]
+    identical: dict[tuple[int, ...], int] = {}
+    for i, signature in enumerate(signatures):
+        previous = identical.get(signature)
+        if previous is not None:
+            # 同一署名（空文書を含む）は代表だけ索引化し、巨大な同一群の全組比較を避ける。
+            yield previous, i
+            continue
+        identical[signature] = i
+        candidates: set[int] = set()
+        for band, buckets in enumerate(bands):
+            key = signature[band * rows : (band + 1) * rows]
+            bucket = buckets.setdefault(key, [])
+            candidates.update(bucket)
+            bucket.append(i)
+        for j in sorted(candidates):
+            yield j, i
+
+
 class _UnionFind:
     """document index 用の決定的 union-find（クラスタ化）。"""
 
@@ -163,23 +196,20 @@ class _UnionFind:
                 self._parent[rx] = ry
 
 
-def _fetch_documents(conn: Any, *, max_docs: int = _DEFAULT_MAX_DOCS) -> list[dict[str, Any]]:
-    """document の (id, 正規化全文, 本文量, 既存印) を集める（上限 ``max_docs``）。
-
-    chunks を document_id でまとめ、各 doc の全 chunk content を結合した全文を作る。
-    本文量 = 全 chunk content 長の合計（正本選定のタイブレーク前提）。
-    既存の suppressed / duplicate_of は冪等比較のために読む。
-
-    H2（doc 数上限）: 全 doc 全文を Python にロードするので、無制限だと巨大コーパスで
-    OOM する。``max_docs > 0`` なら ``id`` 昇順で先頭 ``max_docs`` 件だけ取る（id 昇順
-    なので決定的）。``max_docs <= 0`` なら無制限（従来挙動・後方互換）。
-    """
-    # chunk content を document ごとに結合（chunk_idx 順で決定的）、本文量を合算。
-    # documents を LEFT JOIN して、chunk が 1 つも無い doc も拾う（本文量 0）。
-    # 列/テーブルは固定リテラル・LIMIT 値は placeholder bind → bandit B608 非該当。
-    base_sql = """
+def _fetch_documents(conn: Any, *, max_docs: int = _DEFAULT_MAX_DOCS) -> Iterator[dict[str, Any]]:
+    """新しい取り込み順の keyset paging。本文の集約対象も 1 ページに限定する。"""
+    sql = """
+        WITH page AS (
+            SELECT d.id, d.ingested_at, d.metadata
+            FROM documents d
+            WHERE (%s::timestamptz IS NULL OR
+                   (d.ingested_at, d.id) < (%s::timestamptz, %s::uuid))
+            ORDER BY d.ingested_at DESC, d.id DESC
+            LIMIT %s
+        )
         SELECT
             d.id::text AS document_id,
+            d.ingested_at,
             COALESCE(
                 string_agg(c.content, ' ' ORDER BY c.chunk_idx ASC),
                 ''
@@ -187,20 +217,28 @@ def _fetch_documents(conn: Any, *, max_docs: int = _DEFAULT_MAX_DOCS) -> list[di
             COALESCE(SUM(length(c.content)), 0) AS content_len,
             (d.metadata->>'suppressed') AS suppressed,
             (d.metadata->>'duplicate_of') AS duplicate_of
-        FROM documents d
+        FROM page d
         LEFT JOIN chunks c ON c.document_id = d.id
-        GROUP BY d.id, d.metadata
-        ORDER BY d.id ASC
+        GROUP BY d.id, d.ingested_at, d.metadata
+        ORDER BY d.ingested_at DESC, d.id DESC
     """  # nosec B608  # 固定 SQL・LIMIT のみ placeholder bind
-    rows: list[dict[str, Any]] = []
+    last_ingested_at = None
+    last_id = None
+    fetched = 0
     with conn.cursor() as cur:
-        if max_docs > 0:
-            cur.execute(base_sql + " LIMIT %s", (max_docs,))
-        else:
-            cur.execute(base_sql)
-        for r in cur.fetchall():
-            rows.append(dict(r) if not isinstance(r, dict) else r)
-    return rows
+        while max_docs <= 0 or fetched < max_docs:
+            limit = min(_PAGE_SIZE, max_docs - fetched) if max_docs > 0 else _PAGE_SIZE
+            cur.execute(sql, (last_ingested_at, last_ingested_at, last_id, limit))
+            page = cur.fetchall()
+            if not page:
+                break
+            last_ingested_at = page[-1]["ingested_at"]
+            last_id = page[-1]["document_id"]
+            for row in page:
+                yield dict(row) if not isinstance(row, dict) else row
+            fetched += len(page)
+            if len(page) < limit:
+                break
 
 
 # 非正本に印を付ける（suppressed=true + duplicate_of=正本id）。
@@ -234,7 +272,7 @@ def mark_duplicate_documents(
 ) -> int:
     """コーパス全体の document に重複排除の印（``metadata.suppressed`` 等）を付け直す。
 
-    各 document の正規化全文から単語 3-gram shingle → MinHash 署名を作り、署名間
+    各 document の正規化全文から文字 5-gram shingle → MinHash 署名を作り、LSH 候補の署名間
     Jaccard >= ``jaccard_threshold`` の doc ペアを「基本同一」とみなして union-find で
     クラスタ化する。各クラスタで本文量（全 chunk content 長合計）最大の doc を正本と
     し（同点は document_id 昇順）、他の doc の ``metadata`` に ``suppressed``=true と
@@ -251,8 +289,8 @@ def mark_duplicate_documents(
             本関数はトランザクション境界を持たない＝呼び出し側の ``connection()``
             コンテキストマネージャが commit / rollback を担う。
         jaccard_threshold: 「基本同一」とみなす MinHash Jaccard 推定のしきい値。
-        max_docs: 1 回の dedup で読む document 数の上限（H2・OOM 回避）。``>0`` なら
-            ``id`` 昇順で先頭 ``max_docs`` 件だけ対象（決定的）。``<=0`` で無制限（従来）。
+        max_docs: ``<=0`` で全件（既定）。``>0`` なら ingested_at 降順、同点は id 降順で
+            新しい取り込みから先頭 ``max_docs`` 件だけ対象。
         max_chars: 1 doc あたりの shingle 化前 truncate 文字数（H2・巨大 doc の OOM 回避）。
             ``<=0`` で無制限（従来）。
 
@@ -265,33 +303,26 @@ def mark_duplicate_documents(
         logger.warning("docdedup_threshold_invalid", jaccard_threshold=jaccard_threshold)
         return 0
 
-    docs = _fetch_documents(conn, max_docs=max_docs)
-    n = len(docs)
-    if n < 2:
-        # 1 件以下なら重複はあり得ない。既存印があれば自己修正で外す（冪等）。
-        affected = 0
-        with conn.cursor() as cur:
-            for d in docs:
-                if d.get("suppressed") is not None or d.get("duplicate_of") is not None:
-                    cur.execute(_CLEAR_SUPPRESSED_SQL, (d["document_id"],))
-                    affected += 1 if (cur.rowcount or 0) > 0 else 0
-        logger.info("docdedup_marked", jaccard_threshold=jaccard_threshold, affected=affected)
-        return affected
-
-    # 1) 各 doc の MinHash 署名と本文量を作る（docs は document_id 昇順で固定済み）。
+    started = time.monotonic()
+    # 1) 本文は署名に変換したら捨て、正本選定・差分更新用のメタデータだけ残す。
+    docs: list[dict[str, Any]] = []
     signatures: list[tuple[int, ...]] = []
-    for d in docs:
-        normalized = _normalize_text(d["full_text"] or "")
-        signatures.append(_minhash_signature(_char_shingles(normalized, max_chars=max_chars)))
+    for d in _fetch_documents(conn, max_docs=max_docs):
+        signatures.append(
+            _minhash_signature(
+                _char_shingles(_normalize_text(d.pop("full_text") or ""), max_chars=max_chars)
+            )
+        )
+        docs.append(d)
+    n = len(docs)
 
-    # 2) 全ペアで署名 Jaccard 推定 >= しきい値なら union（O(n^2)・n は数百で十分）。
-    #    本文が空（署名が全 _MAX_HASH）の doc 同士は推定 1.0 になり得るが、両者とも
-    #    本文ゼロ＝中身が無いので「重複」と束ねても害は無い（正本判定で 1 つ残る）。
+    # 2) LSH 候補だけを従来と同じ 64 perm の推定 Jaccard で比較。
     uf = _UnionFind(n)
-    for i in range(n):
-        for j in range(i + 1, n):
-            if _signature_similarity(signatures[i], signatures[j]) >= jaccard_threshold:
-                uf.union(i, j)
+    candidate_pairs = 0
+    for i, j in _candidate_pairs(signatures, jaccard_threshold=jaccard_threshold):
+        candidate_pairs += 1
+        if _signature_similarity(signatures[i], signatures[j]) >= jaccard_threshold:
+            uf.union(i, j)
 
     # 3) クラスタごとに正本（本文量最大・同点は document_id 昇順）を選ぶ。
     clusters: dict[int, list[int]] = {}
@@ -301,7 +332,6 @@ def mark_duplicate_documents(
     # desired[document_id] = 指すべき正本 document_id（None なら印を付けない＝正本/単独）。
     desired: dict[str, str | None] = {}
     for members in clusters.values():
-        # docs は document_id 昇順なので、index 昇順 ≒ document_id 昇順。
         # 本文量降順 → document_id 昇順（タイブレーク）で先頭が正本。
         canonical_idx = min(
             members, key=lambda idx: (-int(docs[idx]["content_len"]), docs[idx]["document_id"])
@@ -324,7 +354,7 @@ def mark_duplicate_documents(
             want = desired.get(doc_id)
             if want is None:
                 # 正本 or 単独 → 印が付いていれば外す。
-                if cur_suppressed or cur_dup_of is not None:
+                if d.get("suppressed") is not None or cur_dup_of is not None:
                     cur.execute(_CLEAR_SUPPRESSED_SQL, (doc_id,))
                     affected += 1 if (cur.rowcount or 0) > 0 else 0
             else:
@@ -337,9 +367,16 @@ def mark_duplicate_documents(
         "docdedup_marked",
         jaccard_threshold=jaccard_threshold,
         documents=n,
+        candidate_pairs=candidate_pairs,
         clusters=len(clusters),
         max_docs=max_docs,
         max_chars=max_chars,
         affected=affected,
+        elapsed_seconds=round(time.monotonic() - started, 3),
+        peak_rss_mb=round(
+            resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+            / (1024**2 if sys.platform == "darwin" else 1024),
+            1,
+        ),
     )
     return affected
