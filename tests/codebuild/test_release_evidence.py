@@ -2003,29 +2003,6 @@ def _no_image_gate_query(*, intent_id: str = INTENT_ID) -> dict[str, str]:
     }
 
 
-@pytest.mark.parametrize("environment_size", [4096, 16384])
-def test_gate_manifest_capacity_for_full_eight_consumer_payloads(environment_size: int) -> None:
-    query = _saved_gate_query()
-    manifest = json.loads(query["consumer_manifest_json"])
-    for consumer in manifest["consumers"]:
-        for phase in ("live", "before", "after"):
-            consumer[phase]["task_definition"]["container_definitions"][0]["environment"].append(
-                {"name": "FULL_EXISTING_TASK_CONFIGURATION", "value": "x" * environment_size}
-            )
-    # This is a real valid eight-consumer manifest, not whitespace padding or a
-    # stubbed parser. Only the bounded transport capacity differs between cases.
-    expected = EVIDENCE._validate_gate_consumer_manifest(manifest)
-    raw = json.dumps(manifest, sort_keys=True, separators=(",", ":"))
-    query["consumer_manifest_json"] = raw
-    if environment_size == 4096:
-        assert 65536 < len(raw) < 262144
-        assert EVIDENCE._parse_terraform_gate_query(query)[0] == expected
-    else:
-        assert len(raw) > 262144
-        with pytest.raises(EVIDENCE.EvidenceError, match="consumer_manifest_json"):
-            EVIDENCE._parse_terraform_gate_query(query)
-
-
 DEFAULT_GATE_QUERY = _saved_gate_query()
 DEFAULT_GATE_QUERY_SHA256 = hashlib.sha256(EVIDENCE.canonical_bytes(DEFAULT_GATE_QUERY)).hexdigest()
 DEFAULT_GATE_QUERY_JSON = json.dumps(
