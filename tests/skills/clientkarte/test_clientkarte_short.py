@@ -8,6 +8,7 @@ import pytest
 from teamagent.adapters.pgvector_client import SearchHit
 from teamagent.skills.base import SkillContext
 from teamagent.skills.clientkarte import skill as karte
+from teamagent.skills.clientkarte.formatting import short_answer
 from teamagent.skills.clientkarte.schema import ClientKarteInput
 from teamagent.skills.clientkarte.status import dated_answer
 from teamagent.skills.morning_digest.calendar_window import JST
@@ -124,10 +125,10 @@ def test_summary_and_cases_rewrite_past_plans_without_changing_results_or_future
         CLIENT,
         datetime(2026, 11, 6).date(),
     )
-    assert "8月に提案予定していた（結果は未確認）" in answer
+    assert "8月に提案を予定していた（結果は未確認）" in answer
     assert "10月中旬に決定を予定していた（結果は未確認）" in answer
     assert "8/26に決定した。11/20に再提案予定" in answer
-    assert "8/26に提案予定していた（結果は未確認）" in answer
+    assert "8/26に提案を予定していた（結果は未確認）" in answer
 
 
 def test_karte_keeps_omitted_count_when_model_already_returns_five_cases(
@@ -154,8 +155,88 @@ def test_karte_summary_rewrites_past_plans_with_fixed_now(
     answer = short_skill.run(ClientKarteInput(client_name=CLIENT), SkillContext()).answer
     conclusion = answer.splitlines()[0]
     assert conclusion.endswith("（10/7 時点）")
-    assert "8/26に提案予定していた（結果は未確認）" in conclusion
+    assert "8/26に提案を予定していた（結果は未確認）" in conclusion
     assert "10月中旬に決定を予定していた（結果は未確認）" in conclusion
+
+
+@pytest.mark.parametrize(
+    "suffix",
+    [
+        "だが結果未確認",
+        "だが結果は未確認",
+        "が結果は未確認",
+        "（結果未確認）",
+        "（結果は未確認）",
+        "(結果未確認)",
+        "していた（結果は未確認）だが結果未確認",
+    ],
+)
+def test_karte_past_plan_has_one_natural_unknown_result_note(
+    short_skill: karte.ClientKarteSkill, suffix: str
+) -> None:
+    short_skill._bedrock.converse.return_value.text = (
+        f"{CLIENT}: 8/26に提案予定{suffix}。\n\n**架空商品7**\n回答待ち。\n次回は11/20に提案予定。"
+    )
+    answer = short_skill.run(ClientKarteInput(client_name=CLIENT), SkillContext()).answer
+    assert answer.splitlines()[0] == (
+        f"{CLIENT}: 8/26に提案を予定していた（結果は未確認）。（10/7 時点）"
+    )
+    assert answer.count("結果は未確認") == 1
+    assert "11/20に提案予定" in answer
+
+
+@pytest.mark.parametrize("stamp", ["（11/7時点）", "（11/7 時点）"])
+@pytest.mark.parametrize("plain_label", ["架空採用", "代理店経由・架空B案件"])
+def test_karte_removes_model_asof_and_recovers_plain_case_heading(
+    short_skill: karte.ClientKarteSkill, stamp: str, plain_label: str
+) -> None:
+    short_skill._pgvector.list_client_timeline_recent.return_value = [
+        SearchHit(1, "架空", 1.0, {"campaign": "架空広報", "occurred_at": "2026-08-07"}),
+        SearchHit(2, "架空", 1.0, {"campaign": "架空採用", "occurred_at": "2026-08-26"}),
+    ]
+    short_skill._bedrock.converse.return_value.text = (
+        f"{CLIENT}: 複数案件並行中。{stamp}\n\n"
+        "**架空広報**\n8/26に提案予定だが結果未確認 [chunk_id: 1]\n"
+        "先方への確認が必要。\n\n"
+        f"{plain_label}{stamp}\n\n"
+        "10月中旬〜下旬にコンペ決定予定（結果未確認） [chunk_id: 2]\n"
+        "次回は11/20に確認予定。"
+    )
+    answer = short_skill.run(ClientKarteInput(client_name=CLIENT), SkillContext()).answer
+    conclusion, *blocks = answer.split("\n\n")
+    assert conclusion == f"{CLIENT}: 複数案件並行中。（8/26 時点）"
+    assert conclusion.count("時点") == 1
+    assert blocks[0].splitlines()[0] == f"**{plain_label}（8/26 時点）**"
+    assert blocks[1].splitlines()[0] == "**架空広報（8/7 時点）**"
+    assert all(2 <= len(block.splitlines()[1:]) <= 3 for block in blocks[:2])
+    assert "コンペ決定を予定していた（結果は未確認）" in answer
+    assert "提案を予定していた（結果は未確認）" in answer
+    assert "11/7" not in answer and "chunk_id" not in answer
+    assert len(answer) <= 600
+
+
+def test_plain_body_lines_stay_body_and_undated_case_heading_is_kept() -> None:
+    hits = [SearchHit(1, "架空", 1.0, {"campaign": "架空広報"})]
+    text = (
+        f"{CLIENT}: 確認中\n\n架空広報\n\n架空広報は回答待ち。\n\n先方へ確認\n\n11/20に再提案予定"
+    )
+    dated = dated_answer(text, hits, CLIENT, datetime(2026, 11, 6).date())
+    assert dated.count("### ") == 1
+    answer = short_answer(dated, hits, CLIENT)
+    assert "**架空広報（時点不明）**" in answer
+    assert "架空広報は回答待ち。\n先方へ確認\n11/20に再提案予定" in answer
+
+
+def test_plain_case_heading_without_body_keeps_two_body_lines(
+    short_skill: karte.ClientKarteSkill,
+) -> None:
+    short_skill._bedrock.converse.return_value.text = (
+        f"{CLIENT}: 回答待ち\n\n**架空商品6**\n提案を共有。\n先方の回答待ち。\n\n架空商品7\n\n"
+    )
+    answer = short_skill.run(ClientKarteInput(client_name=CLIENT), SkillContext()).answer
+    case = answer.split("\n\n")[1].splitlines()
+    assert case[0] == "**架空商品7（10/7 時点）**"
+    assert case[1:] == ["追加の経過は未確認。", "追加の経過は未確認。"]
 
 
 def test_long_related_docs_do_not_collapse_case_bodies(
