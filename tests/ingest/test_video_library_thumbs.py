@@ -288,5 +288,6 @@ def test_webp_covers_are_accepted_and_served_with_their_type() -> None:
     webp = b"RIFF\x24\x00\x00\x00WEBPVP8 "
     assert image_media_type(webp) == "image/webp"
     assert image_media_type(b"\xff\xd8\xff\xe0") == "image/jpeg"
+    assert image_media_type(b"\x89PNG\r\n\x1a\n\x00\x00\x00\r") == "image/png"
     assert image_media_type(b"\x00\x00\x00\x18ftypheic") is None
     assert image_media_type(b"<html>") is None
