@@ -1,12 +1,14 @@
 """calendar_event Skill 本体 — 本人カレンダーへ予定を登録する（招待は送らない）。
 
-入口は 2 つ:
+入口は 3 つ:
 
 1. **ボタン経路**（従来・挙動不変）: 朝ダイジェスト「📅 カレンダーに登録」押下 →
    OpenClaw が system event として転送 → ``event_token``（HMAC 署名トークン）を渡す。
 2. **自由文経路（freeform）**: DM/スレッドの「カレンダーに追加して」「予定入れといて」→
    ``title`` + ``start`` (+ ``end`` / ``location``)。2026-08-18 の本番 QA で
    「ボタン専用のためお応えできない」と正しく断られた＝**設計の穴**を塞ぐもの。
+3. **一括経路**: 共通時刻＋日付・件名の原文を ``bulk_text`` で渡す。一覧提示後に
+   ``confirm_bulk=True`` で同じ単発経路へ流す（本人への再確認は不要）。
 
 ⚠️ 死守ライン:
   G1 本人カレンダー限定（user_email→token, fail-closed）。未連携/旧スコープは error で案内。
@@ -42,6 +44,7 @@ from teamagent.skills._shared.google_connection import (
 )
 from teamagent.skills._shared.user_context import USER_CONTEXT_RULE
 from teamagent.skills.base import BaseSkill, SkillContext, register
+from teamagent.skills.calendar_event.bulk import parse_bulk
 from teamagent.skills.calendar_event.schema import CalendarEventInput, CalendarEventOutput
 from teamagent.skills.morning_digest.event_token import decode_event_token, stable_event_id
 
@@ -112,10 +115,10 @@ class CalendarEventSkill(BaseSkill[CalendarEventInput, CalendarEventOutput]):
 
     name: ClassVar[str] = "calendar_event"
     description: ClassVar[str] = (
-        "本人カレンダーへの予定登録専用（招待・変更・削除なし）。"
-        "ボタンか自由文で登録し、曖昧な日時は確認する。空き時間はcalendar_freebusy、"
-        "予定確認・一覧はcalendar_freebusy(mode='agenda')、"
-        "日程調整ボタンはschedule_propose。"
+        "本人予定登録専用（招待・変更・削除なし）。"
+        "一括はbulk_text全行を一覧提示後confirm_bulk=true（再確認不要）。"
+        "日時不明は確認。空きはcalendar_freebusy、一覧は同mode='agenda'、"
+        "日程調整はschedule_propose。"
     ) + USER_CONTEXT_RULE
     input_schema: ClassVar[type[BaseModel]] = CalendarEventInput
     output_schema: ClassVar[type[BaseModel]] = CalendarEventOutput
@@ -133,8 +136,17 @@ class CalendarEventSkill(BaseSkill[CalendarEventInput, CalendarEventOutput]):
         # 自由文経路の日付レンジ判定で使う「今」（calendar_freebusy と同じ注入口）。
         self._now_factory = now_factory or (lambda: _dt.datetime.now(tz=_JST))
 
-    @google_connection_guard(lambda input: CalendarEventOutput())
     def run(self, input: CalendarEventInput, ctx: SkillContext) -> CalendarEventOutput:
+        # 署名付きボタンは一括引数よりも優先する。
+        if not input.bulk_text.strip() or input.event_token.strip():
+            return self._run_single(input, ctx)
+        requester = str(ctx.metadata.get("user_email", "") or "").strip()
+        if not requester:
+            raise PermissionError("calendar_event は本人 user_email が必須です")
+        return self._run_bulk(input, ctx, requester, ctx.bind_logger(self.name))
+
+    @google_connection_guard(lambda input: CalendarEventOutput())
+    def _run_single(self, input: CalendarEventInput, ctx: SkillContext) -> CalendarEventOutput:
         log = ctx.bind_logger(self.name)
 
         # G1: 本人カレンダー限定（fail-closed）。MCP 外殻が slack_user_id→email を解決して注入。
@@ -159,11 +171,11 @@ class CalendarEventSkill(BaseSkill[CalendarEventInput, CalendarEventOutput]):
             log.info("calendar_event_reauth_needed")
             return CalendarEventOutput(error="reauth_needed", message=_ERR_MSG["reauth_needed"])
 
-        gcal = self._gcalendar_factory(token)  # type: ignore[operator]
         event_id = stable_event_id(
             resolved.start_iso, resolved.end_iso, requester, kind=resolved.id_kind
         )
         try:
+            gcal = self._gcalendar_factory(token)  # type: ignore[operator]
             inserted = gcal.insert_event(
                 ctx.request_id,
                 summary=resolved.title or "打合せ",
@@ -206,6 +218,46 @@ class CalendarEventSkill(BaseSkill[CalendarEventInput, CalendarEventOutput]):
             created=True,
             event_url=inserted.html_link,
             message=message,
+        )
+
+    def _run_bulk(
+        self, input: CalendarEventInput, ctx: SkillContext, requester: str, log: Any
+    ) -> CalendarEventOutput:
+        now = self._now_factory()  # type: ignore[operator]
+        now = now.astimezone(_JST) if now.tzinfo else now.replace(tzinfo=_JST)
+        try:
+            rows, warnings = parse_bulk(input.bulk_text, today=now.date())
+        except ValueError:
+            return CalendarEventOutput(
+                error="bad_datetime",
+                message="一括登録は共通の開始〜終了時刻と、日付・件名を1行ずつ指定してください。",
+            )
+        rows = [row.model_copy(update={"location": input.location}) for row in rows]
+        # 全行を検証してから書く。後半の入力不備で前半だけ登録されるのを防ぐ。
+        for row in rows:
+            _, failure = self._resolve_event(row, requester, log)
+            if failure is not None:
+                return failure
+        if not input.confirm_bulk:
+            lines = [*warnings, f"この {len(rows)} 件を入れます。"]
+            lines.extend(
+                f"・{row.start[:10]} {row.start[11:16]}〜{row.end[11:16]} {row.title}"
+                for row in rows
+            )
+            return CalendarEventOutput(message="\n".join(lines))
+
+        results = [self._run_single(row, ctx) for row in rows]
+        lines = list(warnings)
+        lines.extend(
+            f"・{row.start[:10]} {row.start[11:16]}〜{row.end[11:16]} {row.title}: "
+            + (result.event_url or result.message)
+            for row, result in zip(rows, results, strict=True)
+        )
+        return CalendarEventOutput(
+            created=any(r.created for r in results),
+            already=all(r.already for r in results),
+            error="partial_failure" if any(r.error for r in results) else "",
+            message="\n".join(lines),
         )
 
     # ── 入口の解決（ボタン経路 / 自由文経路）────────────────────────────────────

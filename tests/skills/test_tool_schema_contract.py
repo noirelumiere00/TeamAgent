@@ -216,7 +216,7 @@ def test_calendar_freebusy_router_knobs_are_enumerated_not_free_text() -> None:
     """P1-2 の mode / relative_day が自由文字列に緩まないこと（日付捏造の再発防止）。"""
     schema = CalendarFreeBusyInput.model_json_schema()
     assert not (schema.get("required") or []), "calendar_freebusy は全項目省略可のまま保つこと"
-    assert schema["properties"]["mode"]["enum"] == ["free", "agenda"]
+    assert schema["properties"]["mode"]["enum"] == ["free", "agenda", "report", "save_template"]
     assert schema["properties"]["mode"]["default"] == "free"
     assert schema["properties"]["relative_day"]["enum"] == ["", "today", "tomorrow"]
     assert schema["properties"]["relative_day"]["default"] == ""
