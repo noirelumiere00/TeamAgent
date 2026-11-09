@@ -20,7 +20,9 @@ from tests.connect_web.test_search_routes import _auth_cookie
 __all__ = ["mcp_setup", "setup"]
 
 
-@pytest.mark.parametrize("query", ["化粧品", "#コスメ", "ｃｏｓｍｅｔｉｃｓ", "cosmetics", "COSMETICS"])
+@pytest.mark.parametrize(
+    "query", ["化粧品", "#コスメ", "ｃｏｓｍｅｔｉｃｓ", "cosmetics", "COSMETICS"]
+)
 def test_cosmetics_is_product_filter_not_industry(query: str) -> None:
     where, values, _, _ = library._where({"q": query + " #PR", "_product_ids": "haircare"}, False)
     assert "NOT v.is_private" in where and "p.payload->>'source'='human'" in where
