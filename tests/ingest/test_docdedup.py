@@ -14,8 +14,16 @@
 
 from __future__ import annotations
 
+import math
+import random
+import time
+from datetime import UTC, datetime, timedelta
+from itertools import combinations
 from typing import Any
 
+import pytest
+
+from teamagent.ingest import docdedup
 from teamagent.ingest.docdedup import mark_duplicate_documents
 
 
@@ -27,10 +35,13 @@ class _FakeDoc:
         document_id: str,
         chunks: list[tuple[int, str]],
         metadata: dict[str, Any] | None = None,
+        *,
+        ingested_at: datetime = datetime(2026, 1, 1, tzinfo=UTC),
     ) -> None:
         self.document_id = document_id
         self.chunks = chunks
         self.metadata: dict[str, Any] = dict(metadata or {})
+        self.ingested_at = ingested_at
 
 
 class _FakeCursor:
@@ -42,8 +53,9 @@ class _FakeCursor:
     rowcount は「実際に変化した行数」（本番 UPDATE は WHERE id=... で 1 行ヒット）。
     """
 
-    def __init__(self, docs: list[_FakeDoc]) -> None:
+    def __init__(self, docs: list[_FakeDoc], pages: list[list[str]]) -> None:
         self._docs = docs
+        self._pages = pages
         self.rowcount = 0
         self._last_rows: list[dict[str, Any]] = []
 
@@ -63,10 +75,20 @@ class _FakeCursor:
         params = params or ()
         if "FROM documents" in sql and "SELECT" in sql:
             # fetch: 本番 string_agg(content ORDER BY chunk_idx) + SUM(length) を再現。
-            # H2: SQL 末尾に "LIMIT %s" があれば params の末尾を上限件数として id 昇順で切る。
-            ordered_docs = sorted(self._docs, key=lambda x: x.document_id)
-            if "LIMIT" in sql and params:
-                ordered_docs = ordered_docs[: int(params[-1])]
+            assert "ORDER BY d.ingested_at DESC, d.id DESC" in sql
+            assert sql.index("LIMIT %s") < sql.index("LEFT JOIN chunks")
+            last_ingested_at, _, last_id, limit = params
+            ordered_docs = sorted(
+                self._docs, key=lambda d: (d.ingested_at, d.document_id), reverse=True
+            )
+            if last_ingested_at is not None:
+                ordered_docs = [
+                    d
+                    for d in ordered_docs
+                    if (d.ingested_at, d.document_id) < (last_ingested_at, last_id)
+                ]
+            ordered_docs = ordered_docs[:limit]
+            self._pages.append([d.document_id for d in ordered_docs])
             rows: list[dict[str, Any]] = []
             for d in ordered_docs:
                 ordered = sorted(d.chunks, key=lambda c: c[0])
@@ -75,6 +97,7 @@ class _FakeCursor:
                 rows.append(
                     {
                         "document_id": d.document_id,
+                        "ingested_at": d.ingested_at,
                         "full_text": full_text,
                         "content_len": content_len,
                         "suppressed": d.metadata.get("suppressed"),
@@ -111,9 +134,10 @@ class _FakeCursor:
 class _FakeConn:
     def __init__(self, docs: list[_FakeDoc]) -> None:
         self.docs = docs
+        self.pages: list[list[str]] = []
 
     def cursor(self) -> _FakeCursor:
-        return _FakeCursor(self.docs)
+        return _FakeCursor(self.docs, self.pages)
 
 
 def _doc(doc_id: str, text: str, metadata: dict[str, Any] | None = None) -> _FakeDoc:
@@ -332,23 +356,22 @@ def test_three_way_cluster_keeps_one_canonical() -> None:
 
 
 # -----------------------------------------------------------
-# H2: doc 数上限・per-doc 文字数 truncate で OOM/timeout 回避（決定性維持）
+# doc 数上限は任意・per-doc 文字数 truncate（決定性維持）
 # -----------------------------------------------------------
 def test_max_docs_limits_documents_scanned() -> None:
-    """max_docs を超える分は id 昇順で先頭だけ対象になり、上限外の重複は畳まれない（H2）。
-
-    doc-a/doc-b が重複ペアだが、max_docs=1 なら id 昇順先頭の doc-a だけ読まれ、doc-b は
-    そもそも対象外。n<2 扱いで重複判定は走らず、どちらにも印が付かない（決定的）。
-    """
+    """上限指定時は UUID の順でなく新しい取り込み順。同時刻は id 降順で決定的。"""
     same = "完全 に 同一 の 本文 を 持つ 重複 資料 ペア の テンプレ 提案"
     docs = [
         _FakeDoc("doc-a", [(0, same)]),
-        _FakeDoc("doc-b", [(0, same)]),
+        _FakeDoc("doc-z", [(0, same)]),
+        _FakeDoc("doc-b", [(0, same)], ingested_at=datetime(2026, 1, 2, tzinfo=UTC)),
     ]
     conn = _FakeConn(docs)
-    affected = mark_duplicate_documents(conn, jaccard_threshold=0.7, max_docs=1)
-    assert affected == 0
-    assert _suppressed(docs) == []
+    affected = mark_duplicate_documents(conn, jaccard_threshold=0.7, max_docs=2)
+    assert affected == 1
+    assert conn.pages == [["doc-b", "doc-z"]]
+    assert {d.document_id for d in _suppressed(docs)} == {"doc-z"}
+    assert docs[0].metadata == {}
 
 
 def test_max_docs_unlimited_when_non_positive() -> None:
@@ -394,3 +417,165 @@ def test_huge_doc_truncation_does_not_change_near_dup_decision() -> None:
     affected = mark_duplicate_documents(conn, jaccard_threshold=0.7, max_chars=200)
     assert affected == 1
     assert {d.document_id for d in _suppressed(docs)} == {"doc-long-b"}
+
+
+def _synthetic_texts(*, changed_chars: int) -> list[str]:
+    rng = random.Random(1207)
+    texts = ["".join(rng.choices("abcdefghijklmnopqrstuvwxyz", k=400)) for _ in range(270)]
+    texts += [
+        text[: 400 - changed_chars]
+        + "".join(rng.choices("abcdefghijklmnopqrstuvwxyz", k=changed_chars))
+        for text in texts[:30]
+    ]
+    return texts
+
+
+def test_lsh_matches_all_pairs_on_300_documents(monkeypatch: pytest.MonkeyPatch) -> None:
+    # 240 distinct documents + 30 pairs that qualify under the actual 64-perm estimate.
+    texts = _synthetic_texts(changed_chars=30)
+    signatures = [docdedup._minhash_signature(docdedup._char_shingles(text)) for text in texts]
+    assert all(
+        docdedup._signature_similarity(signatures[i], signatures[270 + i]) >= 0.7 for i in range(30)
+    )
+    docs = [_doc(f"doc-{i:03}", text) for i, text in enumerate(texts)]
+    baseline_docs = [_doc(d.document_id, text) for d, text in zip(docs, texts, strict=True)]
+    affected = mark_duplicate_documents(_FakeConn(docs), jaccard_threshold=0.7)
+    assert affected == 30
+
+    monkeypatch.setattr(
+        docdedup,
+        "_candidate_pairs",
+        lambda signatures, **_: combinations(range(len(signatures)), 2),
+    )
+    assert mark_duplicate_documents(_FakeConn(baseline_docs), jaccard_threshold=0.7) == affected
+    assert [d.metadata for d in docs] == [d.metadata for d in baseline_docs]
+
+
+def test_original_synthetic_pair_below_threshold_is_not_a_duplicate() -> None:
+    texts = _synthetic_texts(changed_chars=40)
+    signatures = [docdedup._minhash_signature(docdedup._char_shingles(texts[i])) for i in (8, 278)]
+    assert docdedup._signature_similarity(*signatures) == 44 / 64
+    assert list(docdedup._candidate_pairs(signatures, jaccard_threshold=0.7)) == [(0, 1)]
+    docs = [_doc(str(i), texts[i]) for i in (8, 278)]
+    assert mark_duplicate_documents(_FakeConn(docs), jaccard_threshold=0.7) == 0
+    assert all(d.metadata == {} for d in docs)
+
+
+def test_identical_signatures_preserve_transitive_cluster(monkeypatch: pytest.MonkeyPatch) -> None:
+    a = (0,) * 64
+    c = (0,) * 45 + (1,) * 19
+    d = (2,) * 19 + c[19:]
+    signatures = {
+        frozenset([text]): sig for text, sig in [("a", a), ("bbbb", a), ("cc", c), ("ddd", d)]
+    }
+    monkeypatch.setattr(docdedup, "_minhash_signature", lambda shingles: signatures[shingles])
+    docs = [_doc(text[0], text) for text in ("a", "bbbb", "cc", "ddd")]
+    assert docdedup._signature_similarity(a, d) < 0.7
+    assert mark_duplicate_documents(_FakeConn(docs), jaccard_threshold=0.7) == 3
+    result = [dict(doc.metadata) for doc in docs]
+    assert docs[1].metadata == {}
+    assert all(doc.metadata["duplicate_of"] == "b" for doc in (docs[0], docs[2], docs[3]))
+
+    monkeypatch.setattr(
+        docdedup,
+        "_candidate_pairs",
+        lambda signatures, **_: combinations(range(len(signatures)), 2),
+    )
+    for doc in docs:
+        doc.metadata.clear()
+    assert mark_duplicate_documents(_FakeConn(docs), jaccard_threshold=0.7) == 3
+    assert [doc.metadata for doc in docs] == result
+
+
+@pytest.mark.parametrize("threshold", [0.1, 0.5, 0.65, 0.7, 0.85, 1.0])
+def test_lsh_keeps_threshold_pairs_even_when_matches_are_scattered(threshold: float) -> None:
+    # Spread mismatches to break as many three-row bands as possible.
+    matches = math.ceil(threshold * 64)
+    a = tuple(range(64))
+    b = list(a)
+    for i in [*range(2, 63, 3), 63, *range(1, 63, 3), *range(0, 63, 3)]:
+        if sum(x == y for x, y in zip(a, b, strict=True)) <= matches:
+            break
+        b[i] += 1000
+    assert list(docdedup._candidate_pairs([a, tuple(b)], jaccard_threshold=threshold)) == [(0, 1)]
+
+
+def test_lsh_20000_signatures_is_sparse_and_fast() -> None:
+    rng = random.Random(20000)
+    signatures = [tuple(rng.getrandbits(61) for _ in range(64)) for _ in range(20_000)]
+    for i in range(0, 200, 2):
+        signatures[i + 1] = signatures[i][:45] + signatures[i + 1][45:]
+    started = time.monotonic()
+    candidates = list(docdedup._candidate_pairs(signatures, jaccard_threshold=0.7))
+    elapsed = time.monotonic() - started
+    assert len(candidates) == 100
+    assert len(candidates) < len(signatures) * (len(signatures) - 1) // 2 * 0.01
+    assert elapsed < 5.0, f"LSH took {elapsed:.3f}s"
+
+
+def test_identical_and_empty_signature_buckets_are_linear() -> None:
+    signatures = [(docdedup._MAX_HASH,) * 64] * 20_000
+    assert sum(1 for _ in docdedup._candidate_pairs(signatures, jaccard_threshold=0.7)) == 19_999
+
+
+def test_lsh_candidates_still_require_signature_similarity(monkeypatch: pytest.MonkeyPatch) -> None:
+    signatures = iter([tuple(range(64)), tuple(range(3)) + tuple(range(100, 161))])
+    monkeypatch.setattr(docdedup, "_minhash_signature", lambda _: next(signatures))
+    docs = [_doc("a", "one"), _doc("b", "two")]
+    assert mark_duplicate_documents(_FakeConn(docs), jaccard_threshold=0.7) == 0
+    assert _suppressed(docs) == []
+
+
+def test_default_reads_beyond_5000_in_pages(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Isolate paging from the cost of generating 5,105 real MinHash signatures.
+    monkeypatch.setattr(
+        docdedup, "_minhash_signature", lambda shingles: (hash(tuple(sorted(shingles))),) * 64
+    )
+    docs = [_doc(f"doc-{i:05}", f"document #{i:05}") for i in range(5105)]
+    docs[-1].chunks = docs[0].chunks[:]
+    conn = _FakeConn(docs)
+    assert mark_duplicate_documents(conn, jaccard_threshold=0.7) == 1
+    visited = [doc_id for page in conn.pages for doc_id in page]
+    assert len(visited) == len(set(visited)) == 5105
+    assert max(map(len, conn.pages)) <= docdedup._PAGE_SIZE
+    assert docs[-1].metadata["duplicate_of"] == docs[0].document_id
+
+
+def test_max_docs_stops_partway_through_a_page(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(docdedup, "_PAGE_SIZE", 2)
+    base_time = datetime(2026, 1, 1, tzinfo=UTC)
+    docs = [_FakeDoc(f"doc-{i}", [], ingested_at=base_time + timedelta(days=i)) for i in range(6)]
+    conn = _FakeConn(docs)
+    assert len(list(docdedup._fetch_documents(conn, max_docs=5))) == 5
+    assert conn.pages == [["doc-5", "doc-4"], ["doc-3", "doc-2"], ["doc-1"]]
+
+
+def test_full_text_is_discarded_after_each_signature(monkeypatch: pytest.MonkeyPatch) -> None:
+    def fetch(conn: Any, **_: Any) -> Any:
+        for i in range(3):
+            row = {"document_id": str(i), "full_text": "same", "content_len": 4}
+            yield row
+            assert "full_text" not in row
+
+    monkeypatch.setattr(docdedup, "_fetch_documents", fetch)
+    assert (
+        mark_duplicate_documents(
+            _FakeConn([_doc(str(i), "same") for i in range(3)]), jaccard_threshold=0.7
+        )
+        == 2
+    )
+
+
+@pytest.mark.parametrize("count", [0, 1, 2])
+def test_completion_logs_counts_time_and_memory(
+    monkeypatch: pytest.MonkeyPatch, count: int
+) -> None:
+    events: list[dict[str, Any]] = []
+    monkeypatch.setattr(docdedup.logger, "info", lambda event, **fields: events.append(fields))
+    docs = [_doc(str(i), "same") for i in range(count)]
+    affected = mark_duplicate_documents(_FakeConn(docs), jaccard_threshold=0.7)
+    assert events[0]["documents"] == count
+    assert events[0]["candidate_pairs"] == max(0, count - 1)
+    assert events[0]["affected"] == affected
+    assert events[0]["elapsed_seconds"] >= 0
+    assert events[0]["peak_rss_mb"] > 0
