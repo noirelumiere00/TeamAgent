@@ -202,7 +202,7 @@ class KnowledgeDeliverSkill(BaseSkill[KnowledgeDeliverInput, KnowledgeDeliverOut
     name: ClassVar[str] = "knowledge_deliver"
     description: ClassVar[str] = (
         "社内資料の実ファイルを検索・要約して本人DMへ添付する（チャンネルではnoteのみ"
-        "）。リンク・要約だけならsearch。依頼の条件を各filterへ、"
+        "）。計算・リンク・要約だけならsearch。依頼の条件を各filterへ、"
         "queryに依頼文全体を入れる。"
     ) + USER_CONTEXT_RULE
     input_schema: ClassVar[type[BaseModel]] = KnowledgeDeliverInput

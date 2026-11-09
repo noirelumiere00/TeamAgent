@@ -47,7 +47,7 @@ from teamagent.skills._shared.next_step import (
 from teamagent.skills._shared.slack_file_delivery import file_metadata
 from teamagent.skills._shared.source_url import hit_doc_url, ingested_slack_file_id
 from teamagent.skills.base import BaseSkill, SkillContext, register
-from teamagent.skills.search import compact, drive_first, timeline_status, visit_cases
+from teamagent.skills.search import compact, drive_first, numeric, timeline_status, visit_cases
 from teamagent.skills.search.aggregation import extract_aggregation_filter
 from teamagent.skills.search.alias_expansion import resolve_topic_client, retry_inputs, scope_footer
 from teamagent.skills.search.answer_mode import (
@@ -224,12 +224,11 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
 
     name: ClassVar[str] = "search"
     description: ClassVar[str] = (
-        "提案書・議事録・メールを探して/列挙する窓口。"
-        "既知の取引先・施策の動画ごとの結果や何が効いたかは、まず search で"
-        "施策実績・動画ごとの数字・資料を探す。"
-        "新規の市場・競合動画は video_algorithm。"
-        "日付は updated_at（更新日）/ title_date（資料名の日付）/ date_basis の返値のみ。"
-        "date_basis=none は日付なし"
+        "資料の検索・列挙、単価・CPV・CPM・あたり・合計・差のコード計算（式・出典付き）。"
+        "既知の取引先・施策の動画実績や効果もまずsearch。"
+        "新規の市場・競合動画はvideo_algorithm。"
+        "日付はupdated_at（更新日）/title_date（資料名の日付）/date_basisの返値のみ。"
+        "date_basis=noneは日付なし"
     )
     input_schema: ClassVar[type[BaseModel]] = SearchInput
     output_schema: ClassVar[type[BaseModel]] = SearchOutput
@@ -598,6 +597,23 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
     @google_connection_guard(lambda input: SearchOutput(answer="", total_cost_usd=0))
     def run(self, input: SearchInput, ctx: SkillContext) -> SearchOutput:
         """全経路の不在回答を、検索を広げてから確定する。"""
+        if input.include_answer and numeric.is_calculation(input.query):
+            # 通常の要約・短文化に計算をさせず、本人の検索結果だけで回答を組む。
+            output = self.run(input.model_copy(update={"include_answer": False}), ctx)
+            if output.error:
+                return output
+            answer, cost, refs = numeric.answer(
+                input.query, output.hits if output.found else [], self._bedrock, ctx.request_id
+            )
+            return output.model_copy(
+                update={
+                    "answer": answer,
+                    "total_cost_usd": output.total_cost_usd + cost,
+                    "displayed_refs": refs,
+                    "suggested_next": None,
+                    "answer_format": None,
+                }
+            )
         if not self._not_found_recovery:
             return self._run_once(input, ctx)
         request = copy(self)
@@ -1253,7 +1269,7 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
             else []
         )
         state_evidence = timeline_status.resolved_evidence(state_hits) if state_hits else {}
-        for h in hits:
+        for h in summary_hits if numeric.is_calculation(input.query) else hits:
             meta = h.metadata or {}
             resolved_file_ref = self._resolved_file_ref(meta, h.content or "", file_urls)
             url = self._doc_url({"drive_url": meta.get("drive_url")})
