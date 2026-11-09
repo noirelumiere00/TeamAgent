@@ -473,12 +473,20 @@ def install_spike(
         ):
             return _error("access_denied", 403)
         service = service_name(pending["params"]["redirect_uri"])
+        callback = urlsplit(pending["params"]["redirect_uri"])
+        callback_host = html.escape(callback.netloc)
         escaped_target = html.escape(target, quote=True)
         content = (
             f"<h1>動画ライブラリを {service} に接続</h1>"
+            f"<p><small>認証の戻り先: {callback_host}</small></p>"
             "<p>本人の閲覧権限で動画を検索・参照します。広告費・動画ファイルは返しません。変更・削除はできません。</p>"
             "<p>接続は自動更新されます。90日間利用がない場合や接続を解除した場合は、再ログインが必要です。</p>"
         )
+        if callback.hostname in {"localhost", "127.0.0.1"}:
+            content += (
+                "<p>この端末のアプリへ接続します。"
+                "操作中のアプリから開始した接続か確認してください。</p>"
+            )
         email = pending.get("email")
         if email:
             content += (

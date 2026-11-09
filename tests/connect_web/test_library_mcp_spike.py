@@ -127,6 +127,8 @@ def _consent_form(client: TestClient, target: str, *, service: str = "Claude") -
     assert page.status_code == 200
     soup = BeautifulSoup(page.text, "html.parser")
     assert soup.find("button", string=f"{service} に読み取り接続を許可")
+    expected_host = "chatgpt.com" if service == "ChatGPT" else "claude.ai"
+    assert "認証の戻り先: " + expected_host in soup.get_text()
     assert _EMAIL not in page.text
     assert "自動更新" in page.text and "広告費" in page.text
     assert "この試作" not in page.text
