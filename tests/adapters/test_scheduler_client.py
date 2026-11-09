@@ -94,7 +94,7 @@ def test_missing_env_raises_value_error() -> None:
         SchedulerClient(group_name="", queue_arn="x", role_arn="y")
 
 
-# runner の対象選定テストはリマインド廃止で削除。登録ゼロは test_digest_preferences_runner.py。
+# runner の対象選定と opt-in は test_digest_preferences_runner.py で確認。
 
 
 # ── Lambda handler ──────────────────────────────────────────────────────────
@@ -302,3 +302,34 @@ def test_lambda_handler_title_link_injection_escaped(monkeypatch: pytest.MonkeyP
     h.handler(event, None)
     # 山括弧はエスケープされ、リンク偽装にならない。
     assert "<https://evil" not in posted[0][1]
+
+
+def test_reminder_post_appends_stop_note_as_small_context(monkeypatch: pytest.MonkeyPatch) -> None:
+    h = _load_handler()
+    monkeypatch.setenv("SLACK_BOT_TOKEN", "xoxb-test")
+    posted: list[dict[str, Any]] = []
+
+    class _Response:
+        def __enter__(self) -> Any:
+            return self
+
+        def __exit__(self, *args: Any) -> None:
+            pass
+
+        def read(self) -> bytes:
+            return b'{"ok":true}'
+
+    def capture(req: Any, **kw: Any) -> _Response:
+        posted.append(json.loads(req.data))
+        return _Response()
+
+    monkeypatch.setattr(h.urllib.request, "urlopen", capture)
+    h.handler({"Records": [{"body": json.dumps({"channel": "D1", "title": "定例"})}]}, None)
+    (payload,) = posted
+    note = "止めるときは、この DM で『リマインドいらない』"
+    assert payload["channel"] == "D1" and payload["text"].splitlines()[-1] == note
+    assert payload["blocks"][-1] == {
+        "type": "context",
+        "elements": [{"type": "mrkdwn", "text": note}],
+    }
+    assert "定例" in payload["blocks"][0]["text"]["text"]

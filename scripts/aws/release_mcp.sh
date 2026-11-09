@@ -28,7 +28,7 @@ set -euo pipefail
 REGION=ap-northeast-1
 ACCOUNT=718959508629
 PROFILE="${RELEASE_MCP_PROFILE:-aiiadev}"
-MFA_ARN="arn:aws:iam::${ACCOUNT}:mfa/N2"
+MFA_ARN="${RELEASE_MCP_MFA_ARN:-arn:aws:iam::${ACCOUNT}:mfa/N2}"
 EVIDENCE_BUCKET=teamagent-dev-image-release-evidence
 POLL_SECONDS=20
 

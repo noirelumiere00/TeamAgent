@@ -2628,11 +2628,14 @@ def test_docdedup_called_when_env_on(monkeypatch: pytest.MonkeyPatch) -> None:
     """DOC_DEDUP_DETECT=1 + commit で mark_duplicate_documents が ops 接続付きで呼ばれる。"""
     monkeypatch.setenv("DOC_DEDUP_DETECT", "1")
     monkeypatch.delenv("DOC_DEDUP_JACCARD", raising=False)
+    monkeypatch.delenv("DOC_DEDUP_MAX_DOCS", raising=False)
+    monkeypatch.delenv("DOC_DEDUP_MAX_CHARS", raising=False)
     monkeypatch.delenv("BOILERPLATE_DETECT", raising=False)
     seen: list[tuple[object, float]] = []
     repo = _RepoWithOpsConn()
 
     def _mark(conn: object, *, jaccard_threshold: float, **_: object) -> int:
+        assert _ == {"max_docs": 0, "max_chars": 500_000}
         assert repo.ops_conn.executed == [
             "SET LOCAL statement_timeout = '0'",
             "SET LOCAL idle_in_transaction_session_timeout = '0'",
@@ -2675,6 +2678,27 @@ def test_docdedup_jaccard_env_override(monkeypatch: pytest.MonkeyPatch) -> None:
     )
     runner.run(_empty_sources())
     assert seen == [0.85]
+
+
+def test_docdedup_limits_env_override(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("DOC_DEDUP_DETECT", "1")
+    monkeypatch.setenv("DOC_DEDUP_MAX_DOCS", "12345")
+    monkeypatch.setenv("DOC_DEDUP_MAX_CHARS", "67890")
+    seen: list[tuple[int, int]] = []
+
+    def mark(conn: object, *, max_docs: int, max_chars: int, **_: object) -> int:
+        seen.append((max_docs, max_chars))
+        return 0
+
+    monkeypatch.setattr("teamagent.ingest.pipeline.mark_duplicate_documents", mark)
+    runner = IngestRunner(
+        repository=_RepoWithOpsConn(),  # type: ignore[arg-type]
+        embedder=_FakeEmbedder(),
+        owner_email="x@y.jp",
+        dry_run=False,
+    )
+    runner._maybe_mark_duplicate_documents(request_id="test")
+    assert seen == [(12345, 67890)]
 
 
 def test_docdedup_failure_is_fail_open(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -2767,7 +2791,7 @@ def test_runner_does_not_crash_on_nonnumeric_detection_envs(
     monkeypatch.setenv("BOILERPLATE_MIN_CHARS", "x")  # 非数値 → 40
     monkeypatch.setenv("DOC_DEDUP_DETECT", "1")
     monkeypatch.setenv("DOC_DEDUP_JACCARD", "3x")  # 非数値 → 0.7
-    monkeypatch.setenv("DOC_DEDUP_MAX_DOCS", "")  # 空文字 → 5000
+    monkeypatch.setenv("DOC_DEDUP_MAX_DOCS", "")  # 空文字 → 0（全件）
     seen_bp: list[tuple[int, int]] = []
     seen_dd: list[float] = []
     monkeypatch.setattr(

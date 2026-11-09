@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import hashlib
 import os
+import re
 import threading
 import time
+import unicodedata
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any, Literal
@@ -15,6 +17,12 @@ from teamagent.mcp_gateway.allowlist import email_allowed
 FieldClass = Literal["required", "nice_to_have", "confirm_side_effect"]
 InputState = Literal["unspecified", "given", "delegated", "declined"]
 Decision = Literal["proceed", "ask_once", "proceed_partial"]
+
+
+def requested_item_count(query: str) -> int | None:
+    """全半角の「N件」「Nつ」を、追加確認せず使える上限として読む。"""
+    match = re.search(r"(?<![\d.\-])([0-9]+)\s*(?:件|つ)", unicodedata.normalize("NFKC", query))
+    return int(match[1]) or None if match else None
 
 
 @dataclass(frozen=True)
