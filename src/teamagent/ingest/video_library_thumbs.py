@@ -82,8 +82,14 @@ def fill_thumbnails(
                     if page_is_challenge(page):
                         raise ValueError("challenge")
                     counts["cover_missing"] += 1
-                    consecutive_failures += 1
-                    repository.record_fetch_outcome(success=False)
+                    if "__UNIVERSAL_DATA_FOR_REHYDRATION__" in page:
+                        # A real page without a cover is a deleted/private post, not throttling;
+                        # counting it paused all fetching on 11/07 (38 of 259 had no cover).
+                        consecutive_failures = 0
+                        repository.record_fetch_outcome(success=True)
+                    else:
+                        consecutive_failures += 1
+                        repository.record_fetch_outcome(success=False)
                 else:
                     key = save_cover(client, storage, row["platform"], row["video_id"], url)
                     with pg.connection(
