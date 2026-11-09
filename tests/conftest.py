@@ -30,6 +30,7 @@ def _no_url_import_worker_thread(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("VIDEO_LIBRARY_IMPORT_WORKER_ENABLED", "0")
     monkeypatch.setenv("VIDEO_LIBRARY_ACCOUNT_FETCH_ENABLED", "0")
     monkeypatch.setenv("VIDEO_LIBRARY_INSIGHTS_ENABLED", "0")
+    monkeypatch.setenv("VIDEO_LIBRARY_CASE_DISCOVERY_ENABLED", "0")
 
 
 @pytest.fixture(autouse=True)

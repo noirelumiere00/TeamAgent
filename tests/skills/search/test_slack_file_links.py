@@ -9,6 +9,35 @@ from teamagent.skills.search.drive_first import canonical_reference
 from teamagent.skills.search.schema import DocumentReference
 
 
+def test_reference_uses_attached_file_before_message_permalink():
+    post = "https://example.slack.com/archives/C0FAKE/p1784424000000001"
+    file_url = "https://example.slack.com/files/U0FAKE/F0SHARED/proposal.pdf"
+    ref = canonical_reference(
+        {
+            "source_type": "slack",
+            "source_uri": post,
+            "files": [{"id": "F0SHARED", "permalink": file_url}],
+        }
+    )
+    assert ref.url == file_url and ref.kind == "slack_attachment"
+    assert ref.slack_file_ids == ["F0SHARED"]
+
+
+def test_reference_does_not_use_another_files_permalink():
+    post = "https://example.slack.com/archives/C0FAKE/p1784424000000001"
+    ref = canonical_reference(
+        {
+            "source_type": "slack",
+            "source_uri": post,
+            "slack_file_ids": ["F0WANTED"],
+            "files": [
+                {"id": "F0OTHER", "permalink": "https://example.slack.com/files/U0/F0OTHER/"}
+            ],
+        }
+    )
+    assert ref.url == post and ref.slack_file_ids == ["F0WANTED"]
+
+
 @pytest.mark.parametrize("host", ["example.slack.com", "slack.com", "nested.example.slack.com"])
 def test_case_link_accepts_slack_file_permalink(host: str) -> None:
     url = f"https://{host}/files/U0OWNER/F0SHARED/proposal.pdf"

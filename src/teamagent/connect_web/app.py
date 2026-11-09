@@ -5810,6 +5810,7 @@ def create_app(
             get_pg=_get_admin_pg,
             admins=_admin_emails,
             auth_config=search_cfg,
+            content_security_policy=_CONTENT_SECURITY_POLICY,
             google_verifier=search_verifier,
         )
 

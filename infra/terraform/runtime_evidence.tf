@@ -841,6 +841,38 @@ data "aws_iam_policy_document" "runtime_evidence_automation" {
     )
   }
 
+  # Transaction ConditionCheck uses its own permission, not TransactWriteItems.
+  # It may inspect only the existing shared lock, inside a write transaction.
+  statement {
+    sid       = "CheckExactSharedRuntimeLockWithinTransaction"
+    actions   = ["dynamodb:ConditionCheckItem"]
+    resources = [aws_dynamodb_table.image_deployment_intents.arn]
+
+    condition {
+      test     = "ForAllValues:StringEquals"
+      variable = "dynamodb:LeadingKeys"
+      values   = ["lock#teamagent/terraform.tfstate"]
+    }
+
+    condition {
+      test     = "ForAnyValue:StringEquals"
+      variable = "dynamodb:EnclosingOperation"
+      values   = ["TransactWriteItems"]
+    }
+
+    condition {
+      test     = "Null"
+      variable = "dynamodb:LeadingKeys"
+      values   = ["false"]
+    }
+
+    condition {
+      test     = "Null"
+      variable = "dynamodb:EnclosingOperation"
+      values   = ["false"]
+    }
+  }
+
   statement {
     sid = "TransitionExactDeploymentIntentLedger"
     actions = [

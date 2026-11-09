@@ -113,7 +113,7 @@ def test_tiktok_buildspec_stops_at_quarantine_after_single_arm64_scan() -> None:
 def test_tiktok_registry_and_trivy_endpoints_ignore_hostile_overrides() -> None:
     body = BUILDSPEC.read_text(encoding="utf-8")
 
-    assert body.count("export AWS_IGNORE_CONFIGURED_ENDPOINT_URLS=true") == 3
+    assert body.count("export AWS_IGNORE_CONFIGURED_ENDPOINT_URLS=true") == 4
     assert body.count('EXPECTED_ACCOUNT_ID="718959508629"') == 3
     assert body.count('EXPECTED_REGION="ap-northeast-1"') == 3
     assert (

@@ -1,0 +1,36 @@
+{
+  "refs": [
+    {
+      "ref": "ref-1",
+      "item_id": "item-1",
+      "title": "架空星雲飲料資料1",
+      "url": "https://drive.google.com/file/d/fixtureRecord1xyz/view"
+    },
+    {
+      "ref": "ref-2",
+      "item_id": "item-2",
+      "title": "架空星雲飲料資料2",
+      "url": "https://drive.google.com/file/d/fixtureRecord2xyz/view"
+    }
+  ],
+  "mail": [
+    {
+      "ref": "ref-1",
+      "item_id": "item-1",
+      "title": "架空星雲飲料資料1",
+      "url": "https://drive.google.com/file/d/fixtureRecord1xyz/view",
+      "content": "架空星雲飲料資料1。架空の飲料の店頭動画を配信した。準備中の企画を確認した。",
+      "source_type": "other",
+      "lane": "mail"
+    },
+    {
+      "ref": "ref-2",
+      "item_id": "item-2",
+      "title": "架空星雲飲料資料2",
+      "url": "https://drive.google.com/file/d/fixtureRecord2xyz/view",
+      "content": "架空星雲飲料資料2。架空の飲料の店頭動画を配信した。準備中の企画を確認した。",
+      "source_type": "other",
+      "lane": "mail"
+    }
+  ]
+}

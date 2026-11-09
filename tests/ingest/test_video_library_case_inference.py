@@ -919,3 +919,46 @@ def test_malformed_json_reason_is_schema_code() -> None:
     assert [e["reason"] for e in logs if e["event"] == "case_inference_failed"] == [
         "invalid_json_invalid"
     ]
+
+
+@pytest.mark.parametrize("ids,expected", [({"2"}, 1), (set(), 0), ({"missing"}, 0)])
+def test_run_filters_before_invalidating_or_predicting(ids: set[str], expected: int) -> None:
+    repository = repo()
+    row = repository.load.return_value[1][0]
+    repository.load.return_value[1].extend(
+        [
+            {**row, "video_id": "2"},
+            {**row, "video_id": "2", "platform": "instagram"},
+        ]
+    )
+    engine = Inference(client(), max_cost_usd=1)
+    counts = run(
+        repository,
+        engine,
+        policy=None,
+        limit=200,
+        dry_run=False,
+        request_id="filtered",
+        video_ids=ids,
+    )
+    assert counts["attempted"] == expected
+    assert engine.client.converse.call_count == repository.invalidate.call_count == expected
+    if expected:
+        assert repository.save.call_args.args[0]["video_id"] == "2"
+        assert repository.save.call_args.args[0]["platform"] == "tiktok"
+
+
+def test_filtered_inference_never_attempts_more_than_200_videos() -> None:
+    repository = repo()
+    row = repository.load.return_value[1][0]
+    repository.load.return_value = (CASES, [{**row, "video_id": str(i)} for i in range(205)])
+    counts = run(
+        repository,
+        Inference(client(), max_cost_usd=20),
+        policy=None,
+        limit=1000,
+        dry_run=False,
+        request_id="cap",
+        video_ids={str(i) for i in range(205)},
+    )
+    assert counts["attempted"] == repository.save.call_count == 200

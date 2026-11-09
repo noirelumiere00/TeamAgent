@@ -113,7 +113,7 @@ def test_zero_drive_cases_checks_slack_before_absence(
     skill._summarize = MagicMock(return_value=("Slack の投稿 " + POST, 0.0))
     out = _run(skill)
     if only_slack:
-        assert out.found and POST in out.answer and "会話の記録" in out.answer
+        assert out.found and POST in out.answer and "資料を見る" in out.answer
         assert not any(ref.drive_file_id for ref in out.displayed_refs)
     else:
         assert not out.found and out.displayed_refs == []

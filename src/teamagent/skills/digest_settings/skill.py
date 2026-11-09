@@ -89,7 +89,12 @@ def _apply(
         reminder_values = {
             k: v for k, v in current.model_dump().items() if k.startswith("reminder")
         }
-        return DEFAULT_PREFERENCES.model_copy(update=reminder_values), []
+        return DEFAULT_PREFERENCES.model_copy(
+            update={
+                **reminder_values,
+                "daily_schedule_template": current.daily_schedule_template,
+            }
+        ), []
     data: dict[str, Any] = current.model_dump()
     notes: list[str] = []
 
@@ -187,9 +192,10 @@ class DigestSettingsSkill(BaseSkill[DigestSettingsInput, DigestSettingsOutput]):
 
     name: ClassVar[str] = "digest_settings"
     description: ClassVar[str] = (
-        "朝のサマリー/朝ダイジェスト・予定リマインドの設定確認・変更。"
+        "朝のサマリー/朝ダイジェスト・リマインド設定。"
         "「リマインド欲しい」「予定の前に知らせて」はaction=update, reminders=true、"
-        "「リマインドいらない」はfalse。指定された項目だけ渡す。DM only。"
+        "「リマインドいらない」はfalse。指定項目のみ。明示希望のみON、既定OFF。DM only。"
+        "件数:返信/Slack1〜8、未読1〜10、予定1〜15。"
     ) + USER_CONTEXT_RULE
     input_schema: ClassVar[type[BaseModel]] = DigestSettingsInput
     output_schema: ClassVar[type[BaseModel]] = DigestSettingsOutput

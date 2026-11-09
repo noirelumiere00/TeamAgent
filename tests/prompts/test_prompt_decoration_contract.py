@@ -55,6 +55,8 @@ HUMAN_FACING_PROMPTS = (
     "search/compact/system.md",
     "search/compact/drive.md",
     "search/compact/normal.md",
+    # 件数指定の事例一覧で、コードが組んだ各件に添える要点（Slack 本文に出る）。
+    "search/case_points/system.md",
     # 複合検索（USE_COMPOSITE_SEARCH）で search の user message に足す節（出典の書き分け）。
     "search/composite/slack.md",
     # 施策実績のヒットがあるとき search の user message に足す節（資料リンク・業種の扱い）。
@@ -97,6 +99,9 @@ EXEMPT_PROMPTS = {
     "dm_quality/v1/system.md": "内部 JSON（判定区分だけ）",
     # 動画ライブラリの事例推定（Haiku に広告主・案件・根拠の JSON だけを返させる）。人には見えない。
     "case_inference/v1/system.md": "内部 JSON（広告主・案件の推定と根拠の引用だけ）",
+    "case_discovery/v1/system.md": "内部 JSON（事例の発見とサンプル本文からの根拠引用だけ）",
+    # 数値計算で使う数値の id だけを JSON で選ばせる内部プロンプト。答えの文はコードが組む。
+    "search/numeric/system.md": "内部 JSON（計算に使う数値の id だけ）",
     # 外部（他社）動画の広告主名の推定（Haiku に広告主と根拠の JSON だけを返させる）。人には見えない。
     "external_advertiser/v1/system.md": "内部 JSON（他社の広告主名の推定と根拠の引用だけ）",
     # 時系列フラグ ON 時だけ本体へ足す規律。装飾の禁止節は v2d/v3 から継承する。

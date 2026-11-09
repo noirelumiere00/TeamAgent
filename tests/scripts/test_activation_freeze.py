@@ -208,8 +208,25 @@ def test_unrelated_changes_still_pass(base: str, head: str, reason: str) -> None
 
 
 def test_unlock_matches_the_committed_declaration() -> None:
-    """core expat の APK 差し替えに追随し、scope と退避した宣言を完全一致で封印する。"""
+    """504 対策の frozen surface と、退避した APK 宣言を完全一致で封印する。"""
     unlock = _freeze_doc()["unlock"]
+    assert unlock["active"] is True
+    assert unlock["scope_paths"] == [
+        "infra/codebuild/image-attestor-buildspec.yml",
+        "infra/codebuild/image-promoter-buildspec.yml",
+        "infra/terraform/codebuild.tf",
+    ]
+    assert unlock["reason"] == (
+        "GitHub リリース取得の間欠的な 504 に対し、4 buildspec の S3 ミラー優先取得・curl リトライと"
+        "必要な CodeBuild 読み取り権限をリポジトリ内で実装する。frozen surface は "
+        "attestor/promoter buildspec と codebuild.tf の 3 path のみ。世代はオフライン再導出し、"
+        "AWS publish・権限変更・Terraform apply は実行しない。"
+    )
+    assert unlock["gate"] == (
+        "human gate 2026-11-09（ユーザーの明示依頼: ビルドツール 504 対策の調査・"
+        "リポジトリ内実装・世代再導出。AWS・S3・GitHub 接続と Terraform apply は禁止）"
+    )
+    unlock = unlock["previous_scope_20261109_media_apk_lock"]
     assert unlock["active"] is True
     assert unlock["scope_paths"] == [
         "infra/codebuild/teamagent_core_media_release_contract.json",
@@ -222,6 +239,7 @@ def test_unlock_matches_the_committed_declaration() -> None:
         unlock["gate"]
         == "human gate 2026-11-09（小俣さん OK・r109 の発射前在庫確認で ffmpeg8 の 3 ライブラリ 8.1.3-r1 が上流から消えた・AWS 内の実インベントリで追随）"
     )
+    unlock = _freeze_doc()["unlock"]
     assert unlock[
         "previous_scope_20261106_teamagent_runtime_contract_teamagent_core_media_release_contract"
     ] == {

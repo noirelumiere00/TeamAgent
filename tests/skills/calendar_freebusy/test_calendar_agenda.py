@@ -12,7 +12,7 @@
 from __future__ import annotations
 
 import datetime as _dt
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 import pytest
@@ -125,6 +125,210 @@ def _run(skill: CalendarFreeBusySkill, **kw: Any) -> Any:
         CalendarFreeBusyInput(**kw),
         SkillContext(request_id="r", metadata={"user_email": ME}),
     )
+
+
+_REPORT_TEMPLATE = """おはようございます。
+{date}の予定報告
+【行動KPI】
+架電20件・提案3件
+【アポ】
+{appointments}
+【仕事】
+{work}
+以上です。"""
+
+
+@dataclass
+class _ReportPreferences:
+    rows: dict[str, dict[str, Any]] = field(default_factory=dict)
+    conflict: bool = False
+    failed: bool = False
+
+    def get(self, email: str, *, request_id: str) -> tuple[dict[str, Any] | None, int]:
+        if self.failed:
+            raise RuntimeError("fake store failure")
+        return self.rows.get(email), 1 if email in self.rows else 0
+
+    def save(self, email: str, prefs: dict[str, Any], **kw: Any) -> int | None:
+        if self.failed:
+            raise RuntimeError("fake store failure")
+        if self.conflict:
+            return None
+        self.rows[email] = dict(prefs)
+        return 1
+
+
+def _report_skill(events: list[CalendarEvent], store: _ReportPreferences) -> CalendarFreeBusySkill:
+    return CalendarFreeBusySkill(
+        token_store=_Store(_Tok()),
+        gcalendar_factory=lambda _t: _FakeGCal(events=events),
+        now_factory=lambda: _NOW,
+        preferences_store=store,
+    )
+
+
+def test_calendar_report_saves_personal_template_and_fills_appointments_and_work(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("DIGEST_INTERNAL_DOMAIN", "vectorinc.co.jp,other-internal.example")
+    store = _ReportPreferences(rows={ME: {"delivery": False, "limits": {"calendar": 3}}})
+    skill = _report_skill([], store)
+    ctx = SkillContext(
+        request_id="r",
+        metadata={
+            "user_email": ME,
+            "channel_id": "DFAKE123",
+            "identity_verified": True,
+        },
+    )
+    saved = skill.run(
+        CalendarFreeBusyInput(mode="save_template", report_template=_REPORT_TEMPLATE), ctx
+    )
+    assert not saved.error and "保存しました" in saved.message
+    assert store.rows[ME] == {
+        "delivery": False,
+        "limits": {"calendar": 3},
+        "daily_schedule_template": _REPORT_TEMPLATE,
+    }
+
+    # 別インスタンスで再読込（プロセス内の記憶に依存しない）。参加者情報だけで分類する。
+    events = [
+        replace(
+            _ev("架空商談", "2026-08-14T11:00+09:00", "2026-08-14T12:00+09:00"),
+            attendees=(ME, "guest@customer.example"),
+            location="架空先方会議室",
+        ),
+        replace(
+            _ev("社内定例", "2026-08-14T10:00+09:00", "2026-08-14T10:30+09:00"),
+            attendees=(
+                ME.upper(),
+                "peer@other-internal.example",
+                "room@resource.calendar.google.com",
+            ),
+        ),
+        _ev("架空原稿", "2026-08-14T09:00+09:00", "2026-08-14T09:30+09:00"),
+        _ev("架空締切", "2026-08-14", "2026-08-15", all_day=True),
+    ]
+    out = _run(_report_skill(events, store), mode="report")
+    assert not out.error
+    assert out.message == (
+        "おはようございます。\n8/14(金)の予定報告\n【行動KPI】\n架電20件・提案3件\n"
+        "【アポ】\n・11:00〜12:00 架空商談 / 架空先方会議室\n"
+        "【仕事】\n・終日 架空締切\n・09:00〜09:30 架空原稿\n・10:00〜10:30 社内定例\n"
+        "以上です。\n" + THIRD_PARTY_TITLE_NOTE
+    )
+    assert "customer.example" not in out.model_dump_json()
+    assert _run(_report_skill(events, store), mode="report").message == out.message
+
+
+@pytest.mark.parametrize(
+    "metadata",
+    [
+        {"channel_id": "CFAKE123", "identity_verified": True},
+        {"channel_id": "DFAKE123", "identity_verified": False},
+        {},
+    ],
+)
+def test_calendar_report_template_save_requires_verified_personal_dm(
+    metadata: dict[str, Any],
+) -> None:
+    store = _ReportPreferences()
+    out = _report_skill([], store).run(
+        CalendarFreeBusyInput(mode="save_template", report_template=_REPORT_TEMPLATE),
+        SkillContext(metadata={"user_email": ME, **metadata}),
+    )
+    assert out.error == "dm_only" and not store.rows
+
+
+def test_calendar_report_template_is_private_and_missing_is_not_empty_schedule() -> None:
+    store = _ReportPreferences(
+        rows={"other@sample.example": {"daily_schedule_template": _REPORT_TEMPLATE}}
+    )
+    out = _run(_report_skill([], store), mode="report")
+    assert out.error == "template_missing"
+    assert "登録されていません" not in out.message
+
+
+def test_calendar_report_empty_categories_preserve_fixed_kpi() -> None:
+    store = _ReportPreferences(rows={ME: {"daily_schedule_template": _REPORT_TEMPLATE}})
+    out = _run(_report_skill([], store), mode="report")
+    assert not out.error and out.message.count("・なし") == 2
+    assert "架電20件・提案3件" in out.message
+    assert THIRD_PARTY_TITLE_NOTE not in out.message
+
+
+@pytest.mark.parametrize(
+    "template", ["", "{work}", "{appointments}{work}{work}", "{appointments}{work}\x00"]
+)
+def test_calendar_report_rejects_incomplete_template(template: str) -> None:
+    store = _ReportPreferences()
+    out = _report_skill([], store).run(
+        CalendarFreeBusyInput(mode="save_template", report_template=template),
+        SkillContext(
+            metadata={"user_email": ME, "channel_id": "DFAKE123", "identity_verified": True}
+        ),
+    )
+    assert out.error == "invalid_template" and not store.rows
+
+
+@pytest.mark.parametrize("failed,conflict", [(True, False), (False, True)])
+def test_calendar_report_does_not_claim_template_saved_on_store_failure(
+    failed: bool, conflict: bool
+) -> None:
+    store = _ReportPreferences(failed=failed, conflict=conflict)
+    out = _report_skill([], store).run(
+        CalendarFreeBusyInput(mode="save_template", report_template=_REPORT_TEMPLATE),
+        SkillContext(
+            metadata={"user_email": ME, "channel_id": "DFAKE123", "identity_verified": True}
+        ),
+    )
+    assert out.error == ("store_failed" if failed else "conflict")
+    assert "保存しました" not in out.message and not store.rows
+
+
+def test_calendar_report_does_not_reinterpret_slots_in_event_titles() -> None:
+    store = _ReportPreferences(rows={ME: {"daily_schedule_template": _REPORT_TEMPLATE}})
+    events = [
+        replace(
+            _ev("架空 {work}", "2026-08-14T09:00+09:00", "2026-08-14T10:00+09:00"),
+            attendees=("guest@external.example",),
+        )
+    ]
+    out = _run(_report_skill(events, store), mode="report")
+    assert "【アポ】\n・09:00〜10:00 架空 {work}\n【仕事】\n・なし" in out.message
+
+
+def test_calendar_report_template_survives_other_digest_settings_updates_and_reset() -> None:
+    from teamagent.skills.digest_settings.schema import DigestSettingsInput
+    from teamagent.skills.digest_settings.skill import _apply
+    from teamagent.skills.morning_digest.preferences import from_storage
+
+    current = from_storage({"daily_schedule_template": _REPORT_TEMPLATE, "delivery": False})
+    for req in [
+        DigestSettingsInput(action="update", auto_drafts=False),
+        DigestSettingsInput(action="reset"),
+    ]:
+        new, _ = _apply(current, req, _NOW.date())
+        assert from_storage(new.to_storage()).daily_schedule_template == _REPORT_TEMPLATE
+
+
+def test_calendar_today_schedule_is_one_line_each_with_location_all_day_first() -> None:
+    events = [
+        replace(
+            _ev("架空午後", "2026-08-14T13:00+09:00", "2026-08-14T14:00+09:00"),
+            location="架空ビル\n3F",
+        ),
+        replace(_ev("架空終日", "2026-08-14", "2026-08-15", all_day=True), location="架空本社"),
+        replace(_ev("架空朝会", "2026-08-14T00:00Z", "2026-08-14T00:30Z"), location="架空会議室"),
+    ]
+    skill, _ = _skill(_FakeGCal(events=events))
+    out = _run(skill, mode="agenda", relative_day="today")
+    assert [line for line in out.message.splitlines() if line.startswith("・")] == [
+        "・終日 架空終日 / 架空本社",
+        "・09:00〜09:30 架空朝会 / 架空会議室",
+        "・13:00〜14:00 架空午後 / 架空ビル 3F",
+    ]
+    assert [item.location for item in out.events] == ["架空本社", "架空会議室", "架空ビル 3F"]
 
 
 # ── ① agenda は list_events を呼び freebusy を呼ばない ───────────────────────

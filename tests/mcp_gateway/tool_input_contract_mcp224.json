@@ -9,11 +9,11 @@
  },
  {
   "name": "calendar_event",
-  "sha256": "b8648c69feaa269f8bb0bd2900cbb8aa3b565d87642568a41c7243c2d3c3c20a"
+  "sha256": "d2bcc4aca0f7522558127c07dd81a861b085b2cbd92c86089a167e0c882faecb"
  },
  {
   "name": "calendar_freebusy",
-  "sha256": "c6b3cd7cef32711bb9793a905bec687156ca6ea1b5ea5b895d772d20a9d5dbad"
+  "sha256": "ca2ae2936660d0c285a3ba880c9d4fb131a511e39154eaa9c188fc9e8de0625d"
  },
  {
   "name": "clientkarte",

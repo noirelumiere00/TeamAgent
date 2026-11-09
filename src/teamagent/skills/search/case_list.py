@@ -1,5 +1,6 @@
-"""事例要求は取得した根拠から最大5件だけ作る。"""
+"""事例要求は取得した根拠からコードで件数・出典を確定する。"""
 
+import json
 import re
 from collections.abc import Callable, Sequence
 from datetime import date
@@ -16,7 +17,8 @@ from teamagent.skills.search.answer_sections import (
     case_external_use_mark,
     entry_from_hit,
 )
-from teamagent.skills.search.campaign_files import video_footer_urls
+from teamagent.skills.search.campaign_files import scope_by_industry, video_footer_urls
+from teamagent.skills.search.client_match import normalize_client
 from teamagent.skills.search.composite import SlackItem
 from teamagent.skills.search.not_found import case_target_hits
 from teamagent.skills.search.schema import DocumentReference
@@ -90,6 +92,7 @@ def _details(text: str) -> list[str]:
             not part
             or re.fullmatch(r"[^。！？]{1,30}[:：]", part)
             or re.match(r"(?:まとめ|要約|推奨アクション|次の一手|おすすめ)", part)
+            or re.search(r"[？?]|ますか|ください|お知らせ|見つかったのは", part)
         ):
             continue
         cleaned = _clean(part, 100)
@@ -108,6 +111,9 @@ def render(
     drive_only: bool = False,
     max_cases: int = 5,
     requested_count: int | None = None,
+    asked_industry: str | None = None,
+    client: str | None = None,
+    summarize: Callable[[list[SearchHit]], str] | None = None,
 ) -> str:
     max_cases = requested_count or max_cases
     lines: list[str] = []
@@ -117,7 +123,17 @@ def render(
         else "\n"
     )
     seen: set[tuple[str, str]] = set()
-    for hit in case_target_hits(hits, target, soft_industry=drive_only):
+    seen_cases: set[str] = set()
+    selected: list[SearchHit] = []
+    rendered: list[list[str]] = []
+    if summarize is not None:
+        hits = scope_by_industry(
+            sorted(hits, key=lambda h: h.score, reverse=True), asked_industry, soft=True
+        )
+        hits = case_target_hits(hits, client)
+        cards = True
+        separator = "\n\n"
+    for hit in case_target_hits(hits, target, soft_industry=drive_only or summarize is not None):
         meta = hit.metadata or {}
         entry = entry_from_hit(hit, url=url_of(hit))
         url = _safe_url(entry.url)
@@ -144,8 +160,7 @@ def render(
             link_label = drive_first.label(ref)
             if requested_count is not None:
                 if ref.kind in {"drive", "slack_attachment", "slack_conversation"}:
-                    label = "会話の記録" if ref.kind == "slack_conversation" else "資料を見る"
-                    if not case_link(url, label):
+                    if not case_link(url, "資料を見る"):
                         continue
                 else:
                     ref = None
@@ -159,16 +174,34 @@ def render(
                 None,
             )
             link_label = "投稿"
+        if summarize is not None and ref is None:
+            continue
         key = (entry.document_id or url or "", entry.title)
         if ref is not None and ref.drive_file_id:
             key = (ref.drive_file_id, entry.title if entry.kind == "case" else "")
         if requested_count is not None and url:
             key = (url, entry.title if entry.kind == "case" else "")
+        case_key = ""
+        if summarize is not None:
+            assert ref is not None  # summarize ありで ref なしは上で continue 済み
+            # 同じ資料はIDで、別資料になった同じ案件は取引先＋施策名でまとめる。
+            key = (ref.drive_file_id or ref.slack_file_id or url or entry.document_id or "", "")
+            project = meta.get("campaign") or meta.get("case_product") or meta.get("case_brand")
+            owner = meta.get("advertiser") or meta.get("case_client") or meta.get("client_name")
+            case_key = normalize_client(f"{owner} {project}") if owner and project else ""
+            if case_key and case_key in seen_cases:
+                continue
         if (not url and ref is None) or key in seen or entry.kind in {"karte", "research"}:
             continue
         seen.add(key)
+        if case_key:
+            seen_cases.add(case_key)
         if ref is not None:
-            details = _details(str(meta.get("case_effect") or hit.content))
+            details = (
+                []
+                if summarize is not None
+                else _details(str(meta.get("case_effect") or hit.content))
+            )
             mark = (
                 "案件（実績ではありません）"
                 if entry.kind == "deal"
@@ -188,11 +221,13 @@ def render(
             if ref.kind == "drive":
                 card.append("• " + (case_link(url, "資料を見る") or "資料URL未確認"))
             elif ref.kind in {"slack_attachment", "slack_conversation"}:
-                label = "資料を見る" if ref.kind == "slack_attachment" else "会話の記録"
-                card.append("• " + (case_link(url, label) or "資料URL未確認"))
+                card.append("• " + (case_link(url, "資料を見る") or "資料URL未確認"))
             else:
                 card.append(f"• {drive_first.label(ref)}（資料URL未確認）")
             line = "\n".join(card)
+            if summarize is not None:
+                selected.append(hit)
+                rendered.append(card)
         else:
             detail = strip_advice(str(meta.get("case_effect") or hit.content), "事例")
             detail = _clean(detail.splitlines()[0] if detail else "", 80)
@@ -212,6 +247,18 @@ def render(
         if len(lines) == max_cases:
             break
     answer = separator.join(lines)
+    if selected and summarize is not None:
+        try:
+            points = json.loads(summarize(selected))
+        except Exception:
+            points = {}
+        if not isinstance(points, dict):
+            points = {}
+        for index, card in enumerate(rendered, 1):
+            text = points.get(str(index), "")
+            if isinstance(text, str):
+                card[1:1] = [f"• {line}" for line in _details(text)[: 4 - len(card)]]
+        answer = separator.join("\n".join(card) for card in rendered)
     if lines and requested_count is not None and len(lines) < requested_count:
         answer += f"\n\n見つかったのは {len(lines)} 件です。"
     return answer

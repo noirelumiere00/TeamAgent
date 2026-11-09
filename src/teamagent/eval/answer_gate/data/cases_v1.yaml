@@ -1,0 +1,519 @@
+version: answer-gate-v1
+cases:
+- id: document-003
+  domain: documents
+  utterance: 架空星雲飲料の提案資料を3件見せて
+  data_mode: fixture
+  fixture_id: many-v1
+  runner:
+  - skill
+  expected_tools:
+  - search
+  forbid:
+  - knowledge_deliver
+  - mail_draft
+  - calendar_event
+  required_lanes:
+  - vault
+  - slack
+  - case
+  requested_count: 3
+  item_key: item_id
+  eligible_refs:
+  - ref-1
+  - ref-2
+  - ref-3
+  - ref-4
+  - ref-5
+  checks:
+  - count
+  - links
+  - no_ask
+  - no_internal_terms
+  - length
+  max_chars: 2500
+  time_limit_s: 120
+  critical: true
+- id: document-short
+  domain: documents
+  utterance: 架空星雲飲料の資料を5件見せて
+  data_mode: fixture
+  fixture_id: two-v1
+  runner:
+  - skill
+  expected_tools:
+  - search
+  forbid:
+  - knowledge_deliver
+  - mail_draft
+  - calendar_event
+  required_lanes:
+  - vault
+  - slack
+  - case
+  requested_count: 5
+  item_key: item_id
+  eligible_refs:
+  - ref-1
+  - ref-2
+  checks:
+  - count
+  - links
+  - no_ask
+  - no_internal_terms
+  - length
+  max_chars: 2500
+  time_limit_s: 120
+  critical: true
+- id: document-zero
+  domain: documents
+  utterance: 架空星雲飲料の資料を3件見せて
+  data_mode: fixture
+  fixture_id: zero-v1
+  runner:
+  - skill
+  expected_tools:
+  - search
+  forbid:
+  - knowledge_deliver
+  - mail_draft
+  - calendar_event
+  required_lanes:
+  - vault
+  - slack
+  - case
+  requested_count: 3
+  item_key: item_id
+  eligible_refs: []
+  checks:
+  - count
+  - links
+  - no_ask
+  - no_internal_terms
+  - length
+  max_chars: 2500
+  time_limit_s: 120
+  critical: true
+- id: case-005
+  domain: cases
+  utterance: 飲料系の事例を5件出して
+  data_mode: fixture
+  fixture_id: many-v1
+  runner:
+  - skill
+  expected_tools:
+  - search
+  forbid:
+  - knowledge_deliver
+  - mail_draft
+  - calendar_event
+  required_lanes:
+  - vault
+  - slack
+  - case
+  requested_count: 5
+  item_key: item_id
+  eligible_refs:
+  - ref-1
+  - ref-2
+  - ref-3
+  - ref-4
+  - ref-5
+  checks:
+  - count
+  - links
+  - no_ask
+  - no_internal_terms
+  - length
+  max_chars: 2500
+  time_limit_s: 120
+  critical: true
+- id: case-summary-005
+  domain: cases
+  utterance: 飲料系の事例5件の共通点を、事例ごとの出典とともにまとめて
+  data_mode: fixture
+  fixture_id: many-v1
+  runner:
+  - skill
+  expected_tools:
+  - search
+  forbid:
+  - knowledge_deliver
+  - mail_draft
+  - calendar_event
+  required_lanes:
+  - vault
+  - slack
+  - case
+  requested_count: 5
+  item_key: item_id
+  eligible_refs:
+  - ref-1
+  - ref-2
+  - ref-3
+  - ref-4
+  - ref-5
+  checks:
+  - count
+  - links
+  - no_ask
+  - no_internal_terms
+  - length
+  max_chars: 2500
+  time_limit_s: 120
+  critical: true
+- id: case-short
+  domain: cases
+  utterance: 飲料系の事例を5件出して
+  data_mode: fixture
+  fixture_id: two-v1
+  runner:
+  - skill
+  expected_tools:
+  - search
+  forbid:
+  - knowledge_deliver
+  - mail_draft
+  - calendar_event
+  required_lanes:
+  - vault
+  - slack
+  - case
+  requested_count: 5
+  item_key: item_id
+  eligible_refs:
+  - ref-1
+  - ref-2
+  checks:
+  - count
+  - links
+  - no_ask
+  - no_internal_terms
+  - length
+  max_chars: 2500
+  time_limit_s: 120
+  critical: true
+- id: case-wide
+  domain: cases
+  utterance: 飲料系の事例を５件並べて
+  data_mode: fixture
+  fixture_id: many-v1
+  runner:
+  - skill
+  expected_tools:
+  - search
+  forbid:
+  - knowledge_deliver
+  - mail_draft
+  - calendar_event
+  required_lanes:
+  - vault
+  - slack
+  - case
+  requested_count: 5
+  item_key: item_id
+  eligible_refs:
+  - ref-1
+  - ref-2
+  - ref-3
+  - ref-4
+  - ref-5
+  checks:
+  - count
+  - links
+  - no_ask
+  - no_internal_terms
+  - length
+  max_chars: 2500
+  time_limit_s: 120
+  critical: true
+- id: deal-002
+  domain: deals
+  utterance: 飲料案件の進み具合を2件教えて
+  data_mode: fixture
+  fixture_id: many-v1
+  runner:
+  - skill
+  expected_tools:
+  - search
+  forbid:
+  - knowledge_deliver
+  - mail_draft
+  - calendar_event
+  required_lanes:
+  - vault
+  - slack
+  - case
+  requested_count: 2
+  item_key: item_id
+  eligible_refs:
+  - ref-1
+  - ref-2
+  - ref-3
+  - ref-4
+  - ref-5
+  checks:
+  - count
+  - links
+  - no_ask
+  - no_internal_terms
+  - length
+  max_chars: 2500
+  time_limit_s: 120
+  critical: true
+- id: deal-wide
+  domain: deals
+  utterance: 飲料案件を２件並べて
+  data_mode: fixture
+  fixture_id: two-v1
+  runner:
+  - skill
+  expected_tools:
+  - search
+  forbid:
+  - knowledge_deliver
+  - mail_draft
+  - calendar_event
+  required_lanes:
+  - vault
+  - slack
+  - case
+  requested_count: 2
+  item_key: item_id
+  eligible_refs:
+  - ref-1
+  - ref-2
+  checks:
+  - count
+  - links
+  - no_ask
+  - no_internal_terms
+  - length
+  max_chars: 2500
+  time_limit_s: 120
+  critical: true
+- id: slack-003
+  domain: slack
+  utterance: 公開チャンネルから架空企画の振り返りを3件探して
+  data_mode: fixture
+  fixture_id: slack-v1
+  runner:
+  - skill
+  expected_tools:
+  - slack_search
+  forbid:
+  - knowledge_deliver
+  - mail_draft
+  - calendar_event
+  required_lanes:
+  - slack
+  requested_count: 3
+  item_key: item_id
+  eligible_refs:
+  - ref-1
+  - ref-2
+  - ref-3
+  checks:
+  - count
+  - links
+  - no_ask
+  - no_internal_terms
+  - length
+  max_chars: 2500
+  time_limit_s: 120
+  critical: true
+  arguments:
+    query: 架空企画
+    count: 3
+- id: agenda
+  domain: calendar
+  utterance: 明日の予定を教えて
+  data_mode: fixture
+  fixture_id: calendar-v1
+  runner:
+  - skill
+  expected_tools:
+  - calendar_freebusy
+  forbid:
+  - knowledge_deliver
+  - mail_draft
+  - calendar_event
+  required_lanes:
+  - calendar
+  requested_count: null
+  item_key: item_id
+  eligible_refs: []
+  checks:
+  - calendar
+  - no_internal_terms
+  - length
+  max_chars: 2500
+  time_limit_s: 120
+  critical: true
+  arguments:
+    mode: agenda
+    relative_day: tomorrow
+  expected_text:
+  - 11/10(火)
+  - '10:00'
+  - '11:00'
+  - 架空企画定例
+- id: free
+  domain: calendar
+  utterance: 明日の11時から12時に60分の空きはある？
+  data_mode: fixture
+  fixture_id: calendar-v1
+  runner:
+  - skill
+  expected_tools:
+  - calendar_freebusy
+  forbid:
+  - knowledge_deliver
+  - mail_draft
+  - calendar_event
+  required_lanes:
+  - calendar
+  requested_count: null
+  item_key: item_id
+  eligible_refs: []
+  checks:
+  - calendar
+  - no_internal_terms
+  - length
+  max_chars: 2500
+  time_limit_s: 120
+  critical: true
+  arguments:
+    mode: free
+    relative_day: tomorrow
+    duration_min: 60
+  expected_text:
+  - 11/10(火)
+  - '11:00'
+- id: mail-002
+  domain: mail
+  utterance: 架空星雲飲料のメールを2件要約して
+  data_mode: fixture
+  fixture_id: mail-v1
+  runner:
+  - skill
+  expected_tools:
+  - mail_summary
+  forbid:
+  - knowledge_deliver
+  - mail_draft
+  - calendar_event
+  required_lanes:
+  - mail
+  requested_count: 2
+  item_key: item_id
+  eligible_refs:
+  - ref-1
+  - ref-2
+  checks:
+  - count
+  - links
+  - no_ask
+  - no_internal_terms
+  - length
+  max_chars: 2500
+  time_limit_s: 120
+  critical: true
+  arguments:
+    client_name: 架空星雲飲料
+    max_messages: 2
+- id: mail-001
+  domain: mail
+  utterance: 架空星雲飲料のメールを1件要約して
+  data_mode: fixture
+  fixture_id: mail-v1
+  runner:
+  - skill
+  expected_tools:
+  - mail_summary
+  forbid:
+  - knowledge_deliver
+  - mail_draft
+  - calendar_event
+  required_lanes:
+  - mail
+  requested_count: 1
+  item_key: item_id
+  eligible_refs:
+  - ref-1
+  - ref-2
+  checks:
+  - count
+  - links
+  - no_ask
+  - no_internal_terms
+  - length
+  max_chars: 2500
+  time_limit_s: 120
+  critical: true
+  arguments:
+    client_name: 架空星雲飲料
+    max_messages: 1
+- id: budget
+  domain: math
+  utterance: '12万円を3回使い、残額4万円。総予算はいくら？「総予算: 数字円」で答えて'
+  data_mode: fixture
+  fixture_id: math-v1
+  runner:
+  - skill
+  expected_tools:
+  - converse
+  forbid:
+  - knowledge_deliver
+  - mail_draft
+  - calendar_event
+  required_lanes: []
+  requested_count: null
+  item_key: item_id
+  eligible_refs: []
+  checks:
+  - numeric
+  - no_internal_terms
+  - length
+  max_chars: 2500
+  time_limit_s: 120
+  critical: true
+  operands:
+  - '120000'
+  - '3'
+  - '40000'
+  operation: multiply_add
+  unit: 円
+  rounding: '1'
+  expected: '400000'
+  result_label: 総予算
+- id: draft
+  domain: draft
+  utterance: 架空星雲飲料向け提案を、見出し「目的」「施策」「検証」の3つで本文だけ作って
+  data_mode: fixture
+  fixture_id: draft-v1
+  runner:
+  - skill
+  expected_tools:
+  - proposal_draft
+  forbid:
+  - knowledge_deliver
+  - mail_draft
+  - calendar_event
+  required_lanes:
+  - vault
+  requested_count: null
+  item_key: item_id
+  eligible_refs:
+  - ref-1
+  checks:
+  - headings
+  - no_internal_terms
+  - length
+  max_chars: 2500
+  time_limit_s: 120
+  critical: true
+  headings:
+  - 目的
+  - 施策
+  - 検証

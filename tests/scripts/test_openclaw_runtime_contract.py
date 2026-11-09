@@ -3749,6 +3749,7 @@ def test_double_wrapped_tool_arguments_reach_the_tool_in_canonical_form() -> Non
     assert wrapped["signedContextKeys"] == [
         "caller_claim",
         "channel_id",
+        "request_text",
         "slack_team_id",
         "slack_user_id",
     ]

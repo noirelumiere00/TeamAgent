@@ -79,7 +79,7 @@ def test_case_list_envelope_contains_no_unused_slack_candidates(
         assert post not in out.model_dump_json()
         assert "追加候補会社" not in out.model_dump_json()
     else:
-        assert out.found and post in out.answer and "会話の記録" in out.answer
+        assert out.found and post in out.answer and "資料を見る" in out.answer
         assert not any(ref.drive_file_id for ref in out.displayed_refs)
 
 

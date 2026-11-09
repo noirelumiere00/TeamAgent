@@ -11,6 +11,7 @@ import pytest
 from teamagent.connect_web.library import search_videos
 from teamagent.ingest.video_library import resolve_business_category
 from tests.ingest.test_video_library_postgres import _DSN, NOW, db, seed_batch
+from tests.migration_postgres import apply_video_library_migration
 
 # Reuse the isolated P1 transaction fixture, never public or production tables.
 __all__ = ["db"]
@@ -32,8 +33,10 @@ def prepare(conn: Any, repository: Any) -> None:
         "0041_video_library_external_cases.sql",
         "0042_video_library_account_add.sql",
         "0043_video_library_insights.sql",
+        "0044_library_mcp_oauth.sql",
+        "0045_video_library_case_discovery.sql",
     ):
-        conn.execute((MIGRATION.parent / later).read_text())
+        apply_video_library_migration(conn, MIGRATION.parent / later)
     batch = seed_batch()
     batch.videos[0].advertiser = "test"
     batch.videos[0].campaign = "test"
