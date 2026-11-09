@@ -37,6 +37,7 @@ from teamagent.ingest.video_library_url_models import (
 from teamagent.ingest.video_library_url_repository import URLImportRepository
 from teamagent.ingest.video_library_url_worker import drain_queue
 from tests.ingest.test_video_library_url_import import NOW, URL, item, page
+from tests.migration_postgres import apply_video_library_migration
 
 _DSN = os.environ.get("TEAMAGENT_TEST_DB_DSN")
 _PRODUCTION_FETCH_LOCK = url_repository.FETCH_LOCK
@@ -89,13 +90,18 @@ def db(monkeypatch: pytest.MonkeyPatch) -> Iterator[tuple[PgVectorClient, URLImp
                     "0041_video_library_external_cases.sql",
                     "0042_video_library_account_add.sql",
                     "0043_video_library_insights.sql",
+                    "0044_library_mcp_oauth.sql",
+                    "0045_video_library_case_discovery.sql",
                 ):
-                    owner.execute((MIGRATIONS / name).read_text())
+                    apply_video_library_migration(owner, MIGRATIONS / name)
             pg = SchemaPg(make_conninfo(_DSN, options=f"-csearch_path={schema},public"))
             yield pg, URLImportRepository(pg)
         finally:
             owner.execute("RESET ROLE")
             owner.execute(sql.SQL("DROP SCHEMA {} CASCADE").format(sql.Identifier(schema)))
+            owner.execute(
+                sql.SQL("DROP ROLE IF EXISTS {}").format(sql.Identifier("mcp_owner_" + schema))
+            )
 
 
 def test_fetch_lock_isolated_from_other_tests_but_shared_within_one_test(

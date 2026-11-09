@@ -12,7 +12,7 @@ from collections import Counter
 from pathlib import Path
 
 import structlog
-from pydantic import ValidationError
+from pydantic import BaseModel, ValidationError
 
 from teamagent.adapters.bedrock_client import BedrockClient, _estimate_cost
 from teamagent.adapters.pgvector_client import PgVectorClient
@@ -72,7 +72,7 @@ class Inference:
             raise ValueError("ungrounded_advertiser")
         return result.model_copy(update={"match_type": "unknown"})
 
-    def _response(self, post: Post, system: str, request_id: str) -> str:
+    def _response(self, post: BaseModel, system: str, request_id: str) -> str:
         body = post.model_dump_json()
         # UTF-8 bytes bound input tokens; reserve cache-write price and full output even on timeout.
         tokens = len(system.encode()) + len(body.encode()) + 1024
@@ -130,10 +130,13 @@ def run(
     limit: int,
     dry_run: bool,
     request_id: str,
+    video_ids: set[str] | None = None,
 ) -> Counter[str]:
     if limit < 1:
         raise ValueError("invalid_case_limit")
     counts: Counter[str] = Counter()
+    if video_ids is not None:
+        limit = min(limit, 200)
     with repository.run_lock() as acquired:
         if not acquired:
             counts["locked"] += 1
@@ -142,6 +145,10 @@ def run(
         if policy and not policy.compatible(inference.client.model_id, inference.prompt, cases):
             raise ValueError("stale_evaluation_policy")
         for row in rows:
+            if video_ids is not None and (
+                row["platform"] != "tiktok" or row["video_id"] not in video_ids
+            ):
+                continue
             post = Post.from_row(row)
             external = row.get("effective_origin", row.get("origin")) == "external"
             if external and (not row.get("is_pr") or not post.caption.strip()):

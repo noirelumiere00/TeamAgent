@@ -2,7 +2,22 @@
 
 from __future__ import annotations
 
+import re
+from pathlib import Path
 from typing import Any
+
+
+def apply_video_library_migration(conn: Any, path: Path) -> None:
+    migration = path.read_text()
+    if path.name == "0044_library_mcp_oauth.sql":
+        # 0044 hardcodes public and a cluster role; isolate both in the fixture's schema.
+        row = conn.execute("SELECT current_schema() AS name").fetchone()
+        schema = row["name"] if isinstance(row, dict) else row[0]
+        assert re.fullmatch(r"[a-z0-9_]+", schema) and len(schema) <= 53
+        migration = re.sub(r"\bpublic\b", schema, migration).replace(
+            "library_mcp_definer", "mcp_owner_" + schema
+        )
+    conn.execute(migration)
 
 
 def apply_with_acl_evidence(conn: Any, migration: str, tables: list[str]) -> None:
