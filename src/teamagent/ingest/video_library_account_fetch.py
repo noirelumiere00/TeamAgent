@@ -10,7 +10,7 @@ import time
 import unicodedata
 import uuid
 from collections import Counter, defaultdict
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from decimal import Decimal
 from typing import Any
 
@@ -30,6 +30,11 @@ from teamagent.ingest.video_library_url_repository import JST
 from teamagent.observability.logging_config import configure_logging
 
 logger = structlog.get_logger(__name__)
+
+
+# First fetch only looks back this far; afterwards the window starts the day before the last fetch.
+FIRST_FETCH_DAYS = 30
+POSTS_PER_ACCOUNT = 10
 
 
 class FetchResult(BaseModel):
@@ -144,7 +149,8 @@ def run(
         raise ValueError("cover_client_required")
     now = (now or datetime.now(JST)).astimezone(JST)
     today = now.date()
-    max_usd = Decimal(os.environ.get("VIDEO_LIBRARY_ACCOUNT_FETCH_MAX_USD", "5.0"))
+    # 11/09 小俣さん「毎日全部取ったら金がかかる・Apify 制限して」: $1/晩（月にして最大 $30）。
+    max_usd = Decimal(os.environ.get("VIDEO_LIBRARY_ACCOUNT_FETCH_MAX_USD", "1.0"))
     if not max_usd.is_finite() or max_usd < 0:
         raise ValueError("invalid_account_fetch_budget")
     session: dict[str, Any] = dict(app_role="teamagent_app", user_email=None, user_role="admin")
@@ -152,13 +158,13 @@ def run(
         rows = conn.execute(
             """SELECT lower(ltrim(handle,'@')) AS handle,
                 bool_or(last_fetched_on IS NULL) AS initial,
-                min(coalesce(last_fetched_on - 1, DATE '2026-01-01')) AS oldest
+                min(coalesce(last_fetched_on - 1, %s)) AS oldest
                 FROM vl_accounts WHERE platform='tiktok' AND operator_label=ANY(%s)
                 AND coalesce(classification,'') NOT LIKE %s
                 AND lower(ltrim(handle,'@')) ~ '^[a-z0-9_.]{2,24}$'
                 GROUP BY lower(ltrim(handle,'@'))
                 ORDER BY handle""",
-            (list(OWN_ACCOUNT_OPERATORS), "%未稼働%"),
+            (today - timedelta(days=FIRST_FETCH_DAYS), list(OWN_ACCOUNT_OPERATORS), "%未稼働%"),
         ).fetchall()
     result.accounts = len(rows)
     groups: dict[tuple[bool, date], list[str]] = defaultdict(list)
@@ -167,8 +173,9 @@ def run(
     spent = Decimal(0)
     skipped: Counter[str] = Counter()
     covers_skipped: Counter[str] = Counter()
-    for (initial, oldest), handles in sorted(groups.items()):
-        per_account = 30 if initial else 10
+    # Already-fetched accounts sort first (False < True), oldest checkpoint first.
+    for (_initial, oldest), handles in sorted(groups.items()):
+        per_account = POSTS_PER_ACCOUNT
         for offset in range(0, len(handles), 20):
             part = handles[offset : offset + 20]
             reservation = len(part) * per_account * Decimal("0.004")
