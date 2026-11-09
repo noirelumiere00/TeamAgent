@@ -26,7 +26,12 @@ from teamagent.skills._shared.slack_file_delivery import file_metadata
 from teamagent.skills._shared.source_url import ingested_slack_file_id
 from teamagent.skills.base import SkillContext
 from teamagent.skills.search import compact, drive_first, timeline_status, visit_cases
-from teamagent.skills.search.answer_mode import classify_answer_mode, is_case_list, strip_advice
+from teamagent.skills.search.answer_mode import (
+    classify_answer_mode,
+    is_case_list,
+    requested_count,
+    strip_advice,
+)
 from teamagent.skills.search.answer_sections import (
     ANSWER_MAX_CHARS,
     SCOPE_PREFIX,
@@ -325,6 +330,7 @@ def _case_hits(result: SourceResult[Any], *, drive_mode: bool = False) -> list[S
 def run_fanout(skill: Any, input: SearchInput, ctx: SkillContext) -> SearchOutput:
     """並行取得→従来の found 判定→専用要約→コードの節と探した範囲。"""
     started = time.perf_counter()
+    requested_limit = requested_count(input.query)
     recovery = ctx.metadata.get("_search_recovery")
     drive_mode = drive_first.enabled(ctx.metadata) or (
         skill._direct_answer_allowed(ctx, "case_cards") and is_case_list(input.query)
@@ -732,7 +738,7 @@ def run_fanout(skill: Any, input: SearchInput, ctx: SkillContext) -> SearchOutpu
         )
         if compact.is_empty(compact_answer, notice=guard_header):
             compact_mode = False
-            drive_fallback = drive_mode
+            drive_fallback = drive_mode and requested_limit is None
             if not drive_fallback:
                 compact_fallback_cards = compact.fallback_cards(
                     input.query,
@@ -997,6 +1003,7 @@ def run_fanout(skill: Any, input: SearchInput, ctx: SkillContext) -> SearchOutpu
         drive_case_listing
         or is_case_list(input.query)
         or bool(compact_fallback_cards)
+        or (requested_limit is not None and not compact_mode)
         or (
             compact.explicit_list(input.query)
             and (
@@ -1030,7 +1037,8 @@ def run_fanout(skill: Any, input: SearchInput, ctx: SkillContext) -> SearchOutpu
             lambda h: skill._hit_url(h, file_urls=file_urls),
             displayed_refs=attachment_refs,
             cards=skill._direct_answer_allowed(ctx, "case_cards") or bool(compact_fallback_cards),
-            drive_only=drive_case_listing and recovery is None,
+            drive_only=drive_case_listing and recovery is None and requested_limit is None,
+            requested_count=requested_limit,
         )
         if displayed_refs is not None:
             displayed_refs.extend(attachment_refs)
@@ -1051,6 +1059,8 @@ def run_fanout(skill: Any, input: SearchInput, ctx: SkillContext) -> SearchOutpu
             if lanes["expand"].kind == "failed":
                 scope += "・言い換え ✗（未完了）"
             answer = build_scoped_not_found_answer(case_target, scope=scope, complete=complete)
+        if requested_limit is not None and not listed:
+            answer += "\n\n見つかったのは 0 件です。"
     if visit and input.include_answer:
         assert displayed_refs is not None
         displayed_refs.clear()
