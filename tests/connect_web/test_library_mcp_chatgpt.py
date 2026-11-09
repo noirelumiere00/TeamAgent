@@ -87,7 +87,13 @@ def test_chatgpt_oauth_catalog_search_detail(setup: Any) -> None:
     )
     assert initialized.status_code == 200, initialized.text
     tools = _rpc(client, token, "tools/list", {}).json()["result"]["tools"]
-    assert [v["name"] for v in tools] == ["ping", "search_videos", "get_video"]
+    assert [v["name"] for v in tools] == [
+        "ping",
+        "get_search_options",
+        "search_cases",
+        "search_videos",
+        "get_video",
+    ]
     assert all(t["annotations"]["readOnlyHint"] for t in tools)
     assert all(not t["annotations"]["destructiveHint"] for t in tools)
     response = _rpc(
@@ -108,7 +114,14 @@ def test_chatgpt_oauth_catalog_search_detail(setup: Any) -> None:
     assert result["videos"][0]["library_url"] == _BASE + "/library/v/tiktok/123"
     sql, values = pg.calls[-1]
     assert "NOT v.is_private" in sql and values[-2:] == [3, 3]
-    assert "%化粧品%" in values and True in values
+    assert sorted(["makeup", "skincare", "fragrance", "nail"]) in values and True in values
+    assert result["applied_filters"]["product_categories"] == [
+        "fragrance",
+        "makeup",
+        "nail",
+        "skincare",
+    ]
+    assert result["classification_pending_count"] == 1
     assert pg.sessions[-1] == {
         "app_role": "teamagent_app",
         "user_email": _EMAIL,

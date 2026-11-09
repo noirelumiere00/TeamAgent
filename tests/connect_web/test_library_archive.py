@@ -457,6 +457,9 @@ def test_workspace_submits_existing_parameters_and_shows_active_filters(
     catalog_pg(pg)
     params = {
         "q": "企業 <img> #PR",
+        "product_category": "cosmetics",
+        "brand": "brand",
+        "product_name": "product",
         "category": "tto",
         "industry": '業種 "&',
         "purpose": "理解",

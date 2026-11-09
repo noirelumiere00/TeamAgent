@@ -41,11 +41,15 @@ def test_search_words_execute_as_and_and_pr(query: str, expected: list[int]) -> 
     with sqlite3.connect(":memory:") as conn:
         conn.create_function("concat_ws", -1, lambda sep, *args: sep.join(x for x in args if x))
         conn.create_function("array_to_string", 2, lambda raw, sep: sep.join(json.loads(raw)))
+        conn.execute("""CREATE TABLE vl_video_analysis
+            (platform TEXT,video_id TEXT,kind TEXT,version TEXT,payload TEXT)""")
         conn.execute("""CREATE TABLE videos (id INTEGER, advertiser TEXT, campaign TEXT,
             caption TEXT, hashtags TEXT, is_pr BOOLEAN, is_private BOOLEAN,
-            account_name TEXT, account_handle TEXT, industry TEXT, purpose TEXT)""")
+            account_name TEXT, account_handle TEXT, industry TEXT, purpose TEXT,
+            platform TEXT, video_id TEXT)""")
         conn.executemany(
-            "INSERT INTO videos VALUES (?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL, NULL)",
+            """INSERT INTO videos(id,advertiser,campaign,caption,hashtags,is_pr,is_private)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
             [
                 (1, "サラヤ", "ラカント", "おいしい", "[]", True, False),
                 (2, "サラヤ", "ラカント", "おいしい PR", '["PR"]', False, False),
