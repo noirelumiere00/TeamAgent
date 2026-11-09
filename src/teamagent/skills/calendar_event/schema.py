@@ -25,24 +25,24 @@ class CalendarEventInput(BaseModel):
     event_token: str = Field(
         default="",
         max_length=500,
-        description=("登録ボタンの署名付きvalue（ボタン時は他の引数不要）。"),
+        description=("ボタン時は署名valueのみ。"),
     )
     title: str = Field(default="", max_length=200)
     start: str = Field(
         default="",
         max_length=40,
-        description=("確定した開始日時ISO 8601（TZ省略時JST）。"),
+        description=("開始ISO 8601（TZなし=JST）。"),
     )
     end: str = Field(
         default="",
         max_length=40,
-        description="終了日時ISO 8601（省略時60分後、最大8時間）。",
+        description="終了ISO 8601（既定60分後、上限8時間）。",
     )
     location: str = Field(default="", max_length=200)
     bulk_text: str = Field(
-        default="", max_length=12000, description="一括依頼の原文（共通時刻と日付・件名の行）"
+        default="", max_length=12000, description="一括原文（共通時刻・日付・件名）"
     )
-    confirm_bulk: bool = Field(default=False, description="一括一覧を本人に提示後trueで登録")
+    confirm_bulk: bool = Field(default=False)
 
 
 class CalendarEventOutput(BaseModel):

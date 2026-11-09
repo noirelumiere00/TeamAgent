@@ -27,17 +27,14 @@ class CalendarFreeBusyInput(BaseModel):
     report_template: str = Field(
         default="",
         max_length=6000,
-        description="貼った型の見出し・固定行を保持し、可変行だけ{appointments}/{work}、日付は{date}に置換。",
+        description="見出し・固定行保持、可変行={appointments}/{work}、日付={date}。",
     )
     date: str = Field(
         default="",
         pattern=r"^(\d{4}-\d{2}-\d{2})?$",
-        description=("本人指定の具体日YYYY-MM-DD（JST、今日・明日はrelative_day）。"),
+        description=("指定日（JST、date優先）。"),
     )
-    relative_day: Literal["", "today", "tomorrow"] = Field(
-        default="",
-        description=("today=今日、tomorrow=明日（date優先、日付計算はサーバ）。"),
-    )
+    relative_day: Literal["", "today", "tomorrow"] = Field(default="")
     days: int = Field(default=1, ge=1, le=7)
     duration_min: int = Field(default=60, ge=15, le=480)
 
