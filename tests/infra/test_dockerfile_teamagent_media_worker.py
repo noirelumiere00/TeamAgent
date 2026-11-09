@@ -62,7 +62,8 @@ UV_DIGEST = "9941e2d8e06ff884d328905091eac0a6bc1e40e5ce12e6dd0de4ef4ee26baac4"
 # 2026-11-06: Alpine 上流への追随（削除: musl-utils-1.2.6-r3 / 追加: musl-utils-1.2.6-r2）。apk 段の実ビルドで lock 差分 -1 +1（240→240 行）。
 # 2026-11-06: Alpine 上流への追随（musl-utils 1.2.6-r2→1.2.6-r3）。apk 段の実ビルドで lock 差分 -1 +1（240→240 行）。
 # 2026-11-07: Alpine 上流への追随（zlib 1.3.2-r1→1.4-r0）。apk 段の実ビルドで lock 差分 -4 +4（240→240 行）。
-APK_LOCK_SHA256 = "295eb1528a274912c0928f2e89cf141d5906b34c40105d35403e6edb313428f2"
+# 2026-11-09: Alpine 上流への追随（削除: ffmpeg8-libavdevice-8.1.3-r1、ffmpeg8-libavfilter-8.1.3-r1、ffmpeg8-libswscale-8.1.3-r1 / 追加: ffmpeg8-libavdevice-8.1.3-r2、ffmpeg8-libavfilter-8.1.3-r2、ffmpeg8-libswscale-8.1.3-r2）。apk 段の実ビルドで lock 差分 -3 +3（240→240 行）。
+APK_LOCK_SHA256 = "14c2c479f42e5619cd4ee84f34147b3d3bc614a3510acabb0543877c4b22b4fb"
 CHROMIUM_PATH = "/usr/lib/chromium/chromium"
 
 
