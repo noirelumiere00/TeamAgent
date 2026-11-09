@@ -734,9 +734,11 @@ def test_offload_drops_answer_built_from_documents_without_slack(
 # ── factory ────────────────────────────────────────────────────────────────
 
 
-@pytest.mark.parametrize(("flag", "attached"), [("1", True), (None, False)])
+@pytest.mark.parametrize(
+    ("flag", "slack_flag", "attached"), [("1", None, True), (None, None, False), (None, "1", True)]
+)
 def test_factory_attaches_slack_store_only_when_flag_on(
-    monkeypatch: pytest.MonkeyPatch, flag: str | None, attached: bool
+    monkeypatch: pytest.MonkeyPatch, flag: str | None, slack_flag: str | None, attached: bool
 ) -> None:
     import teamagent.orchestrator.factory as factory
 
@@ -744,6 +746,10 @@ def test_factory_attaches_slack_store_only_when_flag_on(
     monkeypatch.setattr(factory, "_build_search_skill", lambda: fake)
     monkeypatch.delenv("OAUTH_KMS_KEY_ID", raising=False)
     monkeypatch.delenv("USE_RESEARCH_PERSIST", raising=False)
+    if slack_flag:
+        monkeypatch.setenv("USE_SLACK_SEARCH_TOOL", slack_flag)
+    else:
+        monkeypatch.delenv("USE_SLACK_SEARCH_TOOL", raising=False)
     if flag is None:
         monkeypatch.delenv(COMPOSITE_ENV, raising=False)
     else:

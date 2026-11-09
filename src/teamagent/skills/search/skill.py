@@ -223,12 +223,11 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
 
     name: ClassVar[str] = "search"
     description: ClassVar[str] = (
-        "提案書・議事録・メールを探して/列挙する窓口。"
-        "既知の取引先・施策の動画ごとの結果や何が効いたかは、まず search で"
-        "施策実績・動画ごとの数字・資料を探す。"
+        "提案書・議事録・メールを探して/列挙。"
+        "取引先の撮影日・案件履歴はSlack案件決定と取込台帳を全期間で一覧。"
+        "何が効いたかはまず search で施策実績・動画ごとの数字・資料を探す。"
         "新規の市場・競合動画は video_algorithm。"
-        "日付は updated_at（更新日）/ title_date（資料名の日付）/ date_basis の返値のみ。"
-        "date_basis=none は日付なし"
+        "日付は返値のみ（updated_at/title_date/date_basis、none=日付なし）。"
     )
     input_schema: ClassVar[type[BaseModel]] = SearchInput
     output_schema: ClassVar[type[BaseModel]] = SearchOutput
@@ -597,6 +596,28 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
     @google_connection_guard(lambda input: SearchOutput(answer="", total_cost_usd=0))
     def run(self, input: SearchInput, ctx: SkillContext) -> SearchOutput:
         """全経路の不在回答を、検索を広げてから確定する。"""
+        from teamagent.skills.search.project_history import run_history
+
+        history = run_history(
+            input.query,
+            ctx,
+            pgvector=self._pgvector,
+            app_role=self._app_role,
+            client=input.filter_client,
+            slack_store=self._slack_store,
+            reader_factory=self._slack_reader_factory,
+        )
+        if history is not None:
+            direct = self._direct_answer_allowed(ctx, "list_fast")
+            return SearchOutput(
+                answer=history.message,
+                found=history.count > 0,
+                error=history.error,
+                total_cost_usd=0,
+                answer_format="list",
+                direct_answer=history.message if direct else None,
+                direct_answer_kind="list_fast" if direct else None,
+            )
         if not self._not_found_recovery:
             return self._run_once(input, ctx)
         request = copy(self)

@@ -1951,6 +1951,40 @@ class PgVectorClient:
         )
         return hits
 
+    def list_project_history(self, conn: psycopg.Connection[dict[str, Any]]) -> list[SearchHit]:
+        """本人 RLS 内の案件台帳・案件決定投稿を全期間列挙する（順位・件数制限なし）。"""
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT min(abs(hashtext(c.id::text)::bigint)) AS chunk_id,
+                       string_agg(c.content, E'\\n' ORDER BY c.chunk_idx) AS content,
+                       d.metadata AS doc_metadata, d.source_uri, d.external_id,
+                       d.source_type::text AS source_type, d.title
+                FROM documents d JOIN chunks c ON c.document_id = d.id
+                WHERE (d.source_type = 'gsheets' AND d.metadata->>'topic' = '案件決定')
+                   OR (d.source_type = 'slack' AND
+                       (d.metadata->>'channel_id' = 'C08MH3MG02F'
+                        OR d.source_uri LIKE 'slack://C08MH3MG02F/%%'))
+                GROUP BY d.id
+                ORDER BY d.id
+                """
+            )
+            return [
+                SearchHit(
+                    chunk_id=int(row["chunk_id"]),
+                    content=str(row["content"]),
+                    score=1.0,
+                    metadata={
+                        **(row.get("doc_metadata") or {}),
+                        **{
+                            key: row.get(key)
+                            for key in ("source_uri", "external_id", "source_type", "title")
+                        },
+                    },
+                )
+                for row in cur.fetchall()
+            ]
+
     def search_topic_by_terms(
         self,
         conn: psycopg.Connection[dict[str, Any]],

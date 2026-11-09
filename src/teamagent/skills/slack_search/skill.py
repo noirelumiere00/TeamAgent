@@ -143,11 +143,13 @@ class SlackSearchSkill(BaseSkill[SlackSearchInput, SlackSearchOutput]):
         reader_factory: Any | None = None,
         bedrock: Any | None = None,
         summary_max_tokens: int = 600,
+        pgvector: Any | None = None,
     ) -> None:
         self._slack_store = slack_store
         self._reader_factory = reader_factory or SlackUserReader.from_user_token
         self._bedrock = bedrock
         self._summary_max_tokens = summary_max_tokens
+        self._pgvector = pgvector
 
     def run(self, input: SlackSearchInput, ctx: SkillContext) -> SlackSearchOutput:
         log = ctx.bind_logger(self.name)
@@ -162,6 +164,22 @@ class SlackSearchSkill(BaseSkill[SlackSearchInput, SlackSearchOutput]):
         #    毎回入れる（DM なら D…）ので、空は注入漏れなど想定外の経路＝閉じる側に倒す（09-30）。
         origin = str(ctx.metadata.get("channel_id", "") or "").strip()
         dm_surface = origin.startswith("D")
+
+        from teamagent.skills.search.project_history import run_history
+
+        history = run_history(
+            input.query,
+            ctx,
+            pgvector=self._pgvector,
+            slack_store=self._slack_store,
+            reader_factory=self._reader_factory,
+        )
+        if history is not None:
+            return SlackSearchOutput(
+                message=history.message,
+                match_count=history.count,
+                error=history.error,
+            )
 
         # ── S1: 本人 xoxp（SlackTokenStore の RLS で本人行のみ）。未連携は誘導。
         reader = self._resolve_reader(requester, log)

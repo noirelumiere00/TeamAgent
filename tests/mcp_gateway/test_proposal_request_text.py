@@ -38,7 +38,7 @@ async def test_signed_request_text_is_forwarded_for_both_identity_modes(
 @pytest.mark.parametrize(
     "tool,channel,text,signed",
     [
-        ("search", "D0123456789", "10万円", True),
+        ("search", "D0123456789", "10万円", False),
         ("proposal_builder", "C0123456789", "10万円", True),
         ("proposal_builder", "D0123456789", "10万円", False),
         ("proposal_builder", "D0123456789", "x" * 4001, True),
@@ -82,7 +82,7 @@ async def test_request_text_is_bound_to_the_signature(tool: str) -> None:
         await make_verifier().verify(tool=tool, arguments=args)
 
 
-@pytest.mark.parametrize("tool", ["slack_search", "slack_summary"])
+@pytest.mark.parametrize("tool", ["search", "slack_search", "slack_summary"])
 @pytest.mark.parametrize("channel", ["D0123456789", "C0123456789", "G0123456789"])
 @pytest.mark.parametrize("shared", [False, True])
 async def test_slack_signed_list_request_survives_all_surfaces(tool, channel, shared) -> None:
