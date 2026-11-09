@@ -9,9 +9,12 @@ from datetime import datetime, timedelta
 from typing import Any
 from unittest.mock import MagicMock
 
+import httpx
 import pytest
 
 from teamagent.adapters.apify_client import ACTOR_TIKTOK_VIDEO, ApifyClient, ApifyRunResult
+from teamagent.adapters.video_library_page import MAX_IMAGE_BYTES
+from teamagent.adapters.video_library_storage import VideoLibraryStorage
 from teamagent.ingest import video_library_account_fetch as fetch
 from teamagent.ingest.video_library_url_repository import JST
 
@@ -48,20 +51,41 @@ class FakePg:
         self.metrics: dict[tuple[str, Any], tuple[Any, ...]] = {}
         self.fetched: dict[str, Any] = {}
         self.fail_save = False
+        self.thumbnails: dict[str, str] = {}
+        self.in_transaction = False
 
     @contextmanager
     def connection(self, **session: Any) -> Iterator[MagicMock]:
         assert session == dict(app_role="teamagent_app", user_email=None, user_role="admin")
-        before = deepcopy((self.videos, self.metrics, self.fetched))
+        assert not self.in_transaction
+        self.in_transaction = True
+        before = deepcopy((self.videos, self.metrics, self.fetched, self.thumbnails))
         conn = MagicMock()
         conn.execute.side_effect = self.execute
         try:
             yield conn
         except Exception:
-            self.videos, self.metrics, self.fetched = before
+            self.videos, self.metrics, self.fetched, self.thumbnails = before
             raise
+        finally:
+            self.in_transaction = False
 
     def execute(self, query: str, params: tuple[Any, ...]) -> MagicMock:
+        if "SELECT thumbnail_s3_key" in query:
+            row = (
+                {"thumbnail_s3_key": self.thumbnails.get(params[1])}
+                if params[1] in self.videos
+                else None
+            )
+            return MagicMock(fetchone=lambda: row)
+        if "UPDATE vl_videos SET thumbnail_s3_key" in query:
+            assert "AND thumbnail_s3_key IS NULL" in query
+            key, platform, video_id = params
+            assert platform == "tiktok"
+            updated = video_id in self.videos and video_id not in self.thumbnails
+            if updated:
+                self.thumbnails[video_id] = key
+            return MagicMock(rowcount=int(updated))
         if query.startswith("SELECT"):
             return MagicMock(fetchall=lambda: self.rows)
         if "INSERT INTO vl_videos" in query:
@@ -275,4 +299,125 @@ def test_main_reports_partial_failure_and_closes_pg(
     monkeypatch.setattr(fetch.ApifyClient, "from_env", MagicMock())
     monkeypatch.setattr(fetch, "run", lambda *a, **k: fetch.FetchResult(failed_batches=1))
     assert fetch.main([]) == 1
+    pg.close.assert_called_once()
+
+
+COVER = "https://p16-sign-sg.tiktokcdn.com/cover.jpeg?signature=private"
+
+
+def test_covers_save_independently_after_batch_commit(
+    enabled: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pg = FakePg([{"handle": "sample", "oldest": NOW.date(), "initial": False}])
+    pg.videos["1"] = ()
+    pg.thumbnails["1"] = "existing.jpg"
+    client = MagicMock(spec=ApifyClient)
+    client.run_actor_sync.return_value = response(
+        post(vid="1", videoMeta={"coverUrl": COVER + "&id=1"}),
+        post(vid="2", videoMeta={}),
+        post(vid="3", videoMeta={"coverUrl": "http://169.254.169.254/private"}),
+        post(vid="4", videoMeta={"coverUrl": COVER + "&id=4"}),
+        post(vid="5", videoMeta={"coverUrl": COVER + "&id=5"}),
+        post(vid="6", videoMeta={"coverUrl": COVER + "&id=6"}),
+        post(vid="7", videoMeta={"coverUrl": COVER + "&id=7"}),
+        post(vid="8", videoMeta={"originalCoverUrl": COVER + "&id=8"}),
+        post(vid="9", videoMeta={"coverUrl": "", "originalCoverUrl": COVER + "&id=9"}),
+        post(
+            vid="10",
+            videoMeta={"coverUrl": COVER + "&id=10", "originalCoverUrl": "https://invalid.test"},
+        ),
+    )
+    s3 = MagicMock()
+    storage = VideoLibraryStorage(bucket="private", client=s3)
+    log = MagicMock()
+    monkeypatch.setattr(fetch, "logger", log)
+    requested = []
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        assert not pg.in_transaction
+        assert (
+            len(pg.videos) == 10 and len(pg.metrics) == 10 and pg.fetched == {"sample": NOW.date()}
+        )
+        vid = request.url.params["id"]
+        requested.append(vid)
+        if vid == "4":
+            return httpx.Response(200, content=b"\x89PNG\r\n\x1a\nnot jpeg")
+        if vid == "5":
+            return httpx.Response(403, text="Forbidden")
+        if vid == "6":
+            return httpx.Response(200, content=b"\xff\xd8\xff" + b"x" * MAX_IMAGE_BYTES)
+        return httpx.Response(200, content=b"\xff\xd8\xffimage")
+
+    def put(**kwargs: Any) -> None:
+        assert not pg.in_transaction
+        if kwargs["Key"].endswith("/7.jpg"):
+            raise RuntimeError("https://private.test/secret")
+
+    s3.put_object.side_effect = put
+    with httpx.Client(transport=httpx.MockTransport(handle)) as http_client:
+        result = fetch.run(
+            pg, client, request_id="covers", now=NOW, storage=storage, http_client=http_client
+        )  # type: ignore[arg-type]
+    assert result.failed_batches == 0 and result.metrics == 10
+    assert result.covers_saved == 3
+    assert result.covers_skipped == {
+        "already_present": 1,
+        "cover_missing": 1,
+        "invalid_cover_url": 1,
+        "invalid_cover_image": 1,
+        "http_403": 1,
+        "cover_too_large": 1,
+        "RuntimeError": 1,
+    }
+    assert requested == ["4", "5", "6", "7", "8", "9", "10"]
+    assert pg.thumbnails == {
+        "1": "existing.jpg",
+        "8": "video-library/thumbs/tiktok/8.jpg",
+        "9": "video-library/thumbs/tiktok/9.jpg",
+        "10": "video-library/thumbs/tiktok/10.jpg",
+    }
+    output = str(log.mock_calls)
+    assert "https://" not in output and "169.254" not in output and "signature" not in output
+    final = log.bind.return_value.info.call_args.kwargs
+    assert final["covers_saved"] == 3 and final["covers_skipped"] == result.covers_skipped
+
+
+def test_covers_without_storage_never_download(enabled: None) -> None:
+    pg = FakePg([{"handle": "sample", "oldest": NOW.date(), "initial": False}])
+    client = MagicMock(spec=ApifyClient)
+    client.run_actor_sync.return_value = response(post(videoMeta={"coverUrl": COVER}))
+    http_client = MagicMock(spec=httpx.Client)
+    result = fetch.run(
+        pg, client, request_id="no-storage", now=NOW, storage=None, http_client=http_client
+    )  # type: ignore[arg-type]
+    assert result.covers_saved == 0 and result.covers_skipped == {"storage_unconfigured": 1}
+    assert result.inserted == 1 and result.metrics == 1
+    assert not http_client.mock_calls and not pg.thumbnails
+
+
+@pytest.mark.parametrize("bucket", [None, "private"])
+def test_main_configures_cover_storage_and_closes_http_client(
+    enabled: None,
+    monkeypatch: pytest.MonkeyPatch,
+    bucket: str | None,
+) -> None:
+    if bucket is None:
+        monkeypatch.delenv("VIDEO_LIBRARY_S3_BUCKET", raising=False)
+    else:
+        monkeypatch.setenv("VIDEO_LIBRARY_S3_BUCKET", bucket)
+    monkeypatch.setattr(fetch, "configure_logging", lambda: None)
+    pg, storage, http_client = MagicMock(), MagicMock(), MagicMock()
+    monkeypatch.setattr(fetch.PgVectorClient, "from_env", lambda: pg)
+    monkeypatch.setattr(fetch.ApifyClient, "from_env", MagicMock())
+    storage_factory = MagicMock(return_value=storage)
+    monkeypatch.setattr(fetch, "VideoLibraryStorage", storage_factory)
+    monkeypatch.setattr(fetch, "page_client", lambda: http_client)
+    runner = MagicMock(return_value=fetch.FetchResult())
+    monkeypatch.setattr(fetch, "run", runner)
+    assert fetch.main([]) == 0
+    assert runner.call_args.kwargs["storage"] is (storage if bucket else None)
+    assert runner.call_args.kwargs["http_client"] is http_client.__enter__.return_value
+    assert storage_factory.call_count == int(bucket is not None)
+    http_client.__exit__.assert_called_once()
     pg.close.assert_called_once()
