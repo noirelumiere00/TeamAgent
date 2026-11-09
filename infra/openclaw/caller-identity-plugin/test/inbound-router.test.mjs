@@ -331,3 +331,36 @@ for (const tail of ['資料が必要でしたら、お知らせください。',
     assert.doesNotMatch(sent.payload.text, /お知らせ|ありますか/u);
   });
 }
+
+// R2 separates classification eligibility from the legacy execution gate, which remains for R3.
+for (const [query, rule, intent, evidence, output, fallback] of [
+  ['施策の事例一覧の出典を教えて', 'source', 'document', true, 'answer', true],
+  ['案件は失注で確定した？', 'internal_status', 'status', true, 'answer', false],
+  ['案件の今期の受注金額と粗利率は？', 'internal_metrics', 'metrics', true, 'answer', false],
+  ['提案資料は作成しないで。この文章だけ読んで', 'unknown', 'unknown', false, 'answer', true],
+  ['提案資料の作成はしないで。案件の状態だけお願い', 'internal_status', 'status', true, 'answer', false],
+  ['作成している提案資料はどこまで進んだ？', 'existing_operation', 'document_operation', false, 'tool', true],
+  ['提案資料の作成状況を確認して', 'existing_operation', 'document_operation', false, 'tool', true],
+  ['事例を探して、提案資料を作って', 'unknown', 'mixed', true, 'answer', true],
+  ['Slackの案件一覧を探して', 'existing_operation', 'slack', true, 'list', true],
+  ['Slackの会話をまとめて', 'existing_operation', 'slack', true, 'answer', true],
+  ['Slackの合意を確認して、メールの返信案も書いて', 'unknown', 'mixed', true, 'answer', true],
+  ['カレンダーの空き時間を教えて', 'existing_operation', 'calendar', false, 'list', true],
+  ['受信メールの要点を教えて', 'existing_operation', 'mail', true, 'answer', true],
+  ['「Slackの案件一覧を探して」を翻訳して', 'general', 'general', false, 'answer', true],
+]) {
+  test(`R2 classification: ${query}`, () => {
+    const route = classifyInboundRoute(query);
+    assert.deepEqual([route.rule_id, route.intent, route.requires_internal_evidence,
+      route.requested_output, route.fallback], [rule, intent, evidence, output, fallback]);
+  });
+}
+test('R2 count and industry are metadata; new evidence operations retain legacy fallback', async () => {
+  const route = classifyInboundRoute('食品メーカーの事例を５件出して');
+  assert.equal(route.requested_count, 5); assert.equal(route.industry, '食品');
+  assert.equal(route.rule_id, 'case_list'); assert.equal(route.fallback, false);
+  for (const query of ['Slackの案件一覧を探して', '提案書をレビューして', '顧客のカルテを開いて',
+    'Slackの合意を確認して、メールの返信案も書いて']) {
+    const p = setup({query}); await p.prompt(); assert.equal(p.calls.length, 0);
+  }
+});
