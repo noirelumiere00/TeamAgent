@@ -62,6 +62,16 @@ def _error(error: str, status: int = 400) -> JSONResponse:
     return JSONResponse({"error": error}, status_code=status, headers=_HEADERS)
 
 
+def _csp_callback_source(uri: str) -> str:
+    if any(ord(char) < 33 or ord(char) == 127 for char in uri):
+        raise ValueError("The callback is not a safe CSP source")
+    callback = urlsplit(uri)
+    source = callback._replace(query="", fragment="").geturl()
+    if not re.fullmatch(r"https?://[A-Za-z0-9.\[\]:_-]+(?:/[A-Za-z0-9._~%!$&()*+=:@/-]*)?", source):
+        raise ValueError("The callback is not a safe CSP source")
+    return source
+
+
 def _unique_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
     result: dict[str, Any] = {}
     for key, value in pairs:
@@ -196,6 +206,7 @@ def install_spike(
     get_pg: Callable[[], Any],
     admins: Callable[[], frozenset[str]],
     auth_config: DashboardConfig,
+    content_security_policy: str,
     google_verifier: Verifier | None = None,
 ) -> None:
     base = os.environ.get("CONNECT_MCP_PUBLIC_BASE_URL", "").rstrip("/")
@@ -210,6 +221,8 @@ def install_spike(
         or parsed.password
     ):
         raise ValueError("CONNECT_MCP_PUBLIC_BASE_URL must be an HTTPS origin")
+    if content_security_policy.count("form-action 'self'") != 1:
+        raise ValueError("The baseline consent form policy is unexpected")
 
     def subject_allowed(email: str, hd: str | None) -> bool:
         allowed, _ = check_allowed(
@@ -474,6 +487,11 @@ def install_spike(
             return _error("access_denied", 403)
         service = service_name(pending["params"]["redirect_uri"])
         callback = urlsplit(pending["params"]["redirect_uri"])
+        # Chrome applies form-action to the form's external OAuth redirect too.
+        callback_source = _csp_callback_source(pending["params"]["redirect_uri"])
+        consent_policy = content_security_policy.replace(
+            "form-action 'self'", f"form-action 'self' {callback_source}"
+        )
         callback_host = html.escape(callback.netloc)
         escaped_target = html.escape(target, quote=True)
         content = (
@@ -521,7 +539,11 @@ def install_spike(
                 '}catch{status.textContent="接続できませんでした。もう一度お試しください。";}}</script>'
             )
         return _set_browser(
-            HTMLResponse(_page("接続の確認", content), headers=_BROWSER_HEADERS), browser
+            HTMLResponse(
+                _page("接続の確認", content),
+                headers={**_BROWSER_HEADERS, "Content-Security-Policy": consent_policy},
+            ),
+            browser,
         )
 
     async def verify(request: Request) -> Response:
