@@ -55,6 +55,8 @@ HUMAN_FACING_PROMPTS = (
     "search/compact/system.md",
     "search/compact/drive.md",
     "search/compact/normal.md",
+    # 件数指定の事例一覧で、コードが組んだ各件に添える要点（Slack 本文に出る）。
+    "search/case_points/system.md",
     # 複合検索（USE_COMPOSITE_SEARCH）で search の user message に足す節（出典の書き分け）。
     "search/composite/slack.md",
     # 施策実績のヒットがあるとき search の user message に足す節（資料リンク・業種の扱い）。

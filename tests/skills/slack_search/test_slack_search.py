@@ -622,7 +622,7 @@ def test_factory_registers_only_when_flag_is_on(
 ) -> None:
     import teamagent.orchestrator.factory as factory
 
-    monkeypatch.setattr(factory, "_build_search_skill", lambda: object())
+    monkeypatch.setattr(factory, "_build_search_skill", MagicMock)
     monkeypatch.delenv("OAUTH_KMS_KEY_ID", raising=False)
     monkeypatch.delenv("USE_RESEARCH_PERSIST", raising=False)
     if flag is None:

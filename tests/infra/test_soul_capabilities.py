@@ -27,7 +27,9 @@ def test_soul_capabilities_match_production_fixture(monkeypatch: pytest.MonkeyPa
     )
     # 環境由来の認証・フラグを持ち込まない。実 Skill の run/外部 API は呼ばない。
     monkeypatch.setattr(os, "environ", dict(snapshot["mcp_env"]))
-    search = SimpleNamespace(pgvector=object(), embedder=object())
+    search = SimpleNamespace(
+        pgvector=object(), embedder=object(), attach_slack_store=lambda store: None
+    )
     monkeypatch.setattr(factory, "_build_search_skill", lambda: search)
     monkeypatch.setattr(factory, "_build_token_store", object)
     monkeypatch.setattr(factory, "_build_slack_store", object)

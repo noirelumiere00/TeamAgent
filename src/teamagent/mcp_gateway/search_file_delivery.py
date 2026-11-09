@@ -32,7 +32,10 @@ def _references(output: SearchOutput) -> list[tuple[str | None, DocumentReferenc
     refs: list[tuple[str | None, DocumentReference]] = [
         (None, ref) for ref in [*output.attachment_refs, *(output.displayed_refs or [])]
     ]
+    selected_sources = {ref.source_uri for ref in output.attachment_refs if ref.source_uri}
     for hit in output.hits:
+        if output.answer_format == "list" and hit.source_uri in selected_sources:
+            continue
         ref = hit.reference or canonical_reference(
             {
                 **hit.slack_file_metadata,
@@ -47,6 +50,8 @@ def _references(output: SearchOutput) -> list[tuple[str | None, DocumentReferenc
         )
         refs.append((str(hit.chunk_id), ref))
     for index, item in enumerate(output.slack_hits or []):
+        if output.answer_format == "list" and item.permalink in selected_sources:
+            continue
         ref = item.reference or canonical_reference(
             {
                 "source_type": "slack",

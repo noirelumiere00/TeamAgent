@@ -97,7 +97,11 @@ def test_case_count_lists_cases_and_materials_without_asking(
     assert "ください" not in out.answer and "？" not in out.answer
     if available >= 5:
         assert candidates(out) == [("F0COUNT", "架空飲料資料5")]
-    skill._summarize.assert_not_called()
+    if available:
+        skill._summarize.assert_called_once()
+        assert skill._summarize.call_args.kwargs["case_points"] is True
+    else:
+        skill._summarize.assert_not_called()
 
 
 @pytest.mark.parametrize("fanout_enabled", [False, True])
@@ -196,7 +200,7 @@ def test_case_count_combines_three_case_rows_with_material_and_live_slack(
     pg.list_case_studies.return_value = [
         {
             "title": f"架空飲料事例{i}",
-            "source_uri": "https://docs.google.com/presentation/d/COUNTDECK/edit",
+            "source_uri": f"https://docs.google.com/presentation/d/COUNTDECK{i}/edit",
             "case_client": f"架空飲料社{i}",
             "case_product": f"架空ドリンク{i}",
             "case_effect": "飲料の紹介動画。",
@@ -212,4 +216,5 @@ def test_case_count_combines_three_case_rows_with_material_and_live_slack(
     assert out.answer.count("COUNTDECK") == 3
     assert candidates(out) == [("F0LIVE", "架空飲料提案.pdf")]
     assert "見つかったのは" not in out.answer
-    skill._summarize.assert_not_called()
+    skill._summarize.assert_called_once()
+    assert skill._summarize.call_args.kwargs["case_points"] is True

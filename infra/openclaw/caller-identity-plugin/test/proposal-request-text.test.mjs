@@ -79,7 +79,7 @@ test('truncation discards a trailing numeric token instead of authorizing a part
 test('other tools receive no request text even if the model supplies it', () => {
   const p = setup();
   p.receive('利用者の依頼本文');
-  for (const tool of ['search', 'proposal_builder_status', 'proposal_deck']) {
+  for (const tool of ['proposal_builder_status', 'proposal_deck']) {
     const result = p.call(tool, {params: {_user_context: {request_text: 'モデルの値'}}});
     assert.notEqual(result?.block, true);
     assert.equal(Object.hasOwn(result.params._user_context, 'request_text'), false);
@@ -142,7 +142,7 @@ test('DM alias binding preserves the request, and expired runs cannot reuse it',
   assert.equal(p.call().block, true);
 });
 
-for (const tool of ['slack_search', 'slack_summary']) {
+for (const tool of ['search', 'slack_search', 'slack_summary']) {
   for (const channelId of [DM, 'C12345678', 'G12345678']) {
     test(`${tool} preserves the original list request on ${channelId} before signing`, () => {
       const p = setup();

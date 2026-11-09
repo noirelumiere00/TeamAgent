@@ -767,10 +767,10 @@ class SlackUserReader:
         *,
         oldest: str = "",
         latest: str = "",
-        max_messages: int = 500,
+        max_messages: int | None = 500,
     ) -> SlackSearchRead:
         """一覧用。重複排除と厳密な半開区間で数え、表示分だけを保持する。"""
-        cap = max(1, min(max_messages, 500))
+        cap = max(1, min(max_messages, 500)) if max_messages is not None else None
         matches: dict[tuple[str, str], SlackSearchMatch] = {}
         seen: set[tuple[str, str]] = set()
         total = 0
@@ -792,15 +792,17 @@ class SlackUserReader:
                 if (oldest and seconds < float(oldest)) or (latest and seconds >= float(latest)):
                     continue
                 total += 1
-                if len(matches) < cap:
+                if cap is None or len(matches) < cap:
                     matches[key] = match
             if page * 100 >= result.total:
                 if len(seen) < result.total:
                     return SlackSearchRead(error="incomplete_search")
                 return SlackSearchRead(
-                    matches=tuple(matches.values()), total=total, truncated=total > cap
+                    matches=tuple(matches.values()),
+                    total=total,
+                    truncated=cap is not None and total > cap,
                 )
-            if not oldest and not latest and len(matches) >= cap:
+            if cap is not None and not oldest and not latest and len(matches) >= cap:
                 return SlackSearchRead(
                     matches=tuple(matches.values()), total=result.total, truncated=True
                 )

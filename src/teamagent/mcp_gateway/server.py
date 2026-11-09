@@ -708,12 +708,14 @@ async def _resolve_metadata(
             "proposal_builder",
             "proposal_builder_submit",
             "clientkarte",
+            "search",
             "slack_search",
             "slack_summary",
         }
         and verified_caller is not None
         and (
-            verified_caller.channel_id.startswith("D") or tool in {"slack_search", "slack_summary"}
+            verified_caller.channel_id.startswith("D")
+            or tool in {"search", "slack_search", "slack_summary"}
         )
         and isinstance(request_text, str)
         and 0 < len(request_text) <= 4000
