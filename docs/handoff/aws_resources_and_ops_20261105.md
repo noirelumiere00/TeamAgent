@@ -46,3 +46,17 @@
 
 ## 古い情報（今は使っていない）
 - 2026-06 の常駐ワーカー EC2（systemd で Bot を動かしていた時代）と internal ALB `teamagent-connectweb-alb` は Fargate 化で役目を終えている。残骸が課金されていないか `aws ec2 describe-instances` と ALB 一覧で確認する価値あり。
+
+## 追記 2026-11-09: MCP 便の実行者に engineer-arima を追加（AWS で直接変更・Terraform 未反映）
+
+持ち主（小俣さん）の判断で、外部エンジニアの IAM ユーザー `engineer-arima` にも MCP 便を任せた。Aico の Terraform は正本が無く apply 禁止のため、以下は **AWS を直接変更**しており、`infra/terraform/` とずれている。正本を作り直すときに取り込むこと。
+
+| 対象 | 変更 | Terraform 上の定義 |
+|---|---|---|
+| role `teamagent-dev-approval-caller` の信頼ポリシー | Sid `EngineerArimaMfaSession` を追加（MFA 必須・セッション名 `teamagent-approval-caller`） | `infra/terraform/mcp_approval.tf` |
+| role `teamagent-dev-codebuild-launcher` の信頼ポリシー | Sid `EngineerArimaMfaSession` を追加（MFA 必須・セッション名 `teamagent-build-launcher`） | `infra/terraform/codebuild.tf`（buildspec 世代の入力。変更すると世代の再生成が要る） |
+| user `engineer-arima` | 管理ポリシー `engineer-arima-stage1`（読み取り・Bedrock・踏み台・開発用秘密 2 件）と `engineer-arima-release`（タスク定義の登録、mcp/openclaw/connect-web の更新、定期実行 3 ルール、dispatch Lambda 2 つ、13 ロールの PassRole、証跡鍵の復号、隔離用 ECR 2 つの候補タグ削除）。いずれも MFA 無しは全拒否 | 無し（Terraform 管理外） |
+
+- 実行者の切り替えは `RELEASE_PROFILE` / `RELEASE_MCP_MFA_ARN` / `MFA_BASE_PROFILE` / `MFA_SERIAL` ほか（`scripts/aws/release/` の各スクリプト冒頭）。既定値は持ち主のまま。
+- 任せていないもの: OpenClaw 便、buildspec 世代の公開、`terraform_runtime_guard.sh` による適用。
+- **既知の抜け**: activation freeze の AWS 強制（現在 `declaration_only`）を戻すときは、強制の対象（role 9 + user 1）に `engineer-arima` も加えること。今のままだと強制を戻しても engineer-arima は対象外になる。

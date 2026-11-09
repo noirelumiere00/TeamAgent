@@ -30,11 +30,14 @@ from teamagent.skills.morning_digest.preferences import (
     DEFAULT_PREFERENCES,
     LIMIT_BOUNDS,
     MAX_PAUSE_DAYS,
+    MAX_SKIP_KEYWORD_LEN,
+    MAX_SKIP_KEYWORDS,
     SECTION_LABELS,
     WEEKDAY_KEYS,
     DigestPreferences,
     describe,
     from_storage,
+    normalize_keyword,
 )
 
 _MSG_DM_ONLY = (
@@ -49,14 +52,7 @@ _FOOTER = (
     "（例:「Slack の欄はいらない」「来週まで止めて」）。"
 )
 _APPLY_NOTE = "次の朝のサマリーから反映されます。"
-_MSG_REMINDERS_UNAVAILABLE = "予定のリマインドは今は提供していません"
-_REMINDER_INPUT_FIELDS = (
-    "reminders",
-    "reminder_lead_minutes",
-    "reminder_personal_blocks",
-    "reminder_skip_add",
-    "reminder_skip_remove",
-)
+_REMINDER_NOTE = "今日すでに登録済みの予定リマインドは、そのまま届きます。"
 
 #: 変更点の表示名（ログにも鍵だけ出す＝設定内容は出さない）。
 _FIELD_LABELS: dict[str, str] = {
@@ -66,6 +62,10 @@ _FIELD_LABELS: dict[str, str] = {
     "hidden_sections": "載せる欄",
     "limits": "件数",
     "auto_drafts": "返信の下書き",
+    "reminders_opt_in": "直前リマインド",
+    "reminder_lead_minutes": "リマインドの時間",
+    "reminder_skip_keywords": "リマインドしない予定",
+    "reminder_personal_blocks": "作業枠へのリマインド",
 }
 
 _LIMIT_FIELDS: dict[str, str] = {
@@ -85,7 +85,7 @@ def _apply(
 ) -> tuple[DigestPreferences, list[str]]:
     """変更を当てた新しい設定と、本人に添える注記（丸めた等）を返す。"""
     if req.action == "reset":
-        # 廃止したリマインドの保存値は、サマリーを既定に戻しても残す。
+        # サマリーを既定に戻しても、リマインドの希望と設定は残す。
         reminder_values = {
             k: v for k, v in current.model_dump().items() if k.startswith("reminder")
         }
@@ -150,6 +150,30 @@ def _apply(
 
     if req.auto_drafts is not None:
         data["auto_drafts"] = req.auto_drafts
+    if req.reminders is not None:
+        data["reminders_opt_in"] = req.reminders
+    if req.reminder_personal_blocks is not None:
+        data["reminder_personal_blocks"] = req.reminder_personal_blocks
+    if req.reminder_lead_minutes is not None:
+        lead = min(60, max(1, int(req.reminder_lead_minutes)))
+        if lead != req.reminder_lead_minutes:
+            notes.append(f"リマインドは 1〜60 分前なので {lead} 分前にしました。")
+        data["reminder_lead_minutes"] = lead
+
+    words = list(current.reminder_skip_keywords)
+    for raw in req.reminder_skip_add or ():
+        word = " ".join(str(raw).split())
+        if not word or len(word) > MAX_SKIP_KEYWORD_LEN:
+            raise _InvalidRequestError(
+                f"リマインドしない予定の語は 1〜{MAX_SKIP_KEYWORD_LEN} 文字で指定してください。"
+            )
+        words.append(word)
+    remove = {normalize_keyword(w) for w in (req.reminder_skip_remove or ())}
+    words = [w for w in words if normalize_keyword(w) not in remove]
+    if len({normalize_keyword(w) for w in words}) > MAX_SKIP_KEYWORDS:
+        raise _InvalidRequestError(f"リマインドしない予定の語は {MAX_SKIP_KEYWORDS} 個までです。")
+    data["reminder_skip_keywords"] = tuple(words)
+
     try:
         return DigestPreferences.model_validate(data), notes
     except ValidationError as exc:
@@ -168,7 +192,9 @@ class DigestSettingsSkill(BaseSkill[DigestSettingsInput, DigestSettingsOutput]):
 
     name: ClassVar[str] = "digest_settings"
     description: ClassVar[str] = (
-        "朝のサマリー/朝ダイジェストの設定確認・変更・停止・再開。指定された項目だけ渡す。DM only。"
+        "朝のサマリー/朝ダイジェスト・予定リマインドの設定確認・変更。"
+        "「リマインド欲しい」「予定の前に知らせて」はaction=update, reminders=true、"
+        "「リマインドいらない」はfalse。指定された項目だけ渡す。DM only。"
     ) + USER_CONTEXT_RULE
     input_schema: ClassVar[type[BaseModel]] = DigestSettingsInput
     output_schema: ClassVar[type[BaseModel]] = DigestSettingsOutput
@@ -208,9 +234,6 @@ class DigestSettingsSkill(BaseSkill[DigestSettingsInput, DigestSettingsOutput]):
         if not channel.startswith("D") or ctx.metadata.get("identity_verified") is not True:
             log.info("digest_settings_not_dm")
             return DigestSettingsOutput(message=_MSG_DM_ONLY, error="dm_only")
-
-        if any(getattr(input, field) is not None for field in _REMINDER_INPUT_FIELDS):
-            return DigestSettingsOutput(message=_MSG_REMINDERS_UNAVAILABLE, error="unavailable")
 
         today = _calwin.now_jst().date()
 
@@ -254,6 +277,11 @@ class DigestSettingsSkill(BaseSkill[DigestSettingsInput, DigestSettingsOutput]):
                     if input.action == "reset"
                     else f"✅ 変えました（{labels}）。"
                 )
+                if "reminders_opt_in" in changed and new.reminders_opt_in:
+                    lead = new.reminder_lead()
+                    notes.append(f"明日の朝から、予定の {lead} 分前に届きます。")
+                elif any(k.startswith("reminder") for k in changed):
+                    notes.append(_REMINDER_NOTE)
                 head = "\n".join([title, *notes, _APPLY_NOTE])
                 log.info("digest_settings_saved", changed=changed, attempt=attempt)
                 return DigestSettingsOutput(message=_render(new, head), changed=changed)

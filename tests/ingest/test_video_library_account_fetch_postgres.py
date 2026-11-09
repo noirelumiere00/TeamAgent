@@ -4,13 +4,15 @@ from datetime import timedelta
 from typing import Any
 from unittest.mock import MagicMock
 
+import httpx
 import pytest
 
 from teamagent.adapters.apify_client import ApifyClient
+from teamagent.adapters.video_library_storage import VideoLibraryStorage
 from teamagent.ingest import video_library_account_fetch as fetch
 from teamagent.ingest.video_library_account_repository import AccountAddRepository
 from tests.ingest.test_video_library_account_add_postgres import accounts, db
-from tests.ingest.test_video_library_account_fetch import NOW, enabled, post, response
+from tests.ingest.test_video_library_account_fetch import COVER, NOW, enabled, post, response
 from tests.ingest.test_video_library_postgres import _DSN
 
 __all__ = ["accounts", "db", "enabled"]
@@ -127,3 +129,46 @@ def test_same_start_date_keeps_initial_and_incremental_separate(
     assert [c.args[1]["profiles"] for c in calls] == [["daily"], ["new"]]
     assert [c.args[1]["oldestPostDateUnified"] for c in calls] == ["2026-01-01"] * 2
     assert [c.args[1]["resultsPerPage"] for c in calls] == [10, 30]
+
+
+def test_covers_update_existing_and_new_videos_without_overwriting(
+    accounts: tuple[Any, AccountAddRepository],
+    enabled: None,
+) -> None:
+    conn, repo = accounts
+    conn.execute(
+        "INSERT INTO vl_accounts(platform,handle,operator_label) VALUES ('tiktok','sample','NewsTV')"
+    )
+    conn.execute(
+        """INSERT INTO vl_videos(platform,video_id,url,thumbnail_s3_key)
+           VALUES ('tiktok','123','https://www.tiktok.com/@sample/video/123',NULL),
+                  ('tiktok','456','https://www.tiktok.com/@sample/video/456','existing.jpg')"""
+    )
+    client = MagicMock(spec=ApifyClient)
+    client.run_actor_sync.return_value = response(
+        post(videoMeta={"coverUrl": COVER}),
+        post(vid="456", videoMeta={"coverUrl": COVER}),
+        post(vid="789", videoMeta={"originalCoverUrl": COVER}),
+    )
+    s3 = MagicMock()
+    with httpx.Client(
+        transport=httpx.MockTransport(lambda r: httpx.Response(200, content=b"\xff\xd8\xffimage"))
+    ) as http_client:
+        result = fetch.run(
+            repo.pg,
+            client,
+            request_id="postgres-covers",
+            now=NOW,
+            storage=VideoLibraryStorage(bucket="private", client=s3),
+            http_client=http_client,
+        )
+    assert result.failed_batches == 0 and result.covers_saved == 2
+    assert result.covers_skipped == {"already_present": 1}
+    assert s3.put_object.call_count == 2
+    assert conn.execute(
+        "SELECT video_id,thumbnail_s3_key FROM vl_videos ORDER BY video_id"
+    ).fetchall() == [
+        {"video_id": "123", "thumbnail_s3_key": "video-library/thumbs/tiktok/123.jpg"},
+        {"video_id": "456", "thumbnail_s3_key": "existing.jpg"},
+        {"video_id": "789", "thumbnail_s3_key": "video-library/thumbs/tiktok/789.jpg"},
+    ]

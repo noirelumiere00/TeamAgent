@@ -183,28 +183,53 @@ def test_no_change_does_not_write() -> None:
     assert store.saves == []
 
 
-@pytest.mark.parametrize("action", ["show", "update", "reset"])
-@pytest.mark.parametrize(
-    "kw",
-    [
-        {"reminders": True},
-        {"reminders": False},
-        {"reminder_lead_minutes": 0},
-        {"reminder_personal_blocks": False},
-        {"reminder_skip_add": ["タスク"]},
-        {"reminder_skip_add": []},
-        {"reminder_skip_remove": ["ﾀｽｸ"]},
-        {"reminder_skip_remove": []},
-    ],
-)
-def test_removed_reminder_requests_never_read_or_write(action: str, kw: dict[str, Any]) -> None:
-    store = _Store({"reminders": False, "reminder_skip_keywords": ["タスク"]}, 1)
-    store.fail_get = True  # DB 障害でも同じ定型文。併記されたサマリー変更も保存しない。
-    original = store.row.copy()
-    out = _run(store, action=action, delivery=False, **kw)
-    assert out.message == "予定のリマインドは今は提供していません"
-    assert out.error == "unavailable" and out.changed == []
-    assert store.row == original and store.saves == [] and store.deleted == 0
+@pytest.mark.parametrize("legacy", [True, False])
+def test_explicit_reminder_request_opts_in_and_can_opt_out(
+    monkeypatch: pytest.MonkeyPatch, legacy: bool
+) -> None:
+    monkeypatch.delenv("REMINDER_LEAD_MINUTES", raising=False)
+    store = _Store({"reminders": legacy}, 1)
+    out = _run(store, action="update", reminders=True)
+    assert out.error == "" and out.changed == ["reminders_opt_in"]
+    assert store.row is not None and store.row["reminders_opt_in"] is True
+    assert "明日の朝から、予定の 5 分前に届きます" in out.message
+    assert "リマインドしない予定の語" in out.message and "作業枠" in out.message
+    out = _run(store, action="update", reminders=False)
+    assert out.error == "" and not from_storage(store.row).reminders_opt_in
+    assert "今日すでに登録済み" in out.message
+    assert "分前" not in out.message and "作業枠" not in out.message
+
+
+def test_reminder_options_do_not_implicitly_opt_in() -> None:
+    store = _Store({"reminders": True}, 1)
+    out = _run(
+        store,
+        action="update",
+        reminder_lead_minutes=10,
+        reminder_skip_add=["タスク", "ﾀｽｸ"],
+        reminder_personal_blocks=False,
+    )
+    saved = from_storage(store.row)
+    assert out.error == "" and not saved.reminders_opt_in
+    assert saved.reminder_lead_minutes == 10 and saved.reminder_skip_keywords == ("タスク",)
+    assert saved.reminder_personal_blocks is False
+    assert "作業枠）:" not in out.message
+
+
+def test_reminder_options_update_and_remove_keywords() -> None:
+    store = _Store({"reminders_opt_in": True, "reminder_skip_keywords": ["タスク", "社内"]}, 1)
+    out = _run(store, action="update", reminder_lead_minutes=90, reminder_skip_remove=["ﾀｽｸ"])
+    saved = from_storage(store.row)
+    assert out.error == "" and saved.reminder_lead_minutes == 60
+    assert saved.reminders_opt_in and saved.reminder_skip_keywords == ("社内",)
+    assert "60 分前にしました" in out.message
+
+
+@pytest.mark.parametrize("words", [["a" * 21], ["a\x00b"], [str(i) for i in range(10)]])
+def test_invalid_reminder_keywords_do_not_write(words: list[str]) -> None:
+    store = _Store({"reminder_skip_keywords": ["既存"]}, 1)
+    out = _run(store, action="update", reminders=True, reminder_skip_add=words)
+    assert out.error == "invalid" and store.saves == []
 
 
 @pytest.mark.parametrize("action", ["show", "update", "reset"])
@@ -287,4 +312,15 @@ def test_description_stays_short_and_names_the_trigger_words() -> None:
     """ツール定義は毎リクエストの固定トークンに載る。長くしない・呼ばれる言葉は入れる。"""
     desc = DigestSettingsSkill.description
     assert "朝のサマリー" in desc and "DM only" in desc
+    assert all(
+        word in desc for word in ("リマインド欲しい", "予定の前に知らせて", "リマインドいらない")
+    )
     assert len(desc) < 900
+
+
+def test_summary_reset_preserves_explicit_opt_in() -> None:
+    store = _Store({"delivery": False, "reminders_opt_in": True, "reminder_lead_minutes": 10}, 1)
+    out = _run(store, action="reset")
+    saved = from_storage(store.row)
+    assert out.error == "" and saved.delivery and saved.reminders_opt_in
+    assert saved.reminder_lead_minutes == 10

@@ -116,7 +116,7 @@ class CalendarEventSkill(BaseSkill[CalendarEventInput, CalendarEventOutput]):
     name: ClassVar[str] = "calendar_event"
     description: ClassVar[str] = (
         "本人カレンダーへの予定登録専用（招待・変更・削除なし）。"
-        "一括はbulk_textで全行を渡し、一覧を一度提示後confirm_bulk=true（再確認不要）。"
+        "一括はbulk_textで全行を渡し、一覧を一度提示後confirm_bulk=true（再確認不要）"
         "曖昧な日時は確認。空き時間はcalendar_freebusy、"
         "予定確認・一覧はcalendar_freebusy(mode='agenda')、"
         "日程調整ボタンはschedule_propose。"

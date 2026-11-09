@@ -303,7 +303,7 @@ def fallback_cards(
     *,
     target: str | None = None,
 ) -> str:
-    from teamagent.skills.search.answer_mode import classify_answer_mode
+    from teamagent.skills.search.answer_mode import classify_answer_mode, requested_count
     from teamagent.skills.search.case_list import render
 
     if (
@@ -317,6 +317,7 @@ def fallback_cards(
         target,
         url_of,
         cards=True,
+        requested_count=requested_count(query),
     )
 
 

@@ -40,9 +40,9 @@ class CalendarEventInput(BaseModel):
     )
     location: str = Field(default="", max_length=200)
     bulk_text: str = Field(
-        default="", max_length=12000, description="一括依頼の原文（共通時刻＋日付と件名の各行）。"
+        default="", max_length=12000, description="一括依頼の原文（共通時刻と日付・件名の行）"
     )
-    confirm_bulk: bool = Field(default=False, description="一括一覧を本人に提示後trueで登録。")
+    confirm_bulk: bool = Field(default=False, description="一括一覧を本人に提示後trueで登録")
 
 
 class CalendarEventOutput(BaseModel):

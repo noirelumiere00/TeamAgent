@@ -377,16 +377,22 @@ async def test_case_same_name_different_size_keeps_both(monkeypatch, services):
     services.bot.upload_files.assert_awaited_once()
 
 
-async def test_drive_only_list_has_no_new_post_or_file_lookup(monkeypatch, services):
+@pytest.mark.parametrize("counted", [False, True])
+async def test_drive_only_list_has_no_new_post_or_file_lookup(monkeypatch, services, counted):
     monkeypatch.setenv("SEARCH_DRIVE_FIRST", "1")
     monkeypatch.setenv("SEARCH_DRIVE_FIRST_ALLOWED_EMAILS", ME)
-    result = await dispatch(monkeypatch, services, [drive_hit(1), drive_hit(2)])
+    result = await dispatch(
+        monkeypatch,
+        services,
+        [drive_hit(1), drive_hit(2)],
+        query="飲料の事例を５件見せて" if counted else "飲料の事例を見せて",
+    )
     assert result["answer"] == (
         "*飲料事例1.pdf*（2026年10月）\n• 飲料の提案内容です。\n"
         "• <https://drive.google.com/file/d/DRIVE1/view|資料を見る>\n\n"
         "*飲料事例2.pdf*（2026年10月）\n• 飲料の提案内容です。\n"
         "• <https://drive.google.com/file/d/DRIVE2/view|資料を見る>"
-    )
+    ) + ("\n\n見つかったのは 2 件です。" if counted else "")
     assert services.events == []
     services.reader_factory.assert_not_called()
 
