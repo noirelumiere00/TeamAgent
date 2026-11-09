@@ -12,6 +12,7 @@ from teamagent.ingest.video_library_account_repository import (
 )
 from teamagent.ingest.video_library_repository import VideoLibraryRepository
 from tests.ingest.test_video_library_postgres import _DSN, db
+from tests.migration_postgres import apply_video_library_migration
 
 __all__ = ["db"]
 pytestmark = pytest.mark.skipif(not _DSN, reason="Requires TEAMAGENT_TEST_DB_DSN")
@@ -31,8 +32,10 @@ def accounts(db: tuple[Any, VideoLibraryRepository]) -> tuple[Any, AccountAddRep
         "0041_video_library_external_cases.sql",
         "0042_video_library_account_add.sql",
         "0043_video_library_insights.sql",
+        "0044_library_mcp_oauth.sql",
+        "0045_video_library_case_discovery.sql",
     ):
-        conn.execute((MIGRATIONS / name).read_text())
+        apply_video_library_migration(conn, MIGRATIONS / name)
     return conn, AccountAddRepository(repository.pg)
 
 

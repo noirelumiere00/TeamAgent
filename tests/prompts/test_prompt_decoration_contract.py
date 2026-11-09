@@ -99,6 +99,7 @@ EXEMPT_PROMPTS = {
     "dm_quality/v1/system.md": "内部 JSON（判定区分だけ）",
     # 動画ライブラリの事例推定（Haiku に広告主・案件・根拠の JSON だけを返させる）。人には見えない。
     "case_inference/v1/system.md": "内部 JSON（広告主・案件の推定と根拠の引用だけ）",
+    "case_discovery/v1/system.md": "内部 JSON（事例の発見とサンプル本文からの根拠引用だけ）",
     # 数値計算で使う数値の id だけを JSON で選ばせる内部プロンプト。答えの文はコードが組む。
     "search/numeric/system.md": "内部 JSON（計算に使う数値の id だけ）",
     # 外部（他社）動画の広告主名の推定（Haiku に広告主と根拠の JSON だけを返させる）。人には見えない。
