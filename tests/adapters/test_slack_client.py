@@ -235,3 +235,30 @@ async def test_upload_files_timeout_is_uncertain(fake_web_client: AsyncMock) -> 
     fake_web_client.files_upload_v2.side_effect = TimeoutError("completion response lost")
     client = SlackClient(bot_token="xoxb-test", client=fake_web_client)
     assert await client.upload_files("D123", [("/tmp/a.pdf", "a.pdf")], "r") == "uncertain"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("method", ["upload_file", "upload_files"])
+async def test_upload_trims_comment_that_would_overflow_url(
+    fake_web_client: AsyncMock, method: str
+) -> None:
+    """files.completeUploadExternal は comment を URL に載せる。長いと 414 で添付ごと落ちる（10-30 BU1）。"""
+    from urllib.parse import quote
+
+    fake_web_client.files_upload_v2.return_value = {"ok": True, "files": [{"id": "F1"}]}
+    client = SlackClient(bot_token="xoxb-test", client=fake_web_client)
+    lines = ["⚠️ ドラフト（裏取り前）です。"] + [
+        f"{n}枚目: 警告: 本文500字超過 要確認（{500 + n}字）" for n in range(1, 60)
+    ]
+    comment = "\n".join(lines)
+    assert len(quote(comment)) > 8000
+
+    if method == "upload_file":
+        await client.upload_file("D1", "/tmp/a.pptx", "r", initial_comment=comment)
+    else:
+        await client.upload_files("D1", [("/tmp/a.pptx", "a.pptx")], "r", initial_comment=comment)
+
+    sent = fake_web_client.files_upload_v2.await_args.kwargs["initial_comment"]
+    assert len(quote(sent)) <= 6000
+    assert sent.startswith(lines[0] + "\n" + lines[1])
+    assert sent.endswith("行は省略")

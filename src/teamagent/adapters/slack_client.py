@@ -15,7 +15,7 @@ import re
 import time
 from dataclasses import dataclass
 from typing import Any, Literal
-from urllib.parse import urlsplit
+from urllib.parse import quote, urlsplit
 
 import httpx
 import structlog
@@ -43,6 +43,20 @@ _IDENTITY_TTL_NONE = 60.0
 # ファイル配信ホスト以外へ**絶対にトークンを出さない**ための一次防壁（SSRF/トークン漏洩）。
 _SLACK_FILE_HOST_SUFFIX = "slack.com"
 _SLACK_FILE_CHUNK_BYTES = 256 * 1024
+# completeUploadExternal は initial_comment を URL に載せ、約 8KB で 414（添付ごと失敗）。
+_UPLOAD_COMMENT_URL_BYTES = 6000
+
+
+def _fit_upload_comment(text: str) -> str:
+    """URL に収まる行までで切り、省略した行数を末尾に書く。"""
+    if len(quote(text)) <= _UPLOAD_COMMENT_URL_BYTES:
+        return text
+    lines = text.split("\n")
+    for keep in range(len(lines) - 1, -1, -1):
+        fitted = "\n".join([*lines[:keep], f"…ほか{len(lines) - keep}行は省略"])
+        if len(quote(fitted)) <= _UPLOAD_COMMENT_URL_BYTES:
+            return fitted
+    return fitted
 
 
 def slack_file_url_allowed(url: str) -> bool:
@@ -302,7 +316,7 @@ class SlackClient:
         if filename is not None:
             kwargs["filename"] = filename
         if initial_comment is not None:
-            kwargs["initial_comment"] = initial_comment
+            kwargs["initial_comment"] = _fit_upload_comment(initial_comment)
         if thread_ts is not None:
             kwargs["thread_ts"] = thread_ts
         try:
@@ -341,7 +355,7 @@ class SlackClient:
             ],
         }
         if initial_comment is not None:
-            kwargs["initial_comment"] = initial_comment
+            kwargs["initial_comment"] = _fit_upload_comment(initial_comment)
         if thread_ts is not None:
             kwargs["thread_ts"] = thread_ts
         try:
