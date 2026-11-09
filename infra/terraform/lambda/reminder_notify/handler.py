@@ -37,6 +37,7 @@ import urllib.request
 from typing import Any
 
 _TOKEN_CACHE: dict[str, str] = {}
+_STOP_NOTE = "止めるときは、この DM で『リマインドいらない』"
 
 
 def _slack_token() -> str:
@@ -57,7 +58,16 @@ def _slack_token() -> str:
 
 
 def _post_message(channel: str, text: str) -> None:
-    body = json.dumps({"channel": channel, "text": text}).encode("utf-8")
+    body = json.dumps(
+        {
+            "channel": channel,
+            "text": f"{text}\n{_STOP_NOTE}",
+            "blocks": [
+                {"type": "section", "text": {"type": "mrkdwn", "text": text}},
+                {"type": "context", "elements": [{"type": "mrkdwn", "text": _STOP_NOTE}]},
+            ],
+        }
+    ).encode("utf-8")
     req = urllib.request.Request(
         "https://slack.com/api/chat.postMessage",
         data=body,

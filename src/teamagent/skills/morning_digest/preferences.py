@@ -9,10 +9,11 @@ JSON）。DB は「object であること」しか縛らないので、項目の
   - 配信: 止める / 日付まで休止 / 送る曜日（平日のうち）
   - 欄: 要返信・未確認メール・Slack 返信漏れ・予定・事例ブリーフ の表示/非表示と件数
   - 返信の下書きを自動で作るか
+  - 予定リマインドは明示の希望がある人だけ（既定 OFF・旧 reminders 値は使わない）
 
 ⚠️ 読めない・壊れているときは **既定（＝今までどおりの配信）** に倒す（fail-open）。
    止めたはずの人に 1 通届くのは「うるさい」で済むが、設定表の障害で誰にも届かないのは
-   見逃しを生む（digest_ack と同じ判断）。
+   見逃しを生む（digest_ack と同じ判断）。リマインドは既定 OFF のまま。
 """
 
 from __future__ import annotations
@@ -90,7 +91,8 @@ class DigestPreferences(BaseModel):
     hidden_sections: tuple[str, ...] = ()
     limits: dict[str, int] = Field(default_factory=dict)
     auto_drafts: bool = True
-    reminders: bool = True
+    reminders: bool = True  # 旧保存値の互換用。配信可否には使わない。
+    reminders_opt_in: bool = Field(default=False, strict=True)
     reminder_lead_minutes: int | None = Field(default=None, ge=1, le=60)
     reminder_skip_keywords: tuple[str, ...] = ()
     # None＝全体の既定（MORNING_DIGEST_REMIND_PERSONAL_BLOCKS）に従う。
@@ -161,6 +163,16 @@ class DigestPreferences(BaseModel):
             return SKIP_WEEKDAY
         return None
 
+    def reminder_lead(self) -> int:
+        """本人の指定を優先し、未指定なら従来の全体設定（既定 5 分）を使う。"""
+        if self.reminder_lead_minutes is not None:
+            return self.reminder_lead_minutes
+        try:
+            lead = int(os.environ.get("REMINDER_LEAD_MINUTES", "5"))
+        except ValueError:
+            lead = 5
+        return min(60, max(1, lead))
+
     def remind_personal_blocks(self) -> bool:
         """タスク枠（ゲストも会議リンクも無い予定）にもリマインドを送るか。"""
         if self.reminder_personal_blocks is not None:
@@ -169,7 +181,7 @@ class DigestPreferences(BaseModel):
 
     def reminder_allowed(self, title: str, *, personal_block: bool = False) -> bool:
         """この予定に直前リマインドを送ってよいか。"""
-        if not self.reminders:
+        if not self.reminders_opt_in:
             return False
         if personal_block and not self.remind_personal_blocks():
             return False
@@ -255,6 +267,17 @@ def describe(prefs: DigestPreferences, today: _dt.date) -> str:
         f"• 載せない欄: {'・'.join(hidden) if hidden else 'なし'}",
         f"• 返信の下書き: {drafts}",
     ]
+    if prefs.reminders_opt_in:
+        lead = prefs.reminder_lead()
+        words = "・".join(f"「{w}」" for w in prefs.reminder_skip_keywords) or "なし"
+        personal = "送ります" if prefs.remind_personal_blocks() else "送りません"
+        lines.extend(
+            [
+                f"• 予定の直前リマインド: 開始 {lead} 分前に届きます",
+                f"• リマインドしない予定の語: {words}",
+                f"• ゲストも会議リンクも無い予定（作業枠）: {personal}",
+            ]
+        )
     return "\n".join(lines)
 
 
