@@ -1467,6 +1467,11 @@ data "aws_iam_policy_document" "tiktok_codebuild" {
   count = local.tk_enabled
 
   statement {
+    sid       = "ReadContentAddressedBuildTools"
+    actions   = ["s3:GetObject"]
+    resources = ["${aws_s3_bucket.image_release_evidence.arn}/build-tools/*"]
+  }
+  statement {
     sid     = "Logs"
     actions = ["logs:CreateLogStream", "logs:PutLogEvents"]
     resources = [
@@ -2631,6 +2636,11 @@ resource "aws_iam_role" "image_attestor" {
 
 data "aws_iam_policy_document" "image_attestor" {
   statement {
+    sid       = "ReadContentAddressedBuildTools"
+    actions   = ["s3:GetObject"]
+    resources = ["${aws_s3_bucket.image_release_evidence.arn}/build-tools/*"]
+  }
+  statement {
     sid     = "Logs"
     actions = ["logs:CreateLogStream", "logs:PutLogEvents"]
     resources = [
@@ -2862,6 +2872,11 @@ resource "aws_iam_role" "image_promoter" {
 }
 
 data "aws_iam_policy_document" "image_promoter" {
+  statement {
+    sid       = "ReadContentAddressedBuildTools"
+    actions   = ["s3:GetObject"]
+    resources = ["${aws_s3_bucket.image_release_evidence.arn}/build-tools/*"]
+  }
   statement {
     sid     = "Logs"
     actions = ["logs:CreateLogStream", "logs:PutLogEvents"]
@@ -3586,6 +3601,16 @@ resource "aws_iam_role" "openclaw_codebuild" {
 }
 
 data "aws_iam_policy_document" "openclaw_codebuild" {
+  statement {
+    sid       = "ReadContentAddressedBuildTools"
+    actions   = ["s3:GetObject"]
+    resources = ["${aws_s3_bucket.image_release_evidence.arn}/build-tools/*"]
+  }
+  statement {
+    sid       = "DecryptBuildToolsMirror"
+    actions   = ["kms:Decrypt"]
+    resources = [aws_kms_key.image_release_evidence.arn]
+  }
   statement {
     sid     = "Logs"
     actions = ["logs:CreateLogStream", "logs:PutLogEvents"]

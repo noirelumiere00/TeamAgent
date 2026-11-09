@@ -63,9 +63,17 @@ phases:
         [[ "$TRIVY_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "FATAL: locked Trivy version is malformed"; exit 1; }
         [[ "$TRIVY_SHA256" =~ ^[0-9a-f]{64}$ ]] || { echo "FATAL: locked Trivy archive digest is malformed"; exit 1; }
         TRIVY_ARCHIVE="trivy_${TRIVY_VERSION}_Linux-ARM64.tar.gz"
-        curl --proto '=https' --tlsv1.2 --fail --silent --show-error --location \
-          --output "/tmp/$TRIVY_ARCHIVE" \
-          "https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}/${TRIVY_ARCHIVE}"
+        aws s3api get-object \
+          --region ap-northeast-1 --cli-connect-timeout 10 --cli-read-timeout 30 \
+          --bucket teamagent-dev-image-release-evidence \
+          --key "build-tools/$TRIVY_SHA256/${TRIVY_ARCHIVE}" \
+          --expected-bucket-owner 718959508629 \
+          "/tmp/$TRIVY_ARCHIVE" >/tmp/build-tool-mirror-get.json || \
+          curl --proto '=https' --tlsv1.2 --fail --silent --show-error --location \
+            --retry 6 --retry-delay 20 --retry-all-errors --retry-max-time 600 \
+            --connect-timeout 10 --max-time 90 \
+            --output "/tmp/$TRIVY_ARCHIVE" \
+            "https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}/${TRIVY_ARCHIVE}"
         printf '%s  %s\n' "$TRIVY_SHA256" "/tmp/$TRIVY_ARCHIVE" | sha256sum -c -
         tar -xzf "/tmp/$TRIVY_ARCHIVE" -C /tmp trivy
         install -m 0755 /tmp/trivy /usr/local/bin/trivy
@@ -79,9 +87,17 @@ phases:
         [[ "$BUILDX_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "FATAL: locked Buildx version is malformed"; exit 1; }
         [[ "$BUILDX_SHA256" =~ ^[0-9a-f]{64}$ ]] || { echo "FATAL: locked Buildx binary digest is malformed"; exit 1; }
         mkdir -p "$HOME/.docker/cli-plugins"
-        curl --proto '=https' --tlsv1.2 --fail --silent --show-error --location \
-          --output /tmp/docker-buildx \
-          "https://github.com/docker/buildx/releases/download/v${BUILDX_VERSION}/buildx-v${BUILDX_VERSION}.linux-arm64"
+        aws s3api get-object \
+          --region ap-northeast-1 --cli-connect-timeout 10 --cli-read-timeout 30 \
+          --bucket teamagent-dev-image-release-evidence \
+          --key "build-tools/$BUILDX_SHA256/buildx-v${BUILDX_VERSION}.linux-arm64" \
+          --expected-bucket-owner 718959508629 \
+          /tmp/docker-buildx >/tmp/build-tool-mirror-get.json || \
+          curl --proto '=https' --tlsv1.2 --fail --silent --show-error --location \
+            --retry 6 --retry-delay 20 --retry-all-errors --retry-max-time 600 \
+            --connect-timeout 10 --max-time 90 \
+            --output /tmp/docker-buildx \
+            "https://github.com/docker/buildx/releases/download/v${BUILDX_VERSION}/buildx-v${BUILDX_VERSION}.linux-arm64"
         printf '%s  %s\n' "$BUILDX_SHA256" /tmp/docker-buildx | sha256sum -c -
         install -m 0755 /tmp/docker-buildx "$HOME/.docker/cli-plugins/docker-buildx"
         rm -f /tmp/docker-buildx
