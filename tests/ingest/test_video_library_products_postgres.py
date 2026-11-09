@@ -52,12 +52,20 @@ def seed(conn: Any, repository: Any) -> None:
             (campaign, campaign == "private"),
         )
     for video_id, category in [
-        ("1", "haircare"), ("2", "makeup"), ("4", "skincare"),
-        ("5", "makeup"), ("6", "makeup"), ("7", "makeup"),
+        ("1", "haircare"),
+        ("2", "makeup"),
+        ("4", "skincare"),
+        ("5", "makeup"),
+        ("6", "makeup"),
+        ("7", "makeup"),
     ]:
         products.save(
-            conn, "tiktok", video_id,
-            products.Product(product_category=category, brand="brand", evidence="商品パッケージ確認"),
+            conn,
+            "tiktok",
+            video_id,
+            products.Product(
+                product_category=category, brand="brand", evidence="商品パッケージ確認"
+            ),
             "admin@example.test",
         )
 
@@ -95,13 +103,15 @@ def test_case_counts_scope_missing_metrics_and_unassigned_videos(db: Any) -> Non
     assert own["product_categories"] == ["makeup"] and own["brands"] == ["brand"]
     conn.execute("UPDATE vl_metrics SET total_plays=NULL WHERE video_id='5'")
     own = next(
-        row for row in products.search_cases(conn, params, admin=False, page_size=20)["cases"]
+        row
+        for row in products.search_cases(conn, params, admin=False, page_size=20)["cases"]
         if row["origin"] == "own"
     )
     assert own["matched_total_plays"] == 100 and own["case_total_plays"] is None
     conn.execute("UPDATE vl_metrics SET total_plays=NULL WHERE video_id='2'")
     own = next(
-        row for row in products.search_cases(conn, params, admin=False, page_size=20)["cases"]
+        row
+        for row in products.search_cases(conn, params, admin=False, page_size=20)["cases"]
         if row["origin"] == "own"
     )
     assert own["matched_total_plays"] is None
@@ -110,7 +120,9 @@ def test_case_counts_scope_missing_metrics_and_unassigned_videos(db: Any) -> Non
 def test_options_validation_and_private_values_do_not_leak(db: Any) -> None:
     conn, repository = db
     seed(conn, repository)
-    conn.execute("UPDATE vl_campaign_settings SET purpose='secret-purpose' WHERE campaign='private'")
+    conn.execute(
+        "UPDATE vl_campaign_settings SET purpose='secret-purpose' WHERE campaign='private'"
+    )
     assert products.options(conn, "purpose", "", admin=False)["options"] == []
     assert products.options(conn, "purpose", "", admin=True)["options"] == [
         {"value": "secret-purpose", "label": "secret-purpose"}
@@ -132,12 +144,17 @@ def test_review_can_be_cleared_and_employee_cannot_write(db: Any) -> None:
     assert "2" not in {row["video_id"] for row in data["videos"]}
     assert products.pending_count(conn, {"q": "化粧品"}, admin=False) == 2
     conn.execute("SELECT set_config('app.user_role','viewer',true)")
-    assert conn.execute(
-        "UPDATE vl_video_analysis SET payload='{}' WHERE kind=%s", (products.KIND,)
-    ).rowcount == 0
+    assert (
+        conn.execute(
+            "UPDATE vl_video_analysis SET payload='{}' WHERE kind=%s", (products.KIND,)
+        ).rowcount
+        == 0
+    )
     with pytest.raises(psycopg.errors.InsufficientPrivilege), conn.transaction():
         products.save(
-            conn, "tiktok", "3",
+            conn,
+            "tiktok",
+            "3",
             products.Product(product_category="makeup", evidence="unauthorized"),
             "member@example.test",
         )
@@ -151,3 +168,24 @@ def test_relevance_precedes_popularity_and_explicit_plays_still_works(db: Any) -
     assert ranked["videos"][0]["video_id"] == "2"
     plays = library.search_videos(conn, {"q": "red", "sort": "plays"}, admin=False)
     assert plays["videos"][0]["video_id"] == "6"
+
+
+@pytest.mark.parametrize(
+    "patch",
+    [
+        '{"source":"inferred"}',
+        '{"status":"candidate"}',
+        '{"evidence":" "}',
+        '{"product_category":"unsupported"}',
+    ],
+)
+def test_only_supported_human_verified_classifications_match(db: Any, patch: str) -> None:
+    conn, repository = db
+    seed(conn, repository)
+    conn.execute(
+        "UPDATE vl_video_analysis SET payload=payload || %s::jsonb WHERE video_id='2' AND kind=%s",
+        (patch, products.KIND),
+    )
+    data = library.search_videos(conn, {"q": "化粧品"}, admin=False)
+    assert "2" not in {row["video_id"] for row in data["videos"]}
+    assert products.pending_count(conn, {"q": "化粧品"}, admin=False) == 2

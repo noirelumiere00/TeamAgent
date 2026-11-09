@@ -138,9 +138,7 @@ def _filters(params: VideoSearch | CaseSearch) -> dict[str, str]:
     return result
 
 
-def _video(
-    row: Mapping[str, Any], base: str, filters: Mapping[str, str] | None = None
-) -> Video:
+def _video(row: Mapping[str, Any], base: str, filters: Mapping[str, str] | None = None) -> Video:
     # Explicit projection: never expose ad cost, storage keys, or future DB columns.
     rates = library._rates(row)
     return Video(

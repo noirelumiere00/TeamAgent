@@ -88,7 +88,11 @@ def test_chatgpt_oauth_catalog_search_detail(setup: Any) -> None:
     assert initialized.status_code == 200, initialized.text
     tools = _rpc(client, token, "tools/list", {}).json()["result"]["tools"]
     assert [v["name"] for v in tools] == [
-        "ping", "get_search_options", "search_cases", "search_videos", "get_video"
+        "ping",
+        "get_search_options",
+        "search_cases",
+        "search_videos",
+        "get_video",
     ]
     assert all(t["annotations"]["readOnlyHint"] for t in tools)
     assert all(not t["annotations"]["destructiveHint"] for t in tools)
@@ -112,7 +116,10 @@ def test_chatgpt_oauth_catalog_search_detail(setup: Any) -> None:
     assert "NOT v.is_private" in sql and values[-2:] == [3, 3]
     assert sorted(["makeup", "skincare", "fragrance", "nail"]) in values and True in values
     assert result["applied_filters"]["product_categories"] == [
-        "fragrance", "makeup", "nail", "skincare"
+        "fragrance",
+        "makeup",
+        "nail",
+        "skincare",
     ]
     assert result["classification_pending_count"] == 1
     assert pg.sessions[-1] == {

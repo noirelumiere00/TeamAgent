@@ -49,10 +49,14 @@ class Product(BaseModel):
         for value in (self.brand, self.product_name, self.evidence):
             if any(ord(char) < 32 for char in value):
                 raise ValueError("制御文字は使えません")
+        self.brand = self.brand.strip()
+        self.product_name = self.product_name.strip()
+        self.evidence = self.evidence.strip()
         return self
 
 
 def category_ids(value: str) -> set[str]:
+    value = unicodedata.normalize("NFKC", value).strip().casefold()
     code = ALIASES.get(value, value)
     if code in GROUPS:
         return set(GROUPS[code])
@@ -71,7 +75,7 @@ def normalize(params: Mapping[str, str]) -> tuple[dict[str, str], set[str] | Non
     selected: set[str] | None = None
     terms = []
     for word in words:
-        value = word.lstrip("#")
+        value = word.lstrip("#").casefold()
         if value in ALIASES or value in GROUPS or value in CATEGORIES:
             ids = category_ids(value)
             selected = ids if selected is None else selected & ids
@@ -91,12 +95,12 @@ VALID = """p.payload->>'status'='verified' AND p.payload->>'source'='human'
     AND length(trim(p.payload->>'evidence'))>0"""
 LOOKUP = """FROM vl_video_analysis p WHERE p.platform=v.platform AND p.video_id=v.video_id
     AND p.kind='product_classification' AND p.version='v1'"""
-VERIFIED = f"EXISTS (SELECT 1 {LOOKUP} AND {VALID})"
+VERIFIED = f"EXISTS (SELECT 1 {LOOKUP} AND {VALID})"  # nosec B608
 PROJECTION = f"""(SELECT jsonb_build_object(
     'brand',p.payload->>'brand','product_name',p.payload->>'product_name',
     'product_category',CASE WHEN {VALID} THEN p.payload->>'product_category' END,
     'classification_status',CASE WHEN {VALID} THEN 'verified' ELSE 'unclassified' END)
-    {LOOKUP} AND p.payload->>'source'='human') AS product_metadata"""
+    {LOOKUP} AND p.payload->>'source'='human') AS product_metadata"""  # nosec B608
 
 
 def clauses(params: Mapping[str, str], ids: set[str] | None) -> tuple[list[str], list[Any]]:
@@ -135,6 +139,8 @@ def metadata(row: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def reasons(row: Mapping[str, Any], params: Mapping[str, str]) -> list[str]:
+    from teamagent.connect_web.library import parse_search
+
     normalized, ids = normalize(params)
     product = metadata(row)
     result = []
@@ -150,8 +156,13 @@ def reasons(row: Mapping[str, Any], params: Mapping[str, str]) -> list[str]:
     ):
         if normalized.get(field):
             result.append(label + "の完全一致")
-    if normalized.get("q"):
+    terms, is_pr = parse_search(normalized)
+    if terms:
         result.append("検索語のAND一致")
+    if is_pr is not None:
+        result.append("PRあり" if is_pr else "PRなし")
+    if normalized.get("category"):
+        result.append("区分の完全一致")
     return result
 
 
@@ -165,9 +176,12 @@ def relevance(params: Mapping[str, str]) -> tuple[str, list[Any]]:
     for term in terms:
         scores.append(
             "(CASE WHEN lower(v.advertiser)=lower(%s) OR lower(v.campaign)=lower(%s) "
-            "THEN 200 WHEN v.caption ILIKE %s THEN 100 ELSE 10 END)"
+            f"OR EXISTS (SELECT 1 {LOOKUP} AND p.payload->>'source'='human' "
+            "AND (lower(p.payload->>'brand')=lower(%s) "
+            "OR lower(p.payload->>'product_name')=lower(%s))) "
+            "THEN 200 WHEN v.caption ILIKE %s THEN 100 ELSE 10 END)"  # nosec B608
         )
-        values.extend([term, term, "%" + term + "%"])
+        values.extend([term, term, term, term, "%" + term + "%"])
     return " + ".join(scores) or "0", values
 
 
@@ -273,12 +287,13 @@ def search_cases(
             CASE WHEN count(m.total_plays)=count(*) THEN sum(m.total_plays) END AS case_total_plays
         FROM vl_videos_effective v {_METRICS_JOIN} WHERE {visible}
         GROUP BY v.advertiser,v.campaign,v.origin
-    )"""
+    )"""  # nosec B608
     args = [*rank_values, *values]
     counts = conn.execute(
-        cte + """SELECT (SELECT count(*) FROM cases) AS n,
+        cte
+        + """SELECT (SELECT count(*) FROM cases) AS n,
             (SELECT count(*) FROM matched WHERE coalesce(advertiser,'')=''
-             OR coalesce(campaign,'')='') AS unassigned_video_count""",
+             OR coalesce(campaign,'')='') AS unassigned_video_count""",  # nosec B608
         args,
     ).fetchone()
     orders = {
@@ -292,7 +307,7 @@ def search_cases(
         + f"""SELECT c.*,f.case_video_count,f.case_total_plays FROM cases c
             JOIN full_cases f USING (advertiser,campaign,origin)
             ORDER BY {order} DESC NULLS LAST,c.advertiser,c.campaign,c.origin
-            LIMIT %s OFFSET %s""",
+            LIMIT %s OFFSET %s""",  # nosec B608
         [*args, page_size, (page - 1) * page_size],
     ).fetchall()
     return {
@@ -304,9 +319,7 @@ def search_cases(
 
 def editor(platform: str, video_id: str, payload: Mapping[str, Any] | None) -> str:
     product = payload or {}
-    action = (
-        "/library/v/" + quote(platform, safe="") + "/" + quote(video_id, safe="") + "/product"
-    )
+    action = "/library/v/" + quote(platform, safe="") + "/" + quote(video_id, safe="") + "/product"
     body = (
         '<section class="metric-group"><h2>商品情報（管理者確認）</h2>'
         "<p>業種・案件名は変更しません。商品を確認できない場合は未分類にします。</p>"
@@ -323,10 +336,7 @@ def editor(platform: str, video_id: str, payload: Mapping[str, Any] | None) -> s
         ("evidence", "確認した商品情報・根拠（分類時は必須）", 500),
     ):
         value = escape(str(product.get(field) or ""), quote=True)
-        body += (
-            f'<label>{label}<input name="{field}" maxlength="{length}" '
-            f'value="{value}"></label>'
-        )
+        body += f'<label>{label}<input name="{field}" maxlength="{length}" value="{value}"></label>'
     return body + "<button>商品情報を保存</button></form></section>"
 
 
