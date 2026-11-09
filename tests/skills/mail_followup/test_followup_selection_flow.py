@@ -91,6 +91,8 @@ class FakeGmail:
         elif "from:" in q:
             address = q.split("from:", 1)[1].split(" ", 1)[0].rstrip(")")
             hits = [m for m in self._msgs if address in m.headers.get("From", "")]
+        elif "newer_than:" in q:
+            hits = [m for m in self._msgs if "SENT" not in m.label_ids]
         else:  # pragma: no cover - 想定外のクエリ形
             hits = []
         # ⚠️ newer_than を無視する fake は本番の失敗モード（窓の外の件は「無い」ことに
@@ -204,7 +206,7 @@ def _inbox() -> list[_Msg]:
                 "Subject": "請求書の送付について",
                 "To": f"{OWNER}, other@example.co.jp",
             },
-            body="請求書をお送りします。",
+            body="請求書をお送りします。ご確認をお願いします。",
             days_ago=12,
             label_ids=("INBOX",),
         ),
@@ -332,12 +334,12 @@ def test_the_selected_mail_is_read_in_full_including_past_mail_with_the_same_per
     assert "日程を調整させてください" not in prompt
 
 
-def test_only_the_selected_thread_has_its_body_fetched() -> None:
-    """一覧側は本文経路を 1 度も通らず、選択後に初めて本文を取る。"""
+def test_only_the_selected_thread_body_reaches_the_draft() -> None:
+    """一覧は本文をコードで判定し、選択後の起草に渡す本文は選択したスレッドだけ。"""
     gmail = FakeGmail(_inbox())
     listed = _list_candidates(gmail)
-    assert gmail.body_fetches == []  # 裁定 A: 一覧では本文を読まない
-    assert set(gmail.thread_formats) == {"metadata"}
+    assert gmail.body_fetches == []  # 一覧は threads.get だけを使う
+    assert set(gmail.thread_formats) == {"full"}
 
     _draft_skill(gmail, FakeBedrock()).run(
         MailDraftInput(selection="1", candidate_refs=[i.evidence_ref for i in listed.items]),
@@ -403,9 +405,9 @@ def test_the_selection_reuses_the_list_it_just_showed_instead_of_rescanning() ->
     """
     gmail = FakeGmail(_inbox())
     listed = _list_candidates(gmail)
-    inbox_scans = sum(1 for q in gmail.queries if "in:inbox" in q)
-    metadata_reads = gmail.thread_formats.count("metadata")
-    assert inbox_scans == 1 and metadata_reads > 0  # 一覧側は実際に走査している
+    inbox_scans = sum(1 for q in gmail.queries if "newer_than:" in q and "from:" not in q)
+    thread_reads = gmail.thread_formats.count("full")
+    assert inbox_scans == 1 and thread_reads > 0  # 一覧側は実際に走査している
 
     out = _draft_skill(gmail, FakeBedrock()).run(
         MailDraftInput(selection="1番で", candidate_refs=[i.evidence_ref for i in listed.items]),
@@ -413,8 +415,10 @@ def test_the_selection_reuses_the_list_it_just_showed_instead_of_rescanning() ->
     )
 
     assert out.created is True
-    assert sum(1 for q in gmail.queries if "in:inbox" in q) == inbox_scans  # 再走査ゼロ
-    assert gmail.thread_formats.count("metadata") == metadata_reads
+    assert (
+        sum(1 for q in gmail.queries if "newer_than:" in q and "from:" not in q) == inbox_scans
+    )  # 再走査ゼロ
+    assert gmail.thread_formats.count("full") == thread_reads + 1  # 選んだ1件の起草用取得だけ
 
 
 def test_passing_the_same_window_back_does_not_force_a_rescan() -> None:
@@ -425,7 +429,7 @@ def test_passing_the_same_window_back_does_not_force_a_rescan() -> None:
     """
     gmail = FakeGmail(_inbox())
     listed = _list_candidates(gmail)
-    inbox_scans = sum(1 for q in gmail.queries if "in:inbox" in q)
+    inbox_scans = sum(1 for q in gmail.queries if "newer_than:" in q and "from:" not in q)
 
     out = _draft_skill(gmail, FakeBedrock()).run(
         MailDraftInput(
@@ -437,7 +441,7 @@ def test_passing_the_same_window_back_does_not_force_a_rescan() -> None:
     )
 
     assert out.created is True
-    assert sum(1 for q in gmail.queries if "in:inbox" in q) == inbox_scans
+    assert sum(1 for q in gmail.queries if "newer_than:" in q and "from:" not in q) == inbox_scans
 
 
 def test_a_wider_window_than_the_cached_one_is_honored_with_a_fresh_scan() -> None:
@@ -445,14 +449,16 @@ def test_a_wider_window_than_the_cached_one_is_honored_with_a_fresh_scan() -> No
     gmail = FakeGmail([*_inbox(), _old_mail()])
     listed = _list_candidates(gmail)  # 既定 14 日＝21 日前の件は一覧に出ない
     assert all("高橋" not in (i.subject_scrubbed or "") for i in listed.items)
-    inbox_scans = sum(1 for q in gmail.queries if "in:inbox" in q)
+    inbox_scans = sum(1 for q in gmail.queries if "newer_than:" in q and "from:" not in q)
 
     out = _draft_skill(gmail, FakeBedrock()).run(
         MailDraftInput(selection="高橋さんの件", lookback_days=30),
         _ctx(),
     )
 
-    assert sum(1 for q in gmail.queries if "in:inbox" in q) == inbox_scans + 1
+    assert (
+        sum(1 for q in gmail.queries if "newer_than:" in q and "from:" not in q) == inbox_scans + 1
+    )
     assert out.created is True
     assert gmail.create_draft_calls[0]["to"] == "takahashi@old.co.jp"
 
@@ -461,7 +467,7 @@ def test_an_ask_back_does_not_rescan_the_inbox_either() -> None:
     """言い直し（聞き返し）のたびにフル走査しない。"""
     gmail = FakeGmail(_inbox())
     listed = _list_candidates(gmail)
-    inbox_scans = sum(1 for q in gmail.queries if "in:inbox" in q)
+    inbox_scans = sum(1 for q in gmail.queries if "newer_than:" in q and "from:" not in q)
 
     out = _draft_skill(gmail, FakeBedrock()).run(
         MailDraftInput(
@@ -471,7 +477,7 @@ def test_an_ask_back_does_not_rescan_the_inbox_either() -> None:
     )
 
     assert out.error == "ambiguous_selection"
-    assert sum(1 for q in gmail.queries if "in:inbox" in q) == inbox_scans
+    assert sum(1 for q in gmail.queries if "newer_than:" in q and "from:" not in q) == inbox_scans
 
 
 # ── 一覧と選択で「見ている窓」を一致させる ────────────────────────────────
@@ -536,7 +542,7 @@ def test_a_selection_without_conditions_falls_back_to_the_list_that_was_shown() 
     listed = MailFollowupSkill(gmail=gmail, now_ms=NOW_MS).run(
         MailFollowupInput(idle_days=20), _ctx()
     )
-    inbox_scans = sum(1 for q in gmail.queries if "in:inbox" in q)
+    inbox_scans = sum(1 for q in gmail.queries if "newer_than:" in q and "from:" not in q)
 
     out = _draft_skill(gmail, FakeBedrock()).run(
         MailDraftInput(selection="1番で", candidate_refs=[i.evidence_ref for i in listed.items]),
@@ -546,7 +552,7 @@ def test_a_selection_without_conditions_falls_back_to_the_list_that_was_shown() 
     assert out.error == ""
     assert out.created is True
     assert gmail.create_draft_calls[0]["to"] == "takahashi@old.co.jp"
-    assert sum(1 for q in gmail.queries if "in:inbox" in q) == inbox_scans
+    assert sum(1 for q in gmail.queries if "newer_than:" in q and "from:" not in q) == inbox_scans
 
 
 def test_the_ask_back_keeps_the_idle_filter_the_user_asked_for() -> None:

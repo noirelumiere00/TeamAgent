@@ -1,36 +1,8 @@
-"""mail_followup Skill 本体（要返信トリアージ・メタデータのみ・読み取り専用）。
+"""本人の To/Cc メールから未返信の依頼を列挙する（読み取り専用・LLM 不使用）。
 
-本人の受信箱から、指定クライアントについて「相手から最後に来たまま動いていない」スレッドを
-新しい順／放置日数つきで列挙する。thread_id で重複排除し、スレッド末尾が本人の返信なら除外。
-**本文を一切読まない**（format='metadata'）純メタデータ処理なので、LLM 不使用＝コスト0・
-プロンプトインジェクション面ゼロ・PII 最小。
-
-⚠️ 死守ライン（mail_constraints と同じ G1-G7。本 Skill は本文を読まないので G6 は N/A）:
-  G1 本人受信箱限定: ctx.metadata.user_email→TokenStore。LLM/呼出側に受信箱を選ばせない。
-  G2 連携必須（オプトイン）: TokenStore に本人トークンが無ければ fail-closed。
-  G3 生データを返さない: 件名は scrub_value でマスク＋短縮、From はマスク、messageId はハッシュ。
-  G4 読み取り専用: 連携スコープは gmail.modify だが readonly クライアント（書込メソッドは
-     adapter で封鎖）だけを使う。書込メソッドは呼ばない（drafts/labels なし）。
-  G5 クエリ限定: 期間・受信トレイ・件数上限で必ず絞る。顧客名ありは client_name でも絞る。
-     顧客名なしの一覧トリアージ（下記）は **本人の受信トレイ全体**を見るが、期間
-     （既定 14 日・最大 90）・母数（messages.list を 300 件までページング）・
-     確認件数（threads.get を既定 40 件まで）で必ず頭打ちにし、利用者入力は
-     クエリへ一切載せない（＝Gmail 演算子インジェクションの面を作らない）。
-     予算は **古い側から**割り当てる（放置検出で古い側を切ると、最も必要な 1 通を捨てる）。
-  G6 N/A（本文を読まず LLM に渡さないため、インジェクション面が存在しない）。
-  G7 監査ログ: who(masked)/when/件数のみ。件名・本文・PII は出さない。
-
-⚠️ 正直ラベリング（重要）: 読み取りの users.threads.get(format='metadata') で
-スレッド末尾を確認し、本人の返信が最後のスレッドは候補から除外する。本文取得・下書き作成・
-ラベル変更は行わない（readonly クライアントが messages.modify を adapter で封鎖）。
-
-⚠️ 顧客名が無いとき（2026-08-21 ユーザー裁定）: 「どちらのお客様ですか？」と**聞き返さない**。
-受信箱全体を **メタデータだけ**で走査し、返信が止まっている候補を数件提示して選ばせる
-（裁定 A: 一覧段階では件名・差出人・日時・放置日数だけ／本文は読まない・LLM に渡さない）。
-判定と文面は :mod:`teamagent.skills._shared.inbox_triage`（純関数）に置き、本ファイルは
-Gmail からメタデータを詰め替えるだけにしてある。
-
-3 層分離: 本ファイルは Skill 層。googleapiclient / boto3 は触らず adapters/ 経由。
+本人の Google 連携だけを使い、本文の質問・依頼・期限と後続の本人返信をコードで判定する。
+本文は DLP 済みの要点 1 行だけを返し、生アドレスはマスクする。監査ログに本文は記録しない。
+mail_draft が一覧を再現する既存のメタデータ走査も保持する。
 """
 
 from __future__ import annotations
@@ -79,6 +51,13 @@ from teamagent.skills._shared.mail_connection import (
     resolve_gmail_for_user,
     searched_inbox_prefix,
 )
+from teamagent.skills._shared.mail_tasks import (
+    MailPeriod,
+    period_bounds,
+    period_query,
+    task_item,
+    unreplied_request,
+)
 from teamagent.skills._shared.timefmt import jst_display_or_none, jst_iso_or_none
 from teamagent.skills._shared.user_context import USER_CONTEXT_RULE
 from teamagent.skills.base import BaseSkill, SkillContext, register
@@ -87,14 +66,15 @@ from teamagent.skills.mail_followup.schema import (
     MailFollowupInput,
     MailFollowupOutput,
 )
+from teamagent.skills.morning_digest.calendar_window import now_jst
 
 logger = structlog.get_logger(__name__)
 
 _MS_PER_DAY = 86_400_000
 
 _HONEST_NOTE = (
-    "※ スレッドの最新メッセージをメタデータで確認し、あなたの返信が最後のものは除外して"
-    "います（読み取りのみ・本文は読みません）。"
+    "※ 本人のTo/Cc・本文の質問/依頼/期限・後続の返信を確認し、自動配信と返信済みを除外しています。"
+    "読み取りのみで、本文は要点1行だけ表示します。"
 )
 
 _MISCONFIG_MSG = "TokenStore が未設定です（mail_followup は本人連携前提）"
@@ -130,11 +110,6 @@ SCAN_CACHE_MAX_USERS = 32
 #: 決して衝突しない。番号の位置をずらさないためだけに存在する。
 VANISHED_REF = "-"
 
-_TRIAGE_NOTE = (
-    "※ この一覧は件名・差出人・日時・放置日数だけで選んでいます（本文は読んでいません）。"
-    "選んでいただいた 1 件だけ、中身まで見て下書きを作ります。"
-)
-
 
 def _triage_unfiltered_note(echo: str) -> str:
     """お客様名として使えなかった語を **フィルタに使っていない**ことを開示する一文。
@@ -156,6 +131,7 @@ class InboxSource:
     meta: InboxMailMeta
     anchor_id: str
     counterpart: str | None
+    task: FollowupItem | None = None
 
 
 @dataclass(frozen=True)
@@ -246,12 +222,12 @@ def _no_hits_message(name: str, lookback_days: int, inbox_masked: str) -> str:
 
 @register
 class MailFollowupSkill(BaseSkill[MailFollowupInput, MailFollowupOutput]):
-    """本人受信箱の放置気味メールをメタデータだけで列挙する Skill（読み取り専用・LLM不使用）。"""
+    """本人受信箱の未返信の依頼を列挙する Skill（読み取り専用・LLM不使用）。"""
 
     name: ClassVar[str] = "mail_followup"
     description: ClassVar[str] = (
-        "要返信・返信が必要・返信漏れ・返信待ち・放置メールの候補を列挙（メタデータの"
-        "み）。内容要約はmail_summary、空き時間はcalendar_freebusy、"
+        "要返信・返信が必要・返信漏れ・返信待ち・未返信・放置メールを本文と後続返信で判定。"
+        "今日・今週等はperiodへ。ボールの所在はmail_summary(mode='ball')。内容要約はmail_summary、空き時間はcalendar_freebusy、"
         "予定一覧はcalendar_freebusy(mode='agenda')。顧客不明はclient_name "
         "を**空のまま呼ぶ**。inbox_triageのmessageで番号を選んでもらい、"
         "聞き返しの文面を自作しない。返事はmail_draftへ（selection=原文、"
@@ -345,7 +321,7 @@ class MailFollowupSkill(BaseSkill[MailFollowupInput, MailFollowupOutput]):
         # ⚠️ ここから先は実際に Gmail を叩く。失効トークンはここで初めて露見するので、
         # 例外のまま抜けさせない（要修正3: reauth_needed に落として再連携へ誘導する）。
         try:
-            refs, retried_with = self._search(gmail, verdict, input, ctx, log)
+            refs, retried_with, truncated = self._search(gmail, verdict, input, ctx, log)
         except Exception as e:
             record_google_failure(e)
             return self._api_failure(e, log=log, client_display=display_name, inbox=inbox_masked)
@@ -357,7 +333,7 @@ class MailFollowupSkill(BaseSkill[MailFollowupInput, MailFollowupOutput]):
             unique_threads=len(unique_refs),
         )  # 本文・件名なし
 
-        now_ms = self._now_ms if self._now_ms is not None else int(time.time() * 1000)
+        now_ms = self._now_ms if self._now_ms is not None else int(now_jst().timestamp() * 1000)
         exclude_bulk = env_bool("MAIL_EXCLUDE_BULK", True)
         try:
             items, excluded, kept = self._triage(
@@ -391,12 +367,22 @@ class MailFollowupSkill(BaseSkill[MailFollowupInput, MailFollowupOutput]):
                 self._effective_lookback(input),
                 inbox_masked,
             )
+            if input.period:
+                zero = zero.replace(
+                    f"直近 {self._effective_lookback(input)} 日に", f"{input.period}（JST）に"
+                )
             if retried_with:
                 zero += retry_zero_note(retried_with)
             note = zero + _HONEST_NOTE
             message = note
             error = "no_hits"
 
+        if input.period:
+            note = f"対象期間: {input.period}（JST）\n" + note
+        if truncated:
+            note += "\n※ 確認件数の上限に達しました。未確認のメールがあります。"
+        if error:
+            message = note
         log.info("mail_followup_done", returned=len(items), scanned=len(refs))
         return MailFollowupOutput(
             client_name=display_name,
@@ -433,19 +419,19 @@ class MailFollowupSkill(BaseSkill[MailFollowupInput, MailFollowupOutput]):
         input: MailFollowupInput,
         ctx: SkillContext,
         log: Any,
-    ) -> tuple[list[Any], str]:
+    ) -> tuple[list[Any], str, bool]:
         """1 本目（原文フレーズ）→ 0 件なら 2 本目（固有名詞残差）。Gmail 往復は最大 2 回。"""
         query = self._build_query(input, verdict.search_terms[0])
-        refs, _ = gmail.list_messages(query, ctx.request_id, max_results=input.max_messages)
+        refs, token = gmail.list_messages(query, ctx.request_id, max_results=input.max_messages)
         if refs or len(verdict.search_terms) <= 1:
-            return (list(refs), "")
+            return (list(refs), "", bool(token))
         # 「花王のメール」のように依頼文が混じった名前は 1 本目が 0 件になる。
         log.info("mail_followup_retry_residual", skill=self.name)
         retried_with = str(verdict.search_terms[1])
-        refs, _ = gmail.list_messages(
+        refs, token = gmail.list_messages(
             self._build_query(input, retried_with), ctx.request_id, max_results=input.max_messages
         )
-        return (list(refs), retried_with)
+        return (list(refs), retried_with, bool(token))
 
     def _api_failure(
         self, exc: BaseException, *, log: Any, client_display: str, inbox: str
@@ -466,7 +452,7 @@ class MailFollowupSkill(BaseSkill[MailFollowupInput, MailFollowupOutput]):
             connection="",
         )
 
-    # ── 一覧トリアージ（顧客名なし経路・G3/G4: メタデータのみ）──────────────
+    # ── 一覧トリアージ（顧客名なし経路・読み取り専用）──────────────
 
     def _inbox_triage(
         self,
@@ -478,13 +464,7 @@ class MailFollowupSkill(BaseSkill[MailFollowupInput, MailFollowupOutput]):
         verdict: ClientNameVerdict,
         log: Any,
     ) -> MailFollowupOutput:
-        """受信箱全体から「返信が止まっている候補」を数件返す（本文は読まない）。
-
-        裁定 A の死守: ここで触れるのは ``threads.get(format='metadata')`` のヘッダだけ。
-        ``messages.get``（本文経路）は 1 回も呼ばず、LLM も呼ばない（``total_cost_usd=0``）。
-
-        失敗時は :meth:`_api_failure` へ落とす＝**「0 件」とは別物**として返す。
-        """
+        """受信箱から、本文に依頼があり本人の後続返信が無いものを返す。"""
         inbox_masked = _mask_email(requester)
         window = self._effective_lookback(input)
 
@@ -496,28 +476,36 @@ class MailFollowupSkill(BaseSkill[MailFollowupInput, MailFollowupOutput]):
                 window_days=window,
                 scan_limit=self._triage_scan_limit(input),
                 idle_days=input.idle_days,
-                # 提示は上位 DEFAULT_LIMIT 件だが、候補自体は広く持っておく。後段
-                # （mail_draft の selection）が **この同じ scan** を使い回すため、
-                # ここで 3 件に切ると「一覧に出ていた件が解決できない」が生まれる。
-                limit=TRIAGE_SCAN_DEFAULT,
+                # 一覧に出した全件を保持し、後段の番号選択で同じ並びを使う。
+                limit=self._triage_scan_limit(input),
+                require_request=True,
+                period=input.period,
             )
         except Exception as e:
             record_google_failure(e)
             return self._api_failure(e, log=log, client_display="", inbox=inbox_masked)
         # 直前に本人へ見せた一覧として覚える（選択側の再走査を省く＝threads.get を倍にしない）。
         remember_scan(requester, scan)
-        cands = scan.candidates[:DEFAULT_LIMIT]
+        cands = scan.candidates
         truncated = scan.truncated
 
-        lines = [
-            render_triage_message(
-                cands, scanned=scan.scanned, truncated=truncated, window_days=window
+        lines = render_triage_message(
+            cands, scanned=scan.scanned, truncated=truncated, window_days=window
+        ).splitlines()
+        if input.period:
+            lines[0] = lines[0].replace(f"直近{window}日", f"{input.period}（JST）")
+        for index, cand in enumerate(cands, start=1):
+            item = _followup_item(cand, scan.sources[cand.mail.thread_id])
+            lines[index] += (
+                f" / {item.company_domain} / {item.occurred_at_display or '日時不明'}"
+                f" / {item.request_summary} / {item.mail_url}"
             )
-        ]
         if verdict.normalized:
             # structural（依頼文の断片）のときだけ。「その語で絞ったわけではない」を明示する。
             lines.append(_triage_unfiltered_note(safe_client_name(verdict.normalized)))
-        lines.append(_TRIAGE_NOTE)
+        lines.append(_HONEST_NOTE)
+        if input.period:
+            lines.append(f"対象期間: {input.period}（JST）")
         message = "\n".join(lines)
 
         log.info(
@@ -553,8 +541,10 @@ class MailFollowupSkill(BaseSkill[MailFollowupInput, MailFollowupOutput]):
         scan_limit: int = TRIAGE_SCAN_DEFAULT,
         idle_days: int | None = None,
         limit: int = DEFAULT_LIMIT,
+        require_request: bool = False,
+        period: MailPeriod = "",
     ) -> InboxScan:
-        """受信箱を**メタデータだけ**で走査し、候補を確定した並びで返す（公開・再利用可）。
+        """受信箱を走査し、候補を確定した並びで返す。require_request で本文も判定。
 
         一覧（:meth:`_inbox_triage`）と、選ばれた 1 件を深掘りする後段（mail_draft の
         selection 経路）が **同じコードで同じ順序**を得るための入口。順序が再現できないと
@@ -572,7 +562,14 @@ class MailFollowupSkill(BaseSkill[MailFollowupInput, MailFollowupOutput]):
         Gmail 側の例外はそのまま送出する（呼び出し側が「0 件」と区別して扱う）。
         """
         refs, has_more = _list_inbox_refs(
-            gmail, _build_inbox_query(window_days), ctx.request_id, cap=TRIAGE_LIST_MAX
+            gmail,
+            (
+                f"{period_query(period, window_days, self._now_ms)} -in:sent"
+                if require_request
+                else _build_inbox_query(window_days)
+            ),
+            ctx.request_id,
+            cap=TRIAGE_LIST_MAX,
         )
         unique_refs = _dedupe_refs_by_thread(refs)
         budget = max(1, scan_limit)
@@ -587,8 +584,10 @@ class MailFollowupSkill(BaseSkill[MailFollowupInput, MailFollowupOutput]):
             requester,
             ctx,
             exclude_bulk=env_bool("MAIL_EXCLUDE_BULK", True),
+            require_request=require_request,
+            bounds=period_bounds(period, window_days, self._now_ms),
         )
-        now_ms = self._now_ms if self._now_ms is not None else int(time.time() * 1000)
+        now_ms = self._now_ms if self._now_ms is not None else int(now_jst().timestamp() * 1000)
         # idle_days は顧客名あり経路と同じ意味で効かせる（「N 日以上放置のものだけ」）。
         # 窓を広げるだけで絞らないと、idle_days=10 の依頼に 2 日前の件を混ぜて返してしまう。
         metas = [
@@ -620,8 +619,10 @@ class MailFollowupSkill(BaseSkill[MailFollowupInput, MailFollowupOutput]):
         ctx: SkillContext,
         *,
         exclude_bulk: bool,
+        require_request: bool = False,
+        bounds: tuple[int, int] = (0, 0),
     ) -> list[InboxSource]:
-        """スレッド末尾のヘッダだけを読み、判定層の入力へ詰め替える。
+        """スレッドを読み、判定層の入力へ詰め替える。
 
         ``GmailMessage.snippet`` は format='metadata' でも本文抜粋が返るが、
         :class:`InboxMailMeta` には置き場が無い＝**構造的に**本文が漏れない。
@@ -631,7 +632,14 @@ class MailFollowupSkill(BaseSkill[MailFollowupInput, MailFollowupOutput]):
             thread_id = str(getattr(ref, "thread_id", "") or "")
             if not thread_id:
                 continue
-            anchor = _thread_anchor(gmail.get_thread(thread_id, ctx.request_id, format="metadata"))
+            thread = gmail.get_thread(
+                thread_id, ctx.request_id, format="full" if require_request else "metadata"
+            )
+            anchor = (
+                unreplied_request(thread, requester, bounds)
+                if require_request
+                else _thread_anchor(thread)
+            )
             if anchor is None:
                 continue
             headers = getattr(anchor, "headers", {}) or {}
@@ -651,6 +659,15 @@ class MailFollowupSkill(BaseSkill[MailFollowupInput, MailFollowupOutput]):
                     ),
                     anchor_id=str(getattr(anchor, "id", "") or ""),
                     counterpart=_first_counterpart(headers, requester),
+                    task=task_item(
+                        anchor,
+                        requester,
+                        self._now_ms
+                        if self._now_ms is not None
+                        else int(now_jst().timestamp() * 1000),
+                    )
+                    if require_request
+                    else None,
                 )
             )
         return sources
@@ -667,7 +684,7 @@ class MailFollowupSkill(BaseSkill[MailFollowupInput, MailFollowupOutput]):
             return input.max_messages
         return TRIAGE_SCAN_DEFAULT
 
-    # ── トリアージ（G3/G4: メタデータのみ）──────────────────────────────────
+    # ── トリアージ（読み取り専用・本文は要点のみ）──────────────────────────────────
 
     def _triage(
         self,
@@ -680,7 +697,7 @@ class MailFollowupSkill(BaseSkill[MailFollowupInput, MailFollowupOutput]):
         now_ms: int,
         exclude_bulk: bool,
     ) -> tuple[list[FollowupItem], int, int]:
-        """スレッド末尾をメタデータで確認し、放置中のものだけを列挙する。
+        """本文と後続返信を確認し、未返信の依頼だけを列挙する。
 
         Returns:
             (items, bulk 除外数, 判定対象数)。Gmail 側の例外はそのまま送出し、
@@ -694,15 +711,18 @@ class MailFollowupSkill(BaseSkill[MailFollowupInput, MailFollowupOutput]):
             if not thread_id:
                 # list_messages は thread_id を返す契約。欠損時は末尾を判定できないため除外する。
                 continue
-            # users.threads.get は読み取り。format='metadata' のみを使い、
-            # 本文取得・書き込み・OAuth スコープ拡大は行わない（G4/G6）。
+            # full は読み取りのみ。本人の返信判定のためスレッド全体を確認する。
             thread = gmail.get_thread(
                 thread_id,
                 ctx.request_id,
-                format="metadata",
+                format="full",
             )
             # threads.get に下書きが混ざっても「返信済み」とは扱わず、最後の送受信だけを見る。
-            anchor = _thread_anchor(thread)
+            anchor = unreplied_request(
+                thread,
+                requester,
+                period_bounds(input.period, self._effective_lookback(input), now_ms),
+            )
             if anchor is None:
                 continue
             if exclude_bulk and should_skip_mail(anchor.headers):
@@ -711,21 +731,10 @@ class MailFollowupSkill(BaseSkill[MailFollowupInput, MailFollowupOutput]):
             kept += 1
             if _is_from_requester(anchor, requester):
                 continue
-            counterpart = _first_counterpart(anchor.headers, requester)
             idle_days = _idle_days(anchor.internal_date_ms, now_ms)
             if input.idle_days is not None and idle_days < input.idle_days:
                 continue
-            subject = str(scrub_value(anchor.headers.get("Subject", "")))[:80]
-            items.append(
-                FollowupItem(
-                    counterpart_masked=_mask_email(counterpart) if counterpart else "***",
-                    subject_scrubbed=subject,
-                    idle_days=idle_days,
-                    occurred_at=jst_iso_or_none(anchor.internal_date_ms),
-                    occurred_at_display=jst_display_or_none(anchor.internal_date_ms),
-                    evidence_ref=_hash_id(anchor.id),
-                )
-            )
+            items.append(task_item(anchor, requester, now_ms))
         return (items, excluded, kept)
 
     # ── クエリ構築（G5）─────────────────────────────────────────────────────
@@ -738,11 +747,10 @@ class MailFollowupSkill(BaseSkill[MailFollowupInput, MailFollowupOutput]):
             lookback = min(90, max(lookback, input.idle_days + 3))
         return lookback
 
-    @staticmethod
-    def _build_query(input: MailFollowupInput, term: str) -> str:
+    def _build_query(self, input: MailFollowupInput, term: str) -> str:
         """Gmail 検索クエリ。client + 期間で必ず絞り、自分の送信は除外して受信のみ見る。
 
-        `-in:sent` で送信済みを除外し `in:inbox` で受信トレイに限定する（放置 = 受信箱に残存）。
+        アーカイブ済みも含め、送信以外を期間で絞る。本文取得後に本人の To/Cc を検証する。
         idle_days 指定時は走査窓をその閾値より十分前まで広げる（広げないと post-filter で全部
         落ちて「見つかりませんでした」と誤答する＝信頼を損なう）。上限は schema 同様 90 日。
 
@@ -750,7 +758,9 @@ class MailFollowupSkill(BaseSkill[MailFollowupInput, MailFollowupOutput]):
         client_name をここに流さないこと（`"` を含む値でフレーズを閉じられるため）。
         """
         lookback = MailFollowupSkill._effective_lookback(input)
-        return f"{to_gmail_phrase(term)} newer_than:{lookback}d -in:sent in:inbox"
+        return (
+            f"{to_gmail_phrase(term)} {period_query(input.period, lookback, self._now_ms)} -in:sent"
+        )
 
 
 # ── モジュール関数（純粋・テスト容易）──────────────────────────────────────
@@ -833,6 +843,8 @@ def _is_sole_recipient(headers: dict[str, str], requester: str) -> bool:
 
 def _followup_item(cand: TriageCandidate, source: InboxSource) -> FollowupItem:
     """候補 1 件を出力スキーマへ（G3: マスク済み・生 ID なし）。"""
+    if source.task is not None:
+        return source.task
     return FollowupItem(
         counterpart_masked=_mask_email(source.counterpart) if source.counterpart else "***",
         subject_scrubbed=cand.mail.subject[:80],
