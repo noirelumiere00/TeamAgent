@@ -295,7 +295,13 @@ class SlackUserReader:
         return msgs
 
     def read_thread_checked(
-        self, channel_id: str, thread_ts: str, request_id: str, *, limit: int = 200
+        self,
+        channel_id: str,
+        thread_ts: str,
+        request_id: str,
+        *,
+        limit: int = 200,
+        paginate: bool = False,
     ) -> SlackThreadRead:
         """conversations.replies を **error code つき** で取得（1 ページ・読み取り専用）。
 
@@ -305,6 +311,15 @@ class SlackUserReader:
         """
         if not channel_id or not thread_ts:
             return SlackThreadRead(error="bad_target")
+        if paginate:
+            return self.read_period_checked(
+                channel_id,
+                request_id,
+                oldest="0",
+                latest=str(time.time() + 1),
+                thread_ts=thread_ts,
+                max_messages=limit,
+            )
         start = time.perf_counter()
         try:
             resp = _run_sync(
@@ -744,6 +759,55 @@ class SlackUserReader:
             latency_ms=int((time.perf_counter() - start) * 1000),
         )
         return out
+
+    def search_all_checked(
+        self,
+        query: str,
+        request_id: str,
+        *,
+        oldest: str = "",
+        latest: str = "",
+        max_messages: int = 500,
+    ) -> SlackSearchRead:
+        """一覧用。重複排除と厳密な半開区間で数え、表示分だけを保持する。"""
+        cap = max(1, min(max_messages, 500))
+        matches: dict[tuple[str, str], SlackSearchMatch] = {}
+        seen: set[tuple[str, str]] = set()
+        total = 0
+        # 日付修飾子は timezone 差のため前後を広げるので、境界外を総数に混ぜない。
+        for page in range(1, 101):
+            result = self.search_checked(query, request_id, count=100, page=page)
+            if result.error:
+                return SlackSearchRead(error=result.error)
+            previous = len(seen)
+            for match in result.matches:
+                key = (match.channel_id, match.ts)
+                if key in seen:
+                    continue
+                seen.add(key)
+                try:
+                    seconds = float(match.ts)
+                except ValueError:
+                    return SlackSearchRead(error="bad_response")
+                if (oldest and seconds < float(oldest)) or (latest and seconds >= float(latest)):
+                    continue
+                total += 1
+                if len(matches) < cap:
+                    matches[key] = match
+            if page * 100 >= result.total:
+                if len(seen) < result.total:
+                    return SlackSearchRead(error="incomplete_search")
+                return SlackSearchRead(
+                    matches=tuple(matches.values()), total=total, truncated=total > cap
+                )
+            if not oldest and not latest and len(matches) >= cap:
+                return SlackSearchRead(
+                    matches=tuple(matches.values()), total=result.total, truncated=True
+                )
+            if len(seen) == previous:
+                return SlackSearchRead(error="incomplete_search")
+        # 検索 API の100ページ上限を全件取得と誤認させない。
+        return SlackSearchRead(error="incomplete_search")
 
     def search_checked(
         self,

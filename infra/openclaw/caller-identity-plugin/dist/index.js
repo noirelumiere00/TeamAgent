@@ -4012,8 +4012,7 @@ export function createCallerIdentityPlugin({
       teamId,
       channelId,
       threadTs,
-      requestText: SLACK_DM_CHANNEL_RE.test(channelId) || channelId === `DM:${senderId}`
-        ? proposalRequestText(event?.content) : undefined,
+      requestText: proposalRequestText(event?.content),
       aicoUsageQuestion: isAicoUsageQuestion(event?.content),
       searchAdviceRequested: /打ち手|推奨|おすすめ|ネクストアクション|次の(?:一手|アクション)|戦略|攻め方|改善|アイデア|ヒント|コツ|提案して|案を|考えて|どう(?:攻め|動|提案|進め|すれば|したら)/u.test(event?.content ?? ""),
       searchInsightRequested: /傾向|パターン|共通点|勝ち筋|示唆|戦略|打ち手|攻め方|刺さ|改善|アイデア|ヒント|学び|教訓|コツ|提案して|案を|考えて|なぜ|何が効いた|効いたのは|どう(?:攻め|動|提案|進め|すれば|したら)/u.test(event?.content ?? ""),
@@ -6153,7 +6152,9 @@ export function createCallerIdentityPlugin({
       slack_team_id: trusted.teamId,
       channel_id: trusted.channelId,
       ...(trusted.threadTs === null ? {} : {thread_ts: trusted.threadTs}),
-      ...((tool === "proposal_builder" || tool === "proposal_builder_submit" || tool === "clientkarte") &&
+      ...(((tool === "slack_search" || tool === "slack_summary") ||
+        ((tool === "proposal_builder" || tool === "proposal_builder_submit" || tool === "clientkarte") &&
+          SLACK_DM_CHANNEL_RE.test(trusted.channelId))) &&
         typeof trusted.requestText === "string" ? {request_text: trusted.requestText} : {}),
     };
     const adjustedParams = {
