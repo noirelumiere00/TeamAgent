@@ -67,6 +67,7 @@ from teamagent.ingest.repository import (
     GDriveAclUpdate,
     IngestRepository,
 )
+from teamagent.ingest.vision_md import EXTRACTOR, PPT_MIME, VisionMDError, VisionMDRun
 
 if TYPE_CHECKING:
     from teamagent.ingest.classify import DocClassifier
@@ -2346,6 +2347,7 @@ def _ingest_gdrive_folder(
     observed_gdrive_ids: set[str] | None = None,
     truncated_walk_roots: set[str] | None = None,
     warning_collector: _IngestWarningCollector | None = None,
+    vision_md: VisionMDRun | None = None,
 ) -> tuple[int, int]:
     """1 Drive folder を取り込む。
 
@@ -2371,6 +2373,8 @@ def _ingest_gdrive_folder(
     from teamagent.ingest.classify import build_classifier_from_env
     from teamagent.ingest.contextualize import build_contextualizer_from_env
     from teamagent.ingest.office_extract import OFFICE_VALIDATOR_SCHEMA_VERSION
+
+    vision_md = vision_md or VisionMDRun()
 
     # yaml キー未記載（None）→ コード既定の 99_一次倉庫系除外。空文字 "" → 除外なし。
     effective_exclude_re = (
@@ -2615,6 +2619,7 @@ def _ingest_gdrive_folder(
                 skipped=skipped,
                 classifier=classifier,
                 contextualizer=contextualizer,
+                vision_md=vision_md,
                 content_registry=content_registry,
                 warning_collector=warning_collector,
                 warning_source_kind=warning_source_kind,
@@ -2792,6 +2797,67 @@ def _gdrive_source_metadata(
     }
 
 
+def _vision_md_version(f: Any) -> dict[str, Any] | None:
+    if not getattr(f, "md5_checksum", None) and not f.modified_time:
+        return None
+    return {
+        "md5": getattr(f, "md5_checksum", None),
+        "size": f.size,
+        "modified": f.modified_time,
+        "mime": f.mime_type,
+        "extractor": EXTRACTOR,
+    }
+
+
+def _known_vision_md_failure(
+    vision_md: VisionMDRun,
+    repository: IngestRepository | None,
+    f: Any,
+) -> bool:
+    from teamagent.ingest.office_extract import PPTX_MIME
+
+    if not vision_md.enabled or repository is None:
+        return False
+    if f.mime_type not in _PDF_MIME_TYPES and f.mime_type != PPTX_MIME:
+        return False
+    version = _vision_md_version(f)
+    if version is None:
+        return False
+    try:
+        state = repository.load_connector_state("gdrive", f"vision-md:file:{f.id}")
+        return state is not None and state.metadata.get("failed_version") == version
+    except Exception:
+        logger.warning("vision_md_failed", reason="failure_state_read_failed")
+        return False
+
+
+def _vision_md_drive_pages(
+    vision_md: VisionMDRun,
+    data: bytes,
+    f: Any,
+    *,
+    repository: IngestRepository | None,
+    dry_run: bool,
+    request_id: str,
+    heartbeat: Callable[[bool], None] | None = None,
+) -> list[tuple[int, str]]:
+    try:
+        return vision_md.extract(data, f.mime_type, request_id=request_id, heartbeat=heartbeat)
+    except VisionMDError as exc:
+        if exc.reason == "run_limit":
+            raise
+        version = _vision_md_version(f)
+        if not dry_run and repository is not None and version is not None:
+            repository.save_connector_state(
+                "gdrive",
+                f"vision-md:file:{f.id}",
+                success=False,
+                error=exc.reason,
+                metadata={"failed_version": version, "failure_reason": exc.reason},
+            )
+        return []
+
+
 def _prepare_gdrive_file(
     f: Any,
     *,
@@ -2815,17 +2881,26 @@ def _prepare_gdrive_file(
     lease_heartbeat: Callable[[bool], None] | None = None,
     retry_lease_owner: str | None = None,
     retry_lease_token: str | None = None,
+    vision_md: VisionMDRun | None = None,
 ) -> tuple[DocumentUpsert, list[ChunkUpsert]] | None:
     """通常取込と確認 CLI で、抽出・分割・根拠の入力 metadata を共有する。"""
     from teamagent.adapters.gdrive_client import GDriveDownloadContentError
     from teamagent.ingest.office_extract import (
         GDOC_NATIVE_MIME,
         OFFICE_BINARY_MIMES,
+        PPTX_MIME,
         OfficePayloadError,
         extract_office_pages,
     )
     from teamagent.ingest.pdf_extract import extract_pdf_pages
 
+    vision_md = vision_md or VisionMDRun()
+
+    if vision_md.enabled and f.mime_type == PPT_MIME:
+        logger.info("vision_md_failed", reason="legacy_ppt_unsupported")
+        if skipped is not None:
+            skipped.append(f.id)
+        return None
     if skipped is None:
         skipped = []
     # INGEST_RICH_EXTRACT=1 のときだけ rich 抽出（gslide/gsheet/plain-text 本文化・抽出器の
@@ -2847,6 +2922,7 @@ def _prepare_gdrive_file(
     )
 
     # PDF / Office (docx/pptx/xlsx) / Google native gdoc は chunk 化、他は title のみ
+    vision_metadata: dict[str, str] = {}
     chunks: list[ChunkUpsert] = []
     if f.mime_type in _PDF_MIME_TYPES:
         try:
@@ -2879,6 +2955,18 @@ def _prepare_gdrive_file(
             return None
         try:
             pages = extract_pdf_pages(data, **pdf_kwargs)
+            if not pages and vision_md.enabled:
+                pages = _vision_md_drive_pages(
+                    vision_md,
+                    data,
+                    f,
+                    repository=repository,
+                    dry_run=dry_run,
+                    request_id=request_id,
+                    heartbeat=lease_heartbeat,
+                )
+                if pages:
+                    vision_metadata["extractor"] = EXTRACTOR
             page_chunks = _bounded_chunk_pages(pages)
             if page_chunks:
                 chunks.extend(
@@ -3040,6 +3128,18 @@ def _prepare_gdrive_file(
                 ),
                 **office_kwargs,
             )
+            if not pages and vision_md.enabled and f.mime_type == PPTX_MIME:
+                pages = _vision_md_drive_pages(
+                    vision_md,
+                    data,
+                    f,
+                    repository=repository,
+                    dry_run=dry_run,
+                    request_id=request_id,
+                    heartbeat=lease_heartbeat,
+                )
+                if pages:
+                    vision_metadata["extractor"] = EXTRACTOR
             page_chunks = _bounded_chunk_pages(pages)
             if page_chunks:
                 chunks.extend(
@@ -3492,6 +3592,7 @@ def _prepare_gdrive_file(
         acl_groups=acl_groups,
         metadata={
             **source_metadata,
+            **vision_metadata,
             "mime_type": f.mime_type,
             "size": f.size,
             "md5_checksum": getattr(f, "md5_checksum", None),
@@ -3524,6 +3625,7 @@ def _process_one_gdrive_file(
     lease_heartbeat: Callable[[bool], None] | None = None,
     retry_lease_owner: str | None = None,
     retry_lease_token: str | None = None,
+    vision_md: VisionMDRun | None = None,
 ) -> tuple[int, int]:
     """1 ファイル分の処理を切り出し（_ingest_gdrive_folder から呼ばれる）。
 
@@ -3539,8 +3641,32 @@ def _process_one_gdrive_file(
     """
     from teamagent.ingest.office_extract import OFFICE_BINARY_MIMES
 
+    vision_md = vision_md or VisionMDRun()
+
     if lease_heartbeat is not None:
         lease_heartbeat(True)
+
+    if _known_vision_md_failure(vision_md, repository, f):
+        if warning_collector is not None:
+            warning_collector.add(
+                warning_source_kind,
+                warning_source_id,
+                "vision_md_failed",
+                suppressed=True,
+            )
+        _resolve_source_retry(
+            repository=repository,
+            f=f,
+            source_kind=warning_source_kind,
+            source_id=warning_source_id,
+            request_id=request_id,
+            dry_run=dry_run,
+            expected_lease_owner=retry_lease_owner,
+            expected_lease_token=retry_lease_token,
+            durability_tracker=durability_tracker,
+        )
+        skipped.append(f.id)
+        return 0, 0
 
     unchanged = _should_skip_unchanged_gdrive_file(repository, f, request_id=request_id)
 
@@ -3625,6 +3751,7 @@ def _process_one_gdrive_file(
         f,
         client=client,
         source_metadata=_gdrive_source_metadata(spec),
+        vision_md=vision_md,
         file_owner_email=file_owner_email,
         acl_emails=acl_emails,
         acl_groups=acl_groups,
@@ -3721,6 +3848,7 @@ def _ingest_shared_drives_crawl(
     observed_gdrive_ids: set[str] | None = None,
     truncated_walk_roots: set[str] | None = None,
     warning_collector: _IngestWarningCollector | None = None,
+    vision_md: VisionMDRun | None = None,
 ) -> tuple[int, int]:
     """共有ドライブ全件 crawl + 営業資料フィルタで取り込む (Day 7, 2026-05-27)。
 
@@ -3747,10 +3875,13 @@ def _ingest_shared_drives_crawl(
         GDOC_NATIVE_MIME,
         OFFICE_BINARY_MIMES,
         OFFICE_VALIDATOR_SCHEMA_VERSION,
+        PPTX_MIME,
         OfficePayloadError,
         extract_office_pages,
     )
     from teamagent.ingest.pdf_extract import extract_pdf_pages
+
+    vision_md = vision_md or VisionMDRun()
 
     client = GDriveClient.from_env(readonly=True)
     # ナレッジ自動分類（USE_DOC_CLASSIFY=1 のときだけ非 None。crawl 単位で 1 回構築）。
@@ -3949,6 +4080,22 @@ def _ingest_shared_drives_crawl(
                         filtered_count += 1
                         continue
 
+                if vision_md.enabled and f.mime_type == PPT_MIME:
+                    logger.info("vision_md_failed", reason="legacy_ppt_unsupported")
+                    skipped_count += 1
+                    continue
+
+                if _known_vision_md_failure(vision_md, repository, f):
+                    if warning_collector is not None:
+                        warning_collector.add(
+                            warning_source_kind,
+                            warning_source_id,
+                            "vision_md_failed",
+                            suppressed=True,
+                        )
+                    skipped_count += 1
+                    continue
+
                 if _should_skip_unchanged_gdrive_file(
                     repository,
                     f,
@@ -3986,6 +4133,7 @@ def _ingest_shared_drives_crawl(
                 )
 
                 # 5. 本文抽出
+                vision_metadata: dict[str, str] = {}
                 chunks: list[ChunkUpsert] = []
                 if f.mime_type in _PDF_MIME_TYPES:
                     try:
@@ -4005,6 +4153,17 @@ def _ingest_shared_drives_crawl(
                         continue
                     try:
                         pages = extract_pdf_pages(data, **pdf_kwargs)
+                        if not pages and vision_md.enabled:
+                            pages = _vision_md_drive_pages(
+                                vision_md,
+                                data,
+                                f,
+                                repository=repository,
+                                dry_run=dry_run,
+                                request_id=request_id,
+                            )
+                            if pages:
+                                vision_metadata["extractor"] = EXTRACTOR
                         page_chunks = _bounded_chunk_pages(pages)
                         if page_chunks:
                             chunks.extend(
@@ -4098,6 +4257,17 @@ def _ingest_shared_drives_crawl(
                             expected_md5=getattr(f, "md5_checksum", None),
                             **office_kwargs,
                         )
+                        if not pages and vision_md.enabled and f.mime_type == PPTX_MIME:
+                            pages = _vision_md_drive_pages(
+                                vision_md,
+                                data,
+                                f,
+                                repository=repository,
+                                dry_run=dry_run,
+                                request_id=request_id,
+                            )
+                            if pages:
+                                vision_metadata["extractor"] = EXTRACTOR
                         page_chunks = _bounded_chunk_pages(pages)
                         if page_chunks:
                             chunks.extend(
@@ -4320,6 +4490,7 @@ def _ingest_shared_drives_crawl(
                     acl_groups=acl_groups,
                     metadata={
                         **_gdrive_source_metadata(spec, drive=drive),
+                        **vision_metadata,
                         "mime_type": f.mime_type,
                         "size": f.size,
                         "md5_checksum": getattr(f, "md5_checksum", None),
@@ -5355,6 +5526,7 @@ def _ingest_slack_public_files(
     request_id: str,
     warning_collector: _IngestWarningCollector,
     unchanged_collector: _IngestUnchangedCollector,
+    vision_md: VisionMDRun | None = None,
 ) -> tuple[int, int]:
     """連携者の共有ファイルを増分取得する。
 
@@ -5381,6 +5553,8 @@ def _ingest_slack_public_files(
     )
     from teamagent.ingest.pdf_extract import extract_pdf_pages
     from teamagent.slack2drive.job import slack_credential
+
+    vision_md = vision_md or VisionMDRun()
 
     kind = "slack_public_files"
 
@@ -5611,6 +5785,11 @@ def _ingest_slack_public_files(
             if (
                 rejected is not None
                 and rejected.metadata.get("failed_version") == version
+                and (
+                    not vision_md.enabled
+                    or rejected.metadata.get("failure_reason") != "empty_text"
+                    or rejected.metadata.get("vision_md_extractor") == EXTRACTOR
+                )
                 and rejected.metadata.get("failure_reason")
                 in {"encrypted", "empty_text", "too_large"}
             ):
@@ -5726,6 +5905,15 @@ def _ingest_slack_public_files(
                 )
             else:
                 pages = extract_pdf_pages(data, max_total_chars=MAX_INGEST_EXTRACTED_CHARACTERS)
+            if not pages and vision_md.enabled:
+                failure_reason = "empty_text"
+                pages = vision_md.extract(
+                    data,
+                    PPTX_MIME if f["filetype"] == "pptx" else "application/pdf",
+                    request_id=request_id,
+                )
+                if pages:
+                    metadata["extractor"] = EXTRACTOR
             page_chunks = _bounded_chunk_pages(pages)
             if not page_chunks:
                 failure_reason = "empty_text"
@@ -5769,6 +5957,9 @@ def _ingest_slack_public_files(
                 failure_reason = "too_large"
             elif isinstance(exc, OfficePayloadError):
                 failure_reason = exc.category
+            if isinstance(exc, VisionMDError) and exc.reason == "run_limit":
+                failure_reason = "vision_md_run_limit"
+                remaining += 1
             warn("slack_public_files_file_failed", exc, failure_reason=failure_reason)
             if failure_reason in {"encrypted", "empty_text", "too_large"}:
                 if not dry_run:
@@ -5777,7 +5968,11 @@ def _ingest_slack_public_files(
                         f"files:file:{file_id}",
                         success=False,
                         error=failure_reason,
-                        metadata={"failed_version": version, "failure_reason": failure_reason},
+                        metadata={
+                            "failed_version": version,
+                            "failure_reason": failure_reason,
+                            **({"vision_md_extractor": EXTRACTOR} if vision_md.enabled else {}),
+                        },
                     )
         finally:
             if attempted and processed % 50 == 0:
@@ -5846,6 +6041,8 @@ class IngestRunner:
         """
         kinds = kinds or ["slack", "slack_public_files", "gdrive", "gsheets", "shared_drives"]
         result = IngestResult()
+        vision_md = VisionMDRun()
+        vision_kwargs = {"vision_md": vision_md} if vision_md.enabled else {}
         request_id = f"ingest-{uuid.uuid4().hex[:12]}"
 
         # §2 dedup ガード用レジストリ。この run の gdrive folder 経路と shared_drives crawl 経路で
@@ -5865,6 +6062,7 @@ class IngestRunner:
         unchanged_collector = _IngestUnchangedCollector()
         # フォルダ名除外 regex（yaml グローバルキー。None ならコード既定を handler 側で解決）。
         gdrive_extra_kwargs: dict[str, Any] = {
+            **vision_kwargs,
             "content_registry": content_registry,
             "exclude_folder_name_re": sources.gdrive_exclude_folder_name_re,
             "observed_gdrive_ids": observed_gdrive_ids,
@@ -5906,6 +6104,7 @@ class IngestRunner:
                 _ingest_slack_public_files,
                 request_id=request_id,
                 extra_kwargs={
+                    **vision_kwargs,
                     "warning_collector": warning_collector,
                     "unchanged_collector": unchanged_collector,
                 },

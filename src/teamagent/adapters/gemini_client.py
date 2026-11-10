@@ -134,6 +134,7 @@ class GeminiResponse:
     model_id: str
     latency_ms: int
     thoughts_tokens: int = 0
+    finish_reason: str | None = None
 
 
 @dataclass(frozen=True)
@@ -474,6 +475,7 @@ class GeminiClient:
         media_resolution: str | None = "high",
         max_attempts: int = 2,
         rate_limit_attempts: int = 3,
+        redact_errors: bool = False,
     ) -> GeminiResponse:
         """画像 1 枚を inline で渡す軽い呼び出し（サムネ＝一覧の表紙の読み取り用）。
 
@@ -506,6 +508,7 @@ class GeminiClient:
                 max_attempts=max_attempts,
                 rate_limit_attempts=rate_limit_attempts,
                 log_event="gemini_analyze_image",
+                **({"redact_errors": True} if redact_errors else {}),
             )
         except RuntimeError as exc:
             if level is None or not _is_thinking_rejected(exc.__cause__ or exc):
@@ -525,6 +528,7 @@ class GeminiClient:
                 max_attempts=max_attempts,
                 rate_limit_attempts=rate_limit_attempts,
                 log_event="gemini_analyze_image",
+                **({"redact_errors": True} if redact_errors else {}),
             )
 
     def analyze_images_bytes(
@@ -829,6 +833,7 @@ class GeminiClient:
         rate_limit_attempts: int | None = None,
         log_event: str = "gemini_analyze_video",
         max_output_tokens: int | None = None,
+        redact_errors: bool = False,
     ) -> GeminiResponse:
         """動画/テキスト/画像 part を generate_content に投げ GeminiResponse に整形する共通処理。
 
@@ -910,7 +915,12 @@ class GeminiClient:
             )
         except Exception as e:
             # 生 URL/プロンプトはログに残さない (CLAUDE.md 6-bis)
-            logger.exception("gemini_generate_failed", request_id=request_id)
+            if redact_errors:
+                logger.warning(
+                    "gemini_generate_failed", request_id=request_id, error_type=type(e).__name__
+                )
+            else:
+                logger.exception("gemini_generate_failed", request_id=request_id)
             msg = str(e)
             # file_uri を直接クロールできない URL (TikTok/IG、robots 拒否 YouTube 等)。
             # 設定不良ではなく URL 側の制約なので専用マーカーで上げ案内に変換させる。
@@ -939,6 +949,9 @@ class GeminiClient:
             latency_ms=latency_ms,
             text_len=len(text),
         )
+        candidates = getattr(response, "candidates", None) or []
+        finish = getattr(candidates[0], "finish_reason", None) if candidates else None
+        finish = getattr(finish, "value", finish)
         return GeminiResponse(
             text=text,
             input_tokens=input_tokens,
@@ -947,6 +960,7 @@ class GeminiClient:
             model_id=self.model_id,
             latency_ms=latency_ms,
             thoughts_tokens=thoughts_tokens,
+            finish_reason=str(finish) if finish is not None else None,
         )
 
     def health_check(self) -> bool:
