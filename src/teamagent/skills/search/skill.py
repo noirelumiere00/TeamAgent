@@ -1423,6 +1423,18 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
                     ctx, "list_fast"
                 ):
                     direct_kind = "list_fast"
+            elif (
+                counted_cases
+                and (asked_industry or normalize_industry(case_target))
+                and not (slack_lookup is not None and slack_lookup.hidden_count)
+            ):
+                answer = build_scoped_not_found_answer(
+                    case_target or asked_industry,
+                    scope="社内資料・施策実績" + ("・Slack" if slack_lookup is not None else ""),
+                    complete=complete,
+                )
+                found = False
+                direct_kind = "not_found" if self._direct_answer_allowed(ctx, "not_found") else None
             elif drive_case_listing:
                 answer, found = EMPTY_DRIVE_CASES, False
             elif slack_lookup is not None and slack_lookup.hidden_count:

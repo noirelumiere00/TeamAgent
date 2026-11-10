@@ -7,6 +7,7 @@ from datetime import date
 from urllib.parse import urlsplit
 
 from teamagent.adapters.pgvector_client import SearchHit
+from teamagent.ingest.industry_taxonomy import normalize_industry
 from teamagent.skills._shared.source_url import ingested_slack_file_id, slack_file_permalink
 from teamagent.skills.search import drive_first
 from teamagent.skills.search.answer_mode import strip_advice
@@ -201,12 +202,25 @@ def render(
     rendered: list[list[str]] = []
     if summarize is not None:
         hits = scope_by_industry(
-            sorted(hits, key=lambda h: h.score, reverse=True), asked_industry, soft=True
+            sorted(hits, key=lambda h: h.score, reverse=True),
+            asked_industry,
+            soft=True,
+            include_unknown=False,
         )
         hits = case_target_hits(hits, client)
         cards = True
         separator = "\n\n"
-    hits = case_target_hits(hits, target, soft_industry=drive_only or summarize is not None)
+    if not (
+        summarize is not None
+        and normalize_industry(target)
+        and normalize_industry(target) == normalize_industry(asked_industry)
+    ):
+        hits = case_target_hits(
+            hits,
+            target,
+            soft_industry=drive_only or summarize is not None,
+            include_unknown=summarize is None,
+        )
     if summarize is not None:
         hits = _prefer_latest(hits)
     for hit in hits:

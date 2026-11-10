@@ -30,6 +30,8 @@ from collections import Counter
 from collections.abc import Iterable, Mapping, Sequence
 from typing import Any
 
+import structlog
+
 from teamagent.adapters.pgvector_client import SearchHit
 from teamagent.client_identity import client_identity_key
 from teamagent.ingest.industry_taxonomy import INDUSTRY_KEYWORDS, normalize_industry
@@ -283,9 +285,13 @@ def hit_industry(hit: SearchHit) -> str | None:
 
 
 def scope_by_industry(
-    hits: Sequence[SearchHit], asked_industry: str | None, *, soft: bool = False
+    hits: Sequence[SearchHit],
+    asked_industry: str | None,
+    *,
+    soft: bool = False,
+    include_unknown: bool = True,
 ) -> list[SearchHit]:
-    """既知の別業種を除く。Drive用のsoft選別では近接語を拾い、判断不能は末尾へ残す。"""
+    """別業種を除く。soft選別は近接語も拾い、include_unknownなら判断不能も残す。"""
     wanted = normalize_industry(asked_industry)
     if not wanted:
         return list(hits)
@@ -322,7 +328,15 @@ def scope_by_industry(
                 mentioned.append(hit)
             elif soft:
                 unknown.append(hit)
-    return matched + mentioned + unknown
+    if not include_unknown:
+        structlog.get_logger(__name__).info(
+            "search_case_list_industry_filter",
+            industry=wanted,
+            matched=len(matched),
+            mentioned=len(mentioned),
+            dropped_unknown=len(unknown),
+        )
+    return matched + mentioned + (unknown if include_unknown else [])
 
 
 def campaign_header(hit: SearchHit) -> str:
