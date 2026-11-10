@@ -1,6 +1,8 @@
 """本人の検索結果の一覧を先に投稿し、同じ DM スレッドへ実ファイルを届ける。"""
 
+import asyncio
 import json
+import threading
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
@@ -266,6 +268,7 @@ async def dispatch(
     channel=DM,
     verified=True,
     query="飲料の事例５件出して",
+    wait_attach=True,
 ):
     if direct:
         monkeypatch.setenv("SEARCH_DIRECT_ANSWER", "1")
@@ -297,7 +300,32 @@ async def dispatch(
         if verified
         else None,
     )
+    if wait_attach:
+        await asyncio.gather(*server._search_attach_tasks)
     return json.loads(contents[0].text)
+
+
+async def test_direct_answer_returns_before_slow_attachment_finishes(monkeypatch, services):
+    # 本番: 答えの投稿は 23 秒・添付が終わるのは 43 秒。呼び出し側は 30 秒で失敗扱いにする。
+    release = threading.Event()
+
+    async def slow_download(*args, **kw):
+        await asyncio.to_thread(release.wait, 10)
+        services.events.append("download")
+        return b"%PDF-user-file"
+
+    services.reader.download_file_guarded = AsyncMock(side_effect=slow_download)
+    result = await dispatch(
+        monkeypatch, services, [drive_hit(1), slack_hit("slack")], direct=True, wait_attach=False
+    )
+    try:
+        assert result["delivered"] is True
+        assert services.events == ["post"]
+        services.bot.upload_files.assert_not_awaited()
+    finally:
+        release.set()
+        await asyncio.gather(*server._search_attach_tasks)
+    assert services.events == ["post", "download", "upload"]
 
 
 @pytest.mark.parametrize("direct", [False, True])
@@ -647,6 +675,7 @@ async def test_compact_answer_attaches_only_two_used_files_once(
         identity_resolver=_resolver_for(ME),
         caller_claim_verifier=_Verifier(_claim(channel=DM, thread_ts=THREAD)),
     )
+    await asyncio.gather(*server._search_attach_tasks)
     result = json.loads(contents[0].text)
     if direct or file_delivery:
         assert result["delivered"] is True
