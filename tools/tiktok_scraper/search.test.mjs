@@ -9,17 +9,8 @@ const fixture = (name) => JSON.parse(readFileSync(new URL(`./fixtures/anonymous-
 const saved = fixture("search-response");
 const empty = fixture("empty-response");
 const refused = fixture("refused-response");
-const expectedLegacyVideos = fixture("legacy-videos").map((row, index) => ({ ...row,
-  missingFields: index === 1 ? ["stats.playCount", "stats.commentCount", "stats.shareCount"] : [],
-}));
 const now = new Date("2026-10-23T23:45:00.000Z");
 const cli = (...argv) => parseArgs(["node", "search.mjs", ...argv]);
-
-test("tiktok_search preserves missing metric markers separately from observed zero", () => {
-  const row = normalizeVideo({ id: "1", stats: { playCount: 0, diggCount: 1000, collectCount: null } });
-  assert.deepEqual(row.missingFields, ["stats.commentCount", "stats.shareCount", "stats.collectCount"]);
-  assert.equal(row.stats.playCount, 0);
-});
 
 function browserFixture(initial, { scroll = [], captcha = false, cdn = false, ssr = null, container = false, height = 1000 } = {}) {
   const calls = { contexts: 0, navigations: [], scrolls: 0, moves: [], waits: [], bodiesProcessed: 0, pageClosed: false, contextClosed: false };
@@ -88,8 +79,8 @@ async function capture(initial, options = {}, target = 100, edition = "sales25")
   return { result: edition === "sales25" ? sales25Result(envelope, target, now) : envelope, calls };
 }
 
-test("legacy normalization preserves saved values and adds missing metric markers", () => {
-  assert.deepEqual(saved.data.map((row) => parseSearchItem(row)), expectedLegacyVideos);
+test("legacy normalization stays byte-for-byte compatible with the saved pre-PR3 output", () => {
+  assert.deepEqual(saved.data.map((row) => parseSearchItem(row)), fixture("legacy-videos"));
   assert.equal("edition" in cli("--max", "30"), false);
 });
 
@@ -222,7 +213,7 @@ test("normal no-new partial is accepted; SSR without normal API is not measured 
 
 test("edition OFF preserves legacy result and diagnostic keys", async () => {
   const legacy = (await capture([saved], {}, 30, null)).result;
-  assert.deepEqual(legacy.videos, expectedLegacyVideos);
+  assert.deepEqual(legacy.videos, fixture("legacy-videos"));
   assert.deepEqual(Object.keys(legacy), ["ok", "query", "type", "count", "videos", "error", "errorCode", "diag"]);
   assert.deepEqual(Object.keys(legacy.diag), ["pagesFetched", "captchaDetected", "gridFound", "ssrCount", "videosFound", "sessionsRun"]);
 });

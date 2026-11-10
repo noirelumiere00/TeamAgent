@@ -14,9 +14,8 @@ Apify 等の課金 SaaS を使わず、ローカル Chrome で完結する (仕�
 from __future__ import annotations
 
 from collections.abc import Callable
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from typing import ClassVar
-from zoneinfo import ZoneInfo
 
 import structlog
 from pydantic import BaseModel
@@ -125,7 +124,7 @@ class TikTokSearchSkill(BaseSkill[TikTokSearchInput, TikTokSearchOutput]):
             max_videos=input.max_videos,
             request_id=ctx.request_id,
         )
-        acquired_date = datetime.now(ZoneInfo("Asia/Tokyo")).strftime("%Y-%m-%d JST")
+        acquired_date = datetime.now(timezone(timedelta(hours=9))).strftime("%Y-%m-%d JST")
 
         videos = [
             TikTokVideoOut(
