@@ -60,3 +60,9 @@
 - 実行者の切り替えは `RELEASE_PROFILE` / `RELEASE_MCP_MFA_ARN` / `MFA_BASE_PROFILE` / `MFA_SERIAL` ほか（`scripts/aws/release/` の各スクリプト冒頭）。既定値は持ち主のまま。
 - 任せていないもの: OpenClaw 便、buildspec 世代の公開、`terraform_runtime_guard.sh` による適用。
 - **既知の抜け**: activation freeze の AWS 強制（現在 `declaration_only`）を戻すときは、強制の対象（role 9 + user 1）に `engineer-arima` も加えること。今のままだと強制を戻しても engineer-arima は対象外になる。
+
+## 追記 2026-11-10: engineer-arima に答え試験の起動を追加
+
+- 管理ポリシー `engineer-arima-release` を v3 に（v2 から 1 文追加）: `RunAnswerGateTaskOnly` = `ecs:RunTask`、対象は `task-definition/teamagent-dev-answer-gate:*` だけ、`ecs:cluster` が teamagent-dev、MFA 必須。戻すときは `aws iam set-default-policy-version --policy-arn arn:aws:iam::718959508629:policy/engineer-arima-release --version-id v2`。
+- 一時 TD の後片付け（DeregisterTaskDefinition）は資源を絞れないため付与していない。有馬さんが回した後の試験用 TD は INACTIVE にならず残る（害は無い）。
+- mcp 便の台本一式は `scripts/aws/release/kit/`（持ち主の手元から写したもの）。

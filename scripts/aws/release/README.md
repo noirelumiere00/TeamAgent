@@ -6,6 +6,7 @@
 
 | ファイル | 役割 |
 |---|---|
+| [`kit/`](kit/README.md) | 別端末向けの mcp 便一式（MFA 更新は既存スクリプトを共用、同時実行の確認・答え試験付き）。現行の CLI 差し替え経路と B9 の関係は kit の README を参照 |
 | `fire_and_authorize.sh` | 便の発射（CodeBuild 起動→承認）。その後のタスク定義差し替えは正本 `infra/deploy/terraform_runtime_guard.sh` 経由（持ち主の手元にあった `apply_mcp_tds.sh` は CLI で `update-service` するため repo の規則 B9 に反し、ここには入れていない）。MFA は `mfa_refresh.sh`（36 時間） |
 | `driver_oc.sh` | OpenClaw 側の便の運転役 |
 | `release_r99_order.sh` / `release_r100_order.sh` | 11/05 の便の手順書（順序・確認点）。最新の実例 |

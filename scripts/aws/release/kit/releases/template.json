@@ -1,0 +1,1523 @@
+{
+  "name": "",
+  "description": "",
+  "checks": [
+    {
+      "label": "HEAD に #435 の sysfix（必ず Google 検索ツールを使い…）が無い",
+      "kind": "grep_regex",
+      "path": "src/teamagent/skills/web_research/prompts.py",
+      "pattern": "必ず Google 検索ツールを使い"
+    },
+    {
+      "label": "HEAD の uv.lock の anyio が 4.14.2 単一版でない（#436 未マージ？）",
+      "kind": "lock_version",
+      "path": "uv.lock",
+      "pattern": "4.14.2",
+      "format": "uv_exact",
+      "package": "anyio"
+    },
+    {
+      "label": "HEAD の既定モデルが gemini-3.5-flash でない（#437 未マージ？）",
+      "kind": "grep_regex",
+      "path": "src/teamagent/adapters/gemini_client.py",
+      "pattern": "^DEFAULT_MODEL_ID = \"gemini-3.5-flash\"$"
+    },
+    {
+      "label": "HEAD の media で libexpat の ARG（${LIBEXPAT_VER:-なし}）と lock が一致しない",
+      "kind": "lock_version",
+      "path": "infra/docker/media-apk.lock",
+      "pattern": "LIBEXPAT_PACKAGE_VERSION",
+      "format": "apk_arg",
+      "package": "libexpat",
+      "arg_path": "infra/docker/Dockerfile.teamagent-media-worker"
+    },
+    {
+      "label": "HEAD に #439（429 リトライ）が無い",
+      "kind": "grep_regex",
+      "path": "src/teamagent/adapters/gemini_client.py",
+      "pattern": "rate_limit_policy=RateLimitPolicy"
+    },
+    {
+      "label": "HEAD に #440（thinking の費用計上）が無い",
+      "kind": "grep_regex",
+      "path": "src/teamagent/adapters/gemini_client.py",
+      "pattern": "output_tokens + thoughts_tokens"
+    },
+    {
+      "label": "HEAD に #444（video_capture の説明文）が無い",
+      "kind": "grep_fixed",
+      "path": "src/teamagent/skills/video_capture/skill.py",
+      "pattern": "添付が見えなくても聞き返さずに呼ぶ"
+    },
+    {
+      "label": "HEAD に #444（video_capture の説明文・#820 で短縮後）が無い",
+      "kind": "grep_fixed",
+      "path": "src/teamagent/skills/video_capture/skill.py",
+      "pattern": "YouTube動画の分析はvideo_analysis"
+    },
+    {
+      "label": "HEAD に #444（video_capture の説明文・#820 で短縮後）が無い",
+      "kind": "grep_fixed",
+      "path": "src/teamagent/skills/video_capture/schema.py",
+      "pattern": "もそのまま入れて呼べば添付を案内し"
+    },
+    {
+      "label": "HEAD に #452（お土産資料 段1・input_check.py）が無い",
+      "kind": "grep_regex",
+      "path": "src/teamagent/skills/omiyage_report/input_check.py",
+      "pattern": "^def find_input_problems"
+    },
+    {
+      "label": "HEAD に #453（検索上位チェックの作り直し）が無い",
+      "kind": "grep_regex",
+      "path": "src/teamagent/skills/search_surface_check/conclusion.py",
+      "pattern": "^def ground_conclusion"
+    },
+    {
+      "label": "HEAD に #453（検索上位チェックの作り直し）が無い",
+      "kind": "grep_regex",
+      "path": "src/teamagent/skills/_shared/grounding.py",
+      "pattern": "^def tone_down"
+    },
+    {
+      "label": "HEAD に #453（検索上位チェックの作り直し）が無い",
+      "kind": "grep_regex",
+      "path": "src/teamagent/skills/_html/dads.py",
+      "pattern": "^DADS_TOKENS_CSS"
+    },
+    {
+      "label": "HEAD に #458（動画分析の切り離し）が無い",
+      "kind": "grep_regex",
+      "path": "src/teamagent/mcp_gateway/detached_jobs.py",
+      "pattern": "^class DetachedJobRegistry"
+    },
+    {
+      "label": "HEAD に #459（数字照合の共通部品）が無い",
+      "kind": "grep_regex",
+      "path": "src/teamagent/skills/_shared/grounding.py",
+      "pattern": "^class NumberGrounder"
+    },
+    {
+      "label": "HEAD に #457（検索上位チェックの金庫保存）が無い",
+      "kind": "grep_regex",
+      "path": "src/teamagent/skills/search_surface_check/persist_body.py",
+      "pattern": "^def build_surface_summary_md"
+    },
+    {
+      "label": "HEAD に #455（太字を ** に）が無い",
+      "kind": "grep_fixed",
+      "path": "src/teamagent/skills/x_research/skill.py",
+      "pattern": "🗣️ **Xの声集め**"
+    },
+    {
+      "label": "HEAD に #462（検索上位チェックの 2 段目）が無い",
+      "kind": "grep_regex",
+      "path": "src/teamagent/mcp_gateway/surface_video_followup.py",
+      "pattern": "^def quota_gate"
+    },
+    {
+      "label": "HEAD に #462（検索上位チェックの 2 段目）が無い",
+      "kind": "grep_regex",
+      "path": "src/teamagent/skills/base.py",
+      "pattern": "mcp_relay_fields"
+    },
+    {
+      "label": "HEAD に #462（検索上位チェックの 2 段目）が無い",
+      "kind": "grep_regex",
+      "path": "src/teamagent/skills/search_surface_check/video_structure.py",
+      "pattern": "^GRADE_RULES"
+    },
+    {
+      "label": "HEAD に #463（レポートリンク 404 の修正）が無い",
+      "kind": "grep_regex",
+      "path": "src/teamagent/mcp_gateway/detached_jobs.py",
+      "pattern": "^_BARE_URL = re.compile"
+    },
+    {
+      "label": "HEAD に #463（レポートリンク 404 の修正）が無い",
+      "kind": "grep_fixed",
+      "path": "src/teamagent/skills/video_algorithm/skill.py",
+      "pattern": "・7日有効）: {out.report_url}\""
+    },
+    {
+      "label": "HEAD に #464（検索上位チェックの直接投稿）が無い",
+      "kind": "grep_regex",
+      "path": "src/teamagent/mcp_gateway/direct_summary.py",
+      "pattern": "^def posted_response"
+    },
+    {
+      "label": "HEAD に #464（検索上位チェックの直接投稿）が無い",
+      "kind": "grep_regex",
+      "path": "src/teamagent/mcp_gateway/detached_jobs.py",
+      "pattern": "^def post_to_origin_status"
+    },
+    {
+      "label": "HEAD に #465（直接投稿の Block Kit）が無い",
+      "kind": "grep_regex",
+      "path": "src/teamagent/skills/search_surface_check/slack_render.py",
+      "pattern": "^def surface_message"
+    },
+    {
+      "label": "HEAD に #465（直接投稿の Block Kit）が無い",
+      "kind": "grep_regex",
+      "path": "src/teamagent/skills/search_surface_check/slack_render.py",
+      "pattern": "^def followup_message"
+    },
+    {
+      "label": "HEAD に #465（直接投稿の Block Kit）が無い",
+      "kind": "grep_regex",
+      "path": "src/teamagent/skills/video_algorithm/slack_render.py",
+      "pattern": "^def _video_line"
+    },
+    {
+      "label": "HEAD に #466（動画分析のスライド作り直し）が無い",
+      "kind": "grep_regex",
+      "path": "src/teamagent/skills/video_algorithm/facts.py",
+      "pattern": "^def video_facts"
+    },
+    {
+      "label": "HEAD に #466（動画分析のスライド作り直し）が無い",
+      "kind": "grep_regex",
+      "path": "src/teamagent/skills/video_algorithm/synthesis_checks.py",
+      "pattern": "^def competitor_ref_ok"
+    },
+    {
+      "label": "HEAD に #467 の mcp 側（📅 トークンの短縮）が無い",
+      "kind": "grep_regex",
+      "path": "src/teamagent/skills/morning_digest/event_token.py",
+      "pattern": "payload, ensure_ascii=False"
+    },
+    {
+      "label": "HEAD に #468（一致度から原因を言わない）が無い",
+      "kind": "grep_regex",
+      "path": "src/teamagent/skills/search_surface_check/conclusion.py",
+      "pattern": "^def drop_causal_from_rho"
+    },
+    {
+      "label": "HEAD に #469（F0 取得状態）が無い",
+      "kind": "grep_regex",
+      "path": "src/teamagent/skills/_shared/mail_connection.py",
+      "pattern": "^def classify_google_fetch_failure"
+    },
+    {
+      "label": "HEAD に #470（F0 連携の生存確認）が無い",
+      "kind": "grep_regex",
+      "path": "src/teamagent/skills/oauth_connect/skill.py",
+      "pattern": "OAUTH_CONNECT_LIVENESS_PROBE"
+    },
+    {
+      "label": "HEAD に #472（F0 祝日）が無い",
+      "kind": "file_exists",
+      "path": "src/teamagent/jp_holidays.py"
+    },
+    {
+      "label": "HEAD に #474（サムネのタップ要因）が無い",
+      "kind": "grep_regex",
+      "path": "src/teamagent/skills/video_algorithm/cover_read.py",
+      "pattern": "^def parse_cover"
+    },
+    {
+      "label": "HEAD に #474（サムネのタップ要因）が無い",
+      "kind": "grep_regex",
+      "path": "src/teamagent/skills/video_algorithm/cover_read.py",
+      "pattern": "^_MAX_JSON_DEPTH"
+    },
+    {
+      "label": "HEAD に #475（施策実績のリコール床）が無い",
+      "kind": "grep_regex",
+      "path": "src/teamagent/skills/search/skill.py",
+      "pattern": "def _apply_campaign_floor"
+    },
+    {
+      "label": "HEAD に #475（施策実績のリコール床）が無い",
+      "kind": "grep_regex",
+      "path": "src/teamagent/skills/search/knowledge_query.py",
+      "pattern": "^def is_campaign_results_intent"
+    },
+    {
+      "label": "HEAD に #486 の mcp 側（例外文の短縮）が無い",
+      "kind": "grep_regex",
+      "path": "src/teamagent/mcp_gateway/server.py",
+      "pattern": "^def _exception_text"
+    },
+    {
+      "label": "HEAD に #477（会議名の絵文字割れ）が無い",
+      "kind": "grep_regex",
+      "path": [
+        "src/teamagent/util/grapheme_cut.py",
+        "src/teamagent/skills/_shared/grapheme_cut.py"
+      ],
+      "pattern": "^def truncate_graphemes"
+    },
+    {
+      "label": "HEAD に #481（複数KWの取得を組み直す）が無い",
+      "kind": "grep_regex",
+      "path": "src/teamagent/skills/tiktok_acquire/plan.py",
+      "pattern": "^def _keywords_per_job"
+    },
+    {
+      "label": "HEAD に #487（取得ジョブの投稿を KW で絞る・#481 と同じ便が必須）が無い",
+      "kind": "grep_regex",
+      "path": "src/teamagent/skills/video_algorithm/skill.py",
+      "pattern": "^def _posts_for_query"
+    },
+    {
+      "label": "HEAD に #491（ツール定義の軽量化）が無い",
+      "kind": "grep_regex",
+      "path": "src/teamagent/mcp_gateway/server.py",
+      "pattern": "^def _strip_schema_titles"
+    },
+    {
+      "label": "HEAD に #492（Slack 検索）が無い",
+      "kind": "file_exists",
+      "path": "src/teamagent/skills/slack_search/skill.py"
+    },
+    {
+      "label": "HEAD に #493（朝のサマリーの本人設定）が無い",
+      "kind": "file_exists",
+      "path": "src/teamagent/skills/digest_settings/skill.py"
+    },
+    {
+      "label": "HEAD に #495（資料配信とメール系の DM 限定）が無い",
+      "kind": "grep_regex",
+      "path": "src/teamagent/mcp_gateway/server.py",
+      "pattern": "^DM_ONLY_TOOLS: frozenset"
+    },
+    {
+      "label": "HEAD に #496（30 分前配信）が無い",
+      "kind": "grep_regex",
+      "path": "src/teamagent/skills/morning_digest/delivery_calendar.py",
+      "pattern": "MORNING_DIGEST_PERSONALIZED"
+    },
+    {
+      "label": "HEAD の uv.lock に #494（urllib3 2.8.0）/ #497（sentence-transformers 5.6.0）/ #697（virtualenv 21.14.13・pypdf 6.21.2）が無い",
+      "kind": "lock_version",
+      "path": "uv.lock",
+      "pattern": "2.8.0",
+      "format": "uv_exact",
+      "package": "urllib3"
+    },
+    {
+      "label": "HEAD の uv.lock に #494（urllib3 2.8.0）/ #497（sentence-transformers 5.6.0）/ #697（virtualenv 21.14.13・pypdf 6.21.2）が無い",
+      "kind": "lock_version",
+      "path": "uv.lock",
+      "pattern": "5.6.0",
+      "format": "uv_exact",
+      "package": "sentence-transformers"
+    },
+    {
+      "label": "HEAD の uv.lock に #494（urllib3 2.8.0）/ #497（sentence-transformers 5.6.0）/ #697（virtualenv 21.14.13・pypdf 6.21.2）が無い",
+      "kind": "lock_version",
+      "path": "uv.lock",
+      "pattern": "21.14.13",
+      "format": "uv_exact",
+      "package": "virtualenv"
+    },
+    {
+      "label": "HEAD の uv.lock に #494（urllib3 2.8.0）/ #497（sentence-transformers 5.6.0）/ #697（virtualenv 21.14.13・pypdf 6.21.2）が無い（11-02 #775 で pypdf 6.21.4 へ）",
+      "kind": "lock_version",
+      "path": "uv.lock",
+      "pattern": "6.21.4",
+      "format": "uv_exact",
+      "package": "pypdf"
+    },
+    {
+      "label": "HEAD に #490（ブリーフとリマインドの絵文字割れ）が無い",
+      "kind": "file_exists",
+      "path": "src/teamagent/util/grapheme_cut.py"
+    },
+    {
+      "label": "HEAD に #504（社内だけのやり取りは朝の自動下書きを作らない）が無い",
+      "kind": "grep_regex",
+      "path": "src/teamagent/skills/morning_digest/skill.py",
+      "pattern": "^def _is_internal_only"
+    },
+    {
+      "label": "HEAD に #504（社内だけのやり取りは朝の自動下書きを作らない）が無い",
+      "kind": "grep_regex",
+      "path": "scripts/run_morning_digest_fargate.py",
+      "pattern": "draft_skip_internal"
+    },
+    {
+      "label": "HEAD に #508（自動推定の分類フィルタで未分類を消さない）が無い",
+      "kind": "grep_regex",
+      "path": "src/teamagent/skills/search/skill.py",
+      "pattern": "metadata_filters_allow_missing=self._auto_filters_allow_unclassified"
+    },
+    {
+      "label": "HEAD に #508（自動推定の分類フィルタで未分類を消さない）が無い",
+      "kind": "grep_regex",
+      "path": "src/teamagent/adapters/pgvector_client.py",
+      "pattern": "OR d.metadata->>%s IS NULL)"
+    },
+    {
+      "label": "HEAD に #509（チャンネル名は slack_search の in:）が無い",
+      "kind": "grep_fixed",
+      "path": "src/teamagent/skills/slack_search/skill.py",
+      "pattern": "in:#名前（ID は求めない）"
+    },
+    {
+      "label": "HEAD に #501（回答モード・既定 OFF）が無い",
+      "kind": "file_exists",
+      "path": "src/teamagent/skills/search/answer_mode.py"
+    },
+    {
+      "label": "HEAD に #501（回答モード・既定 OFF）が無い",
+      "kind": "file_exists",
+      "path": "src/teamagent/prompts/search/v3/system.md"
+    },
+    {
+      "label": "HEAD に #512（書体に無い文字でデッキ全体を止めない）が無い",
+      "kind": "grep_regex",
+      "path": "src/teamagent/skills/omiyage_report/fmt/fonts.py",
+      "pattern": "^def make_renderable"
+    },
+    {
+      "label": "HEAD に #513（失敗を自分から知らせる・#548 で共通の完了通知へ移した）が無い",
+      "kind": "grep_regex",
+      "path": "src/teamagent/skills/omiyage_report/compose.py",
+      "pattern": "^def build_job_failed_notice"
+    },
+    {
+      "label": "HEAD に #513（失敗を自分から知らせる・#548 で共通の完了通知へ移した）が無い",
+      "kind": "grep_regex",
+      "path": "src/teamagent/mcp_gateway/server.py",
+      "pattern": "if tool == \"omiyage_report_submit\":"
+    },
+    {
+      "label": "HEAD に #516（案件決定v2 の取り込み・gid: auto）が無い",
+      "kind": "grep_regex",
+      "path": "src/teamagent/ingest/loader.py",
+      "pattern": "^GID_BY_TITLE = -1"
+    },
+    {
+      "label": "HEAD に #516（案件決定v2 の取り込み・gid: auto）が無い",
+      "kind": "grep_regex",
+      "path": "data/ingest_sources.yaml",
+      "pattern": "1UNicjhmAPYzlY4TBTgTn92dqRkVYPqAmYh1c3oxcsYU"
+    },
+    {
+      "label": "HEAD に #518（pcre2 10.49-r0 の明示 pin・r44 段3 の ECR ゲート）が無い",
+      "kind": "grep_regex",
+      "path": "infra/docker/Dockerfile.teamagent-media-worker",
+      "pattern": "^ARG PCRE2_PACKAGE_VERSION=10.49-r0$"
+    },
+    {
+      "label": "HEAD に #518（pcre2 10.49-r0 の明示 pin・r44 段3 の ECR ゲート）が無い",
+      "kind": "grep_regex",
+      "path": "infra/docker/media-apk.lock",
+      "pattern": "pcre2-10.49-r0",
+      "whole_line": true
+    },
+    {
+      "label": "HEAD に #519（fp連携 を名前の頭で取り込む）が無い",
+      "kind": "grep_regex",
+      "path": "src/teamagent/ingest/pipeline.py",
+      "pattern": "^def _expand_slack_channel_prefixes"
+    },
+    {
+      "label": "HEAD に #519（fp連携 を名前の頭で取り込む）が無い",
+      "kind": "grep_regex",
+      "path": "data/ingest_sources.yaml",
+      "pattern": "name_prefix: \"fp連携\""
+    },
+    {
+      "label": "HEAD に #521（KW おまかせを聞き返さない）が無い",
+      "kind": "grep_regex",
+      "path": "src/teamagent/skills/omiyage_report/preflight.py",
+      "pattern": "^KEYWORD_DELEGATE_LINE = ("
+    },
+    {
+      "label": "HEAD に #522（カレンダーのタスク枠）が無い",
+      "kind": "grep_regex",
+      "path": "src/teamagent/skills/morning_digest/calendar_window.py",
+      "pattern": "^def is_personal_block"
+    },
+    {
+      "label": "HEAD に #523（商談の準備レポート・DM 限定）が無い",
+      "kind": "grep_regex",
+      "path": "src/teamagent/skills/meeting_prep/skill.py",
+      "pattern": "^class MeetingPrepSkill"
+    },
+    {
+      "label": "HEAD に #523（商談の準備レポート・DM 限定）が無い",
+      "kind": "grep_regex",
+      "path": "src/teamagent/mcp_gateway/server.py",
+      "pattern": "\"meeting_prep\","
+    },
+    {
+      "label": "HEAD に #524（/r が HTML を自分で返す）が無い",
+      "kind": "grep_regex",
+      "path": "src/teamagent/adapters/report_publish.py",
+      "pattern": "^def fetch_report_html"
+    },
+    {
+      "label": "HEAD に #525（案件決定の床）が無い",
+      "kind": "grep_regex",
+      "path": "src/teamagent/skills/search/skill.py",
+      "pattern": "def _apply_deal_floor"
+    },
+    {
+      "label": "HEAD に #526・#699（ffmpeg 追随・libavfilter 8.1.3-r0）/#527（短い英字名の検索）が無い",
+      "kind": "grep_regex",
+      "path": "src/teamagent/skills/omiyage_report/skill.py",
+      "pattern": "def _name_query"
+    },
+    {
+      "label": "HEAD に #526・#699（ffmpeg 追随・libavfilter 8.1.3-r0）/#527（短い英字名の検索）が無い（10-30 上流で ffmpeg8-* に改名）→#852 で r1（zlib 1.4 の作り直し）→#859 で r2",
+      "kind": "grep_regex",
+      "path": "infra/docker/media-apk.lock",
+      "pattern": "ffmpeg8-libavfilter-8.1.3-r2",
+      "whole_line": true
+    },
+    {
+      "label": "HEAD に #528/#596（python ベース上げ）が無い",
+      "kind": "grep_regex",
+      "path": "infra/docker/Dockerfile.teamagent-mcp",
+      "pattern": "ARG PYTHON_RUNTIME_ARM64_DIGEST=sha256:(348247389f6aae35cbe588efff26ff0f53f65ce8612eaca7ba21c743c22bc225|f9552d99b5fcf870d9cd1d285e0086ae90aa2f0758aeff8d1f80dc9346fb52c5)",
+      "whole_line": true,
+      "dialect": "extended"
+    },
+    {
+      "label": "HEAD に #529（作業枠リマインドの tf 変数）が無い",
+      "kind": "grep_regex",
+      "path": "infra/terraform/morning_digest_schedule.tf",
+      "pattern": "MORNING_DIGEST_REMIND_PERSONAL_BLOCKS"
+    },
+    {
+      "label": "HEAD に #530（検索上位＋全 KW の動画を 1 通・取得前の確認）が無い",
+      "kind": "grep_regex",
+      "path": "src/teamagent/mcp_gateway/surface_video_followup.py",
+      "pattern": "^def one_shot_payload"
+    },
+    {
+      "label": "HEAD に #530（検索上位＋全 KW の動画を 1 通・取得前の確認）が無い",
+      "kind": "grep_regex",
+      "path": "src/teamagent/skills/search_surface_check/confirm.py",
+      "pattern": "^def confirm_required"
+    },
+    {
+      "label": "HEAD に #531（実機確認 4 件）が無い",
+      "kind": "grep_regex",
+      "path": "src/teamagent/skills/search/knowledge_query.py",
+      "pattern": "^_DEAL_KANJI_TERM_RE"
+    },
+    {
+      "label": "HEAD に #531（実機確認 4 件）が無い",
+      "kind": "grep_regex",
+      "path": "src/teamagent/mcp_gateway/direct_summary.py",
+      "pattern": "^DEFERRED_TEXT"
+    },
+    {
+      "label": "HEAD に #532（Slack 履歴の複数ページ）が無い",
+      "kind": "grep_regex",
+      "path": "src/teamagent/ingest/loader.py",
+      "pattern": "^MAX_HISTORY_PAGES"
+    },
+    {
+      "label": "HEAD に #484（メール×社内資料）が無い",
+      "kind": "grep_regex",
+      "path": "src/teamagent/skills/_shared/source_url.py",
+      "pattern": "^def hit_doc_url"
+    },
+    {
+      "label": "HEAD に #650（免除の 12/15 延長）が無い",
+      "kind": "grep_regex",
+      "path": "infra/codebuild/release_evidence.py",
+      "pattern": "2026-12-15T00:00:00Z"
+    },
+    {
+      "label": "HEAD に #535（fsspec 2026.9.0）が無い",
+      "kind": "lock_version",
+      "path": "uv.lock",
+      "pattern": "2026.9.0",
+      "format": "uv_adjacent",
+      "package": "fsspec",
+      "whole_line": false
+    },
+    {
+      "label": "HEAD に #536（本人メモ M6／M7）が無い",
+      "kind": "grep_regex",
+      "path": "src/teamagent/mcp_gateway/capacity.py",
+      "pattern": "MCP_REQUEST_GATE"
+    },
+    {
+      "label": "HEAD に #536（本人メモ M6／M7）が無い",
+      "kind": "grep_regex",
+      "path": "src/teamagent/adapters/personal_memory_admin.py",
+      "pattern": "^class PersonalMemoryAdmin"
+    },
+    {
+      "label": "HEAD に #537（export_vault の共有 URI）が無い",
+      "kind": "grep_regex",
+      "path": "scripts/export_vault.py",
+      "pattern": "distinct_identity"
+    },
+    {
+      "label": "HEAD に #538（事例集 PPTX・施策実績を事例へ）が無い",
+      "kind": "grep_regex",
+      "path": "data/ingest_sources.yaml",
+      "pattern": "^case_corpus_decks:"
+    },
+    {
+      "label": "HEAD に #540（回答評価の隠しツール）が無い",
+      "kind": "grep_regex",
+      "path": "src/teamagent/mcp_gateway/answer_feedback.py",
+      "pattern": "^def verify_feedback_token"
+    },
+    {
+      "label": "HEAD に #541（お土産の二重受付）が無い",
+      "kind": "grep_regex",
+      "path": "src/teamagent/adapters/proposal_job_store.py",
+      "pattern": "dedup_lock"
+    },
+    {
+      "label": "HEAD に #542（許可リストの *）が無い",
+      "kind": "grep_regex",
+      "path": "src/teamagent/mcp_gateway/allowlist.py",
+      "pattern": "^def email_allowed"
+    },
+    {
+      "label": "HEAD に #543（複合検索・該当なし）が無い",
+      "kind": "grep_regex",
+      "path": "src/teamagent/skills/search/not_found.py",
+      "pattern": "^def judge_found"
+    },
+    {
+      "label": "HEAD に #545（Slack 要約のチャンネル名＋期間）が無い",
+      "kind": "grep_regex",
+      "path": [
+        "src/teamagent/skills/slack_summary/period.py",
+        "src/teamagent/skills/slack_summary/skill.py"
+      ],
+      "pattern": "SLACK_SUMMARY_NAMED_PERIOD_ENABLED"
+    },
+    {
+      "label": "HEAD に #547（別名で探し直す・頼む文を落とす）が無い",
+      "kind": "grep_regex",
+      "path": "src/teamagent/skills/search/alias_expansion.py",
+      "pattern": "^def retry_inputs"
+    },
+    {
+      "label": "HEAD に #547（別名で探し直す・頼む文を落とす）が無い",
+      "kind": "grep_regex",
+      "path": "src/teamagent/skills/search/skill.py",
+      "pattern": "^def _drop_punt_lines"
+    },
+    {
+      "label": "HEAD に #548（長い作業の完了通知）が無い",
+      "kind": "grep_regex",
+      "path": "src/teamagent/mcp_gateway/async_job_notify.py",
+      "pattern": "^def start_recovery"
+    },
+    {
+      "label": "HEAD に #548（長い作業の完了通知）が無い",
+      "kind": "grep_regex",
+      "path": "src/teamagent/skills/_shared/long_jobs.py",
+      "pattern": "^def set_liveness_probe"
+    },
+    {
+      "label": "HEAD に #549/#552（他社の資料を添付しない）が無い",
+      "kind": "grep_regex",
+      "path": "src/teamagent/skills/knowledge_deliver/skill.py",
+      "pattern": "^def _mentions_subject"
+    },
+    {
+      "label": "HEAD に #549/#552（他社の資料を添付しない）が無い",
+      "kind": "grep_regex",
+      "path": "src/teamagent/skills/knowledge_deliver/skill.py",
+      "pattern": "KNOWLEDGE_DELIVER_CLIENT_GUARD"
+    },
+    {
+      "label": "HEAD に #551（商談準備の先読み）が無い",
+      "kind": "grep_regex",
+      "path": "src/teamagent/skills/meeting_prep/skill.py",
+      "pattern": "MEETING_PREP_LOOKAHEAD_DAYS"
+    },
+    {
+      "label": "HEAD に #553（時間帯データ無しで起動）が無い",
+      "kind": "grep_regex",
+      "path": "tests/runtime/test_no_iana_timezone.py",
+      "pattern": "^def test_every_module_imports_without_time_zone_data"
+    },
+    {
+      "label": "HEAD に #554（* で全員開放したときの事前確認・1 通化）が無い",
+      "kind": "grep_regex",
+      "path": "src/teamagent/skills/search_surface_check/confirm.py",
+      "pattern": "email_allowed"
+    },
+    {
+      "label": "HEAD に #557（投稿リンクの先の添付・既定 OFF）が無い",
+      "kind": "grep_regex",
+      "path": "src/teamagent/skills/attachment_assist/permalink.py",
+      "pattern": "^def parse_permalink"
+    },
+    {
+      "label": "HEAD に #557（投稿リンクの先の添付・既定 OFF）が無い",
+      "kind": "grep_regex",
+      "path": "src/teamagent/skills/attachment_assist/permalink.py",
+      "pattern": "^def may_repost"
+    },
+    {
+      "label": "HEAD に #559（お土産の見張りが作成中を配信中断と取り違える修正）が無い",
+      "kind": "grep_fixed",
+      "path": "src/teamagent/mcp_gateway/server.py",
+      "pattern": "else \"処理中です。\""
+    },
+    {
+      "label": "HEAD に #560（Slack 本人連携の scope 追加と再連携の促し）が無い",
+      "kind": "grep_fixed",
+      "path": "src/teamagent/adapters/slack_oauth_flow.py",
+      "pattern": "\"files:read\","
+    },
+    {
+      "label": "HEAD に #560（Slack 本人連携の scope 追加と再連携の促し）が無い",
+      "kind": "grep_regex",
+      "path": "src/teamagent/skills/oauth_connect/skill.py",
+      "pattern": "oauth_connect_slack_scope_upgrade_needed"
+    },
+    {
+      "label": "HEAD に #561（先週・今月などの期間指定）が無い",
+      "kind": "grep_fixed",
+      "path": "src/teamagent/skills/slack_summary/period.py",
+      "pattern": "\"先々週\","
+    },
+    {
+      "label": "HEAD に #562（83 枚提案書の許可リスト）が無い",
+      "kind": "grep_regex",
+      "path": "src/teamagent/skills/proposal_builder/skill.py",
+      "pattern": "PROPOSAL_BUILDER_ALLOWED_EMAILS"
+    },
+    {
+      "label": "HEAD に #563（署名付き S3 URL をモデルへ渡さない P8①）が無い",
+      "kind": "grep_regex",
+      "path": "src/teamagent/mcp_gateway/payload_offload.py",
+      "pattern": "payload_offload_presigned_blocked"
+    },
+    {
+      "label": "HEAD に #563（署名付き S3 URL をモデルへ渡さない P8①）が無い",
+      "kind": "grep_regex",
+      "path": "src/teamagent/adapters/report_link_token.py",
+      "pattern": "payload-offload/"
+    },
+    {
+      "label": "HEAD に #564（投稿リンクの許可リスト）が無い",
+      "kind": "grep_regex",
+      "path": "src/teamagent/skills/attachment_assist/skill.py",
+      "pattern": "ATTACHMENT_PERMALINK_ALLOWED_EMAILS"
+    },
+    {
+      "label": "HEAD に #565（評価トークンの k を受ける mcp 側・oc17 より先に必要）が無い",
+      "kind": "grep_regex",
+      "path": "src/teamagent/mcp_gateway/answer_feedback.py",
+      "pattern": "MAX_TOOL_NAMES"
+    },
+    {
+      "label": "HEAD に #569（施策事例に動画ごとの数字とリンク）が無い",
+      "kind": "grep_regex",
+      "path": "src/teamagent/skills/search/campaign_files.py",
+      "pattern": "^def video_stats_footer"
+    },
+    {
+      "label": "HEAD に #571（要約に内部 ID を出さない・届かなかったお土産は決まった文）が無い",
+      "kind": "grep_regex",
+      "path": "src/teamagent/skills/_shared/long_jobs.py",
+      "pattern": "^def completed_delivery_failed"
+    },
+    {
+      "label": "HEAD に #571（要約に内部 ID を出さない・届かなかったお土産は決まった文）が無い",
+      "kind": "grep_regex",
+      "path": "src/teamagent/skills/slack_summary/skill.py",
+      "pattern": "^_USER_MENTION_RE"
+    },
+    {
+      "label": "HEAD に #572（調査 JSON の自動作成・既定 OFF）が無い",
+      "kind": "grep_regex",
+      "path": "src/teamagent/skills/proposal_research/skill.py",
+      "pattern": "^class ProposalResearchSkill"
+    },
+    {
+      "label": "HEAD に #572（調査 JSON の自動作成・既定 OFF）が無い",
+      "kind": "grep_regex",
+      "path": "src/teamagent/skills/proposal_builder/skill.py",
+      "pattern": "PROPOSAL_RESEARCH_AUTO"
+    },
+    {
+      "label": "HEAD に #576（weasyprint 70 と url_fetcher の追随）が無い",
+      "kind": "grep_regex",
+      "path": "src/teamagent/media/render_child.py",
+      "pattern": "URLFetcher(allowed_protocols"
+    },
+    {
+      "label": "HEAD に #576（weasyprint 70 と url_fetcher の追随）が無い",
+      "kind": "lock_version",
+      "path": "uv.lock",
+      "pattern": "70.0",
+      "format": "uv_adjacent",
+      "package": "weasyprint",
+      "whole_line": true
+    },
+    {
+      "label": "HEAD に #578（PPTX の機械検査）が無い",
+      "kind": "grep_regex",
+      "path": "src/teamagent/media/deck_qa.py",
+      "pattern": "^def inspect_pptx"
+    },
+    {
+      "label": "HEAD に #580（お土産の直せる版の文字の大きさ）が無い",
+      "kind": "grep_regex",
+      "path": "src/teamagent/skills/omiyage_report/fmt/ooxml.py",
+      "pattern": "^_EMU_PER_PT = 12700$"
+    },
+    {
+      "label": "HEAD に #581（検査の要約で media の依頼が失敗しない）が無い",
+      "kind": "grep_regex",
+      "path": "src/teamagent/media/proposal_quality.py",
+      "pattern": "^_DECK_QA_MAX_BYTES = "
+    },
+    {
+      "label": "HEAD に #582（要確認の枚目を届く文に）が無い",
+      "kind": "grep_regex",
+      "path": "src/teamagent/skills/_shared/deck_review.py",
+      "pattern": "^def review_slides"
+    },
+    {
+      "label": "HEAD に #584（機械検査の表の校正）が無い",
+      "kind": "grep_regex",
+      "path": "src/teamagent/media/deck_qa.py",
+      "pattern": "table_overflow"
+    },
+    {
+      "label": "HEAD に #585（53 枚目の字数の上限）が無い",
+      "kind": "grep_regex",
+      "path": "src/teamagent/skills/proposal_deck/contract.py",
+      "pattern": "^    64: (1, 30),$"
+    },
+    {
+      "label": "HEAD に #586（置き換えで書式を保つ）が無い",
+      "kind": "grep_regex",
+      "path": "src/teamagent/media/operations.py",
+      "pattern": "^def _set_text_keeping_format"
+    },
+    {
+      "label": "HEAD に #587（改行にも書式）が無い",
+      "kind": "grep_regex",
+      "path": "src/teamagent/media/operations.py",
+      "pattern": "if run.tag not in {f\"{_DRAWING_NS}r\", f\"{_DRAWING_NS}br\"}:"
+    },
+    {
+      "label": "HEAD に #588（段 C の並列化）が無い",
+      "kind": "grep_regex",
+      "path": "src/teamagent/skills/proposal_research/skill.py",
+      "pattern": "^_TIKTOK_PARALLEL = 3$"
+    },
+    {
+      "label": "HEAD に #596（core の python ベース glibc 2.44-r8・#573 の glibc 例外撤去・CVE-2026-87910）が無い（10-16: #628 の python-3.14 例外は別件で許す）",
+      "kind": "grep_regex",
+      "path": "infra/docker/Dockerfile.teamagent-mcp",
+      "pattern": "^ARG PYTHON_RUNTIME_ARM64_DIGEST=sha256:f9552d99b5fcf870d9cd1d285e0086ae90aa2f0758aeff8d1f80dc9346fb52c5$"
+    },
+    {
+      "label": "HEAD に #596（core の python ベース glibc 2.44-r8・#573 の glibc 例外撤去・CVE-2026-87910）が無い（10-16: #628 の python-3.14 例外は別件で許す）",
+      "kind": "lock_version",
+      "path": "infra/codebuild/ecr_scan_exceptions_core.json",
+      "pattern": "glibc",
+      "format": "json_no_package_prefix"
+    },
+    {
+      "label": "HEAD に #600（search の 📊 の直接投稿）が無い",
+      "kind": "grep_regex",
+      "path": "src/teamagent/mcp_gateway/direct_video_metrics.py",
+      "pattern": "^ENABLED_ENV = \"USE_DIRECT_VIDEO_METRICS_POST\"$"
+    },
+    {
+      "label": "HEAD に #601（📊 の後に数字を並べ直さない）が無い",
+      "kind": "grep_regex",
+      "path": "src/teamagent/mcp_gateway/direct_video_metrics.py",
+      "pattern": "説明では数字を並べ直しません。"
+    },
+    {
+      "label": "HEAD に #603（hits の本文から動画ごとの数字を抜く）が無い",
+      "kind": "grep_regex",
+      "path": "src/teamagent/skills/search/campaign_files.py",
+      "pattern": "^def strip_video_numbers"
+    },
+    {
+      "label": "HEAD に #603（hits の本文から動画ごとの数字を抜く）が無い",
+      "kind": "grep_regex",
+      "path": "src/teamagent/mcp_gateway/direct_video_metrics.py",
+      "pattern": "^def _strip_hit_numbers"
+    },
+    {
+      "label": "HEAD に #604（質問と回答の履歴）が無い",
+      "kind": "grep_regex",
+      "path": "src/teamagent/adapters/dm_history.py",
+      "pattern": "^def redact_secret_links"
+    },
+    {
+      "label": "HEAD に #604（質問と回答の履歴）が無い",
+      "kind": "grep_regex",
+      "path": "src/teamagent/connect_web/app.py",
+      "pattern": "@app.get(\"/admin/history\""
+    },
+    {
+      "label": "HEAD に #606（83 枚提案書の同時実行の上限）が無い",
+      "kind": "grep_regex",
+      "path": "src/teamagent/skills/proposal_builder/skill.py",
+      "pattern": "^def _shared_job_slots"
+    },
+    {
+      "label": "HEAD に #605（社外共有チャンネルへ添付し直さない）が無い",
+      "kind": "grep_regex",
+      "path": "src/teamagent/adapters/slack_user_reader.py",
+      "pattern": "class SlackChannelSharing"
+    },
+    {
+      "label": "HEAD に #608（本人 Slack 由来の要約を退避先へ書かない）が無い",
+      "kind": "grep_regex",
+      "path": "src/teamagent/mcp_gateway/payload_offload.py",
+      "pattern": "^PER_USER_DERIVED_KEYS"
+    },
+    {
+      "label": "HEAD に #609（/admin/memory の dict 行）が無い",
+      "kind": "grep_regex",
+      "path": "src/teamagent/adapters/personal_memory_admin.py",
+      "pattern": "^def _col"
+    },
+    {
+      "label": "HEAD に #610（Aico 自身の過去の答えを根拠にしない）が無い",
+      "kind": "grep_regex",
+      "path": "src/teamagent/skills/search/composite.py",
+      "pattern": "^def drop_own_conversation"
+    },
+    {
+      "label": "HEAD に #611（動画系の施策フィルタで資料を落とさない）が無い",
+      "kind": "grep_regex",
+      "path": "src/teamagent/skills/search/knowledge_query.py",
+      "pattern": "^def is_video_solution"
+    },
+    {
+      "label": "HEAD に #612（📊 に載る数字を要約器へ渡さない）が無い",
+      "kind": "grep_regex",
+      "path": "src/teamagent/skills/search/campaign_files.py",
+      "pattern": "^VIDEO_ROWS_FOOTER_HEADING"
+    },
+    {
+      "label": "HEAD に #613（統合検索・既定 OFF）が無い",
+      "kind": "grep_regex",
+      "path": "src/teamagent/skills/search/fanout.py",
+      "pattern": "^def fanout_active"
+    },
+    {
+      "label": "HEAD に #613（統合検索・既定 OFF）が無い",
+      "kind": "grep_regex",
+      "path": "src/teamagent/skills/search/answer_sections.py",
+      "pattern": "^SCOPE_PREFIX = \"探した範囲（まとめて検索）: \""
+    },
+    {
+      "label": "HEAD に #614 が無い",
+      "kind": "grep_regex",
+      "path": "src/teamagent/skills/search/fanout.py",
+      "pattern": "^LIST_FAST_HEAD"
+    },
+    {
+      "label": "HEAD に #615 が無い",
+      "kind": "grep_regex",
+      "path": "src/teamagent/connect_web/app.py",
+      "pattern": "/search/graph/focus"
+    },
+    {
+      "label": "HEAD に #616 が無い",
+      "kind": "grep_regex",
+      "path": "src/teamagent/skills/_shared/input_policy.py",
+      "pattern": "USE_INPUT_POLICY_V1"
+    },
+    {
+      "label": "HEAD に #618 が無い",
+      "kind": "grep_regex",
+      "path": "src/teamagent/adapters/pgvector_client.py",
+      "pattern": "SEARCH_TIMELINE_STATUS"
+    },
+    {
+      "label": "HEAD に #620 が無い",
+      "kind": "grep_regex",
+      "path": "src/teamagent/skills/search/comparison.py",
+      "pattern": "^_COMPARISON = re.compile"
+    },
+    {
+      "label": "HEAD に #621 が無い",
+      "kind": "grep_regex",
+      "path": "src/teamagent/skills/search/composite.py",
+      "pattern": "^FANOUT_FETCH_COUNT = 20"
+    },
+    {
+      "label": "HEAD に #622 が無い",
+      "kind": "grep_regex",
+      "path": "src/teamagent/mcp_gateway/server.py",
+      "pattern": "await asyncio.to_thread(maybe_offload"
+    },
+    {
+      "label": "HEAD に #624 が無い",
+      "kind": "grep_regex",
+      "path": "src/teamagent/skills/first_visit/contract.py",
+      "pattern": "^def missing_inputs"
+    },
+    {
+      "label": "HEAD に #625 が無い",
+      "kind": "grep_regex",
+      "path": "src/teamagent/skills/search/campaign_files.py",
+      "pattern": "asked_industry: str | None = None"
+    },
+    {
+      "label": "HEAD に #626 が無い",
+      "kind": "grep_regex",
+      "path": "src/teamagent/skills/first_visit/recording.py",
+      "pattern": "^def capture_enabled"
+    },
+    {
+      "label": "HEAD に #627 が無い",
+      "kind": "grep_regex",
+      "path": "src/teamagent/skills/search/not_found.py",
+      "pattern": "^def build_case_not_found_answer"
+    },
+    {
+      "label": "HEAD に #629 が無い",
+      "kind": "grep_regex",
+      "path": "src/teamagent/mcp_gateway/direct_search_answer.py",
+      "pattern": "^ENABLED_ENV = \"SEARCH_DIRECT_ANSWER\""
+    },
+    {
+      "label": "HEAD に #630 が無い",
+      "kind": "grep_regex",
+      "path": "src/teamagent/skills/search/not_found.py",
+      "pattern": "unavailable: str = \"\""
+    },
+    {
+      "label": "HEAD に #636（X11 系の pin）が無い",
+      "kind": "grep_regex",
+      "path": "infra/docker/Dockerfile.teamagent-media-worker",
+      "pattern": "^ARG LIBX11_PACKAGE_VERSION=1.8.14-r0$"
+    },
+    {
+      "label": "HEAD に #637 が無い",
+      "kind": "grep_regex",
+      "path": "src/teamagent/mcp_gateway/direct_search_answer.py",
+      "pattern": "SEARCH_DIRECT_ANSWER_KINDS"
+    },
+    {
+      "label": "HEAD の aiohttp が 3.14.4 でない（#641）",
+      "kind": "grep_regex",
+      "path": "uv.lock",
+      "pattern": "aiohttp"
+    },
+    {
+      "label": "HEAD の aiohttp が 3.14.4 でない（#641）",
+      "kind": "lock_version",
+      "path": "uv.lock",
+      "pattern": "3.14.4",
+      "format": "uv_adjacent",
+      "package": "aiohttp",
+      "whole_line": false
+    },
+    {
+      "label": "HEAD に #638 が無い",
+      "kind": "grep_regex",
+      "path": "src/teamagent/connect_web/app.py",
+      "pattern": "_admin_html"
+    },
+    {
+      "label": "HEAD に #646 が無い",
+      "kind": "grep_regex",
+      "path": "src/teamagent/skills/proposal_deck/skill.py",
+      "pattern": "_LENGTH_REPAIR_BUDGET_USD"
+    },
+    {
+      "label": "HEAD に #647 が無い",
+      "kind": "grep_regex",
+      "path": "src/teamagent/mcp_gateway/server.py",
+      "pattern": "_search_compact_answer"
+    },
+    {
+      "label": "HEAD に #648 が無い",
+      "kind": "grep_regex",
+      "path": "src/teamagent/skills/search/answer_mode.py",
+      "pattern": "def is_case_list"
+    },
+    {
+      "label": "HEAD に #651 が無い",
+      "kind": "grep_regex",
+      "path": "src/teamagent/skills/search/drive_first.py",
+      "pattern": "SEARCH_DRIVE_FIRST"
+    },
+    {
+      "label": "HEAD に #652 が無い",
+      "kind": "grep_regex",
+      "path": "src/teamagent/skills/proposal_research/skill.py",
+      "pattern": "proposal_research_final_validation_failed"
+    },
+    {
+      "label": "HEAD に #664（初訪④・kit 25eccd8）が無い",
+      "kind": "file_exists",
+      "path": "tools/first_visit/tiktok-skills-kit-25eccd8.tar.gz"
+    },
+    {
+      "label": "HEAD に #663（83 枚の見た目）が無い",
+      "kind": "file_exists",
+      "path": "src/teamagent/media/proposal_cleanup.py"
+    },
+    {
+      "label": "HEAD に #667（出す前の検査）が無い",
+      "kind": "file_exists",
+      "path": "src/teamagent/media/proposal_dates.py"
+    },
+    {
+      "label": "HEAD に #665（事例は Drive の資料だけ）が無い",
+      "kind": "grep_regex",
+      "path": "src/teamagent/skills/search/case_list.py",
+      "pattern": "EMPTY_DRIVE_CASES"
+    },
+    {
+      "label": "HEAD に #669（最初の返事から Drive リンク）が無い",
+      "kind": "grep_regex",
+      "path": "src/teamagent/skills/search/compact.py",
+      "pattern": "used_keys"
+    },
+    {
+      "label": "HEAD に #668（OC 土台 ca r3）が無い",
+      "kind": "grep_regex",
+      "path": "infra/docker/Dockerfile.openclaw",
+      "pattern": "4e3acbdfc5647f9c40ee16ad0f3937309847489948d85dbb0a4f4a766fd4360d"
+    },
+    {
+      "label": "HEAD に core の ca-certificates-bundle r3 差し替えが無い（段 4 の Trivy で HIGH CVE-2026-111943 が落ちる）",
+      "kind": "file_exists",
+      "path": "infra/docker/core-ca-bundle.lock.json"
+    },
+    {
+      "label": "HEAD の virtualenv が 21.14.13 でない（#697）",
+      "kind": "lock_version",
+      "path": "uv.lock",
+      "pattern": "21.14.13",
+      "format": "uv_adjacent",
+      "package": "virtualenv",
+      "whole_line": false
+    },
+    {
+      "label": "HEAD に #672（BU2 の頁の除外）が無い",
+      "kind": "grep_regex",
+      "path": "src/teamagent/media/proposal_cleanup.py",
+      "pattern": "def proposal_bu2_slide_ids"
+    },
+    {
+      "label": "HEAD に #673（BU2 用 3 頁）が無い",
+      "kind": "file_exists",
+      "path": "src/teamagent/media/proposal_bu2.py"
+    },
+    {
+      "label": "本番の 86 頁 FMT（正本・10-27 決定）の SHA が許可の一覧に無い（資料生成が止まる）",
+      "kind": "grep_regex",
+      "path": "src/teamagent/media/proposal_template.py",
+      "pattern": "07ea41700933d380295c5b8e713d803c8276c46c94b18008dbd8bf230539f883"
+    },
+    {
+      "label": "HEAD に #674（通常回答の Drive リンク）が無い",
+      "kind": "grep_regex",
+      "path": "src/teamagent/skills/search/compact.py",
+      "pattern": "def append_used_drive_links"
+    },
+    {
+      "label": "HEAD に #676（BU2 の数値は依頼文だけ）が無い",
+      "kind": "grep_regex",
+      "path": "src/teamagent/media/proposal_bu2.py",
+      "pattern": "def grounded_in_request"
+    },
+    {
+      "label": "HEAD に #677（業種で 0 件にしない）が無い",
+      "kind": "grep_regex",
+      "path": "src/teamagent/adapters/pgvector_client.py",
+      "pattern": "soft_industry"
+    },
+    {
+      "label": "HEAD に #679（事例の Drive ID の引き継ぎ）が無い",
+      "kind": "grep_regex",
+      "path": "src/teamagent/adapters/pgvector_client.py",
+      "pattern": "AS drive_file_id"
+    },
+    {
+      "label": "HEAD に #681（実機テスト 8 回目の回帰）が無い",
+      "kind": "grep_regex",
+      "path": "src/teamagent/skills/search/drive_first.py",
+      "pattern": "def scope_hits"
+    },
+    {
+      "label": "HEAD に #683（話題の質問のリンク）が無い",
+      "kind": "file_exists",
+      "path": "src/teamagent/prompts/search/compact/normal.md"
+    },
+    {
+      "label": "HEAD に #689（『事例』で候補が消える直し）が無い",
+      "kind": "grep_regex",
+      "path": "src/teamagent/skills/search/skill.py",
+      "pattern": "事例は検索の目的"
+    },
+    {
+      "label": "HEAD に #687（訪問先の事例相談）が無い",
+      "kind": "file_exists",
+      "path": "src/teamagent/skills/search/visit_cases.py"
+    },
+    {
+      "label": "HEAD に #690（sales25 のつなぎ込み）が無い",
+      "kind": "grep_regex",
+      "path": "src/teamagent/skills/omiyage_report/sales25_wire.py",
+      "pattern": "search_tiktok_sales25"
+    },
+    {
+      "label": "HEAD に #700（お土産資料の時間短縮）が無い",
+      "kind": "grep_fixed",
+      "path": "src/teamagent/mcp_gateway/async_job_notify.py",
+      "pattern": "件数（検索 1/6・分析 3/30）だけの変化では知らせない"
+    },
+    {
+      "label": "HEAD に #702（資料リンクをコードで付ける）が無い",
+      "kind": "grep_fixed",
+      "path": "src/teamagent/mcp_gateway/direct_search_answer.py",
+      "pattern": "\"video_metrics\", \"case_cards\""
+    },
+    {
+      "label": "HEAD に #706（原本リンクの再認可）が無い",
+      "kind": "grep_fixed",
+      "path": "src/teamagent/skills/search/skill.py",
+      "pattern": "from teamagent.mcp_gateway.document_followup import reauthorize"
+    },
+    {
+      "label": "HEAD に #708（状態の日付と根拠リンク）が無い",
+      "kind": "grep_regex",
+      "path": "src/teamagent/skills/search/timeline_status.py",
+      "pattern": "^def status_answer"
+    },
+    {
+      "label": "HEAD に sales25 受付の直し（お任せ補完）が無い",
+      "kind": "file_exists",
+      "path": "src/teamagent/skills/omiyage_report/omakase.py"
+    },
+    {
+      "label": "HEAD の Pillow が 13.0.0 でない（#655）",
+      "kind": "lock_version",
+      "path": "uv.lock",
+      "pattern": "13.0.0",
+      "format": "uv_adjacent",
+      "package": "pillow",
+      "whole_line": false
+    },
+    {
+      "label": "HEAD の certifi が 2026.10.19 でない（#655）",
+      "kind": "lock_version",
+      "path": "uv.lock",
+      "pattern": "2026.10.19",
+      "format": "uv_adjacent",
+      "package": "certifi",
+      "whole_line": false
+    },
+    {
+      "label": "src/scripts に IANA 名の時間帯が残っている（本番に時間帯データが無い・r48 で起動失敗）",
+      "kind": "grep_regex",
+      "path": [
+        "src",
+        "scripts"
+      ],
+      "pattern": "ZoneInfo\\(|^from zoneinfo|^import zoneinfo",
+      "dialect": "extended",
+      "absent": true
+    },
+    {
+      "label": "#712 お任せの対象商品をブランド全般で補う",
+      "kind": "grep_fixed",
+      "path": "src/teamagent/skills/omiyage_report/omakase.py",
+      "pattern": "（ブランド全般）"
+    },
+    {
+      "label": "#716 sales25 の検索件数の設定",
+      "kind": "grep_fixed",
+      "path": "src/teamagent/skills/omiyage_report/sales25.py",
+      "pattern": "OMIYAGE_SALES25_SEARCH_DEPTH"
+    },
+    {
+      "label": "#717 sales25 の Apify 取り直し",
+      "kind": "file_exists",
+      "path": "src/teamagent/adapters/tiktok_search_fallback.py"
+    },
+    {
+      "label": "#718 結果の知らせ",
+      "kind": "grep_fixed",
+      "path": "src/teamagent/skills/omiyage_report/sales25.py",
+      "pattern": "のお土産資料は作れませんでした。"
+    },
+    {
+      "label": "#714 投稿開始日なし",
+      "kind": "grep_fixed",
+      "path": "src/teamagent/media/render_child.py",
+      "pattern": "未定"
+    },
+    {
+      "label": "#719 #720 media の Python 3.14.10-r1",
+      "kind": "grep_fixed",
+      "path": "infra/docker/Dockerfile.teamagent-media-worker",
+      "pattern": "ARG PYTHON_PACKAGE_VERSION=3.14.10-r1"
+    },
+    {
+      "label": "#721→#834 oauthlib 4.0.1（CVE-2026-49272）",
+      "kind": "lock_version",
+      "format": "uv_exact",
+      "path": "uv.lock",
+      "package": "oauthlib",
+      "pattern": "4.0.1"
+    },
+    {
+      "label": "#722 目標件数どおりなら未達扱いにしない",
+      "kind": "grep_fixed",
+      "path": "src/teamagent/skills/omiyage_report/sales25.py",
+      "pattern": "result.actual < search_depth() and result.status == \"complete\""
+    },
+    {
+      "label": "#725 スクロールの間隔（20 秒・10〜14 秒）",
+      "kind": "grep_fixed",
+      "path": "tools/tiktok_scraper/search.mjs",
+      "pattern": "await delay(s === 0 ? 20000 : 10000, s === 0 ? 20000 : 14000);"
+    },
+    {
+      "label": "#725 断られたら残りの語は Apify",
+      "kind": "grep_fixed",
+      "path": "src/teamagent/skills/omiyage_report/sales25_wire.py",
+      "pattern": "previous_browser_refused"
+    },
+    {
+      "label": "#725 media の search.mjs SHA",
+      "kind": "grep_fixed",
+      "path": "infra/docker/Dockerfile.teamagent-media-worker",
+      "pattern": "ARG TIKTOK_SCRAPER_SHA256=46e24c03e810eea6b397e32a5fdbab3d9bf3e91df6617f49d9d5c7c2aa1e438f"
+    },
+    {
+      "label": "#726 関連判定の費用上限 0.1",
+      "kind": "grep_fixed",
+      "path": "src/teamagent/skills/first_visit/sales25_authoring.py",
+      "pattern": "RELEVANCE_MAX_COST_USD = 0.1"
+    },
+    {
+      "label": "media_case_search のスキル",
+      "kind": "file_exists",
+      "path": "src/teamagent/skills/media_case_search/skill.py"
+    },
+    {
+      "label": "media_case_search の取り込み口",
+      "kind": "file_exists",
+      "path": "scripts/ingest_media_cases.py"
+    },
+    {
+      "label": "対象 10 アカウント",
+      "kind": "grep_fixed",
+      "path": "src/teamagent/assets/media_accounts.csv",
+      "pattern": "trendsnap_official"
+    },
+    {
+      "label": "#727 関連判定の一時エラーを 1 回やり直す",
+      "kind": "grep_fixed",
+      "path": "src/teamagent/skills/first_visit/sales25_authoring.py",
+      "pattern": "一時的な 5xx・期限切れは同じ request_id で 1 回だけやり直す"
+    },
+    {
+      "label": "#733 崩れた関連判定は別 request_id で聞き直す",
+      "kind": "grep_fixed",
+      "path": "src/teamagent/skills/first_visit/sales25_authoring.py",
+      "pattern": "def _relevance_decisions("
+    },
+    {
+      "label": "#734 事例検索の思考を最小に",
+      "kind": "grep_fixed",
+      "path": "src/teamagent/adapters/gemini_client.py",
+      "pattern": "thinking_budget must be nonnegative"
+    },
+    {
+      "label": "#735 案件の識別子を 1 つだけ選ぶ",
+      "kind": "grep_fixed",
+      "path": "src/teamagent/skills/media_case_search/campaigns.py",
+      "pattern": "def _identity("
+    },
+    {
+      "label": "#738 Apify の整数秒の長さは許容 1 秒",
+      "kind": "grep_fixed",
+      "path": "src/teamagent/media/sales25_media.py",
+      "pattern": "Search providers may round duration metadata to whole seconds."
+    },
+    {
+      "label": "#737 事例検索の思考の切り替え",
+      "kind": "grep_fixed",
+      "path": "src/teamagent/skills/media_case_search/distill.py",
+      "pattern": "MEDIA_CASE_THINKING must be minimal, low or medium"
+    },
+    {
+      "label": "#736 media の nodejs r1",
+      "kind": "grep_fixed",
+      "path": "infra/docker/media-apk.lock",
+      "pattern": "nodejs-24.22.1-r1"
+    },
+    {
+      "label": "画像判定の答えの包みを受け入れる",
+      "kind": "grep_fixed",
+      "path": "src/teamagent/skills/first_visit/sales25_analysis.py",
+      "pattern": "def _model_json("
+    },
+    {
+      "label": "HEAD に #740（小さなまとまりの吸収）が無い",
+      "kind": "grep_fixed",
+      "path": "src/teamagent/skills/media_case_search/campaigns.py",
+      "pattern": "Unknown brands are ignored on both sides"
+    },
+    {
+      "label": "HEAD に #743（MEDIA_CASE_MODEL）が無い",
+      "kind": "grep_fixed",
+      "path": "src/teamagent/skills/media_case_search/distill.py",
+      "pattern": "MODELS = (\"gemini-3.5-flash\", \"gemini-3.6-flash\", \"bedrock-haiku\")"
+    },
+    {
+      "label": "HEAD に #745（sales25 の答えの包みを外す）が無い",
+      "kind": "grep_regex",
+      "path": "src/teamagent/skills/first_visit/sales25_analysis.py",
+      "pattern": "^def _unfence"
+    },
+    {
+      "label": "HEAD に #744（未定の計画日付の整理）が無い",
+      "kind": "grep_fixed",
+      "path": "src/teamagent/media/proposal_dates.py",
+      "pattern": "Schedule date cleanup and checks shared by local and isolated proposal renderers."
+    },
+    {
+      "label": "HEAD に #741（evidence key の区切り単位の検査）が無い",
+      "kind": "grep_fixed",
+      "path": "infra/codebuild/release_evidence.py",
+      "pattern": "for part in payload_key.split(\"/\")"
+    },
+    {
+      "label": "HEAD に ffmpeg 8.1.3（#756）が無い",
+      "kind": "grep_fixed",
+      "path": "infra/docker/Dockerfile.teamagent-media-worker",
+      "pattern": "ARG FFMPEG_PACKAGE_VERSION=8.1.3-r0"
+    },
+    {
+      "label": "HEAD に #759（core の py3-pip-wheel 26.2.2-r1）が無い",
+      "kind": "file_exists",
+      "path": "infra/docker/core-pip-wheel.lock.json"
+    },
+    {
+      "label": "#761 ad_label_check スキルが無い",
+      "kind": "grep_fixed",
+      "path": "src/teamagent/skills/ad_label_check/skill.py",
+      "pattern": "name: ClassVar[str] = \"ad_label_check\""
+    },
+    {
+      "label": "#761 YouTube のタイアップ取得 actor が無い",
+      "kind": "grep_fixed",
+      "path": "src/teamagent/adapters/apify_client.py",
+      "pattern": "ACTOR_YT_VIDEOS = \"streamers~youtube-scraper\""
+    },
+    {
+      "label": "#761 http・スキーム無し URL の https 化が無い",
+      "kind": "grep_fixed",
+      "path": "src/teamagent/skills/ad_label_check/schema.py",
+      "pattern": "def _canonical(url: str) -> str:"
+    },
+    {
+      "label": "#761 factory の USE_AD_LABEL_CHECK_TOOL 登録が無い",
+      "kind": "grep_fixed",
+      "path": "src/teamagent/orchestrator/factory.py",
+      "pattern": "if _envflag(\"USE_AD_LABEL_CHECK_TOOL\"):"
+    },
+    {
+      "label": "#769 ad_label_check の受付の知らせが無い",
+      "kind": "grep_fixed",
+      "path": "src/teamagent/mcp_gateway/progress_notify.py",
+      "pattern": "\"ad_label_check\": \"🏷️ タイアップ表示と #PR 表記を確認しています"
+    },
+    {
+      "label": "HEAD に #752 が無い",
+      "kind": "file_exists",
+      "path": "src/teamagent/case_state.py"
+    },
+    {
+      "label": "HEAD に #755 が無い",
+      "kind": "file_exists",
+      "path": "tests/skills/search/test_case_state_rendering.py"
+    },
+    {
+      "label": "HEAD に #766 が無い",
+      "kind": "file_exists",
+      "path": "infra/openclaw/caller-identity-plugin/outbound_rules.json"
+    },
+    {
+      "label": "HEAD に #767 が無い",
+      "kind": "file_exists",
+      "path": "docs/search-not-found-recovery.md"
+    },
+    {
+      "label": "HEAD に #768 が無い",
+      "kind": "file_exists",
+      "path": "docs/long_job_notifications.md"
+    },
+    {
+      "label": "HEAD に #765 が無い",
+      "kind": "file_exists",
+      "path": "src/teamagent/skills/_shared/google_connection.py"
+    },
+    {
+      "label": "HEAD に #762 が無い",
+      "kind": "file_exists",
+      "path": "tests/infra/test_soul_capabilities.py"
+    },
+    {
+      "label": "HEAD に #764 が無い",
+      "kind": "file_exists",
+      "path": "docs/conversation-continuity.md"
+    },
+    {
+      "label": "HEAD に #757（psycopg-binary 3.3.6）が無い",
+      "kind": "grep_fixed",
+      "path": "uv.lock",
+      "pattern": "psycopg_binary-3.3.6"
+    },
+    {
+      "label": "HEAD に #776（core の python-3.14.10）が無い",
+      "kind": "grep_fixed",
+      "path": "infra/docker/Dockerfile.teamagent-mcp",
+      "pattern": "3.14.10_git20261028-r0"
+    },
+    {
+      "label": "#779/da3e15c1 ad_label_check のラベルなし・ハッシュタグなしの見出しが無い",
+      "kind": "grep_fixed",
+      "path": "src/teamagent/skills/ad_label_check/skill.py",
+      "pattern": "(\"ハッシュタグなし\", [r for r in checked if not r.disclosure_tags]),"
+    },
+    {
+      "label": "HEAD に #786 が無い",
+      "kind": "grep_fixed",
+      "path": "tests/routing/catalog_routing_corpus.jsonl",
+      "pattern": "似た過去の提案書"
+    },
+    {
+      "label": "HEAD に r98 の変更が無い",
+      "kind": "grep_fixed",
+      "path": "src/teamagent/skills/search/timeline_status.py",
+      "pattern": "def asks_status"
+    },
+    {
+      "label": "HEAD に #818（URL 取り込み worker の既定 ON）が無い",
+      "kind": "grep_fixed",
+      "path": "src/teamagent/ingest/video_library_url_worker.py",
+      "pattern": "os.environ.get(\"VIDEO_LIBRARY_IMPORT_WORKER_ENABLED\", \"1\")"
+    },
+    {
+      "label": "HEAD に #817（URL 取り込み画面）が無い",
+      "kind": "file_exists",
+      "path": "src/teamagent/connect_web/library_import.py"
+    }
+  ],
+  "OLD_CORE": "sha256:ad2c436791e59b866ba28e23eb7297eb03d96a71fa29f69d17169bb9d1b27c51"
+}
