@@ -1226,6 +1226,8 @@ createCallerIdentityPlugin({env: {
   SLACK_TEAM_ID: process.env.TEST_TEAM_ID,
   SLACK_BOT_TOKEN: 'fixture-token', TEAMAGENT_MCP_BEARER: 'fixture-bearer',
   TEAMAGENT_INBOUND_ROUTER: 'enforce', SEARCH_DIRECT_ANSWER_ALLOWED_EMAILS: 'owner@example.test',
+  TEAMAGENT_INBOUND_ROUTER_ALLOWED_EMAILS: 'owner@example.test',
+  TEAMAGENT_INBOUND_ROUTER_ALLOWED_RULES: 'case_list',
 }, now: () => Number(process.env.TEST_NOW) * 1000, fetchFn: async (url, options) => {
   const body = JSON.parse(options.body);
   if (url.endsWith('/users.info')) return response({ok: true, user: {
@@ -1240,7 +1242,7 @@ createCallerIdentityPlugin({env: {
   logger: {info() {}, warn() {}}});
 const ctx = {runId: 'pre-model-claim', sessionKey: 'agent:fixture:slack:direct:test',
   senderId: process.env.TEST_USER_ID, channelId: 'D0123456789'};
-hooks.get('message_received')({content: '社内でいう未知の略語とは？', runId: ctx.runId,
+hooks.get('message_received')({content: '飲料の事例を5件見せて', runId: ctx.runId,
   senderId: ctx.senderId, messageId: '1784424000.000001',
   metadata: {guildId: process.env.TEST_TEAM_ID, to: ctx.channelId}},
   {...ctx, channelId: 'slack', conversationId: ctx.channelId, messageId: '1784424000.000001'});
