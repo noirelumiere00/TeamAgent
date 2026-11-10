@@ -116,6 +116,7 @@ _usage_recorder_singleton: UsageRecorder | object | None = _USAGE_RECORDER_UNSET
 # fire-and-forget task は完了まで強参照を保持する。done callback で例外も回収するため、
 # recorder の失敗が MCP 応答や event loop の未回収例外へ波及しない。
 _usage_record_tasks: set[asyncio.Future[Any]] = set()
+_search_attach_tasks: set[asyncio.Future[Any]] = set()
 
 
 def _envflag(name: str, default: str = "false") -> bool:
@@ -155,6 +156,13 @@ def _usage_record_done(task: asyncio.Future[Any]) -> None:
         return
     if error is not None:
         logger.warning("usage_event_record_failed", error=type(error).__name__)
+
+
+def _search_attach_done(task: asyncio.Future[Any]) -> None:
+    """裏で回した資料添付の参照と例外を回収する。"""
+    _search_attach_tasks.discard(task)
+    if not task.cancelled() and task.exception() is not None:
+        logger.warning("search_attach_failed", error=type(task.exception()).__name__)
 
 
 async def _record_usage_event(event: UsageEvent) -> None:
@@ -1813,9 +1821,17 @@ async def dispatch_tool(
                 ),
             )
             if posted is not None and posted.get("delivered") is True:
-                await asyncio.to_thread(
-                    search_file_delivery.attach, output, ctx, search_direct_destination
+                # 答えは投稿済み。資料の添付（数十秒）を待つと
+                # 呼び出し側が時間切れで失敗扱いにするので裏へ回す。
+                # shortcut: 添付中にコンテナが止まると添付だけ落ちる。
+                # 取りこぼしが出たら detached_jobs へ移す。
+                attach_task = asyncio.get_running_loop().create_task(
+                    asyncio.to_thread(
+                        search_file_delivery.attach, output, ctx, search_direct_destination
+                    )
                 )
+                _search_attach_tasks.add(attach_task)
+                attach_task.add_done_callback(_search_attach_done)
                 posted["direct_delivery"] = candidate
                 if data.get("case_state_answer") is not None:
                     posted["case_state_answer"] = data["case_state_answer"]
