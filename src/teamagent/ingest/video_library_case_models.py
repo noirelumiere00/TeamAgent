@@ -98,7 +98,8 @@ def validate_prediction(text: str, post: Post, cases: list[Case]) -> Prediction:
 
 
 def _ground(value: str) -> str:
-    return re.sub(r"\s+", "", unicodedata.normalize("NFKC", value)).casefold()
+    # NFKC maps ～ to "~" but keeps the wave dash 〜, so "お〜いお茶" missed "お～いお茶".
+    return re.sub(r"\s+", "", unicodedata.normalize("NFKC", value).replace("〜", "~")).casefold()
 
 
 def application_prediction(result: Prediction, cases: list[Case], post: Post) -> Prediction:
