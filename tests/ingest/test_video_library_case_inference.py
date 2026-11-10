@@ -962,3 +962,15 @@ def test_filtered_inference_never_attempts_more_than_200_videos() -> None:
         video_ids={str(i) for i in range(205)},
     )
     assert counts["attempted"] == repository.save.call_count == 200
+
+
+@pytest.mark.parametrize("source", ["#お～いお茶", "お~いお茶", "お〜いお茶"])
+def test_wave_dash_and_tilde_spellings_name_the_same_campaign(source: str) -> None:
+    cases = [
+        Case(advertiser="伊藤園", campaign="お〜いお茶"),
+        Case(advertiser="伊藤園", campaign="発表会"),
+    ]
+    raw = prediction(
+        advertiser="伊藤園", campaign="お〜いお茶", evidence=[dict(field="caption", quote=source)]
+    )
+    assert application_prediction(raw, cases, Post(caption=source)).campaign == "お〜いお茶"
