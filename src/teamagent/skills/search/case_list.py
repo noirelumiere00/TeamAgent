@@ -252,6 +252,20 @@ def render(
             link_label = "投稿"
         if summarize is not None and ref is None:
             continue
+        title = next(
+            (
+                cleaned
+                for value in (
+                    _case_title(hit) if summarize is not None else entry.title,
+                    ref.title if ref is not None else "",
+                )
+                if (cleaned := _clean(_source_text(value), 100))
+                and cleaned not in {"案件名不明", "資料", "記録", "Slackの記録"}
+            ),
+            "",
+        )
+        if not title:
+            continue
         key = (entry.document_id or url or "", entry.title)
         if ref is not None and ref.drive_file_id:
             key = (ref.drive_file_id, entry.title if entry.kind == "case" else "")
@@ -285,13 +299,6 @@ def render(
             )
             if mark:
                 details = [mark + (" " + details[0] if details else ""), *details[1:]]
-            title = (
-                _clean(
-                    _source_text(_case_title(hit) if summarize is not None else entry.title), 100
-                )
-                or _clean(_source_text(ref.title), 100)
-                or "案件名不明"
-            )
             card = [f"*{title}*（{_month(entry.date)}）"]
             card.extend(f"• {detail}" for detail in details)
             if ref.kind == "drive":
@@ -332,6 +339,8 @@ def render(
             unicodedata.normalize("NFKC", key).strip(): value for key, value in points.items()
         }
         for index, card in enumerate(rendered, 1):
+            if not selected[index - 1].content.strip():
+                continue
             text = points.get(str(index), "")
             if isinstance(text, str):
                 details = _details(text)

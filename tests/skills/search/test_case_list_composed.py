@@ -2,7 +2,7 @@
 
 import json
 from dataclasses import replace
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -26,6 +26,104 @@ def hit(index, *, industry="飲料", score=0.9, **meta):
         score=score,
         metadata={**original.metadata, "cls_industry": industry, **meta},
     )
+
+
+@pytest.mark.parametrize("fanout_enabled", [False, True])
+@pytest.mark.parametrize("counted", [False, True])
+@pytest.mark.parametrize("fill", [False, True])
+def test_thread_attachments_only_use_own_file_points_and_skip_untitled(
+    monkeypatch, fanout_enabled, counted, fill
+):
+    monkeypatch.setenv("USE_SEARCH_FANOUT", str(int(fanout_enabled)))
+    post = "https://example.slack.com/archives/C0SHARED/p1784424000000001"
+    points = "架空電力様は視聴回数678万8536回。\n検索数19pt上昇。"
+    files = [
+        {
+            "id": f"F0FILE{i}",
+            "name": f"飲料施策{i}.pdf",
+            "permalink": f"https://example.slack.com/files/U0OWNER/F0FILE{i}/report.pdf",
+        }
+        for i in range(1, 4)
+    ]
+    reader = MagicMock()
+    reader.message_files = AsyncMock(return_value=files)
+    reader.file_info = AsyncMock(side_effect=lambda fid: next(f for f in files if f["id"] == fid))
+    monkeypatch.setattr(material_files, "file_reader", lambda *a, **kw: reader)
+    monkeypatch.setattr(
+        material_files, "_drive_reader", MagicMock(side_effect=AssertionError("no real Drive"))
+    )
+    shared = replace(
+        hit(10, source_type="slack", source_uri=post, case_effect=points), content=points
+    )
+    imported = replace(
+        hit(
+            11,
+            title=files[0]["name"],
+            source_type="other",
+            source_uri=files[0]["permalink"],
+            external_id=files[0]["id"],
+            files=files,
+        ),
+        content=points,
+    )
+    untitled = hit(12, title="", source_type="slack", source_uri=post.replace("000001", "000002"))
+    hits = [shared, imported, untitled, *([hit(4), hit(5)] if fill else [])]
+    # 題名なしの投稿は添付も持たない。同じスレッドの3資料とは別候補。
+    reader.message_files.side_effect = lambda channel, ts: files if ts.endswith("000001") else []
+    skill, _ = make(hits)
+    monkeypatch.setattr(skill, "_retrieve", lambda *a, **kw: hits)
+    monkeypatch.setattr(skill, "_collect_slack_lookup", lambda *a: SlackLookup("ok", "ok"))
+    monkeypatch.setattr(fanout, "lookup_slack", lambda **kw: SlackLookup("ok", "ok"))
+    monkeypatch.setattr(skill, "_resolve_file_urls", lambda *a: {})
+    bedrock = _fake_bedrock()
+
+    def summarize(**kw):
+        inputs = json.loads(kw["messages"][0]["content"][0]["text"])
+        # 空の入力にも誤って要点を返すモデルでも、未読ファイルには表示しない。
+        return replace(
+            bedrock.converse.return_value,
+            text=json.dumps({key: row["content"] or points for key, row in inputs.items()}),
+        )
+
+    bedrock.converse.side_effect = summarize
+    skill._bedrock = bedrock
+    monkeypatch.setattr(fanout, "build_summary_client", lambda: bedrock)
+    out = skill.run(
+        SearchInput(query="飲料の事例を5件見せて" if counted else "飲料の事例を見せて"),
+        SkillContext(metadata=META),
+    )
+    cards = out.answer.split("\n\n")
+    for i, file in enumerate(files, 1):
+        card = next(card for card in cards if file["permalink"] in card)
+        assert (points.splitlines()[0] in card) == (i == 1)
+        assert (points.splitlines()[1] in card) == (i == 1)
+    assert out.answer.count(points.splitlines()[0]) == 1
+    assert "案件名不明" not in out.answer
+    assert "*資料*" not in out.answer and "*記録*" not in out.answer
+    assert post.replace("000001", "000002") not in out.answer
+    assert out.answer.count("|資料を見る>") == (5 if fill and counted else 3)
+    if fill:
+        assert "FILE4/view" in out.answer and "FILE5/view" in out.answer
+    elif counted:
+        assert "見つかったのは 3 件です。" in out.answer
+
+
+@pytest.mark.parametrize("title", ["", "案件名不明", "<https://example.test/title>"])
+def test_untitled_candidate_is_skipped_before_counting_and_next_candidates_fill(title):
+    model = MagicMock(return_value="{}")
+    refs = []
+    answer = render(
+        [hit(1, title=title), hit(2), hit(3)],
+        "飲料",
+        lambda h: None,
+        requested_count=2,
+        summarize=model,
+        displayed_refs=refs,
+    )
+    assert "案件名不明" not in answer and "FILE1/view" not in answer
+    assert [ref.drive_file_id for ref in refs] == ["FILE2", "FILE3"]
+    assert [h.chunk_id for h in model.call_args.args[0]] == [2, 3]
+    assert "見つかったのは" not in answer
 
 
 @pytest.mark.parametrize("fanout_enabled", [False, True])
