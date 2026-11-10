@@ -414,3 +414,29 @@ test('R2 count and industry are metadata; new evidence operations retain legacy 
     const p = setup({query}); await p.prompt(); assert.equal(p.calls.length, 0);
   }
 });
+
+
+test('missing bot token warns once per run, with no caller data or search', async () => {
+  const p = setup({mode: 'shadow', env: {SLACK_BOT_TOKEN: ''}});
+  await Promise.all([p.prompt(), p.prompt()]); await p.prompt();
+  const warnings = () => p.logs.filter(line => line.includes('router skipped reason='));
+  assert.deepEqual(warnings(), ['teamagent-caller-identity: router skipped reason=no_slack_bot_token']);
+  p.inbound('message_received', undefined, 'another-run', {messageId: '1792041600.222222'});
+  await p.prompt([], {...p.ctx, runId: 'another-run'});
+  assert.equal(warnings().length, 2);
+  assert.equal(p.calls.length, 0); assert.equal(p.posts.length, 0);
+  const off = setup({mode: 'off', env: {SLACK_BOT_TOKEN: ''}}); await off.prompt();
+  assert.equal(off.logs.some(line => line.includes('router skipped reason=')), false);
+});
+
+
+test('email lookup warning is once per run even when runs share a receipt', async () => {
+  const p = setup({mode: 'shadow', email: ''});
+  await Promise.all([p.prompt(), p.prompt()]); p.end();
+  p.inbound('message_received', undefined, 'replayed-run');
+  await Promise.all([p.prompt([], {...p.ctx, runId: 'replayed-run'}),
+    p.prompt([], {...p.ctx, runId: 'replayed-run'})]);
+  assert.equal(p.logs.filter(line => line.includes('router skipped reason=email_unavailable')).length, 2);
+  assert.equal(p.logs.filter(line => line.includes('router route_version=1')).length, 1);
+  assert.equal(p.calls.length, 0);
+});

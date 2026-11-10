@@ -14,10 +14,11 @@ const response = body => ({ok: true, status: 200, headers: {get: () => null},
 
 async function setup(t, {historyError, sentAuthor = BOT, metadataWarning = false,
   startupMessages = [], beforeHistory, runtimeChannel, channels, envOverrides = {},
+  routerProfile = {email: 'owner@example.test'}, routerProfileError,
   waitForSlackReady = async () => ({connectedAt: NOW, observedAt: NOW})} = {}) {
   const state = await mkdtemp(join(tmpdir(), 'oc-catchup-plugin-'));
   t.after(() => rm(state, {recursive: true, force: true}));
-  const hooks = new Map(), services = [], tasks = [], requests = [], logs = [];
+  const hooks = new Map(), services = [], tasks = [], requests = [], logs = [], warnings = [];
   let savedMetadata;
   const config = {channels: {slack: {enabled: true, dmPolicy: 'open', allowFrom: ['*']}}};
   createCallerIdentityPlugin({env: {OPENCLAW_STATE_DIR: state,
@@ -29,6 +30,12 @@ async function setup(t, {historyError, sentAuthor = BOT, metadataWarning = false
     const target = new URL(url), method = target.pathname.split('/').at(-1);
     const body = options.body ? JSON.parse(options.body) : Object.fromEntries(target.searchParams);
     requests.push({method, body});
+    if (method === 'users.info') return response(routerProfileError
+      ? {ok: false, error: routerProfileError}
+      : {ok: true, user: {id: USER, team_id: TEAM, profile: routerProfile}});
+    if (body.method === 'tools/call') return response({jsonrpc: '2.0', id: body.id,
+      result: {content: [{type: 'text', text: JSON.stringify({found: false, answer})}]}});
+    if (body.method) return response({jsonrpc: '2.0', id: body.id, result: {}});
     if (method === 'auth.test') return response({ok: true, team_id: TEAM, user_id: BOT});
     if (method === 'conversations.list') return response({ok: true, channels: channels ?? [{id: CHANNEL, user: USER, is_im: true}]});
     if (method === 'conversations.history') {
@@ -49,7 +56,7 @@ async function setup(t, {historyError, sentAuthor = BOT, metadataWarning = false
     dispatchReplyWithBufferedBlockDispatcher: async () => ({queuedFinal: false}),
   }}}, registerService: service => services.push(service),
   registerInteractiveHandler() {}, on: (name, fn) => hooks.set(name, fn),
-  logger: {info: line => logs.push(line), warn: line => logs.push(line)}});
+  logger: {info: line => logs.push(line), warn: line => {logs.push(line); warnings.push(line);}}});
   const event = {from: `slack:${USER}`, content: '質問です', senderId: USER,
     messageId: TS, runId: 'catchup-run',
     metadata: {guildId: TEAM, to: `user:${USER}`, originatingTo: `user:${USER}`}};
@@ -61,7 +68,7 @@ async function setup(t, {historyError, sentAuthor = BOT, metadataWarning = false
     await services[0].start({config, stateDir: state});
     await Promise.all(tasks);
   }
-  return {hooks, event, ctx, requests, logs, start, tasks, state, config, services};
+  return {hooks, event, ctx, requests, logs, warnings, start, tasks, state, config, services};
 }
 
 test('plugin startup registers and starts bounded DM recovery', async t => {
@@ -508,4 +515,54 @@ for (const enabled of [false, true]) {
       assert.equal(claim.message, TS);
     }
   });
+}
+
+for (const agentFields of [
+  {channelId: 'slack', conversationId: CHANNEL, chatId: CHANNEL},
+  {channelId: USER, chatId: USER},
+]) {
+  for (const [mode, email, expectedSearches, profileError] of [
+    ['shadow', 'owner@example.test', 0],
+    ['shadow', 'other@example.test', 0],
+    ['enforce', 'owner@example.test', 1],
+    ['enforce', 'other@example.test', 0],
+    ['shadow', undefined, 0], ['enforce', undefined, 0],
+    ['shadow', '', 0, 'missing_scope'], ['enforce', '', 0, 'missing_scope'],
+  ]) {
+    test(`router production hook order: ${mode}, ${email}, ${agentFields.channelId}, ${profileError ?? 'ok'}`, async t => {
+      const p = await setup(t, {envOverrides: {TEAMAGENT_MCP_BEARER: 'fixture-bearer',
+        TEAMAGENT_INBOUND_ROUTER: mode, TEAMAGENT_INBOUND_ROUTER_ALLOWED_EMAILS: 'owner@example.test',
+        TEAMAGENT_INBOUND_ROUTER_ALLOWED_RULES: 'case_list'}, routerProfile: {email}, routerProfileError: profileError});
+      await p.start();
+      const content = '飲料の事例を5件見せて';
+      await p.hooks.get('message_received')({...p.event, content, runId: undefined}, {...p.ctx, runId: undefined});
+      assert.equal(await p.hooks.get('reply_dispatch')({...dispatchEvent(p, {BodyForCommands: content}),
+        runId: p.ctx.runId}, {}), undefined);
+      const ctx = {runId: p.ctx.runId, sessionKey: p.ctx.sessionKey, senderId: USER,
+        messageProvider: 'slack', trigger: 'user', channel: 'slack', ...agentFields};
+      await p.hooks.get('before_agent_reply')({cleanedBody: content}, ctx);
+      p.hooks.get('before_model_resolve')({prompt: content}, ctx);
+      const output = await p.hooks.get('before_prompt_build')({prompt: content, messages: []}, ctx);
+      await p.hooks.get('before_prompt_build')({prompt: content, messages: []}, ctx);
+      const signed = p.hooks.get('before_tool_call')({runId: ctx.runId, toolCallId: 'production-tool',
+        toolName: 'teamagent__search', params: {query: content}}, {...ctx, toolCallId: 'production-tool', toolName: 'teamagent__search'});
+      assert.equal(signed?.block === true, expectedSearches === 1);
+      const routes = p.logs.filter(line => line.includes('router route_version=1'));
+      assert.equal(routes.length, 1);
+      assert.match(routes[0], new RegExp(`mode=${mode}.*gate_allowed=${email === 'owner@example.test'}`));
+      const skipped = p.warnings.filter(line => line.includes('router skipped reason='));
+      assert.equal(skipped.length, email ? 0 : 1);
+      if (!email) assert.match(skipped[0], new RegExp(`reason=${profileError ? 'email_lookup_failed' : 'email_unavailable'}$`));
+      for (const line of [...routes, ...skipped]) assert.doesNotMatch(line, /飲料|事例|owner@|U123|D123|catchup-run/u);
+      const calls = p.requests.filter(request => request.body.method === 'tools/call');
+      assert.equal(calls.length, expectedSearches);
+      assert.equal(p.requests.some(request => request.method === 'chat.postMessage'), false);
+      if (expectedSearches) {
+        const context = calls[0].body.params.arguments._user_context;
+        const claim = JSON.parse(Buffer.from(context.caller_claim.split('.')[0], 'base64url'));
+        assert.equal(claim.channel, CHANNEL);
+        assert.equal(claim.message, TS);
+      } else assert.equal(output, undefined);
+    });
+  }
 }
