@@ -95,14 +95,16 @@ def test_five_vault_seventeen_slack_three_cases_keep_five_with_only_three_points
     monkeypatch.setattr(fanout, "lookup_slack", lambda **kw: slack)
     summary = MagicMock(
         return_value=(
-            json.dumps(
+            "各件の要点です。\n```json\n"
+            + json.dumps(
                 {
-                    str(
-                        i
+                    str(i).translate(
+                        str.maketrans("123", "１２３")
                     ): "商品の実演動画を配信。\n利用場面を紹介。\nより詳しく見たい資料はありますか？"
                     for i in range(1, 4)
                 }
-            ),
+            )
+            + "\n```",
             0.001,
         )
     )
@@ -127,6 +129,7 @@ def test_five_vault_seventeen_slack_three_cases_keep_five_with_only_three_points
     assert out.answer.count("FILE1/view") == 1
     assert "見つかったのは" not in out.answer
     assert out.answer.count("商品の実演動画を配信。") == 3
+    assert out.answer.count("利用場面を紹介。") == 3
     assert all(card.count("• ") <= 3 for card in cards)
     assert "ありますか" not in out.answer and "？" not in out.answer
     assert out.suggested_next is None
@@ -208,3 +211,149 @@ def test_case_points_prompt_sends_only_selected_inputs_and_returns_raw_json():
     assert inputs["1"]["title"] == "架空企画1"
     assert "最大2行" in call["system"] and "聞き返し" in call["system"]
     assert cost > 0
+
+
+@pytest.mark.parametrize("wrapper", ["{}", "```json\n{}\n```", "各件の要点です。\n{}\n以上です。"])
+@pytest.mark.parametrize("wide_keys", [False, True])
+@pytest.mark.parametrize("case_mark", [False, True])
+def test_haiku_points_are_bound_to_each_selected_card(wrapper, wide_keys, case_mark):
+    points = {
+        (
+            str(i).translate(str.maketrans("12345", "１２３４５")) if wide_keys else str(i)
+        ): f"架空施策{i}の実演動画を配信。\n架空施策{i}の利用場面を紹介。"
+        for i in range(1, 6)
+    }
+    model = MagicMock(return_value=wrapper.format(json.dumps(points, ensure_ascii=False)))
+    answer = render(
+        [hit(i, **({"case_corpus": "true"} if case_mark else {})) for i in range(1, 6)],
+        "飲料",
+        lambda h: None,
+        requested_count=5,
+        asked_industry="飲料",
+        summarize=model,
+    )
+    cards = answer.split("\n\n")
+    assert len(cards) == 5
+    for i, card in enumerate(cards, 1):
+        assert f"架空施策{i}の実演動画を配信。" in card
+        assert f"架空施策{i}の利用場面を紹介。" in card
+        assert f"FILE{i}/view" in card
+        assert card.count("• ") == 3
+        assert ("社外利用は要確認" in card) == case_mark
+    model.assert_called_once()
+
+
+@pytest.mark.parametrize(
+    ("older", "newer", "old_meta", "new_meta"),
+    [
+        ("提案_FY27_PR戦略【自社】架空社.pptx", "提案_v3_FY27_PR戦略【自社】架空社.pptx", {}, {}),
+        ("提案_架空社_瓶ストーリー施策_v2.pptx", "提案_架空社_瓶ストーリー施策_v10.pptx", {}, {}),
+        ("提案_架空社_瓶ストーリー施策.pptx", "提案_架空社_瓶ストーリー施策_最終.pptx", {}, {}),
+        ("提案_架空社_瓶ストーリー施策.pptx", "提案_架空社_瓶ストーリー施策_修正版.pptx", {}, {}),
+        (
+            "提案_260424_架空社_瓶ストーリー施策.pptx",
+            "提案_260501_架空社_瓶ストーリー施策.pptx",
+            {},
+            {},
+        ),
+        (
+            "旧資料.pptx",
+            "新資料.pptx",
+            {
+                "advertiser": "株式会社架空社",
+                "campaign": "瓶ストーリー施策",
+                "updated_at": "2026-08-01",
+            },
+            {"advertiser": "架空社", "campaign": "瓶ストーリー施策", "updated_at": "2026-09-01"},
+        ),
+    ],
+)
+def test_revision_duplicates_use_newest_and_fill_five(older, newer, old_meta, new_meta):
+    model = MagicMock(return_value="{}")
+    refs = []
+    answer = render(
+        [
+            hit(1, title=older, score=1, **old_meta),
+            *(hit(i, score=0.9 - i / 100) for i in range(3, 7)),
+            hit(2, title=newer, score=0.1, **new_meta),
+        ],
+        "飲料",
+        lambda h: None,
+        requested_count=5,
+        asked_industry="飲料",
+        summarize=model,
+        displayed_refs=refs,
+    )
+    assert [h.chunk_id for h in model.call_args.args[0]] == [2, 3, 4, 5, 6]
+    assert [ref.drive_file_id for ref in refs] == ["FILE2", "FILE3", "FILE4", "FILE5", "FILE6"]
+    assert answer.count("|資料を見る>") == 5
+    assert "見つかったのは" not in answer
+
+
+@pytest.mark.parametrize(
+    ("title", "meta", "heading"),
+    [
+        (
+            "レポート_260424ご提出v2_結果分析_架空社_瓶ストーリー施策.pptx",
+            {},
+            "架空社 瓶ストーリー施策",
+        ),
+        ("提案_v3_FY27_PR戦略【自社】架空社.pptx", {}, "FY27 PR戦略架空社"),
+        ("2026-04-24_提案_架空社_瓶ストーリー施策_最終.pdf", {}, "架空社 瓶ストーリー施策"),
+        (
+            "元資料.pptx",
+            {"advertiser": "架空社", "campaign": "瓶ストーリー施策"},
+            "架空社 瓶ストーリー施策",
+        ),
+        (
+            "元資料.pptx",
+            {"case_client": "架空社", "case_product": "瓶ストーリー施策"},
+            "架空社 瓶ストーリー施策",
+        ),
+    ],
+)
+def test_short_case_heading(title, meta, heading):
+    answer = render(
+        [hit(1, title=title, **meta)],
+        "飲料",
+        lambda h: None,
+        requested_count=1,
+        asked_industry="飲料",
+        summarize=lambda selected: "{}",
+    )
+    assert answer.startswith(f"*{heading}*（2026年")
+    assert "FILE1/view" in answer
+
+
+def test_revision_group_keeps_other_clients_campaigns_and_uses_valid_link():
+    model = MagicMock(return_value="{}")
+    answer = render(
+        [
+            hit(1, title="提案_架空社_瓶施策.pptx", advertiser="架空社", campaign="瓶施策"),
+            hit(
+                2,
+                title="提案_架空社_瓶施策_v3.pptx",
+                advertiser="架空社",
+                campaign="瓶施策",
+                source_uri="",
+            ),
+            hit(3, advertiser="架空別社", campaign="瓶施策"),
+            hit(4, advertiser="架空社", campaign="別施策"),
+        ],
+        "飲料",
+        lambda h: None,
+        requested_count=5,
+        asked_industry="飲料",
+        summarize=model,
+    )
+    assert [h.chunk_id for h in model.call_args.args[0]] == [1, 3, 4]
+    assert "見つかったのは 3 件です。" in answer
+
+
+def test_titles_that_shorten_to_nothing_are_not_merged() -> None:
+    from teamagent.adapters.pgvector_client import SearchHit
+    from teamagent.skills.search.case_list import _case_key
+
+    a = SearchHit(chunk_id=1, content="", score=0.9, metadata={"title": "提案書.pdf"})
+    b = SearchHit(chunk_id=2, content="", score=0.9, metadata={"title": "【自社】提案書_v2.pptx"})
+    assert _case_key(a) != _case_key(b)
