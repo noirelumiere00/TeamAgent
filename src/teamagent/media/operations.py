@@ -645,6 +645,11 @@ def _post_row(
         "comments": comments,
         "shares": shares,
         "saves": saves,
+        "missing_fields": [
+            f"stats.{key}"
+            for key in ("playCount", "diggCount", "commentCount", "shareCount", "collectCount")
+            if stats.get(key) is None or f"stats.{key}" in (video.get("missingFields") or [])
+        ],
         "eg_rate": round((likes + comments + shares + saves) / max(plays, 1) * 100, 6),
         "save_rate": round(saves / max(plays, 1) * 100, 6),
         "create_time": int(video.get("createTime") or 0),

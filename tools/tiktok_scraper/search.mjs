@@ -275,6 +275,8 @@ function normalizeVideo(v, edition) {
       ? { title: v.music.title || "", authorName: v.music.authorName || "", original: !!v.music.original }
       : null,
   };
+  normalized.missingFields = Object.keys(normalized.stats)
+    .filter((key) => stats[key] == null).map((key) => `stats.${key}`);
   if (edition === "sales25") {
     const count = (value) => {
       if (typeof value === "string" && /^\d+$/.test(value)) value = Number(value);

@@ -1858,7 +1858,11 @@ async def dispatch_tool(
     if isinstance(data, dict) and data.get("case_state_answer") is None:
         from teamagent.mcp_gateway.payload_offload import maybe_offload
 
+        # 機械生成した上位動画の一覧は長文退避でも欠落させない。
+        tiktok_summary = data.get("slack_summary") if name == "tiktok_search" else None
         data = await asyncio.to_thread(maybe_offload, name, data, request_id=ctx.request_id)
+        if tiktok_summary is not None:
+            data["slack_summary"] = tiktok_summary
     if name == SEARCH_TOOL_NAME and isinstance(data, dict):
         _inject_search_web_links(data)
     return [TextContent(type="text", text=json.dumps(data, ensure_ascii=False, default=str))]
