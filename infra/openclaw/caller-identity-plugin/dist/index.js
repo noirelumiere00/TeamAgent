@@ -2971,7 +2971,7 @@ export function classifyInboundRoute(text) {
       (/メール|予定|カレンダー|翻訳|要約して|資料も送|資料を作/u.test(own) ||
        ["slack", "document_operation", "clientkarte"].includes(intent)));
     return {intent, requires_internal_evidence: evidence, requested_output: output, rule_id: rule,
-      // Classification eligibility only; the existing execution gate is changed in R3.
+      // Only these rules are eligible for pre-model execution.
       fallback: !evidence || secondary || !["case_list", "internal_status", "internal_metrics"].includes(rule),
       ...(secondary ? {secondary_intent: "existing_operation"} : {}),
       ...(count ? {requested_count: Number(count[1])} : {}), ...(industry ? {industry} : {})};
@@ -3118,6 +3118,10 @@ export function createCallerIdentityPlugin({
     mcpBearer !== null && slackBotToken !== null && typeof fetchFn === "function";
   const inboundRouterMode = String(env.TEAMAGENT_INBOUND_ROUTER ?? "off").trim();
   if (!["off", "shadow", "enforce"].includes(inboundRouterMode)) fail("invalid TEAMAGENT_INBOUND_ROUTER");
+  const inboundRouterAllowedEmails = new Set(String(env.TEAMAGENT_INBOUND_ROUTER_ALLOWED_EMAILS ?? "")
+    .split(",").map(value => value.trim().toLowerCase()).filter(Boolean));
+  const inboundRouterAllowedRules = new Set(String(env.TEAMAGENT_INBOUND_ROUTER_ALLOWED_RULES ?? "")
+    .split(",").map(value => value.trim()).filter(Boolean));
   if (String(env.TEAMAGENT_ROUTE_CLASSIFIER ?? "0").trim() !== "0")
     fail("TEAMAGENT_ROUTE_CLASSIFIER requires PR6; keep 0");
   const searchDirectKnownKinds = new Set(["not_found", "comparison", "list_fast", "video_metrics", "case_cards"]);
@@ -6580,11 +6584,11 @@ export function createCallerIdentityPlugin({
   }
 
   function rememberSearchDelivery(event, ctx, logger) {
-    if (!searchDirectAllowlist.size || event?.error ||
+    if (event?.error ||
         !["search", "teamagent__search", "knowledge_deliver", "teamagent__knowledge_deliver"].includes(event?.toolName)) return;
     const runId = canonicalInvocationId(ctx?.runId);
     if (!runId || (event?.runId && event.runId !== runId) || !connectIngressByRun.has(runId) ||
-        (!searchDirectEnabled && !searchDirectByRun.get(runId)?.preModel)) return;
+        ((!searchDirectEnabled || !searchDirectAllowlist.size) && !searchDirectByRun.get(runId)?.preModel)) return;
     const data = searchResultData(event.result);
     const pdfReceipt = ["knowledge_deliver", "teamagent__knowledge_deliver"].includes(event?.toolName) &&
       deliveredPdfBatch(data);
@@ -6619,7 +6623,7 @@ export function createCallerIdentityPlugin({
   }
 
   async function prepareInboundRoute(event, ctx, logger) {
-    if (inboundRouterMode === "off" || !slackBotToken || !searchDirectAllowlist.size) return;
+    if (inboundRouterMode === "off" || !slackBotToken) return;
     const runId = canonicalInvocationId(ctx?.runId);
     if (!runId || (event?.runId && event.runId !== runId)) return;
     const ingress = ingressByRun.get(runId);
@@ -6641,8 +6645,7 @@ export function createCallerIdentityPlugin({
         } catch { return; }
         const email = profile.user?.profile?.email;
         if (profile.user?.id !== ingress.senderId || profile.user?.team_id !== ingress.teamId ||
-            typeof email !== "string" || !email.trim() || (!searchDirectAllowlist.has("*") &&
-            !searchDirectAllowlist.has(email.trim().toLowerCase()))) return;
+            typeof email !== "string" || !email.trim()) return;
         const conversationKey = JSON.stringify([ingress.teamId, ingress.senderId, ingress.sessionKey, ingress.threadTs]);
         const previous = routerContextByConversation.get(conversationKey)?.queries ?? [];
         entry.context = previous.slice(-3).join("\n").slice(0, 3072);
@@ -6651,11 +6654,14 @@ export function createCallerIdentityPlugin({
         const routeStarted = now();
         const route = classifyInboundRoute(saved.query);
         entry.route = route;
+        const gateAllowed = (inboundRouterAllowedEmails.has("*") ||
+          inboundRouterAllowedEmails.has(email.trim().toLowerCase())) &&
+          inboundRouterAllowedRules.has(route.rule_id) && route.fallback === false;
         emitPluginLog(logger, "info", `router route_version=1 mode=${inboundRouterMode}` +
-          ` rule_id=${route.rule_id} intent=${route.intent}` +
+          ` rule_id=${route.rule_id} intent=${route.intent} gate_allowed=${gateAllowed}` +
           ` requires_internal_evidence=${route.requires_internal_evidence} requested_output=${route.requested_output}` +
           ` route_ms=${Math.max(0, now() - routeStarted)}`);
-        if (inboundRouterMode !== "enforce" || !route.requires_internal_evidence ||
+        if (inboundRouterMode !== "enforce" || !gateAllowed || !route.requires_internal_evidence ||
             route.requested_output === "file" || route.secondary_intent || ingress.connectRequest || ingress.hasMedia || !mcpBearer) return;
         entry.preModel = true;
         searchDirectByRun.set(runId, entry);

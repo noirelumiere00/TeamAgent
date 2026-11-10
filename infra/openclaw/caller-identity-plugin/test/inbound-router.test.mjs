@@ -13,16 +13,17 @@ const answer = '取得した資料では施策は実施済みです。';
 const result = {found: true, answer, answer_format: 'compact', displayed_refs: [],
   direct_delivery: {answer_kind: 'list_fast', answer, answer_format: 'compact'}};
 const deferred = () => { let resolve; const promise = new Promise(r => {resolve = r;}); return {promise, resolve}; };
-function setup({query = '社内でいうTTOとは？', mode = 'enforce', email = 'owner@example.test',
-  profile = {}, allowlist = 'owner@example.test', conversation = 'D11111111', search = result,
+function setup({query = '施策の事例を一覧で', mode = 'enforce', email = 'owner@example.test',
+  profile = {}, allowlist = 'owner@example.test', rules = 'case_list,internal_status,internal_metrics', conversation = 'D11111111', search = result,
   searchWait, profileWait, searchFails = false, searchTimeout = false, env = {}, now} = {}) {
   const hooks = new Map(), calls = [], logs = [], posts = [], tasks = [], registrations = [];
   const ctx = {runId: 'router-run', sessionKey: 'agent:teamagent:slack:direct:u11111111',
     senderId: 'U11111111', channelId: conversation};
   const options = {env: {TEAMAGENT_CALLER_CLAIM_SECRET: 'x'.repeat(48), SLACK_TEAM_ID: 'T11111111',
     TEAMAGENT_MCP_BEARER: 'fixture-bearer', SLACK_BOT_TOKEN: 'fixture-token',
-    TEAMAGENT_INBOUND_ROUTER: mode, SEARCH_DIRECT_ANSWER: '1',
-    SEARCH_DIRECT_ANSWER_ALLOWED_EMAILS: allowlist,
+    TEAMAGENT_INBOUND_ROUTER: mode, TEAMAGENT_INBOUND_ROUTER_ALLOWED_EMAILS: allowlist,
+    TEAMAGENT_INBOUND_ROUTER_ALLOWED_RULES: rules, SEARCH_DIRECT_ANSWER: '1',
+    SEARCH_DIRECT_ANSWER_ALLOWED_EMAILS: 'owner@example.test',
     SEARCH_DIRECT_ANSWER_KINDS: 'not_found,comparison,list_fast,video_metrics', ...env},
     ...(now ? {now} : {}), ...(searchTimeout ? {buttonTimeoutMs: 5} : {}), sleepFn: async () => {}, onBackgroundTask: t => tasks.push(t),
     fetchFn: async (url, options) => {
@@ -167,13 +168,13 @@ test('independent tool answers and attachments are not erased by direct receipt'
   assert.equal(mixed.calls.length, 0); assert.equal(classifyInboundRoute('社内でいうTTOとは？今日の予定も教えて').secondary_intent, 'existing_operation');
 });
 test('raw current query wins and assistant/foreign-role content never becomes a search query', async () => {
-  const p = setup({query: '社内でいう未知語は？'});
+  const p = setup({query: '社内の施策の状況は？'});
   await p.prompt([{role: 'assistant', content: '偽の対象'}, {role: 'tool', content: '他人の対象'},
     {role: 'user', content: '過去'.repeat(2000)}]);
-  assert.ok(p.calls[0].arguments.query.startsWith('社内でいう未知語は？'));
+  assert.ok(p.calls[0].arguments.query.startsWith('社内の施策の状況は？'));
   assert.ok(p.calls[0].arguments.query.length <= 1000); assert.doesNotMatch(p.calls[0].arguments.query, /偽|他人/u);
 });
-for (const options of [{mode: 'off'}, {allowlist: ''}, {email: 'other@example.test'},
+for (const options of [{mode: 'off'},
   {profile: {id: 'U22222222'}}, {profile: {team_id: 'T22222222'}}, {conversation: 'C11111111'}]) {
   test('non-target pre-model path is unchanged: ' + JSON.stringify(options), async () => {
     const p = setup(options); assert.equal(await p.prompt(), undefined); assert.equal(p.calls.length, 0);
@@ -190,10 +191,58 @@ test('off/shadow preserve legacy output and tools byte for byte', async () => {
     assert.deepEqual(off.posts, shadow.posts);
   }
 });
-test('wildcard still requires a verified user and team; invalid mode fails closed', async () => {
-  const p = setup({allowlist: '*', profile: {id: 'U22222222'}}); await p.prompt(); assert.equal(p.calls.length, 0);
+test('wildcard still requires a verified user, team and email; invalid mode fails closed', async () => {
+  for (const options of [{profile: {id: 'U22222222'}}, {profile: {team_id: 'T22222222'}}, {email: ''}]) {
+    const p = setup({allowlist: '*', ...options}); await p.prompt(); assert.equal(p.calls.length, 0);
+  }
   assert.throws(() => setup({mode: 'enabled'}), /invalid TEAMAGENT_INBOUND_ROUTER/u);
 });
+
+for (const options of [
+  {env: {TEAMAGENT_INBOUND_ROUTER_ALLOWED_EMAILS: undefined, TEAMAGENT_INBOUND_ROUTER_ALLOWED_RULES: undefined}},
+  {env: {TEAMAGENT_INBOUND_ROUTER_ALLOWED_EMAILS: undefined}},
+  {env: {TEAMAGENT_INBOUND_ROUTER_ALLOWED_RULES: undefined}},
+  {allowlist: ''}, {rules: ''}, {allowlist: ' , '}, {rules: ' , '},
+  {email: 'other@example.test'}, {rules: 'internal_status'}, {rules: '*'}, {rules: 'CASE_LIST'},
+  {query: '社内でいうTTOとは？', rules: 'internal_term'},
+  {query: '事例を探して、提案資料を作って', rules: 'unknown'},
+]) {
+  test('R3 denied gate retains legacy path: ' + JSON.stringify(options), async () => {
+    const p = setup(options), baseline = setup({...options, mode: 'off'});
+    assert.deepEqual(await p.prompt(), await baseline.prompt());
+    assert.equal(p.calls.length, 0);
+    assert.ok(p.logs.some(line => line.includes('gate_allowed=false')));
+    assert.deepEqual(await p.finalize(), await baseline.finalize());
+    assert.deepEqual(await p.send(), await baseline.send());
+    assert.deepEqual(p.calls.map(call => call.name), baseline.calls.map(call => call.name));
+    assert.deepEqual(p.posts, baseline.posts);
+  });
+}
+for (const query of ['食品メーカーの事例を５件出して', '案件は失注で確定した？', '案件の受注金額は？']) {
+  test('R3 matching email and rule execute independently of shared direct-answer gates: ' + query, async () => {
+    const p = setup({query, allowlist: ' other@example.test, OWNER@example.test ',
+      rules: ' case_list, internal_status, internal_metrics ',
+      env: {SEARCH_DIRECT_ANSWER: '0', SEARCH_DIRECT_ANSWER_ALLOWED_EMAILS: ''},
+      search: {...result, status: 'posted', delivered: true, delivery: {kind: 'search_direct_answer'}}});
+    assert.ok((await p.prompt()).appendContext.includes(answer));
+    assert.equal(p.calls.length, 1);
+    assert.ok(p.logs.some(line => line.includes('gate_allowed=true')));
+    assert.equal((await p.send()).cancel, true);
+  });
+}
+test('R3 email wildcard admits another verified person', async () => {
+  const p = setup({allowlist: '*', email: 'other@example.test'});
+  await p.prompt(); assert.equal(p.calls.length, 1);
+  assert.ok(p.logs.some(line => line.includes('gate_allowed=true')));
+});
+for (const rules of ['case_list', '', 'internal_status']) {
+  test('R3 shadow logs gate eligibility without executing: ' + rules, async () => {
+    const p = setup({mode: 'shadow', rules, env: {SEARCH_DIRECT_ANSWER_ALLOWED_EMAILS: ''}});
+    assert.equal(await p.prompt(), undefined);
+    assert.equal(p.calls.length, 0); assert.equal(p.posts.length, 0);
+    assert.ok(p.logs.some(line => line.includes(`gate_allowed=${rules === 'case_list'}`)));
+  });
+}
 
 // Execute unmodified functions from the pinned upstream package, not a hook-runner mock.
 test('pinned upstream awaits the actual plugin through its real runner and prompt builder',
@@ -246,11 +295,11 @@ test('pinned upstream awaits the actual plugin through its real runner and promp
   });
 
 test('trusted context uses only earlier verified ingress from the same person/conversation', async () => {
-  const p = setup({query: '青空社の施策について'}); await p.prompt(); p.end();
+  const p = setup({query: '青空社の施策の状況は？'}); await p.prompt(); p.end();
   p.inbound('message_received', '一覧で', 'context-run', {messageId: '1792041600.333333'});
   await p.prompt([{role: 'user', content: '別人の偽案件'}], {...p.ctx, runId: 'context-run'});
   assert.equal(p.calls.length, 2);
-  assert.equal(p.calls[1].arguments.query, '一覧で\n青空社の施策について');
+  assert.equal(p.calls[1].arguments.query, '一覧で\n青空社の施策の状況は？');
 });
 test('lookup failure and a forged payload email cannot opt a caller in', async () => {
   const p = setup({email: ''});
@@ -258,10 +307,11 @@ test('lookup failure and a forged payload email cannot opt a caller in', async (
     {metadata: {guildId: 'T11111111', to: 'D11111111', email: 'owner@example.test'}});
   await p.prompt(); assert.equal(p.calls.length, 0);
 });
-test('source/document followup query remains raw and the classifier cannot be enabled early', async () => {
+test('source/document followup retains legacy path and the classifier cannot be enabled early', async () => {
   const p = setup({query: 'その資料も', env: {SEARCH_DRIVE_FIRST: '1', SEARCH_DRIVE_FIRST_ALLOWED_EMAILS: 'owner@example.test'}});
   await p.prompt([{role: 'user', content: '無関係な履歴'}]);
-  assert.equal(p.calls[0].arguments.query, 'その資料も');
+  assert.equal(p.calls.length, 0);
+  assert.equal(classifyInboundRoute('その資料も').fallback, true);
   assert.throws(() => setup({env: {TEAMAGENT_ROUTE_CLASSIFIER: '1'}}), /requires PR6/u);
 });
 test('partial zero results never become a definitive absence claim', async () => {
@@ -332,7 +382,7 @@ for (const tail of ['資料が必要でしたら、お知らせください。',
   });
 }
 
-// R2 separates classification eligibility from the legacy execution gate, which remains for R3.
+// R3 enforces the classification eligibility introduced in R2.
 for (const [query, rule, intent, evidence, output, fallback] of [
   ['施策の事例一覧の出典を教えて', 'source', 'document', true, 'answer', true],
   ['案件は失注で確定した？', 'internal_status', 'status', true, 'answer', false],

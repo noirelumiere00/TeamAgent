@@ -1095,6 +1095,8 @@ def test_entrypoint_is_readonly_secret_safe_and_environment_allowlisted() -> Non
         "TEAMAGENT_ANSWER_FEEDBACK",
         "TEAMAGENT_FIRST_MESSAGE_RESTORE",
         "TEAMAGENT_INBOUND_ROUTER",
+        "TEAMAGENT_INBOUND_ROUTER_ALLOWED_EMAILS",
+        "TEAMAGENT_INBOUND_ROUTER_ALLOWED_RULES",
         "TEAMAGENT_ROUTE_CLASSIFIER",
         "SEARCH_DIRECT_ANSWER",
         "SEARCH_DIRECT_ANSWER_ALLOWED_EMAILS",
@@ -1151,6 +1153,8 @@ process.stdout.write(child.stdout);
         env={
             "PATH": os.environ["PATH"],
             "TEAMAGENT_INBOUND_ROUTER": "shadow",
+            "TEAMAGENT_INBOUND_ROUTER_ALLOWED_EMAILS": allowed,
+            "TEAMAGENT_INBOUND_ROUTER_ALLOWED_RULES": "case_list,internal_status",
             "TEAMAGENT_ROUTE_CLASSIFIER": "0",
             "SEARCH_DIRECT_ANSWER": flag,
             "SEARCH_DIRECT_ANSWER_ALLOWED_EMAILS": allowed,
@@ -1170,6 +1174,8 @@ process.stdout.write(child.stdout);
     assert result.returncode == 0, result.stderr
     child = json.loads(result.stdout)
     assert child["TEAMAGENT_INBOUND_ROUTER"] == "shadow"
+    assert child["TEAMAGENT_INBOUND_ROUTER_ALLOWED_EMAILS"] == allowed
+    assert child["TEAMAGENT_INBOUND_ROUTER_ALLOWED_RULES"] == "case_list,internal_status"
     assert child["TEAMAGENT_ROUTE_CLASSIFIER"] == "0"
     assert child["SEARCH_DIRECT_ANSWER"] == flag
     assert child["SEARCH_DIRECT_ANSWER_ALLOWED_EMAILS"] == allowed
@@ -1545,6 +1551,16 @@ def _render_task(task: dict[str, Any], image: str) -> subprocess.CompletedProces
         [{"name": "TEAMAGENT_INBOUND_ROUTER", "value": "off"}],
         [{"name": "TEAMAGENT_INBOUND_ROUTER", "value": "shadow"}],
         [{"name": "TEAMAGENT_INBOUND_ROUTER", "value": "enforce"}],
+        [{"name": "TEAMAGENT_INBOUND_ROUTER_ALLOWED_EMAILS", "value": ""}],
+        [{"name": "TEAMAGENT_INBOUND_ROUTER_ALLOWED_EMAILS", "value": "*"}],
+        [
+            {
+                "name": "TEAMAGENT_INBOUND_ROUTER_ALLOWED_EMAILS",
+                "value": "me@example.test,other@example.test",
+            }
+        ],
+        [{"name": "TEAMAGENT_INBOUND_ROUTER_ALLOWED_RULES", "value": ""}],
+        [{"name": "TEAMAGENT_INBOUND_ROUTER_ALLOWED_RULES", "value": "case_list,internal_status"}],
         [{"name": "TEAMAGENT_ROUTE_CLASSIFIER", "value": "0"}],
         [{"name": "SEARCH_DIRECT_ANSWER", "value": "1"}],
         [{"name": "SEARCH_DIRECT_ANSWER_KINDS", "value": "not_found"}],
@@ -1594,6 +1610,8 @@ def test_task_hardening_preserves_legacy_inputs_and_optional_search_delivery_inp
     "name",
     [
         "TEAMAGENT_INBOUND_ROUTER",
+        "TEAMAGENT_INBOUND_ROUTER_ALLOWED_EMAILS",
+        "TEAMAGENT_INBOUND_ROUTER_ALLOWED_RULES",
         "TEAMAGENT_ROUTE_CLASSIFIER",
         "SEARCH_DIRECT_ANSWER",
         "SEARCH_DIRECT_ANSWER_ALLOWED_EMAILS",
