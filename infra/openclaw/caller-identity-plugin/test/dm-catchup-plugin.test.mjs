@@ -552,7 +552,7 @@ for (const agentFields of [
       assert.match(routes[0], new RegExp(`mode=${mode}.*gate_allowed=${email === 'owner@example.test'}`));
       const skipped = p.warnings.filter(line => line.includes('router skipped reason='));
       assert.equal(skipped.length, email ? 0 : 1);
-      if (!email) assert.match(skipped[0], new RegExp(`reason=${profileError ? 'email_lookup_failed' : 'email_unavailable'}$`));
+      if (!email) assert.match(skipped[0], new RegExp(`reason=${profileError ? `email_lookup_failed code=slack_api_${profileError}` : 'email_unavailable'}$`));
       for (const line of [...routes, ...skipped]) assert.doesNotMatch(line, /飲料|事例|owner@|U123|D123|catchup-run/u);
       const calls = p.requests.filter(request => request.body.method === 'tools/call');
       assert.equal(calls.length, expectedSearches);
