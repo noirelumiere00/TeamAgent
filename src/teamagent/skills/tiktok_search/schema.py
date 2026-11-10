@@ -50,6 +50,7 @@ class TikTokVideoOut(BaseModel):
     duration: int
     hashtags: list[str] = Field(default_factory=list)
     cover_url: str = ""  # サムネイル (HTML レポート用)
+    missing_fields: list[str] = Field(default_factory=list)
 
 
 class TikTokSearchOutput(BaseModel):
@@ -59,6 +60,7 @@ class TikTokSearchOutput(BaseModel):
     search_type: str  # keyword | hashtag | keyword(fallback)
     count: int
     videos: list[TikTokVideoOut] = Field(default_factory=list)
+    slack_summary: str = ""
     analysis: str | None = Field(
         default=None, description="Gemini による上位動画の横断分析 (analyze=true のとき)"
     )
