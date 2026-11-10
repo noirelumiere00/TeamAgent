@@ -6661,7 +6661,11 @@ export function createCallerIdentityPlugin({
         try {
           profile = await callSlackApiOnce({fetchFn, botToken: slackBotToken, method: "users.info",
             body: {user: ingress.senderId}, timeoutMs: SLACK_API_TIMEOUT_MS});
-        } catch { entry.skipReason = "email_lookup_failed"; }
+        } catch (error) {
+          // Slack の失敗の種類（slack_api_<code>・slack_timeout 等）だけを残す。値や本文は出さない。
+          const code = error instanceof ConnectPathError ? error.code : "unexpected";
+          entry.skipReason = `email_lookup_failed code=${String(code).slice(0, 64)}`;
+        }
         if (profile && (profile.user?.id !== ingress.senderId || profile.user?.team_id !== ingress.teamId)) {
           entry.skipReason = "identity_mismatch";
           return;
