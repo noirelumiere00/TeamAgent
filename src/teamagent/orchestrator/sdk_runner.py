@@ -29,6 +29,7 @@ from typing import Any
 import structlog
 from anthropic import AsyncAnthropicBedrock
 
+from teamagent.adapters.bedrock_client import resolve_bedrock_model_id
 from teamagent.skills.base import ORCHESTRATED_METADATA_KEY, SkillContext
 
 from .faithfulness import extract_chunk_ids_from_tool_json
@@ -372,6 +373,7 @@ async def run_sdk_agent(
         "cache_read_input_tokens": 0,
         "cache_creation_input_tokens": 0,
     }
+    model = resolve_bedrock_model_id(model, caller=f"{__name__}.run_sdk_agent")
     client = AsyncAnthropicBedrock()
     try:
         for turn in range(max_turns):

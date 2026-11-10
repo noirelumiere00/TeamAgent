@@ -311,3 +311,39 @@ def test_python_bedrock_loop_executes_tools_without_cli(
         and message["content"][0]["type"] == "tool_result"
         for message in final_messages
     )
+
+
+@pytest.mark.parametrize("prefix", ["jp", "us", "global"])
+@pytest.mark.parametrize("generation", ["sonnet-4-6", "SoNnEt-5-5", "haiku-4-5-20251001-v1:0"])
+def test_sdk_bedrock_model_ban(
+    monkeypatch: pytest.MonkeyPatch, prefix: str, generation: str
+) -> None:
+    from teamagent.adapters.bedrock_client import DEFAULT_MODEL_ID
+
+    monkeypatch.setenv("BEDROCK_MODEL_ID", DEFAULT_MODEL_ID)
+    model = f"{prefix}.anthropic.claude-{generation}"
+    expected = DEFAULT_MODEL_ID if "sonnet" in model.lower() else model
+    client = _FakeBedrock(
+        [
+            SimpleNamespace(
+                content=[_Block("text", text="完了")],
+                usage=_Usage(100, 10),
+                model=expected,
+                stop_reason="end_turn",
+            )
+        ]
+    )
+    monkeypatch.setattr("teamagent.orchestrator.sdk_runner.AsyncAnthropicBedrock", lambda: client)
+    result = asyncio.run(
+        run_sdk_agent(
+            goal="調べて",
+            request_id="model-ban",
+            specs=[],
+            model=model,
+            system_prompt="system",
+        )
+    )
+    assert result.ok
+    assert client.messages.calls[0]["model"] == expected
+    assert result.cost_records[0].model == expected
+    assert client.closed

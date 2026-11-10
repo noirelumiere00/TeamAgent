@@ -525,7 +525,6 @@ def test_outer_loop_model_fallback_is_pinned() -> None:
     assert provider["auth"] == "aws-sdk"
     assert [model["id"] for model in provider["models"]] == [
         "jp.anthropic.claude-haiku-4-5-20251001-v1:0",
-        "jp.anthropic.claude-sonnet-4-6",
     ]
     assert "model" not in config["agents"]["defaults"]
     assert [
@@ -536,7 +535,6 @@ def test_outer_loop_model_fallback_is_pinned() -> None:
             True,
             {
                 "primary": "amazon-bedrock/jp.anthropic.claude-haiku-4-5-20251001-v1:0",
-                "fallbacks": ["amazon-bedrock/jp.anthropic.claude-sonnet-4-6"],
             },
         ),
     ]

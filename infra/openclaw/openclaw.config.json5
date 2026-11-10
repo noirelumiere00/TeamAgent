@@ -50,10 +50,9 @@
         // §D: 外側ループ=Haiku4.5（ツール判断＋最終整形＝速い/安い）。重い合成は MCP 境界内(L2)に任せる。
         // §O: 公式は provider/model 記法（amazon-bedrock/ プレフィックス必須）。
         // §P: ID は list-inference-profiles の実測値で確定（2026-06-11・account 718959508629/東京）。
-        // 2026.7.1 AgentModelSchema: agent 個別の fallbacks で障害時だけ Sonnet へ（東京の JP profile）。
+        // 2026-11-10: Sonnet は全面禁止のため、障害時の Sonnet への切り替え（fallbacks）は持たない。
         model: {
           primary: "amazon-bedrock/jp.anthropic.claude-haiku-4-5-20251001-v1:0",
-          fallbacks: ["amazon-bedrock/jp.anthropic.claude-sonnet-4-6"],
         },
         identity: { name: "Aico", emoji: "🧭" },
         // §S: skipBootstrap は agents.list[] に無い（agents.defaults 専用）ため削除。
@@ -401,14 +400,6 @@
             id: "jp.anthropic.claude-haiku-4-5-20251001-v1:0", // §D: 外側ループ既定（速い・安い）
             name: "Claude Haiku 4.5 (Bedrock Tokyo)",
             reasoning: false,
-            input: ["text"],
-            contextWindow: 200000,
-            maxTokens: 8192,
-          },
-          {
-            id: "jp.anthropic.claude-sonnet-4-6", // 重い処理用（任意・通常は MCP 側 L2 が使用）
-            name: "Claude Sonnet 4.6 (Bedrock Tokyo)",
-            reasoning: true,
             input: ["text"],
             contextWindow: 200000,
             maxTokens: 8192,
