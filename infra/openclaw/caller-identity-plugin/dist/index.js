@@ -3247,6 +3247,7 @@ export function createCallerIdentityPlugin({
   const searchDirectByRun = new Map();
   const searchQueryByPending = new Map();
   const routerByMessage = new Map();
+  const routerSkippedByRun = new Map();
   const routerContextByConversation = new Map();
   const revisedRepliesByRun = new Map();
   function evidenceSessionKey(runId) {
@@ -3720,6 +3721,7 @@ export function createCallerIdentityPlugin({
       searchDirectByRun,
       searchQueryByPending,
       routerByMessage,
+      routerSkippedByRun,
       routerContextByConversation,
       revisedRepliesByRun,
       toolCallsByRun,
@@ -6622,15 +6624,32 @@ export function createCallerIdentityPlugin({
       .map(text => text.slice(0, 1024)).filter(Boolean).join("\n").slice(0, 3072);
   }
 
+  function warnRouterSkipped(runId, reason, logger) {
+    if (routerSkippedByRun.has(runId)) return;
+    routerSkippedByRun.set(runId, {updatedAtMs: now()});
+    emitPluginLog(logger, "warn", `router skipped reason=${reason}`);
+  }
+
   async function prepareInboundRoute(event, ctx, logger) {
-    if (inboundRouterMode === "off" || !slackBotToken) return;
+    if (inboundRouterMode === "off") return;
     const runId = canonicalInvocationId(ctx?.runId);
     if (!runId || (event?.runId && event.runId !== runId)) return;
     const ingress = ingressByRun.get(runId);
-    if (!ingress || ingress.ingressKind !== "message" ||
+    if (!ingress) {
+      warnRouterSkipped(runId, "no_ingress", logger);
+      return;
+    }
+    if (ingress.ingressKind !== "message" ||
         (!SLACK_DM_CHANNEL_RE.test(ingress.channelId) && ingress.channelId !== `DM:${ingress.senderId}`)) return;
     const saved = searchQueryByPending.get(ingress.pendingKey);
-    if (!saved?.query) return;
+    if (!saved?.query) {
+      warnRouterSkipped(runId, "no_saved_query", logger);
+      return;
+    }
+    if (!slackBotToken) {
+      warnRouterSkipped(runId, "no_slack_bot_token", logger);
+      return;
+    }
     // A person's canonical 1:1 DM has one identity even when hooks use user:/D aliases.
     const receiptKey = JSON.stringify([ingress.teamId, ingress.senderId, "dm", ingress.threadTs, ingress.messageId]);
     let entry = routerByMessage.get(receiptKey);
@@ -6642,20 +6661,27 @@ export function createCallerIdentityPlugin({
         try {
           profile = await callSlackApiOnce({fetchFn, botToken: slackBotToken, method: "users.info",
             body: {user: ingress.senderId}, timeoutMs: SLACK_API_TIMEOUT_MS});
-        } catch { return; }
-        const email = profile.user?.profile?.email;
-        if (profile.user?.id !== ingress.senderId || profile.user?.team_id !== ingress.teamId ||
-            typeof email !== "string" || !email.trim()) return;
-        const conversationKey = JSON.stringify([ingress.teamId, ingress.senderId, ingress.sessionKey, ingress.threadTs]);
-        const previous = routerContextByConversation.get(conversationKey)?.queries ?? [];
-        entry.context = previous.slice(-3).join("\n").slice(0, 3072);
-        routerContextByConversation.delete(conversationKey);
-        routerContextByConversation.set(conversationKey, {updatedAtMs: now(), queries: [...previous.slice(-2), saved.query.slice(0, 1024)]});
+        } catch { entry.skipReason = "email_lookup_failed"; }
+        if (profile && (profile.user?.id !== ingress.senderId || profile.user?.team_id !== ingress.teamId)) {
+          entry.skipReason = "identity_mismatch";
+          return;
+        }
+        const email = typeof profile?.user?.profile?.email === "string"
+          ? profile.user.profile.email.trim().toLowerCase() : "";
+        if (!email) entry.skipReason ??= "email_unavailable";
+        if (email) {
+          const conversationKey = JSON.stringify([ingress.teamId, ingress.senderId, ingress.sessionKey, ingress.threadTs]);
+          const previous = routerContextByConversation.get(conversationKey)?.queries ?? [];
+          entry.context = previous.slice(-3).join("\n").slice(0, 3072);
+          routerContextByConversation.delete(conversationKey);
+          routerContextByConversation.set(conversationKey, {updatedAtMs: now(), queries: [...previous.slice(-2), saved.query.slice(0, 1024)]});
+        }
         const routeStarted = now();
         const route = classifyInboundRoute(saved.query);
         entry.route = route;
-        const gateAllowed = (inboundRouterAllowedEmails.has("*") ||
-          inboundRouterAllowedEmails.has(email.trim().toLowerCase())) &&
+        // Classification remains observable when email scope is missing; execution still needs verified email.
+        const gateAllowed = Boolean(email) && (inboundRouterAllowedEmails.has("*") ||
+          inboundRouterAllowedEmails.has(email)) &&
           inboundRouterAllowedRules.has(route.rule_id) && route.fallback === false;
         emitPluginLog(logger, "info", `router route_version=1 mode=${inboundRouterMode}` +
           ` rule_id=${route.rule_id} intent=${route.intent} gate_allowed=${gateAllowed}` +
@@ -6692,6 +6718,7 @@ export function createCallerIdentityPlugin({
       });
     }
     await entry.task;
+    if (entry.skipReason) warnRouterSkipped(runId, entry.skipReason, logger);
     if (!entry.preModel) return;
     // Replayed runs share the receipt, not the authority to sign after agent_end.
     searchDirectByRun.set(runId, entry);

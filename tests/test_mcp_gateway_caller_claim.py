@@ -1217,19 +1217,32 @@ def test_production_claim_contract_requires_separate_secret_and_team(
 async def test_router_pre_model_search_claim_is_accepted_once_by_python_mcp() -> None:
     script = r"""
 import {pathToFileURL} from 'node:url';
+import {mkdtemp, rm} from 'node:fs/promises';
+import {tmpdir} from 'node:os';
+import {join} from 'node:path';
+import assert from 'node:assert/strict';
 const {createCallerIdentityPlugin} = await import(pathToFileURL(process.argv[1]));
 console.info = () => {}; console.warn = () => {};
-const hooks = new Map(), calls = [];
+const hooks = new Map(), calls = [], services = [], tasks = [], logs = [];
+const state = await mkdtemp(join(tmpdir(), 'router-claim-'));
+try {
 const response = data => ({ok: true, text: async () => JSON.stringify(data)});
 createCallerIdentityPlugin({env: {
+  OPENCLAW_STATE_DIR: state, DM_CATCHUP_ENABLED: '1',
+  DM_CATCHUP_ALLOWED_USERS: process.env.TEST_USER_ID,
   TEAMAGENT_CALLER_CLAIM_SECRET: process.env.TEST_CLAIM_SECRET,
   SLACK_TEAM_ID: process.env.TEST_TEAM_ID,
   SLACK_BOT_TOKEN: 'fixture-token', TEAMAGENT_MCP_BEARER: 'fixture-bearer',
   TEAMAGENT_INBOUND_ROUTER: 'enforce', SEARCH_DIRECT_ANSWER_ALLOWED_EMAILS: 'owner@example.test',
   TEAMAGENT_INBOUND_ROUTER_ALLOWED_EMAILS: 'owner@example.test',
   TEAMAGENT_INBOUND_ROUTER_ALLOWED_RULES: 'case_list',
-}, now: () => Number(process.env.TEST_NOW) * 1000, fetchFn: async (url, options) => {
-  const body = JSON.parse(options.body);
+}, onBackgroundTask: task => tasks.push(task),
+waitForSlackReady: async () => ({connectedAt: Number(process.env.TEST_NOW) * 1000}),
+now: () => Number(process.env.TEST_NOW) * 1000, fetchFn: async (url, options) => {
+  const body = options.body ? JSON.parse(options.body) : {};
+  if (url.endsWith('/auth.test')) return response({ok: true, team_id: process.env.TEST_TEAM_ID, user_id: 'U9999999999'});
+  if (new URL(url).pathname.endsWith('/conversations.list')) return response({ok: true, channels: []});
+  if (url.endsWith('/conversations.open')) return response({ok: true, channel: {id: 'D0123456789'}});
   if (url.endsWith('/users.info')) return response({ok: true, user: {
     id: process.env.TEST_USER_ID, team_id: process.env.TEST_TEAM_ID, profile: {email: 'owner@example.test'}}});
   if (body.method === 'tools/call') {
@@ -1239,15 +1252,30 @@ createCallerIdentityPlugin({env: {
   }
   return response({jsonrpc: '2.0', id: body.id, result: {}});
 }}).register({on: (name, handler) => hooks.set(name, handler), registerInteractiveHandler() {},
-  logger: {info() {}, warn() {}}});
+  registerService: service => services.push(service),
+  logger: {info: line => logs.push(line), warn: line => logs.push(line)}});
+const config = {channels: {slack: {enabled: true, dmPolicy: 'open', allowFrom: ['*']}}};
+await services[0].start({config}); await Promise.all(tasks);
 const ctx = {runId: 'pre-model-claim', sessionKey: 'agent:fixture:slack:direct:test',
-  senderId: process.env.TEST_USER_ID, channelId: 'D0123456789'};
-hooks.get('message_received')({content: '飲料の事例を5件見せて', runId: ctx.runId,
-  senderId: ctx.senderId, messageId: '1784424000.000001',
-  metadata: {guildId: process.env.TEST_TEAM_ID, to: ctx.channelId}},
-  {...ctx, channelId: 'slack', conversationId: ctx.channelId, messageId: '1784424000.000001'});
-await hooks.get('before_prompt_build')({messages: []}, ctx);
+  senderId: process.env.TEST_USER_ID, channelId: 'slack', conversationId: 'D0123456789',
+  chatId: 'D0123456789', messageProvider: 'slack', trigger: 'user', channel: 'slack'};
+const content = '飲料の事例を5件見せて', messageId = '1784423940.000001';
+await hooks.get('message_received')({content, senderId: ctx.senderId, messageId,
+  metadata: {guildId: process.env.TEST_TEAM_ID, to: `user:${ctx.senderId}`}},
+  {...ctx, runId: undefined, conversationId: `user:${ctx.senderId}`, messageId});
+await hooks.get('reply_dispatch')({runId: ctx.runId, ctx: {
+  Provider: 'slack', Surface: 'slack', OriginatingChannel: 'slack', ChatType: 'direct',
+  NativeChannelId: ctx.conversationId, MessageSid: messageId, SenderId: ctx.senderId,
+  GroupSpace: process.env.TEST_TEAM_ID, SessionKey: ctx.sessionKey, BodyForCommands: content}}, {});
+await hooks.get('before_agent_reply')({cleanedBody: content}, ctx);
+hooks.get('before_model_resolve')({prompt: content}, ctx);
+await hooks.get('before_prompt_build')({prompt: content, messages: []}, ctx);
+await hooks.get('before_prompt_build')({prompt: content, messages: []}, ctx);
+const tool = {runId: ctx.runId, toolCallId: 'repeat-search', toolName: 'teamagent__search'};
+assert.equal(hooks.get('before_tool_call')({...tool, params: {query: content}}, {...ctx, ...tool}).block, true);
+assert.equal(logs.filter(line => line.includes('router route_version=1')).length, 1);
 process.stdout.write(JSON.stringify(calls));
+} finally { await rm(state, {recursive: true, force: true}); }
 """
     completed = subprocess.run(
         ["node", "--input-type=module", "-e", script, str(CALLER_PLUGIN)],
