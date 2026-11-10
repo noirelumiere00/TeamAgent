@@ -33,7 +33,7 @@ from tests.mcp_gateway.test_surface_video_followup import (
     _spec,
     _Verifier,
 )
-from tests.skills.search.test_fanout import make
+from tests.skills.search.test_fanout import _converse, make
 
 POST = "https://example.slack.com/archives/C0SHARED/p1784424000000001"
 FILE = "https://example.slack.com/files/U0OWNER/F0ONLY/proposal.pdf"
@@ -274,6 +274,14 @@ async def dispatch(
     monkeypatch.setenv("USE_SEARCH_FANOUT", str(int(fanout_enabled)))
     monkeypatch.setenv("SEARCH_FANOUT_ALLOWED_EMAILS", "*")
     skill, pg = make(hits)
+
+    def fake_summary(**kw):
+        text = kw["messages"][0]["content"][0]["text"]
+        if text.startswith("{"):
+            return _converse(json.dumps({key: "飲料の提案内容です。" for key in json.loads(text)}))
+        return _converse()
+
+    skill._bedrock.converse.side_effect = fake_summary
     pg.resolve_file_urls_by_titles.return_value = services.urls
     monkeypatch.setattr(fanout, "build_summary_client", lambda: skill._bedrock)
     skill._slack_store = services.store
@@ -368,12 +376,13 @@ async def test_case_duplicate_prefers_accessible_original_and_never_attaches_twi
         services.bot.upload_files.assert_awaited_once()
 
 
-async def test_case_same_name_different_size_keeps_both(monkeypatch, services):
+async def test_case_same_name_different_size_is_one_case(monkeypatch, services):
+    # 同じ名前の資料は大きさが違っても同じ案件の別版。一覧では 1 件にまとめる（#883）。
     services.google.get_file_metadata.return_value["size"] = "300"
     await dispatch(
         monkeypatch, services, [drive_hit(title="飲料提案.pdf", size=300), slack_hit()], direct=True
     )
-    assert services.bot.posts[0]["text"].count("|資料を見る>") == 2
+    assert services.bot.posts[0]["text"].count("|資料を見る>") == 1
     services.bot.upload_files.assert_awaited_once()
 
 
@@ -387,10 +396,11 @@ async def test_drive_only_list_has_no_new_post_or_file_lookup(monkeypatch, servi
         [drive_hit(1), drive_hit(2)],
         query="飲料の事例を５件見せて" if counted else "飲料の事例を見せて",
     )
+    ext = "" if counted else ".pdf"  # 件数つきの一覧だけ見出しを案件名にする（#883）
     assert result["answer"] == (
-        "*飲料事例1.pdf*（2026年10月）\n• 飲料の提案内容です。\n"
+        f"*飲料事例1{ext}*（2026年10月）\n• 飲料の提案内容です。\n"
         "• <https://drive.google.com/file/d/DRIVE1/view|資料を見る>\n\n"
-        "*飲料事例2.pdf*（2026年10月）\n• 飲料の提案内容です。\n"
+        f"*飲料事例2{ext}*（2026年10月）\n• 飲料の提案内容です。\n"
         "• <https://drive.google.com/file/d/DRIVE2/view|資料を見る>"
     ) + ("\n\n見つかったのは 2 件です。" if counted else "")
     assert services.events == []
@@ -439,6 +449,60 @@ async def test_case_without_file_permalink_links_to_message_and_still_attaches(
     await dispatch(monkeypatch, services, [slack_hit()], direct=True)
     assert f"<{POST}|資料を見る>" in services.bot.posts[0]["text"]
     services.bot.upload_files.assert_awaited_once()
+
+
+async def test_imported_file_url_wins_over_live_message_attachment(monkeypatch, services):
+    imported = slack_hit("other")
+    imported_url = FILE.replace("proposal.pdf", "imported.pdf")
+    imported.metadata["source_uri"] = imported_url
+    result = await dispatch(monkeypatch, services, [slack_hit(), imported], direct=True)
+    assert result["delivered"] is True
+    text = services.bot.posts[0]["text"]
+    assert f"<{imported_url}|資料を見る>" in text and POST not in text
+    assert text.count("|資料を見る>") == 1
+    services.bot.upload_files.assert_awaited_once()
+
+
+async def test_message_without_attachments_uses_permalink_without_file_candidate(
+    monkeypatch, services
+):
+    services.api.conversations_replies.return_value["messages"][0].pop("files")
+    result = await dispatch(monkeypatch, services, [slack_hit()], direct=True)
+    assert result["delivered"] is True
+    assert f"<{POST}|資料を見る>" in services.bot.posts[0]["text"]
+    services.bot.upload_files.assert_not_awaited()
+
+
+async def test_inaccessible_private_message_has_no_attachment_candidate(monkeypatch, services):
+    services.api.conversations_replies.side_effect = SlackApiError(
+        "denied", {"ok": False, "error": "not_in_channel"}
+    )
+    candidates = search_file_delivery.candidates
+    checked = MagicMock(wraps=candidates)
+    monkeypatch.setattr(search_file_delivery, "candidates", checked)
+    result = await dispatch(monkeypatch, services, [slack_hit()], direct=True)
+    assert result["delivered"] is True
+    services.bot.upload_files.assert_not_awaited()
+    services.reader.download_file_guarded.assert_not_awaited()
+    assert checked.call_args is not None and candidates(checked.call_args.args[0]) == []
+
+
+async def test_inaccessible_private_attachment_ids_do_not_revive_from_raw_hits(
+    monkeypatch, services
+):
+    services.api.files_info.side_effect = SlackApiError(
+        "denied", {"ok": False, "error": "access_denied"}
+    )
+    private = slack_hit()
+    private.metadata.update({"slack_file_ids": ["F0ONLY"], "is_public": False})
+    candidates = search_file_delivery.candidates
+    checked = MagicMock(wraps=candidates)
+    monkeypatch.setattr(search_file_delivery, "candidates", checked)
+    result = await dispatch(monkeypatch, services, [private], direct=True)
+    assert result["delivered"] is True
+    assert checked.call_args is not None and candidates(checked.call_args.args[0]) == []
+    services.bot.upload_files.assert_not_awaited()
+    services.reader.download_file_guarded.assert_not_awaited()
 
 
 async def test_case_five_slack_files_keep_order_and_attach_only_first_three(monkeypatch, services):
@@ -509,7 +573,7 @@ async def test_case_no_token_uses_known_filename_instead_of_channel_ingest_title
     result = await dispatch(monkeypatch, services, [hit])
     assert result["delivered"] is True
     text = services.bot.posts[0]["text"]
-    assert "飲料提案.pdf" in text and "proj-ナレッジ共有" not in text
+    assert "*飲料提案*" in text and "proj-ナレッジ共有" not in text
     assert f"<{POST}|資料を見る>" in text
     services.bot.upload_files.assert_not_awaited()
 

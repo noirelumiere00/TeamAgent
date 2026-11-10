@@ -10,7 +10,7 @@ from typing import Any
 from urllib.parse import urlsplit
 
 from teamagent.adapters.pgvector_client import SearchHit
-from teamagent.skills._shared.slack_file_delivery import file_reader
+from teamagent.skills._shared.slack_file_delivery import _can_fallback, file_reader
 from teamagent.skills._shared.source_url import ingested_slack_file_id, slack_file_permalink
 from teamagent.skills.base import SkillContext
 from teamagent.skills.search import drive_first
@@ -90,6 +90,7 @@ async def _prepare(skill: Any, hits: list[SearchHit], ctx: SkillContext) -> list
                 )
             enriched.append(hit)
             continue
+        before = len(enriched)
         for index, fid in enumerate(ids):
             file: dict[str, Any] = next((f for f in files if f.get("id") == fid), {})
             if reader is not None:
@@ -101,6 +102,8 @@ async def _prepare(skill: Any, hits: list[SearchHit], ctx: SkillContext) -> list
                         verified_slack.add(fid)
                 except Exception as exc:
                     log.info("file_info_unavailable", error=type(exc).__name__)
+                    if not _can_fallback({**meta, **ref.slack_file_metadata}, file):
+                        continue
             names = list(meta.get("file_names") or [])
             name = str(
                 file.get("name")
@@ -109,7 +112,11 @@ async def _prepare(skill: Any, hits: list[SearchHit], ctx: SkillContext) -> list
             )
             version = meta.get("slack_file_version") or {}
             size = file.get("size") or meta.get("size") or version.get("size")
-            url = slack_file_permalink(file.get("permalink")) or ref.url
+            url = (
+                ref.url
+                if ingested_slack_file_id(meta)
+                else slack_file_permalink(file.get("permalink")) or ref.url
+            )
             own_meta = {
                 **meta,
                 "title": name,
@@ -136,6 +143,27 @@ async def _prepare(skill: Any, hits: list[SearchHit], ctx: SkillContext) -> list
                 ),
             }
             enriched.append(replace(hit, metadata=own_meta))
+        if len(enriched) == before and meta.get("source_type") == "slack":
+            enriched.append(
+                replace(
+                    hit,
+                    metadata={
+                        **meta,
+                        "files": [],
+                        "slack_file_ids": [],
+                        drive_first.REFERENCE_KEY: ref.model_copy(
+                            update={
+                                "kind": "slack_conversation",
+                                "url": drive_first.canonical_reference(
+                                    {"source_type": "slack", "source_uri": meta.get("source_uri")}
+                                ).url,
+                                "slack_file_id": None,
+                                "slack_file_ids": [],
+                            }
+                        ),
+                    },
+                )
+            )
 
     slack_names = {
         normalized_name(drive_first.canonical_reference(h.metadata, h.content).title)
@@ -256,7 +284,11 @@ async def _prepare(skill: Any, hits: list[SearchHit], ctx: SkillContext) -> list
                 )
             )
             if same_id or same_file:
-                preferred = hit if ref.drive_file_id in verified_drive else prior
+                preferred = (
+                    hit
+                    if ref.drive_file_id in verified_drive or ingested_slack_file_id(hit.metadata)
+                    else prior
+                )
                 drive_id = ref.drive_file_id or old.drive_file_id
                 slack_id = ref.slack_file_id or old.slack_file_id
                 if same_file and drive_id not in verified_drive:

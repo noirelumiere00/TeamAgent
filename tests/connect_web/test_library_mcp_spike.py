@@ -262,6 +262,8 @@ def test_dcr_consent_code_token_ping(client: TestClient, path: str) -> None:
     )
     assert [tool["name"] for tool in listing.json()["result"]["tools"]] == [
         "ping",
+        "get_search_options",
+        "search_cases",
         "search_videos",
         "get_video",
     ]
@@ -511,6 +513,8 @@ async def test_sdk_streamable_client_roundtrip(enabled: None) -> None:
             await session.initialize()
             assert [tool.name for tool in (await session.list_tools()).tools] == [
                 "ping",
+                "get_search_options",
+                "search_cases",
                 "search_videos",
                 "get_video",
             ]

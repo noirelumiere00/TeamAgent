@@ -480,6 +480,12 @@ locals {
       content_type                  = "text/yaml"
       object_lock_retain_until_date = "2099-12-31T00:00:00Z"
     }
+    # 2026-11-09 オフライン導出（未公開）。GitHub 504 対策の S3 ミラー優先・curl リトライ。
+    # pure-locals Terraform 評価で旧世代を完全再現して校正。公開時にこの属性で作成し、実体を照合する。
+    "447e6246505c4482e6888439124efe804e3e147c33c8c242c106f975d8969d12" = {
+      content_type                  = "text/yaml"
+      object_lock_retain_until_date = "2099-12-31T00:00:00Z"
+    }
   }
 
   image_promoter_buildspec_generations = {
@@ -690,6 +696,12 @@ locals {
     # 2026-11-09 publish 世代（apk lock 再生成）。実ビルドで lock 差分 -3 +3（240→240 行）、削除: ffmpeg8-libavdevice-8.1.3-r1、ffmpeg8-libavfilter-8.1.3-r1、ffmpeg8-libswscale-8.1.3-r1 / 追加: ffmpeg8-libavdevice-8.1.3-r2、ffmpeg8-libavfilter-8.1.3-r2、ffmpeg8-libswscale-8.1.3-r2 を検出したため
     # media-apk.lock と契約 artifact.apk-lock.sha256 を追随させた再レンダリング（apply_apklock.sh）。
     "955f4949da3d38f02be3baca47a990a51f14db6d95f6a1bf02af5bcba2d5ecd9" = {
+      content_type                  = "text/yaml"
+      object_lock_retain_until_date = "2099-12-31T00:00:00Z"
+    }
+    # 2026-11-09 オフライン導出（未公開）。GitHub 504 対策の S3 ミラー優先・curl リトライ。
+    # pure-locals Terraform 評価で旧世代を完全再現して校正。公開時にこの属性で作成し、実体を照合する。
+    "aa15b2ac2b8469cbf8363f39a706e369f2fccee82d630d7ae1f6f3775018784f" = {
       content_type                  = "text/yaml"
       object_lock_retain_until_date = "2099-12-31T00:00:00Z"
     }

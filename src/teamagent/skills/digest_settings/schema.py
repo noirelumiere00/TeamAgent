@@ -22,44 +22,35 @@ Weekday = Literal["mon", "tue", "wed", "thu", "fri"]
 
 class DigestSettingsInput(BaseModel):
     action: Literal["show", "update", "reset"] = Field(default="show")
-    delivery: bool | None = Field(default=None, description="false=停止、true=再開（休止も解除）。")
-    pause_until: _dt.date | None = Field(
-        default=None, description="この日まで休止（YYYY-MM-DD、当日含む）。"
-    )
+    delivery: bool | None = Field(default=None, description="false=停止、true=休止解除・再開。")
+    pause_until: _dt.date | None = Field(default=None, description="休止最終日。")
     pause_days: int | None = Field(
         default=None,
         ge=1,
         le=MAX_PAUSE_DAYS,
-        description="今日から休止する日数（pause_untilの代替）。",
+        description="今日からの休止日数。",
     )
     weekdays: list[Weekday] | None = Field(default=None, max_length=5)
     hide_sections: list[Section] | None = Field(
         default=None,
         max_length=5,
-        description=(
-            "非表示欄（reply=返信対象、unread=他の未読、slack=未返信メンション、"
-            "calendar=今日の予定、brief=商談準備）。"
-        ),
+        description=("非表示欄（enum順）:返信/他の未読/未返信メンション/今日の予定/商談準備。"),
     )
     show_sections: list[Section] | None = Field(default=None, max_length=5)
-    limit_reply: int | None = Field(default=None, description="1〜8件。")
-    limit_unread: int | None = Field(default=None, description="1〜10件。")
-    limit_slack: int | None = Field(default=None, description="1〜8件。")
-    limit_calendar: int | None = Field(default=None, description="1〜15件。")
+    limit_reply: int | None = Field(default=None)
+    limit_unread: int | None = Field(default=None)
+    limit_slack: int | None = Field(default=None)
+    limit_calendar: int | None = Field(default=None)
     auto_drafts: bool | None = Field(default=None)
-    reminders: bool | None = Field(
-        default=None, description="明示の希望のみtrue、不要ならfalse。既定OFF。"
-    )
-    reminder_lead_minutes: int | None = Field(
-        default=None, description="1〜60分前。希望のONとは別。"
-    )
+    reminders: bool | None = Field(default=None)
+    reminder_lead_minutes: int | None = Field(default=None, description="1〜60分前（ONとは別）。")
     reminder_personal_blocks: bool | None = Field(
-        default=None, description="ゲスト・会議リンクなしの作業枠も通知するか。"
+        default=None, description="ゲスト・会議リンクなしの作業枠も通知。"
     )
     reminder_skip_add: list[str] | None = Field(
         default=None,
         max_length=MAX_SKIP_KEYWORDS,
-        description="予定名に含むと通知を除外する語を追加。",
+        description="予定名による通知除外語を追加。",
     )
     reminder_skip_remove: list[str] | None = Field(default=None, max_length=MAX_SKIP_KEYWORDS)
 

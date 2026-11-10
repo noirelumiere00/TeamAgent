@@ -6189,7 +6189,7 @@ export function createCallerIdentityPlugin({
       slack_team_id: trusted.teamId,
       channel_id: trusted.channelId,
       ...(trusted.threadTs === null ? {} : {thread_ts: trusted.threadTs}),
-      ...(((tool === "slack_search" || tool === "slack_summary") ||
+      ...(((tool === "search" || tool === "slack_search" || tool === "slack_summary") ||
         ((tool === "proposal_builder" || tool === "proposal_builder_submit" || tool === "clientkarte") &&
           SLACK_DM_CHANNEL_RE.test(trusted.channelId))) &&
         typeof trusted.requestText === "string" ? {request_text: trusted.requestText} : {}),

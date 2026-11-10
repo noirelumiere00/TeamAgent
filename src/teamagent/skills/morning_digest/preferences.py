@@ -91,6 +91,7 @@ class DigestPreferences(BaseModel):
     hidden_sections: tuple[str, ...] = ()
     limits: dict[str, int] = Field(default_factory=dict)
     auto_drafts: bool = True
+    daily_schedule_template: str = Field(default="", max_length=6000)
     reminders: bool = True  # 旧保存値の互換用。配信可否には使わない。
     reminders_opt_in: bool = Field(default=False, strict=True)
     reminder_lead_minutes: int | None = Field(default=None, ge=1, le=60)

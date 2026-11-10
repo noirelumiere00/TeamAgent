@@ -193,6 +193,14 @@ def main() -> int:
         except (Exception, SystemExit) as exc:
             logger.error("video_library_account_fetch_failed", error=type(exc).__name__)
         try:
+            from teamagent.ingest.video_library_case_discovery import main as discover_video_cases
+
+            code = discover_video_cases([])
+            if code:
+                logger.error("video_library_case_discovery_failed", exit_code=code)
+        except (Exception, SystemExit) as exc:
+            logger.error("video_library_case_discovery_failed", error=type(exc).__name__)
+        try:
             from teamagent.ingest.video_library_thumbs import main as fill_video_thumbnails
 
             code = fill_video_thumbnails([])

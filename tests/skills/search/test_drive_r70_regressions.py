@@ -161,7 +161,7 @@ def test_structured_cases_survive_threshold_and_bind_only_matching_drive_files(
     else:
         assert out.found and "資料URL未確認" in out.answer
         assert not any(ref.drive_file_id for ref in out.displayed_refs)
-        assert "会話の記録" in out.answer
+        assert "資料を見る" in out.answer
     assert "spreadsheets" not in out.answer
     skill._summarize.assert_not_called()
 

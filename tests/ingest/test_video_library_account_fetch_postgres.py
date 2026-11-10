@@ -60,7 +60,7 @@ def test_selection_dates_existing_video_and_latest_public_metrics(
     assert [c.args[1]["oldestPostDateUnified"] for c in client.run_actor_sync.call_args_list] == [
         "2026-11-03",
         "2026-11-05",
-        "2026-01-01",
+        "2026-10-07",  # first fetch looks back 30 days only
     ]
     assert [c.args[1]["profiles"] for c in client.run_actor_sync.call_args_list] == [
         ["failed"],
@@ -70,9 +70,9 @@ def test_selection_dates_existing_video_and_latest_public_metrics(
     assert [c.args[1]["resultsPerPage"] for c in client.run_actor_sync.call_args_list] == [
         10,
         10,
-        30,
+        10,
     ]
-    assert [c.kwargs["max_items"] for c in client.run_actor_sync.call_args_list] == [10, 10, 30]
+    assert [c.kwargs["max_items"] for c in client.run_actor_sync.call_args_list] == [10, 10, 10]
     fetched = {
         r["handle"]: r["last_fetched_on"]
         for r in conn.execute("SELECT * FROM vl_accounts").fetchall()
@@ -119,7 +119,7 @@ def test_same_start_date_keeps_initial_and_incremental_separate(
     conn, repo = accounts
     conn.execute(
         """INSERT INTO vl_accounts(platform,handle,operator_label,last_fetched_on)
-           VALUES ('tiktok','new','NewsTV',NULL), ('tiktok','daily','NewsTV','2026-01-02')"""
+           VALUES ('tiktok','new','NewsTV',NULL), ('tiktok','daily','NewsTV','2026-10-08')"""
     )
     client = MagicMock(spec=ApifyClient)
     client.run_actor_sync.return_value = response()
@@ -127,8 +127,8 @@ def test_same_start_date_keeps_initial_and_incremental_separate(
     assert result.accounts == result.batches == 2
     calls = client.run_actor_sync.call_args_list
     assert [c.args[1]["profiles"] for c in calls] == [["daily"], ["new"]]
-    assert [c.args[1]["oldestPostDateUnified"] for c in calls] == ["2026-01-01"] * 2
-    assert [c.args[1]["resultsPerPage"] for c in calls] == [10, 30]
+    assert [c.args[1]["oldestPostDateUnified"] for c in calls] == ["2026-10-07"] * 2
+    assert [c.args[1]["resultsPerPage"] for c in calls] == [10, 10]
 
 
 def test_covers_update_existing_and_new_videos_without_overwriting(

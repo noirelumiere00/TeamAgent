@@ -82,7 +82,7 @@ def test_slack_only_evidence_rescues_drive_case_miss(monkeypatch: pytest.MonkeyP
     skill, _ = make([])
     out = skill.run(SearchInput(query="宅配の事例"), SkillContext(metadata=META))
     assert out.found and "見つかりませんでした" not in out.answer
-    assert post in out.answer and "会話の記録" in out.answer
+    assert post in out.answer and "資料を見る" in out.answer
 
 
 @pytest.mark.parametrize("complete", [False, True])

@@ -275,6 +275,14 @@ class BedrockClient:
         )
 
     @classmethod
+    def credentials_available(cls) -> bool:
+        """Check the AWS credential chain, including ECS roles, without a model invocation."""
+        try:
+            return boto3.Session().get_credentials() is not None
+        except BotoCoreError:
+            return False
+
+    @classmethod
     def from_env(cls, *, model_id_override: str | None = None) -> BedrockClient:
         """環境変数から BedrockClient を構築する。
 

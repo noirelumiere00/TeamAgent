@@ -9,6 +9,12 @@ phases:
     commands:
       - |
         set -euo pipefail
+        export AWS_IGNORE_CONFIGURED_ENDPOINT_URLS=true
+        unset AWS_ENDPOINT_URL AWS_ENDPOINT_URL_STS AWS_ENDPOINT_URL_ECR AWS_ENDPOINT_URL_S3 AWS_ENDPOINT_URL_KMS
+        while IFS= read -r AWS_ENDPOINT_VARIABLE; do
+          unset "$AWS_ENDPOINT_VARIABLE"
+        done < <(compgen -A variable AWS_ENDPOINT_URL)
+        unset AWS_ENDPOINT_VARIABLE
         unset TRIVY_DB_REPOSITORY TRIVY_JAVA_DB_REPOSITORY
         export TRIVY_DB_REPOSITORY="public.ecr.aws/aquasecurity/trivy-db:2"
         export TRIVY_JAVA_DB_REPOSITORY="public.ecr.aws/aquasecurity/trivy-java-db:1"
@@ -16,9 +22,17 @@ phases:
         TRIVY_VERSION="0.70.0"
         TRIVY_ARCHIVE="trivy_${TRIVY_VERSION}_Linux-ARM64.tar.gz"
         TRIVY_SHA256="2f6bb988b553a1bbac6bdd1ce890f5e412439564e17522b88a4541b4f364fc8d"
-        curl --proto '=https' --tlsv1.2 --fail --silent --show-error --location \
-          --output "/tmp/$TRIVY_ARCHIVE" \
-          "https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}/${TRIVY_ARCHIVE}"
+        aws s3api get-object \
+          --region ap-northeast-1 --cli-connect-timeout 10 --cli-read-timeout 30 \
+          --bucket teamagent-dev-image-release-evidence \
+          --key "build-tools/$TRIVY_SHA256/${TRIVY_ARCHIVE}" \
+          --expected-bucket-owner 718959508629 \
+          "/tmp/$TRIVY_ARCHIVE" >/tmp/build-tool-mirror-get.json || \
+          curl --proto '=https' --tlsv1.2 --fail --silent --show-error --location \
+            --retry 6 --retry-delay 20 --retry-all-errors --retry-max-time 600 \
+            --connect-timeout 10 --max-time 90 \
+            --output "/tmp/$TRIVY_ARCHIVE" \
+            "https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}/${TRIVY_ARCHIVE}"
         printf '%s  %s\n' "$TRIVY_SHA256" "/tmp/$TRIVY_ARCHIVE" | sha256sum -c -
         tar -xzf "/tmp/$TRIVY_ARCHIVE" -C /tmp trivy
         install -m 0755 /tmp/trivy /usr/local/bin/trivy
