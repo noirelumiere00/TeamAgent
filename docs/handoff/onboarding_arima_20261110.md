@@ -73,14 +73,17 @@ aws sts get-caller-identity
 
 便の番号は持ち主と共有。撃つ前に `releases/` の最新番号 +1 を使い、Slack で一声かける。
 
-## 6. 最初の仕事の候補（どれから始めるかは小俣さんと決める）
+## 6. 最初の仕事（資料生成は有馬さんの担当・2026-11-10 小俣さん決定）
 
-| 候補 | 大きさ | 入口 |
-|---|---|---|
-| 事例一覧の見出しに残る日付・「御中」・会社名の重複を落とす | 小 | `src/teamagent/skills/search/case_list.py` の `_short_title` |
-| 要点が 1 行しか出ない事例を 2 行に揃える | 小 | 同 `case_list.py`・`skills/search/case_points/system.md` |
-| 答え試験のメール・予算の不合格（本物の LLM で落ちる）を調べる | 中 | `src/teamagent/eval/answer_gate/` |
-| 入口の振り分けの shadow ログを集計し、全員 enforce の判断材料を作る | 中 | `infra/openclaw/caller-identity-plugin/dist/index.js` の `router route_version=1` ログ |
+資料生成（提案書の下書き・お土産資料・提案デッキ）は有馬さんが持ちます。検索・事例一覧・入口の振り分けは小俣さん側で続けます。
+
+| 順 | 仕事 | 大きさ | 入口 |
+|---|---|---|---|
+| 1 | 資料系 4 ツールの振り分け注記（枝 `fix/omiyage-d1-routing-20261108`・commit dba679a3）を本番へ。道具説明の合計が上限 37,000 字を超える分を削り、PR を出して kit で便を流す | 小 | `tests/mcp_gateway/test_tool_definition_budget.py`・`tests/skills/test_routing_descriptions_decks.py`・`src/teamagent/skills/{omiyage_report,proposal,proposal_builder,video_algorithm}/skill.py` |
+| 2 | 提案書の下書きの品質を Haiku で確かめる（Sonnet は全世代で使用禁止になった）。落ちる所を直す | 中 | `src/teamagent/skills/proposal/`・`src/teamagent/skills/proposal_builder/`・答え試験 `src/teamagent/eval/answer_gate/` |
+| 3 | 86 枚の提案デッキを頭から最後まで通して作り、止まる所・崩れる所を洗い出す | 中 | `src/teamagent/skills/proposal_deck/`（`renderer.py`・`contract.py`）・`src/teamagent/skills/first_visit/sales25_analysis.py` |
+
+1 は便の出し方を 1 周するための小さい仕事です。ここで kit の流れ（CI → マージ → 答え試験 → 差し替え）を覚えてから 2・3 に進みます。
 
 ## 7. 困ったら
 
