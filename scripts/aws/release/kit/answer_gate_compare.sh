@@ -14,11 +14,22 @@ if [ "$LIVE" = "$CAND" ]; then echo "候補＝本番（比較なし）"; grep -q
 echo "== 本番 ${LIVE:0:19}…（対照）"; bash "$T/run_answer_gate.sh" "$LIVE" | tee "$W/live.txt"
 grep -q "ANSWER_GATE_EXIT" "$W/cand.txt" || { echo "FATAL: 候補の試験が完走していない"; exit 1; }
 grep -q "ANSWER_GATE_EXIT" "$W/live.txt" || { echo "FATAL: 本番の試験が完走していない"; exit 1; }
-python3 - "$W/live.txt" "$W/cand.txt" <<'PY'
+# 本物の LLM は 1 回だと揺れる（11/10 r113 で draft が候補だけ 1 回落ちた）。
+# 本番より悪く見えたら候補をもう 1 回回し、2 回とも落ちた問題だけを悪化と数える。
+if python3 - "$W/live.txt" "$W/cand.txt" <<'PY'
+import re, sys
+r = lambda p: {m[1]: m[2] for m in re.finditer(r"ANSWER_GATE (\S+) (PASS|FAIL)", open(p).read())}
+live, cand = r(sys.argv[1]), r(sys.argv[2])
+sys.exit(0 if any(v == "FAIL" and live.get(k) == "PASS" for k, v in cand.items()) else 1)
+PY
+then echo "== 候補を再試験（本番より悪く見えた問題があるため）"; bash "$T/run_answer_gate.sh" "$CAND" | tee "$W/cand2.txt"; else : > "$W/cand2.txt"; fi
+python3 - "$W/live.txt" "$W/cand.txt" "$W/cand2.txt" <<'PY'
 import re, sys
 def read(p):
     return {m[1]: m[2] for m in re.finditer(r"ANSWER_GATE (\S+) (PASS|FAIL)", open(p).read())}
-live, cand = read(sys.argv[1]), read(sys.argv[2])
+live, cand, cand2 = read(sys.argv[1]), read(sys.argv[2]), read(sys.argv[3])
+# 2 回目で通った問題は揺れとして合格扱い
+cand = {k: ("PASS" if v == "FAIL" and cand2.get(k) == "PASS" else v) for k, v in cand.items()}
 if not live or not cand: print("FATAL: 候補の結果が読めない"); sys.exit(1)
 worse = sorted(k for k, v in cand.items() if v == "FAIL" and live.get(k) == "PASS")
 better = sorted(k for k, v in cand.items() if v == "PASS" and live.get(k) == "FAIL")
