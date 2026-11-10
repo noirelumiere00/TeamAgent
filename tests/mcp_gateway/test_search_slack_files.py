@@ -376,12 +376,13 @@ async def test_case_duplicate_prefers_accessible_original_and_never_attaches_twi
         services.bot.upload_files.assert_awaited_once()
 
 
-async def test_case_same_name_different_size_keeps_both(monkeypatch, services):
+async def test_case_same_name_different_size_is_one_case(monkeypatch, services):
+    # 同じ名前の資料は大きさが違っても同じ案件の別版。一覧では 1 件にまとめる（#883）。
     services.google.get_file_metadata.return_value["size"] = "300"
     await dispatch(
         monkeypatch, services, [drive_hit(title="飲料提案.pdf", size=300), slack_hit()], direct=True
     )
-    assert services.bot.posts[0]["text"].count("|資料を見る>") == 2
+    assert services.bot.posts[0]["text"].count("|資料を見る>") == 1
     services.bot.upload_files.assert_awaited_once()
 
 
@@ -395,10 +396,11 @@ async def test_drive_only_list_has_no_new_post_or_file_lookup(monkeypatch, servi
         [drive_hit(1), drive_hit(2)],
         query="飲料の事例を５件見せて" if counted else "飲料の事例を見せて",
     )
+    ext = "" if counted else ".pdf"  # 件数つきの一覧だけ見出しを案件名にする（#883）
     assert result["answer"] == (
-        "*飲料事例1.pdf*（2026年10月）\n• 飲料の提案内容です。\n"
+        f"*飲料事例1{ext}*（2026年10月）\n• 飲料の提案内容です。\n"
         "• <https://drive.google.com/file/d/DRIVE1/view|資料を見る>\n\n"
-        "*飲料事例2.pdf*（2026年10月）\n• 飲料の提案内容です。\n"
+        f"*飲料事例2{ext}*（2026年10月）\n• 飲料の提案内容です。\n"
         "• <https://drive.google.com/file/d/DRIVE2/view|資料を見る>"
     ) + ("\n\n見つかったのは 2 件です。" if counted else "")
     assert services.events == []
@@ -571,7 +573,7 @@ async def test_case_no_token_uses_known_filename_instead_of_channel_ingest_title
     result = await dispatch(monkeypatch, services, [hit])
     assert result["delivered"] is True
     text = services.bot.posts[0]["text"]
-    assert "飲料提案.pdf" in text and "proj-ナレッジ共有" not in text
+    assert "*飲料提案*" in text and "proj-ナレッジ共有" not in text
     assert f"<{POST}|資料を見る>" in text
     services.bot.upload_files.assert_not_awaited()
 
