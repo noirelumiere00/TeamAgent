@@ -20,9 +20,9 @@ function setup({direct = true, shared = false, driveFirst = false, documentRecei
     SEARCH_DRIVE_FIRST: driveFirst ? '1' : '0',
     SEARCH_DRIVE_FIRST_ALLOWED_EMAILS: allowedEmail,
   }, sleepFn: async () => {}, onBackgroundTask: task => tasks.push(task), fetchFn: async (url, options) => {
-    const body = JSON.parse(options.body);
+    const body = (options.body ? JSON.parse(options.body) : Object.fromEntries(new URL(url).searchParams));
     let result;
-    if (url.endsWith('/users.info')) result = {ok: true, user: {id: ctx.senderId,
+    if (new URL(url).pathname.endsWith('/users.info')) result = {ok: true, user: {id: ctx.senderId,
       team_id: profileTeam, profile: {email: profileEmail}}};
     else if (url.endsWith('/conversations.open')) result = {ok: true, channel: {id: 'D12345678'}};
     else if (url.endsWith('/chat.postMessage')) {

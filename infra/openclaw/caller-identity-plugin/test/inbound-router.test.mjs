@@ -27,8 +27,8 @@ function setup({query = '施策の事例を一覧で', mode = 'enforce', email =
     SEARCH_DIRECT_ANSWER_KINDS: 'not_found,comparison,list_fast,video_metrics', ...env},
     ...(now ? {now} : {}), ...(searchTimeout ? {buttonTimeoutMs: 5} : {}), sleepFn: async () => {}, onBackgroundTask: t => tasks.push(t),
     fetchFn: async (url, options) => {
-      const body = JSON.parse(options.body);
-      if (url.endsWith('/users.info')) { await profileWait; return reply({ok: true,
+      const body = (options.body ? JSON.parse(options.body) : Object.fromEntries(new URL(url).searchParams));
+      if (new URL(url).pathname.endsWith('/users.info')) { await profileWait; return reply({ok: true,
         user: {id: 'U11111111', team_id: 'T11111111', profile: {email}, ...profile}}); }
       if (url.endsWith('/conversations.open')) return reply({ok: true, channel: {id: 'D11111111'}});
       if (url.endsWith('/chat.postMessage')) { posts.push(body); return reply({ok: true}); }

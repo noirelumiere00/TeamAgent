@@ -2239,9 +2239,11 @@ function buildButtonReply(binding, actionId, data, message) {
 //                        受信側で `DM:U…` にしか解決できない DM ではこれが必須。
 //   chat.postMessage   … 本文の投稿。
 // Slack は HTTP 200 + `{"ok": false, "error": "…"}` で失敗を返すので、必ず ok を見る。
+const SLACK_QUERY_METHODS = new Set(["conversations.list", "conversations.history", "users.info"]);
 async function callSlackApiOnce({ fetchFn, botToken, method, body, timeoutMs }) {
   let response;
-  const listRequest = method === "conversations.list";
+  // Slack の読み取り系は JSON 本文を読まない（users.info が user_not_found になる）。URL の条件で送る。
+  const listRequest = SLACK_QUERY_METHODS.has(method);
   const url = new URL(`${SLACK_API_BASE}/${method}`);
   if (listRequest) for (const [name, value] of Object.entries(body ?? {})) {
     if (value !== "") url.searchParams.set(name, String(value));
