@@ -61,7 +61,7 @@ function setup({deliveries = [{kind: 'final', payload: {text: '回答です'}}],
   const fetchFn = async (url, options) => {
     if (fetchError) throw fetchError;
     const method = new URL(url).pathname.split('/').at(-1);
-    const body = JSON.parse(options.body);
+    const body = (options.body ? JSON.parse(options.body) : Object.fromEntries(new URL(url).searchParams));
     calls.push({method, body});
     assert.equal(options.headers.Authorization, `Bearer ${TOKEN}`);
     return response({ok: true, channel: CHANNEL,

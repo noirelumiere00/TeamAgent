@@ -477,7 +477,7 @@ test('a completion marker on the second history page prevents replay of the firs
   await p.api.start();
   const calls = p.calls.filter(call => call.method === 'conversations.history');
   assert.equal(calls.length, 2);
-  assert.ok(calls.every(call => call.params.limit === 100));
+  assert.ok(calls.every(call => String(call.params.limit) === '100'));
   assert.equal(p.dispatched.length, 0);
 });
 

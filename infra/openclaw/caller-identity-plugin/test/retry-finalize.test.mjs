@@ -13,7 +13,7 @@ function setup(query = '比較して何が効いた？', {postWait, conversation
     TEAMAGENT_CALLER_CLAIM_SECRET: 'x'.repeat(48), SLACK_TEAM_ID: 'T07MU5P2PBR',
     SLACK_BOT_TOKEN: 'test-token',
   }, onBackgroundTask: task => tasks.push(task), fetchFn: async (url, options) => {
-    const body = JSON.parse(options.body);
+    const body = (options.body ? JSON.parse(options.body) : Object.fromEntries(new URL(url).searchParams));
     if (url.endsWith('/chat.postMessage')) {
       posts.push(body);
       started();

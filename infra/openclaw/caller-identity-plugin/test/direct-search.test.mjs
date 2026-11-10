@@ -29,9 +29,9 @@ function setup({env = {}, query = '比較して何が効いた？', email = 'kom
     SEARCH_DIRECT_ANSWER_KINDS: 'not_found,comparison,list_fast,video_metrics,case_cards', ...env,
   }, ...(now ? {now} : {}), sleepFn: async () => {}, onBackgroundTask: task => tasks.push(task),
   fetchFn: async (url, options) => {
-    const body = JSON.parse(options.body);
-    if (url.endsWith('/users.info') && profileFails) return response({ok: false, error: 'missing_scope'});
-    if (url.endsWith('/users.info')) return response({ok: true, user: {
+    const body = (options.body ? JSON.parse(options.body) : Object.fromEntries(new URL(url).searchParams));
+    if (new URL(url).pathname.endsWith('/users.info') && profileFails) return response({ok: false, error: 'missing_scope'});
+    if (new URL(url).pathname.endsWith('/users.info')) return response({ok: true, user: {
       id: 'U12345678', team_id: 'T07MU5P2PBR', profile: {email}}});
     if (url.endsWith('/conversations.open')) {
       await dmWait;

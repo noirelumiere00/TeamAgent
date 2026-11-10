@@ -30,6 +30,9 @@ async function setup(t, {historyError, sentAuthor = BOT, metadataWarning = false
     const target = new URL(url), method = target.pathname.split('/').at(-1);
     const body = options.body ? JSON.parse(options.body) : Object.fromEntries(target.searchParams);
     requests.push({method, body});
+    // 本物の Slack は users.info / conversations.history の JSON 本文を読まない（利用者 ID が空扱い）。
+    if (['users.info', 'conversations.history'].includes(method) && options.body)
+      return response({ok: false, error: method === 'users.info' ? 'user_not_found' : 'channel_not_found'});
     if (method === 'users.info') return response(routerProfileError
       ? {ok: false, error: routerProfileError}
       : {ok: true, user: {id: USER, team_id: TEAM, profile: routerProfile}});
