@@ -6,13 +6,15 @@ import {resolve} from 'node:path';
 import {pathToFileURL} from 'node:url';
 import {classifyInboundRoute} from '../../infra/openclaw/caller-identity-plugin/dist/index.js';
 
-// Fixed projection of existing intents, not additional utterance matching rules.
+// Fixed projection of plugin intents, not additional utterance matching rules.
 const DOMAINS = {
   generation: 'document_creation', document: 'internal_knowledge',
   cases: 'cases', status: 'cases', metrics: 'cases', comparison: 'cases',
   internal_term: 'internal_knowledge', internal_topic: 'internal_knowledge',
   external_research: 'public_research', existing_operation: 'integration',
   general: 'general', chat: 'general', unknown: 'unknown',
+  slack: 'slack', mail: 'mail', calendar: 'calendar', mixed: 'mixed',
+  document_operation: 'document_creation', clientkarte: 'cases',
 };
 const FIRST_WEEK_RULES = new Set(['case_list', 'internal_status', 'internal_metrics']);
 const rate = (n, N) => ({n, N, rate: N ? n / N : null});
@@ -35,9 +37,8 @@ export function evaluateRows(corpus) {
     const start = performance.now();
     const route = classifyInboundRoute(expected.utterance);
     const duration = performance.now() - start;
-    // Text-only eligibility from prepareInboundRoute; no identity/media/hook simulation.
-    const fallback = !route.requires_internal_evidence || route.requested_output === 'file' ||
-      Boolean(route.secondary_intent);
+    // Classification eligibility only; no identity/media/hook simulation.
+    const fallback = route.fallback;
     const domain = route.rule_id === 'document_delivery' ? 'integration' : DOMAINS[route.intent];
     if (!domain) throw new Error(`Unmapped plugin intent: ${route.intent}`);
     return {id: expected.id, expected, actual: {...route, domain, fallback}, classification_ms: duration};

@@ -2962,37 +2962,70 @@ function legacySearchRequirement(text) {
 // Rules describe the request, never caller authority or facts about the answer.
 export function classifyInboundRoute(text) {
   const request = typeof text === "string" ? text.slice(0, 4096).normalize("NFKC").trim() : "";
-  const route = (intent, evidence, output, rule) => ({intent,
-    requires_internal_evidence: evidence, requested_output: output, rule_id: rule,
-    ...(evidence && /メール|予定|カレンダー|翻訳|要約して|資料も送|資料を作/u.test(request)
-      ? {secondary_intent: "existing_operation"} : {})});
-  if (!request) return route("unknown", false, "answer", "absent");
   // Quoted/forwarded instructions are data; only the surrounding user's request routes tools.
   const own = request.replace(/```[\s\S]*?```|「[^」]*」|『[^』]*』|^>.*$/gmu, "");
-  if (classifyConnectRequest(request) || /^(?:覚えて|忘れて|記憶|まだ[?？]?|進捗[?？]?)$/u.test(request))
+  const count = own.match(/(\d{1,3})\s*件/u);
+  const industry = own.match(/化粧品|食品|飲食|宅配|美容|金融|不動産/u)?.[0];
+  const route = (intent, evidence, output, rule) => {
+    const secondary = intent === "mixed" || (evidence &&
+      (/メール|予定|カレンダー|翻訳|要約して|資料も送|資料を作/u.test(own) ||
+       ["slack", "document_operation", "clientkarte"].includes(intent)));
+    return {intent, requires_internal_evidence: evidence, requested_output: output, rule_id: rule,
+      // Classification eligibility only; the existing execution gate is changed in R3.
+      fallback: !evidence || secondary || !["case_list", "internal_status", "internal_metrics"].includes(rule),
+      ...(secondary ? {secondary_intent: "existing_operation"} : {}),
+      ...(count ? {requested_count: Number(count[1])} : {}), ...(industry ? {industry} : {})};
+  };
+  if (!request) return route("unknown", false, "answer", "absent");
+  if (classifyConnectRequest(own) || /(?:Slack|カレンダー|メール).{0,8}(?:連携|接続)/iu.test(own) ||
+      /^(?:覚えて|忘れて|記憶|まだ[?？]?|進捗[?？]?)$/u.test(own))
     return route("existing_operation", false, "tool", "existing_operation");
-  if (/(?:提案|お土産|初訪).{0,16}(?:資料|PPTX|パワポ|骨子).{0,16}(?:作|生成|お願い)|(?:提案|お土産)資料を/u.test(own) &&
-      /作|生成|お願い/u.test(own)) return route("generation", false, "artifact", "generation");
+  if (/検索(?:しない|不要)|検索せず/u.test(own)) return route("unknown", false, "answer", "negated_search");
+  if (/翻訳|訳して|英語に/u.test(own)) return route("general", false, "answer", "general");
+  const document = /提案|お土産|初訪|資料|スライド|PPTX?|パワポ|パワーポイント/iu.test(own);
+  const generationNegated = /(?:作成|生成|制作)(?:は|を)?(?:しない|不要)|作ら(?:ない|ず)|作る必要(?:は)?ない/u.test(own);
+  const generation = document && !generationNegated &&
+    /作って|つくって|作成して|制作して|生成して|お願い|修正して|更新して|直して|改訂して|作り直して/u.test(own);
+  const active = own.replace(/(?:メール|予定|カレンダー)[^。！？!?]*?(?:不要|対象外|調べなくてよい)/gu, "");
+  if ((/Slack/iu.test(active) && /メール|予定|カレンダー/u.test(active)) ||
+      (/社内|案件|施策/u.test(active) && /メール|予定|カレンダー/u.test(active) && /も|してから|その内容で/u.test(active)) ||
+      (generation && /(?:事例|案件|社内|Slack).{0,40}(?:探して|検索して|確認して|調べて)/iu.test(active)))
+    return route("mixed", true, "answer", "unknown");
+  if (/Slack/iu.test(own)) {
+    if (/要約|まとめて|整理して|箇条書き|説明して/u.test(own))
+      return route("slack", true, "answer", "existing_operation");
+    return route("slack", true, "list", "existing_operation");
+  }
+  if (document && /レビュー|採点|点検|整合|審査/u.test(own))
+    return route("document_operation", true, "answer", "existing_operation");
+  if (document && !generationNegated && /(?:作成|生成|制作).{0,16}(?:状況|状態|進捗|終わ|完了|どこまで|できた)|ジョブ|進捗/u.test(own))
+    return route("document_operation", false, "tool", "existing_operation");
+  if (generation) return route("generation", false, "artifact", "generation");
   if (/(?:PDF|提案書|資料|ファイル).{0,20}(?:添付|送って|送付|届け)|(?:添付|送付).{0,16}(?:PDF|資料)/iu.test(own))
     return route("document", true, "file", "document_delivery");
+  if (/メール/u.test(own)) return route("mail", true, "answer", "existing_operation");
+  if (/予定|カレンダー|空いている時間|空き時間|時間帯/u.test(own))
+    return route("calendar", false, "list", "existing_operation");
   if (explicitlyRequestsFreshVideoAnalysis(own)) return route("external_research", false, "tool", "fresh_video");
   if (/一般(?:論|的|の意味)|ダイヤ(?:モンド)?|iPhone|Android/iu.test(own))
     return route("general", false, "answer", "general");
   const internal = /社内|(?:うち|当社|弊社|自社)(?:の|も|は|が)|案件|施策|実績/u.test(own);
   const term = /ビデオリリース|\bTTO\b|\bVVS\b|タテガタ|ショートドラマ|スワイプ\s*LP|ソリューションプラン|\bVSEO\b|ケイパ|BANT|営業\s*FB|カルテ|二次利用費/iu.test(own);
-  if (/検索(?:しない|不要)|検索せず/u.test(own)) return route("unknown", false, "answer", "negated_search");
+  if (/カルテ/u.test(own) && /開いて|まとめて|確認して|教えて/u.test(own))
+    return route("clientkarte", true, "answer", "existing_operation");
   if (/(?:うち|当社|弊社|自社)(?:も|は|が|の)?.{0,12}(?:関わ|関与|担当)/u.test(own))
     return route("internal_topic", true, "answer", "involvement");
   if (/比較|比べ|何が効|どっちが|どちらが/u.test(own) && (internal || term))
     return route("comparison", true, "answer", "internal_comparison");
+  if (/元の資料|元資料|出典|根拠|資料を(?:もと|基)に|ソース|(?:その|さっきの|直前の)(?:事例の)?資料/u.test(own))
+    return route("document", true, "answer", "source");
+  if (/事例|一覧|リスト(?:アップ)?|列挙/u.test(own)) return route("cases", true, "list", "case_list");
   if (/社内で(?:いう|言う)|社内用語/u.test(own) || term)
     return route("internal_term", true, "answer", "internal_term");
-  if (/事例|一覧|リスト(?:アップ)?|列挙/u.test(own)) return route("cases", true, "list", "case_list");
-  if (/元の資料|根拠|資料を(?:もと|基)に|ソース|(?:その|さっきの|直前の)(?:事例の)?資料/u.test(own))
-    return route("document", true, "answer", "source");
-  if (internal && /今|状況|状態|終わ|完了|見送り|どうな/u.test(own))
+  if (internal && /数字|再生|保存|結果|何件|件数|受注金額|粗利率|売上|金額/u.test(own))
+    return route("metrics", true, "answer", "internal_metrics");
+  if (internal && /状況|状態|終わ|完了|見送り|失注|受注(?:済|した|確定)|どうな/u.test(own))
     return route("status", true, "answer", "internal_status");
-  if (internal && /数字|再生|保存|結果|何件/u.test(own)) return route("metrics", true, "answer", "internal_metrics");
   if (internal) return route("internal_topic", true, "answer", "internal_topic");
   if (/^(?:ありがとう.*|こんにちは[!！。]?|おはよう.*|こんばんは.*|あなたの名前は[?？]?)$/u.test(own))
     return route("chat", false, "answer", "chat");
