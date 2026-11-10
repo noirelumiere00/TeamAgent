@@ -30,6 +30,24 @@ from teamagent.adapters.retry import RetryPolicy, call_with_retry
 
 logger = structlog.get_logger(__name__)
 
+DEFAULT_MODEL_ID = "jp.anthropic.claude-haiku-4-5-20251001-v1:0"
+
+
+def resolve_bedrock_model_id(model_id: str, *, caller: str) -> str:
+    """Sonnet 全世代を禁止し、用途別設定が残っていても Haiku に置き換える。"""
+    if "sonnet" not in model_id.lower():
+        return model_id
+    replacement = os.environ.get("BEDROCK_MODEL_ID", "").strip() or DEFAULT_MODEL_ID
+    if "sonnet" in replacement.lower() or "haiku" not in replacement.lower():
+        replacement = DEFAULT_MODEL_ID
+    logger.warning(
+        "bedrock_model_banned",
+        original_model_id=model_id,
+        replacement_model_id=replacement,
+        caller=caller,
+    )
+    return replacement
+
 
 # Bedrock で「一過性（リトライ可）」と判断するエラーコード。
 # スロットリングと一時的なサーバ/接続エラーのみ。ValidationException や
@@ -294,10 +312,8 @@ class BedrockClient:
         # コスト方針(2026-06-29): env 未設定時の既定は Haiku。以前の既定 Sonnet は
         # 「BEDROCK_MODEL_ID を注入し忘れたタスク」が silent に Sonnet 課金へ落ちる事故源だった
         # （2026-07-13 実測: 週次 ingest 分類が 573回/週 Sonnet 落ち＝CloudTrail で確定）。
-        # 高品質が要る呼び出しは env で明示的に Sonnet を指定する（暗黙昇格の禁止）。
-        model_id = model_id_override or os.environ.get(
-            "BEDROCK_MODEL_ID", "jp.anthropic.claude-haiku-4-5-20251001-v1:0"
-        )
+        # 2026-11-10: 明示指定も含め Sonnet は送信境界で Haiku に置き換える。
+        model_id = model_id_override or os.environ.get("BEDROCK_MODEL_ID") or DEFAULT_MODEL_ID
         rerank_arn = os.environ.get("BEDROCK_RERANK_MODEL_ARN")
         embed_model_id = os.environ.get("COHERE_EMBED_MODEL_ID", "cohere.embed-multilingual-v3")
         # 任意で env からバックオフを上書き（既定: 5回 / base 0.5s / cap 20s）。
@@ -367,6 +383,8 @@ class BedrockClient:
         Returns:
             ConverseResponse(text, usage, model_id, latency_ms, stop_reason)
         """
+        # 初期化後の model_id 上書きも、リトライに入る前に必ず検査する。
+        self.model_id = resolve_bedrock_model_id(self.model_id, caller="BedrockClient.converse")
         kwargs: dict[str, Any] = {
             "modelId": self.model_id,
             "messages": messages,
@@ -491,6 +509,13 @@ class BedrockClient:
 
         number_of_results = top_n if top_n is not None else len(documents)
 
+        # Haiku は Rerank API 非対応なので、不正設定は通信前に止める。
+        if (
+            resolve_bedrock_model_id(self.rerank_model_arn, caller="BedrockClient.rerank")
+            != self.rerank_model_arn
+        ):
+            raise ValueError("Sonnet is banned for Bedrock rerank")
+
         request_body: dict[str, Any] = {
             "queries": [{"type": "TEXT", "textQuery": {"text": query}}],
             "rerankingConfiguration": {
@@ -561,6 +586,12 @@ class BedrockClient:
 
         ループ変数をクロージャに束縛しないようメソッドに切り出す（B023 回避・型推論明示）。
         """
+        # Haiku は Cohere の埋め込み形式に非対応なので、通信前に止める。
+        if (
+            resolve_bedrock_model_id(self.embed_model_id, caller="BedrockClient.embed_texts")
+            != self.embed_model_id
+        ):
+            raise ValueError("Sonnet is banned for Bedrock embeddings")
         return call_with_retry(
             lambda: self._client.invoke_model(modelId=self.embed_model_id, body=body),
             is_retryable=_is_bedrock_retryable,

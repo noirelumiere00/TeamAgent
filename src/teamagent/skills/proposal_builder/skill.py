@@ -707,15 +707,7 @@ class ProposalBuilderSkill(BaseSkill[ProposalBuilderInput, ProposalBuilderOutput
 
     @staticmethod
     def _build_deck() -> ProposalDeckSkill:
-        # 高品質モデルへの暗黙昇格も、Haikuへの暗黙降格も避ける。用途別model IDを
-        # 明示し、未指定時だけ明示済みの全体BEDROCK_MODEL_IDを継承する。
-        model_id = (
-            os.environ.get("PROPOSAL_BUILDER_MODEL_ID") or os.environ.get("BEDROCK_MODEL_ID") or ""
-        ).strip()
-        if not model_id:
-            raise ValueError(
-                "PROPOSAL_BUILDER_MODEL_ID or BEDROCK_MODEL_ID must be explicitly configured"
-            )
+        model_id = os.environ.get("PROPOSAL_BUILDER_MODEL_ID", "").strip() or None
         bedrock = BedrockClient.from_env(model_id_override=model_id)
         return ProposalDeckSkill(
             bedrock=bedrock,
