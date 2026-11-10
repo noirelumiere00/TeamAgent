@@ -14,6 +14,7 @@ Apify 等の課金 SaaS を使わず、ローカル Chrome で完結する (仕�
 from __future__ import annotations
 
 from collections.abc import Callable
+from datetime import datetime, timedelta, timezone
 from typing import ClassVar
 
 import structlog
@@ -38,6 +39,25 @@ logger = structlog.get_logger(__name__)
 
 # search_tiktok の型 (テストで差し替え可能にするため Callable で持つ)
 Searcher = Callable[..., TikTokSearchResult]
+
+
+def _slack_summary(out: TikTokSearchOutput, acquired_date: str) -> str:
+    lines = [f"📊 動画ごとの数字（TikTok「{out.query}」検索 上位 {out.count} 本・{acquired_date}）"]
+    for v in out.videos:
+        plays = "—" if "stats.playCount" in v.missing_fields else f"{v.play_count:,}"
+        likes = "—" if "stats.diggCount" in v.missing_fields else f"{v.digg_count:,}"
+        saves = "—" if "stats.collectCount" in v.missing_fields else f"{v.collect_count:,}"
+        eng = "—" if v.missing_fields else f"{v.engagement_rate:.1%}"
+        lines.append(
+            f"{v.rank}. @{v.author.lstrip('@')}｜再生 {plays}・いいね {likes}・保存 {saves}・"
+            f"ENG {eng}｜<{v.url}|動画を見る>"
+        )
+    summary = "\n".join(lines)
+    if out.analysis:
+        summary += "\n\n\n" + out.analysis[:600]
+    if out.report_url:
+        summary += f"\n📎 詳細レポート: <{out.report_url}|7日有効リンク>"
+    return summary
 
 
 def _format_videos_for_prompt(videos: list[TikTokVideoOut]) -> str:
@@ -104,6 +124,7 @@ class TikTokSearchSkill(BaseSkill[TikTokSearchInput, TikTokSearchOutput]):
             max_videos=input.max_videos,
             request_id=ctx.request_id,
         )
+        acquired_date = datetime.now(timezone(timedelta(hours=9))).strftime("%Y-%m-%d JST")
 
         videos = [
             TikTokVideoOut(
@@ -121,8 +142,9 @@ class TikTokSearchSkill(BaseSkill[TikTokSearchInput, TikTokSearchOutput]):
                 duration=v.duration,
                 hashtags=list(v.hashtags),
                 cover_url=v.cover_url,
+                missing_fields=list(v.missing_fields),
             )
-            for i, v in enumerate(result.videos)
+            for i, v in enumerate(result.videos[: input.max_videos])
         ]
 
         out = TikTokSearchOutput(
@@ -166,6 +188,7 @@ class TikTokSearchSkill(BaseSkill[TikTokSearchInput, TikTokSearchOutput]):
         if "pptx" in wanted:
             out.report_pptx_url = publish_pptx(report, tool=self.name, request_id=ctx.request_id)
 
+        out.slack_summary = _slack_summary(out, acquired_date)
         log.info(
             "tiktok_search_skill_done",
             count=out.count,

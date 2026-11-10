@@ -6,20 +6,37 @@
 
 from __future__ import annotations
 
+import json
+from datetime import UTC, datetime
 from unittest.mock import MagicMock
 
 import pytest
 
 from teamagent.adapters.gemini_client import GeminiResponse
+from teamagent.adapters.report_publish import PublishedObject
 from teamagent.adapters.tiktok_scraper import (
     TikTokAuthor,
     TikTokScrapeError,
     TikTokSearchResult,
     TikTokVideo,
+    _parse_media_post,
+    _parse_video,
 )
+from teamagent.mcp_gateway import payload_offload
+from teamagent.mcp_gateway import server as mcp_server
+from teamagent.media.operations import _post_row
+from teamagent.orchestrator.tools import tool_from_skill
 from teamagent.skills.base import SkillContext
 from teamagent.skills.tiktok_search.schema import TikTokSearchInput
 from teamagent.skills.tiktok_search.skill import TikTokSearchSkill
+
+
+@pytest.fixture(autouse=True)
+def fake_report_io(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        "teamagent.skills.tiktok_search.skill.html_reports_enabled", lambda _: False
+    )
+    monkeypatch.setattr("teamagent.skills.tiktok_search.skill.publish_report", lambda *a, **k: None)
 
 
 def _video(vid: str, plays: int, likes: int) -> TikTokVideo:
@@ -123,3 +140,131 @@ def test_analysis_prompt_includes_metrics(fake_gemini: MagicMock) -> None:
     assert "新宿 ランチ" in prompt
     assert "再生" in prompt  # メタデータが prompt に整形されている
     assert "@u" in prompt
+
+
+@pytest.mark.parametrize("via_worker", [False, True], ids=["browser", "media-worker"])
+@pytest.mark.parametrize("max_videos", [10, 3])
+@pytest.mark.parametrize("offload", [False, True])
+async def test_tiktok_search_slack_summary_reaches_gateway(
+    monkeypatch: pytest.MonkeyPatch,
+    fake_gemini: MagicMock,
+    via_worker: bool,
+    max_videos: int,
+    offload: bool,
+) -> None:
+    """実取得境界の欠損 → 10本の機械生成文 → MCP 返却を外部 I/O 無しで通す。"""
+    videos = []
+    for i in range(1, 11):
+        stats = {
+            "playCount": 100000,
+            "diggCount": 1000,
+            "collectCount": 50,
+            "commentCount": 10,
+            "shareCount": 5,
+        }
+        if i == 2:
+            stats = dict.fromkeys(stats, 0)  # 実測の 0 は欠損と区別する。
+        raw = {
+            "id": str(i),
+            "url": f"https://www.tiktok.com/@u/video/{i}",
+            "author": {"uniqueId": "u"},
+            "stats": stats,
+        }
+        if i == 3:
+            raw["stats"] = {"playCount": None, "commentCount": 10, "shareCount": 5}
+        if i == 4:
+            # ブラウザが互換用の 0 と欠損フラグを返すケース。
+            stats["commentCount"] = 0
+            raw["missingFields"] = ["stats.commentCount"]
+        videos.append(
+            _parse_media_post(_post_row(raw, "ミールキット", i, str(i), "keyword"))
+            if via_worker
+            else _parse_video(raw)
+        )
+
+    result = TikTokSearchResult("ミールキット", "keyword", tuple(videos))
+    skill = TikTokSearchSkill(gemini=fake_gemini, searcher=MagicMock(return_value=result))
+    report_url = "https://reports.example.test/tiktok?signature=abc%2Bdef"
+    publish = MagicMock(return_value=report_url)
+    monkeypatch.setattr("teamagent.skills.tiktok_search.skill.publish_report", publish)
+
+    class FrozenDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):  # type: ignore[no-untyped-def]
+            return datetime(2026, 11, 9, 15, 2, tzinfo=UTC).astimezone(tz)
+
+    monkeypatch.setattr("teamagent.skills.tiktok_search.skill.datetime", FrozenDatetime)
+    monkeypatch.setattr(mcp_server, "_record_usage", MagicMock())
+    monkeypatch.setenv("USE_PAYLOAD_OFFLOAD", "1" if offload else "0")
+    monkeypatch.setenv("TEAMAGENT_SHARED_COMPANY_DOMAINS", "example.test")
+    monkeypatch.setenv("PAYLOAD_OFFLOAD_MAX_CHARS", "1000")
+    monkeypatch.setenv("PAYLOAD_OFFLOAD_FIELD_CHARS", "50")
+    monkeypatch.setattr(
+        "teamagent.adapters.report_publish.publish_text_result",
+        lambda *a, **k: PublishedObject(
+            url="https://reports.example.test/raw", bucket="fake", key="fake", region="fake"
+        ),
+    )
+    monkeypatch.setattr(payload_offload, "_short_url", lambda *a, **k: None)
+    spec = tool_from_skill(TikTokSearchSkill, factory=lambda: skill)
+    contents = await mcp_server.dispatch_tool(
+        {spec.name: spec},
+        "tiktok_search",
+        {"query": "ミールキット", "max_videos": max_videos},
+        require_rls=False,
+    )
+    data = json.loads(contents[0].text)
+    lines = data["slack_summary"].splitlines()
+    assert lines[0] == (
+        f"📊 動画ごとの数字（TikTok「ミールキット」検索 上位 {max_videos} 本・2026-11-10 JST）"
+    )
+    expected_metrics = [
+        "再生 100,000・いいね 1,000・保存 50・ENG 1.1%",
+        "再生 0・いいね 0・保存 0・ENG 0.0%",
+        "再生 —・いいね —・保存 —・ENG —",
+        "再生 100,000・いいね 1,000・保存 50・ENG —",
+        *["再生 100,000・いいね 1,000・保存 50・ENG 1.1%"] * 6,
+    ]
+    expected_rows = [
+        f"{i}. @u｜{metrics}｜<https://www.tiktok.com/@u/video/{i}|動画を見る>"
+        for i, metrics in enumerate(expected_metrics[:max_videos], 1)
+    ]
+    analysis = fake_gemini.generate_text.return_value.text
+    assert lines[1 : max_videos + 1] == expected_rows
+    assert data["slack_summary"] == (
+        "\n".join([lines[0], *expected_rows])
+        + f"\n\n\n{analysis}\n📎 詳細レポート: <{report_url}|7日有効リンク>"
+    )
+    assert data["count"] == max_videos
+    assert data.get("offloaded", False) is offload
+    if not offload:
+        assert len(data["videos"]) == max_videos
+    assert data["report_url"] == report_url
+    publish.assert_called_once()
+    fake_gemini.generate_text.assert_called_once()
+
+
+def test_tiktok_search_slack_summary_truncates_only_analysis(
+    monkeypatch: pytest.MonkeyPatch, fake_gemini: MagicMock
+) -> None:
+    fake_gemini.generate_text.return_value = GeminiResponse(
+        text="分析" * 301,
+        input_tokens=1,
+        output_tokens=1,
+        cost_usd=0.0,
+        model_id="fake",
+        latency_ms=0,
+    )
+    monkeypatch.setattr(
+        "teamagent.skills.tiktok_search.skill.publish_report",
+        lambda *a, **k: "https://reports.example.test/report",
+    )
+    skill = TikTokSearchSkill(gemini=fake_gemini, searcher=MagicMock(return_value=_fake_result(10)))
+    out = skill.run(TikTokSearchInput(query="新宿 ランチ"), SkillContext())
+    assert out.analysis == "分析" * 301
+    assert out.slack_summary.endswith(
+        "\n\n\n"
+        + "分析" * 300
+        + "\n📎 詳細レポート: <https://reports.example.test/report|7日有効リンク>"
+    )
+    assert out.slack_summary.count("|動画を見る>") == 10

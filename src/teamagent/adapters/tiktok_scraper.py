@@ -80,6 +80,8 @@ class TikTokVideo:
     collect_count: int  # 保存
     hashtags: tuple[str, ...]
     music_title: str
+    # 数値型は既存の呼び出し元と互換のまま、未取得を実測の 0 と区別する。
+    missing_fields: tuple[str, ...] = ()
 
     @property
     def engagement_rate(self) -> float:
@@ -159,6 +161,11 @@ def _parse_video(d: dict[str, Any]) -> TikTokVideo:
         collect_count=int(s.get("collectCount", 0) or 0),
         hashtags=tuple(d.get("hashtags", []) or []),
         music_title=(music or {}).get("title", "") if isinstance(music, dict) else "",
+        missing_fields=tuple(
+            f"stats.{key}"
+            for key in ("playCount", "diggCount", "commentCount", "shareCount", "collectCount")
+            if s.get(key) is None or f"stats.{key}" in (d.get("missingFields") or [])
+        ),
     )
 
 
@@ -186,6 +193,17 @@ def _parse_media_post(post: dict[str, Any]) -> TikTokVideo:
             str(value) for value in (post.get("hashtags") or ()) if isinstance(value, str)
         ),
         music_title=str(post.get("music_title") or ""),
+        missing_fields=tuple(
+            f"stats.{key}"
+            for field, key in (
+                ("plays", "playCount"),
+                ("likes", "diggCount"),
+                ("comments", "commentCount"),
+                ("shares", "shareCount"),
+                ("saves", "collectCount"),
+            )
+            if post.get(field) is None or f"stats.{key}" in (post.get("missing_fields") or [])
+        ),
     )
 
 
