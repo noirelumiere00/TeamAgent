@@ -1553,7 +1553,12 @@ def _render_task(task: dict[str, Any], image: str) -> subprocess.CompletedProces
         [{"name": "TEAMAGENT_INBOUND_ROUTER", "value": "enforce"}],
         [{"name": "TEAMAGENT_INBOUND_ROUTER_ALLOWED_EMAILS", "value": ""}],
         [{"name": "TEAMAGENT_INBOUND_ROUTER_ALLOWED_EMAILS", "value": "*"}],
-        [{"name": "TEAMAGENT_INBOUND_ROUTER_ALLOWED_EMAILS", "value": "me@example.test,other@example.test"}],
+        [
+            {
+                "name": "TEAMAGENT_INBOUND_ROUTER_ALLOWED_EMAILS",
+                "value": "me@example.test,other@example.test",
+            }
+        ],
         [{"name": "TEAMAGENT_INBOUND_ROUTER_ALLOWED_RULES", "value": ""}],
         [{"name": "TEAMAGENT_INBOUND_ROUTER_ALLOWED_RULES", "value": "case_list,internal_status"}],
         [{"name": "TEAMAGENT_ROUTE_CLASSIFIER", "value": "0"}],

@@ -261,7 +261,10 @@ def test_inbound_router_has_independent_allowlists_denied_by_default() -> None:
     ):
         assert f'{{ name = "{env_name}", value = var.{variable} }}' in block
         assert _rendered_default(block, variables, env_name) == default
-    for variable in ("openclaw_inbound_router_allowed_emails", "openclaw_inbound_router_allowed_rules"):
+    for variable in (
+        "openclaw_inbound_router_allowed_emails",
+        "openclaw_inbound_router_allowed_rules",
+    ):
         start = variables.index(f'variable "{variable}" {{')
         assert "validation {" in variables[start : variables.index("\n}\n", start)]
 
