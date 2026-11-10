@@ -75,7 +75,8 @@ async def _prepare(skill: Any, hits: list[SearchHit], ctx: SkillContext) -> list
                     files = await reader.message_files(*location)
                 except Exception as exc:
                     log.info("message_files_unavailable", error=type(exc).__name__)
-        ids = list(dict.fromkeys([*ids, *(str(f.get("id") or "") for f in files)]))
+        if not ingested:
+            ids = list(dict.fromkeys([*ids, *(str(f.get("id") or "") for f in files)]))
         ids = [fid for fid in ids if re.fullmatch(r"F[A-Z0-9]+", fid)]
         if not ids:
             names = drive_first.candidate_names(meta, hit.content)
@@ -142,7 +143,12 @@ async def _prepare(skill: Any, hits: list[SearchHit], ctx: SkillContext) -> list
                     }
                 ),
             }
-            enriched.append(replace(hit, metadata=own_meta))
+            # 投稿・スレッドの本文は添付の根拠にしない。取込済みファイルの本文だけ残す。
+            if not ingested:
+                own_meta.pop("case_effect", None)
+            enriched.append(
+                replace(hit, content=hit.content if ingested else "", metadata=own_meta)
+            )
         if len(enriched) == before and meta.get("source_type") == "slack":
             enriched.append(
                 replace(

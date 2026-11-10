@@ -7,6 +7,7 @@ from datetime import date
 from urllib.parse import urlsplit
 
 from teamagent.adapters.pgvector_client import SearchHit
+from teamagent.ingest.industry_taxonomy import normalize_industry
 from teamagent.skills._shared.source_url import ingested_slack_file_id, slack_file_permalink
 from teamagent.skills.search import drive_first
 from teamagent.skills.search.answer_mode import strip_advice
@@ -201,12 +202,25 @@ def render(
     rendered: list[list[str]] = []
     if summarize is not None:
         hits = scope_by_industry(
-            sorted(hits, key=lambda h: h.score, reverse=True), asked_industry, soft=True
+            sorted(hits, key=lambda h: h.score, reverse=True),
+            asked_industry,
+            soft=True,
+            include_unknown=False,
         )
         hits = case_target_hits(hits, client)
         cards = True
         separator = "\n\n"
-    hits = case_target_hits(hits, target, soft_industry=drive_only or summarize is not None)
+    if not (
+        summarize is not None
+        and normalize_industry(target)
+        and normalize_industry(target) == normalize_industry(asked_industry)
+    ):
+        hits = case_target_hits(
+            hits,
+            target,
+            soft_industry=drive_only or summarize is not None,
+            include_unknown=summarize is None,
+        )
     if summarize is not None:
         hits = _prefer_latest(hits)
     for hit in hits:
@@ -252,6 +266,20 @@ def render(
             link_label = "投稿"
         if summarize is not None and ref is None:
             continue
+        title = next(
+            (
+                cleaned
+                for value in (
+                    _case_title(hit) if summarize is not None else entry.title,
+                    ref.title if ref is not None else "",
+                )
+                if (cleaned := _clean(_source_text(value), 100))
+                and cleaned not in {"案件名不明", "資料", "記録", "Slackの記録"}
+            ),
+            "",
+        )
+        if not title:
+            continue
         key = (entry.document_id or url or "", entry.title)
         if ref is not None and ref.drive_file_id:
             key = (ref.drive_file_id, entry.title if entry.kind == "case" else "")
@@ -285,13 +313,6 @@ def render(
             )
             if mark:
                 details = [mark + (" " + details[0] if details else ""), *details[1:]]
-            title = (
-                _clean(
-                    _source_text(_case_title(hit) if summarize is not None else entry.title), 100
-                )
-                or _clean(_source_text(ref.title), 100)
-                or "案件名不明"
-            )
             card = [f"*{title}*（{_month(entry.date)}）"]
             card.extend(f"• {detail}" for detail in details)
             if ref.kind == "drive":
@@ -332,6 +353,8 @@ def render(
             unicodedata.normalize("NFKC", key).strip(): value for key, value in points.items()
         }
         for index, card in enumerate(rendered, 1):
+            if not selected[index - 1].content.strip():
+                continue
             text = points.get(str(index), "")
             if isinstance(text, str):
                 details = _details(text)

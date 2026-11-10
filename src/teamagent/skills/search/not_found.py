@@ -209,7 +209,11 @@ def target_matches(text: str, target: str) -> bool:
 
 
 def case_target_hits(
-    hits: Sequence[SearchHit], target: str | None, *, soft_industry: bool = False
+    hits: Sequence[SearchHit],
+    target: str | None,
+    *,
+    soft_industry: bool = False,
+    include_unknown: bool = True,
 ) -> list[SearchHit]:
     """事例の対象があるときだけ、同じ対象のヒットへ絞る。"""
     if not target:
@@ -217,7 +221,7 @@ def case_target_hits(
     if normalize_industry(target):
         from teamagent.skills.search.campaign_files import scope_by_industry
 
-        return scope_by_industry(hits, target, soft=soft_industry)
+        return scope_by_industry(hits, target, soft=soft_industry, include_unknown=include_unknown)
     return [hit for hit in hits if target_matches(_haystack(hit), target)]
 
 

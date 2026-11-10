@@ -1093,6 +1093,16 @@ def run_fanout(skill: Any, input: SearchInput, ctx: SkillContext) -> SearchOutpu
                 direct_kind = "case_cards"
             elif skill._direct_answer_allowed(ctx, "list_fast"):
                 direct_kind = "list_fast"
+        elif (
+            counted_cases
+            and (asked_industry or normalize_industry(case_target))
+            and not slack.hidden_count
+        ):
+            answer = build_scoped_not_found_answer(
+                case_target or asked_industry, scope="社内資料・施策実績・Slack", complete=complete
+            )
+            found = visible_found = False
+            direct_kind = "not_found" if skill._direct_answer_allowed(ctx, "not_found") else None
         elif drive_case_listing and recovery is None:
             answer, found, visible_found = EMPTY_DRIVE_CASES, False, False
         elif slack.hidden_count:
