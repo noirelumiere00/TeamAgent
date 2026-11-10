@@ -1239,11 +1239,11 @@ createCallerIdentityPlugin({env: {
 }, onBackgroundTask: task => tasks.push(task),
 waitForSlackReady: async () => ({connectedAt: Number(process.env.TEST_NOW) * 1000}),
 now: () => Number(process.env.TEST_NOW) * 1000, fetchFn: async (url, options) => {
-  const body = options.body ? JSON.parse(options.body) : {};
+  const body = options.body ? JSON.parse(options.body) : Object.fromEntries(new URL(url).searchParams);
   if (url.endsWith('/auth.test')) return response({ok: true, team_id: process.env.TEST_TEAM_ID, user_id: 'U9999999999'});
   if (new URL(url).pathname.endsWith('/conversations.list')) return response({ok: true, channels: []});
   if (url.endsWith('/conversations.open')) return response({ok: true, channel: {id: 'D0123456789'}});
-  if (url.endsWith('/users.info')) return response({ok: true, user: {
+  if (new URL(url).pathname.endsWith('/users.info')) return response({ok: true, user: {
     id: process.env.TEST_USER_ID, team_id: process.env.TEST_TEAM_ID, profile: {email: 'owner@example.test'}}});
   if (body.method === 'tools/call') {
     calls.push(body.params);
