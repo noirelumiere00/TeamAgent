@@ -63,7 +63,8 @@ UV_DIGEST = "9941e2d8e06ff884d328905091eac0a6bc1e40e5ce12e6dd0de4ef4ee26baac4"
 # 2026-11-06: Alpine 上流への追随（musl-utils 1.2.6-r2→1.2.6-r3）。apk 段の実ビルドで lock 差分 -1 +1（240→240 行）。
 # 2026-11-07: Alpine 上流への追随（zlib 1.3.2-r1→1.4-r0）。apk 段の実ビルドで lock 差分 -4 +4（240→240 行）。
 # 2026-11-09: Alpine 上流への追随（削除: ffmpeg8-libavdevice-8.1.3-r1、ffmpeg8-libavfilter-8.1.3-r1、ffmpeg8-libswscale-8.1.3-r1 / 追加: ffmpeg8-libavdevice-8.1.3-r2、ffmpeg8-libavfilter-8.1.3-r2、ffmpeg8-libswscale-8.1.3-r2）。apk 段の実ビルドで lock 差分 -3 +3（240→240 行）。
-APK_LOCK_SHA256 = "14c2c479f42e5619cd4ee84f34147b3d3bc614a3510acabb0543877c4b22b4fb"
+# 2026-11-11: CVE 対応の明示 pin（libxslt 1.1.43-r3→1.1.43-r4）。lock は該当 1 行だけ差し替え（240→240 行・手元の実ビルドなし。段 3 の image-builder が照合）。
+APK_LOCK_SHA256 = "c50404e70c98ee33b380199bdb5b9e72b5dc527391a308aeb9ec5461e8609d2d"
 CHROMIUM_PATH = "/usr/lib/chromium/chromium"
 
 
@@ -189,6 +190,8 @@ def test_base_bundled_cve_packages_are_pinned_to_the_fixed_versions() -> None:
         "MUSL_PACKAGE_VERSION": ("musl", "1.2.6-r3"),
         # ECR 脆弱性ゲートが musl-utils 1.2.6-r2 を musl の CVE-2026-107891（HIGH）として検出・v3.24 で 1.2.6-r3
         "MUSL_UTILS_PACKAGE_VERSION": ("musl-utils", "1.2.6-r3"),
+        # chromium ベース同梱の libxslt 1.1.43-r3 に HIGH 3 件と MEDIUM 1 件。便 r118 段 3 の ECR ゲートが拒否した（e8db45f5）。Alpine secdb v3.24 main で 1.1.43-r4 が修正版
+        "LIBXSLT_PACKAGE_VERSION": ("libxslt", "1.1.43-r4"),
         "LIBSSL3_PACKAGE_VERSION": ("libssl3", "3.5.9-r0"),
     }
     lock = APK_LOCK.read_text(encoding="utf-8").splitlines()

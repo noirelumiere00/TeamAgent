@@ -208,20 +208,32 @@ def test_unrelated_changes_still_pass(base: str, head: str, reason: str) -> None
 
 
 def test_unlock_matches_the_committed_declaration() -> None:
-    """glibc の APK 差し替えと、退避した 504 宣言を完全一致で封印する。"""
+    """libxslt の明示 pin と、退避した glibc・504・apk ロックの宣言を完全一致で封印する。"""
     unlock = _freeze_doc()["unlock"]
     assert unlock["active"] is True
     assert unlock["scope_paths"] == [
-        "infra/codebuild/teamagent_runtime_contract.json",
         "infra/codebuild/teamagent_core_media_release_contract.json",
     ]
     assert (
         unlock["reason"]
-        == unlock["gate"]
-        == (
-            "human gate 2026-11-11（小俣さん承認: 便 r118 が段 3 の ECR 脆弱性ゲートで core の glibc 2.44-r8（CVE-2026-84243 HIGH）を拒否。土台の digest は変えず Wolfi 公式の修正版 glibc 2.44-r16 を固定 APK/SHA/APKINDEX で差し替え、runtime/release 契約・世代・凍結をオフライン更新。AWS 書き込み・CodeBuild 起動・S3 公開・git commit・push は行わない）"
-        )
+        == "【media の apk ロック追随】 【2026-11-11 CVE 対応の明示 pin】便 r118 の 2 回目（e8db45f5）で段 3 の ECR 脆弱性ゲートが media の libxslt 1.1.43-r3（chromium ベース同梱・CVE-2026-9947 / CVE-2026-87636 / CVE-2026-125350 HIGH・CVE-2025-10911 MEDIUM）を拒否した。Alpine secdb v3.24 main の修正版 1.1.43-r4 を Dockerfile に明示 pin し、lock は該当 1 行だけ差し替えた（240→240 行・手元の実ビルドなし。実物との一致は段 3 の image-builder が照合する）。lock の sha256 が動くため契約の artifact.apk-lock.sha256 と release 契約の sha が動き、世代 publish を再度強制する。scope は core_media 契約 1 path。"
     )
+    assert (
+        unlock["gate"]
+        == "human gate 2026-11-11（小俣さん承認: 便 r118 の 2 回目が段 3 の ECR 脆弱性ゲートで media の libxslt 1.1.43-r3（CVE-2026-9947 / CVE-2026-87636 / CVE-2026-125350 HIGH・CVE-2025-10911 MEDIUM）を拒否。chromium ベースの digest は変えず、Alpine v3.24 公式の修正版 libxslt 1.1.43-r4 を明示 pin し、lock・release 契約・世代・凍結をオフライン更新。例外は足さない）"
+    )
+    assert unlock[
+        "previous_scope_20261111_teamagent_runtime_contract_teamagent_core_media_release_contract"
+    ] == {
+        "active": True,
+        "scope_paths": [
+            "infra/codebuild/teamagent_runtime_contract.json",
+            "infra/codebuild/teamagent_core_media_release_contract.json",
+        ],
+        "reason": "human gate 2026-11-11（小俣さん承認: 便 r118 が段 3 の ECR 脆弱性ゲートで core の glibc 2.44-r8（CVE-2026-84243 HIGH）を拒否。土台の digest は変えず Wolfi 公式の修正版 glibc 2.44-r16 を固定 APK/SHA/APKINDEX で差し替え、runtime/release 契約・世代・凍結をオフライン更新。AWS 書き込み・CodeBuild 起動・S3 公開・git commit・push は行わない）",
+        "gate": "human gate 2026-11-11（小俣さん承認: 便 r118 が段 3 の ECR 脆弱性ゲートで core の glibc 2.44-r8（CVE-2026-84243 HIGH）を拒否。土台の digest は変えず Wolfi 公式の修正版 glibc 2.44-r16 を固定 APK/SHA/APKINDEX で差し替え、runtime/release 契約・世代・凍結をオフライン更新。AWS 書き込み・CodeBuild 起動・S3 公開・git commit・push は行わない）",
+        "note": "dev 取り込み済みで本 PR では触らないため scope から外す（過剰 unlock の禁止）。human gate 2026-11-11（小俣さん承認: 便 r118 の 2 回目が段 3 の ECR 脆弱性ゲートで media の libxslt 1.1.43-r3（CVE-2026-9947 / CVE-2026-87636 / CVE-2026-125350 HIGH・CVE-2025-10911 MEDIUM）を拒否。chromium ベースの digest は変えず、Alpine v3.24 公式の修正版 libxslt 1.1.43-r4 を明示 pin し、lock・release 契約・世代・凍結をオフライン更新。例外は足さない）",
+    }
     unlock = unlock["previous_scope_20261111_core_glibc"]
     assert unlock["active"] is True
     assert unlock["scope_paths"] == [

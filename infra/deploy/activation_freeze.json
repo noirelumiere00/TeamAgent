@@ -375,11 +375,10 @@
   "unlock": {
     "active": true,
     "scope_paths": [
-      "infra/codebuild/teamagent_runtime_contract.json",
       "infra/codebuild/teamagent_core_media_release_contract.json"
     ],
-    "reason": "human gate 2026-11-11（小俣さん承認: 便 r118 が段 3 の ECR 脆弱性ゲートで core の glibc 2.44-r8（CVE-2026-84243 HIGH）を拒否。土台の digest は変えず Wolfi 公式の修正版 glibc 2.44-r16 を固定 APK/SHA/APKINDEX で差し替え、runtime/release 契約・世代・凍結をオフライン更新。AWS 書き込み・CodeBuild 起動・S3 公開・git commit・push は行わない）",
-    "gate": "human gate 2026-11-11（小俣さん承認: 便 r118 が段 3 の ECR 脆弱性ゲートで core の glibc 2.44-r8（CVE-2026-84243 HIGH）を拒否。土台の digest は変えず Wolfi 公式の修正版 glibc 2.44-r16 を固定 APK/SHA/APKINDEX で差し替え、runtime/release 契約・世代・凍結をオフライン更新。AWS 書き込み・CodeBuild 起動・S3 公開・git commit・push は行わない）",
+    "reason": "【media の apk ロック追随】 【2026-11-11 CVE 対応の明示 pin】便 r118 の 2 回目（e8db45f5）で段 3 の ECR 脆弱性ゲートが media の libxslt 1.1.43-r3（chromium ベース同梱・CVE-2026-9947 / CVE-2026-87636 / CVE-2026-125350 HIGH・CVE-2025-10911 MEDIUM）を拒否した。Alpine secdb v3.24 main の修正版 1.1.43-r4 を Dockerfile に明示 pin し、lock は該当 1 行だけ差し替えた（240→240 行・手元の実ビルドなし。実物との一致は段 3 の image-builder が照合する）。lock の sha256 が動くため契約の artifact.apk-lock.sha256 と release 契約の sha が動き、世代 publish を再度強制する。scope は core_media 契約 1 path。",
+    "gate": "human gate 2026-11-11（小俣さん承認: 便 r118 の 2 回目が段 3 の ECR 脆弱性ゲートで media の libxslt 1.1.43-r3（CVE-2026-9947 / CVE-2026-87636 / CVE-2026-125350 HIGH・CVE-2025-10911 MEDIUM）を拒否。chromium ベースの digest は変えず、Alpine v3.24 公式の修正版 libxslt 1.1.43-r4 を明示 pin し、lock・release 契約・世代・凍結をオフライン更新。例外は足さない）",
     "folded_2026_08_28": {
       "decision": "裁定③（relock せず相乗り）を打ち切り、本 PR で unlock を畳む。Human Gate ⑤ を 2026-08-28 にユーザーが通した。",
       "why_now": "①本 PR は frozen surface を 1 path も変更していない（assert-frozen-surface --base origin/dev --head HEAD が「frozen surface 無変更（監視対象 21 path）」を返す実測）。∴ この unlock は本 PR には不要。②active のままだと test_unlock_is_inactive_and_empty_by_default が落ち、CI が 1 failed / 7,474 passed で恒常的に赤になる（3.11 / 3.13 / 3.14 すべてで実測）。本物の失敗と見分けがつかなくなる。③裁定③の rationale「いま relock すると同じ宣言を立て直す往復が発生する」は成立しない。retention_ruling_2026_08_27.landmine_partial_scope のとおり、相乗り PR は scope_paths を自分の変更集合へ絞り込まねばならず、**どのみち書き直しが必須**だから。",
@@ -700,6 +699,16 @@
       ],
       "reason": "GitHub リリース取得の間欠的な 504 に対し、4 buildspec の S3 ミラー優先取得・curl リトライと必要な CodeBuild 読み取り権限をリポジトリ内で実装する。frozen surface は attestor/promoter buildspec と codebuild.tf の 3 path のみ。世代はオフライン再導出し、AWS publish・権限変更・Terraform apply は実行しない。",
       "gate": "human gate 2026-11-09（ユーザーの明示依頼: ビルドツール 504 対策の調査・リポジトリ内実装・世代再導出。AWS・S3・GitHub 接続と Terraform apply は禁止）"
+    },
+    "previous_scope_20261111_teamagent_runtime_contract_teamagent_core_media_release_contract": {
+      "active": true,
+      "scope_paths": [
+        "infra/codebuild/teamagent_runtime_contract.json",
+        "infra/codebuild/teamagent_core_media_release_contract.json"
+      ],
+      "reason": "human gate 2026-11-11（小俣さん承認: 便 r118 が段 3 の ECR 脆弱性ゲートで core の glibc 2.44-r8（CVE-2026-84243 HIGH）を拒否。土台の digest は変えず Wolfi 公式の修正版 glibc 2.44-r16 を固定 APK/SHA/APKINDEX で差し替え、runtime/release 契約・世代・凍結をオフライン更新。AWS 書き込み・CodeBuild 起動・S3 公開・git commit・push は行わない）",
+      "gate": "human gate 2026-11-11（小俣さん承認: 便 r118 が段 3 の ECR 脆弱性ゲートで core の glibc 2.44-r8（CVE-2026-84243 HIGH）を拒否。土台の digest は変えず Wolfi 公式の修正版 glibc 2.44-r16 を固定 APK/SHA/APKINDEX で差し替え、runtime/release 契約・世代・凍結をオフライン更新。AWS 書き込み・CodeBuild 起動・S3 公開・git commit・push は行わない）",
+      "note": "dev 取り込み済みで本 PR では触らないため scope から外す（過剰 unlock の禁止）。human gate 2026-11-11（小俣さん承認: 便 r118 の 2 回目が段 3 の ECR 脆弱性ゲートで media の libxslt 1.1.43-r3（CVE-2026-9947 / CVE-2026-87636 / CVE-2026-125350 HIGH・CVE-2025-10911 MEDIUM）を拒否。chromium ベースの digest は変えず、Alpine v3.24 公式の修正版 libxslt 1.1.43-r4 を明示 pin し、lock・release 契約・世代・凍結をオフライン更新。例外は足さない）"
     }
   },
   "production_deployment_freeze": {
