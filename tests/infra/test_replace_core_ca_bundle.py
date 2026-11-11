@@ -1,4 +1,4 @@
-"""The pinned Wolfi APK changes exactly one runtime package and its payload."""
+"""Pinned Wolfi APKs change only their runtime package records and payloads."""
 
 from __future__ import annotations
 
@@ -109,7 +109,16 @@ def test_vendored_inputs_keep_their_exact_bytes_in_canonical_build_context(tmp_p
     sys.modules[spec.name] = context
     spec.loader.exec_module(context)
     source = tmp_path / "source"
-    inputs = (APK, LOCK, PIP_APK, PIP_LOCK, EXPAT_APK, EXPAT_LOCK, SCRIPT)
+    inputs = (
+        APK,
+        LOCK,
+        PIP_APK,
+        PIP_LOCK,
+        EXPAT_APK,
+        EXPAT_LOCK,
+        SCRIPT,
+        *(path for name in GLIBC_NAMES for path in _glibc_inputs(name)),
+    )
     for path in inputs:
         destination = source / path.relative_to(ROOT)
         destination.parent.mkdir(parents=True, exist_ok=True)
@@ -611,6 +620,204 @@ def test_expat_combines_with_existing_pinned_replacements_and_finalizes_copy(tmp
             str(ROOT / "infra/docker/vendor" / lock["archive"]),
             "--lock",
             str(path),
+            "--apk-sha256",
+            lock["archive_sha256"],
+            "--version",
+            lock["apkindex"]["V"],
+        ]
+    subprocess.run(command, check=True, capture_output=True, text=True)
+    module.verify(base, before, packages)
+
+
+GLIBC_NAMES = ("glibc-2.44", "glibc-2.44-locale-posix", "ld-linux-2.44")
+GLIBC_VERSION = "2.44-r16"
+
+
+def _glibc_inputs(name):
+    return (
+        ROOT / f"infra/docker/vendor/{name}-{GLIBC_VERSION}.apk",
+        ROOT / f"infra/docker/core-{name}.lock.json",
+    )
+
+
+def _glibc_packages(module):
+    import json
+
+    packages = []
+    for name in GLIBC_NAMES:
+        apk, lock = _glibc_inputs(name)
+        data = json.loads(lock.read_bytes())
+        packages.append(module.load_package(apk, lock, data["archive_sha256"], GLIBC_VERSION))
+    return packages
+
+
+def _glibc_base(tmp_path, packages):
+    base, before = _expat_base(tmp_path)
+    (base / "lib").symlink_to("usr/lib")
+    for name in ("libgcc", "merged-lib", "merged-sbin", "merged-usrsbin"):
+        before += f"P:{name}\nV:1\n\n".encode()
+    for package in packages:
+        name = package["lock"]["apkindex"]["P"]
+        stale = (f"usr/lib/obsolete-{name}", f"var/lib/db/sbom/{name}-2.44-r8.spdx.json")
+        record = f"P:{name}\nV:2.44-r8\no:glibc-2.44\n"
+        for path in stale:
+            record += f"F:{Path(path).parent}\nR:{Path(path).name}\n"
+            (base / path).write_bytes(b"old glibc payload")
+        before += (record + "\n").encode()
+    (base / DB).write_bytes(before)
+    (base / "usr/lib/libc.so.6").write_bytes(b"old libc")
+    (base / "usr/lib/ld-linux-aarch64.so.1").write_bytes(b"old loader")
+    (base / "usr/bin").mkdir(parents=True, exist_ok=True)
+    (base / "usr/bin/ld.so").symlink_to("../../lib/ld-linux-aarch64.so.1")
+    return base, before
+
+
+def test_glibc_replaces_every_origin_record_and_preserves_loader_symlink(tmp_path):
+    module = _module()
+    packages = _glibc_packages(module)
+    base, before = _glibc_base(tmp_path, packages)
+    module.prepare(base, packages)
+    module.verify(base, before, packages)
+    assert (base / DB).read_bytes().split(b"\n\n")[:-4] == before.split(b"\n\n")[:-4]
+    assert (base / DB).read_bytes().count(b"V:2.44-r16\n") == 3
+    assert os.readlink(base / "usr/bin/ld.so") == "../../lib/ld-linux-aarch64.so.1"
+    assert (base / "usr/bin/ld.so").resolve() == base / "usr/lib/ld-linux-aarch64.so.1"
+    for package in packages:
+        assert not (base / module.old_sbom(package)).exists()
+    spec = importlib.util.spec_from_file_location("smoke_core", ROOT / "infra/docker/smoke_core.py")
+    smoke = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(smoke)
+    smoke._assert_glibc_packages(base)
+
+
+@pytest.mark.parametrize("name", GLIBC_NAMES)
+@pytest.mark.parametrize("field", ["C", "P", "V", "A", "S", "I", "T", "c", "D", "p", "o"])
+def test_glibc_rejects_apkindex_or_archive_mismatch(tmp_path, name, field):
+    import json
+
+    module = _module()
+    apk, lock = _glibc_inputs(name)
+    data = json.loads(lock.read_bytes())
+    digest = data["archive_sha256"]
+    data["apkindex"][field] = "0" if field in ("S", "I") else "wrong"
+    bad = tmp_path / "lock.json"
+    bad.write_text(json.dumps(data))
+    with pytest.raises(ValueError):
+        module.load_package(apk, bad, digest, GLIBC_VERSION)
+    with pytest.raises(ValueError, match="APK SHA-256"):
+        module.load_package(apk, lock, "0" * 64, GLIBC_VERSION)
+
+
+@pytest.mark.parametrize(
+    "change",
+    ["base-version", "missing-provider", "duplicate", "extra-origin", "origin", "partial", "musl"],
+)
+def test_glibc_rejects_inventory_and_dependency_drift_before_writing(tmp_path, change):
+    module = _module()
+    packages = _glibc_packages(module)
+    base, before = _glibc_base(tmp_path, packages)
+    if change == "base-version":
+        before = before.replace(b"V:2.44-r8", b"V:2.44-r7", 1)
+    elif change == "missing-provider":
+        before = before.replace(b"P:libgcc\nV:1\n\n", b"")
+    elif change == "duplicate":
+        before += b"P:glibc-2.44\nV:2.44-r8\no:glibc-2.44\n\n"
+    elif change == "extra-origin":
+        before += b"P:glibc-2.44-dev\nV:2.44-r8\no:glibc-2.44\n\n"
+    elif change == "origin":
+        before = before.replace(b"o:glibc-2.44", b"o:glibc-2.43", 1)
+    elif change == "partial":
+        packages = packages[:-1]
+    else:
+        before += b"P:musl\nV:1\n\n"
+    (base / DB).write_bytes(before)
+    with pytest.raises(ValueError):
+        module.prepare(base, packages)
+    assert (base / DB).read_bytes() == before
+    assert (base / "usr/lib/libc.so.6").read_bytes() == b"old libc"
+    assert (base / "usr/lib/ld-linux-aarch64.so.1").read_bytes() == b"old loader"
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        "libc",
+        "loader",
+        "locale",
+        "mode",
+        "special-mode",
+        "symlink",
+        "sbom",
+        "stale",
+        "other-package",
+    ],
+)
+def test_glibc_final_verification_fails_closed(tmp_path, change):
+    module = _module()
+    packages = _glibc_packages(module)
+    base, before = _glibc_base(tmp_path, packages)
+    module.prepare(base, packages)
+    if change in ("mode", "special-mode"):
+        # The macOS sandbox strips setuid/setgid; sticky still exercises the special-bit mask.
+        (base / "usr/lib/libc.so.6").chmod(0o644 if change == "mode" else 0o1755)
+    elif change == "symlink":
+        (base / "usr/bin/ld.so").unlink()
+        (base / "usr/bin/ld.so").symlink_to("../../lib/obsolete-loader.so")
+    elif change == "other-package":
+        db = base / DB
+        db.write_bytes(db.read_bytes().replace(b"P:python-3.14\n", b"P:python-3.15\n"))
+    else:
+        path = {
+            "libc": "usr/lib/libc.so.6",
+            "loader": "usr/lib/ld-linux-aarch64.so.1",
+            "locale": "usr/lib/locale/C.utf8/LC_CTYPE",
+            "sbom": "var/lib/db/sbom/ld-linux-2.44-2.44-r16.spdx.json",
+            "stale": "var/lib/db/sbom/glibc-2.44-2.44-r8.spdx.json",
+        }[change]
+        (base / path).write_bytes(b"corrupt")
+    with pytest.raises(ValueError):
+        module.verify(base, before, packages)
+
+
+def test_glibc_combines_with_existing_replacements_and_finalizes_copy(tmp_path):
+    module = _module()
+    glibc = _glibc_packages(module)
+    base, before = _glibc_base(tmp_path, glibc)
+    packages = [
+        module.load_package(APK, LOCK, SHA256, VERSION),
+        *_python_packages(module),
+        _expat_package(module),
+        *glibc,
+    ]
+    module.prepare(base, packages)
+    baseline = tmp_path / "installed-before"
+    baseline.write_bytes(before)
+    retained = {
+        path for package in packages for kind in ("files", "links") for path in package[kind]
+    }
+    for package in packages:
+        for name in module.stale_paths(package, before, retained):
+            (base / name).write_bytes(b"base layer COPY overlay")
+    command = [
+        sys.executable,
+        str(SCRIPT),
+        "finalize",
+        "--root",
+        str(base),
+        "--base-db",
+        str(baseline),
+    ]
+    for package in packages:
+        lock = package["lock"]
+        name = lock["apkindex"]["P"]
+        lock_path = {"ca-certificates-bundle": LOCK, "py3-pip-wheel": PIP_LOCK}.get(
+            name, ROOT / f"infra/docker/core-{name}.lock.json"
+        )
+        command += [
+            "--apk",
+            str(ROOT / "infra/docker/vendor" / lock["archive"]),
+            "--lock",
+            str(lock_path),
             "--apk-sha256",
             lock["archive_sha256"],
             "--version",

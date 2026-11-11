@@ -390,3 +390,57 @@ def test_expat_is_pinned_and_verified_in_builder_and_final_runtime() -> None:
         assert assertion["value"] == expected
         assert f'{assertion["oci_label"]}="${arg}"' in final
         assert all(use in builder for use in assertion["dockerfile_uses"])
+
+
+def test_glibc_origin_is_pinned_and_copied_without_dereferencing_loader_links() -> None:
+    import json
+
+    builder, final = _stage("builder", "final"), _stage("final")
+    packages = {
+        "glibc-2.44": "GLIBC_APK_SHA256",
+        "glibc-2.44-locale-posix": "GLIBC_LOCALE_POSIX_APK_SHA256",
+        "ld-linux-2.44": "LD_LINUX_APK_SHA256",
+    }
+    expected = {"GLIBC_PACKAGE_VERSION": "2.44-r16"}
+    for name, arg in packages.items():
+        lock = ROOT / f"infra/docker/core-{name}.lock.json"
+        data = json.loads(lock.read_bytes())
+        apk = ROOT / "infra/docker/vendor" / data["archive"]
+        digest = hashlib.sha256(apk.read_bytes()).hexdigest()
+        assert data["archive_sha256"] == digest
+        assert data["url"] == f"https://packages.wolfi.dev/os/aarch64/{name}-2.44-r16.apk"
+        assert data["base_version"] == "2.44-r8"
+        assert data["apkindex"]["V"] == "2.44-r16"
+        assert data["apkindex"]["o"] == "glibc-2.44"
+        assert f"ARG {arg}={digest}" in TEXT
+        for path in (lock, apk):
+            assert f"COPY {path.relative_to(ROOT)} /tmp/core-glibc/" in builder
+            assert f"!{path.relative_to(ROOT)}" in DOCKERIGNORE.read_text()
+        assert (
+            f"{hashlib.sha256(lock.read_bytes()).hexdigest()} /tmp/core-glibc/{lock.name} | sha256sum -c -"
+            in builder
+        )
+        assert builder.count(f'--apk-sha256 "${arg}" --version "$GLIBC_PACKAGE_VERSION"') == 1
+        assert f'"--apk-sha256", "{digest}", "--version", "2.44-r16"' in final
+        expected[arg] = digest
+    assert "ARG GLIBC_PACKAGE_VERSION=2.44-r16" in TEXT
+    assert "cp -a /tmp/core-ca/root/usr/bin/ld.so " in builder
+    assert "COPY --from=builder /tmp/core-glibc/root/ /" in final
+    assert "source=/tmp/core-glibc,target=/tmp/core-glibc" in final
+    runtime = json.loads((ROOT / "infra/codebuild/teamagent_runtime_contract.json").read_bytes())
+    python = next(
+        entry
+        for entry in runtime["receipt"]["entries"]
+        if entry["key"] == "component.python.version"
+    )
+    check = 'python -c "import ssl, ctypes, locale, sqlite3"'
+    assert check in python["dockerfile_uses"] and check in builder
+    contract = json.loads(
+        (ROOT / "infra/codebuild/teamagent_core_media_release_contract.json").read_bytes()
+    )
+    core = next(subject for subject in contract["subjects"] if subject["name"] == "core")
+    for arg, value in expected.items():
+        assertion = next(item for item in core["source_assertions"] if item["build_arg"] == arg)
+        assert assertion["value"] == value
+        assert f'{assertion["oci_label"]}="${arg}"' in final
+        assert all(use in builder for use in assertion["dockerfile_uses"])

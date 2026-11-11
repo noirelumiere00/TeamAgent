@@ -27,6 +27,11 @@ ARG BROTLI_COMMON_APK_SHA256=1801ba6f752b201c5d52fadd98a3698a672a5695ad18d232116
 ARG BROTLI_DEC_APK_SHA256=a5a25fb6a8238af95af1c21f039ecb4cb1a32fadd040ac276d73532ffd72fb1c
 ARG BROTLI_ENC_APK_SHA256=d15c3aaa157a5fa281768fe5e69ae3da9357d3e58668ca47aa7bf2c3442d09b8
 # CVE-2026-113351 / CVE-2026-115506: retain the fixed Wolfi expat shared library.
+# CVE-2026-84243: replace every installed glibc origin package in the fixed runtime.
+ARG GLIBC_PACKAGE_VERSION=2.44-r16
+ARG GLIBC_APK_SHA256=f8dc51006371a7387048b3791db643760246df648bb74ce620a443baac76c528
+ARG GLIBC_LOCALE_POSIX_APK_SHA256=0262151832e1a8ceab613f428e1c57a2e67bc92fbe2547c77b81d3b1aa1d12e4
+ARG LD_LINUX_APK_SHA256=7bec5a9414f5fd81b7ce83243a2cd879b8f2095d38c74cd9098a5f35584705dd
 ARG EXPAT_PACKAGE_VERSION=2.10.0-r0
 ARG LIBEXPAT_APK_SHA256=68d2212a36051d122200630086b3f9f3edae4785b4700599ac47edb92364e8c5
 ARG LIBEXPAT_BINARY_SHA256=a152dbe6777769de636347b3cd3c53cd46ccdae7b911a2acb76cf8f66ab9c366
@@ -71,6 +76,10 @@ ARG BROTLI_PACKAGE_VERSION
 ARG BROTLI_COMMON_APK_SHA256
 ARG BROTLI_DEC_APK_SHA256
 ARG BROTLI_ENC_APK_SHA256
+ARG GLIBC_PACKAGE_VERSION
+ARG GLIBC_APK_SHA256
+ARG GLIBC_LOCALE_POSIX_APK_SHA256
+ARG LD_LINUX_APK_SHA256
 ARG EXPAT_PACKAGE_VERSION
 ARG LIBEXPAT_APK_SHA256
 ARG LIBEXPAT_BINARY_SHA256
@@ -111,7 +120,7 @@ assert parsed_receipt['subject'] == 'core'; \
 assert parsed_receipt['values'] == expected_values; \
 assert all(os.environ[entry['build_arg']] == entry['value'] for entry in entries)"
 
-# Keep the base digests; update pinned Python 3.14, Brotli, libexpat, CA and pip-wheel payloads.
+# Keep the base digests; update pinned Python 3.14, Brotli, libexpat, glibc, CA and pip-wheel payloads.
 COPY --from=runtime-base / /tmp/core-ca/root/
 COPY infra/docker/vendor/libbrotlicommon1-1.2.1-r0.apk /tmp/core-brotli/
 COPY infra/docker/vendor/libbrotlidec1-1.2.1-r0.apk /tmp/core-brotli/
@@ -130,6 +139,12 @@ COPY infra/docker/core-ca-bundle.lock.json /tmp/core-ca/lock.json
 COPY infra/docker/vendor/py3-pip-wheel-26.2.2-r2.apk /tmp/core-ca/pip-wheel.apk
 COPY infra/docker/core-pip-wheel.lock.json /tmp/core-ca/pip-wheel.lock.json
 COPY infra/docker/replace_core_ca_bundle.py /tmp/core-ca/replace_core_ca_bundle.py
+COPY infra/docker/vendor/glibc-2.44-2.44-r16.apk /tmp/core-glibc/
+COPY infra/docker/core-glibc-2.44.lock.json /tmp/core-glibc/
+COPY infra/docker/vendor/glibc-2.44-locale-posix-2.44-r16.apk /tmp/core-glibc/
+COPY infra/docker/core-glibc-2.44-locale-posix.lock.json /tmp/core-glibc/
+COPY infra/docker/vendor/ld-linux-2.44-2.44-r16.apk /tmp/core-glibc/
+COPY infra/docker/core-ld-linux-2.44.lock.json /tmp/core-glibc/
 COPY infra/docker/vendor/libexpat1-2.10.0-r0.apk /tmp/core-expat/
 COPY infra/docker/core-libexpat1.lock.json /tmp/core-expat/
 COPY infra/docker/vendor/python-3.14-3.14.10_git20261028-r0.apk /tmp/core-python/
@@ -143,6 +158,9 @@ COPY infra/docker/core-python-3.14-base-dev.lock.json /tmp/core-python/
 COPY infra/docker/vendor/python-3.14-dev-3.14.10_git20261028-r0.apk /tmp/core-python/
 COPY infra/docker/core-python-3.14-dev.lock.json /tmp/core-python/
 RUN set -eu; \
+    printf '%s  %s\n' 9a00558cf00a77753f317474a4429649cb88d282adaad4078a787d25109ea326 /tmp/core-glibc/core-glibc-2.44.lock.json | sha256sum -c -; \
+    printf '%s  %s\n' 72e43f05a9dfef3bc3d052641dfd34ca1d7959bbcc480f7587f384b3d002b911 /tmp/core-glibc/core-glibc-2.44-locale-posix.lock.json | sha256sum -c -; \
+    printf '%s  %s\n' a3e455d0e0d2f92915c650911ed2b3395f9131150f904a9615337ad80d03dccb /tmp/core-glibc/core-ld-linux-2.44.lock.json | sha256sum -c -; \
     printf '%s  %s\n' f102c3d4301b773dd6741072294d456637ed5e7bf9b8990aca5f92904abd5f40 /tmp/core-expat/core-libexpat1.lock.json | sha256sum -c -; \
     printf '%s  %s\n' 5b0040f65d5ca2f65b872829868b9cf0854b25cac6828d5a6fca406cd9c52043 /tmp/core-python/core-python-3.14.lock.json | sha256sum -c -; \
     printf '%s  %s\n' ad3f81e3f6e959afa94d8520217a8e0dd2244e0841d56ecb81b8e700da75ab45 /tmp/core-python/core-python-3.14-base.lock.json | sha256sum -c -; \
@@ -153,6 +171,12 @@ RUN set -eu; \
     printf '%s  %s\n' 90de1897152e745869e5953cf359cd2ecfd4afb993a4451560f0ac4c617479a0 /tmp/core-ca/pip-wheel.lock.json | sha256sum -c -; \
     python /tmp/core-ca/replace_core_ca_bundle.py prepare \
       --root /tmp/core-ca/root --base-db /tmp/core-ca/base-installed \
+      --apk /tmp/core-glibc/glibc-2.44-2.44-r16.apk --lock /tmp/core-glibc/core-glibc-2.44.lock.json \
+      --apk-sha256 "$GLIBC_APK_SHA256" --version "$GLIBC_PACKAGE_VERSION" \
+      --apk /tmp/core-glibc/glibc-2.44-locale-posix-2.44-r16.apk --lock /tmp/core-glibc/core-glibc-2.44-locale-posix.lock.json \
+      --apk-sha256 "$GLIBC_LOCALE_POSIX_APK_SHA256" --version "$GLIBC_PACKAGE_VERSION" \
+      --apk /tmp/core-glibc/ld-linux-2.44-2.44-r16.apk --lock /tmp/core-glibc/core-ld-linux-2.44.lock.json \
+      --apk-sha256 "$LD_LINUX_APK_SHA256" --version "$GLIBC_PACKAGE_VERSION" \
       --apk /tmp/core-ca/bundle.apk --lock /tmp/core-ca/lock.json \
       --apk-sha256 "$CA_CERTIFICATES_BUNDLE_APK_SHA256" \
       --version "$CA_CERTIFICATES_BUNDLE_VERSION" \
@@ -182,9 +206,24 @@ RUN set -eu; \
       --apk-sha256 "$PYTHON_BASE_DEV_APK_SHA256" --version "$PYTHON_PACKAGE_VERSION" \
       --apk /tmp/core-python/python-3.14-dev-3.14.10_git20261028-r0.apk --lock /tmp/core-python/core-python-3.14-dev.lock.json \
       --apk-sha256 "$PYTHON_DEV_APK_SHA256" --version "$PYTHON_PACKAGE_VERSION"; \
+    mkdir -p /tmp/core-glibc/root/usr/lib/locale /tmp/core-glibc/root/usr/bin \
+      /tmp/core-glibc/root/etc/apk/commit_hooks.d /tmp/core-glibc/root/etc/ld.so.conf.d \
+      /tmp/core-glibc/root/var/lib/db/sbom; \
+    for library in libBrokenLocale.so.1 libanl.so.1 libc.so.6 libc_malloc_debug.so.0 libdl.so.2 libm.so.6 libmemusage.so libmvec.so.1 libnsl.so.1 libnss_compat.so.2 libnss_dns.so.2 libnss_files.so.2 libpthread.so.0 libresolv.so.2 librt.so.1 libthread_db.so.1 libutil.so.1 ld-linux-aarch64.so.1; do \
+      cp -a "/tmp/core-ca/root/usr/lib/$library" /tmp/core-glibc/root/usr/lib/; \
+    done; \
+    cp -a /tmp/core-ca/root/usr/lib/locale/C.utf8 /tmp/core-glibc/root/usr/lib/locale/; \
+    cp -a /tmp/core-ca/root/usr/bin/ld.so /tmp/core-ca/root/usr/bin/ldconfig /tmp/core-glibc/root/usr/bin/; \
+    cp -a /tmp/core-ca/root/etc/apk/commit_hooks.d/ldconfig-commit.sh /tmp/core-glibc/root/etc/apk/commit_hooks.d/; \
+    cp -a /tmp/core-ca/root/etc/ld.so.conf /tmp/core-glibc/root/etc/; \
+    cp -a /tmp/core-ca/root/etc/ld.so.conf.d/libc.conf /tmp/core-glibc/root/etc/ld.so.conf.d/; \
+    cp -a /tmp/core-ca/root/etc/rpc /tmp/core-glibc/root/etc/; \
+    cp -a /tmp/core-ca/root/var/lib/db/sbom/glibc-2.44*-2.44-r16.spdx.json \
+      /tmp/core-ca/root/var/lib/db/sbom/ld-linux-2.44-2.44-r16.spdx.json /tmp/core-glibc/root/var/lib/db/sbom/; \
     mkdir -p /tmp/core-expat/lib; \
     cp -a /tmp/core-ca/root/usr/lib/libexpat.so.1* /tmp/core-expat/lib/; \
     python -c "import pyexpat; assert pyexpat.EXPAT_VERSION == 'expat_2.10.0'"; \
+    python -c "import ssl, ctypes, locale, sqlite3"; \
     printf '%s  %s\n' "$LIBEXPAT_BINARY_SHA256" /usr/lib/libexpat.so.1.13.1 | sha256sum -c -; \
     test "$(python --version | tr -d +)" = "Python ${PYTHON_VERSION}"; \
     printf '%s  %s\n' "$PYTHON_BINARY_SHA256" /usr/bin/python3.14 | sha256sum -c -
@@ -346,6 +385,10 @@ ARG BROTLI_PACKAGE_VERSION
 ARG BROTLI_COMMON_APK_SHA256
 ARG BROTLI_DEC_APK_SHA256
 ARG BROTLI_ENC_APK_SHA256
+ARG GLIBC_PACKAGE_VERSION
+ARG GLIBC_APK_SHA256
+ARG GLIBC_LOCALE_POSIX_APK_SHA256
+ARG LD_LINUX_APK_SHA256
 ARG EXPAT_PACKAGE_VERSION
 ARG LIBEXPAT_APK_SHA256
 ARG LIBEXPAT_BINARY_SHA256
@@ -357,7 +400,8 @@ ARG RUNTIME_CONTRACT_SHA256
 ARG RUNTIME_RECEIPT_B64
 ARG RUNTIME_RECEIPT_SHA256
 
-# Copy the directory so Docker preserves the pinned library symlink.
+# Directory COPY preserves the pinned loader and library symlinks.
+COPY --from=builder /tmp/core-glibc/root/ /
 COPY --from=builder /tmp/core-expat/lib/ /usr/lib/
 COPY --from=builder /tmp/core-ca/root/var/lib/db/sbom/libexpat1-2.10.0-r0.spdx.json /var/lib/db/sbom/
 COPY --from=builder /tmp/core-ca/root/usr/lib/libbrotli*.so.1* /usr/lib/
@@ -379,8 +423,15 @@ RUN ["/usr/bin/python3.14", "-c", "from pathlib import Path; import ctypes; [Pat
 RUN --mount=type=bind,from=builder,source=/tmp/core-ca,target=/tmp/core-ca \
     --mount=type=bind,from=builder,source=/tmp/core-python,target=/tmp/core-python \
     --mount=type=bind,from=builder,source=/tmp/core-expat,target=/tmp/core-expat \
+    --mount=type=bind,from=builder,source=/tmp/core-glibc,target=/tmp/core-glibc \
     ["/usr/bin/python3.14", "-B", "/tmp/core-ca/replace_core_ca_bundle.py", "finalize", \
      "--root", "/", "--base-db", "/tmp/core-ca/base-installed", \
+     "--apk", "/tmp/core-glibc/glibc-2.44-2.44-r16.apk", "--lock", "/tmp/core-glibc/core-glibc-2.44.lock.json", \
+     "--apk-sha256", "f8dc51006371a7387048b3791db643760246df648bb74ce620a443baac76c528", "--version", "2.44-r16", \
+     "--apk", "/tmp/core-glibc/glibc-2.44-locale-posix-2.44-r16.apk", "--lock", "/tmp/core-glibc/core-glibc-2.44-locale-posix.lock.json", \
+     "--apk-sha256", "0262151832e1a8ceab613f428e1c57a2e67bc92fbe2547c77b81d3b1aa1d12e4", "--version", "2.44-r16", \
+     "--apk", "/tmp/core-glibc/ld-linux-2.44-2.44-r16.apk", "--lock", "/tmp/core-glibc/core-ld-linux-2.44.lock.json", \
+     "--apk-sha256", "7bec5a9414f5fd81b7ce83243a2cd879b8f2095d38c74cd9098a5f35584705dd", "--version", "2.44-r16", \
      "--apk", "/tmp/core-ca/bundle.apk", "--lock", "/tmp/core-ca/lock.json", \
      "--apk-sha256", "4f57ebd7dc21d78ecce228f397d0a4ee46b5cfc777ac5f292821d41a97bfd896", \
      "--version", "20260909-r3", \
@@ -443,6 +494,10 @@ LABEL org.opencontainers.image.revision="$GIT_COMMIT" \
       io.teamagent.contract.brotli-common-apk-sha256="$BROTLI_COMMON_APK_SHA256" \
       io.teamagent.contract.brotli-dec-apk-sha256="$BROTLI_DEC_APK_SHA256" \
       io.teamagent.contract.brotli-enc-apk-sha256="$BROTLI_ENC_APK_SHA256" \
+      io.teamagent.contract.glibc-package-version="$GLIBC_PACKAGE_VERSION" \
+      io.teamagent.contract.glibc-apk-sha256="$GLIBC_APK_SHA256" \
+      io.teamagent.contract.glibc-locale-posix-apk-sha256="$GLIBC_LOCALE_POSIX_APK_SHA256" \
+      io.teamagent.contract.ld-linux-apk-sha256="$LD_LINUX_APK_SHA256" \
       io.teamagent.contract.expat-package-version="$EXPAT_PACKAGE_VERSION" \
       io.teamagent.contract.libexpat-apk-sha256="$LIBEXPAT_APK_SHA256" \
       io.teamagent.contract.libexpat-binary-sha256="$LIBEXPAT_BINARY_SHA256" \

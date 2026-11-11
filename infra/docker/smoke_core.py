@@ -11,6 +11,7 @@ import os
 import pwd
 import shutil
 import stat
+import subprocess
 import sys
 import tempfile
 from pathlib import Path
@@ -21,6 +22,8 @@ EXPECTED_PYTHON_SHA256 = "81060a4e37f0e6746c7f53468dcd28c200053b4a2bb377a3fe2169
 EXPECTED_LIBPYTHON_SHA256 = "5acb30a9c68ceb2985f094c5621f1d62ff8abd4480ea85c7b4ede09e741df0c6"
 EXPECTED_PIP_WHEEL_SHA256 = "38f4aacff7c3b0d7b216cac0a106a1036eef98b0a7ff5b932ea2fcb787e97bc5"
 EXPECTED_LIBEXPAT_SHA256 = "a152dbe6777769de636347b3cd3c53cd46ccdae7b911a2acb76cf8f66ab9c366"
+EXPECTED_LIBC_SHA256 = "15e7e70edb8e6e3dc19305fd646ee9477cc5e9181fd0ed88314adf073262565d"
+EXPECTED_LD_LINUX_SHA256 = "c91b0de6b77a9b9d2e68f8184f5da2191dd32c3fd06b6dc63a5f965093f4c735"
 
 
 def _sha256(path: Path) -> str:
@@ -167,6 +170,52 @@ def _assert_repeated_temp_cleanup() -> None:
     assert list(jobs.iterdir()) == []
 
 
+def _assert_glibc_packages(root: Path = Path("/")) -> None:
+    expected = {"glibc-2.44", "glibc-2.44-locale-posix", "ld-linux-2.44"}
+    actual = {}
+    for record in (root / "usr/lib/apk/db/installed").read_text().split("\n\n"):
+        fields = dict(
+            line.split(":", 1)
+            for line in record.splitlines()
+            if line.startswith(("P:", "V:", "o:"))
+        )
+        if fields.get("o", "").startswith("glibc") or fields.get("P") in expected:
+            actual[fields["P"]] = fields["V"]
+    assert actual == dict.fromkeys(expected, "2.44-r16"), actual
+    sboms = {
+        path.name
+        for pattern in ("glibc-*.spdx.json", "ld-linux-*.spdx.json")
+        for path in (root / "var/lib/db/sbom").glob(pattern)
+    }
+    assert sboms == {f"{name}-2.44-r16.spdx.json" for name in expected}, sboms
+    assert _sha256(root / "usr/lib/libc.so.6") == EXPECTED_LIBC_SHA256
+    assert _sha256(root / "usr/lib/ld-linux-aarch64.so.1") == EXPECTED_LD_LINUX_SHA256
+    assert os.readlink(root / "usr/bin/ld.so") == "../../lib/ld-linux-aarch64.so.1"
+
+
+def _assert_glibc_runtime() -> None:
+    # Start a fresh process so the loader and libc both come from the final image.
+    subprocess.run(
+        [
+            sys.executable,
+            "-B",
+            "-c",
+            "import ctypes, locale, sqlite3, ssl; "
+            "libc = ctypes.CDLL('libc.so.6'); "
+            "libc.gnu_get_libc_version.restype = ctypes.c_char_p; "
+            "assert libc.gnu_get_libc_version() == b'2.44'; "
+            "locale.setlocale(locale.LC_ALL, 'C.UTF-8'); "
+            "libc.gettext.restype = ctypes.c_char_p; "
+            "assert libc.gettext(b'teamagent-smoke') == b'teamagent-smoke'; "
+            "assert sqlite3.connect(':memory:').execute('select 1').fetchone() == (1,); "
+            "assert ssl.create_default_context().cert_store_stats()['x509_ca'] > 0",
+        ],
+        env={**os.environ, "LANGUAGE": "../x"},
+        check=True,
+        timeout=30,
+    )
+
+
 def main() -> None:
     assert os.getuid() == 10001
     assert os.getgid() == 10001
@@ -185,6 +234,8 @@ def main() -> None:
     _assert_pip_wheel()
     _assert_python_packages()
     _assert_expat_package()
+    _assert_glibc_packages()
+    _assert_glibc_runtime()
     import pyexpat
 
     assert pyexpat.EXPAT_VERSION == "expat_2.10.0"
@@ -197,6 +248,7 @@ def main() -> None:
                 "runtime": "core",
                 "uid": os.getuid(),
                 "python": sys.version.split()[0],
+                "glibc": "2.44-r16",
                 "e5_dimension": 1024,
                 "root_read_only": True,
                 "tmp_mode": "1777",

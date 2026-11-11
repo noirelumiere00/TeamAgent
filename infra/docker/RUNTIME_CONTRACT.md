@@ -74,6 +74,22 @@ release 契約は APK SHA・package 版・実体 SHA の OCI label と builder �
 smoke でも同 origin の installed inventory・唯一の新 SBOM・実体 SHA・ロード済み expat 版を照合する。
 base digest と既存 CA・Brotli・pip-wheel・Python 差し替えは維持する。
 
+2026-11-11: CVE-2026-84243 / GHSA-8rvm-662m-jvqv は、Wolfi 公式 secdb の
+origin `glibc-2.44` 修正版 `2.44-r16` で対応する。固定 runtime の同 origin 全件は
+`glibc-2.44`・`glibc-2.44-locale-posix`・`ld-linux-2.44`（旧版はすべて `2.44-r8`）の3件。
+[`core-glibc-2.44.lock.json`](./core-glibc-2.44.lock.json)、
+[`core-glibc-2.44-locale-posix.lock.json`](./core-glibc-2.44-locale-posix.lock.json)、
+[`core-ld-linux-2.44.lock.json`](./core-ld-linux-2.44.lock.json) が公式 APK の SHA と APKINDEX を固定する。
+3件を一括置換し、依存（`!musl` を含む）・origin 全件・APK DB の exact delta を変更前に検証する。
+libc・動的ローダ・locale・設定・SBOM の全 byte/mode/symlink と旧ファイル削除を最終イメージで照合する。
+`cp -a` による staging とディレクトリ COPY で `ld.so` の相対 symlink を保持する。
+runtime receipt は既存 Python の互換 import 条件を追加し、core release 契約は3 APK の SHA と版を束縛する。
+smoke は新版 inventory と
+libc/ローダの SHA を照合し、`LANGUAGE=../x` の新規 Python プロセスで `ssl`・`ctypes`・
+`locale`・`sqlite3` の import と基本動作を確認する。脆弱性の再現は行わない。
+builder の glibc 開発用2件は追加取得せず、builder 自体の glibc は変更しない。
+土台の digest、Python 3.14、既存 vendor APK、media/openclaw は維持する。
+
 Productionのconnect-webは `CONNECT_APP_HTML_S3_URI` による `source=s3` が正であり、baked
 fallbackとQA済みproduction artifactを同一digestとして扱わない。最終core OCI contractは次を
 固定する。
