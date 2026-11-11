@@ -1537,7 +1537,8 @@ class PgVectorClient:
         **母集団（case_corpus='true'）は広げない**（照合キーが 1 本増えるだけ）。
 
         段3/4 は ``industry`` が None なら空を返す。Drive用の soft_industry 時は
-        段4を業種で絞らず最大30件取り、呼び出し側で選別する。
+        段4を業種で絞らず最大30件取り、呼び出し側で選別する。その30件は指定業種の
+        事例を先頭に並べる（新しい順だけだと指定業種が1件も入らないことがある）。
         """
         limit = max(1, min(30 if soft_industry else 5, int(limit)))
         base = f"""
@@ -1547,6 +1548,7 @@ class PgVectorClient:
             WHERE d.metadata->>'case_corpus' = 'true'
         """  # nosec B608 - 列リストは定数、条件は全てバインド
         params: dict[str, Any] = {"limit": limit}
+        order = ""
         if stage == 1:
             if not client_name.strip():
                 return []
@@ -1584,6 +1586,13 @@ class PgVectorClient:
         elif stage == 4:
             if soft_industry:
                 where = ""
+                if industry:
+                    # IS NOT DISTINCT FROM: 業種が NULL の行を false にする（= は NULL が先頭）。
+                    order = (
+                        "(COALESCE(d.metadata->>'case_industry', d.metadata->>'cls_industry')"
+                        " IS NOT DISTINCT FROM %(industry)s) DESC, "
+                    )
+                    params["industry"] = industry
             elif not industry:
                 return []
             else:
@@ -1598,7 +1607,9 @@ class PgVectorClient:
         sql = (
             base
             + where
-            + "\n            ORDER BY d.modified_at DESC NULLS LAST\n            LIMIT %(limit)s"
+            + "\n            ORDER BY "
+            + order
+            + "d.modified_at DESC NULLS LAST\n            LIMIT %(limit)s"
         )
         with conn.cursor() as cur:
             cur.execute(sql, params)
@@ -1611,6 +1622,7 @@ class PgVectorClient:
             stage=stage,
             hit_count=len(out),
             has_industry=bool(industry),
+            industry_matched=sum(1 for r in out if industry and r.get("case_industry") == industry),
         )
         return out
 

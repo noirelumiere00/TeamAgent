@@ -291,7 +291,11 @@ def scope_by_industry(
     soft: bool = False,
     include_unknown: bool = True,
 ) -> list[SearchHit]:
-    """別業種を除く。soft選別は近接語も拾い、include_unknownなら判断不能も残す。"""
+    """別業種を除く。soft選別は近接語も拾い、include_unknownなら判断不能も残す。
+
+    include_unknown=False（業種指定の事例一覧）は、業種の語を題名・商材名など見出しの
+    項目だけで見る。本文に1語あるだけの無関係な投稿を事例として出さないため。
+    """
     wanted = normalize_industry(asked_industry)
     if not wanted:
         return list(hits)
@@ -309,21 +313,19 @@ def scope_by_industry(
             matched.append(hit)
         elif industry is None:
             meta = hit.metadata or {}
-            text = (
-                "\n".join(
-                    str(meta.get(key) or "")
-                    for key in (
-                        "title",
-                        "campaign",
-                        "case_product",
-                        "cls_project",
-                        "advertiser",
-                        *(("client_name", "case_client", "brand", "product") if soft else ()),
-                    )
+            text = "\n".join(
+                str(meta.get(key) or "")
+                for key in (
+                    "title",
+                    "campaign",
+                    "case_product",
+                    "cls_project",
+                    "advertiser",
+                    *(("client_name", "case_client", "brand", "product") if soft else ()),
                 )
-                + "\n"
-                + hit.content
             )
+            if include_unknown:
+                text += "\n" + hit.content
             if target_matches(text, wanted) or any(term in text for term in food_terms):
                 mentioned.append(hit)
             elif soft:

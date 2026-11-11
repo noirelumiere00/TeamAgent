@@ -19,8 +19,9 @@ from tests.skills.search.test_fanout import setup as setup
 
 def industry_hits():
     return [
-        replace(hit(3, industry=None, score=1), content="架空社のドリンク紹介動画。"),
-        hit(4, industry=None, score=1),
+        hit(3, industry=None, score=1, case_product="架空ドリンク"),
+        # 業種不明で本文にだけ業種の語がある投稿は、業種指定の一覧に出さない。
+        replace(hit(4, industry=None, score=1), content="架空社のドリンク紹介動画。"),
         hit(5, industry=None, score=1),
         hit(6, industry=None, score=1),
         hit(7, industry="化粧品", score=1),

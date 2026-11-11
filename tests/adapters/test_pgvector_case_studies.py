@@ -47,12 +47,21 @@ def _client() -> PgVectorClient:
     return PgVectorClient("postgresql://user:pw@localhost/db")
 
 
-def test_drive_soft_industry_reads_thirty_without_an_industry_predicate() -> None:
+def test_drive_soft_industry_reads_thirty_with_the_asked_industry_first() -> None:
     conn = _Conn()
     _client().list_case_studies(conn, industry="食品", stage=4, limit=30, soft_industry=True)  # type: ignore[arg-type]
+    assert conn.params == [{"limit": 30, "industry": "食品"}]
+    where, order = conn.sql[0].split("ORDER BY")
+    assert "d.metadata->>'case_corpus' = 'true'" in where
+    assert "%(industry)s" not in where  # 絞らない（別業種も30件の残りに入る）
+    assert order.index("IS NOT DISTINCT FROM %(industry)s) DESC") < order.index("d.modified_at")
+
+
+def test_drive_soft_industry_without_industry_keeps_newest_order() -> None:
+    conn = _Conn()
+    _client().list_case_studies(conn, stage=4, limit=30, soft_industry=True)  # type: ignore[arg-type]
     assert conn.params == [{"limit": 30}]
-    assert "d.metadata->>'case_corpus' = 'true'" in conn.sql[0]
-    assert "= %(industry)s" not in conn.sql[0]
+    assert "ORDER BY d.modified_at DESC NULLS LAST" in conn.sql[0]
 
 
 def test_named_comparison_filters_drive_before_limiting_candidates() -> None:
