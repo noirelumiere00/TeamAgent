@@ -381,3 +381,34 @@ def test_get_conversation_propagates_non429_or_exhausted_retries(
     assert exc.value is error
     assert fake.conversations_info.call_count == (6 if status == 429 else 1)
     assert sleep.call_count == (5 if status == 429 else 0)
+
+
+def test_message_reactions_from_raw() -> None:
+    from teamagent.adapters.slack_channel_ingest_client import SlackReaction
+
+    message = _message_from_raw(
+        {
+            "ts": "1700000000.000001",
+            "text": "募集",
+            "reactions": [
+                {"name": "thumbsup", "users": ["U001", "U002"], "count": 3},
+                {"name": "eyes", "users": ["U001"]},
+                {"name": "wave", "users": ["U002", None], "count": "invalid"},
+                {"name": "tada", "users": "U001", "count": "2"},
+                None,
+                "bad",
+                {"users": ["U001"]},
+                {"name": ""},
+                {"name": 42},
+            ],
+        }
+    )
+    assert message.reactions == (
+        SlackReaction("thumbsup", ("U001", "U002"), 3),
+        SlackReaction("eyes", ("U001",), 1),
+        SlackReaction("wave", ("U002",), 1),
+        SlackReaction("tada", (), 2),
+    )
+    assert _message_from_raw({}).reactions == ()
+    assert _message_from_raw({"reactions": None}).reactions == ()
+    assert _message_from_raw({"reactions": {"name": "eyes"}}).reactions == ()

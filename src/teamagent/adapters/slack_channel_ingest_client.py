@@ -47,6 +47,15 @@ logger = structlog.get_logger(__name__)
 # データ型
 # -----------------------------------------------------------
 @dataclass(frozen=True)
+class SlackReaction:
+    """history / replies に含まれるリアクションと利用者一覧。"""
+
+    name: str
+    users: tuple[str, ...]
+    count: int
+
+
+@dataclass(frozen=True)
 class SlackMessage:
     """Slack conversations.history / replies の 1 件。
 
@@ -61,6 +70,7 @@ class SlackMessage:
     subtype: str | None = None  # 'channel_join' 'bot_message' 等
     bot_id: str | None = None
     files: tuple[dict[str, Any], ...] = ()  # 添付ファイル（PDF / 画像 / 動画）
+    reactions: tuple[SlackReaction, ...] = ()
 
     @property
     def is_thread_parent(self) -> bool:
@@ -368,6 +378,25 @@ class SlackChannelIngestClient:
 # -----------------------------------------------------------
 def _message_from_raw(raw: dict[str, Any]) -> SlackMessage:
     """conversations.history / replies の 1 件を dataclass にマップ。"""
+    reactions: list[SlackReaction] = []
+    raw_reactions = raw.get("reactions")
+    for item in raw_reactions if isinstance(raw_reactions, list) else ():
+        if not isinstance(item, dict) or not isinstance(item.get("name"), str):
+            continue
+        name = item["name"].strip()
+        if not name:
+            continue
+        raw_users = item.get("users")
+        users = tuple(
+            uid
+            for uid in (raw_users if isinstance(raw_users, list) else ())
+            if isinstance(uid, str) and uid.strip()
+        )
+        try:
+            count = int(item.get("count", len(users)))
+        except (TypeError, ValueError, OverflowError):
+            count = len(users)
+        reactions.append(SlackReaction(name=name, users=users, count=count))
     return SlackMessage(
         ts=str(raw.get("ts", "")),
         user=raw.get("user"),
@@ -377,6 +406,7 @@ def _message_from_raw(raw: dict[str, Any]) -> SlackMessage:
         subtype=raw.get("subtype"),
         bot_id=raw.get("bot_id"),
         files=tuple(raw.get("files", []) or ()),
+        reactions=tuple(reactions),
     )
 
 

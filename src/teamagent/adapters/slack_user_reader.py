@@ -256,9 +256,9 @@ class SlackUserReader:
         if not xoxp or not xoxp.strip():
             raise ValueError("xoxp が空です（本人 Slack 未連携）")
         self._client = client or AsyncWebClient(token=xoxp, timeout=15, retry_handlers=[])
-        # user_id -> (表示名 or None, 有効期限 monotonic 秒)。インスタンス単位
+        # user_id -> ((表示名 or None, ゲスト), 有効期限 monotonic 秒)。インスタンス単位
         # （＝1 ユーザーの xoxp 単位）に閉じる。他人のトークンの結果と混ぜない。
-        self._name_cache: dict[str, tuple[str | None, float]] = {}
+        self._name_cache: dict[str, tuple[tuple[str | None, bool], float]] = {}
 
     @classmethod
     def from_user_token(cls, xoxp: str, *, client: AsyncWebClient | None = None) -> SlackUserReader:
@@ -678,20 +678,24 @@ class SlackUserReader:
           「名前が分からなかった」として扱う（推測した名前を作らない）。
         - **G8**: ログに実名は出さない（解決できたかの真偽と latency だけ）。
         """
+        return self.get_user_label(user_id, request_id)[0]
+
+    def get_user_label(self, user_id: str, request_id: str) -> tuple[str | None, bool]:
+        """表示名とゲスト判定を同じ TTL で保持する。失敗時は (None, False)。"""
         uid = (user_id or "").strip()
         if not uid or not _SLACK_USER_ID_RE.match(uid):
-            return None
+            return (None, False)
         now = time.monotonic()
         cached = self._name_cache.get(uid)
         if cached is not None and cached[1] > now:
             return cached[0]
-        name = self._fetch_display_name(uid, request_id)
-        ttl = _DISPLAY_NAME_TTL if name is not None else _DISPLAY_NAME_TTL_MISS
-        self._name_cache[uid] = (name, now + ttl)
-        return name
+        label = self._fetch_user_label(uid, request_id)
+        ttl = _DISPLAY_NAME_TTL if label[0] is not None else _DISPLAY_NAME_TTL_MISS
+        self._name_cache[uid] = (label, now + ttl)
+        return label
 
-    def _fetch_display_name(self, user_id: str, request_id: str) -> str | None:
-        """users.info を 1 回叩いて表示名候補を取り出す（キャッシュ判定は呼び出し側）。"""
+    def _fetch_user_label(self, user_id: str, request_id: str) -> tuple[str | None, bool]:
+        """users.info を 1 回叩いて表示名候補とゲスト判定を取り出す。"""
         start = time.perf_counter()
         try:
             resp = _run_sync(lambda: self._client.users_info(user=user_id))
@@ -701,14 +705,14 @@ class SlackUserReader:
                 request_id=request_id,
                 error=type(e).__name__,
             )
-            return None
+            return (None, False)
         try:
             if resp.get("ok") is False:
-                return None
+                return (None, False)
             user: dict[str, Any] = dict(resp.get("user") or {})
+            profile: dict[str, Any] = dict(user.get("profile") or {})
         except Exception:  # 想定外の応答形でも落とさない
-            return None
-        profile: dict[str, Any] = dict(user.get("profile") or {})
+            return (None, False)
         # 優先順: 本人が設定した表示名 → 本名 → ハンドル。空文字は「無い」として次へ。
         name: str | None = None
         for source, key in (
@@ -727,7 +731,7 @@ class SlackUserReader:
             resolved=name is not None,  # G8: 実名そのものは絶対に出さない
             latency_ms=int((time.perf_counter() - start) * 1000),
         )
-        return name
+        return (name, user.get("is_restricted") is True or user.get("is_ultra_restricted") is True)
 
     def search(self, query: str, request_id: str, *, count: int = 15) -> list[SlackSearchMatch]:
         """search.messages で横断検索（user token 限定）。fail-open で空返し。"""
