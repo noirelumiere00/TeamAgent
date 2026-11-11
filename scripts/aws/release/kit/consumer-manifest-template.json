@@ -1,0 +1,4423 @@
+{
+  "consumers": [
+    {
+      "activator": {
+        "identity": "teamagent-dev-mcp",
+        "type": "ecs_service"
+      },
+      "after": {
+        "activation": {
+          "desired_count": 1,
+          "task_definition_arn": "arn:aws:ecs:ap-northeast-1:718959508629:task-definition/teamagent-dev-mcp:92"
+        },
+        "image": "718959508629.dkr.ecr.ap-northeast-1.amazonaws.com/teamagent-mcp@sha256:cd43968333de9a343020438af021e7e016ca0b5e59ede3b0776e29d2bcd82078",
+        "task_definition": {
+          "container_definitions": [
+            {
+              "command": [
+                "/app/.venv/bin/python",
+                "/app/scripts/run_mcp_vertex_entrypoint.py"
+              ],
+              "entryPoint": null,
+              "environment": [
+                {
+                  "name": "ANALYSIS_CACHE_BUCKET",
+                  "value": "teamagent-dev-raw-files"
+                },
+                {
+                  "name": "ANALYSIS_CACHE_ENABLED",
+                  "value": "true"
+                },
+                {
+                  "name": "AWS_REGION",
+                  "value": "ap-northeast-1"
+                },
+                {
+                  "name": "BEDROCK_MODEL_ID",
+                  "value": "jp.anthropic.claude-haiku-4-5-20251001-v1:0"
+                },
+                {
+                  "name": "BOILERPLATE_EXCLUDE_SEARCH",
+                  "value": "true"
+                },
+                {
+                  "name": "COMMENT_MINING_ALLOWED_EMAILS",
+                  "value": ""
+                },
+                {
+                  "name": "CONNECT_BASE_URL",
+                  "value": "https://connect.newstv.co.jp"
+                },
+                {
+                  "name": "CONNECT_GOOGLE_CLIENT_ID",
+                  "value": "676659122211-pgd1mj4et6sf7uqqmsni2b3kmbbd8qeg.apps.googleusercontent.com"
+                },
+                {
+                  "name": "COST_APIFY_MONTHLY_USD",
+                  "value": "50"
+                },
+                {
+                  "name": "COST_GUARD_TABLE",
+                  "value": "teamagent-dev-cost-usage"
+                },
+                {
+                  "name": "DOC_DEDUP_EXCLUDE_SEARCH",
+                  "value": "true"
+                },
+                {
+                  "name": "DRAFT_ON_DEMAND_ONLY",
+                  "value": "true"
+                },
+                {
+                  "name": "ENABLE_PROGRESS_NOTIFY",
+                  "value": "true"
+                },
+                {
+                  "name": "GEMINI_USE_VERTEX",
+                  "value": "true"
+                },
+                {
+                  "name": "GEMINI_VERTEX_LOCATION",
+                  "value": "us-central1"
+                },
+                {
+                  "name": "GEMINI_VERTEX_PROJECT",
+                  "value": "ntv-ai"
+                },
+                {
+                  "name": "GOOGLE_FORCE_OAUTH",
+                  "value": "1"
+                },
+                {
+                  "name": "HOME",
+                  "value": "/tmp/home"
+                },
+                {
+                  "name": "KNOWLEDGE_DELIVER_MIN_SCORE",
+                  "value": "0.5"
+                },
+                {
+                  "name": "MEDIA_ARTIFACT_TTL_SECONDS",
+                  "value": "2592000"
+                },
+                {
+                  "name": "MEDIA_JOBS_TABLE",
+                  "value": "teamagent-dev-tiktok-acquire-jobs"
+                },
+                {
+                  "name": "MEDIA_JOB_BUCKET",
+                  "value": "teamagent-dev-raw-files"
+                },
+                {
+                  "name": "MEDIA_TASK_QUEUE",
+                  "value": "https://sqs.ap-northeast-1.amazonaws.com/718959508629/teamagent-dev-tiktok-acquire-jobs"
+                },
+                {
+                  "name": "OAUTH_KMS_KEY_ID",
+                  "value": "alias/teamagent-oauth-tokens"
+                },
+                {
+                  "name": "OAUTH_REDIRECT_URI",
+                  "value": "https://connect.newstv.co.jp/oauth2/callback"
+                },
+                {
+                  "name": "PAYLOAD_OFFLOAD_BUCKET",
+                  "value": "teamagent-dev-raw-files"
+                },
+                {
+                  "name": "PGVECTOR_POOL_MIN",
+                  "value": "2"
+                },
+                {
+                  "name": "PROPOSAL_JOBS_TABLE",
+                  "value": "teamagent-dev-proposal-builder-jobs"
+                },
+                {
+                  "name": "PYTHONPYCACHEPREFIX",
+                  "value": "/tmp/.pycache"
+                },
+                {
+                  "name": "SEARCH_ANSWER_SOURCE_LINKS",
+                  "value": "1"
+                },
+                {
+                  "name": "SEARCH_DEDUP_RESULTS",
+                  "value": "true"
+                },
+                {
+                  "name": "SEARCH_HNSW_EF_SEARCH",
+                  "value": "100"
+                },
+                {
+                  "name": "SEARCH_MIN_RELEVANCE",
+                  "value": "0.4"
+                },
+                {
+                  "name": "SEARCH_MIN_RELEVANCE_FALLBACK",
+                  "value": "0.05"
+                },
+                {
+                  "name": "SEARCH_SURFACE_ALLOWED_EMAILS",
+                  "value": ""
+                },
+                {
+                  "name": "SLACK_OAUTH_REDIRECT_URI",
+                  "value": "https://connect.newstv.co.jp/slack/oauth/callback"
+                },
+                {
+                  "name": "SLACK_TEAM_ID",
+                  "value": "T07MU5P2PBR"
+                },
+                {
+                  "name": "SLACK_WORKSPACE_DOMAIN",
+                  "value": "vector-workspcae"
+                },
+                {
+                  "name": "STRUCTLOG_FORMAT",
+                  "value": "json"
+                },
+                {
+                  "name": "TEAMAGENT_CALLER_CLAIM_REPLAY_TABLE",
+                  "value": "teamagent-dev-mcp-caller-claim-nonces"
+                },
+                {
+                  "name": "TEAMAGENT_MCP_HOST",
+                  "value": "0.0.0.0"
+                },
+                {
+                  "name": "TEAMAGENT_MCP_PATH",
+                  "value": "/mcp"
+                },
+                {
+                  "name": "TEAMAGENT_MCP_PORT",
+                  "value": "8787"
+                },
+                {
+                  "name": "TEAMAGENT_SHARED_COMPANY_DOMAINS",
+                  "value": "__LIVE_ENV__"
+                },
+                {
+                  "name": "TIKTOK_JOBS_TABLE",
+                  "value": "teamagent-dev-tiktok-acquire-jobs"
+                },
+                {
+                  "name": "TIKTOK_S3_BUCKET",
+                  "value": "teamagent-dev-raw-files"
+                },
+                {
+                  "name": "TIKTOK_TASK_QUEUE",
+                  "value": "https://sqs.ap-northeast-1.amazonaws.com/718959508629/teamagent-dev-tiktok-acquire-jobs"
+                },
+                {
+                  "name": "TMPDIR",
+                  "value": "/tmp"
+                },
+                {
+                  "name": "USE_AILAVAULT_DEEPLINKS",
+                  "value": "true"
+                },
+                {
+                  "name": "USE_ATTACHMENT_TOOLS",
+                  "value": "true"
+                },
+                {
+                  "name": "USE_CALENDAR_EVENT_TOOL",
+                  "value": "true"
+                },
+                {
+                  "name": "USE_CALENDAR_FREEBUSY_TOOL",
+                  "value": "true"
+                },
+                {
+                  "name": "USE_COHERE_RERANK",
+                  "value": "true"
+                },
+                {
+                  "name": "USE_FOLLOWUP_TOOL",
+                  "value": "true"
+                },
+                {
+                  "name": "USE_KAIWAI_CLASSIFY",
+                  "value": "1"
+                },
+                {
+                  "name": "USE_KNOWLEDGE_DELIVER",
+                  "value": "true"
+                },
+                {
+                  "name": "USE_KNOWLEDGE_FILTERS",
+                  "value": "true"
+                },
+                {
+                  "name": "USE_MAIL_DRAFT_TOOL",
+                  "value": "true"
+                },
+                {
+                  "name": "USE_MAIL_LINK_TOOL",
+                  "value": "true"
+                },
+                {
+                  "name": "USE_MAIL_REPLY_TOOL",
+                  "value": "true"
+                },
+                {
+                  "name": "USE_MAIL_SUMMARY_TOOL",
+                  "value": "true"
+                },
+                {
+                  "name": "USE_MORNING_DIGEST_TOOL",
+                  "value": "true"
+                },
+                {
+                  "name": "USE_NEW_SCHEMA",
+                  "value": "true"
+                },
+                {
+                  "name": "USE_OAUTH_CONNECT_TOOL",
+                  "value": "true"
+                },
+                {
+                  "name": "USE_PAYLOAD_OFFLOAD",
+                  "value": "true"
+                },
+                {
+                  "name": "USE_REPORT_SHORTURL",
+                  "value": "1"
+                },
+                {
+                  "name": "USE_RESEARCH_PERSIST",
+                  "value": "1"
+                },
+                {
+                  "name": "USE_SCHEDULE_PROPOSE_TOOL",
+                  "value": "true"
+                },
+                {
+                  "name": "USE_SEARCH_SURFACE_TOOL",
+                  "value": "1"
+                },
+                {
+                  "name": "USE_SLACK_SUMMARY_TOOL",
+                  "value": "true"
+                },
+                {
+                  "name": "USE_TIKTOK_ACQUIRE",
+                  "value": "1"
+                },
+                {
+                  "name": "USE_TIKTOK_COMMENT_TOOLS",
+                  "value": "1"
+                },
+                {
+                  "name": "USE_TIKTOK_TOOLS",
+                  "value": "1"
+                },
+                {
+                  "name": "USE_VIDEO_CAPTURE_TOOL",
+                  "value": "true"
+                },
+                {
+                  "name": "USE_VIDEO_TOOLS",
+                  "value": "1"
+                },
+                {
+                  "name": "USE_WEB_RESEARCH_TOOL",
+                  "value": "true"
+                },
+                {
+                  "name": "USE_X_RESEARCH_TOOLS",
+                  "value": "1"
+                },
+                {
+                  "name": "UV_CACHE_DIR",
+                  "value": "/tmp/.uv-cache"
+                },
+                {
+                  "name": "VIDEO_ALGORITHM_RESULT_CACHE_ENABLED",
+                  "value": "true"
+                },
+                {
+                  "name": "VIDEO_ALGO_BOARD_SIZE",
+                  "value": "30"
+                },
+                {
+                  "name": "VIDEO_ALGO_MAX_VIDEOS",
+                  "value": "5"
+                },
+                {
+                  "name": "VIDEO_MONTHLY_QUOTA",
+                  "value": "20"
+                },
+                {
+                  "name": "VIDEO_QUOTA_ENABLED",
+                  "value": "true"
+                },
+                {
+                  "name": "VSEO_REPORT_BUCKET",
+                  "value": "teamagent-dev-raw-files"
+                },
+                {
+                  "name": "WEB_RESEARCH_ALLOWED_EMAILS",
+                  "value": "__LIVE_ENV__"
+                },
+                {
+                  "name": "XDG_CACHE_HOME",
+                  "value": "/tmp/.cache"
+                },
+                {
+                  "name": "X_ANALYSIS_MODEL_ID",
+                  "value": "jp.anthropic.claude-sonnet-4-6"
+                },
+                {
+                  "name": "X_JOBS_TABLE",
+                  "value": "teamagent-dev-x-buzz-jobs"
+                },
+                {
+                  "name": "X_RESEARCH_ALLOWED_EMAILS",
+                  "value": ""
+                },
+                {
+                  "name": "X_S3_BUCKET",
+                  "value": "teamagent-dev-raw-files"
+                },
+                {
+                  "name": "X_TASK_QUEUE",
+                  "value": "https://sqs.ap-northeast-1.amazonaws.com/718959508629/teamagent-dev-x-buzz-jobs"
+                }
+              ],
+              "essential": true,
+              "healthCheck": {
+                "command": [
+                  "CMD",
+                  "/app/.venv/bin/python",
+                  "-c",
+                  "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8787/healthz', timeout=4).close()"
+                ],
+                "interval": 30,
+                "retries": 5,
+                "startPeriod": 40,
+                "timeout": 5
+              },
+              "image": "718959508629.dkr.ecr.ap-northeast-1.amazonaws.com/teamagent-mcp@sha256:cd43968333de9a343020438af021e7e016ca0b5e59ede3b0776e29d2bcd82078",
+              "linuxParameters": {
+                "capabilities": {
+                  "add": [],
+                  "drop": [
+                    "ALL"
+                  ]
+                },
+                "initProcessEnabled": true
+              },
+              "logConfiguration": {
+                "logDriver": "awslogs",
+                "options": {
+                  "awslogs-group": "/teamagent/dev/teamagent-mcp",
+                  "awslogs-region": "ap-northeast-1",
+                  "awslogs-stream-prefix": "mcp"
+                }
+              },
+              "mountPoints": [
+                {
+                  "containerPath": "/tmp",
+                  "readOnly": false,
+                  "sourceVolume": "runtime-tmp"
+                }
+              ],
+              "name": "teamagent-mcp",
+              "portMappings": [
+                {
+                  "containerPort": 8787,
+                  "hostPort": 8787,
+                  "protocol": "tcp"
+                }
+              ],
+              "privileged": false,
+              "readonlyRootFilesystem": true,
+              "secrets": [
+                {
+                  "name": "APIFY_API_TOKEN",
+                  "valueFrom": "arn:aws:secretsmanager:ap-northeast-1:718959508629:secret:teamagent/dev/tiktok/apify-token-cIdMxf"
+                },
+                {
+                  "name": "CONNECT_GOOGLE_CLIENT_SECRET",
+                  "valueFrom": "arn:aws:secretsmanager:ap-northeast-1:718959508629:secret:teamagent/dev/connect_google_secret-rWes7O"
+                },
+                {
+                  "name": "CONNECT_SLACK_CLIENT_ID",
+                  "valueFrom": "arn:aws:secretsmanager:ap-northeast-1:718959508629:secret:teamagent/dev/connect_slack_client_id-aTZTb2"
+                },
+                {
+                  "name": "DATABASE_URL",
+                  "valueFrom": "arn:aws:secretsmanager:ap-northeast-1:718959508629:secret:teamagent/dev/database-url-4pJMDr"
+                },
+                {
+                  "name": "GOOGLE_CLIENT_ID",
+                  "valueFrom": "arn:aws:secretsmanager:ap-northeast-1:718959508629:secret:teamagent/dev/google_oauth-L8HOBj:client_id::"
+                },
+                {
+                  "name": "GOOGLE_CLIENT_SECRET",
+                  "valueFrom": "arn:aws:secretsmanager:ap-northeast-1:718959508629:secret:teamagent/dev/google_oauth-L8HOBj:client_secret::"
+                },
+                {
+                  "name": "GOOGLE_OAUTH_REFRESH_TOKEN",
+                  "valueFrom": "arn:aws:secretsmanager:ap-northeast-1:718959508629:secret:teamagent/dev/google_oauth-L8HOBj:refresh_token::"
+                },
+                {
+                  "name": "MAIL_ACTION_HMAC_SECRET",
+                  "valueFrom": "arn:aws:secretsmanager:ap-northeast-1:718959508629:secret:teamagent/dev/database-url-4pJMDr"
+                },
+                {
+                  "name": "OAUTH_STATE_SECRET",
+                  "valueFrom": "arn:aws:secretsmanager:ap-northeast-1:718959508629:secret:teamagent/dev/oauth_state_secret-tKil2L"
+                },
+                {
+                  "name": "REPORT_LINK_HMAC_SECRET",
+                  "valueFrom": "arn:aws:secretsmanager:ap-northeast-1:718959508629:secret:teamagent/dev/report-link-hmac-RKEHWS"
+                },
+                {
+                  "name": "SLACK_BOT_TOKEN",
+                  "valueFrom": "arn:aws:secretsmanager:ap-northeast-1:718959508629:secret:teamagent/dev/openclaw/slack-bot-token-N1vpyd"
+                },
+                {
+                  "name": "SLACK_OAUTH_STATE_SECRET",
+                  "valueFrom": "arn:aws:secretsmanager:ap-northeast-1:718959508629:secret:teamagent/dev/slack_oauth_state_secret-yGYkUF"
+                },
+                {
+                  "name": "TEAMAGENT_CALLER_CLAIM_SECRET",
+                  "valueFrom": "arn:aws:secretsmanager:ap-northeast-1:718959508629:secret:teamagent/dev/openclaw/caller-claim-hmac-TZgjtj"
+                },
+                {
+                  "name": "TEAMAGENT_MCP_BEARER",
+                  "valueFrom": "arn:aws:secretsmanager:ap-northeast-1:718959508629:secret:teamagent/dev/mcp/bearer-STVVSR"
+                },
+                {
+                  "name": "VERTEX_SA_JSON",
+                  "valueFrom": "arn:aws:secretsmanager:ap-northeast-1:718959508629:secret:teamagent/dev/vertex_sa-Y4AAUC"
+                }
+              ],
+              "systemControls": [],
+              "user": "10001:10001",
+              "volumesFrom": []
+            }
+          ],
+          "cpu": "1024",
+          "execution_role_arn": "arn:aws:iam::718959508629:role/teamagent-dev-ecs-exec-mcp",
+          "memory": "4096",
+          "network_mode": "awsvpc",
+          "task_role_arn": "arn:aws:iam::718959508629:role/teamagent-dev-mcp-task",
+          "volumes": [
+            {
+              "configure_at_launch": false,
+              "docker_volume_configuration": [],
+              "efs_volume_configuration": [],
+              "fsx_windows_file_server_volume_configuration": [],
+              "host_path": "",
+              "name": "runtime-tmp"
+            }
+          ]
+        },
+        "task_definition_arn": "arn:aws:ecs:ap-northeast-1:718959508629:task-definition/teamagent-dev-mcp:92"
+      },
+      "before": {
+        "activation": {
+          "desired_count": 1,
+          "task_definition_arn": "arn:aws:ecs:ap-northeast-1:718959508629:task-definition/teamagent-dev-mcp:92"
+        },
+        "image": "718959508629.dkr.ecr.ap-northeast-1.amazonaws.com/teamagent-mcp@sha256:cd43968333de9a343020438af021e7e016ca0b5e59ede3b0776e29d2bcd82078",
+        "task_definition": {
+          "container_definitions": [
+            {
+              "command": [
+                "/app/.venv/bin/python",
+                "/app/scripts/run_mcp_vertex_entrypoint.py"
+              ],
+              "entryPoint": null,
+              "environment": [
+                {
+                  "name": "ANALYSIS_CACHE_BUCKET",
+                  "value": "teamagent-dev-raw-files"
+                },
+                {
+                  "name": "ANALYSIS_CACHE_ENABLED",
+                  "value": "true"
+                },
+                {
+                  "name": "AWS_REGION",
+                  "value": "ap-northeast-1"
+                },
+                {
+                  "name": "BEDROCK_MODEL_ID",
+                  "value": "jp.anthropic.claude-haiku-4-5-20251001-v1:0"
+                },
+                {
+                  "name": "BOILERPLATE_EXCLUDE_SEARCH",
+                  "value": "true"
+                },
+                {
+                  "name": "COMMENT_MINING_ALLOWED_EMAILS",
+                  "value": ""
+                },
+                {
+                  "name": "CONNECT_BASE_URL",
+                  "value": "https://connect.newstv.co.jp"
+                },
+                {
+                  "name": "CONNECT_GOOGLE_CLIENT_ID",
+                  "value": "676659122211-pgd1mj4et6sf7uqqmsni2b3kmbbd8qeg.apps.googleusercontent.com"
+                },
+                {
+                  "name": "COST_APIFY_MONTHLY_USD",
+                  "value": "50"
+                },
+                {
+                  "name": "COST_GUARD_TABLE",
+                  "value": "teamagent-dev-cost-usage"
+                },
+                {
+                  "name": "DOC_DEDUP_EXCLUDE_SEARCH",
+                  "value": "true"
+                },
+                {
+                  "name": "DRAFT_ON_DEMAND_ONLY",
+                  "value": "true"
+                },
+                {
+                  "name": "ENABLE_PROGRESS_NOTIFY",
+                  "value": "true"
+                },
+                {
+                  "name": "GEMINI_USE_VERTEX",
+                  "value": "true"
+                },
+                {
+                  "name": "GEMINI_VERTEX_LOCATION",
+                  "value": "us-central1"
+                },
+                {
+                  "name": "GEMINI_VERTEX_PROJECT",
+                  "value": "ntv-ai"
+                },
+                {
+                  "name": "GOOGLE_FORCE_OAUTH",
+                  "value": "1"
+                },
+                {
+                  "name": "HOME",
+                  "value": "/tmp/home"
+                },
+                {
+                  "name": "KNOWLEDGE_DELIVER_MIN_SCORE",
+                  "value": "0.5"
+                },
+                {
+                  "name": "MEDIA_ARTIFACT_TTL_SECONDS",
+                  "value": "2592000"
+                },
+                {
+                  "name": "MEDIA_JOBS_TABLE",
+                  "value": "teamagent-dev-tiktok-acquire-jobs"
+                },
+                {
+                  "name": "MEDIA_JOB_BUCKET",
+                  "value": "teamagent-dev-raw-files"
+                },
+                {
+                  "name": "MEDIA_TASK_QUEUE",
+                  "value": "https://sqs.ap-northeast-1.amazonaws.com/718959508629/teamagent-dev-tiktok-acquire-jobs"
+                },
+                {
+                  "name": "OAUTH_KMS_KEY_ID",
+                  "value": "alias/teamagent-oauth-tokens"
+                },
+                {
+                  "name": "OAUTH_REDIRECT_URI",
+                  "value": "https://connect.newstv.co.jp/oauth2/callback"
+                },
+                {
+                  "name": "PAYLOAD_OFFLOAD_BUCKET",
+                  "value": "teamagent-dev-raw-files"
+                },
+                {
+                  "name": "PGVECTOR_POOL_MIN",
+                  "value": "2"
+                },
+                {
+                  "name": "PROPOSAL_JOBS_TABLE",
+                  "value": "teamagent-dev-proposal-builder-jobs"
+                },
+                {
+                  "name": "PYTHONPYCACHEPREFIX",
+                  "value": "/tmp/.pycache"
+                },
+                {
+                  "name": "SEARCH_ANSWER_SOURCE_LINKS",
+                  "value": "1"
+                },
+                {
+                  "name": "SEARCH_DEDUP_RESULTS",
+                  "value": "true"
+                },
+                {
+                  "name": "SEARCH_HNSW_EF_SEARCH",
+                  "value": "100"
+                },
+                {
+                  "name": "SEARCH_MIN_RELEVANCE",
+                  "value": "0.4"
+                },
+                {
+                  "name": "SEARCH_MIN_RELEVANCE_FALLBACK",
+                  "value": "0.05"
+                },
+                {
+                  "name": "SEARCH_SURFACE_ALLOWED_EMAILS",
+                  "value": ""
+                },
+                {
+                  "name": "SLACK_OAUTH_REDIRECT_URI",
+                  "value": "https://connect.newstv.co.jp/slack/oauth/callback"
+                },
+                {
+                  "name": "SLACK_TEAM_ID",
+                  "value": "T07MU5P2PBR"
+                },
+                {
+                  "name": "SLACK_WORKSPACE_DOMAIN",
+                  "value": "vector-workspcae"
+                },
+                {
+                  "name": "STRUCTLOG_FORMAT",
+                  "value": "json"
+                },
+                {
+                  "name": "TEAMAGENT_CALLER_CLAIM_REPLAY_TABLE",
+                  "value": "teamagent-dev-mcp-caller-claim-nonces"
+                },
+                {
+                  "name": "TEAMAGENT_MCP_HOST",
+                  "value": "0.0.0.0"
+                },
+                {
+                  "name": "TEAMAGENT_MCP_PATH",
+                  "value": "/mcp"
+                },
+                {
+                  "name": "TEAMAGENT_MCP_PORT",
+                  "value": "8787"
+                },
+                {
+                  "name": "TEAMAGENT_SHARED_COMPANY_DOMAINS",
+                  "value": "__LIVE_ENV__"
+                },
+                {
+                  "name": "TIKTOK_JOBS_TABLE",
+                  "value": "teamagent-dev-tiktok-acquire-jobs"
+                },
+                {
+                  "name": "TIKTOK_S3_BUCKET",
+                  "value": "teamagent-dev-raw-files"
+                },
+                {
+                  "name": "TIKTOK_TASK_QUEUE",
+                  "value": "https://sqs.ap-northeast-1.amazonaws.com/718959508629/teamagent-dev-tiktok-acquire-jobs"
+                },
+                {
+                  "name": "TMPDIR",
+                  "value": "/tmp"
+                },
+                {
+                  "name": "USE_AILAVAULT_DEEPLINKS",
+                  "value": "true"
+                },
+                {
+                  "name": "USE_ATTACHMENT_TOOLS",
+                  "value": "true"
+                },
+                {
+                  "name": "USE_CALENDAR_EVENT_TOOL",
+                  "value": "true"
+                },
+                {
+                  "name": "USE_CALENDAR_FREEBUSY_TOOL",
+                  "value": "true"
+                },
+                {
+                  "name": "USE_COHERE_RERANK",
+                  "value": "true"
+                },
+                {
+                  "name": "USE_FOLLOWUP_TOOL",
+                  "value": "true"
+                },
+                {
+                  "name": "USE_KAIWAI_CLASSIFY",
+                  "value": "1"
+                },
+                {
+                  "name": "USE_KNOWLEDGE_DELIVER",
+                  "value": "true"
+                },
+                {
+                  "name": "USE_KNOWLEDGE_FILTERS",
+                  "value": "true"
+                },
+                {
+                  "name": "USE_MAIL_DRAFT_TOOL",
+                  "value": "true"
+                },
+                {
+                  "name": "USE_MAIL_LINK_TOOL",
+                  "value": "true"
+                },
+                {
+                  "name": "USE_MAIL_REPLY_TOOL",
+                  "value": "true"
+                },
+                {
+                  "name": "USE_MAIL_SUMMARY_TOOL",
+                  "value": "true"
+                },
+                {
+                  "name": "USE_MORNING_DIGEST_TOOL",
+                  "value": "true"
+                },
+                {
+                  "name": "USE_NEW_SCHEMA",
+                  "value": "true"
+                },
+                {
+                  "name": "USE_OAUTH_CONNECT_TOOL",
+                  "value": "true"
+                },
+                {
+                  "name": "USE_PAYLOAD_OFFLOAD",
+                  "value": "true"
+                },
+                {
+                  "name": "USE_REPORT_SHORTURL",
+                  "value": "1"
+                },
+                {
+                  "name": "USE_RESEARCH_PERSIST",
+                  "value": "1"
+                },
+                {
+                  "name": "USE_SCHEDULE_PROPOSE_TOOL",
+                  "value": "true"
+                },
+                {
+                  "name": "USE_SEARCH_SURFACE_TOOL",
+                  "value": "1"
+                },
+                {
+                  "name": "USE_SLACK_SUMMARY_TOOL",
+                  "value": "true"
+                },
+                {
+                  "name": "USE_TIKTOK_ACQUIRE",
+                  "value": "1"
+                },
+                {
+                  "name": "USE_TIKTOK_COMMENT_TOOLS",
+                  "value": "1"
+                },
+                {
+                  "name": "USE_TIKTOK_TOOLS",
+                  "value": "1"
+                },
+                {
+                  "name": "USE_VIDEO_CAPTURE_TOOL",
+                  "value": "true"
+                },
+                {
+                  "name": "USE_VIDEO_TOOLS",
+                  "value": "1"
+                },
+                {
+                  "name": "USE_WEB_RESEARCH_TOOL",
+                  "value": "true"
+                },
+                {
+                  "name": "USE_X_RESEARCH_TOOLS",
+                  "value": "1"
+                },
+                {
+                  "name": "UV_CACHE_DIR",
+                  "value": "/tmp/.uv-cache"
+                },
+                {
+                  "name": "VIDEO_ALGORITHM_RESULT_CACHE_ENABLED",
+                  "value": "true"
+                },
+                {
+                  "name": "VIDEO_ALGO_BOARD_SIZE",
+                  "value": "30"
+                },
+                {
+                  "name": "VIDEO_ALGO_MAX_VIDEOS",
+                  "value": "5"
+                },
+                {
+                  "name": "VIDEO_MONTHLY_QUOTA",
+                  "value": "20"
+                },
+                {
+                  "name": "VIDEO_QUOTA_ENABLED",
+                  "value": "true"
+                },
+                {
+                  "name": "VSEO_REPORT_BUCKET",
+                  "value": "teamagent-dev-raw-files"
+                },
+                {
+                  "name": "WEB_RESEARCH_ALLOWED_EMAILS",
+                  "value": "__LIVE_ENV__"
+                },
+                {
+                  "name": "XDG_CACHE_HOME",
+                  "value": "/tmp/.cache"
+                },
+                {
+                  "name": "X_ANALYSIS_MODEL_ID",
+                  "value": "jp.anthropic.claude-sonnet-4-6"
+                },
+                {
+                  "name": "X_JOBS_TABLE",
+                  "value": "teamagent-dev-x-buzz-jobs"
+                },
+                {
+                  "name": "X_RESEARCH_ALLOWED_EMAILS",
+                  "value": ""
+                },
+                {
+                  "name": "X_S3_BUCKET",
+                  "value": "teamagent-dev-raw-files"
+                },
+                {
+                  "name": "X_TASK_QUEUE",
+                  "value": "https://sqs.ap-northeast-1.amazonaws.com/718959508629/teamagent-dev-x-buzz-jobs"
+                }
+              ],
+              "essential": true,
+              "healthCheck": {
+                "command": [
+                  "CMD",
+                  "/app/.venv/bin/python",
+                  "-c",
+                  "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8787/healthz', timeout=4).close()"
+                ],
+                "interval": 30,
+                "retries": 5,
+                "startPeriod": 40,
+                "timeout": 5
+              },
+              "image": "718959508629.dkr.ecr.ap-northeast-1.amazonaws.com/teamagent-mcp@sha256:cd43968333de9a343020438af021e7e016ca0b5e59ede3b0776e29d2bcd82078",
+              "linuxParameters": {
+                "capabilities": {
+                  "add": [],
+                  "drop": [
+                    "ALL"
+                  ]
+                },
+                "initProcessEnabled": true
+              },
+              "logConfiguration": {
+                "logDriver": "awslogs",
+                "options": {
+                  "awslogs-group": "/teamagent/dev/teamagent-mcp",
+                  "awslogs-region": "ap-northeast-1",
+                  "awslogs-stream-prefix": "mcp"
+                }
+              },
+              "mountPoints": [
+                {
+                  "containerPath": "/tmp",
+                  "readOnly": false,
+                  "sourceVolume": "runtime-tmp"
+                }
+              ],
+              "name": "teamagent-mcp",
+              "portMappings": [
+                {
+                  "containerPort": 8787,
+                  "hostPort": 8787,
+                  "protocol": "tcp"
+                }
+              ],
+              "privileged": false,
+              "readonlyRootFilesystem": true,
+              "secrets": [
+                {
+                  "name": "APIFY_API_TOKEN",
+                  "valueFrom": "arn:aws:secretsmanager:ap-northeast-1:718959508629:secret:teamagent/dev/tiktok/apify-token-cIdMxf"
+                },
+                {
+                  "name": "CONNECT_GOOGLE_CLIENT_SECRET",
+                  "valueFrom": "arn:aws:secretsmanager:ap-northeast-1:718959508629:secret:teamagent/dev/connect_google_secret-rWes7O"
+                },
+                {
+                  "name": "CONNECT_SLACK_CLIENT_ID",
+                  "valueFrom": "arn:aws:secretsmanager:ap-northeast-1:718959508629:secret:teamagent/dev/connect_slack_client_id-aTZTb2"
+                },
+                {
+                  "name": "DATABASE_URL",
+                  "valueFrom": "arn:aws:secretsmanager:ap-northeast-1:718959508629:secret:teamagent/dev/database-url-4pJMDr"
+                },
+                {
+                  "name": "GOOGLE_CLIENT_ID",
+                  "valueFrom": "arn:aws:secretsmanager:ap-northeast-1:718959508629:secret:teamagent/dev/google_oauth-L8HOBj:client_id::"
+                },
+                {
+                  "name": "GOOGLE_CLIENT_SECRET",
+                  "valueFrom": "arn:aws:secretsmanager:ap-northeast-1:718959508629:secret:teamagent/dev/google_oauth-L8HOBj:client_secret::"
+                },
+                {
+                  "name": "GOOGLE_OAUTH_REFRESH_TOKEN",
+                  "valueFrom": "arn:aws:secretsmanager:ap-northeast-1:718959508629:secret:teamagent/dev/google_oauth-L8HOBj:refresh_token::"
+                },
+                {
+                  "name": "MAIL_ACTION_HMAC_SECRET",
+                  "valueFrom": "arn:aws:secretsmanager:ap-northeast-1:718959508629:secret:teamagent/dev/database-url-4pJMDr"
+                },
+                {
+                  "name": "OAUTH_STATE_SECRET",
+                  "valueFrom": "arn:aws:secretsmanager:ap-northeast-1:718959508629:secret:teamagent/dev/oauth_state_secret-tKil2L"
+                },
+                {
+                  "name": "REPORT_LINK_HMAC_SECRET",
+                  "valueFrom": "arn:aws:secretsmanager:ap-northeast-1:718959508629:secret:teamagent/dev/report-link-hmac-RKEHWS"
+                },
+                {
+                  "name": "SLACK_BOT_TOKEN",
+                  "valueFrom": "arn:aws:secretsmanager:ap-northeast-1:718959508629:secret:teamagent/dev/openclaw/slack-bot-token-N1vpyd"
+                },
+                {
+                  "name": "SLACK_OAUTH_STATE_SECRET",
+                  "valueFrom": "arn:aws:secretsmanager:ap-northeast-1:718959508629:secret:teamagent/dev/slack_oauth_state_secret-yGYkUF"
+                },
+                {
+                  "name": "TEAMAGENT_CALLER_CLAIM_SECRET",
+                  "valueFrom": "arn:aws:secretsmanager:ap-northeast-1:718959508629:secret:teamagent/dev/openclaw/caller-claim-hmac-TZgjtj"
+                },
+                {
+                  "name": "TEAMAGENT_MCP_BEARER",
+                  "valueFrom": "arn:aws:secretsmanager:ap-northeast-1:718959508629:secret:teamagent/dev/mcp/bearer-STVVSR"
+                },
+                {
+                  "name": "VERTEX_SA_JSON",
+                  "valueFrom": "arn:aws:secretsmanager:ap-northeast-1:718959508629:secret:teamagent/dev/vertex_sa-Y4AAUC"
+                }
+              ],
+              "systemControls": [],
+              "user": "10001:10001",
+              "volumesFrom": []
+            }
+          ],
+          "cpu": "1024",
+          "execution_role_arn": "arn:aws:iam::718959508629:role/teamagent-dev-ecs-exec-mcp",
+          "memory": "4096",
+          "network_mode": "awsvpc",
+          "task_role_arn": "arn:aws:iam::718959508629:role/teamagent-dev-mcp-task",
+          "volumes": [
+            {
+              "configure_at_launch": false,
+              "docker_volume_configuration": [],
+              "efs_volume_configuration": [],
+              "fsx_windows_file_server_volume_configuration": [],
+              "host_path": "",
+              "name": "runtime-tmp"
+            }
+          ]
+        },
+        "task_definition_arn": "arn:aws:ecs:ap-northeast-1:718959508629:task-definition/teamagent-dev-mcp:92"
+      },
+      "consumer_id": "mcp",
+      "container_name": "teamagent-mcp",
+      "ecs_family": "teamagent-dev-mcp",
+      "live": {
+        "activation": {
+          "desired_count": 1,
+          "task_definition_arn": "arn:aws:ecs:ap-northeast-1:718959508629:task-definition/teamagent-dev-mcp:92"
+        },
+        "image": "718959508629.dkr.ecr.ap-northeast-1.amazonaws.com/teamagent-mcp@sha256:cd43968333de9a343020438af021e7e016ca0b5e59ede3b0776e29d2bcd82078",
+        "task_definition": {
+          "container_definitions": [
+            {
+              "command": [
+                "/app/.venv/bin/python",
+                "/app/scripts/run_mcp_vertex_entrypoint.py"
+              ],
+              "entryPoint": null,
+              "environment": [
+                {
+                  "name": "ANALYSIS_CACHE_BUCKET",
+                  "value": "teamagent-dev-raw-files"
+                },
+                {
+                  "name": "ANALYSIS_CACHE_ENABLED",
+                  "value": "true"
+                },
+                {
+                  "name": "AWS_REGION",
+                  "value": "ap-northeast-1"
+                },
+                {
+                  "name": "BEDROCK_MODEL_ID",
+                  "value": "jp.anthropic.claude-haiku-4-5-20251001-v1:0"
+                },
+                {
+                  "name": "BOILERPLATE_EXCLUDE_SEARCH",
+                  "value": "true"
+                },
+                {
+                  "name": "COMMENT_MINING_ALLOWED_EMAILS",
+                  "value": ""
+                },
+                {
+                  "name": "CONNECT_BASE_URL",
+                  "value": "https://connect.newstv.co.jp"
+                },
+                {
+                  "name": "CONNECT_GOOGLE_CLIENT_ID",
+                  "value": "676659122211-pgd1mj4et6sf7uqqmsni2b3kmbbd8qeg.apps.googleusercontent.com"
+                },
+                {
+                  "name": "COST_APIFY_MONTHLY_USD",
+                  "value": "50"
+                },
+                {
+                  "name": "COST_GUARD_TABLE",
+                  "value": "teamagent-dev-cost-usage"
+                },
+                {
+                  "name": "DOC_DEDUP_EXCLUDE_SEARCH",
+                  "value": "true"
+                },
+                {
+                  "name": "DRAFT_ON_DEMAND_ONLY",
+                  "value": "true"
+                },
+                {
+                  "name": "ENABLE_PROGRESS_NOTIFY",
+                  "value": "true"
+                },
+                {
+                  "name": "GEMINI_USE_VERTEX",
+                  "value": "true"
+                },
+                {
+                  "name": "GEMINI_VERTEX_LOCATION",
+                  "value": "us-central1"
+                },
+                {
+                  "name": "GEMINI_VERTEX_PROJECT",
+                  "value": "ntv-ai"
+                },
+                {
+                  "name": "GOOGLE_FORCE_OAUTH",
+                  "value": "1"
+                },
+                {
+                  "name": "HOME",
+                  "value": "/tmp/home"
+                },
+                {
+                  "name": "KNOWLEDGE_DELIVER_MIN_SCORE",
+                  "value": "0.5"
+                },
+                {
+                  "name": "MEDIA_ARTIFACT_TTL_SECONDS",
+                  "value": "2592000"
+                },
+                {
+                  "name": "MEDIA_JOBS_TABLE",
+                  "value": "teamagent-dev-tiktok-acquire-jobs"
+                },
+                {
+                  "name": "MEDIA_JOB_BUCKET",
+                  "value": "teamagent-dev-raw-files"
+                },
+                {
+                  "name": "MEDIA_TASK_QUEUE",
+                  "value": "https://sqs.ap-northeast-1.amazonaws.com/718959508629/teamagent-dev-tiktok-acquire-jobs"
+                },
+                {
+                  "name": "OAUTH_KMS_KEY_ID",
+                  "value": "alias/teamagent-oauth-tokens"
+                },
+                {
+                  "name": "OAUTH_REDIRECT_URI",
+                  "value": "https://connect.newstv.co.jp/oauth2/callback"
+                },
+                {
+                  "name": "PAYLOAD_OFFLOAD_BUCKET",
+                  "value": "teamagent-dev-raw-files"
+                },
+                {
+                  "name": "PGVECTOR_POOL_MIN",
+                  "value": "2"
+                },
+                {
+                  "name": "PROPOSAL_JOBS_TABLE",
+                  "value": "teamagent-dev-proposal-builder-jobs"
+                },
+                {
+                  "name": "PYTHONPYCACHEPREFIX",
+                  "value": "/tmp/.pycache"
+                },
+                {
+                  "name": "SEARCH_ANSWER_SOURCE_LINKS",
+                  "value": "1"
+                },
+                {
+                  "name": "SEARCH_DEDUP_RESULTS",
+                  "value": "true"
+                },
+                {
+                  "name": "SEARCH_HNSW_EF_SEARCH",
+                  "value": "100"
+                },
+                {
+                  "name": "SEARCH_MIN_RELEVANCE",
+                  "value": "0.4"
+                },
+                {
+                  "name": "SEARCH_MIN_RELEVANCE_FALLBACK",
+                  "value": "0.05"
+                },
+                {
+                  "name": "SEARCH_SURFACE_ALLOWED_EMAILS",
+                  "value": ""
+                },
+                {
+                  "name": "SLACK_OAUTH_REDIRECT_URI",
+                  "value": "https://connect.newstv.co.jp/slack/oauth/callback"
+                },
+                {
+                  "name": "SLACK_TEAM_ID",
+                  "value": "T07MU5P2PBR"
+                },
+                {
+                  "name": "SLACK_WORKSPACE_DOMAIN",
+                  "value": "vector-workspcae"
+                },
+                {
+                  "name": "STRUCTLOG_FORMAT",
+                  "value": "json"
+                },
+                {
+                  "name": "TEAMAGENT_CALLER_CLAIM_REPLAY_TABLE",
+                  "value": "teamagent-dev-mcp-caller-claim-nonces"
+                },
+                {
+                  "name": "TEAMAGENT_MCP_HOST",
+                  "value": "0.0.0.0"
+                },
+                {
+                  "name": "TEAMAGENT_MCP_PATH",
+                  "value": "/mcp"
+                },
+                {
+                  "name": "TEAMAGENT_MCP_PORT",
+                  "value": "8787"
+                },
+                {
+                  "name": "TEAMAGENT_SHARED_COMPANY_DOMAINS",
+                  "value": "__LIVE_ENV__"
+                },
+                {
+                  "name": "TIKTOK_JOBS_TABLE",
+                  "value": "teamagent-dev-tiktok-acquire-jobs"
+                },
+                {
+                  "name": "TIKTOK_S3_BUCKET",
+                  "value": "teamagent-dev-raw-files"
+                },
+                {
+                  "name": "TIKTOK_TASK_QUEUE",
+                  "value": "https://sqs.ap-northeast-1.amazonaws.com/718959508629/teamagent-dev-tiktok-acquire-jobs"
+                },
+                {
+                  "name": "TMPDIR",
+                  "value": "/tmp"
+                },
+                {
+                  "name": "USE_AILAVAULT_DEEPLINKS",
+                  "value": "true"
+                },
+                {
+                  "name": "USE_ATTACHMENT_TOOLS",
+                  "value": "true"
+                },
+                {
+                  "name": "USE_CALENDAR_EVENT_TOOL",
+                  "value": "true"
+                },
+                {
+                  "name": "USE_CALENDAR_FREEBUSY_TOOL",
+                  "value": "true"
+                },
+                {
+                  "name": "USE_COHERE_RERANK",
+                  "value": "true"
+                },
+                {
+                  "name": "USE_FOLLOWUP_TOOL",
+                  "value": "true"
+                },
+                {
+                  "name": "USE_KAIWAI_CLASSIFY",
+                  "value": "1"
+                },
+                {
+                  "name": "USE_KNOWLEDGE_DELIVER",
+                  "value": "true"
+                },
+                {
+                  "name": "USE_KNOWLEDGE_FILTERS",
+                  "value": "true"
+                },
+                {
+                  "name": "USE_MAIL_DRAFT_TOOL",
+                  "value": "true"
+                },
+                {
+                  "name": "USE_MAIL_LINK_TOOL",
+                  "value": "true"
+                },
+                {
+                  "name": "USE_MAIL_REPLY_TOOL",
+                  "value": "true"
+                },
+                {
+                  "name": "USE_MAIL_SUMMARY_TOOL",
+                  "value": "true"
+                },
+                {
+                  "name": "USE_MORNING_DIGEST_TOOL",
+                  "value": "true"
+                },
+                {
+                  "name": "USE_NEW_SCHEMA",
+                  "value": "true"
+                },
+                {
+                  "name": "USE_OAUTH_CONNECT_TOOL",
+                  "value": "true"
+                },
+                {
+                  "name": "USE_PAYLOAD_OFFLOAD",
+                  "value": "true"
+                },
+                {
+                  "name": "USE_REPORT_SHORTURL",
+                  "value": "1"
+                },
+                {
+                  "name": "USE_RESEARCH_PERSIST",
+                  "value": "1"
+                },
+                {
+                  "name": "USE_SCHEDULE_PROPOSE_TOOL",
+                  "value": "true"
+                },
+                {
+                  "name": "USE_SEARCH_SURFACE_TOOL",
+                  "value": "1"
+                },
+                {
+                  "name": "USE_SLACK_SUMMARY_TOOL",
+                  "value": "true"
+                },
+                {
+                  "name": "USE_TIKTOK_ACQUIRE",
+                  "value": "1"
+                },
+                {
+                  "name": "USE_TIKTOK_COMMENT_TOOLS",
+                  "value": "1"
+                },
+                {
+                  "name": "USE_TIKTOK_TOOLS",
+                  "value": "1"
+                },
+                {
+                  "name": "USE_VIDEO_CAPTURE_TOOL",
+                  "value": "true"
+                },
+                {
+                  "name": "USE_VIDEO_TOOLS",
+                  "value": "1"
+                },
+                {
+                  "name": "USE_WEB_RESEARCH_TOOL",
+                  "value": "true"
+                },
+                {
+                  "name": "USE_X_RESEARCH_TOOLS",
+                  "value": "1"
+                },
+                {
+                  "name": "UV_CACHE_DIR",
+                  "value": "/tmp/.uv-cache"
+                },
+                {
+                  "name": "VIDEO_ALGORITHM_RESULT_CACHE_ENABLED",
+                  "value": "true"
+                },
+                {
+                  "name": "VIDEO_ALGO_BOARD_SIZE",
+                  "value": "30"
+                },
+                {
+                  "name": "VIDEO_ALGO_MAX_VIDEOS",
+                  "value": "5"
+                },
+                {
+                  "name": "VIDEO_MONTHLY_QUOTA",
+                  "value": "20"
+                },
+                {
+                  "name": "VIDEO_QUOTA_ENABLED",
+                  "value": "true"
+                },
+                {
+                  "name": "VSEO_REPORT_BUCKET",
+                  "value": "teamagent-dev-raw-files"
+                },
+                {
+                  "name": "WEB_RESEARCH_ALLOWED_EMAILS",
+                  "value": "__LIVE_ENV__"
+                },
+                {
+                  "name": "XDG_CACHE_HOME",
+                  "value": "/tmp/.cache"
+                },
+                {
+                  "name": "X_ANALYSIS_MODEL_ID",
+                  "value": "jp.anthropic.claude-sonnet-4-6"
+                },
+                {
+                  "name": "X_JOBS_TABLE",
+                  "value": "teamagent-dev-x-buzz-jobs"
+                },
+                {
+                  "name": "X_RESEARCH_ALLOWED_EMAILS",
+                  "value": ""
+                },
+                {
+                  "name": "X_S3_BUCKET",
+                  "value": "teamagent-dev-raw-files"
+                },
+                {
+                  "name": "X_TASK_QUEUE",
+                  "value": "https://sqs.ap-northeast-1.amazonaws.com/718959508629/teamagent-dev-x-buzz-jobs"
+                }
+              ],
+              "essential": true,
+              "healthCheck": {
+                "command": [
+                  "CMD",
+                  "/app/.venv/bin/python",
+                  "-c",
+                  "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8787/healthz', timeout=4).close()"
+                ],
+                "interval": 30,
+                "retries": 5,
+                "startPeriod": 40,
+                "timeout": 5
+              },
+              "image": "718959508629.dkr.ecr.ap-northeast-1.amazonaws.com/teamagent-mcp@sha256:cd43968333de9a343020438af021e7e016ca0b5e59ede3b0776e29d2bcd82078",
+              "linuxParameters": {
+                "capabilities": {
+                  "add": [],
+                  "drop": [
+                    "ALL"
+                  ]
+                },
+                "initProcessEnabled": true
+              },
+              "logConfiguration": {
+                "logDriver": "awslogs",
+                "options": {
+                  "awslogs-group": "/teamagent/dev/teamagent-mcp",
+                  "awslogs-region": "ap-northeast-1",
+                  "awslogs-stream-prefix": "mcp"
+                }
+              },
+              "mountPoints": [
+                {
+                  "containerPath": "/tmp",
+                  "readOnly": false,
+                  "sourceVolume": "runtime-tmp"
+                }
+              ],
+              "name": "teamagent-mcp",
+              "portMappings": [
+                {
+                  "containerPort": 8787,
+                  "hostPort": 8787,
+                  "protocol": "tcp"
+                }
+              ],
+              "privileged": false,
+              "readonlyRootFilesystem": true,
+              "secrets": [
+                {
+                  "name": "APIFY_API_TOKEN",
+                  "valueFrom": "arn:aws:secretsmanager:ap-northeast-1:718959508629:secret:teamagent/dev/tiktok/apify-token-cIdMxf"
+                },
+                {
+                  "name": "CONNECT_GOOGLE_CLIENT_SECRET",
+                  "valueFrom": "arn:aws:secretsmanager:ap-northeast-1:718959508629:secret:teamagent/dev/connect_google_secret-rWes7O"
+                },
+                {
+                  "name": "CONNECT_SLACK_CLIENT_ID",
+                  "valueFrom": "arn:aws:secretsmanager:ap-northeast-1:718959508629:secret:teamagent/dev/connect_slack_client_id-aTZTb2"
+                },
+                {
+                  "name": "DATABASE_URL",
+                  "valueFrom": "arn:aws:secretsmanager:ap-northeast-1:718959508629:secret:teamagent/dev/database-url-4pJMDr"
+                },
+                {
+                  "name": "GOOGLE_CLIENT_ID",
+                  "valueFrom": "arn:aws:secretsmanager:ap-northeast-1:718959508629:secret:teamagent/dev/google_oauth-L8HOBj:client_id::"
+                },
+                {
+                  "name": "GOOGLE_CLIENT_SECRET",
+                  "valueFrom": "arn:aws:secretsmanager:ap-northeast-1:718959508629:secret:teamagent/dev/google_oauth-L8HOBj:client_secret::"
+                },
+                {
+                  "name": "GOOGLE_OAUTH_REFRESH_TOKEN",
+                  "valueFrom": "arn:aws:secretsmanager:ap-northeast-1:718959508629:secret:teamagent/dev/google_oauth-L8HOBj:refresh_token::"
+                },
+                {
+                  "name": "MAIL_ACTION_HMAC_SECRET",
+                  "valueFrom": "arn:aws:secretsmanager:ap-northeast-1:718959508629:secret:teamagent/dev/database-url-4pJMDr"
+                },
+                {
+                  "name": "OAUTH_STATE_SECRET",
+                  "valueFrom": "arn:aws:secretsmanager:ap-northeast-1:718959508629:secret:teamagent/dev/oauth_state_secret-tKil2L"
+                },
+                {
+                  "name": "REPORT_LINK_HMAC_SECRET",
+                  "valueFrom": "arn:aws:secretsmanager:ap-northeast-1:718959508629:secret:teamagent/dev/report-link-hmac-RKEHWS"
+                },
+                {
+                  "name": "SLACK_BOT_TOKEN",
+                  "valueFrom": "arn:aws:secretsmanager:ap-northeast-1:718959508629:secret:teamagent/dev/openclaw/slack-bot-token-N1vpyd"
+                },
+                {
+                  "name": "SLACK_OAUTH_STATE_SECRET",
+                  "valueFrom": "arn:aws:secretsmanager:ap-northeast-1:718959508629:secret:teamagent/dev/slack_oauth_state_secret-yGYkUF"
+                },
+                {
+                  "name": "TEAMAGENT_CALLER_CLAIM_SECRET",
+                  "valueFrom": "arn:aws:secretsmanager:ap-northeast-1:718959508629:secret:teamagent/dev/openclaw/caller-claim-hmac-TZgjtj"
+                },
+                {
+                  "name": "TEAMAGENT_MCP_BEARER",
+                  "valueFrom": "arn:aws:secretsmanager:ap-northeast-1:718959508629:secret:teamagent/dev/mcp/bearer-STVVSR"
+                },
+                {
+                  "name": "VERTEX_SA_JSON",
+                  "valueFrom": "arn:aws:secretsmanager:ap-northeast-1:718959508629:secret:teamagent/dev/vertex_sa-Y4AAUC"
+                }
+              ],
+              "systemControls": [],
+              "user": "10001:10001",
+              "volumesFrom": []
+            }
+          ],
+          "cpu": "1024",
+          "execution_role_arn": "arn:aws:iam::718959508629:role/teamagent-dev-ecs-exec-mcp",
+          "memory": "4096",
+          "network_mode": "awsvpc",
+          "task_role_arn": "arn:aws:iam::718959508629:role/teamagent-dev-mcp-task",
+          "volumes": [
+            {
+              "configure_at_launch": false,
+              "docker_volume_configuration": [],
+              "efs_volume_configuration": [],
+              "fsx_windows_file_server_volume_configuration": [],
+              "host_path": "",
+              "name": "runtime-tmp"
+            }
+          ]
+        },
+        "task_definition_arn": "arn:aws:ecs:ap-northeast-1:718959508629:task-definition/teamagent-dev-mcp:92"
+      },
+      "receipt": {
+        "pipeline": "mcp",
+        "subject": "core"
+      },
+      "release_repository": "teamagent-mcp",
+      "terraform_task_definition_address": "aws_ecs_task_definition.mcp"
+    },
+    {
+      "activator": {
+        "identity": "teamagent-dev-connect-web",
+        "type": "ecs_service"
+      },
+      "after": {
+        "activation": {
+          "desired_count": 1,
+          "task_definition_arn": "arn:aws:ecs:ap-northeast-1:718959508629:task-definition/teamagent-dev-connect-web:78"
+        },
+        "image": "718959508629.dkr.ecr.ap-northeast-1.amazonaws.com/teamagent-mcp@sha256:cd43968333de9a343020438af021e7e016ca0b5e59ede3b0776e29d2bcd82078",
+        "task_definition": {
+          "container_definitions": [
+            {
+              "command": [
+                "python",
+                "-m",
+                "teamagent.connect_web"
+              ],
+              "entryPoint": null,
+              "environment": [
+                {
+                  "name": "AWS_REGION",
+                  "value": "ap-northeast-1"
+                },
+                {
+                  "name": "BEDROCK_MODEL_ID",
+                  "value": "jp.anthropic.claude-haiku-4-5-20251001-v1:0"
+                },
+                {
+                  "name": "BOILERPLATE_EXCLUDE_SEARCH",
+                  "value": "true"
+                },
+                {
+                  "name": "CONNECT_APP_HTML_BAKED_SHA256",
+                  "value": "716ac25a96516efd6443277c903102d514f3f86729f8706baea41ee48f0ecdeb"
+                },
+                {
+                  "name": "CONNECT_APP_HTML_BUILD_INPUTS_SHA256",
+                  "value": "bd58ccb0eeeb776fdd4deb97f29b5c94aa69a7135e3553f4555071f19c2d6fe1"
+                },
+                {
+                  "name": "CONNECT_APP_HTML_MANIFEST_SHA256",
+                  "value": "1196228818d4162c275f302421b926415123063b39e86b5839fcf0a1eae3c4f1"
+                },
+                {
+                  "name": "CONNECT_APP_HTML_S3_URI",
+                  "value": "s3://teamagent-dev-raw-files/codebuild/connect-web-app.html"
+                },
+                {
+                  "name": "CONNECT_APP_HTML_S3_VERSION_ID",
+                  "value": "QCqb751F5Xo391e23YhcqpT6BKCBqZZi"
+                },
+                {
+                  "name": "CONNECT_APP_HTML_SHA256",
+                  "value": "cb93112ed8754855f1d92b9880fc9cde5d71aeaa9f077c4bd6638d2190d20872"
+                },
+                {
+                  "name": "CONNECT_BASE_URL",
+                  "value": "https://connect.newstv.co.jp"
+                },
+                {
+                  "name": "CONNECT_GOOGLE_CLIENT_ID",
+                  "value": "676659122211-pgd1mj4et6sf7uqqmsni2b3kmbbd8qeg.apps.googleusercontent.com"
+                },
+                {
+                  "name": "CONNECT_SEARCH_ALLOWED_HD",
+                  "value": "__LIVE_ENV__"
+                },
+                {
+                  "name": "CONNECT_WEB_HOST",
+                  "value": "0.0.0.0"
+                },
+                {
+                  "name": "CONNECT_WEB_PORT",
+                  "value": "8788"
+                },
+                {
+                  "name": "DOC_DEDUP_EXCLUDE_SEARCH",
+                  "value": "true"
+                },
+                {
+                  "name": "GRAPH_CONCEPT_EDGES",
+                  "value": "false"
+                },
+                {
+                  "name": "OAUTH_KMS_KEY_ID",
+                  "value": "arn:aws:kms:ap-northeast-1:718959508629:key/7e41bedb-6980-4a67-a0bc-e1307d798fb4"
+                },
+                {
+                  "name": "OAUTH_KMS_REGION",
+                  "value": "ap-northeast-1"
+                },
+                {
+                  "name": "OAUTH_REDIRECT_URI",
+                  "value": "https://connect.newstv.co.jp/oauth2/callback"
+                },
+                {
+                  "name": "SEARCH_BUDGET_SORT",
+                  "value": "true"
+                },
+                {
+                  "name": "SEARCH_CLIENT_MATCH_SORT",
+                  "value": "1"
+                },
+                {
+                  "name": "SEARCH_DEDUP_RESULTS",
+                  "value": "true"
+                },
+                {
+                  "name": "SEARCH_HNSW_EF_SEARCH",
+                  "value": "100"
+                },
+                {
+                  "name": "SEARCH_MIN_RELEVANCE",
+                  "value": "0.0"
+                },
+                {
+                  "name": "SLACK_OAUTH_REDIRECT_URI",
+                  "value": "https://connect.newstv.co.jp/slack/oauth/callback"
+                },
+                {
+                  "name": "SLACK_TEAM_ID",
+                  "value": "T07MU5P2PBR"
+                },
+                {
+                  "name": "STRUCTLOG_FORMAT",
+                  "value": "json"
+                },
+                {
+                  "name": "TEAMAGENT_HMAC_STATE_SCOPE",
+                  "value": "teamagent/dev"
+                },
+                {
+                  "name": "TEAMAGENT_HMAC_STATE_TABLE",
+                  "value": "teamagent-dev-hmac-state"
+                },
+                {
+                  "name": "TEMPLATE_EXCLUDE_SEARCH",
+                  "value": "1"
+                },
+                {
+                  "name": "USE_CLIENT_BOOST",
+                  "value": "true"
+                },
+                {
+                  "name": "USE_COHERE_RERANK",
+                  "value": "true"
+                },
+                {
+                  "name": "USE_DOC_KIND_RULES",
+                  "value": "1"
+                },
+                {
+                  "name": "USE_KNOWLEDGE_FILTERS",
+                  "value": "true"
+                },
+                {
+                  "name": "USE_NEW_SCHEMA",
+                  "value": "true"
+                },
+                {
+                  "name": "USE_QUERY_PLANNER",
+                  "value": "false"
+                },
+                {
+                  "name": "USE_REPORT_SHORTURL",
+                  "value": "1"
+                }
+              ],
+              "essential": true,
+              "healthCheck": {
+                "command": [
+                  "CMD",
+                  "/app/.venv/bin/python",
+                  "-c",
+                  "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8788/healthz', timeout=4).close()"
+                ],
+                "interval": 30,
+                "retries": 5,
+                "startPeriod": 40,
+                "timeout": 5
+              },
+              "image": "718959508629.dkr.ecr.ap-northeast-1.amazonaws.com/teamagent-mcp@sha256:cd43968333de9a343020438af021e7e016ca0b5e59ede3b0776e29d2bcd82078",
+              "linuxParameters": null,
+              "logConfiguration": {
+                "logDriver": "awslogs",
+                "options": {
+                  "awslogs-group": "/teamagent/dev/connect-web",
+                  "awslogs-region": "ap-northeast-1",
+                  "awslogs-stream-prefix": "connect-web"
+                }
+              },
+              "mountPoints": [],
+              "name": "connect-web",
+              "portMappings": [
+                {
+                  "containerPort": 8788,
+                  "hostPort": 8788,
+                  "protocol": "tcp"
+                }
+              ],
+              "privileged": null,
+              "readonlyRootFilesystem": null,
+              "secrets": [
+                {
+                  "name": "CONNECT_GOOGLE_CLIENT_SECRET",
+                  "valueFrom": "arn:aws:secretsmanager:ap-northeast-1:718959508629:secret:teamagent/dev/connect_google_secret-rWes7O"
+                },
+                {
+                  "name": "CONNECT_SLACK_CLIENT_ID",
+                  "valueFrom": "arn:aws:secretsmanager:ap-northeast-1:718959508629:secret:teamagent/dev/connect_slack_client_id-aTZTb2"
+                },
+                {
+                  "name": "CONNECT_SLACK_CLIENT_SECRET",
+                  "valueFrom": "arn:aws:secretsmanager:ap-northeast-1:718959508629:secret:teamagent/dev/connect_slack_secret-fOlJIt"
+                },
+                {
+                  "name": "DATABASE_URL",
+                  "valueFrom": "arn:aws:secretsmanager:ap-northeast-1:718959508629:secret:teamagent/dev/database-url-4pJMDr"
+                },
+                {
+                  "name": "MAIL_ACTION_HMAC_SECRET",
+                  "valueFrom": "arn:aws:secretsmanager:ap-northeast-1:718959508629:secret:teamagent/dev/database-url-4pJMDr"
+                },
+                {
+                  "name": "OAUTH_STATE_SECRET",
+                  "valueFrom": "arn:aws:secretsmanager:ap-northeast-1:718959508629:secret:teamagent/dev/oauth_state_secret-tKil2L"
+                },
+                {
+                  "name": "REPORT_LINK_HMAC_SECRET",
+                  "valueFrom": "arn:aws:secretsmanager:ap-northeast-1:718959508629:secret:teamagent/dev/report-link-hmac-RKEHWS"
+                },
+                {
+                  "name": "SLACK_OAUTH_STATE_SECRET",
+                  "valueFrom": "arn:aws:secretsmanager:ap-northeast-1:718959508629:secret:teamagent/dev/slack_oauth_state_secret-yGYkUF"
+                }
+              ],
+              "systemControls": [],
+              "user": null,
+              "volumesFrom": []
+            }
+          ],
+          "cpu": "512",
+          "execution_role_arn": "arn:aws:iam::718959508629:role/teamagent-dev-ecs-exec-connect-web",
+          "memory": "3072",
+          "network_mode": "awsvpc",
+          "task_role_arn": "arn:aws:iam::718959508629:role/teamagent-dev-connect-web-task",
+          "volumes": []
+        },
+        "task_definition_arn": "arn:aws:ecs:ap-northeast-1:718959508629:task-definition/teamagent-dev-connect-web:78"
+      },
+      "before": {
+        "activation": {
+          "desired_count": 1,
+          "task_definition_arn": "arn:aws:ecs:ap-northeast-1:718959508629:task-definition/teamagent-dev-connect-web:78"
+        },
+        "image": "718959508629.dkr.ecr.ap-northeast-1.amazonaws.com/teamagent-mcp@sha256:cd43968333de9a343020438af021e7e016ca0b5e59ede3b0776e29d2bcd82078",
+        "task_definition": {
+          "container_definitions": [
+            {
+              "command": [
+                "python",
+                "-m",
+                "teamagent.connect_web"
+              ],
+              "entryPoint": null,
+              "environment": [
+                {
+                  "name": "AWS_REGION",
+                  "value": "ap-northeast-1"
+                },
+                {
+                  "name": "BEDROCK_MODEL_ID",
+                  "value": "jp.anthropic.claude-haiku-4-5-20251001-v1:0"
+                },
+                {
+                  "name": "BOILERPLATE_EXCLUDE_SEARCH",
+                  "value": "true"
+                },
+                {
+                  "name": "CONNECT_APP_HTML_BAKED_SHA256",
+                  "value": "716ac25a96516efd6443277c903102d514f3f86729f8706baea41ee48f0ecdeb"
+                },
+                {
+                  "name": "CONNECT_APP_HTML_BUILD_INPUTS_SHA256",
+                  "value": "bd58ccb0eeeb776fdd4deb97f29b5c94aa69a7135e3553f4555071f19c2d6fe1"
+                },
+                {
+                  "name": "CONNECT_APP_HTML_MANIFEST_SHA256",
+                  "value": "1196228818d4162c275f302421b926415123063b39e86b5839fcf0a1eae3c4f1"
+                },
+                {
+                  "name": "CONNECT_APP_HTML_S3_URI",
+                  "value": "s3://teamagent-dev-raw-files/codebuild/connect-web-app.html"
+                },
+                {
+                  "name": "CONNECT_APP_HTML_S3_VERSION_ID",
+                  "value": "QCqb751F5Xo391e23YhcqpT6BKCBqZZi"
+                },
+                {
+                  "name": "CONNECT_APP_HTML_SHA256",
+                  "value": "cb93112ed8754855f1d92b9880fc9cde5d71aeaa9f077c4bd6638d2190d20872"
+                },
+                {
+                  "name": "CONNECT_BASE_URL",
+                  "value": "https://connect.newstv.co.jp"
+                },
+                {
+                  "name": "CONNECT_GOOGLE_CLIENT_ID",
+                  "value": "676659122211-pgd1mj4et6sf7uqqmsni2b3kmbbd8qeg.apps.googleusercontent.com"
+                },
+                {
+                  "name": "CONNECT_SEARCH_ALLOWED_HD",
+                  "value": "__LIVE_ENV__"
+                },
+                {
+                  "name": "CONNECT_WEB_HOST",
+                  "value": "0.0.0.0"
+                },
+                {
+                  "name": "CONNECT_WEB_PORT",
+                  "value": "8788"
+                },
+                {
+                  "name": "DOC_DEDUP_EXCLUDE_SEARCH",
+                  "value": "true"
+                },
+                {
+                  "name": "GRAPH_CONCEPT_EDGES",
+                  "value": "false"
+                },
+                {
+                  "name": "OAUTH_KMS_KEY_ID",
+                  "value": "arn:aws:kms:ap-northeast-1:718959508629:key/7e41bedb-6980-4a67-a0bc-e1307d798fb4"
+                },
+                {
+                  "name": "OAUTH_KMS_REGION",
+                  "value": "ap-northeast-1"
+                },
+                {
+                  "name": "OAUTH_REDIRECT_URI",
+                  "value": "https://connect.newstv.co.jp/oauth2/callback"
+                },
+                {
+                  "name": "SEARCH_BUDGET_SORT",
+                  "value": "true"
+                },
+                {
+                  "name": "SEARCH_CLIENT_MATCH_SORT",
+                  "value": "1"
+                },
+                {
+                  "name": "SEARCH_DEDUP_RESULTS",
+                  "value": "true"
+                },
+                {
+                  "name": "SEARCH_HNSW_EF_SEARCH",
+                  "value": "100"
+                },
+                {
+                  "name": "SEARCH_MIN_RELEVANCE",
+                  "value": "0.0"
+                },
+                {
+                  "name": "SLACK_OAUTH_REDIRECT_URI",
+                  "value": "https://connect.newstv.co.jp/slack/oauth/callback"
+                },
+                {
+                  "name": "SLACK_TEAM_ID",
+                  "value": "T07MU5P2PBR"
+                },
+                {
+                  "name": "STRUCTLOG_FORMAT",
+                  "value": "json"
+                },
+                {
+                  "name": "TEAMAGENT_HMAC_STATE_SCOPE",
+                  "value": "teamagent/dev"
+                },
+                {
+                  "name": "TEAMAGENT_HMAC_STATE_TABLE",
+                  "value": "teamagent-dev-hmac-state"
+                },
+                {
+                  "name": "TEMPLATE_EXCLUDE_SEARCH",
+                  "value": "1"
+                },
+                {
+                  "name": "USE_CLIENT_BOOST",
+                  "value": "true"
+                },
+                {
+                  "name": "USE_COHERE_RERANK",
+                  "value": "true"
+                },
+                {
+                  "name": "USE_DOC_KIND_RULES",
+                  "value": "1"
+                },
+                {
+                  "name": "USE_KNOWLEDGE_FILTERS",
+                  "value": "true"
+                },
+                {
+                  "name": "USE_NEW_SCHEMA",
+                  "value": "true"
+                },
+                {
+                  "name": "USE_QUERY_PLANNER",
+                  "value": "false"
+                },
+                {
+                  "name": "USE_REPORT_SHORTURL",
+                  "value": "1"
+                }
+              ],
+              "essential": true,
+              "healthCheck": {
+                "command": [
+                  "CMD",
+                  "/app/.venv/bin/python",
+                  "-c",
+                  "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8788/healthz', timeout=4).close()"
+                ],
+                "interval": 30,
+                "retries": 5,
+                "startPeriod": 40,
+                "timeout": 5
+              },
+              "image": "718959508629.dkr.ecr.ap-northeast-1.amazonaws.com/teamagent-mcp@sha256:cd43968333de9a343020438af021e7e016ca0b5e59ede3b0776e29d2bcd82078",
+              "linuxParameters": null,
+              "logConfiguration": {
+                "logDriver": "awslogs",
+                "options": {
+                  "awslogs-group": "/teamagent/dev/connect-web",
+                  "awslogs-region": "ap-northeast-1",
+                  "awslogs-stream-prefix": "connect-web"
+                }
+              },
+              "mountPoints": [],
+              "name": "connect-web",
+              "portMappings": [
+                {
+                  "containerPort": 8788,
+                  "hostPort": 8788,
+                  "protocol": "tcp"
+                }
+              ],
+              "privileged": null,
+              "readonlyRootFilesystem": null,
+              "secrets": [
+                {
+                  "name": "CONNECT_GOOGLE_CLIENT_SECRET",
+                  "valueFrom": "arn:aws:secretsmanager:ap-northeast-1:718959508629:secret:teamagent/dev/connect_google_secret-rWes7O"
+                },
+                {
+                  "name": "CONNECT_SLACK_CLIENT_ID",
+                  "valueFrom": "arn:aws:secretsmanager:ap-northeast-1:718959508629:secret:teamagent/dev/connect_slack_client_id-aTZTb2"
+                },
+                {
+                  "name": "CONNECT_SLACK_CLIENT_SECRET",
+                  "valueFrom": "arn:aws:secretsmanager:ap-northeast-1:718959508629:secret:teamagent/dev/connect_slack_secret-fOlJIt"
+                },
+                {
+                  "name": "DATABASE_URL",
+                  "valueFrom": "arn:aws:secretsmanager:ap-northeast-1:718959508629:secret:teamagent/dev/database-url-4pJMDr"
+                },
+                {
+                  "name": "MAIL_ACTION_HMAC_SECRET",
+                  "valueFrom": "arn:aws:secretsmanager:ap-northeast-1:718959508629:secret:teamagent/dev/database-url-4pJMDr"
+                },
+                {
+                  "name": "OAUTH_STATE_SECRET",
+                  "valueFrom": "arn:aws:secretsmanager:ap-northeast-1:718959508629:secret:teamagent/dev/oauth_state_secret-tKil2L"
+                },
+                {
+                  "name": "REPORT_LINK_HMAC_SECRET",
+                  "valueFrom": "arn:aws:secretsmanager:ap-northeast-1:718959508629:secret:teamagent/dev/report-link-hmac-RKEHWS"
+                },
+                {
+                  "name": "SLACK_OAUTH_STATE_SECRET",
+                  "valueFrom": "arn:aws:secretsmanager:ap-northeast-1:718959508629:secret:teamagent/dev/slack_oauth_state_secret-yGYkUF"
+                }
+              ],
+              "systemControls": [],
+              "user": null,
+              "volumesFrom": []
+            }
+          ],
+          "cpu": "512",
+          "execution_role_arn": "arn:aws:iam::718959508629:role/teamagent-dev-ecs-exec-connect-web",
+          "memory": "3072",
+          "network_mode": "awsvpc",
+          "task_role_arn": "arn:aws:iam::718959508629:role/teamagent-dev-connect-web-task",
+          "volumes": []
+        },
+        "task_definition_arn": "arn:aws:ecs:ap-northeast-1:718959508629:task-definition/teamagent-dev-connect-web:78"
+      },
+      "consumer_id": "connect_web",
+      "container_name": "connect-web",
+      "ecs_family": "teamagent-dev-connect-web",
+      "live": {
+        "activation": {
+          "desired_count": 1,
+          "task_definition_arn": "arn:aws:ecs:ap-northeast-1:718959508629:task-definition/teamagent-dev-connect-web:78"
+        },
+        "image": "718959508629.dkr.ecr.ap-northeast-1.amazonaws.com/teamagent-mcp@sha256:cd43968333de9a343020438af021e7e016ca0b5e59ede3b0776e29d2bcd82078",
+        "task_definition": {
+          "container_definitions": [
+            {
+              "command": [
+                "python",
+                "-m",
+                "teamagent.connect_web"
+              ],
+              "entryPoint": null,
+              "environment": [
+                {
+                  "name": "AWS_REGION",
+                  "value": "ap-northeast-1"
+                },
+                {
+                  "name": "BEDROCK_MODEL_ID",
+                  "value": "jp.anthropic.claude-haiku-4-5-20251001-v1:0"
+                },
+                {
+                  "name": "BOILERPLATE_EXCLUDE_SEARCH",
+                  "value": "true"
+                },
+                {
+                  "name": "CONNECT_APP_HTML_BAKED_SHA256",
+                  "value": "716ac25a96516efd6443277c903102d514f3f86729f8706baea41ee48f0ecdeb"
+                },
+                {
+                  "name": "CONNECT_APP_HTML_BUILD_INPUTS_SHA256",
+                  "value": "bd58ccb0eeeb776fdd4deb97f29b5c94aa69a7135e3553f4555071f19c2d6fe1"
+                },
+                {
+                  "name": "CONNECT_APP_HTML_MANIFEST_SHA256",
+                  "value": "1196228818d4162c275f302421b926415123063b39e86b5839fcf0a1eae3c4f1"
+                },
+                {
+                  "name": "CONNECT_APP_HTML_S3_URI",
+                  "value": "s3://teamagent-dev-raw-files/codebuild/connect-web-app.html"
+                },
+                {
+                  "name": "CONNECT_APP_HTML_S3_VERSION_ID",
+                  "value": "QCqb751F5Xo391e23YhcqpT6BKCBqZZi"
+                },
+                {
+                  "name": "CONNECT_APP_HTML_SHA256",
+                  "value": "cb93112ed8754855f1d92b9880fc9cde5d71aeaa9f077c4bd6638d2190d20872"
+                },
+                {
+                  "name": "CONNECT_BASE_URL",
+                  "value": "https://connect.newstv.co.jp"
+                },
+                {
+                  "name": "CONNECT_GOOGLE_CLIENT_ID",
+                  "value": "676659122211-pgd1mj4et6sf7uqqmsni2b3kmbbd8qeg.apps.googleusercontent.com"
+                },
+                {
+                  "name": "CONNECT_SEARCH_ALLOWED_HD",
+                  "value": "__LIVE_ENV__"
+                },
+                {
+                  "name": "CONNECT_WEB_HOST",
+                  "value": "0.0.0.0"
+                },
+                {
+                  "name": "CONNECT_WEB_PORT",
+                  "value": "8788"
+                },
+                {
+                  "name": "DOC_DEDUP_EXCLUDE_SEARCH",
+                  "value": "true"
+                },
+                {
+                  "name": "GRAPH_CONCEPT_EDGES",
+                  "value": "false"
+                },
+                {
+                  "name": "OAUTH_KMS_KEY_ID",
+                  "value": "arn:aws:kms:ap-northeast-1:718959508629:key/7e41bedb-6980-4a67-a0bc-e1307d798fb4"
+                },
+                {
+                  "name": "OAUTH_KMS_REGION",
+                  "value": "ap-northeast-1"
+                },
+                {
+                  "name": "OAUTH_REDIRECT_URI",
+                  "value": "https://connect.newstv.co.jp/oauth2/callback"
+                },
+                {
+                  "name": "SEARCH_BUDGET_SORT",
+                  "value": "true"
+                },
+                {
+                  "name": "SEARCH_CLIENT_MATCH_SORT",
+                  "value": "1"
+                },
+                {
+                  "name": "SEARCH_DEDUP_RESULTS",
+                  "value": "true"
+                },
+                {
+                  "name": "SEARCH_HNSW_EF_SEARCH",
+                  "value": "100"
+                },
+                {
+                  "name": "SEARCH_MIN_RELEVANCE",
+                  "value": "0.0"
+                },
+                {
+                  "name": "SLACK_OAUTH_REDIRECT_URI",
+                  "value": "https://connect.newstv.co.jp/slack/oauth/callback"
+                },
+                {
+                  "name": "SLACK_TEAM_ID",
+                  "value": "T07MU5P2PBR"
+                },
+                {
+                  "name": "STRUCTLOG_FORMAT",
+                  "value": "json"
+                },
+                {
+                  "name": "TEAMAGENT_HMAC_STATE_SCOPE",
+                  "value": "teamagent/dev"
+                },
+                {
+                  "name": "TEAMAGENT_HMAC_STATE_TABLE",
+                  "value": "teamagent-dev-hmac-state"
+                },
+                {
+                  "name": "TEMPLATE_EXCLUDE_SEARCH",
+                  "value": "1"
+                },
+                {
+                  "name": "USE_CLIENT_BOOST",
+                  "value": "true"
+                },
+                {
+                  "name": "USE_COHERE_RERANK",
+                  "value": "true"
+                },
+                {
+                  "name": "USE_DOC_KIND_RULES",
+                  "value": "1"
+                },
+                {
+                  "name": "USE_KNOWLEDGE_FILTERS",
+                  "value": "true"
+                },
+                {
+                  "name": "USE_NEW_SCHEMA",
+                  "value": "true"
+                },
+                {
+                  "name": "USE_QUERY_PLANNER",
+                  "value": "false"
+                },
+                {
+                  "name": "USE_REPORT_SHORTURL",
+                  "value": "1"
+                }
+              ],
+              "essential": true,
+              "healthCheck": {
+                "command": [
+                  "CMD",
+                  "/app/.venv/bin/python",
+                  "-c",
+                  "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8788/healthz', timeout=4).close()"
+                ],
+                "interval": 30,
+                "retries": 5,
+                "startPeriod": 40,
+                "timeout": 5
+              },
+              "image": "718959508629.dkr.ecr.ap-northeast-1.amazonaws.com/teamagent-mcp@sha256:cd43968333de9a343020438af021e7e016ca0b5e59ede3b0776e29d2bcd82078",
+              "linuxParameters": null,
+              "logConfiguration": {
+                "logDriver": "awslogs",
+                "options": {
+                  "awslogs-group": "/teamagent/dev/connect-web",
+                  "awslogs-region": "ap-northeast-1",
+                  "awslogs-stream-prefix": "connect-web"
+                }
+              },
+              "mountPoints": [],
+              "name": "connect-web",
+              "portMappings": [
+                {
+                  "containerPort": 8788,
+                  "hostPort": 8788,
+                  "protocol": "tcp"
+                }
+              ],
+              "privileged": null,
+              "readonlyRootFilesystem": null,
+              "secrets": [
+                {
+                  "name": "CONNECT_GOOGLE_CLIENT_SECRET",
+                  "valueFrom": "arn:aws:secretsmanager:ap-northeast-1:718959508629:secret:teamagent/dev/connect_google_secret-rWes7O"
+                },
+                {
+                  "name": "CONNECT_SLACK_CLIENT_ID",
+                  "valueFrom": "arn:aws:secretsmanager:ap-northeast-1:718959508629:secret:teamagent/dev/connect_slack_client_id-aTZTb2"
+                },
+                {
+                  "name": "CONNECT_SLACK_CLIENT_SECRET",
+                  "valueFrom": "arn:aws:secretsmanager:ap-northeast-1:718959508629:secret:teamagent/dev/connect_slack_secret-fOlJIt"
+                },
+                {
+                  "name": "DATABASE_URL",
+                  "valueFrom": "arn:aws:secretsmanager:ap-northeast-1:718959508629:secret:teamagent/dev/database-url-4pJMDr"
+                },
+                {
+                  "name": "MAIL_ACTION_HMAC_SECRET",
+                  "valueFrom": "arn:aws:secretsmanager:ap-northeast-1:718959508629:secret:teamagent/dev/database-url-4pJMDr"
+                },
+                {
+                  "name": "OAUTH_STATE_SECRET",
+                  "valueFrom": "arn:aws:secretsmanager:ap-northeast-1:718959508629:secret:teamagent/dev/oauth_state_secret-tKil2L"
+                },
+                {
+                  "name": "REPORT_LINK_HMAC_SECRET",
+                  "valueFrom": "arn:aws:secretsmanager:ap-northeast-1:718959508629:secret:teamagent/dev/report-link-hmac-RKEHWS"
+                },
+                {
+                  "name": "SLACK_OAUTH_STATE_SECRET",
+                  "valueFrom": "arn:aws:secretsmanager:ap-northeast-1:718959508629:secret:teamagent/dev/slack_oauth_state_secret-yGYkUF"
+                }
+              ],
+              "systemControls": [],
+              "user": null,
+              "volumesFrom": []
+            }
+          ],
+          "cpu": "512",
+          "execution_role_arn": "arn:aws:iam::718959508629:role/teamagent-dev-ecs-exec-connect-web",
+          "memory": "3072",
+          "network_mode": "awsvpc",
+          "task_role_arn": "arn:aws:iam::718959508629:role/teamagent-dev-connect-web-task",
+          "volumes": []
+        },
+        "task_definition_arn": "arn:aws:ecs:ap-northeast-1:718959508629:task-definition/teamagent-dev-connect-web:78"
+      },
+      "receipt": {
+        "pipeline": "mcp",
+        "subject": "core"
+      },
+      "release_repository": "teamagent-mcp",
+      "terraform_task_definition_address": "aws_ecs_task_definition.connect_web[0]"
+    },
+    {
+      "activator": {
+        "identity": "teamagent-dev-openclaw",
+        "type": "ecs_service"
+      },
+      "after": {
+        "activation": {
+          "desired_count": 1,
+          "task_definition_arn": "aws_ecs_task_definition.openclaw[0]"
+        },
+        "image": "718959508629.dkr.ecr.ap-northeast-1.amazonaws.com/teamagent-openclaw@sha256:5530dbe44ed4e63146d60a8ab7df5b47b8d02c3a50191bbcdcdfff2958404744",
+        "task_definition": {
+          "container_definitions": [
+            {
+              "command": null,
+              "entryPoint": null,
+              "environment": [
+                {
+                  "name": "AWS_REGION",
+                  "value": "ap-northeast-1"
+                },
+                {
+                  "name": "SLACK_DM_ALLOWLIST",
+                  "value": "*"
+                },
+                {
+                  "name": "SLACK_TEAM_ID",
+                  "value": "T07MU5P2PBR"
+                },
+                {
+                  "name": "TMPDIR",
+                  "value": "/tmp"
+                }
+              ],
+              "essential": true,
+              "healthCheck": {
+                "command": [
+                  "CMD",
+                  "/usr/bin/node",
+                  "-e",
+                  "fetch('http://127.0.0.1:18789/readyz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+                ],
+                "interval": 30,
+                "retries": 5,
+                "startPeriod": 40,
+                "timeout": 5
+              },
+              "image": "718959508629.dkr.ecr.ap-northeast-1.amazonaws.com/teamagent-openclaw@sha256:5530dbe44ed4e63146d60a8ab7df5b47b8d02c3a50191bbcdcdfff2958404744",
+              "linuxParameters": {
+                "capabilities": {
+                  "add": [],
+                  "drop": [
+                    "ALL"
+                  ]
+                },
+                "initProcessEnabled": true
+              },
+              "logConfiguration": {
+                "logDriver": "awslogs",
+                "options": {
+                  "awslogs-group": "/teamagent/dev/openclaw",
+                  "awslogs-region": "ap-northeast-1",
+                  "awslogs-stream-prefix": "openclaw"
+                }
+              },
+              "mountPoints": [
+                {
+                  "containerPath": "/tmp",
+                  "readOnly": false,
+                  "sourceVolume": "tmp"
+                },
+                {
+                  "containerPath": "/tmp/teamagent-openclaw",
+                  "readOnly": false,
+                  "sourceVolume": "state"
+                }
+              ],
+              "name": "openclaw",
+              "portMappings": [],
+              "privileged": false,
+              "readonlyRootFilesystem": true,
+              "secrets": [
+                {
+                  "name": "OPENCLAW_GATEWAY_TOKEN",
+                  "valueFrom": "arn:aws:secretsmanager:ap-northeast-1:718959508629:secret:teamagent/dev/openclaw/gateway-token-gYnSeE"
+                },
+                {
+                  "name": "SLACK_APP_TOKEN",
+                  "valueFrom": "arn:aws:secretsmanager:ap-northeast-1:718959508629:secret:teamagent/dev/openclaw/slack-app-token-xyn06X"
+                },
+                {
+                  "name": "SLACK_BOT_TOKEN",
+                  "valueFrom": "arn:aws:secretsmanager:ap-northeast-1:718959508629:secret:teamagent/dev/openclaw/slack-bot-token-N1vpyd"
+                },
+                {
+                  "name": "TEAMAGENT_CALLER_CLAIM_SECRET",
+                  "valueFrom": "arn:aws:secretsmanager:ap-northeast-1:718959508629:secret:teamagent/dev/openclaw/caller-claim-hmac-TZgjtj"
+                },
+                {
+                  "name": "TEAMAGENT_MCP_BEARER",
+                  "valueFrom": "arn:aws:secretsmanager:ap-northeast-1:718959508629:secret:teamagent/dev/mcp/bearer-STVVSR"
+                }
+              ],
+              "stopTimeout": 120,
+              "systemControls": [],
+              "user": "65532:65532",
+              "volumesFrom": []
+            }
+          ],
+          "cpu": "512",
+          "execution_role_arn": "arn:aws:iam::718959508629:role/teamagent-dev-ecs-exec-openclaw",
+          "memory": "1024",
+          "network_mode": "awsvpc",
+          "task_role_arn": "arn:aws:iam::718959508629:role/teamagent-dev-openclaw-task",
+          "volumes": [
+            {
+              "configure_at_launch": false,
+              "docker_volume_configuration": [],
+              "efs_volume_configuration": [
+                {
+                  "authorization_config": [
+                    {
+                      "access_point_id": "fsap-0ef0f5c713fa1dda4",
+                      "iam": "ENABLED"
+                    }
+                  ],
+                  "file_system_id": "fs-04d9d0e0a1d2a4d5c",
+                  "root_directory": "/",
+                  "transit_encryption": "ENABLED",
+                  "transit_encryption_port": 0
+                }
+              ],
+              "fsx_windows_file_server_volume_configuration": [],
+              "host_path": "",
+              "name": "state"
+            },
+            {
+              "configure_at_launch": false,
+              "docker_volume_configuration": [],
+              "efs_volume_configuration": [],
+              "fsx_windows_file_server_volume_configuration": [],
+              "host_path": "",
+              "name": "tmp"
+            }
+          ]
+        },
+        "task_definition_arn": "aws_ecs_task_definition.openclaw[0]"
+      },
+      "before": {
+        "activation": {
+          "desired_count": 1,
+          "task_definition_arn": "arn:aws:ecs:ap-northeast-1:718959508629:task-definition/teamagent-dev-openclaw:41"
+        },
+        "image": "718959508629.dkr.ecr.ap-northeast-1.amazonaws.com/teamagent-openclaw@sha256:37ff59e8108f9d72a8544e9360d2b2b249df54003afa8b89e5296765980081b5",
+        "task_definition": {
+          "container_definitions": [
+            {
+              "command": null,
+              "entryPoint": null,
+              "environment": [
+                {
+                  "name": "AWS_REGION",
+                  "value": "ap-northeast-1"
+                },
+                {
+                  "name": "SLACK_DM_ALLOWLIST",
+                  "value": "*"
+                },
+                {
+                  "name": "SLACK_TEAM_ID",
+                  "value": "T07MU5P2PBR"
+                },
+                {
+                  "name": "TMPDIR",
+                  "value": "/tmp"
+                }
+              ],
+              "essential": true,
+              "healthCheck": {
+                "command": [
+                  "CMD",
+                  "/usr/bin/node",
+                  "-e",
+                  "fetch('http://127.0.0.1:18789/readyz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+                ],
+                "interval": 30,
+                "retries": 5,
+                "startPeriod": 40,
+                "timeout": 5
+              },
+              "image": "718959508629.dkr.ecr.ap-northeast-1.amazonaws.com/teamagent-openclaw@sha256:37ff59e8108f9d72a8544e9360d2b2b249df54003afa8b89e5296765980081b5",
+              "linuxParameters": {
+                "capabilities": {
+                  "add": [],
+                  "drop": [
+                    "ALL"
+                  ]
+                },
+                "initProcessEnabled": true
+              },
+              "logConfiguration": {
+                "logDriver": "awslogs",
+                "options": {
+                  "awslogs-group": "/teamagent/dev/openclaw",
+                  "awslogs-region": "ap-northeast-1",
+                  "awslogs-stream-prefix": "openclaw"
+                }
+              },
+              "mountPoints": [
+                {
+                  "containerPath": "/tmp",
+                  "readOnly": false,
+                  "sourceVolume": "tmp"
+                },
+                {
+                  "containerPath": "/tmp/teamagent-openclaw",
+                  "readOnly": false,
+                  "sourceVolume": "state"
+                }
+              ],
+              "name": "openclaw",
+              "portMappings": [],
+              "privileged": false,
+              "readonlyRootFilesystem": true,
+              "secrets": [
+                {
+                  "name": "OPENCLAW_GATEWAY_TOKEN",
+                  "valueFrom": "arn:aws:secretsmanager:ap-northeast-1:718959508629:secret:teamagent/dev/openclaw/gateway-token-gYnSeE"
+                },
+                {
+                  "name": "SLACK_APP_TOKEN",
+                  "valueFrom": "arn:aws:secretsmanager:ap-northeast-1:718959508629:secret:teamagent/dev/openclaw/slack-app-token-xyn06X"
+                },
+                {
+                  "name": "SLACK_BOT_TOKEN",
+                  "valueFrom": "arn:aws:secretsmanager:ap-northeast-1:718959508629:secret:teamagent/dev/openclaw/slack-bot-token-N1vpyd"
+                },
+                {
+                  "name": "TEAMAGENT_CALLER_CLAIM_SECRET",
+                  "valueFrom": "arn:aws:secretsmanager:ap-northeast-1:718959508629:secret:teamagent/dev/openclaw/caller-claim-hmac-TZgjtj"
+                },
+                {
+                  "name": "TEAMAGENT_MCP_BEARER",
+                  "valueFrom": "arn:aws:secretsmanager:ap-northeast-1:718959508629:secret:teamagent/dev/mcp/bearer-STVVSR"
+                }
+              ],
+              "stopTimeout": 120,
+              "systemControls": [],
+              "user": "65532:65532",
+              "volumesFrom": []
+            }
+          ],
+          "cpu": "512",
+          "execution_role_arn": "arn:aws:iam::718959508629:role/teamagent-dev-ecs-exec-openclaw",
+          "memory": "1024",
+          "network_mode": "awsvpc",
+          "task_role_arn": "arn:aws:iam::718959508629:role/teamagent-dev-openclaw-task",
+          "volumes": [
+            {
+              "configure_at_launch": false,
+              "docker_volume_configuration": [],
+              "efs_volume_configuration": [
+                {
+                  "authorization_config": [
+                    {
+                      "access_point_id": "fsap-0ef0f5c713fa1dda4",
+                      "iam": "ENABLED"
+                    }
+                  ],
+                  "file_system_id": "fs-04d9d0e0a1d2a4d5c",
+                  "root_directory": "/",
+                  "transit_encryption": "ENABLED",
+                  "transit_encryption_port": 0
+                }
+              ],
+              "fsx_windows_file_server_volume_configuration": [],
+              "host_path": "",
+              "name": "state"
+            },
+            {
+              "configure_at_launch": false,
+              "docker_volume_configuration": [],
+              "efs_volume_configuration": [],
+              "fsx_windows_file_server_volume_configuration": [],
+              "host_path": "",
+              "name": "tmp"
+            }
+          ]
+        },
+        "task_definition_arn": "arn:aws:ecs:ap-northeast-1:718959508629:task-definition/teamagent-dev-openclaw:41"
+      },
+      "consumer_id": "openclaw",
+      "container_name": "openclaw",
+      "ecs_family": "teamagent-dev-openclaw",
+      "live": {
+        "activation": {
+          "desired_count": 1,
+          "task_definition_arn": "arn:aws:ecs:ap-northeast-1:718959508629:task-definition/teamagent-dev-openclaw:41"
+        },
+        "image": "718959508629.dkr.ecr.ap-northeast-1.amazonaws.com/teamagent-openclaw@sha256:37ff59e8108f9d72a8544e9360d2b2b249df54003afa8b89e5296765980081b5",
+        "task_definition": {
+          "container_definitions": [
+            {
+              "command": null,
+              "entryPoint": null,
+              "environment": [
+                {
+                  "name": "AWS_REGION",
+                  "value": "ap-northeast-1"
+                },
+                {
+                  "name": "SLACK_DM_ALLOWLIST",
+                  "value": "*"
+                },
+                {
+                  "name": "SLACK_TEAM_ID",
+                  "value": "T07MU5P2PBR"
+                },
+                {
+                  "name": "TMPDIR",
+                  "value": "/tmp"
+                }
+              ],
+              "essential": true,
+              "healthCheck": {
+                "command": [
+                  "CMD",
+                  "/usr/bin/node",
+                  "-e",
+                  "fetch('http://127.0.0.1:18789/readyz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+                ],
+                "interval": 30,
+                "retries": 5,
+                "startPeriod": 40,
+                "timeout": 5
+              },
+              "image": "718959508629.dkr.ecr.ap-northeast-1.amazonaws.com/teamagent-openclaw@sha256:37ff59e8108f9d72a8544e9360d2b2b249df54003afa8b89e5296765980081b5",
+              "linuxParameters": {
+                "capabilities": {
+                  "add": [],
+                  "drop": [
+                    "ALL"
+                  ]
+                },
+                "initProcessEnabled": true
+              },
+              "logConfiguration": {
+                "logDriver": "awslogs",
+                "options": {
+                  "awslogs-group": "/teamagent/dev/openclaw",
+                  "awslogs-region": "ap-northeast-1",
+                  "awslogs-stream-prefix": "openclaw"
+                }
+              },
+              "mountPoints": [
+                {
+                  "containerPath": "/tmp",
+                  "readOnly": false,
+                  "sourceVolume": "tmp"
+                },
+                {
+                  "containerPath": "/tmp/teamagent-openclaw",
+                  "readOnly": false,
+                  "sourceVolume": "state"
+                }
+              ],
+              "name": "openclaw",
+              "portMappings": [],
+              "privileged": false,
+              "readonlyRootFilesystem": true,
+              "secrets": [
+                {
+                  "name": "OPENCLAW_GATEWAY_TOKEN",
+                  "valueFrom": "arn:aws:secretsmanager:ap-northeast-1:718959508629:secret:teamagent/dev/openclaw/gateway-token-gYnSeE"
+                },
+                {
+                  "name": "SLACK_APP_TOKEN",
+                  "valueFrom": "arn:aws:secretsmanager:ap-northeast-1:718959508629:secret:teamagent/dev/openclaw/slack-app-token-xyn06X"
+                },
+                {
+                  "name": "SLACK_BOT_TOKEN",
+                  "valueFrom": "arn:aws:secretsmanager:ap-northeast-1:718959508629:secret:teamagent/dev/openclaw/slack-bot-token-N1vpyd"
+                },
+                {
+                  "name": "TEAMAGENT_CALLER_CLAIM_SECRET",
+                  "valueFrom": "arn:aws:secretsmanager:ap-northeast-1:718959508629:secret:teamagent/dev/openclaw/caller-claim-hmac-TZgjtj"
+                },
+                {
+                  "name": "TEAMAGENT_MCP_BEARER",
+                  "valueFrom": "arn:aws:secretsmanager:ap-northeast-1:718959508629:secret:teamagent/dev/mcp/bearer-STVVSR"
+                }
+              ],
+              "stopTimeout": 120,
+              "systemControls": [],
+              "user": "65532:65532",
+              "volumesFrom": []
+            }
+          ],
+          "cpu": "512",
+          "execution_role_arn": "arn:aws:iam::718959508629:role/teamagent-dev-ecs-exec-openclaw",
+          "memory": "1024",
+          "network_mode": "awsvpc",
+          "task_role_arn": "arn:aws:iam::718959508629:role/teamagent-dev-openclaw-task",
+          "volumes": [
+            {
+              "configure_at_launch": false,
+              "docker_volume_configuration": [],
+              "efs_volume_configuration": [
+                {
+                  "authorization_config": [
+                    {
+                      "access_point_id": "fsap-0ef0f5c713fa1dda4",
+                      "iam": "ENABLED"
+                    }
+                  ],
+                  "file_system_id": "fs-04d9d0e0a1d2a4d5c",
+                  "root_directory": "/",
+                  "transit_encryption": "ENABLED",
+                  "transit_encryption_port": 0
+                }
+              ],
+              "fsx_windows_file_server_volume_configuration": [],
+              "host_path": "",
+              "name": "state"
+            },
+            {
+              "configure_at_launch": false,
+              "docker_volume_configuration": [],
+              "efs_volume_configuration": [],
+              "fsx_windows_file_server_volume_configuration": [],
+              "host_path": "",
+              "name": "tmp"
+            }
+          ]
+        },
+        "task_definition_arn": "arn:aws:ecs:ap-northeast-1:718959508629:task-definition/teamagent-dev-openclaw:41"
+      },
+      "receipt": {
+        "pipeline": "openclaw",
+        "subject": "core"
+      },
+      "release_repository": "teamagent-openclaw",
+      "terraform_task_definition_address": "aws_ecs_task_definition.openclaw[0]"
+    },
+    {
+      "activator": {
+        "identity": "teamagent-dev-canary-hourly",
+        "type": "eventbridge_rule_ecs_target"
+      },
+      "after": {
+        "activation": {
+          "state": "DISABLED",
+          "task_definition_arn": "arn:aws:ecs:ap-northeast-1:718959508629:task-definition/teamagent-dev-canary:29"
+        },
+        "image": "718959508629.dkr.ecr.ap-northeast-1.amazonaws.com/teamagent-mcp@sha256:cd43968333de9a343020438af021e7e016ca0b5e59ede3b0776e29d2bcd82078",
+        "task_definition": {
+          "container_definitions": [
+            {
+              "command": [
+                "python",
+                "scripts/run_canary_health.py"
+              ],
+              "entryPoint": null,
+              "environment": [
+                {
+                  "name": "AWS_REGION",
+                  "value": "ap-northeast-1"
+                },
+                {
+                  "name": "CANARY_SLACK_USER_ID",
+                  "value": "U09CX1CCBLN"
+                },
+                {
+                  "name": "SLACK_TEAM_ID",
+                  "value": "T07MU5P2PBR"
+                },
+                {
+                  "name": "STRUCTLOG_FORMAT",
+                  "value": "json"
+                }
+              ],
+              "essential": true,
+              "image": "718959508629.dkr.ecr.ap-northeast-1.amazonaws.com/teamagent-mcp@sha256:cd43968333de9a343020438af021e7e016ca0b5e59ede3b0776e29d2bcd82078",
+              "linuxParameters": null,
+              "logConfiguration": {
+                "logDriver": "awslogs",
+                "options": {
+                  "awslogs-group": "/teamagent/dev/canary-health",
+                  "awslogs-region": "ap-northeast-1",
+                  "awslogs-stream-prefix": "canary"
+                }
+              },
+              "mountPoints": [],
+              "name": "canary",
+              "portMappings": [],
+              "privileged": null,
+              "readonlyRootFilesystem": null,
+              "secrets": [
+                {
+                  "name": "SLACK_BOT_TOKEN",
+                  "valueFrom": "arn:aws:secretsmanager:ap-northeast-1:718959508629:secret:teamagent/dev/openclaw/slack-bot-token-N1vpyd"
+                }
+              ],
+              "systemControls": [],
+              "user": null,
+              "volumesFrom": []
+            }
+          ],
+          "cpu": "256",
+          "execution_role_arn": "arn:aws:iam::718959508629:role/teamagent-dev-ecs-exec-canary",
+          "memory": "512",
+          "network_mode": "awsvpc",
+          "task_role_arn": "arn:aws:iam::718959508629:role/teamagent-dev-canary-task",
+          "volumes": []
+        },
+        "task_definition_arn": "arn:aws:ecs:ap-northeast-1:718959508629:task-definition/teamagent-dev-canary:29"
+      },
+      "before": {
+        "activation": {
+          "state": "DISABLED",
+          "task_definition_arn": "arn:aws:ecs:ap-northeast-1:718959508629:task-definition/teamagent-dev-canary:29"
+        },
+        "image": "718959508629.dkr.ecr.ap-northeast-1.amazonaws.com/teamagent-mcp@sha256:cd43968333de9a343020438af021e7e016ca0b5e59ede3b0776e29d2bcd82078",
+        "task_definition": {
+          "container_definitions": [
+            {
+              "command": [
+                "python",
+                "scripts/run_canary_health.py"
+              ],
+              "entryPoint": null,
+              "environment": [
+                {
+                  "name": "AWS_REGION",
+                  "value": "ap-northeast-1"
+                },
+                {
+                  "name": "CANARY_SLACK_USER_ID",
+                  "value": "U09CX1CCBLN"
+                },
+                {
+                  "name": "SLACK_TEAM_ID",
+                  "value": "T07MU5P2PBR"
+                },
+                {
+                  "name": "STRUCTLOG_FORMAT",
+                  "value": "json"
+                }
+              ],
+              "essential": true,
+              "image": "718959508629.dkr.ecr.ap-northeast-1.amazonaws.com/teamagent-mcp@sha256:cd43968333de9a343020438af021e7e016ca0b5e59ede3b0776e29d2bcd82078",
+              "linuxParameters": null,
+              "logConfiguration": {
+                "logDriver": "awslogs",
+                "options": {
+                  "awslogs-group": "/teamagent/dev/canary-health",
+                  "awslogs-region": "ap-northeast-1",
+                  "awslogs-stream-prefix": "canary"
+                }
+              },
+              "mountPoints": [],
+              "name": "canary",
+              "portMappings": [],
+              "privileged": null,
+              "readonlyRootFilesystem": null,
+              "secrets": [
+                {
+                  "name": "SLACK_BOT_TOKEN",
+                  "valueFrom": "arn:aws:secretsmanager:ap-northeast-1:718959508629:secret:teamagent/dev/openclaw/slack-bot-token-N1vpyd"
+                }
+              ],
+              "systemControls": [],
+              "user": null,
+              "volumesFrom": []
+            }
+          ],
+          "cpu": "256",
+          "execution_role_arn": "arn:aws:iam::718959508629:role/teamagent-dev-ecs-exec-canary",
+          "memory": "512",
+          "network_mode": "awsvpc",
+          "task_role_arn": "arn:aws:iam::718959508629:role/teamagent-dev-canary-task",
+          "volumes": []
+        },
+        "task_definition_arn": "arn:aws:ecs:ap-northeast-1:718959508629:task-definition/teamagent-dev-canary:29"
+      },
+      "consumer_id": "canary",
+      "container_name": "canary",
+      "ecs_family": "teamagent-dev-canary",
+      "live": {
+        "activation": {
+          "state": "DISABLED",
+          "task_definition_arn": "arn:aws:ecs:ap-northeast-1:718959508629:task-definition/teamagent-dev-canary:29"
+        },
+        "image": "718959508629.dkr.ecr.ap-northeast-1.amazonaws.com/teamagent-mcp@sha256:cd43968333de9a343020438af021e7e016ca0b5e59ede3b0776e29d2bcd82078",
+        "task_definition": {
+          "container_definitions": [
+            {
+              "command": [
+                "python",
+                "scripts/run_canary_health.py"
+              ],
+              "entryPoint": null,
+              "environment": [
+                {
+                  "name": "AWS_REGION",
+                  "value": "ap-northeast-1"
+                },
+                {
+                  "name": "CANARY_SLACK_USER_ID",
+                  "value": "U09CX1CCBLN"
+                },
+                {
+                  "name": "SLACK_TEAM_ID",
+                  "value": "T07MU5P2PBR"
+                },
+                {
+                  "name": "STRUCTLOG_FORMAT",
+                  "value": "json"
+                }
+              ],
+              "essential": true,
+              "image": "718959508629.dkr.ecr.ap-northeast-1.amazonaws.com/teamagent-mcp@sha256:cd43968333de9a343020438af021e7e016ca0b5e59ede3b0776e29d2bcd82078",
+              "linuxParameters": null,
+              "logConfiguration": {
+                "logDriver": "awslogs",
+                "options": {
+                  "awslogs-group": "/teamagent/dev/canary-health",
+                  "awslogs-region": "ap-northeast-1",
+                  "awslogs-stream-prefix": "canary"
+                }
+              },
+              "mountPoints": [],
+              "name": "canary",
+              "portMappings": [],
+              "privileged": null,
+              "readonlyRootFilesystem": null,
+              "secrets": [
+                {
+                  "name": "SLACK_BOT_TOKEN",
+                  "valueFrom": "arn:aws:secretsmanager:ap-northeast-1:718959508629:secret:teamagent/dev/openclaw/slack-bot-token-N1vpyd"
+                }
+              ],
+              "systemControls": [],
+              "user": null,
+              "volumesFrom": []
+            }
+          ],
+          "cpu": "256",
+          "execution_role_arn": "arn:aws:iam::718959508629:role/teamagent-dev-ecs-exec-canary",
+          "memory": "512",
+          "network_mode": "awsvpc",
+          "task_role_arn": "arn:aws:iam::718959508629:role/teamagent-dev-canary-task",
+          "volumes": []
+        },
+        "task_definition_arn": "arn:aws:ecs:ap-northeast-1:718959508629:task-definition/teamagent-dev-canary:29"
+      },
+      "receipt": {
+        "pipeline": "mcp",
+        "subject": "core"
+      },
+      "release_repository": "teamagent-mcp",
+      "terraform_task_definition_address": "aws_ecs_task_definition.canary[0]"
+    },
+    {
+      "activator": {
+        "identity": "teamagent-dev-ingest-weekly",
+        "type": "eventbridge_rule_ecs_target"
+      },
+      "after": {
+        "activation": {
+          "state": "DISABLED",
+          "task_definition_arn": "arn:aws:ecs:ap-northeast-1:718959508629:task-definition/teamagent-dev-ingest:61"
+        },
+        "image": "718959508629.dkr.ecr.ap-northeast-1.amazonaws.com/teamagent-mcp@sha256:cd43968333de9a343020438af021e7e016ca0b5e59ede3b0776e29d2bcd82078",
+        "task_definition": {
+          "container_definitions": [
+            {
+              "command": [
+                "python",
+                "scripts/run_ingest_fargate.py"
+              ],
+              "entryPoint": null,
+              "environment": [
+                {
+                  "name": "AWS_REGION",
+                  "value": "ap-northeast-1"
+                },
+                {
+                  "name": "BEDROCK_MODEL_ID",
+                  "value": "jp.anthropic.claude-haiku-4-5-20251001-v1:0"
+                },
+                {
+                  "name": "BOILERPLATE_DETECT",
+                  "value": "true"
+                },
+                {
+                  "name": "DOC_DEDUP_DETECT",
+                  "value": "true"
+                },
+                {
+                  "name": "GEMINI_USE_VERTEX",
+                  "value": "true"
+                },
+                {
+                  "name": "GEMINI_VERTEX_LOCATION",
+                  "value": "us-central1"
+                },
+                {
+                  "name": "GEMINI_VERTEX_PROJECT",
+                  "value": "ntv-ai"
+                },
+                {
+                  "name": "GOOGLE_FORCE_OAUTH",
+                  "value": "1"
+                },
+                {
+                  "name": "INGEST_DIFFERENTIAL",
+                  "value": "true"
+                },
+                {
+                  "name": "INGEST_OWNER_EMAIL",
+                  "value": "__LIVE_ENV__"
+                },
+                {
+                  "name": "INGEST_RICH_EXTRACT",
+                  "value": "true"
+                },
+                {
+                  "name": "INGEST_SOURCES",
+                  "value": "slack,gdrive,gsheets,shared_drives"
+                },
+                {
+                  "name": "MKL_NUM_THREADS",
+                  "value": "4"
+                },
+                {
+                  "name": "OMP_NUM_THREADS",
+                  "value": "4"
+                },
+                {
+                  "name": "STRUCTLOG_FORMAT",
+                  "value": "json"
+                },
+                {
+                  "name": "TEAMAGENT_SHARED_COMPANY_DOMAINS",
+                  "value": "__LIVE_ENV__"
+                },
+                {
+                  "name": "USE_DOC_CLASSIFY",
+                  "value": "true"
+                },
+                {
+                  "name": "USE_ENTITY_TAGS",
+                  "value": "false"
+                },
+                {
+                  "name": "USE_INCREMENTAL_SYNC",
+                  "value": "1"
+                },
+                {
+                  "name": "VERTEX_SA_PATH",
+                  "value": "/tmp/vertex-sa.json"
+                }
+              ],
+              "essential": true,
+              "image": "718959508629.dkr.ecr.ap-northeast-1.amazonaws.com/teamagent-mcp@sha256:cd43968333de9a343020438af021e7e016ca0b5e59ede3b0776e29d2bcd82078",
+              "linuxParameters": null,
+              "logConfiguration": {
+                "logDriver": "awslogs",
+                "options": {
+                  "awslogs-group": "/teamagent/dev/ingest",
+                  "awslogs-region": "ap-northeast-1",
+                  "awslogs-stream-prefix": "ingest"
+                }
+              },
+              "mountPoints": [],
+              "name": "ingest",
+              "portMappings": [],
+              "privileged": null,
+              "readonlyRootFilesystem": null,
+              "secrets": [
+                {
+                  "name": "DATABASE_URL",
+                  "valueFrom": "arn:aws:secretsmanager:ap-northeast-1:718959508629:secret:teamagent/dev/database-url-4pJMDr"
+                },
+                {
+                  "name": "GOOGLE_OAUTH_JSON",
+                  "valueFrom": "arn:aws:secretsmanager:ap-northeast-1:718959508629:secret:teamagent/dev/google_oauth-L8HOBj"
+                },
+                {
+                  "name": "SLACK_BOT_TOKEN",
+                  "valueFrom": "arn:aws:secretsmanager:ap-northeast-1:718959508629:secret:teamagent/dev/openclaw/slack-bot-token-N1vpyd"
+                },
+                {
+                  "name": "VERTEX_SA_JSON",
+                  "valueFrom": "arn:aws:secretsmanager:ap-northeast-1:718959508629:secret:teamagent/dev/vertex_sa-Y4AAUC"
+                }
+              ],
+              "systemControls": [],
+              "user": null,
+              "volumesFrom": []
+            }
+          ],
+          "cpu": "4096",
+          "execution_role_arn": "arn:aws:iam::718959508629:role/teamagent-dev-ecs-exec-ingest",
+          "memory": "8192",
+          "network_mode": "awsvpc",
+          "task_role_arn": "arn:aws:iam::718959508629:role/teamagent-dev-ingest-task",
+          "volumes": []
+        },
+        "task_definition_arn": "arn:aws:ecs:ap-northeast-1:718959508629:task-definition/teamagent-dev-ingest:61"
+      },
+      "before": {
+        "activation": {
+          "state": "DISABLED",
+          "task_definition_arn": "arn:aws:ecs:ap-northeast-1:718959508629:task-definition/teamagent-dev-ingest:61"
+        },
+        "image": "718959508629.dkr.ecr.ap-northeast-1.amazonaws.com/teamagent-mcp@sha256:cd43968333de9a343020438af021e7e016ca0b5e59ede3b0776e29d2bcd82078",
+        "task_definition": {
+          "container_definitions": [
+            {
+              "command": [
+                "python",
+                "scripts/run_ingest_fargate.py"
+              ],
+              "entryPoint": null,
+              "environment": [
+                {
+                  "name": "AWS_REGION",
+                  "value": "ap-northeast-1"
+                },
+                {
+                  "name": "BEDROCK_MODEL_ID",
+                  "value": "jp.anthropic.claude-haiku-4-5-20251001-v1:0"
+                },
+                {
+                  "name": "BOILERPLATE_DETECT",
+                  "value": "true"
+                },
+                {
+                  "name": "DOC_DEDUP_DETECT",
+                  "value": "true"
+                },
+                {
+                  "name": "GEMINI_USE_VERTEX",
+                  "value": "true"
+                },
+                {
+                  "name": "GEMINI_VERTEX_LOCATION",
+                  "value": "us-central1"
+                },
+                {
+                  "name": "GEMINI_VERTEX_PROJECT",
+                  "value": "ntv-ai"
+                },
+                {
+                  "name": "GOOGLE_FORCE_OAUTH",
+                  "value": "1"
+                },
+                {
+                  "name": "INGEST_DIFFERENTIAL",
+                  "value": "true"
+                },
+                {
+                  "name": "INGEST_OWNER_EMAIL",
+                  "value": "__LIVE_ENV__"
+                },
+                {
+                  "name": "INGEST_RICH_EXTRACT",
+                  "value": "true"
+                },
+                {
+                  "name": "INGEST_SOURCES",
+                  "value": "slack,gdrive,gsheets,shared_drives"
+                },
+                {
+                  "name": "MKL_NUM_THREADS",
+                  "value": "4"
+                },
+                {
+                  "name": "OMP_NUM_THREADS",
+                  "value": "4"
+                },
+                {
+                  "name": "STRUCTLOG_FORMAT",
+                  "value": "json"
+                },
+                {
+                  "name": "TEAMAGENT_SHARED_COMPANY_DOMAINS",
+                  "value": "__LIVE_ENV__"
+                },
+                {
+                  "name": "USE_DOC_CLASSIFY",
+                  "value": "true"
+                },
+                {
+                  "name": "USE_ENTITY_TAGS",
+                  "value": "false"
+                },
+                {
+                  "name": "USE_INCREMENTAL_SYNC",
+                  "value": "1"
+                },
+                {
+                  "name": "VERTEX_SA_PATH",
+                  "value": "/tmp/vertex-sa.json"
+                }
+              ],
+              "essential": true,
+              "image": "718959508629.dkr.ecr.ap-northeast-1.amazonaws.com/teamagent-mcp@sha256:cd43968333de9a343020438af021e7e016ca0b5e59ede3b0776e29d2bcd82078",
+              "linuxParameters": null,
+              "logConfiguration": {
+                "logDriver": "awslogs",
+                "options": {
+                  "awslogs-group": "/teamagent/dev/ingest",
+                  "awslogs-region": "ap-northeast-1",
+                  "awslogs-stream-prefix": "ingest"
+                }
+              },
+              "mountPoints": [],
+              "name": "ingest",
+              "portMappings": [],
+              "privileged": null,
+              "readonlyRootFilesystem": null,
+              "secrets": [
+                {
+                  "name": "DATABASE_URL",
+                  "valueFrom": "arn:aws:secretsmanager:ap-northeast-1:718959508629:secret:teamagent/dev/database-url-4pJMDr"
+                },
+                {
+                  "name": "GOOGLE_OAUTH_JSON",
+                  "valueFrom": "arn:aws:secretsmanager:ap-northeast-1:718959508629:secret:teamagent/dev/google_oauth-L8HOBj"
+                },
+                {
+                  "name": "SLACK_BOT_TOKEN",
+                  "valueFrom": "arn:aws:secretsmanager:ap-northeast-1:718959508629:secret:teamagent/dev/openclaw/slack-bot-token-N1vpyd"
+                },
+                {
+                  "name": "VERTEX_SA_JSON",
+                  "valueFrom": "arn:aws:secretsmanager:ap-northeast-1:718959508629:secret:teamagent/dev/vertex_sa-Y4AAUC"
+                }
+              ],
+              "systemControls": [],
+              "user": null,
+              "volumesFrom": []
+            }
+          ],
+          "cpu": "4096",
+          "execution_role_arn": "arn:aws:iam::718959508629:role/teamagent-dev-ecs-exec-ingest",
+          "memory": "8192",
+          "network_mode": "awsvpc",
+          "task_role_arn": "arn:aws:iam::718959508629:role/teamagent-dev-ingest-task",
+          "volumes": []
+        },
+        "task_definition_arn": "arn:aws:ecs:ap-northeast-1:718959508629:task-definition/teamagent-dev-ingest:61"
+      },
+      "consumer_id": "ingest",
+      "container_name": "ingest",
+      "ecs_family": "teamagent-dev-ingest",
+      "live": {
+        "activation": {
+          "state": "DISABLED",
+          "task_definition_arn": "arn:aws:ecs:ap-northeast-1:718959508629:task-definition/teamagent-dev-ingest:61"
+        },
+        "image": "718959508629.dkr.ecr.ap-northeast-1.amazonaws.com/teamagent-mcp@sha256:cd43968333de9a343020438af021e7e016ca0b5e59ede3b0776e29d2bcd82078",
+        "task_definition": {
+          "container_definitions": [
+            {
+              "command": [
+                "python",
+                "scripts/run_ingest_fargate.py"
+              ],
+              "entryPoint": null,
+              "environment": [
+                {
+                  "name": "AWS_REGION",
+                  "value": "ap-northeast-1"
+                },
+                {
+                  "name": "BEDROCK_MODEL_ID",
+                  "value": "jp.anthropic.claude-haiku-4-5-20251001-v1:0"
+                },
+                {
+                  "name": "BOILERPLATE_DETECT",
+                  "value": "true"
+                },
+                {
+                  "name": "DOC_DEDUP_DETECT",
+                  "value": "true"
+                },
+                {
+                  "name": "GEMINI_USE_VERTEX",
+                  "value": "true"
+                },
+                {
+                  "name": "GEMINI_VERTEX_LOCATION",
+                  "value": "us-central1"
+                },
+                {
+                  "name": "GEMINI_VERTEX_PROJECT",
+                  "value": "ntv-ai"
+                },
+                {
+                  "name": "GOOGLE_FORCE_OAUTH",
+                  "value": "1"
+                },
+                {
+                  "name": "INGEST_DIFFERENTIAL",
+                  "value": "true"
+                },
+                {
+                  "name": "INGEST_OWNER_EMAIL",
+                  "value": "__LIVE_ENV__"
+                },
+                {
+                  "name": "INGEST_RICH_EXTRACT",
+                  "value": "true"
+                },
+                {
+                  "name": "INGEST_SOURCES",
+                  "value": "slack,gdrive,gsheets,shared_drives"
+                },
+                {
+                  "name": "MKL_NUM_THREADS",
+                  "value": "4"
+                },
+                {
+                  "name": "OMP_NUM_THREADS",
+                  "value": "4"
+                },
+                {
+                  "name": "STRUCTLOG_FORMAT",
+                  "value": "json"
+                },
+                {
+                  "name": "TEAMAGENT_SHARED_COMPANY_DOMAINS",
+                  "value": "__LIVE_ENV__"
+                },
+                {
+                  "name": "USE_DOC_CLASSIFY",
+                  "value": "true"
+                },
+                {
+                  "name": "USE_ENTITY_TAGS",
+                  "value": "false"
+                },
+                {
+                  "name": "USE_INCREMENTAL_SYNC",
+                  "value": "1"
+                },
+                {
+                  "name": "VERTEX_SA_PATH",
+                  "value": "/tmp/vertex-sa.json"
+                }
+              ],
+              "essential": true,
+              "image": "718959508629.dkr.ecr.ap-northeast-1.amazonaws.com/teamagent-mcp@sha256:cd43968333de9a343020438af021e7e016ca0b5e59ede3b0776e29d2bcd82078",
+              "linuxParameters": null,
+              "logConfiguration": {
+                "logDriver": "awslogs",
+                "options": {
+                  "awslogs-group": "/teamagent/dev/ingest",
+                  "awslogs-region": "ap-northeast-1",
+                  "awslogs-stream-prefix": "ingest"
+                }
+              },
+              "mountPoints": [],
+              "name": "ingest",
+              "portMappings": [],
+              "privileged": null,
+              "readonlyRootFilesystem": null,
+              "secrets": [
+                {
+                  "name": "DATABASE_URL",
+                  "valueFrom": "arn:aws:secretsmanager:ap-northeast-1:718959508629:secret:teamagent/dev/database-url-4pJMDr"
+                },
+                {
+                  "name": "GOOGLE_OAUTH_JSON",
+                  "valueFrom": "arn:aws:secretsmanager:ap-northeast-1:718959508629:secret:teamagent/dev/google_oauth-L8HOBj"
+                },
+                {
+                  "name": "SLACK_BOT_TOKEN",
+                  "valueFrom": "arn:aws:secretsmanager:ap-northeast-1:718959508629:secret:teamagent/dev/openclaw/slack-bot-token-N1vpyd"
+                },
+                {
+                  "name": "VERTEX_SA_JSON",
+                  "valueFrom": "arn:aws:secretsmanager:ap-northeast-1:718959508629:secret:teamagent/dev/vertex_sa-Y4AAUC"
+                }
+              ],
+              "systemControls": [],
+              "user": null,
+              "volumesFrom": []
+            }
+          ],
+          "cpu": "4096",
+          "execution_role_arn": "arn:aws:iam::718959508629:role/teamagent-dev-ecs-exec-ingest",
+          "memory": "8192",
+          "network_mode": "awsvpc",
+          "task_role_arn": "arn:aws:iam::718959508629:role/teamagent-dev-ingest-task",
+          "volumes": []
+        },
+        "task_definition_arn": "arn:aws:ecs:ap-northeast-1:718959508629:task-definition/teamagent-dev-ingest:61"
+      },
+      "receipt": {
+        "pipeline": "mcp",
+        "subject": "core"
+      },
+      "release_repository": "teamagent-mcp",
+      "terraform_task_definition_address": "aws_ecs_task_definition.ingest[0]"
+    },
+    {
+      "activator": {
+        "identity": "teamagent-dev-morning-digest-weekday",
+        "type": "eventbridge_rule_ecs_target"
+      },
+      "after": {
+        "activation": {
+          "state": "ENABLED",
+          "task_definition_arn": "arn:aws:ecs:ap-northeast-1:718959508629:task-definition/teamagent-dev-morning-digest:59"
+        },
+        "image": "718959508629.dkr.ecr.ap-northeast-1.amazonaws.com/teamagent-mcp@sha256:cd43968333de9a343020438af021e7e016ca0b5e59ede3b0776e29d2bcd82078",
+        "task_definition": {
+          "container_definitions": [
+            {
+              "command": [
+                "python",
+                "scripts/run_morning_digest_fargate.py"
+              ],
+              "entryPoint": null,
+              "environment": [
+                {
+                  "name": "AWS_REGION",
+                  "value": "ap-northeast-1"
+                },
+                {
+                  "name": "BEDROCK_MODEL_ID",
+                  "value": "jp.anthropic.claude-haiku-4-5-20251001-v1:0"
+                },
+                {
+                  "name": "CONNECT_GOOGLE_CLIENT_ID",
+                  "value": "676659122211-pgd1mj4et6sf7uqqmsni2b3kmbbd8qeg.apps.googleusercontent.com"
+                },
+                {
+                  "name": "DIGEST_INTERNAL_DOMAIN",
+                  "value": "__LIVE_ENV__"
+                },
+                {
+                  "name": "DRAFT_ON_DEMAND_ONLY",
+                  "value": "false"
+                },
+                {
+                  "name": "IMPORTANT_SENDERS",
+                  "value": ""
+                },
+                {
+                  "name": "MORNING_DIGEST_CALENDAR_BUTTON",
+                  "value": "true"
+                },
+                {
+                  "name": "MORNING_DIGEST_COMPACT",
+                  "value": "true"
+                },
+                {
+                  "name": "MORNING_DIGEST_CONCURRENCY",
+                  "value": "1"
+                },
+                {
+                  "name": "MORNING_DIGEST_EXCLUDE",
+                  "value": ""
+                },
+                {
+                  "name": "MORNING_DIGEST_MAX_DRAFTS",
+                  "value": "5"
+                },
+                {
+                  "name": "MORNING_DIGEST_REMINDERS",
+                  "value": "true"
+                },
+                {
+                  "name": "MORNING_DIGEST_SCHEDULE_BUTTON",
+                  "value": "true"
+                },
+                {
+                  "name": "MORNING_DIGEST_SLACK_UNREAD",
+                  "value": "true"
+                },
+                {
+                  "name": "MORNING_DIGEST_USERS",
+                  "value": ""
+                },
+                {
+                  "name": "OAUTH_KMS_KEY_ID",
+                  "value": "alias/teamagent-oauth-tokens"
+                },
+                {
+                  "name": "OAUTH_KMS_REGION",
+                  "value": "ap-northeast-1"
+                },
+                {
+                  "name": "REMINDER_LEAD_MINUTES",
+                  "value": "5"
+                },
+                {
+                  "name": "REMINDER_QUEUE_ARN",
+                  "value": "arn:aws:sqs:ap-northeast-1:718959508629:teamagent-dev-reminders.fifo"
+                },
+                {
+                  "name": "REMINDER_SCHEDULER_GROUP",
+                  "value": "teamagent-dev-reminders"
+                },
+                {
+                  "name": "REMINDER_SCHEDULER_ROLE_ARN",
+                  "value": "arn:aws:iam::718959508629:role/teamagent-dev-reminders-scheduler"
+                },
+                {
+                  "name": "STRUCTLOG_FORMAT",
+                  "value": "json"
+                }
+              ],
+              "essential": true,
+              "image": "718959508629.dkr.ecr.ap-northeast-1.amazonaws.com/teamagent-mcp@sha256:cd43968333de9a343020438af021e7e016ca0b5e59ede3b0776e29d2bcd82078",
+              "linuxParameters": null,
+              "logConfiguration": {
+                "logDriver": "awslogs",
+                "options": {
+                  "awslogs-group": "/teamagent/dev/morning-digest",
+                  "awslogs-region": "ap-northeast-1",
+                  "awslogs-stream-prefix": "morning-digest"
+                }
+              },
+              "mountPoints": [],
+              "name": "morning-digest",
+              "portMappings": [],
+              "privileged": null,
+              "readonlyRootFilesystem": null,
+              "secrets": [
+                {
+                  "name": "CONNECT_GOOGLE_CLIENT_SECRET",
+                  "valueFrom": "arn:aws:secretsmanager:ap-northeast-1:718959508629:secret:teamagent/dev/connect_google_secret-rWes7O"
+                },
+                {
+                  "name": "DATABASE_URL",
+                  "valueFrom": "arn:aws:secretsmanager:ap-northeast-1:718959508629:secret:teamagent/dev/database-url-4pJMDr"
+                },
+                {
+                  "name": "GOOGLE_OAUTH_JSON",
+                  "valueFrom": "arn:aws:secretsmanager:ap-northeast-1:718959508629:secret:teamagent/dev/google_oauth-L8HOBj"
+                },
+                {
+                  "name": "MAIL_ACTION_HMAC_SECRET",
+                  "valueFrom": "arn:aws:secretsmanager:ap-northeast-1:718959508629:secret:teamagent/dev/database-url-4pJMDr"
+                },
+                {
+                  "name": "SLACK_BOT_TOKEN",
+                  "valueFrom": "arn:aws:secretsmanager:ap-northeast-1:718959508629:secret:teamagent/dev/openclaw/slack-bot-token-N1vpyd"
+                }
+              ],
+              "systemControls": [],
+              "user": null,
+              "volumesFrom": []
+            }
+          ],
+          "cpu": "1024",
+          "execution_role_arn": "arn:aws:iam::718959508629:role/teamagent-dev-ecs-exec-morning-digest",
+          "memory": "2048",
+          "network_mode": "awsvpc",
+          "task_role_arn": "arn:aws:iam::718959508629:role/teamagent-dev-morning-digest-task",
+          "volumes": []
+        },
+        "task_definition_arn": "arn:aws:ecs:ap-northeast-1:718959508629:task-definition/teamagent-dev-morning-digest:59"
+      },
+      "before": {
+        "activation": {
+          "state": "ENABLED",
+          "task_definition_arn": "arn:aws:ecs:ap-northeast-1:718959508629:task-definition/teamagent-dev-morning-digest:59"
+        },
+        "image": "718959508629.dkr.ecr.ap-northeast-1.amazonaws.com/teamagent-mcp@sha256:cd43968333de9a343020438af021e7e016ca0b5e59ede3b0776e29d2bcd82078",
+        "task_definition": {
+          "container_definitions": [
+            {
+              "command": [
+                "python",
+                "scripts/run_morning_digest_fargate.py"
+              ],
+              "entryPoint": null,
+              "environment": [
+                {
+                  "name": "AWS_REGION",
+                  "value": "ap-northeast-1"
+                },
+                {
+                  "name": "BEDROCK_MODEL_ID",
+                  "value": "jp.anthropic.claude-haiku-4-5-20251001-v1:0"
+                },
+                {
+                  "name": "CONNECT_GOOGLE_CLIENT_ID",
+                  "value": "676659122211-pgd1mj4et6sf7uqqmsni2b3kmbbd8qeg.apps.googleusercontent.com"
+                },
+                {
+                  "name": "DIGEST_INTERNAL_DOMAIN",
+                  "value": "__LIVE_ENV__"
+                },
+                {
+                  "name": "DRAFT_ON_DEMAND_ONLY",
+                  "value": "false"
+                },
+                {
+                  "name": "IMPORTANT_SENDERS",
+                  "value": ""
+                },
+                {
+                  "name": "MORNING_DIGEST_CALENDAR_BUTTON",
+                  "value": "true"
+                },
+                {
+                  "name": "MORNING_DIGEST_COMPACT",
+                  "value": "true"
+                },
+                {
+                  "name": "MORNING_DIGEST_CONCURRENCY",
+                  "value": "1"
+                },
+                {
+                  "name": "MORNING_DIGEST_EXCLUDE",
+                  "value": ""
+                },
+                {
+                  "name": "MORNING_DIGEST_MAX_DRAFTS",
+                  "value": "5"
+                },
+                {
+                  "name": "MORNING_DIGEST_REMINDERS",
+                  "value": "true"
+                },
+                {
+                  "name": "MORNING_DIGEST_SCHEDULE_BUTTON",
+                  "value": "true"
+                },
+                {
+                  "name": "MORNING_DIGEST_SLACK_UNREAD",
+                  "value": "true"
+                },
+                {
+                  "name": "MORNING_DIGEST_USERS",
+                  "value": ""
+                },
+                {
+                  "name": "OAUTH_KMS_KEY_ID",
+                  "value": "alias/teamagent-oauth-tokens"
+                },
+                {
+                  "name": "OAUTH_KMS_REGION",
+                  "value": "ap-northeast-1"
+                },
+                {
+                  "name": "REMINDER_LEAD_MINUTES",
+                  "value": "5"
+                },
+                {
+                  "name": "REMINDER_QUEUE_ARN",
+                  "value": "arn:aws:sqs:ap-northeast-1:718959508629:teamagent-dev-reminders.fifo"
+                },
+                {
+                  "name": "REMINDER_SCHEDULER_GROUP",
+                  "value": "teamagent-dev-reminders"
+                },
+                {
+                  "name": "REMINDER_SCHEDULER_ROLE_ARN",
+                  "value": "arn:aws:iam::718959508629:role/teamagent-dev-reminders-scheduler"
+                },
+                {
+                  "name": "STRUCTLOG_FORMAT",
+                  "value": "json"
+                }
+              ],
+              "essential": true,
+              "image": "718959508629.dkr.ecr.ap-northeast-1.amazonaws.com/teamagent-mcp@sha256:cd43968333de9a343020438af021e7e016ca0b5e59ede3b0776e29d2bcd82078",
+              "linuxParameters": null,
+              "logConfiguration": {
+                "logDriver": "awslogs",
+                "options": {
+                  "awslogs-group": "/teamagent/dev/morning-digest",
+                  "awslogs-region": "ap-northeast-1",
+                  "awslogs-stream-prefix": "morning-digest"
+                }
+              },
+              "mountPoints": [],
+              "name": "morning-digest",
+              "portMappings": [],
+              "privileged": null,
+              "readonlyRootFilesystem": null,
+              "secrets": [
+                {
+                  "name": "CONNECT_GOOGLE_CLIENT_SECRET",
+                  "valueFrom": "arn:aws:secretsmanager:ap-northeast-1:718959508629:secret:teamagent/dev/connect_google_secret-rWes7O"
+                },
+                {
+                  "name": "DATABASE_URL",
+                  "valueFrom": "arn:aws:secretsmanager:ap-northeast-1:718959508629:secret:teamagent/dev/database-url-4pJMDr"
+                },
+                {
+                  "name": "GOOGLE_OAUTH_JSON",
+                  "valueFrom": "arn:aws:secretsmanager:ap-northeast-1:718959508629:secret:teamagent/dev/google_oauth-L8HOBj"
+                },
+                {
+                  "name": "MAIL_ACTION_HMAC_SECRET",
+                  "valueFrom": "arn:aws:secretsmanager:ap-northeast-1:718959508629:secret:teamagent/dev/database-url-4pJMDr"
+                },
+                {
+                  "name": "SLACK_BOT_TOKEN",
+                  "valueFrom": "arn:aws:secretsmanager:ap-northeast-1:718959508629:secret:teamagent/dev/openclaw/slack-bot-token-N1vpyd"
+                }
+              ],
+              "systemControls": [],
+              "user": null,
+              "volumesFrom": []
+            }
+          ],
+          "cpu": "1024",
+          "execution_role_arn": "arn:aws:iam::718959508629:role/teamagent-dev-ecs-exec-morning-digest",
+          "memory": "2048",
+          "network_mode": "awsvpc",
+          "task_role_arn": "arn:aws:iam::718959508629:role/teamagent-dev-morning-digest-task",
+          "volumes": []
+        },
+        "task_definition_arn": "arn:aws:ecs:ap-northeast-1:718959508629:task-definition/teamagent-dev-morning-digest:59"
+      },
+      "consumer_id": "morning_digest",
+      "container_name": "morning-digest",
+      "ecs_family": "teamagent-dev-morning-digest",
+      "live": {
+        "activation": {
+          "state": "ENABLED",
+          "task_definition_arn": "arn:aws:ecs:ap-northeast-1:718959508629:task-definition/teamagent-dev-morning-digest:59"
+        },
+        "image": "718959508629.dkr.ecr.ap-northeast-1.amazonaws.com/teamagent-mcp@sha256:cd43968333de9a343020438af021e7e016ca0b5e59ede3b0776e29d2bcd82078",
+        "task_definition": {
+          "container_definitions": [
+            {
+              "command": [
+                "python",
+                "scripts/run_morning_digest_fargate.py"
+              ],
+              "entryPoint": null,
+              "environment": [
+                {
+                  "name": "AWS_REGION",
+                  "value": "ap-northeast-1"
+                },
+                {
+                  "name": "BEDROCK_MODEL_ID",
+                  "value": "jp.anthropic.claude-haiku-4-5-20251001-v1:0"
+                },
+                {
+                  "name": "CONNECT_GOOGLE_CLIENT_ID",
+                  "value": "676659122211-pgd1mj4et6sf7uqqmsni2b3kmbbd8qeg.apps.googleusercontent.com"
+                },
+                {
+                  "name": "DIGEST_INTERNAL_DOMAIN",
+                  "value": "__LIVE_ENV__"
+                },
+                {
+                  "name": "DRAFT_ON_DEMAND_ONLY",
+                  "value": "false"
+                },
+                {
+                  "name": "IMPORTANT_SENDERS",
+                  "value": ""
+                },
+                {
+                  "name": "MORNING_DIGEST_CALENDAR_BUTTON",
+                  "value": "true"
+                },
+                {
+                  "name": "MORNING_DIGEST_COMPACT",
+                  "value": "true"
+                },
+                {
+                  "name": "MORNING_DIGEST_CONCURRENCY",
+                  "value": "1"
+                },
+                {
+                  "name": "MORNING_DIGEST_EXCLUDE",
+                  "value": ""
+                },
+                {
+                  "name": "MORNING_DIGEST_MAX_DRAFTS",
+                  "value": "5"
+                },
+                {
+                  "name": "MORNING_DIGEST_REMINDERS",
+                  "value": "true"
+                },
+                {
+                  "name": "MORNING_DIGEST_SCHEDULE_BUTTON",
+                  "value": "true"
+                },
+                {
+                  "name": "MORNING_DIGEST_SLACK_UNREAD",
+                  "value": "true"
+                },
+                {
+                  "name": "MORNING_DIGEST_USERS",
+                  "value": ""
+                },
+                {
+                  "name": "OAUTH_KMS_KEY_ID",
+                  "value": "alias/teamagent-oauth-tokens"
+                },
+                {
+                  "name": "OAUTH_KMS_REGION",
+                  "value": "ap-northeast-1"
+                },
+                {
+                  "name": "REMINDER_LEAD_MINUTES",
+                  "value": "5"
+                },
+                {
+                  "name": "REMINDER_QUEUE_ARN",
+                  "value": "arn:aws:sqs:ap-northeast-1:718959508629:teamagent-dev-reminders.fifo"
+                },
+                {
+                  "name": "REMINDER_SCHEDULER_GROUP",
+                  "value": "teamagent-dev-reminders"
+                },
+                {
+                  "name": "REMINDER_SCHEDULER_ROLE_ARN",
+                  "value": "arn:aws:iam::718959508629:role/teamagent-dev-reminders-scheduler"
+                },
+                {
+                  "name": "STRUCTLOG_FORMAT",
+                  "value": "json"
+                }
+              ],
+              "essential": true,
+              "image": "718959508629.dkr.ecr.ap-northeast-1.amazonaws.com/teamagent-mcp@sha256:cd43968333de9a343020438af021e7e016ca0b5e59ede3b0776e29d2bcd82078",
+              "linuxParameters": null,
+              "logConfiguration": {
+                "logDriver": "awslogs",
+                "options": {
+                  "awslogs-group": "/teamagent/dev/morning-digest",
+                  "awslogs-region": "ap-northeast-1",
+                  "awslogs-stream-prefix": "morning-digest"
+                }
+              },
+              "mountPoints": [],
+              "name": "morning-digest",
+              "portMappings": [],
+              "privileged": null,
+              "readonlyRootFilesystem": null,
+              "secrets": [
+                {
+                  "name": "CONNECT_GOOGLE_CLIENT_SECRET",
+                  "valueFrom": "arn:aws:secretsmanager:ap-northeast-1:718959508629:secret:teamagent/dev/connect_google_secret-rWes7O"
+                },
+                {
+                  "name": "DATABASE_URL",
+                  "valueFrom": "arn:aws:secretsmanager:ap-northeast-1:718959508629:secret:teamagent/dev/database-url-4pJMDr"
+                },
+                {
+                  "name": "GOOGLE_OAUTH_JSON",
+                  "valueFrom": "arn:aws:secretsmanager:ap-northeast-1:718959508629:secret:teamagent/dev/google_oauth-L8HOBj"
+                },
+                {
+                  "name": "MAIL_ACTION_HMAC_SECRET",
+                  "valueFrom": "arn:aws:secretsmanager:ap-northeast-1:718959508629:secret:teamagent/dev/database-url-4pJMDr"
+                },
+                {
+                  "name": "SLACK_BOT_TOKEN",
+                  "valueFrom": "arn:aws:secretsmanager:ap-northeast-1:718959508629:secret:teamagent/dev/openclaw/slack-bot-token-N1vpyd"
+                }
+              ],
+              "systemControls": [],
+              "user": null,
+              "volumesFrom": []
+            }
+          ],
+          "cpu": "1024",
+          "execution_role_arn": "arn:aws:iam::718959508629:role/teamagent-dev-ecs-exec-morning-digest",
+          "memory": "2048",
+          "network_mode": "awsvpc",
+          "task_role_arn": "arn:aws:iam::718959508629:role/teamagent-dev-morning-digest-task",
+          "volumes": []
+        },
+        "task_definition_arn": "arn:aws:ecs:ap-northeast-1:718959508629:task-definition/teamagent-dev-morning-digest:59"
+      },
+      "receipt": {
+        "pipeline": "mcp",
+        "subject": "core"
+      },
+      "release_repository": "teamagent-mcp",
+      "terraform_task_definition_address": "aws_ecs_task_definition.morning_digest[0]"
+    },
+    {
+      "activator": {
+        "identity": "teamagent-dev-x-buzz-dispatch",
+        "type": "lambda_taskdef_arn_environment"
+      },
+      "after": {
+        "activation": {
+          "event_source_mapping_enabled": true,
+          "task_definition_arn": "arn:aws:ecs:ap-northeast-1:718959508629:task-definition/teamagent-dev-x-buzz-worker:1"
+        },
+        "image": "718959508629.dkr.ecr.ap-northeast-1.amazonaws.com/teamagent-mcp@sha256:1747d2d0729d2c30ae04ab4d21dc9dc10c1351553684eb10303e157f58a227e8",
+        "task_definition": {
+          "container_definitions": [
+            {
+              "command": [
+                "python",
+                "-m",
+                "teamagent.workers.x_buzz_job"
+              ],
+              "entryPoint": null,
+              "environment": [
+                {
+                  "name": "AWS_REGION",
+                  "value": "ap-northeast-1"
+                },
+                {
+                  "name": "COST_APIFY_MONTHLY_USD",
+                  "value": "50"
+                },
+                {
+                  "name": "COST_GUARD_TABLE",
+                  "value": "teamagent-dev-cost-usage"
+                },
+                {
+                  "name": "X_JOBS_TABLE",
+                  "value": "teamagent-dev-x-buzz-jobs"
+                },
+                {
+                  "name": "X_S3_BUCKET",
+                  "value": "teamagent-dev-raw-files"
+                }
+              ],
+              "essential": true,
+              "image": "718959508629.dkr.ecr.ap-northeast-1.amazonaws.com/teamagent-mcp@sha256:1747d2d0729d2c30ae04ab4d21dc9dc10c1351553684eb10303e157f58a227e8",
+              "linuxParameters": null,
+              "logConfiguration": {
+                "logDriver": "awslogs",
+                "options": {
+                  "awslogs-group": "/teamagent/dev/x-buzz",
+                  "awslogs-region": "ap-northeast-1",
+                  "awslogs-stream-prefix": "worker"
+                }
+              },
+              "mountPoints": [],
+              "name": "worker",
+              "portMappings": [],
+              "privileged": null,
+              "readonlyRootFilesystem": null,
+              "secrets": [
+                {
+                  "name": "APIFY_API_TOKEN",
+                  "valueFrom": "arn:aws:secretsmanager:ap-northeast-1:718959508629:secret:teamagent/dev/tiktok/apify-token-cIdMxf"
+                }
+              ],
+              "systemControls": [],
+              "user": null,
+              "volumesFrom": []
+            }
+          ],
+          "cpu": "512",
+          "execution_role_arn": "arn:aws:iam::718959508629:role/teamagent-dev-x-buzz-exec",
+          "memory": "1024",
+          "network_mode": "awsvpc",
+          "task_role_arn": "arn:aws:iam::718959508629:role/teamagent-dev-x-buzz-task",
+          "volumes": []
+        },
+        "task_definition_arn": "arn:aws:ecs:ap-northeast-1:718959508629:task-definition/teamagent-dev-x-buzz-worker:1"
+      },
+      "before": {
+        "activation": {
+          "event_source_mapping_enabled": true,
+          "task_definition_arn": "arn:aws:ecs:ap-northeast-1:718959508629:task-definition/teamagent-dev-x-buzz-worker:1"
+        },
+        "image": "718959508629.dkr.ecr.ap-northeast-1.amazonaws.com/teamagent-mcp@sha256:1747d2d0729d2c30ae04ab4d21dc9dc10c1351553684eb10303e157f58a227e8",
+        "task_definition": {
+          "container_definitions": [
+            {
+              "command": [
+                "python",
+                "-m",
+                "teamagent.workers.x_buzz_job"
+              ],
+              "entryPoint": null,
+              "environment": [
+                {
+                  "name": "AWS_REGION",
+                  "value": "ap-northeast-1"
+                },
+                {
+                  "name": "COST_APIFY_MONTHLY_USD",
+                  "value": "50"
+                },
+                {
+                  "name": "COST_GUARD_TABLE",
+                  "value": "teamagent-dev-cost-usage"
+                },
+                {
+                  "name": "X_JOBS_TABLE",
+                  "value": "teamagent-dev-x-buzz-jobs"
+                },
+                {
+                  "name": "X_S3_BUCKET",
+                  "value": "teamagent-dev-raw-files"
+                }
+              ],
+              "essential": true,
+              "image": "718959508629.dkr.ecr.ap-northeast-1.amazonaws.com/teamagent-mcp@sha256:1747d2d0729d2c30ae04ab4d21dc9dc10c1351553684eb10303e157f58a227e8",
+              "linuxParameters": null,
+              "logConfiguration": {
+                "logDriver": "awslogs",
+                "options": {
+                  "awslogs-group": "/teamagent/dev/x-buzz",
+                  "awslogs-region": "ap-northeast-1",
+                  "awslogs-stream-prefix": "worker"
+                }
+              },
+              "mountPoints": [],
+              "name": "worker",
+              "portMappings": [],
+              "privileged": null,
+              "readonlyRootFilesystem": null,
+              "secrets": [
+                {
+                  "name": "APIFY_API_TOKEN",
+                  "valueFrom": "arn:aws:secretsmanager:ap-northeast-1:718959508629:secret:teamagent/dev/tiktok/apify-token-cIdMxf"
+                }
+              ],
+              "systemControls": [],
+              "user": null,
+              "volumesFrom": []
+            }
+          ],
+          "cpu": "512",
+          "execution_role_arn": "arn:aws:iam::718959508629:role/teamagent-dev-x-buzz-exec",
+          "memory": "1024",
+          "network_mode": "awsvpc",
+          "task_role_arn": "arn:aws:iam::718959508629:role/teamagent-dev-x-buzz-task",
+          "volumes": []
+        },
+        "task_definition_arn": "arn:aws:ecs:ap-northeast-1:718959508629:task-definition/teamagent-dev-x-buzz-worker:1"
+      },
+      "consumer_id": "x_buzz_worker",
+      "container_name": "worker",
+      "ecs_family": "teamagent-dev-x-buzz-worker",
+      "live": {
+        "activation": {
+          "event_source_mapping_enabled": true,
+          "task_definition_arn": "arn:aws:ecs:ap-northeast-1:718959508629:task-definition/teamagent-dev-x-buzz-worker:1"
+        },
+        "image": "718959508629.dkr.ecr.ap-northeast-1.amazonaws.com/teamagent-mcp@sha256:1747d2d0729d2c30ae04ab4d21dc9dc10c1351553684eb10303e157f58a227e8",
+        "task_definition": {
+          "container_definitions": [
+            {
+              "command": [
+                "python",
+                "-m",
+                "teamagent.workers.x_buzz_job"
+              ],
+              "entryPoint": null,
+              "environment": [
+                {
+                  "name": "AWS_REGION",
+                  "value": "ap-northeast-1"
+                },
+                {
+                  "name": "COST_APIFY_MONTHLY_USD",
+                  "value": "50"
+                },
+                {
+                  "name": "COST_GUARD_TABLE",
+                  "value": "teamagent-dev-cost-usage"
+                },
+                {
+                  "name": "X_JOBS_TABLE",
+                  "value": "teamagent-dev-x-buzz-jobs"
+                },
+                {
+                  "name": "X_S3_BUCKET",
+                  "value": "teamagent-dev-raw-files"
+                }
+              ],
+              "essential": true,
+              "image": "718959508629.dkr.ecr.ap-northeast-1.amazonaws.com/teamagent-mcp@sha256:1747d2d0729d2c30ae04ab4d21dc9dc10c1351553684eb10303e157f58a227e8",
+              "linuxParameters": null,
+              "logConfiguration": {
+                "logDriver": "awslogs",
+                "options": {
+                  "awslogs-group": "/teamagent/dev/x-buzz",
+                  "awslogs-region": "ap-northeast-1",
+                  "awslogs-stream-prefix": "worker"
+                }
+              },
+              "mountPoints": [],
+              "name": "worker",
+              "portMappings": [],
+              "privileged": null,
+              "readonlyRootFilesystem": null,
+              "secrets": [
+                {
+                  "name": "APIFY_API_TOKEN",
+                  "valueFrom": "arn:aws:secretsmanager:ap-northeast-1:718959508629:secret:teamagent/dev/tiktok/apify-token-cIdMxf"
+                }
+              ],
+              "systemControls": [],
+              "user": null,
+              "volumesFrom": []
+            }
+          ],
+          "cpu": "512",
+          "execution_role_arn": "arn:aws:iam::718959508629:role/teamagent-dev-x-buzz-exec",
+          "memory": "1024",
+          "network_mode": "awsvpc",
+          "task_role_arn": "arn:aws:iam::718959508629:role/teamagent-dev-x-buzz-task",
+          "volumes": []
+        },
+        "task_definition_arn": "arn:aws:ecs:ap-northeast-1:718959508629:task-definition/teamagent-dev-x-buzz-worker:1"
+      },
+      "receipt": {
+        "pipeline": "mcp",
+        "subject": "core"
+      },
+      "release_repository": "teamagent-mcp",
+      "terraform_task_definition_address": "aws_ecs_task_definition.x_buzz_worker[0]"
+    },
+    {
+      "activator": {
+        "identity": "teamagent-dev-tiktok-acquire-dispatch",
+        "type": "lambda_taskdef_arn_environment"
+      },
+      "after": {
+        "activation": {
+          "event_source_mapping_enabled": true,
+          "task_definition_arn": "arn:aws:ecs:ap-northeast-1:718959508629:task-definition/teamagent-dev-tiktok-acquire:25"
+        },
+        "image": "718959508629.dkr.ecr.ap-northeast-1.amazonaws.com/teamagent-media-worker@sha256:b91b5321cdf900d510a25a3a6b06614fb7f1be76a188621be927b292eb29494f",
+        "task_definition": {
+          "container_definitions": [
+            {
+              "command": null,
+              "entryPoint": null,
+              "environment": [
+                {
+                  "name": "HOME",
+                  "value": "/tmp/home"
+                },
+                {
+                  "name": "MEDIA_BLOCKED_VPC_CIDRS",
+                  "value": "172.31.0.0/16"
+                },
+                {
+                  "name": "PYTHONPYCACHEPREFIX",
+                  "value": "/tmp/.pycache"
+                },
+                {
+                  "name": "TMPDIR",
+                  "value": "/tmp"
+                },
+                {
+                  "name": "XDG_CACHE_HOME",
+                  "value": "/tmp/.cache"
+                }
+              ],
+              "essential": true,
+              "image": "718959508629.dkr.ecr.ap-northeast-1.amazonaws.com/teamagent-media-worker@sha256:b91b5321cdf900d510a25a3a6b06614fb7f1be76a188621be927b292eb29494f",
+              "linuxParameters": {
+                "capabilities": {
+                  "add": [],
+                  "drop": [
+                    "ALL"
+                  ]
+                },
+                "initProcessEnabled": true
+              },
+              "logConfiguration": {
+                "logDriver": "awslogs",
+                "options": {
+                  "awslogs-group": "/teamagent/dev/tiktok-acquire",
+                  "awslogs-region": "ap-northeast-1",
+                  "awslogs-stream-prefix": "acquire"
+                }
+              },
+              "mountPoints": [
+                {
+                  "containerPath": "/tmp",
+                  "readOnly": false,
+                  "sourceVolume": "runtime-tmp"
+                }
+              ],
+              "name": "acquire",
+              "portMappings": [],
+              "privileged": false,
+              "readonlyRootFilesystem": true,
+              "secrets": [],
+              "stopTimeout": 30,
+              "systemControls": [],
+              "user": "10001:10001",
+              "volumesFrom": []
+            }
+          ],
+          "cpu": "16384",
+          "execution_role_arn": "arn:aws:iam::718959508629:role/teamagent-dev-tiktok-acquire-exec",
+          "memory": "32768",
+          "network_mode": "awsvpc",
+          "task_role_arn": "",
+          "volumes": [
+            {
+              "configure_at_launch": false,
+              "docker_volume_configuration": [],
+              "efs_volume_configuration": [],
+              "fsx_windows_file_server_volume_configuration": [],
+              "host_path": "",
+              "name": "runtime-tmp"
+            }
+          ]
+        },
+        "task_definition_arn": "arn:aws:ecs:ap-northeast-1:718959508629:task-definition/teamagent-dev-tiktok-acquire:25"
+      },
+      "before": {
+        "activation": {
+          "event_source_mapping_enabled": true,
+          "task_definition_arn": "arn:aws:ecs:ap-northeast-1:718959508629:task-definition/teamagent-dev-tiktok-acquire:25"
+        },
+        "image": "718959508629.dkr.ecr.ap-northeast-1.amazonaws.com/teamagent-media-worker@sha256:b91b5321cdf900d510a25a3a6b06614fb7f1be76a188621be927b292eb29494f",
+        "task_definition": {
+          "container_definitions": [
+            {
+              "command": null,
+              "entryPoint": null,
+              "environment": [
+                {
+                  "name": "HOME",
+                  "value": "/tmp/home"
+                },
+                {
+                  "name": "MEDIA_BLOCKED_VPC_CIDRS",
+                  "value": "172.31.0.0/16"
+                },
+                {
+                  "name": "PYTHONPYCACHEPREFIX",
+                  "value": "/tmp/.pycache"
+                },
+                {
+                  "name": "TMPDIR",
+                  "value": "/tmp"
+                },
+                {
+                  "name": "XDG_CACHE_HOME",
+                  "value": "/tmp/.cache"
+                }
+              ],
+              "essential": true,
+              "image": "718959508629.dkr.ecr.ap-northeast-1.amazonaws.com/teamagent-media-worker@sha256:b91b5321cdf900d510a25a3a6b06614fb7f1be76a188621be927b292eb29494f",
+              "linuxParameters": {
+                "capabilities": {
+                  "add": [],
+                  "drop": [
+                    "ALL"
+                  ]
+                },
+                "initProcessEnabled": true
+              },
+              "logConfiguration": {
+                "logDriver": "awslogs",
+                "options": {
+                  "awslogs-group": "/teamagent/dev/tiktok-acquire",
+                  "awslogs-region": "ap-northeast-1",
+                  "awslogs-stream-prefix": "acquire"
+                }
+              },
+              "mountPoints": [
+                {
+                  "containerPath": "/tmp",
+                  "readOnly": false,
+                  "sourceVolume": "runtime-tmp"
+                }
+              ],
+              "name": "acquire",
+              "portMappings": [],
+              "privileged": false,
+              "readonlyRootFilesystem": true,
+              "secrets": [],
+              "stopTimeout": 30,
+              "systemControls": [],
+              "user": "10001:10001",
+              "volumesFrom": []
+            }
+          ],
+          "cpu": "16384",
+          "execution_role_arn": "arn:aws:iam::718959508629:role/teamagent-dev-tiktok-acquire-exec",
+          "memory": "32768",
+          "network_mode": "awsvpc",
+          "task_role_arn": "",
+          "volumes": [
+            {
+              "configure_at_launch": false,
+              "docker_volume_configuration": [],
+              "efs_volume_configuration": [],
+              "fsx_windows_file_server_volume_configuration": [],
+              "host_path": "",
+              "name": "runtime-tmp"
+            }
+          ]
+        },
+        "task_definition_arn": "arn:aws:ecs:ap-northeast-1:718959508629:task-definition/teamagent-dev-tiktok-acquire:25"
+      },
+      "consumer_id": "tiktok_acquire",
+      "container_name": "acquire",
+      "ecs_family": "teamagent-dev-tiktok-acquire",
+      "live": {
+        "activation": {
+          "event_source_mapping_enabled": true,
+          "task_definition_arn": "arn:aws:ecs:ap-northeast-1:718959508629:task-definition/teamagent-dev-tiktok-acquire:25"
+        },
+        "image": "718959508629.dkr.ecr.ap-northeast-1.amazonaws.com/teamagent-media-worker@sha256:b91b5321cdf900d510a25a3a6b06614fb7f1be76a188621be927b292eb29494f",
+        "task_definition": {
+          "container_definitions": [
+            {
+              "command": null,
+              "entryPoint": null,
+              "environment": [
+                {
+                  "name": "HOME",
+                  "value": "/tmp/home"
+                },
+                {
+                  "name": "MEDIA_BLOCKED_VPC_CIDRS",
+                  "value": "172.31.0.0/16"
+                },
+                {
+                  "name": "PYTHONPYCACHEPREFIX",
+                  "value": "/tmp/.pycache"
+                },
+                {
+                  "name": "TMPDIR",
+                  "value": "/tmp"
+                },
+                {
+                  "name": "XDG_CACHE_HOME",
+                  "value": "/tmp/.cache"
+                }
+              ],
+              "essential": true,
+              "image": "718959508629.dkr.ecr.ap-northeast-1.amazonaws.com/teamagent-media-worker@sha256:b91b5321cdf900d510a25a3a6b06614fb7f1be76a188621be927b292eb29494f",
+              "linuxParameters": {
+                "capabilities": {
+                  "add": [],
+                  "drop": [
+                    "ALL"
+                  ]
+                },
+                "initProcessEnabled": true
+              },
+              "logConfiguration": {
+                "logDriver": "awslogs",
+                "options": {
+                  "awslogs-group": "/teamagent/dev/tiktok-acquire",
+                  "awslogs-region": "ap-northeast-1",
+                  "awslogs-stream-prefix": "acquire"
+                }
+              },
+              "mountPoints": [
+                {
+                  "containerPath": "/tmp",
+                  "readOnly": false,
+                  "sourceVolume": "runtime-tmp"
+                }
+              ],
+              "name": "acquire",
+              "portMappings": [],
+              "privileged": false,
+              "readonlyRootFilesystem": true,
+              "secrets": [],
+              "stopTimeout": 30,
+              "systemControls": [],
+              "user": "10001:10001",
+              "volumesFrom": []
+            }
+          ],
+          "cpu": "16384",
+          "execution_role_arn": "arn:aws:iam::718959508629:role/teamagent-dev-tiktok-acquire-exec",
+          "memory": "32768",
+          "network_mode": "awsvpc",
+          "task_role_arn": "",
+          "volumes": [
+            {
+              "configure_at_launch": false,
+              "docker_volume_configuration": [],
+              "efs_volume_configuration": [],
+              "fsx_windows_file_server_volume_configuration": [],
+              "host_path": "",
+              "name": "runtime-tmp"
+            }
+          ]
+        },
+        "task_definition_arn": "arn:aws:ecs:ap-northeast-1:718959508629:task-definition/teamagent-dev-tiktok-acquire:25"
+      },
+      "receipt": {
+        "pipeline": "mcp",
+        "subject": "media"
+      },
+      "release_repository": "teamagent-media-worker",
+      "terraform_task_definition_address": "aws_ecs_task_definition.tiktok_acquire[0]"
+    }
+  ],
+  "mode": "receipt-required",
+  "registry_sha256": "6059522a0a88c213e1e0f3f56baf019e9f9b3f0bee62d3cd0c18e26c1595062f",
+  "schema_version": 1
+}

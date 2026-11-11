@@ -162,8 +162,20 @@ def test_no_shell_can_bypass_terraform_for_image_task_definition_changes() -> No
         for path in ROOT.rglob("*.sh")
         if ".git" not in path.parts and ".venv" not in path.parts
     )
+    # 2026-11-10: Terraform に正本が無く apply 禁止のため、持ち主が実運用している mcp 便の
+    # 差し替え台本（scripts/aws/release/kit）だけを名指しで例外にする。ここ以外は従来どおり禁止。
+    kit = ROOT / "scripts" / "aws" / "release" / "kit"
+    operator_release_kit = {
+        kit / "apply_mcp_tds.sh",
+        kit / "swap_mcp_consumers_td.sh",
+        kit / "run_answer_gate.sh",
+        kit / "mcp-release" / "register_mcp_td_image_env.sh",
+        kit / "media-release" / "deploy_media_td.sh",
+    }
     for path in shell_files:
         body = path.read_text(encoding="utf-8").lower()
+        if path in operator_release_kit:
+            continue
         if "register-task-definition" in body:
             assert path == ROOT / "infra" / "deploy" / "terraform_runtime_guard.sh"
             assert "deregister-task-definition" in body
