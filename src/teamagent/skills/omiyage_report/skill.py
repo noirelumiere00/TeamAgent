@@ -519,6 +519,9 @@ class OmiyageReportSubmitSkill(BaseSkill[OmiyageReportSubmitInput, OmiyageReport
         "omiyage_report_statusで照会、retry_after_secondsは完成予定ではない。"
         "商材の企画提案書（86枚FMT）はproposal_builder_submit。"
         "動画の中身の分析・なぜ上位かの読み解きはvideo_algorithm（このツールは分析しない）。"
+        "必要情報が足りなくても、まずこのツールを呼ぶこと"
+        "（不足の聞き返しはこのツールの応答が行う。呼ばずに質問しない）。"
+        "返信テキストに内部のツール名は書かない。"
     )
     input_schema: ClassVar[type[BaseModel]] = OmiyageReportSubmitInput
     output_schema: ClassVar[type[BaseModel]] = OmiyageReportSubmitOutput

@@ -1575,7 +1575,10 @@ class ProposalBuilderSubmitSkill(
         "省略可）。PROPOSAL_RESEARCH_AUTO有効時はresearch_briefで調査から作成しJSONは"
         "不要、他はgemini_jsonの一方だけを指定。投稿開始日は日付を補完せず未定。"
         "返された秒数後にproposal_builder_statusで照会し、queued/"
-        "running中は再submitしない。BU2見積・試算は、"
+        "running中は再submitしない。必要情報が足りなくても、"
+        "まずこのツールを呼ぶこと（不足の聞き返しはこのツールの応答が行う。"
+        "呼ばずに質問しない）。返信テキストに内部のツール名は書かない。"
+        "BU2見積・試算は、"
     ) + BU2_REQUEST_VALUES_ONLY
     input_schema: ClassVar[type[BaseModel]] = ProposalBuilderSubmitInput
     output_schema: ClassVar[type[BaseModel]] = ProposalBuilderSubmitOutput

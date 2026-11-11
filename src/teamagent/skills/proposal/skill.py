@@ -42,6 +42,9 @@ class ProposalDraftSkill(BaseSkill[ProposalDraftInput, ProposalDraftOutput]):
         "迷ったら recommend を優先して資料を見せ、骨子は求められてから。"
         "完成品のPPTX資料は作らない（TikTok調査のお土産資料はomiyage_report_submit・"
         "86枚の提案書はproposal_builder_submit）。"
+        "必要情報が足りなくても、まずこのツールを呼ぶこと"
+        "（不足の聞き返しはこのツールの応答が行う。呼ばずに質問しない）。"
+        "返信テキストに内部のツール名は書かない。"
     )
     input_schema: ClassVar[type[BaseModel]] = ProposalDraftInput
     output_schema: ClassVar[type[BaseModel]] = ProposalDraftOutput

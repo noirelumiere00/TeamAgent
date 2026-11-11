@@ -485,6 +485,9 @@ class VideoAlgorithmSkill(BaseSkill[VideoAlgorithmInput, VideoAlgorithmOutput]):
         "既知施策の何が効いたかはsearchで施策実績・動画ごとの数字・資料を探す。"
         "資料・パワポ・スライドの作成は対象外（お土産資料はomiyage_report_submit・"
         "86枚の提案書はproposal_builder_submit。ここは分析と分析レポートのみ）。"
+        "必要情報が足りなくても、まずこのツールを呼ぶこと"
+        "（不足の聞き返しはこのツールの応答が行う。呼ばずに質問しない）。"
+        "返信テキストに内部のツール名は書かない。"
     )
     input_schema: ClassVar[type[BaseModel]] = VideoAlgorithmInput
     output_schema: ClassVar[type[BaseModel]] = VideoAlgorithmOutput
