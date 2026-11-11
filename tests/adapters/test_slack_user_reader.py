@@ -418,9 +418,9 @@ def test_get_display_name_caches_hit_for_24h() -> None:
     assert reader.get_display_name("U12345678", "req") == "小俣"
     assert client.users_info.await_count == 1  # 2 回目はキャッシュ
     # TTL は 24h。期限切れにすると再度叩く。
-    name, expires = reader._name_cache["U12345678"]
-    assert name == "小俣" and expires > 0
-    reader._name_cache["U12345678"] = (name, -1.0)
+    label, expires = reader._name_cache["U12345678"]
+    assert label == ("小俣", False) and expires > 0
+    reader._name_cache["U12345678"] = (label, -1.0)
     assert reader.get_display_name("U12345678", "req") == "小俣"
     assert client.users_info.await_count == 2
 
@@ -460,3 +460,56 @@ async def test_read_thread_works_inside_running_loop() -> None:
     reader = SlackUserReader("xoxp-x", client=client)
     msgs = reader.read_thread("C1", "1.1", "req")
     assert [m.text for m in msgs] == ["hi"]
+
+
+@pytest.mark.parametrize(
+    ("flags", "guest"),
+    [
+        ({}, False),
+        ({"is_restricted": True}, True),
+        ({"is_ultra_restricted": True}, True),
+        ({"is_restricted": "false", "is_ultra_restricted": 1}, False),
+    ],
+)
+def test_get_user_label_shares_name_cache(flags: dict[str, object], guest: bool) -> None:
+    client = _client(
+        users_info=AsyncMock(return_value=_users_info({"display_name": "架空メンバーA"}, **flags))
+    )
+    reader = SlackUserReader("xoxp-test", client=client)
+    assert reader.get_user_label("U12345678", "req") == ("架空メンバーA", guest)
+    assert reader.get_user_label("U12345678", "req") == ("架空メンバーA", guest)
+    assert reader.get_display_name("U12345678", "req") == "架空メンバーA"
+    client.users_info.assert_awaited_once_with(user="U12345678")
+
+
+def test_get_user_label_after_display_name_uses_cache() -> None:
+    client = _client(
+        users_info=AsyncMock(
+            return_value=_users_info({"display_name": "架空メンバーB"}, is_restricted=True)
+        )
+    )
+    reader = SlackUserReader("xoxp-test", client=client)
+    assert reader.get_display_name("U12345678", "req") == "架空メンバーB"
+    assert reader.get_user_label("U12345678", "req") == ("架空メンバーB", True)
+    client.users_info.assert_awaited_once()
+
+
+@pytest.mark.parametrize(
+    "response", [{"ok": False, "error": "user_not_found"}, {"ok": True, "user": {"profile": 1}}]
+)
+def test_get_user_label_bad_response_is_fail_open(response: dict[str, object]) -> None:
+    client = _client(users_info=AsyncMock(return_value=response))
+    reader = SlackUserReader("xoxp-test", client=client)
+    assert reader.get_user_label("U12345678", "req") == (None, False)
+    assert reader.get_user_label("U12345678", "req") == (None, False)
+    client.users_info.assert_awaited_once()
+
+
+def test_get_user_label_api_failure_and_invalid_id() -> None:
+    client = _client(users_info=AsyncMock(side_effect=RuntimeError("unavailable")))
+    reader = SlackUserReader("xoxp-test", client=client)
+    assert reader.get_user_label("bad-id", "req") == (None, False)
+    client.users_info.assert_not_awaited()
+    assert reader.get_user_label("U12345678", "req") == (None, False)
+    assert reader.get_user_label("U12345678", "req") == (None, False)
+    client.users_info.assert_awaited_once()

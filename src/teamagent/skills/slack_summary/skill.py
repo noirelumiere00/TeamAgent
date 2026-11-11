@@ -52,6 +52,7 @@ from teamagent.skills._shared.source_url import slack_permalink
 from teamagent.skills._shared.user_context import USER_CONTEXT_RULE
 from teamagent.skills.base import BaseSkill, SkillContext, register
 from teamagent.skills.slack_summary.period import PERIOD_WORDS, resolve_period
+from teamagent.skills.slack_summary.reactions import render_reactions, wants_reactions
 from teamagent.skills.slack_summary.schema import SlackSummaryInput, SlackSummaryOutput
 
 logger = structlog.get_logger(__name__)
@@ -63,6 +64,7 @@ _UNIFORM_DENY_CODES = frozenset(
         "not_in_channel",
         "channel_not_found",
         "thread_not_found",
+        "message_not_found",
         "is_archived",
         "access_denied",
         "bad_target",
@@ -152,7 +154,8 @@ class SlackSummarySkill(BaseSkill[SlackSummaryInput, SlackSummaryOutput]):
         "auto は現スレッドが1件以下なら現チャンネルへ切替。"
         "チャンネルからの依頼は発信元だけ、DM は本人が読める範囲。"
         "期間指定の無い「#〇〇 も見て」は slack_search（query に in:#チャンネル名）。"
-        "受信メールは mail_summary。投稿・転送はしない。" + USER_CONTEXT_RULE
+        "受信メールは mail_summary。投稿・転送はしない。スタンプを押した人の一覧も可。"
+        + USER_CONTEXT_RULE
     )
     input_schema: ClassVar[type[BaseModel]] = SlackSummaryInput
     output_schema: ClassVar[type[BaseModel]] = SlackSummaryOutput
@@ -184,7 +187,10 @@ class SlackSummarySkill(BaseSkill[SlackSummaryInput, SlackSummaryOutput]):
 
         request = str(ctx.metadata.get("request_text", "") or "")
         intent = " ".join((request, input.focus))
-        list_mode = wants_list(intent) or input.period in ("過去全部", "全期間", "全部")
+        reaction_mode = wants_reactions(intent)
+        list_mode = not reaction_mode and (
+            wants_list(intent) or input.period in ("過去全部", "全期間", "全部")
+        )
         period_mode = bool(input.channel_name.strip() or input.period.strip())
         if period_mode and not list_mode and not tool_enabled("SLACK_SUMMARY_NAMED_PERIOD_ENABLED"):
             return SlackSummaryOutput(
@@ -197,7 +203,10 @@ class SlackSummarySkill(BaseSkill[SlackSummaryInput, SlackSummaryOutput]):
             except ValueError:
                 return SlackSummaryOutput(error="bad_period", message=_ERR_MSG["bad_period"])
         # 名前指定は常にチャンネル単位。DM 自身を暗黙の要約対象にはしない。
-        if input.scope == "channel" or period_mode or (list_mode and input.scope != "thread"):
+        if reaction_mode and input.thread_ts:
+            target_channel, target_ts = _resolve_target(input, ctx.metadata)
+            has_target = bool(target_channel and target_ts)
+        elif input.scope == "channel" or period_mode or (list_mode and input.scope != "thread"):
             target_channel = input.channel_id.strip() or ("" if input.channel_name else origin)
             target_ts = ""
             has_target = bool(target_channel or input.channel_name.strip())
@@ -287,7 +296,20 @@ class SlackSummarySkill(BaseSkill[SlackSummaryInput, SlackSummaryOutput]):
         # ── A7: 読み取りのみ（各 API 1 ページ）。auto は単発スレッドなら channel へ切替。
         thread_limit = env_int("SLACK_SUMMARY_THREAD_LIMIT", 200)
         effective_scope = "thread"
-        if bounds:
+        if reaction_mode and target_ts:
+            result = reader.read_message_checked(target_channel, target_ts, ctx.request_id)
+            if not result.error and any(m.reply_count > 0 for m in result.messages):
+                replies = reader.read_thread_checked(
+                    target_channel, target_ts, ctx.request_id, limit=thread_limit
+                )
+                result = SlackThreadRead(
+                    messages=tuple(
+                        {m.ts: m for m in (*result.messages, *replies.messages)}.values()
+                    ),
+                    error=replies.error,
+                    truncated=result.truncated or replies.truncated,
+                )
+        elif bounds:
             result = _read_channel_period(reader, target_channel, ctx.request_id, bounds)
             effective_scope = "channel"
         elif input.scope == "channel":
@@ -318,6 +340,16 @@ class SlackSummarySkill(BaseSkill[SlackSummaryInput, SlackSummaryOutput]):
                 key = "not_member"
             log.info("slack_summary_read_denied", reason=key)
             return SlackSummaryOutput(scope=effective_scope, error=key, message=_ERR_MSG[key])
+
+        if reaction_mode:
+            return render_reactions(
+                result,
+                reader=reader,
+                channel_id=target_channel,
+                request_id=ctx.request_id,
+                intent=intent,
+                scope=effective_scope,
+            )
 
         messages = result.messages
         if effective_scope == "channel" and not bounds:
