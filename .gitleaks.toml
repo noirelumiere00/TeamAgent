@@ -56,4 +56,6 @@ regexes = [
     '''anthropic\.claude-.*''',
     '''us\.anthropic\.claude-.*''',
     '''jp\.anthropic\.claude-.*''',
+    # EFS のアクセスポイント ID（資源の番号で、秘密ではない。kit の consumer manifest に出る）
+    '''fsap-[0-9a-f]{17}''',
 ]
