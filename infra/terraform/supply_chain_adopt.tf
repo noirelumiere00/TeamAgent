@@ -259,7 +259,9 @@ locals {
     }
     # 2026-11-11 オフライン導出（未公開）。base digest を維持し core glibc を Wolfi 公式 2.44-r16 へ差し替え。
     # 公開 OLD 本文を SHA 照合し、既存 504 対策を維持した repo 導出本文の契約2か所を置換・逆置換検証。
-    "23315fa0619c0f86c5737bfd3e1ed3b10a4b1a45586ab9f9bd00516cf5945962" = {
+    # 2026-11-11 publish 世代（CVE 対応の明示 pin）。便 r118 段 3 の ECR 脆弱性ゲートが media の libxslt 1.1.43-r3（HIGH 3 件）を
+    # 拒否したため修正版 1.1.43-r4 を明示 pin し、media-apk.lock と契約 artifact.apk-lock.sha256 を追随させた再レンダリング（apply_apklock.sh）。
+    "b52dd1e60dd7788864235339a5f3f6cc74a37d5c5d8fe1e4686fdd2ea0ec7c1a" = {
       content_type                  = "text/yaml"
       object_lock_retain_until_date = "2099-12-31T00:00:00Z"
     }
@@ -494,7 +496,9 @@ locals {
     }
     # 2026-11-11 オフライン導出（未公開）。base digest を維持し core glibc を Wolfi 公式 2.44-r16 へ差し替え。
     # 公開 OLD 本文を SHA 照合し、既存 504 対策を維持した repo 導出本文の契約2か所を置換・逆置換検証。
-    "a46ee5591c81484dd4ca7076785f374be4d707fc74c977d4bd4e66acdd75efa3" = {
+    # 2026-11-11 publish 世代（CVE 対応の明示 pin）。便 r118 段 3 の ECR 脆弱性ゲートが media の libxslt 1.1.43-r3（HIGH 3 件）を
+    # 拒否したため修正版 1.1.43-r4 を明示 pin し、media-apk.lock と契約 artifact.apk-lock.sha256 を追随させた再レンダリング（apply_apklock.sh）。
+    "475f26d42ed18069feed6e3fa6a880bfad333a6c1b7872659f7b345f85889b67" = {
       content_type                  = "text/yaml"
       object_lock_retain_until_date = "2099-12-31T00:00:00Z"
     }
@@ -719,7 +723,9 @@ locals {
     }
     # 2026-11-11 オフライン導出（未公開）。base digest を維持し core glibc を Wolfi 公式 2.44-r16 へ差し替え。
     # 公開 OLD 本文を SHA 照合し、既存 504 対策を維持した repo 導出本文の契約2か所を置換・逆置換検証。
-    "ffa5126a2eb1ef555179c3f6c69d6812ff33bbc23b81f47a07538f8df69d008e" = {
+    # 2026-11-11 publish 世代（CVE 対応の明示 pin）。便 r118 段 3 の ECR 脆弱性ゲートが media の libxslt 1.1.43-r3（HIGH 3 件）を
+    # 拒否したため修正版 1.1.43-r4 を明示 pin し、media-apk.lock と契約 artifact.apk-lock.sha256 を追随させた再レンダリング（apply_apklock.sh）。
+    "203fa7ffff638c2cd21dd3c2067de106ec6262f1681b69df65ce7ef84c17c58b" = {
       content_type                  = "text/yaml"
       object_lock_retain_until_date = "2099-12-31T00:00:00Z"
     }
@@ -918,18 +924,18 @@ removed {
 }
 
 import {
-  to = aws_s3_object.mcp_source_publisher_buildspec_generation["23315fa0619c0f86c5737bfd3e1ed3b10a4b1a45586ab9f9bd00516cf5945962"]
-  id = "teamagent-dev-image-release-evidence/codebuild-buildspecs/teamagent-dev-mcp-source-publisher/23315fa0619c0f86c5737bfd3e1ed3b10a4b1a45586ab9f9bd00516cf5945962.yml"
+  to = aws_s3_object.mcp_source_publisher_buildspec_generation["b52dd1e60dd7788864235339a5f3f6cc74a37d5c5d8fe1e4686fdd2ea0ec7c1a"]
+  id = "teamagent-dev-image-release-evidence/codebuild-buildspecs/teamagent-dev-mcp-source-publisher/b52dd1e60dd7788864235339a5f3f6cc74a37d5c5d8fe1e4686fdd2ea0ec7c1a.yml"
 }
 
 import {
-  to = aws_s3_object.image_attestor_buildspec_generation["a46ee5591c81484dd4ca7076785f374be4d707fc74c977d4bd4e66acdd75efa3"]
-  id = "teamagent-dev-image-release-evidence/codebuild-buildspecs/teamagent-dev-image-attestor/a46ee5591c81484dd4ca7076785f374be4d707fc74c977d4bd4e66acdd75efa3.yml"
+  to = aws_s3_object.image_attestor_buildspec_generation["475f26d42ed18069feed6e3fa6a880bfad333a6c1b7872659f7b345f85889b67"]
+  id = "teamagent-dev-image-release-evidence/codebuild-buildspecs/teamagent-dev-image-attestor/475f26d42ed18069feed6e3fa6a880bfad333a6c1b7872659f7b345f85889b67.yml"
 }
 
 import {
-  to = aws_s3_object.image_promoter_buildspec_generation["ffa5126a2eb1ef555179c3f6c69d6812ff33bbc23b81f47a07538f8df69d008e"]
-  id = "teamagent-dev-image-release-evidence/codebuild-buildspecs/teamagent-dev-image-promoter/ffa5126a2eb1ef555179c3f6c69d6812ff33bbc23b81f47a07538f8df69d008e.yml"
+  to = aws_s3_object.image_promoter_buildspec_generation["203fa7ffff638c2cd21dd3c2067de106ec6262f1681b69df65ce7ef84c17c58b"]
+  id = "teamagent-dev-image-release-evidence/codebuild-buildspecs/teamagent-dev-image-promoter/203fa7ffff638c2cd21dd3c2067de106ec6262f1681b69df65ce7ef84c17c58b.yml"
 }
 
 import {
