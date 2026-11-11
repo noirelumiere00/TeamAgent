@@ -13,7 +13,7 @@
   },
   "source_runtime_contract": {
     "path": "infra/codebuild/teamagent_runtime_contract.json",
-    "sha256": "ac1ad51a68a17b7d1575a986667986a53317df99b91b3fb67ad23019e2093227"
+    "sha256": "4f3129ef1388e58c569c989205d6ecc40b76c04b5e187d01541db76180737ba3"
   },
   "app_html": {
     "bucket": "teamagent-dev-raw-files",
@@ -124,6 +124,33 @@
           ]
         },
         {
+          "key": "artifact.glibc-apk-sha256",
+          "value": "f8dc51006371a7387048b3791db643760246df648bb74ce620a443baac76c528",
+          "build_arg": "GLIBC_APK_SHA256",
+          "oci_label": "io.teamagent.contract.glibc-apk-sha256",
+          "dockerfile_uses": [
+            "--apk-sha256 \"$GLIBC_APK_SHA256\""
+          ]
+        },
+        {
+          "key": "artifact.glibc-locale-posix-apk-sha256",
+          "value": "0262151832e1a8ceab613f428e1c57a2e67bc92fbe2547c77b81d3b1aa1d12e4",
+          "build_arg": "GLIBC_LOCALE_POSIX_APK_SHA256",
+          "oci_label": "io.teamagent.contract.glibc-locale-posix-apk-sha256",
+          "dockerfile_uses": [
+            "--apk-sha256 \"$GLIBC_LOCALE_POSIX_APK_SHA256\""
+          ]
+        },
+        {
+          "key": "artifact.ld-linux-apk-sha256",
+          "value": "7bec5a9414f5fd81b7ce83243a2cd879b8f2095d38c74cd9098a5f35584705dd",
+          "build_arg": "LD_LINUX_APK_SHA256",
+          "oci_label": "io.teamagent.contract.ld-linux-apk-sha256",
+          "dockerfile_uses": [
+            "--apk-sha256 \"$LD_LINUX_APK_SHA256\""
+          ]
+        },
+        {
           "key": "artifact.libexpat-apk-sha256",
           "value": "68d2212a36051d122200630086b3f9f3edae4785b4700599ac47edb92364e8c5",
           "build_arg": "LIBEXPAT_APK_SHA256",
@@ -202,6 +229,15 @@
           "oci_label": "io.teamagent.contract.expat-package-version",
           "dockerfile_uses": [
             "--version \"$EXPAT_PACKAGE_VERSION\""
+          ]
+        },
+        {
+          "key": "package.glibc.version",
+          "value": "2.44-r16",
+          "build_arg": "GLIBC_PACKAGE_VERSION",
+          "oci_label": "io.teamagent.contract.glibc-package-version",
+          "dockerfile_uses": [
+            "--version \"$GLIBC_PACKAGE_VERSION\""
           ]
         },
         {

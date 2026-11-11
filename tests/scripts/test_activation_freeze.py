@@ -208,8 +208,21 @@ def test_unrelated_changes_still_pass(base: str, head: str, reason: str) -> None
 
 
 def test_unlock_matches_the_committed_declaration() -> None:
-    """504 対策の frozen surface と、退避した APK 宣言を完全一致で封印する。"""
+    """glibc の APK 差し替えと、退避した 504 宣言を完全一致で封印する。"""
     unlock = _freeze_doc()["unlock"]
+    assert unlock["active"] is True
+    assert unlock["scope_paths"] == [
+        "infra/codebuild/teamagent_runtime_contract.json",
+        "infra/codebuild/teamagent_core_media_release_contract.json",
+    ]
+    assert (
+        unlock["reason"]
+        == unlock["gate"]
+        == (
+            "human gate 2026-11-11（小俣さん承認: 便 r118 が段 3 の ECR 脆弱性ゲートで core の glibc 2.44-r8（CVE-2026-84243 HIGH）を拒否。土台の digest は変えず Wolfi 公式の修正版 glibc 2.44-r16 を固定 APK/SHA/APKINDEX で差し替え、runtime/release 契約・世代・凍結をオフライン更新。AWS 書き込み・CodeBuild 起動・S3 公開・git commit・push は行わない）"
+        )
+    )
+    unlock = unlock["previous_scope_20261111_core_glibc"]
     assert unlock["active"] is True
     assert unlock["scope_paths"] == [
         "infra/codebuild/image-attestor-buildspec.yml",
@@ -226,7 +239,7 @@ def test_unlock_matches_the_committed_declaration() -> None:
         "human gate 2026-11-09（ユーザーの明示依頼: ビルドツール 504 対策の調査・"
         "リポジトリ内実装・世代再導出。AWS・S3・GitHub 接続と Terraform apply は禁止）"
     )
-    unlock = unlock["previous_scope_20261109_media_apk_lock"]
+    unlock = _freeze_doc()["unlock"]["previous_scope_20261109_media_apk_lock"]
     assert unlock["active"] is True
     assert unlock["scope_paths"] == [
         "infra/codebuild/teamagent_core_media_release_contract.json",

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Apply pinned Wolfi CA, pip-wheel, Python and libexpat APKs, fail closed."""
+"""Apply pinned Wolfi CA, pip-wheel, Python, libexpat and glibc APKs, fail closed."""
 
 from __future__ import annotations
 
@@ -23,7 +23,8 @@ PYTHON_PACKAGES = {
     "python-3.14-dev",
     "python-3.14-base-dev",
 }
-PAYLOAD_PACKAGES = PYTHON_PACKAGES | {"libexpat1"}
+GLIBC_PACKAGES = {"glibc-2.44", "glibc-2.44-locale-posix", "ld-linux-2.44"}
+PAYLOAD_PACKAGES = PYTHON_PACKAGES | GLIBC_PACKAGES | {"libexpat1"}
 
 
 def q1(data: bytes) -> str:
@@ -90,7 +91,7 @@ def load_package(apk: Path, lock_path: Path, apk_sha256: str, version: str) -> d
         directory = None
         directories = set()
         for member in archive:
-            if member.name in (".PKGINFO", ".melange.yaml"):
+            if member.name in (".PKGINFO", ".melange.yaml", ".source.sha256"):
                 continue
             path = Path(member.name)
             if path.is_absolute() or ".." in path.parts:
@@ -115,8 +116,14 @@ def load_package(apk: Path, lock_path: Path, apk_sha256: str, version: str) -> d
                 )
                 modes[member.name] = expected_mode
             elif member.issym() and (name == NAME or full_payload):
-                if full_payload and (
-                    Path(member.linkname).is_absolute() or ".." in Path(member.linkname).parts
+                if (
+                    full_payload
+                    and (Path(member.linkname).is_absolute() or ".." in Path(member.linkname).parts)
+                    and not (
+                        name == "glibc-2.44"
+                        and member.name == "usr/bin/ld.so"
+                        and member.linkname == "../../lib/ld-linux-aarch64.so.1"
+                    )
                 ):
                     raise ValueError("unsafe package symlink")
                 data = member.linkname.encode()
@@ -137,6 +144,21 @@ def load_package(apk: Path, lock_path: Path, apk_sha256: str, version: str) -> d
             "usr/lib/libexpat.so.1": "libexpat.so.1.13.1"
         }:
             raise ValueError("unexpected libexpat payload/SBOM")
+    elif name in GLIBC_PACKAGES:
+        primary = {
+            "glibc-2.44": "usr/lib/libc.so.6",
+            "glibc-2.44-locale-posix": "usr/lib/locale/C.utf8/LC_CTYPE",
+            "ld-linux-2.44": "usr/lib/ld-linux-aarch64.so.1",
+        }[name]
+        expected_links = (
+            {"usr/bin/ld.so": "../../lib/ld-linux-aarch64.so.1"} if name == "glibc-2.44" else {}
+        )
+        if (
+            index.get("o") != "glibc-2.44"
+            or not {primary, sbom}.issubset(files)
+            or links != expected_links
+        ):
+            raise ValueError("unexpected glibc payload/SBOM")
     elif full_payload:
         if sbom not in files or (name == "python-3.14-base" and "usr/bin/python3.14" not in files):
             raise ValueError("missing Python payload/SBOM")
@@ -213,7 +235,7 @@ def verify_payload(root: Path, package: dict, stale: list[str]) -> None:
     for path, data in package["files"].items():
         if (root / path).is_symlink() or (root / path).read_bytes() != data:
             raise ValueError(f"payload differs from the pinned APK: {path}")
-        if (root / path).stat().st_mode & 0o777 != package["modes"][path]:
+        if (root / path).stat().st_mode & 0o7777 != package["modes"][path]:
             raise ValueError(f"payload mode differs from the pinned APK: {path}")
     for path, target in package["links"].items():
         if not (root / path).is_symlink() or os.readlink(root / path) != target:
@@ -225,6 +247,23 @@ def verify_payload(root: Path, package: dict, stale: list[str]) -> None:
 
 def prepare(root: Path, packages: list[dict]) -> None:
     before = (root / DB).read_bytes()
+    glibc_replacements = {
+        package["lock"]["apkindex"]["P"]
+        for package in packages
+        if package["lock"]["apkindex"]["P"] in GLIBC_PACKAGES
+    }
+    if glibc_replacements:
+        glibc_origin = {}
+        for block in before.decode().split("\n\n"):
+            fields = dict(
+                line.split(":", 1) for line in block.splitlines() if line.startswith(("P:", "o:"))
+            )
+            if fields.get("o") == "glibc" or fields.get("o", "").startswith("glibc-"):
+                glibc_origin[fields["P"]] = fields["o"]
+        if glibc_replacements != GLIBC_PACKAGES or glibc_origin != dict.fromkeys(
+            GLIBC_PACKAGES, "glibc-2.44"
+        ):
+            raise ValueError("unexpected glibc origin package inventory/replacements")
     after = before
     for package in packages:
         after = replaced_db(after, package)
@@ -251,7 +290,10 @@ def prepare(root: Path, packages: list[dict]) -> None:
             raise ValueError("unexpected expat origin package inventory")
     if any(package["lock"]["apkindex"]["P"] in PAYLOAD_PACKAGES for package in packages):
         for dep in dependencies:
-            if dep not in providers:
+            if dep.startswith("!"):
+                if dep[1:] in providers:
+                    raise ValueError(f"conflicting replacement package dependency: {dep}")
+            elif dep not in providers:
                 raise ValueError(f"unsatisfied replacement package dependency: {dep}")
     retained = {
         path for package in packages for kind in ("files", "links") for path in package[kind]

@@ -1,0 +1,23 @@
+{
+  "schema_version": 1,
+  "url": "https://packages.wolfi.dev/os/aarch64/glibc-2.44-locale-posix-2.44-r16.apk",
+  "archive": "glibc-2.44-locale-posix-2.44-r16.apk",
+  "archive_sha256": "0262151832e1a8ceab613f428e1c57a2e67bc92fbe2547c77b81d3b1aa1d12e4",
+  "base_version": "2.44-r8",
+  "apkindex": {
+    "C": "Q1Eyaw/7CoSnlauc/lgVmkSQFpRMM=",
+    "P": "glibc-2.44-locale-posix",
+    "V": "2.44-r16",
+    "A": "aarch64",
+    "S": "105191",
+    "I": "421852",
+    "T": "POSIX locale data for glibc",
+    "L": "LGPL-2.1-or-later",
+    "o": "glibc-2.44",
+    "m": "wolfi",
+    "t": "1794325754",
+    "c": "69c2b75e0711c38be3c5881e3a141667ccf54341",
+    "D": "merged-lib merged-sbin merged-usrsbin wolfi-baselayout",
+    "p": "glibc-locale-posix=2.44-r16"
+  }
+}

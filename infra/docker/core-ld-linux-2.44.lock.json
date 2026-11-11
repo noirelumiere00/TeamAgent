@@ -1,0 +1,24 @@
+{
+  "schema_version": 1,
+  "url": "https://packages.wolfi.dev/os/aarch64/ld-linux-2.44-2.44-r16.apk",
+  "archive": "ld-linux-2.44-2.44-r16.apk",
+  "archive_sha256": "7bec5a9414f5fd81b7ce83243a2cd879b8f2095d38c74cd9098a5f35584705dd",
+  "base_version": "2.44-r8",
+  "apkindex": {
+    "C": "Q1t17fCm2B60BTF1vt7/MMKfiN4/k=",
+    "P": "ld-linux-2.44",
+    "V": "2.44-r16",
+    "A": "aarch64",
+    "S": "147275",
+    "I": "275646",
+    "T": "the GLIBC ELF interpreter",
+    "L": "LGPL-2.1-or-later",
+    "o": "glibc-2.44",
+    "m": "wolfi",
+    "t": "1794325754",
+    "c": "69c2b75e0711c38be3c5881e3a141667ccf54341",
+    "D": "glibc-2.44=2.44-r16 merged-lib merged-sbin merged-usrsbin wolfi-baselayout",
+    "p": "ld-linux=2.44-r16 so-ver:ld-linux-aarch64.so.1=2.44-r16 so:ld-linux-aarch64.so.1=1",
+    "k": "244"
+  }
+}

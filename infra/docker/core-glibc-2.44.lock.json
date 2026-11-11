@@ -1,0 +1,24 @@
+{
+  "schema_version": 1,
+  "url": "https://packages.wolfi.dev/os/aarch64/glibc-2.44-2.44-r16.apk",
+  "archive": "glibc-2.44-2.44-r16.apk",
+  "archive_sha256": "f8dc51006371a7387048b3791db643760246df648bb74ce620a443baac76c528",
+  "base_version": "2.44-r8",
+  "apkindex": {
+    "C": "Q1u1UNmHsIUyB4ysWbOKO73XAo7d4=",
+    "P": "glibc-2.44",
+    "V": "2.44-r16",
+    "A": "aarch64",
+    "S": "2332232",
+    "I": "5708893",
+    "T": "the GNU C library",
+    "L": "LGPL-2.1-or-later",
+    "o": "glibc-2.44",
+    "m": "wolfi",
+    "t": "1794325754",
+    "c": "69c2b75e0711c38be3c5881e3a141667ccf54341",
+    "D": "!musl glibc-2.44-locale-posix ld-linux-2.44=2.44-r16 libgcc merged-lib merged-sbin merged-usrsbin so:ld-linux-aarch64.so.1 wolfi-baselayout",
+    "p": "cmd:ldconfig=2.44-r16 glibc=2.44-r16 so-ver:libBrokenLocale.so.1=2.44-r16 so-ver:libanl.so.1=2.44-r16 so-ver:libc.so.6=2.44-r16 so-ver:libc_malloc_debug.so.0=2.44-r16 so-ver:libdl.so.2=2.44-r16 so-ver:libm.so.6=2.44-r16 so-ver:libmemusage.so=2.44-r16 so-ver:libmvec.so.1=2.44-r16 so-ver:libnsl.so.1=2.44-r16 so-ver:libnss_compat.so.2=2.44-r16 so-ver:libnss_dns.so.2=2.44-r16 so-ver:libnss_files.so.2=2.44-r16 so-ver:libpthread.so.0=2.44-r16 so-ver:libresolv.so.2=2.44-r16 so-ver:librt.so.1=2.44-r16 so-ver:libthread_db.so.1=2.44-r16 so-ver:libutil.so.1=2.44-r16 so:libBrokenLocale.so.1=1 so:libanl.so.1=1 so:libc.so.6=6 so:libc_malloc_debug.so.0=0 so:libdl.so.2=2 so:libm.so.6=6 so:libmemusage.so=0 so:libmvec.so.1=1 so:libnsl.so.1=1 so:libnss_compat.so.2=2 so:libnss_dns.so.2=2 so:libnss_files.so.2=2 so:libpthread.so.0=0 so:libresolv.so.2=2 so:librt.so.1=1 so:libthread_db.so.1=1 so:libutil.so.1=1",
+    "k": "244"
+  }
+}

@@ -19,6 +19,12 @@
 !infra/docker/replace_core_ca_bundle.py
 !infra/docker/core-ca-bundle.lock.json
 !infra/docker/core-libexpat1.lock.json
+!infra/docker/core-glibc-2.44.lock.json
+!infra/docker/vendor/glibc-2.44-2.44-r16.apk
+!infra/docker/core-glibc-2.44-locale-posix.lock.json
+!infra/docker/vendor/glibc-2.44-locale-posix-2.44-r16.apk
+!infra/docker/core-ld-linux-2.44.lock.json
+!infra/docker/vendor/ld-linux-2.44-2.44-r16.apk
 !infra/docker/vendor/libexpat1-2.10.0-r0.apk
 !infra/docker/core-pip-wheel.lock.json
 !infra/docker/vendor/py3-pip-wheel-26.2.2-r2.apk
