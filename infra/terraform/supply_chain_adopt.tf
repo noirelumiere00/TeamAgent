@@ -526,6 +526,12 @@ locals {
       content_type                  = "text/yaml"
       object_lock_retain_until_date = "2099-12-31T00:00:00Z"
     }
+    # 2026-11-12 オフライン導出（未公開）。OpenClaw の CVE-2026-84243 HIGH 対応で glibc 2.44-r16 の土台へ更新。
+    # SHA 確認済み live 本文の OpenClaw 契約1か所だけを置換し、逆置換で一致を確認。
+    "e556d63bd19b57a0de7fdcddee501fae4ac37faa31fd45526a2193d1dd7f1835" = {
+      content_type                  = "text/yaml"
+      object_lock_retain_until_date = "2099-12-31T00:00:00Z"
+    }
   }
 
   image_promoter_buildspec_generations = {
@@ -965,8 +971,8 @@ import {
 }
 
 import {
-  to = aws_s3_object.image_attestor_buildspec_generation["79e2719704c72809074bcc2db0305648f0bdaa00a4c3af47f89760d30f4df528"]
-  id = "teamagent-dev-image-release-evidence/codebuild-buildspecs/teamagent-dev-image-attestor/79e2719704c72809074bcc2db0305648f0bdaa00a4c3af47f89760d30f4df528.yml"
+  to = aws_s3_object.image_attestor_buildspec_generation["e556d63bd19b57a0de7fdcddee501fae4ac37faa31fd45526a2193d1dd7f1835"]
+  id = "teamagent-dev-image-release-evidence/codebuild-buildspecs/teamagent-dev-image-attestor/e556d63bd19b57a0de7fdcddee501fae4ac37faa31fd45526a2193d1dd7f1835.yml"
 }
 
 import {

@@ -208,20 +208,26 @@ def test_unrelated_changes_still_pass(base: str, head: str, reason: str) -> None
 
 
 def test_unlock_matches_the_committed_declaration() -> None:
-    """nodejs の版更新と、退避した過去の宣言を完全一致で封印する。"""
+    """OpenClaw 土台更新と、退避した過去の宣言を完全一致で封印する。"""
     unlock = _freeze_doc()["unlock"]
     assert unlock["active"] is True
     assert unlock["scope_paths"] == [
-        "infra/codebuild/teamagent_core_media_release_contract.json",
+        "infra/codebuild/openclaw_bundle_contract.json",
     ]
     assert (
         unlock["reason"]
-        == "human gate 2026-11-12（小俣さん 11-12『直して撃ち直す』の続き・Alpine 上流で nodejs 24.22.1-r1 が消え 24.22.3-r0 へ。r120 の事前確認で検出）"
+        == "human gate 2026-11-12（小俣さん 11-12 OK・openclaw 土台の glibc 2.44-r9 が CVE-2026-84243 HIGH。Chainguard node arm64 25aa71b7… へ）"
     )
     assert (
         unlock["gate"]
-        == "human gate 2026-11-12（小俣さん 11-12『直して撃ち直す』の続き・Alpine 上流で nodejs 24.22.1-r1 が消え 24.22.3-r0 へ。r120 の事前確認で検出）"
+        == "human gate 2026-11-12（小俣さん 11-12 OK・openclaw 土台の glibc 2.44-r9 が CVE-2026-84243 HIGH。Chainguard node arm64 25aa71b7… へ）"
     )
+    assert unlock["previous_scope_20261112c_node"] == {
+        "active": True,
+        "scope_paths": ["infra/codebuild/teamagent_core_media_release_contract.json"],
+        "reason": "human gate 2026-11-12（小俣さん 11-12『直して撃ち直す』の続き・Alpine 上流で nodejs 24.22.1-r1 が消え 24.22.3-r0 へ。r120 の事前確認で検出）",
+        "gate": "human gate 2026-11-12（小俣さん 11-12『直して撃ち直す』の続き・Alpine 上流で nodejs 24.22.1-r1 が消え 24.22.3-r0 へ。r120 の事前確認で検出）",
+    }
     assert unlock[
         "previous_scope_20261111_teamagent_runtime_contract_teamagent_core_media_release_contract"
     ] == {
