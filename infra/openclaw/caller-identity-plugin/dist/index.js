@@ -2993,7 +2993,8 @@ export function classifyInboundRoute(text) {
       (/社内|案件|施策/u.test(active) && /メール|予定|カレンダー/u.test(active) && /も|してから|その内容で/u.test(active)) ||
       (generation && /(?:事例|案件|社内|Slack).{0,40}(?:探して|検索して|確認して|調べて)/iu.test(active)))
     return route("mixed", true, "answer", "unknown");
-  if (/Slack/iu.test(own)) {
+  // スタンプ／リアクションを押した人の一覧は Slack の操作（「一覧」で事例一覧に回さない）。
+  if (/Slack|スタンプ(?!ラリー)|リアクション/iu.test(own)) {
     if (/要約|まとめて|整理して|箇条書き|説明して/u.test(own))
       return route("slack", true, "answer", "existing_operation");
     return route("slack", true, "list", "existing_operation");
