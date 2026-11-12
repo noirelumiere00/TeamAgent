@@ -22,6 +22,7 @@ PERIOD_WORDS = (
     "今月",
     "先月",
     "直近N日",
+    "直近N週間",
     "M月D日〜D日",
     "M/D〜M/D",
     "YYYY-MM-DD",
@@ -96,6 +97,12 @@ def resolve_period(period: str, *, now: datetime | None = None) -> tuple[str, st
         if not match[1] and start > today:
             start = _date(year - 1, int(match[2]), 1)
         end = (start.replace(day=28) + timedelta(days=4)).replace(day=1)
+    elif match := re.fullmatch(r"(?:直近|過去|この|ここ)?(\d{1,2})週間", period):
+        # 「直近1週間」= 「直近7日」と同じ。モデルも人もこの言い方をよく使う。
+        days = int(match[1]) * 7
+        if not 1 <= days <= _RECENT_MAX_DAYS:
+            raise ValueError("bad_period")
+        start, end = today - timedelta(days=days), now
     elif match := re.fullmatch(r"(?:直近|過去)(\d{1,3})日(?:間)?", period):
         days = int(match[1])
         if not 1 <= days <= _RECENT_MAX_DAYS:

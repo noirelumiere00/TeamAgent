@@ -303,7 +303,7 @@ def test_planner_creates_one_idempotent_reservation_per_user(
     monkeypatch.setenv("DIGEST_USER_REF_PEPPER", "p")
     monkeypatch.setattr(mod, "_build_token_store", lambda: object())
     monkeypatch.setattr(
-        mod, "_read_only_calendar", lambda store, email: _Cal([_Ev("2026-09-11T11:00:00+09:00")])
+        mod, "_read_only_calendar", lambda store, email: _Cal([_Ev("2026-09-11T08:00:00+09:00")])
     )
     import teamagent.adapters.scheduler_client as sched_mod
 
@@ -345,7 +345,7 @@ def test_planner_honors_operator_date_over_the_wall_clock(
     monkeypatch.setenv("DIGEST_USER_REF_PEPPER", "p")
     monkeypatch.setattr(mod, "_build_token_store", lambda: object())
     monkeypatch.setattr(
-        mod, "_read_only_calendar", lambda store, email: _Cal([_Ev("2026-09-11T11:00:00+09:00")])
+        mod, "_read_only_calendar", lambda store, email: _Cal([_Ev("2026-09-11T08:00:00+09:00")])
     )
     import teamagent.adapters.scheduler_client as sched_mod
 
@@ -389,14 +389,14 @@ def test_planner_skips_users_without_calendar(monkeypatch: pytest.MonkeyPatch) -
 def test_planner_reserves_late_starters_and_leaves_default_ones_to_bulk(
     monkeypatch: pytest.MonkeyPatch, _reserve_store: _ReserveStore
 ) -> None:
-    """10-01 裁定（30 分前・上限なし）での振り分け。
+    """30 分前・上限＝既定時刻（11-12「朝のダイジェストを 14 時に送るのはおかしい」）での振り分け。
 
     - 時刻つき予定なし → 予約しない（9:30 の一括）
     - 最初の予定 10:00 → 送信 9:30 ＝既定時刻と同じ → 予約しない（一括で同時刻に届く）
-    - 最初の予定 15:00 → 14:30 に予約（旧仕様は上限で 9:30 に丸めていた）
+    - 最初の予定 15:00 → 上限で 9:30 → 予約しない（10-01〜11-12 は 14:30 に予約していた）
     - 最初の予定 08:00 → 07:30 に予約
 
-    変異: 上限（cap_to_default）を戻すと 15:00 の人が予約されず赤。
+    変異: 上限（cap_to_default）を外すと 15:00 の人が 14:30 に予約されて赤。
     ``fire_at == default_at`` の判定を外すと 10:00 の人に余分な予約ができて赤。
     """
     created: list[dict[str, Any]] = []
@@ -426,11 +426,10 @@ def test_planner_reserves_late_starters_and_leaves_default_ones_to_bulk(
     assert mod.run_planner(list(cals)) == 0
     fires = {c["name"]: (c["fire_at"].hour, c["fire_at"].minute) for c in created}
     assert fires == {
-        digest_schedule_name(user_ref(late, pepper="p"), "20260911"): (14, 30),
         digest_schedule_name(user_ref(early, pepper="p"), "20260911"): (7, 30),
     }
-    # 予約した人だけに印を付ける（9:30 の一括はこの印で見送る）。
-    assert sorted(_reserve_store.reserved) == sorted([late, early])
+    # 予約した人だけに印を付ける（9:30 の一括はこの印で見送る＝遅い人は一括で届く）。
+    assert sorted(_reserve_store.reserved) == [early]
 
 
 def test_planner_does_not_schedule_without_a_reservation_mark(
@@ -452,7 +451,7 @@ def test_planner_does_not_schedule_without_a_reservation_mark(
     monkeypatch.setenv("DIGEST_USER_REF_PEPPER", "p")
     monkeypatch.setattr(mod, "_build_token_store", lambda: object())
     monkeypatch.setattr(
-        mod, "_read_only_calendar", lambda store, email: _Cal([_Ev("2026-09-11T15:00:00+09:00")])
+        mod, "_read_only_calendar", lambda store, email: _Cal([_Ev("2026-09-11T08:00:00+09:00")])
     )
     import teamagent.adapters.scheduler_client as sched_mod
 
@@ -477,7 +476,7 @@ def test_failed_schedule_removes_the_mark(
     monkeypatch.setenv("DIGEST_USER_REF_PEPPER", "p")
     monkeypatch.setattr(mod, "_build_token_store", lambda: object())
     monkeypatch.setattr(
-        mod, "_read_only_calendar", lambda store, email: _Cal([_Ev("2026-09-11T15:00:00+09:00")])
+        mod, "_read_only_calendar", lambda store, email: _Cal([_Ev("2026-09-11T08:00:00+09:00")])
     )
     import teamagent.adapters.scheduler_client as sched_mod
 

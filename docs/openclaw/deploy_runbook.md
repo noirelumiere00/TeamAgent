@@ -104,6 +104,11 @@ contract が独立承認で active になった後だけ、次の固定経路を
 `ca-certificates-bundle` は 20260909-r2 → 20260909-r3。Claude が取得した arm64 レイヤの実測値で node probe を同期した。
 OpenClaw の ECR 例外はすでに空で、追加・撤去はない。Docker 実ビルドと実イメージの Trivy 検査は便で確認する。
 
+2026-11-12: glibc 2.44-r9 の HIGH `CVE-2026-84243` に対応し、runtime ベースを arm64 `sha256:25aa71b71fb30bee71daf1b8451f8b12ba1a83af29b9e1b486325aff06ac0db6` へ更新する。
+nodejs-26 26.13.0-r1・glibc 2.44-r16・ca-certificates-bundle 20261020-r0・ICU 79 の世代。npm-12 12.2.2-r0 は従来どおり runtime から除去する。
+Claude がホストの Docker で2回実測し一致した `/usr/bin/node` の SHA-256 `7a25b7cb0de67da8f32bb33b27671da1d4233669c64f82201bed17b9ad5df380` に契約の node probe とテスト表を同期した。
+提供されたホストの Trivy 記録では、このベースの HIGH/CRITICAL は 0 件。最終 OpenClaw イメージの実ビルドと ECR 検査は便で確認する。
+
 build role は candidate/release repository、publisher evidence、deployment
 resource を変更できません。publisher/launcher も ECS、EventBridge、
 task definition、service を変更できません。

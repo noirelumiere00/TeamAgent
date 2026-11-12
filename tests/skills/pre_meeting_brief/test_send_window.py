@@ -40,9 +40,16 @@ def test_early_meeting_clamps_to_floor_and_flags() -> None:
     assert plan.clamped_to_floor is True
 
 
-def test_late_meeting_is_not_capped_at_default() -> None:
-    """10-01 裁定「一律 9:30 を撤廃」: 15:00 の予定なら 14:30（上限を戻すと赤）。"""
+def test_late_meeting_is_capped_at_default() -> None:
+    """11-12「朝のダイジェストを 14 時に送るのはおかしい」: 15:00 の予定でも 9:30（上限を外すと赤）。"""
     plan = compute_send_time(DAY, _at(15, 0), default_hhmm=DEFAULT)
+    assert plan.fire_at == _at(9, 30)
+    assert plan.clamped_to_default is True
+
+
+def test_uncapped_mode_reproduces_the_october_rule() -> None:
+    """戻すとき用: 10-01〜11-12 の上限なしは ``cap_to_default=False`` で再現できる。"""
+    plan = compute_send_time(DAY, _at(15, 0), default_hhmm=DEFAULT, cap_to_default=False)
     assert plan.fire_at == _at(14, 30)
     assert plan.clamped_to_default is False
 
