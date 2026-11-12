@@ -124,6 +124,17 @@ def test_quoted_words_filter_posts(quote: str) -> None:
     assert not bed.calls
 
 
+def test_quoted_words_with_no_match_show_all_reacted_posts_and_say_so() -> None:
+    skill, factory, bed, _ = _build(
+        history_messages=[_post("連絡"), _post("募集", ts="1755400050.000100")]
+    )
+    _names(factory._client)
+    out = _run(skill, scope="channel", focus="「スタンプを押した人」" + FOCUS)
+    assert out.message_count == 2 and "連絡" in out.message and "募集" in out.message
+    assert out.message.startswith("指定の語を含む投稿には無かったので")
+    assert not bed.calls
+
+
 @pytest.mark.parametrize("posts", [[], [_post(reactions=[])]])
 def test_no_reactions_is_success(posts: list[dict[str, Any]]) -> None:
     skill, factory, bed, _ = _build(history_messages=posts)
@@ -233,6 +244,10 @@ def test_reaction_log_contains_counts_only(monkeypatch: pytest.MonkeyPatch) -> N
     call = next(c for c in log.info.call_args_list if c.args == ("slack_summary_reactions",))
     assert set(call.kwargs) == {
         "request_id",
+        "read",
+        "reacted",
+        "terms",
+        "widened",
         "messages",
         "stamp_lines",
         "users",

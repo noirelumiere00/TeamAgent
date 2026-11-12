@@ -54,9 +54,12 @@ def render_reactions(
 ) -> SlackSummaryOutput:
     start = time.perf_counter()
     terms = [a or b for a, b in re.findall(r"「([^」]+)」|『([^』]+)』", intent)]
-    posts = [
-        m for m in result.messages if m.reactions and (not terms or any(t in m.text for t in terms))
-    ]
+    reacted = [m for m in result.messages if m.reactions]
+    posts = [m for m in reacted if not terms or any(t in m.text for t in terms)]
+    # 「」はモデルが focus に足した語のこともある。絞って 0 件なら絞らずに出し、そう書く。
+    widened = bool(terms) and not posts and bool(reacted)
+    if widened:
+        posts = reacted
     truncated = result.truncated or len(posts) > MAX_POSTS
     limited = len(posts) > MAX_POSTS
     names: dict[str, str] = {}
@@ -89,6 +92,11 @@ def render_reactions(
             stamp_lines += 1
         blocks.append("\n".join(lines))
     message = "\n\n".join(blocks) or "スタンプの付いた投稿は見つかりませんでした。"
+    if widened:
+        message = (
+            "指定の語を含む投稿には無かったので、期間内でスタンプの付いた投稿をすべて出します。\n\n"
+            + message
+        )
     if limited:
         message += "\n上限のため一部だけ表示"
     elif result.truncated:
@@ -96,6 +104,10 @@ def render_reactions(
     logger.info(
         "slack_summary_reactions",
         request_id=request_id,
+        read=len(result.messages),
+        reacted=len(reacted),
+        terms=len(terms),
+        widened=widened,
         messages=len(blocks),
         stamp_lines=stamp_lines,
         users=len(names),
