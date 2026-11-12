@@ -1,14 +1,14 @@
 """個人別配信時刻の決定（純関数・JST 固定）— DELTA §1 の唯一の実装。
 
-    送信時刻 = max(その日の最初の「時刻つき」予定の開始 − 30分, 下限 06:00)
+    送信時刻 = min(max(その日の最初の「時刻つき」予定の開始 − 30分, 下限 06:00), 上限 <既定時刻>)
     予定が 1 件も無い日 = <既定時刻>（一括実行）
 
 - **終日予定は「最初の予定」の計算から除外**（終日だけの日は「予定なし」扱い）。
 - 分は 5 分単位に **切り下げ**（08:47 → 08:45）。
 - 下限 06:00 に張り付いたら、冒頭に 1 行添える（``clamped_to_floor``）。
-- **上限なし**（2026-10-01 小俣さん裁定「一律 9:30 を撤廃・予定の 30 分前」）。最初の予定が
-  14:00 の人には 13:30 に届く。旧仕様（60 分前・上限=既定時刻）は ``cap_to_default=True``
-  と ``lead_minutes=60`` で再現できる（戻すときのため）。
+- **上限＝既定時刻**（2026-11-12 小俣さん「朝のダイジェストを 14 時に送るのはおかしい」）。
+  最初の予定が遅い日も既定時刻（9:30）の一括で届く。10-01 の「30 分前」は早い予定の日だけ効く。
+  上限なし（10-01〜11-12 の仕様）は ``cap_to_default=False`` で再現できる。
 
 planner 実行後に予定が追加・変更されても当日の送信時刻は追随しない。
 本関数は祝日・休暇の判定をしない（予定が無ければ既定時刻）。祝日に予約を
@@ -90,7 +90,7 @@ def compute_send_time(
     default_hhmm: tuple[int, int],
     floor_hhmm: tuple[int, int] = FLOOR_HHMM,
     lead_minutes: int = LEAD_MINUTES,
-    cap_to_default: bool = False,
+    cap_to_default: bool = True,
 ) -> SendPlan:
     """DELTA §1 の式そのもの。``first_start`` は時刻つき予定の最初の開始（JST）。"""
     default_at = _dt.datetime.combine(
@@ -110,7 +110,8 @@ def compute_send_time(
     #   付けてはいけない（嘘の注記になる）。張り付き扱いは target < floor_at だけ。
     if target < floor_at:
         return SendPlan(fire_at=floor_at, clamped_to_floor=True)
-    if cap_to_default and target >= default_at:
+    # 既定時刻ちょうど（最初の予定が 10:00）は張り付き扱いにしない＝通常どおりの 30 分前。
+    if cap_to_default and target > default_at:
         return SendPlan(fire_at=default_at, clamped_to_default=True)
     return SendPlan(fire_at=target)
 
