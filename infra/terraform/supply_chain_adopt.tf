@@ -271,6 +271,12 @@ locals {
       content_type                  = "text/yaml"
       object_lock_retain_until_date = "2099-12-31T00:00:00Z"
     }
+    # 2026-11-12 オフライン導出（未公開）。Alpine 上流から旧版が消えたため nodejs 24.22.3-r0 と edge の実測 binary SHA へ追随。
+    # SHA 確認済み live 本文の core_media 契約1か所だけを置換し、逆置換で一致を確認。
+    "5c70ee6fed99f71e3cdc5f333bfe449fd5965462f141f085df3be5b71f764548" = {
+      content_type                  = "text/yaml"
+      object_lock_retain_until_date = "2099-12-31T00:00:00Z"
+    }
   }
 
   image_attestor_buildspec_generations = {
@@ -514,6 +520,12 @@ locals {
       content_type                  = "text/yaml"
       object_lock_retain_until_date = "2099-12-31T00:00:00Z"
     }
+    # 2026-11-12 オフライン導出（未公開）。Alpine 上流から旧版が消えたため nodejs 24.22.3-r0 と edge の実測 binary SHA へ追随。
+    # SHA 確認済み live 本文の core_media 契約1か所だけを置換し、逆置換で一致を確認。
+    "79e2719704c72809074bcc2db0305648f0bdaa00a4c3af47f89760d30f4df528" = {
+      content_type                  = "text/yaml"
+      object_lock_retain_until_date = "2099-12-31T00:00:00Z"
+    }
   }
 
   image_promoter_buildspec_generations = {
@@ -747,6 +759,12 @@ locals {
       content_type                  = "text/yaml"
       object_lock_retain_until_date = "2099-12-31T00:00:00Z"
     }
+    # 2026-11-12 オフライン導出（未公開）。Alpine 上流から旧版が消えたため nodejs 24.22.3-r0 と edge の実測 binary SHA へ追随。
+    # SHA 確認済み live 本文の core_media 契約1か所だけを置換し、逆置換で一致を確認。
+    "43c2f165d13274500297054f810da5a712b2413317b58834aca248ce5bb851b7" = {
+      content_type                  = "text/yaml"
+      object_lock_retain_until_date = "2099-12-31T00:00:00Z"
+    }
   }
 
   approval_publisher_resolved_source_buildspec_generations = {
@@ -942,18 +960,18 @@ removed {
 }
 
 import {
-  to = aws_s3_object.mcp_source_publisher_buildspec_generation["32c57554373bdc406f9d19aca2da2b80ccf379cf99bb5f1d5fa3958a57990afd"]
-  id = "teamagent-dev-image-release-evidence/codebuild-buildspecs/teamagent-dev-mcp-source-publisher/32c57554373bdc406f9d19aca2da2b80ccf379cf99bb5f1d5fa3958a57990afd.yml"
+  to = aws_s3_object.mcp_source_publisher_buildspec_generation["5c70ee6fed99f71e3cdc5f333bfe449fd5965462f141f085df3be5b71f764548"]
+  id = "teamagent-dev-image-release-evidence/codebuild-buildspecs/teamagent-dev-mcp-source-publisher/5c70ee6fed99f71e3cdc5f333bfe449fd5965462f141f085df3be5b71f764548.yml"
 }
 
 import {
-  to = aws_s3_object.image_attestor_buildspec_generation["af31b81d23433e6b63aa9a7d8072efd8ef08a6de41848901194e3f988e149ae9"]
-  id = "teamagent-dev-image-release-evidence/codebuild-buildspecs/teamagent-dev-image-attestor/af31b81d23433e6b63aa9a7d8072efd8ef08a6de41848901194e3f988e149ae9.yml"
+  to = aws_s3_object.image_attestor_buildspec_generation["79e2719704c72809074bcc2db0305648f0bdaa00a4c3af47f89760d30f4df528"]
+  id = "teamagent-dev-image-release-evidence/codebuild-buildspecs/teamagent-dev-image-attestor/79e2719704c72809074bcc2db0305648f0bdaa00a4c3af47f89760d30f4df528.yml"
 }
 
 import {
-  to = aws_s3_object.image_promoter_buildspec_generation["e227bd539ffa4e5a8e0c649572ec201d225a2bb1c61cf1034e6ccd190284e2d8"]
-  id = "teamagent-dev-image-release-evidence/codebuild-buildspecs/teamagent-dev-image-promoter/e227bd539ffa4e5a8e0c649572ec201d225a2bb1c61cf1034e6ccd190284e2d8.yml"
+  to = aws_s3_object.image_promoter_buildspec_generation["43c2f165d13274500297054f810da5a712b2413317b58834aca248ce5bb851b7"]
+  id = "teamagent-dev-image-release-evidence/codebuild-buildspecs/teamagent-dev-image-promoter/43c2f165d13274500297054f810da5a712b2413317b58834aca248ce5bb851b7.yml"
 }
 
 import {
