@@ -224,6 +224,11 @@ NODE_BINARY_SHA256_BY_RUNTIME_DIGEST = {
     "sha256:4e3acbdfc5647f9c40ee16ad0f3937309847489948d85dbb0a4f4a766fd4360d": (
         "6410d7ee22c666fb81dc671fefeac4370918a554156700a97f6c5af65ffd4501"
     ),
+    # 2026-11-12 Claude が Docker で2回実測・一致: nodejs-26 26.13.0-r1・glibc 2.44-r16。
+    # glibc 2.44-r9 の HIGH CVE-2026-84243 に対応。
+    "sha256:25aa71b71fb30bee71daf1b8451f8b12ba1a83af29b9e1b486325aff06ac0db6": (
+        "7a25b7cb0de67da8f32bb33b27671da1d4233669c64f82201bed17b9ad5df380"
+    ),
 }
 
 
