@@ -64,7 +64,7 @@ UV_DIGEST = "9941e2d8e06ff884d328905091eac0a6bc1e40e5ce12e6dd0de4ef4ee26baac4"
 # 2026-11-07: Alpine 上流への追随（zlib 1.3.2-r1→1.4-r0）。apk 段の実ビルドで lock 差分 -4 +4（240→240 行）。
 # 2026-11-09: Alpine 上流への追随（削除: ffmpeg8-libavdevice-8.1.3-r1、ffmpeg8-libavfilter-8.1.3-r1、ffmpeg8-libswscale-8.1.3-r1 / 追加: ffmpeg8-libavdevice-8.1.3-r2、ffmpeg8-libavfilter-8.1.3-r2、ffmpeg8-libswscale-8.1.3-r2）。apk 段の実ビルドで lock 差分 -3 +3（240→240 行）。
 # 2026-11-11: CVE 対応の明示 pin（libxslt 1.1.43-r3→1.1.43-r4）。lock は該当 1 行だけ差し替え（240→240 行・手元の実ビルドなし。段 3 の image-builder が照合）。
-APK_LOCK_SHA256 = "c50404e70c98ee33b380199bdb5b9e72b5dc527391a308aeb9ec5461e8609d2d"
+APK_LOCK_SHA256 = "5894cd6ac612f826b869e0eccca33c5c28544d5ebf66df3b53d168fa20c590fe"
 CHROMIUM_PATH = "/usr/lib/chromium/chromium"
 
 
@@ -100,7 +100,7 @@ def test_media_runtime_packages_versions_and_binaries_are_exact() -> None:
         ),
         "NODE_PACKAGE_VERSION": "24.22.1-r1",
         "NODE_VERSION": "24.22.1",
-        "NODE_BINARY_SHA256": ("5b783adaa4c44c648568373e40ad5e4c48070085a62d1afa1b24d15bf8ad5178"),
+        "NODE_BINARY_SHA256": ("be3970940ddd92908f825215c6d5044841a8048efceea98c5d9107307061acc6"),
         "PYTHON_PACKAGE_VERSION": "3.14.10-r1",
         "PYTHON_VERSION": "3.14.10",
         "PYTHON_BINARY_SHA256": (
