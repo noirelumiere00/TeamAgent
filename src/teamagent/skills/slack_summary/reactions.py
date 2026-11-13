@@ -44,12 +44,12 @@ def reaction_channel(intent: str) -> dict[str, str]:
     for named in re.finditer(r"(?<![\w/#])#([\w-]+)", intent):
         if not named[1].isdecimal():
             return {"channel_name": named[1]}
-    named = re.search(
+    labelled = re.search(
         r"チャンネル(?:名)?(?:\s*[:：]\s*|[ \t]+|[「『]|(?=[A-Za-z0-9_-]))"
         r"[*`]*([\w-]+)",
         intent,
     )
-    return {"channel_name": named[1]} if named and not named[1].isdecimal() else {}
+    return {"channel_name": labelled[1]} if labelled and not labelled[1].isdecimal() else {}
 
 
 def reaction_terms(intent: str) -> list[str]:

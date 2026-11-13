@@ -602,8 +602,8 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
         """全経路の不在回答を、検索を広げてから確定する。"""
         from teamagent.skills.slack_summary.reactions import reaction_channel, wants_reactions
 
-        request = str(ctx.metadata.get("request_text", "") or "")
-        channel = reaction_channel(request) if wants_reactions(request) else {}
+        request_text = str(ctx.metadata.get("request_text", "") or "")
+        channel = reaction_channel(request_text) if wants_reactions(request_text) else {}
         if channel:
             from teamagent.skills.slack_summary.schema import SlackSummaryInput
             from teamagent.skills.slack_summary.skill import SlackSummarySkill
