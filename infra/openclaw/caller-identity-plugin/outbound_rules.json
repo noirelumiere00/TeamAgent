@@ -69,6 +69,23 @@
     "tool_call": "処理",
     "stack trace": "エラーの詳細"
   },
+  "tool_name_terms": {
+    "omiyage_report_submit": "お土産資料の作成",
+    "omiyage_report_status": "お土産資料の進捗確認",
+    "proposal_builder_submit": "提案書の作成",
+    "proposal_builder_status": "提案書の進捗確認",
+    "proposal_draft": "提案の骨子づくり",
+    "recommend": "似た過去の提案書の検索",
+    "video_algorithm": "動画の分析",
+    "video_algorithm_status": "動画分析の進捗確認",
+    "x_voice_search": "Xでの生活者の声の収集",
+    "search_surface_check": "検索面の調査",
+    "tiktok_search": "TikTok検索",
+    "tiktok_acquire": "TikTokの取得",
+    "tiktok_acquire_status": "TikTok取得の進捗確認",
+    "web_research": "Web調査",
+    "attachment_assist": "添付資料の確認"
+  },
   "error_text": "処理の途中で止まりました。もう一度お試しください。",
   "error_pattern": "^Traceback \\(most recent call last\\):\\r?\\n(?:[ \\t]+[^\\n]*\\r?\\n)*[^\\n]*(?:Error|Exception):[^\\n]*(?:\\r?\\n|$)|^(?:[^\\n]*(?:\\b(?:[A-Z][A-Za-z0-9_]*(?:Error|Exception)|Error|Exception)\\b(?:\\s*:)?|\\b[A-Z][A-Z0-9_]+_(?:ERROR|FAILED|TIMEOUT|IN_PROGRESS)\\b|\\b(?:ReadTimeout|ConnectTimeout|AccessDenied|ECONNRESET|ETIMEDOUT|ENOTFOUND)\\b|Traceback \\(most recent call last\\):|Unhandled (?:exception|rejection)|(?:Error|error) (?:executing|calling) tool|Tool (?:execution|invocation) failed|Failed to (?:execute|invoke|call) tool|Request timed out|fetch failed|An error occurred|Request failed with status code)[^\\n]*|[ \\t]*(?:at [A-Za-z_][^\\n]*|File \"[^\\n]*|[~^]+))[\\r\\n]*",
   "signed_url_pattern": "(?:[?&]|&amp;)(?:X-Amz-[A-Za-z-]+|X-Goog-[A-Za-z-]+|AWSAccessKeyId|Signature|GoogleAccessId|sig|token|access_token|expires)=[^\\s]*|\\?[^#\\s]{512,}",

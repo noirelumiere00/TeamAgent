@@ -63,6 +63,9 @@ const SLACK_INTERACTION_VALUE_ELLIPSIS = "…";
 // 同じルールを Python の直接配信でも使う。イメージにはこのファイルを同梱する。
 const OUTBOUND_RULES = JSON.parse(readFileSync(new URL("../outbound_rules.json", import.meta.url), "utf8"));
 export const OUTBOUND_TOOL_NAMES = Object.freeze(OUTBOUND_RULES.tool_names);
+// §8-2（2026-11-13・持ち主指示「営業さんに見える文には、進める前の説明も含めて一切出さない」）:
+// ツール名は消すのではなく、営業さん向けの自然な表現に言い換える（マップ外は従来どおり消す）。
+const OUTBOUND_TOOL_NAME_TERMS = Object.freeze(OUTBOUND_RULES.tool_name_terms ?? {});
 const OUTBOUND_SIGNED_URL_RE = new RegExp(OUTBOUND_RULES.signed_url_pattern, "iu");
 const OUTBOUND_BROKEN_URL_RE = new RegExp(OUTBOUND_RULES.broken_url_pattern, "iu");
 const OUTBOUND_DRIVE_RE = new RegExp(OUTBOUND_RULES.drive_url_pattern, "u");
@@ -95,6 +98,10 @@ const OUTBOUND_TOOL_RE = new RegExp(
 );
 const OUTBOUND_INTERNAL_TOOL_RE = new RegExp(
   OUTBOUND_TOOL_RE.source.replace(OUTBOUND_BARE_TOOL_SOURCE, OUTBOUND_TOOL_SOURCE), "giu");
+// 言い換え用は名前だけにマッチする（助詞やコードスパンの囲みは含めない・§8-2）。
+const OUTBOUND_TOOL_TERM_RE = new RegExp(
+  `(?:\`[ \\t　]*${OUTBOUND_TOOL_SOURCE}[ \\t　]*\`|(?<![a-z0-9_])${OUTBOUND_BARE_TOOL_SOURCE}(?![a-z0-9_]))`,
+  "giu");
 const OUTBOUND_INTERNAL_NAME_RE = /\b(?:(?:SOUL|IDENTITY|AGENTS|HEARTBEAT|TOOLS|USER|MEMORY)\.md|openclaw\.config\.json5)\b/iu;
 const OUTBOUND_SETTING_NAME_RE = /\b(?:SEARCH_|TEAMAGENT_|OPENCLAW_|DIRECT_VIDEO_)[A-Z0-9_]+\b/u;
 // 名前だけ消すと引数や実行手順が残るため、モデル向け指示は段落ごと落とす。
@@ -184,6 +191,15 @@ export function scrubOutboundReplyText(text, replacementConnectUrls = new Set(),
       if (!OUTBOUND_INTERNAL_NAME_RE.test(sentence) && !OUTBOUND_SETTING_NAME_RE.test(sentence)) return sentence;
       counts.toolNames += 1;
       return "";
+    });
+    // §8-2: マップにある名前は、助詞を飲み込まずに名前だけ自然な表現へ言い換える
+    // （「attachment_assistで確認します」→「添付資料の確認で確認します」。消すと文に穴が開く）。
+    plain = plain.replace(OUTBOUND_TOOL_TERM_RE, match => {
+      const bare = match.replace(/^[`\s　]+|[`\s　]+$/g, "").replace(/teamagent__/, "");
+      const term = OUTBOUND_TOOL_NAME_TERMS[bare];
+      if (!term) return match;
+      counts.toolNames += 1;
+      return term;
     });
     plain = plain.replace(OUTBOUND_TERMS_RE, term => {
       counts.toolNames += 1;
@@ -517,6 +533,72 @@ export const AD_LABEL_ROUTE_CONTEXT =
   "この発話は TikTok / Instagram / YouTube の投稿 URL だけです。`ad_label_check` が使えるなら、" +
   "urls に URL をすべてそのまま渡し、戻り値の slack_summary をそのまま返してください" +
   "（要約し直さない）。使えないときは通常どおり答えてください。";
+
+// 資料系の依頼（お土産資料 D1・2026-11-13 持ち主指示）。SOUL に常設せず、該当した回だけ
+// 指示を差し込む。Bedrock 試験（30 発話×3 回）では、モデルが「まずツールを呼ばずに聞き返す」
+// ことが 70/90 で起きた。sales25 は自社名だけで進む作りなので、まずツールを呼ばせて、足りない
+// 項目はその応答（needs_input）に従って聞くのが営業さんの手間が少ない。
+const OMIYAGE_DECK_RE = /お土産|初訪|初回(?:訪問|商談)|TikTok.{0,12}(?:調査|比較|出方)|市場調査|商談のネタ|比較表/u;
+const OMIYAGE_OUTPUT_RE = /資料|スライド|パワポ|パワーポイント|PPTX?/iu;
+const OMIYAGE_86_RE = /86\s*枚|統合FMT|\bFMT\b|FMTどおり|FMT通り/u;
+const OMIYAGE_DRAFT_RE = /骨子|たたき台/u;
+const OMIYAGE_PROGRESS_RE = /まだ[?？]?|進捗|ジョブ|完了して?ない|どこまで/u;
+const OMIYAGE_GENERATION_RE = /作って|つくって|作成|生成|作り直して|変えて|もう1冊|選んで|まとめて|にして|して/u;
+const OMIYAGE_ANALYSIS_RE = /分析|バズ|読み解|フック|CTA|テロップ|共通点/u;
+
+export const OMIYAGE_ROUTE_CONTEXTS = Object.freeze({
+  // お土産資料の作成依頼（Sales25 は自社名だけで進める。足りない項目はツールの応答が聞く）。
+  submit:
+    "この発話は TikTok 調査のお土産資料（25 枚の PPTX）を作る依頼です。`omiyage_report_submit` が" +
+    "使えるなら、まず必ず `omiyage_report_submit` を呼んでください（呼ぶ前に項目を聞き返さない）。" +
+    "足りない項目はこのツールの応答（needs_input）に従って営業さんに質問してください。" +
+    "動画分析・86枚提案書・骨子づくりは使いません。",
+  status:
+    "この発話はお土産資料ジョブの進捗照会です。`omiyage_report_status` が使えるなら、" +
+    "まず必ず `omiyage_report_status` を呼んで進捗を答えてください。新しい生成を始めません。",
+  proposal_builder:
+    "この発話は 86 枚の統合 FMT による企画提案書を作る依頼です。`proposal_builder_submit` が" +
+    "使えるなら、まず必ず `proposal_builder_submit` を呼んでください（呼ぶ前に項目を聞き返さない）。" +
+    "足りない項目はこのツールの応答に従って営業さんに質問してください。" +
+    "TikTok 調査のお土産資料（omiyage_report_submit）は使いません。",
+  proposal_draft:
+    "この発話は提案の骨子（たたき台）を作る依頼です。`proposal_draft` が使えるなら、" +
+    "まず必ず `proposal_draft` を呼んでください。完成品の PPTX は作りません" +
+    "（お土産資料は omiyage_report_submit・86 枚提案書は proposal_builder_submit）。",
+  both:
+    "この発話には複数の成果物（お土産資料と 86 枚提案書など）の依頼が含まれています。" +
+    "勝手に始めず、どちらを先にするかを営業さんに聞いてください。",
+  deck_only:
+    "この発話は資料を作る依頼ですが、何の資料かが分かりません。" +
+    "勝手に生成を始めず、何の資料かを営業さんに聞いてください。",
+});
+
+// 資料系の依頼を判定して差し込むべき指示の種類を返す（該当しなければ null）。
+// 判定は D1 の decks corpus（30 発話・tests/routing/decks_routing_corpus.jsonl）と 10/30 実害
+//（「パワポにして」で動画分析が始まった）に合わせる。見本: tests/scripts の omiyage route テスト。
+export function omiyageRouteKind(text) {
+  if (typeof text !== "string") return null;
+  const own = text.slice(0, 4096).normalize("NFKC")
+    .replace(/```[\s\S]*?```|「[^」]*」|『[^』]*』|^>.*$/gmu, "");
+  const hasDeck = OMIYAGE_DECK_RE.test(own);
+  const hasOutput = OMIYAGE_OUTPUT_RE.test(own);
+  const has86 = OMIYAGE_86_RE.test(own);
+  const hasDraft = OMIYAGE_DRAFT_RE.test(own);
+  const hasAnalysis = OMIYAGE_ANALYSIS_RE.test(own);
+  const hasGeneration = OMIYAGE_GENERATION_RE.test(own);
+  if (has86 && hasDeck) return "both";
+  if (has86) return "proposal_builder";
+  if (hasDraft) return "proposal_draft";
+  // 進捗照会（生成依頼語が無い・「教えて」「まだ?」だけ）。
+  if (hasDeck && OMIYAGE_PROGRESS_RE.test(own) && !hasGeneration) return "status";
+  // お土産系の語＋資料の語なら、生成依頼の言い方を問わずお土産として進める。
+  if (hasDeck && hasOutput) return "submit";
+  // 「分析して資料に」は資料化が目的（10/30 実害の再現行 bd-01/bd-02 相当）。
+  if (hasAnalysis && hasOutput) return "submit";
+  // 資料の語だけ（「資料にして」）は何の資料か分からない → 聞き返しを指示。
+  if (hasOutput && hasGeneration) return "deck_only";
+  return null;
+}
 
 // 本文が投稿 URL（VIDEO_URL_RULES の 3 媒体）だけなら URL 数、そうでなければ 0。
 export function adLabelUrlCount(text) {
@@ -3131,6 +3213,9 @@ export function createCallerIdentityPlugin({
   const documentFollowupEnabled = ["1", "true", "yes"].includes(String(env.SEARCH_DRIVE_FIRST ?? "").trim().toLowerCase());
   const documentFollowupAllowedEmails = new Set(String(env.SEARCH_DRIVE_FIRST_ALLOWED_EMAILS ?? "")
     .split(",").map(value => value.trim().toLowerCase()).filter(Boolean));
+  // 資料系の依頼（お土産 D1）の指示差し込み。SOUL に常設しないためのフラグ（§8-4 整理までは
+  // off で配備し、Komata さん側で有効化する）。
+  const omiyageRouteEnabled = ["1", "true", "yes"].includes(String(env.TEAMAGENT_OMIYAGE_ROUTE ?? "").trim().toLowerCase());
   const documentFollowupPattern = /^(?:その|さっきの|直前の)(?:事例の)?(?:資料|ファイル)(?:の(?:URL|リンク))?(?:も|を|も一緒に)?(?:出して|見せて|送って|教えて|共有して|ください|下さい)(?:ください|下さい)?[。！!？?\s]*$/iu;
   const sourceExplanationPattern = /(?:元の資料|元資料).{0,24}(?:根拠|もと|基).{0,24}説明/u;
   const searchDirectKinds = new Set(String(env.SEARCH_DIRECT_ANSWER_KINDS ?? "")
@@ -4073,6 +4158,8 @@ export function createCallerIdentityPlugin({
       videoUrlKind,
       videoRequestIntent,
       adLabelUrlCount: adLabelUrlCount(event?.content),
+      // 資料系の依頼（お土産 D1）。該当した回だけ before_prompt_build で指示を差し込む。
+      omiyageRouteKind: omiyageRouteEnabled ? omiyageRouteKind(event?.content) : null,
       videoAnalysisQuerySlots: explicitVideoQuerySlots(event?.content),
       searchRequired: legacySearchRequirement(event?.content),
       hasMedia,
@@ -7943,12 +8030,18 @@ export function createCallerIdentityPlugin({
         const routed = await prepareInboundRoute(event, ctx, api.logger);
         if (inboundRouterMode === "enforce" && !routed) await restoreDocumentFollowup(event, ctx);
         const memo = await injectPersonalMemory(event, ctx, api.logger);
-        const adLabel = ingressByRun.get(canonicalInvocationId(ctx?.runId))?.adLabelUrlCount
-          ? AD_LABEL_ROUTE_CONTEXT : undefined;
+        const routeIngress = ingressByRun.get(canonicalInvocationId(ctx?.runId));
+        const adLabel = routeIngress?.adLabelUrlCount ? AD_LABEL_ROUTE_CONTEXT : undefined;
         if (adLabel) emitPluginLog(api.logger, "info", "ad label route outcome=context_appended");
-        if (routed || adLabel) {
+        // 資料系の依頼（お土産 D1・§8-2 ①）。該当した回だけ指示を差し込む（SOUL に常設しない）。
+        const omiyageKind = routeIngress?.omiyageRouteKind;
+        const omiyageRoute = omiyageKind ? OMIYAGE_ROUTE_CONTEXTS[omiyageKind] : undefined;
+        if (omiyageRoute) emitPluginLog(api.logger, "info",
+          `omiyage route outcome=context_appended kind=${omiyageKind}`);
+        if (routed || adLabel || omiyageRoute) {
           return {...memo, ...restore,
-            appendContext: [restore?.appendContext, routed?.appendContext, adLabel].filter(Boolean).join("\n\n")};
+            appendContext: [restore?.appendContext, routed?.appendContext, adLabel, omiyageRoute]
+              .filter(Boolean).join("\n\n")};
         }
         if (restore === undefined) return memo;
         return memo === undefined ? restore : { ...memo, ...restore };
