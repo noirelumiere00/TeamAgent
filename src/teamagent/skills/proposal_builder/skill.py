@@ -1570,7 +1570,7 @@ class ProposalBuilderSubmitSkill(
     name: ClassVar[str] = "proposal_builder_submit"
     description: ClassVar[str] = (
         "商材の企画提案書（86枚の統合FMT・PPTX）を非同期作成する依頼で使う。"
-        "TikTok調査・競合比較のお土産資料は対象外（→omiyage_report_submit）。"
+        "TikTok調査のお土産資料は対象外（→omiyage_report_submit）。"
         "商材名・与件を渡す（公式URL・投稿開始日は"
         "省略可）。PROPOSAL_RESEARCH_AUTO有効時はresearch_briefで調査から作成しJSONは"
         "不要、他はgemini_jsonの一方だけを指定。投稿開始日は日付を補完せず未定。"

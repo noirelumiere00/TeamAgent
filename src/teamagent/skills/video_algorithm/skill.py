@@ -484,7 +484,7 @@ class VideoAlgorithmSkill(BaseSkill[VideoAlgorithmInput, VideoAlgorithmOutput]):
         "ロップ・ブランド認識・フック・CTAと共通点をレポート化）。"
         "既知施策の何が効いたかはsearchで施策実績・動画ごとの数字・資料を探す。"
         "資料・パワポ・スライドの作成は対象外（お土産資料はomiyage_report_submit・"
-        "86枚の提案書はproposal_builder_submit。ここは分析と分析レポートのみ）。"
+        "86枚提案書はproposal_builder_submit）。"
     )
     input_schema: ClassVar[type[BaseModel]] = VideoAlgorithmInput
     output_schema: ClassVar[type[BaseModel]] = VideoAlgorithmOutput
