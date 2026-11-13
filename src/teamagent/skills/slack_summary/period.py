@@ -34,6 +34,20 @@ _MD = r"(\d{1,2})(?:月|/)(\d{1,2})日?"
 _RECENT_MAX_DAYS = 366
 
 
+def extract_period(text: str) -> str:
+    """リアクション依頼の原文から、resolve_period が扱う期間を取り出す。"""
+    text = unicodedata.normalize("NFKC", text)
+    found = re.search(
+        rf"\d{{4}}-\d{{1,2}}-\d{{1,2}}(?:{_SEP}\d{{4}}-\d{{1,2}}-\d{{1,2}}(?:まで)?)?"
+        rf"|\d{{1,2}}(?:月|/)\d{{1,2}}日?(?:{_SEP}(?:\d{{1,2}}(?:月|/))?\d{{1,2}}日?(?:まで)?)?"
+        r"|(?:\d{4}年)?\d{1,2}月|(?:直近|過去)\d+日(?:間)?"
+        r"|(?:直近|過去|この|ここ)?\d+週間|先々週|先週|今週|先月|今月|一昨日|昨日|今日"
+        r"|過去全部|全期間",
+        text,
+    )
+    return found[0] if found else ""
+
+
 def _month_start(day: datetime) -> datetime:
     return day.replace(day=1)
 

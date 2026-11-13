@@ -600,6 +600,29 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
     @google_connection_guard(lambda input: SearchOutput(answer="", total_cost_usd=0))
     def run(self, input: SearchInput, ctx: SkillContext) -> SearchOutput:
         """全経路の不在回答を、検索を広げてから確定する。"""
+        from teamagent.skills.slack_summary.reactions import reaction_channel, wants_reactions
+
+        request_text = str(ctx.metadata.get("request_text", "") or "")
+        channel = reaction_channel(request_text) if wants_reactions(request_text) else {}
+        if channel:
+            from teamagent.skills.slack_summary.schema import SlackSummaryInput
+            from teamagent.skills.slack_summary.skill import SlackSummarySkill
+
+            logger.info(
+                "search_handoff_reactions", request_id=ctx.request_id, has_channel=bool(channel)
+            )
+            result = SlackSummarySkill(
+                slack_store=self._slack_store, reader_factory=self._slack_reader_factory
+            ).run(SlackSummaryInput(scope="channel", **channel), ctx)
+            return SearchOutput(
+                answer=result.message,
+                message=result.message,
+                found=result.message_count > 0 and not result.error,
+                error=result.error,
+                total_cost_usd=result.total_cost_usd,
+                answer_format="list",
+            )
+
         from teamagent.skills.search.project_history import run_history
 
         history = run_history(

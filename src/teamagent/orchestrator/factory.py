@@ -573,6 +573,7 @@ def build_production_tools() -> list[ToolSpec]:
         from teamagent.skills.slack_summary.skill import SlackSummarySkill
 
         summary_slack_store = _build_slack_store()
+        search.attach_slack_store(summary_slack_store)
         specs.append(
             ToolSpec(
                 SlackSummarySkill.name,
