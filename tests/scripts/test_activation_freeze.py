@@ -208,20 +208,26 @@ def test_unrelated_changes_still_pass(base: str, head: str, reason: str) -> None
 
 
 def test_unlock_matches_the_committed_declaration() -> None:
-    """OpenClaw 土台更新と、退避した過去の宣言を完全一致で封印する。"""
+    """ffmpeg8 の lock 追随と、退避した過去の宣言を完全一致で封印する。"""
     unlock = _freeze_doc()["unlock"]
     assert unlock["active"] is True
     assert unlock["scope_paths"] == [
-        "infra/codebuild/openclaw_bundle_contract.json",
+        "infra/codebuild/teamagent_core_media_release_contract.json",
     ]
     assert (
         unlock["reason"]
-        == "human gate 2026-11-13（小俣さん 11-13 OK・openclaw 土台の nodejs-26 26.13.0-r1 が CVE-2026-123863 HIGH。Chainguard node arm64 d86b29ff… へ）"
+        == "human gate 2026-11-13（小俣さん 11-13『修正して』の便 r121 の続き・Alpine 上流で ffmpeg8-libavdevice/libavfilter/libswscale 8.1.3-r2 が消え 8.1.3-r3 へ。r121 の事前確認で検出）"
     )
     assert (
         unlock["gate"]
-        == "human gate 2026-11-13（小俣さん 11-13 OK・openclaw 土台の nodejs-26 26.13.0-r1 が CVE-2026-123863 HIGH。Chainguard node arm64 d86b29ff… へ）"
+        == "human gate 2026-11-13（小俣さん 11-13『修正して』の便 r121 の続き・Alpine 上流で ffmpeg8-libavdevice/libavfilter/libswscale 8.1.3-r2 が消え 8.1.3-r3 へ。r121 の事前確認で検出）"
     )
+    assert unlock["previous_scope_20261113_ffmpeg"] == {
+        "active": True,
+        "scope_paths": ["infra/codebuild/openclaw_bundle_contract.json"],
+        "reason": "human gate 2026-11-13（小俣さん 11-13 OK・openclaw 土台の nodejs-26 26.13.0-r1 が CVE-2026-123863 HIGH。Chainguard node arm64 d86b29ff… へ）",
+        "gate": "human gate 2026-11-13（小俣さん 11-13 OK・openclaw 土台の nodejs-26 26.13.0-r1 が CVE-2026-123863 HIGH。Chainguard node arm64 d86b29ff… へ）",
+    }
     assert unlock["previous_scope_20261113_ocbase"] == {
         "active": True,
         "scope_paths": ["infra/codebuild/openclaw_bundle_contract.json"],
