@@ -13,6 +13,8 @@ from typing import Any
 from urllib.parse import urlsplit
 
 CONTRACT_VERSION = 1
+# 1 語あたりの取得目標（内部 100 件検索・sales25.py generate() の acquisition と同じ基準）。
+SALES25_TARGET = 100
 BUNDLE = Path(__file__).resolve().parents[4] / "tools/first_visit/sales25"
 LOCK_SHA256 = "9b27c72411f5dc8b95c24c3e34661fa345a335e5caabd161f06d0099e900de01"
 STATS = ("playCount", "diggCount", "commentCount", "shareCount", "collectCount")

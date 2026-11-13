@@ -19,6 +19,7 @@ import pytest
 from PIL import Image
 
 from teamagent.skills.first_visit import sales25
+from teamagent.skills.first_visit import sales25_authoring as authoring
 from teamagent.skills.first_visit import sales25_contract as contract
 from tests.skills.first_visit.sales25_fixture import OWNER, inputs, prepare
 
@@ -344,7 +345,8 @@ def test_25_pages_checker_results_links_notes_and_native_table(
     built: tuple[Path, Path, dict[str, Any]],
 ) -> None:
     root, output, result = built
-    assert result["delivery_status"] == "incomplete"
+    # §8-1(a): 取得の未達は P2/P25 に実数と理由を明記するので、機械検査が通れば delivered。
+    assert result["delivery_status"] == "delivered"
     assert result["visual_review"] == "not_verified"
     assert (
         result["output_sha256"] == hashlib.sha256((output / "deck.pptx").read_bytes()).hexdigest()
@@ -428,7 +430,12 @@ def test_no_clobber_or_output_inside_inputs(built: tuple[Path, Path, dict[str, A
         sales25.generate(root, root / "output", owner_id=OWNER)
 
 
-def test_neutral_query_shortfall_stays_incomplete(authored: Path) -> None:
+def test_neutral_query_shortfall_delivers_with_actual_counts(authored: Path) -> None:
+    """§8-1(a): 中立語の取得未達でも status=passed・delivery_status=delivered を維持する。
+
+    未達は P2/P25 に実数と理由を明記する（sales25_authoring）。§8-1 が転換して
+    SHORTFALL_DELIVERABLE=False に戻ったら status は incomplete に落ちる（旧挙動）。
+    """
     change(
         authored,
         "raw/q3.json",
@@ -441,13 +448,37 @@ def test_neutral_query_shortfall_stays_incomplete(authored: Path) -> None:
     out = authored.parent / "out"
     result = sales25.generate(authored, out, owner_id=OWNER)
     assert contract.read_json(out / "qa/check_top5_analysis.json")["result"]["status"] == "passed"
-    assert result["status"] == "incomplete"
+    assert result["status"] == "passed"
+    assert result["delivery_status"] == "delivered"
     assert result["acquisition"][3] == {
         "query_id": "q3",
         "target": 100,
         "actual": 50,
         "shortfall": 50,
     }
+
+
+def test_shortfall_notes_appear_on_p2_and_p25() -> None:
+    """§8-1(a): 未達語があると P2/P25 に理由の文言が入る。全語達成なら空文字。"""
+    queries = [{"query": "味噌汁"}, {"query": "即席みそ汁"}]
+    full = {
+        "味噌汁": [{"id": i} for i in range(100)],
+        "即席みそ汁": [{"id": i} for i in range(100)],
+    }
+    short = {
+        "味噌汁": [{"id": i} for i in range(100)],
+        "即席みそ汁": [{"id": i} for i in range(50)],
+    }
+    assert authoring._p2_shortfall_note(full, queries) == ""
+    assert authoring._p25_shortfall_reason(full, queries) == ""
+    assert (
+        authoring._p2_shortfall_note(short, queries)
+        == "うち1語は目標未達（TikTokで表示された件数の上限）。"
+    )
+    assert (
+        authoring._p25_shortfall_reason(short, queries)
+        == "。目標未達はTikTokで表示された件数の上限。"
+    )
 
 
 def test_pillow13_real_filler_formats_aspect_padding_and_alpha(authored: Path) -> None:

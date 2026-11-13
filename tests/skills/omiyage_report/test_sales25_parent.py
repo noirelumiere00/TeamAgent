@@ -380,18 +380,21 @@ def test_fake_pipeline_partial_delivers_once_after_terminal_save(
     accepted = build(store, pipeline).run(request(), ctx())
     assert "約45〜60分（暫定" in accepted.message
     saved = result(store, accepted.job_id)
-    assert saved.status == "partial" and len(saved.checkpoints) == 12
+    # §8-1(a): 検索軸の取得未達のみの不足は、P2/P25 に実数と理由を明記して完成扱い（ready）。
+    # 「一部の数字が足りません」は付けない。理由の列挙（summary_lines）は透明性のため維持。
+    assert saved.status == "ready" and len(saved.checkpoints) == 12
     assert saved.final_pptx_ref is not None
     for query in ["ブランドA", "ブランドB", "ブランドC", "朝のケア", "乾燥対策", "時短ケア"]:
         assert f"「{query}」100本目標→37本取得" in "\n".join(saved.summary_lines)
     assert saved.checkpoints["page_qa"].status == "not_available"
+    assert "一部の数字が足りません" not in saved.message
     assert "完成" not in saved.message
     slack = FakeSlack(store, accepted.job_id)
     parent = sales25.Parent(store, reader=lambda ref: pipeline.data, slack=slack)
     status = OmiyageReportStatusSkill(store=store, sales25_parent=parent)
     context = ctx()
     output = status.run(OmiyageReportStatusInput(job_id=accepted.job_id), context)
-    assert output.report_status == "partial" and not slack.uploads
+    assert output.report_status == "ready" and not slack.uploads
     monkeypatch.setattr(notify, "ProposalJobStore", lambda: store)
     target = context.metadata[ORIGIN_KEY]
     assert notify.publish_notice(
@@ -401,7 +404,9 @@ def test_fake_pipeline_partial_delivers_once_after_terminal_save(
     assert slack.uploads[0]["data"] == pipeline.data
     assert slack.uploads[0]["channel"] == "D_SELF"
     comment = slack.uploads[0]["initial_comment"]
-    assert "一部の数字が足りません" in comment
+    # §8-1(a): 「一部の数字が足りません」は付けず、未達の理由の列挙で伝える。
+    assert "一部の数字が足りません" not in comment
+    assert "100本目標に未達" in comment
     assert "sales25" not in comment and "partial" not in comment and "L1" not in comment
     assert "見た目（描画）は未確認。PowerPoint の左の一覧で 3・7・21枚目は要確認です" in comment
     assert result(store, accepted.job_id).delivery_status == "delivered"
@@ -716,7 +721,8 @@ def test_shortfall_names_only_the_actual_queries_that_are_short() -> None:
         ctx(),
     )
     saved = result(store, accepted.job_id)
-    assert saved.status == "partial" and saved.delivery_status == "pending"
+    # §8-1(a): 検索未達のみなら ready（「一部の数字が足りません」は付けない）。理由の列挙は維持。
+    assert saved.status == "ready" and saved.delivery_status == "pending"
     assert saved.summary_lines == ["「実際の検索語」100本目標→37本取得"]
 
 

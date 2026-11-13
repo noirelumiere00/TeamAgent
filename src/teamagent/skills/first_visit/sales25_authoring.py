@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -246,6 +246,24 @@ def _acquisition(posts: list[dict[str, Any]]) -> str:
     return f"100本目標→{len(posts)}本取得"
 
 
+def _shortfall_count(sources: dict[str, list[dict[str, Any]]], queries: Sequence[Any]) -> int:
+    """目標（contract.SALES25_TARGET）に届かなかった検索語の数。"""
+    return sum(1 for q in queries if len(sources[q["query"]]) < contract.SALES25_TARGET)
+
+
+def _p2_shortfall_note(sources: dict[str, list[dict[str, Any]]], queries: Sequence[Any]) -> str:
+    """§8-1(a): P2（全体サマリー）に載せる未達の文言。全語が目標どおりなら空文字。"""
+    count = _shortfall_count(sources, queries)
+    return f"うち{count}語は目標未達（TikTokで表示された件数の上限）。" if count else ""
+
+
+def _p25_shortfall_reason(sources: dict[str, list[dict[str, Any]]], queries: Sequence[Any]) -> str:
+    """§8-1(a): P25（調査条件）に載せる未達の理由。全語が目標どおりなら空文字。"""
+    return (
+        "。目標未達はTikTokで表示された件数の上限。" if _shortfall_count(sources, queries) else ""
+    )
+
+
 def build_manuscript(root: Path, *, owner_id: str) -> None:
     """Map verified evidence to the pinned kit. No network or model calls in the media worker."""
     contract.verify_bundle()
@@ -309,8 +327,12 @@ def build_manuscript(root: Path, *, owner_id: str) -> None:
             if missing:
                 slide["media_missing"] = missing
         if role == "overall_summary":
+            # §8-1(a): 取得の未達は「一部の数字が足りません」ではなく、P2/P25 に実数と理由を
+            # 明記して完成扱いにする。各語の実数はこの表と最終ページ。
             texts["t001"] = (
-                "各語100本目標。取得範囲の関連投稿を比較（市場全体の推計ではありません）。"
+                "各語100本目標。"
+                + _p2_shortfall_note(sources, queries)
+                + "取得範囲の関連投稿を比較（市場全体の推計ではありません）。"
             )
             values = []
             summaries = []
@@ -530,7 +552,8 @@ def build_manuscript(root: Path, *, owner_id: str) -> None:
                 prose,
                 [
                     route_text
-                    + "。原音・見た目未確認を含む。因果関係・市場全体の推計ではありません。",
+                    + _p25_shortfall_reason(sources, queries)
+                    + "原音・見た目未確認を含む。因果関係・市場全体の推計ではありません。",
                     counts + ("\n" + assumptions if assumptions else ""),
                     counting,
                     "関連投稿の判明した再生数の合計。欠損はゼロに置換しない。",
