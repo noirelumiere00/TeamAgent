@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
@@ -9,20 +10,39 @@ import pytest
 
 from teamagent.adapters.slack_user_reader import SlackThreadRead
 from teamagent.skills.base import SkillContext
-from teamagent.skills.slack_summary.reactions import wants_reactions
+from teamagent.skills.slack_summary.period import JST, resolve_period
+from teamagent.skills.slack_summary.reactions import reaction_terms, wants_reactions
 from teamagent.skills.slack_summary.schema import SlackSummaryInput
 from tests.skills.slack_summary.test_slack_summary import (
     ORIGIN_CH,
     ORIGIN_TS,
     OTHER_CH,
-    _build,
     _channel_msg,
     _run,
+)
+from tests.skills.slack_summary.test_slack_summary import (
+    _build as _build_summary,
 )
 
 UID_A = "U12345678"
 UID_B = "U23456789"
 FOCUS = "スタンプを押した人の一覧"
+
+
+@pytest.fixture(autouse=True)
+def _fixed_period(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        "teamagent.skills.slack_summary.skill.resolve_period",
+        lambda period: resolve_period(period, now=datetime(2025, 8, 18, 12, tzinfo=JST)),
+    )
+
+
+def _build(*args: Any, **kwargs: Any) -> Any:
+    skill, factory, bed, store = _build_summary(*args, **kwargs)
+    factory._client.search_messages = AsyncMock(
+        return_value={"ok": True, "messages": {"matches": [], "total": 0}}
+    )
+    return skill, factory, bed, store
 
 
 def _post(text: str = "募集の投稿", **kw: Any) -> dict[str, Any]:
@@ -75,6 +95,7 @@ def test_wants_reactions(stamp: str, action: str) -> None:
         "リアクションが多い人気の投稿を要約して",
         "絵文字なしで一覧にして",
         "スタンプラリーの投稿を一覧にして",
+        "リアクション動画の事例を一覧で見せて",
     ],
 )
 def test_does_not_want_reactions(intent: str) -> None:
@@ -131,7 +152,7 @@ def test_quoted_words_with_no_match_show_all_reacted_posts_and_say_so() -> None:
     _names(factory._client)
     out = _run(skill, scope="channel", focus="「スタンプを押した人」" + FOCUS)
     assert out.message_count == 2 and "連絡" in out.message and "募集" in out.message
-    assert out.message.startswith("指定の語を含む投稿には無かったので")
+    assert "指定の語を含む投稿には無かったので" in out.message
     assert not bed.calls
 
 
@@ -139,7 +160,9 @@ def test_quoted_words_with_no_match_show_all_reacted_posts_and_say_so() -> None:
 def test_no_reactions_is_success(posts: list[dict[str, Any]]) -> None:
     skill, factory, bed, _ = _build(history_messages=posts)
     out = _run(skill, scope="channel", focus=FOCUS)
-    assert out.message == "スタンプの付いた投稿は見つかりませんでした。"
+    assert "スタンプの付いた投稿は見つかりませんでした。" in out.message
+    assert out.message.startswith("対象期間: 直近90日")
+    assert out.message.endswith("ゲスト 0 人・社員 0 人")
     assert out.message_count == 0 and out.error == "" and not bed.calls
     assert not factory._client.users_info.called
 
@@ -212,13 +235,14 @@ def test_post_cap_and_title_length() -> None:
     _names(factory._client)
     out = _run(skill, scope="channel", focus=FOCUS)
     assert out.message_count == 20 and out.truncated
-    assert out.message.endswith("上限のため一部だけ表示")
+    assert "上限のため一部だけ表示" in out.message
     assert out.message.count("上限のため一部だけ表示") == 1
     assert "あ" * 40 in out.message and "あ" * 41 not in out.message
     assert factory._client.users_info.await_count == 1 and not bed.calls
 
 
-def test_user_cap_is_shared_across_posts_and_stamps() -> None:
+@pytest.mark.parametrize("unique", ["", "ユニーク"])
+def test_user_cap_is_shared_across_posts_and_stamps(unique: str) -> None:
     users = [f"U{i:08}" for i in range(201)]
     posts = [
         _post(reactions=[{"name": "eyes", "users": users[:150], "count": 150}]),
@@ -226,9 +250,9 @@ def test_user_cap_is_shared_across_posts_and_stamps() -> None:
     ]
     skill, factory, bed, _ = _build(history_messages=posts)
     _names(factory._client)
-    out = _run(skill, scope="channel", focus=FOCUS)
+    out = _run(skill, scope="channel", focus=FOCUS + unique)
     assert out.truncated and out.message_count == 2
-    assert out.message.endswith("上限のため一部だけ表示")
+    assert "上限のため一部だけ表示" in out.message
     assert factory._client.users_info.await_count == 200 and not bed.calls
     assert {call.kwargs["user"] for call in factory._client.users_info.await_args_list} == set(
         users[:200]
@@ -307,5 +331,133 @@ def test_link_read_denied_is_uniform(code: str) -> None:
 def test_link_without_reactions_does_not_use_other_channel_posts() -> None:
     skill, factory, bed, _ = _build(history_messages=[_post(reactions=[])])
     out = _run(skill, thread_ts=ORIGIN_TS, focus=FOCUS)
-    assert out.message == "スタンプの付いた投稿は見つかりませんでした。"
+    assert "スタンプの付いた投稿は見つかりませんでした。" in out.message
     assert not out.error and not bed.calls and not factory.channel_calls
+
+
+@pytest.mark.parametrize(
+    "phrase",
+    [
+        "含む文字列：**募集**",
+        "文字列:募集",
+        "文字列募集",
+        "募集 を含む投稿",
+        "募集を含むメッセージ",
+        "**募集** を含むメッセージ",
+    ],
+)
+def test_unquoted_words_filter_posts(phrase: str) -> None:
+    skill, factory, _, _ = _build(
+        history_messages=[_post("連絡"), _post("募集", ts="1755400050.000100")]
+    )
+    _names(factory._client)
+    out = _run(skill, scope="channel", focus=FOCUS + "\n" + phrase)
+    assert out.message_count == 1 and "募集" in out.message and "連絡" not in out.message
+
+
+def test_unquoted_no_match_still_widens() -> None:
+    skill, factory, _, _ = _build(history_messages=[_post("連絡")])
+    _names(factory._client)
+    out = _run(skill, scope="channel", focus=FOCUS + "\n文字列:募集")
+    assert out.message_count == 1 and "連絡" in out.message
+    assert "指定の語を含む投稿には無かったので" in out.message
+
+
+def test_terms_strip_decorations_and_keep_labelled_spaces() -> None:
+    assert reaction_terms("メッセージに含む文字列：**制作 パートナー募集**") == [
+        "制作 パートナー募集"
+    ]
+
+
+def test_default_period_uses_90_days_and_existing_read_cap() -> None:
+    skill, factory, _, _ = _build(history_messages=[_post()])
+    _names(factory._client)
+    out = _run(skill, scope="channel", focus=FOCUS)
+    args = factory._client.conversations_history.await_args.kwargs
+    assert (args["oldest"], args["latest"]) == resolve_period(
+        "直近90日", now=datetime(2025, 8, 18, 12, tzinfo=JST)
+    )
+    assert out.message.startswith("対象期間: 直近90日（2025-05-20 00:00")
+    assert "ゲスト 1 人・社員 1 人" in out.message and not out.truncated
+
+
+@pytest.mark.parametrize("word", ["ユニーク", "重複なし", "重複を除く", "一意", "列挙"])
+def test_unique_users_count_posts_once_across_stamps(word: str) -> None:
+    first = _post()
+    first["reactions"].append({"name": "eyes", "users": [UID_B], "count": 1})
+    second = _post(ts="1755400050.000100")
+    skill, factory, bed, _ = _build(history_messages=[first, second])
+    _names(factory._client)
+    out = _run(skill, scope="channel", focus=FOCUS + word)
+    assert "架空メンバーB（ゲスト） — 2 投稿\n架空メンバーA — 2 投稿" in out.message
+    assert out.message.count("架空メンバーB") == 1 and ":eyes:" not in out.message
+    assert "募集の投稿" not in out.message and out.message_count == 2
+    assert out.message.endswith("ゲスト 1 人・社員 1 人") and not bed.calls
+
+
+@pytest.mark.parametrize("unique", ["", "ユニーク"])
+@pytest.mark.parametrize("word", ["マルチチャンネルゲスト", "ゲストだけ", "ゲストのみ"])
+def test_guest_only_and_omitted_users_do_not_inflate_totals(unique: str, word: str) -> None:
+    post = _post(
+        reactions=[
+            {"name": "eyes", "users": [UID_A, UID_B], "count": 5},
+            {"name": "wave", "count": 7},
+        ]
+    )
+    skill, factory, _, _ = _build(history_messages=[post])
+    _names(factory._client)
+    out = _run(skill, scope="channel", focus=FOCUS + unique + word)
+    assert "架空メンバーB（ゲスト）" in out.message and "架空メンバーA" not in out.message
+    assert out.message.endswith("ゲスト 1 人") and "社員" not in out.message
+    assert "ほか N 人）は人数に含めていません" in out.message and out.truncated
+    if not unique:
+        assert "ほか3人" in out.message and "ほか7人" in out.message
+
+
+def test_unique_reads_beyond_per_post_display_cap_and_sorts_names() -> None:
+    posts = [
+        _post(ts=f"1755400{i:03}.000100", reactions=[{"name": "eyes", "users": [UID_A]}])
+        for i in range(21)
+    ]
+    posts[-1]["reactions"][0]["users"] = [UID_B]
+    skill, factory, _, _ = _build(history_messages=posts)
+    _names(factory._client)
+    out = _run(skill, scope="channel", focus=FOCUS + "ユニーク")
+    assert "架空メンバーB（ゲスト） — 1 投稿\n架空メンバーA — 20 投稿" in out.message
+    assert not out.truncated and out.message_count == 21
+
+
+def test_unique_sorts_each_group_by_name() -> None:
+    labels = {
+        "U12345678": ("社員B", False),
+        "U23456789": ("ゲストB", True),
+        "U34567890": ("社員A", False),
+        "U45678901": ("ゲストA", True),
+    }
+    skill, factory, _, _ = _build(
+        history_messages=[_post(reactions=[{"name": "eyes", "users": list(labels), "count": 4}])]
+    )
+
+    async def info(*, user: str) -> dict[str, Any]:
+        name, guest = labels[user]
+        return {"ok": True, "user": {"profile": {"display_name": name}, "is_restricted": guest}}
+
+    factory._client.users_info = AsyncMock(side_effect=info)
+    out = _run(skill, scope="channel", focus=FOCUS + "ユニーク")
+    assert out.message.splitlines()[1:] == [
+        "ゲストA（ゲスト） — 1 投稿",
+        "ゲストB（ゲスト） — 1 投稿",
+        "社員A — 1 投稿",
+        "社員B — 1 投稿",
+        "ゲスト 2 人・社員 2 人",
+    ]
+
+
+@pytest.mark.parametrize("unique", ["", "ユニーク"])
+def test_omitted_all_users_are_not_counted_as_employees(unique: str) -> None:
+    skill, factory, _, _ = _build(
+        history_messages=[_post(reactions=[{"name": "eyes", "count": 5}])]
+    )
+    out = _run(skill, scope="channel", focus=FOCUS + unique)
+    assert out.message.endswith("ゲスト 0 人・社員 0 人") and out.truncated
+    assert not factory._client.users_info.called

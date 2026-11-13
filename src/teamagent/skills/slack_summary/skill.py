@@ -32,6 +32,7 @@ import os
 import re
 import time
 import unicodedata
+from datetime import datetime
 from typing import Any, ClassVar, TypeVar
 
 import structlog
@@ -51,7 +52,7 @@ from teamagent.skills._shared.slack_context import _neutralize
 from teamagent.skills._shared.source_url import slack_permalink
 from teamagent.skills._shared.user_context import USER_CONTEXT_RULE
 from teamagent.skills.base import BaseSkill, SkillContext, register
-from teamagent.skills.slack_summary.period import PERIOD_WORDS, resolve_period
+from teamagent.skills.slack_summary.period import JST, PERIOD_WORDS, extract_period, resolve_period
 from teamagent.skills.slack_summary.reactions import render_reactions, wants_reactions
 from teamagent.skills.slack_summary.schema import SlackSummaryInput, SlackSummaryOutput
 
@@ -154,8 +155,8 @@ class SlackSummarySkill(BaseSkill[SlackSummaryInput, SlackSummaryOutput]):
         "auto は現スレッドが1件以下なら現チャンネルへ切替。"
         "チャンネルからの依頼は発信元だけ、DM は本人が読める範囲。"
         "期間指定の無い「#〇〇 も見て」は slack_search（query に in:#チャンネル名）。"
-        "受信メールは mail_summary。投稿・転送はしない。スタンプを押した人の一覧も可。"
-        + USER_CONTEXT_RULE
+        "受信メールは mail_summary。投稿・転送はしない。"
+        "スタンプを押した人の一覧は期間省略で直近90日。ユニーク・ゲスト限定可。" + USER_CONTEXT_RULE
     )
     input_schema: ClassVar[type[BaseModel]] = SlackSummaryInput
     output_schema: ClassVar[type[BaseModel]] = SlackSummaryOutput
@@ -191,15 +192,19 @@ class SlackSummarySkill(BaseSkill[SlackSummaryInput, SlackSummaryOutput]):
         list_mode = not reaction_mode and (
             wants_list(intent) or input.period in ("過去全部", "全期間", "全部")
         )
-        period_mode = bool(input.channel_name.strip() or input.period.strip())
+        period = input.period.strip() or (extract_period(intent) if reaction_mode else "")
+        period_mode = bool(input.channel_name.strip() or period)
         if period_mode and not list_mode and not tool_enabled("SLACK_SUMMARY_NAMED_PERIOD_ENABLED"):
             return SlackSummaryOutput(
                 error="feature_disabled", message=_ERR_MSG["feature_disabled"]
             )
         bounds: tuple[str, str] | None = None
-        if period_mode and not list_mode:
+        if not list_mode and (
+            period_mode or (reaction_mode and not input.thread_ts and input.scope != "thread")
+        ):
             try:
-                bounds = resolve_period(input.period or "今週")
+                period = period or ("直近90日" if reaction_mode else "今週")
+                bounds = resolve_period(period)
             except ValueError:
                 return SlackSummaryOutput(error="bad_period", message=_ERR_MSG["bad_period"])
         # 名前指定は常にチャンネル単位。DM 自身を暗黙の要約対象にはしない。
@@ -342,7 +347,7 @@ class SlackSummarySkill(BaseSkill[SlackSummaryInput, SlackSummaryOutput]):
             return SlackSummaryOutput(scope=effective_scope, error=key, message=_ERR_MSG[key])
 
         if reaction_mode:
-            return render_reactions(
+            output = render_reactions(
                 result,
                 reader=reader,
                 channel_id=target_channel,
@@ -350,6 +355,13 @@ class SlackSummarySkill(BaseSkill[SlackSummaryInput, SlackSummaryOutput]):
                 intent=intent,
                 scope=effective_scope,
             )
+            if bounds and effective_scope == "channel":
+                start, end = (datetime.fromtimestamp(float(ts), JST) for ts in bounds)
+                output.message = (
+                    f"対象期間: {period}（{start:%Y-%m-%d %H:%M} 〜 "
+                    f"{end:%Y-%m-%d %H:%M} 未満・JST）\n" + output.message
+                )
+            return output
 
         messages = result.messages
         if effective_scope == "channel" and not bounds:

@@ -29,10 +29,38 @@ _ACTION_WORDS = ("押し", "つけ", "付け", "反応し", "誰", "した人", 
 
 def wants_reactions(intent: str) -> bool:
     # 「人」1字や「絵文字」は普通の要約依頼（人気の投稿・絵文字なしで）に当たるので使わない。
-    intent = intent.replace("スタンプラリー", "")
+    intent = intent.replace("スタンプラリー", "").replace("リアクション動画", "")
     return any(word in intent for word in ("スタンプ", "リアクション")) and any(
         word in intent for word in _ACTION_WORDS
     )
+
+
+def reaction_channel(intent: str) -> dict[str, str]:
+    """依頼に明記されたチャンネルだけを返す（発信元から推測しない）。"""
+    intent = re.sub(r"(?:https?://|www\.)[^\s<>]+", "", intent, flags=re.I)
+    mention = re.search(r"<#([CG][A-Za-z0-9]+)(?:\|[^>]*)?>", intent)
+    if mention:
+        return {"channel_id": mention[1]}
+    for named in re.finditer(r"(?<![\w/#])#([\w-]+)", intent):
+        if not named[1].isdecimal():
+            return {"channel_name": named[1]}
+    named = re.search(
+        r"チャンネル(?:名)?(?:\s*[:：]\s*|[ \t]+|[「『]|(?=[A-Za-z0-9_-]))"
+        r"[*`]*([\w-]+)",
+        intent,
+    )
+    return {"channel_name": named[1]} if named and not named[1].isdecimal() else {}
+
+
+def reaction_terms(intent: str) -> list[str]:
+    intent = intent.replace("**", "").replace("`", "")
+    quoted = [a or b for a, b in re.findall(r"「([^」]+)」|『([^』]+)』", intent)]
+    labelled = re.findall(r"(?:含む文字列|文字列)\s*[:：]\s*([^\n\r]+)", intent)
+    bare = re.findall(r"文字列\s*(?![:：\sを])([^\s、。「『:：]+)", intent)
+    before = re.findall(r"([^\s、。]+?)\s*を含む\s*(?:投稿|メッセージ)", intent)
+    # 明記された検索語があるとき、「ユニーク」等の依頼中の引用を検索語に混ぜない。
+    terms = labelled or [*quoted, *bare, *before]
+    return list(dict.fromkeys(t.strip(" *_「」『』") for t in terms))
 
 
 def _safe_text(text: str, limit: int) -> str:
@@ -53,19 +81,24 @@ def render_reactions(
     scope: str,
 ) -> SlackSummaryOutput:
     start = time.perf_counter()
-    terms = [a or b for a, b in re.findall(r"「([^」]+)」|『([^』]+)』", intent)]
+    terms = reaction_terms(intent)
+    unique = any(w in intent for w in ("ユニーク", "重複なし", "重複を除", "一意", "列挙"))
+    guest_only = any(w in intent for w in ("マルチチャンネルゲスト", "ゲストだけ", "ゲストのみ"))
     reacted = [m for m in result.messages if m.reactions]
     posts = [m for m in reacted if not terms or any(t in m.text for t in terms)]
     # 「」はモデルが focus に足した語のこともある。絞って 0 件なら絞らずに出し、そう書く。
     widened = bool(terms) and not posts and bool(reacted)
     if widened:
         posts = reacted
-    truncated = result.truncated or len(posts) > MAX_POSTS
-    limited = len(posts) > MAX_POSTS
-    names: dict[str, str] = {}
+    limited = not unique and len(posts) > MAX_POSTS
+    truncated = result.truncated or limited
+    names: dict[str, tuple[str, bool]] = {}
+    user_posts: dict[str, set[str]] = {}
+    omitted = False
     blocks: list[str] = []
     stamp_lines = 0
-    for post in posts[:MAX_POSTS]:
+    selected = posts if unique else posts[:MAX_POSTS]
+    for post in selected:
         try:
             date = datetime.fromtimestamp(float(post.ts), JST).strftime("%Y-%m-%d")
         except (ValueError, OverflowError, OSError):
@@ -82,25 +115,49 @@ def render_reactions(
                         continue
                     name, guest = reader.get_user_label(uid, request_id)
                     label = _safe_text(name, 80) if name else ""
-                    names[uid] = (label or _UNKNOWN_NAME) + ("（ゲスト）" if guest else "")
-                labels.append(names[uid])
-            line = f"・:{_safe_text(reaction.name, 80)}: {reaction.count}人 — " + "、".join(labels)
+                    names[uid] = (label or _UNKNOWN_NAME, guest)
+                label, guest = names[uid]
+                if guest_only and not guest:
+                    continue
+                user_posts.setdefault(uid, set()).add(post.ts)
+                labels.append(label + ("（ゲスト）" if guest else ""))
+            count = len(labels) if guest_only else reaction.count
+            line = f"・:{_safe_text(reaction.name, 80)}: {count}人 — " + "、".join(labels)
             if reaction.count > len(reaction.users):
                 line += f" ほか{reaction.count - len(reaction.users)}人（Slack が一覧を省略）"
-                truncated = True
+                omitted = truncated = True
             lines.append(line)
             stamp_lines += 1
         blocks.append("\n".join(lines))
-    message = "\n\n".join(blocks) or "スタンプの付いた投稿は見つかりませんでした。"
+    if unique:
+        users = sorted(user_posts, key=lambda uid: (not names[uid][1], names[uid][0], uid))
+        message = (
+            "\n".join(
+                f"{names[uid][0]}{'（ゲスト）' if names[uid][1] else ''}"
+                f" — {len(user_posts[uid])} 投稿"
+                for uid in users
+            )
+            or "該当するユーザーは見つかりませんでした。"
+        )
+    else:
+        message = "\n\n".join(blocks) or "スタンプの付いた投稿は見つかりませんでした。"
     if widened:
         message = (
             "指定の語を含む投稿には無かったので、期間内でスタンプの付いた投稿をすべて出します。\n\n"
             + message
         )
+    guests = sum(names[uid][1] for uid in user_posts)
+    if omitted:
+        message += "\n※ Slack が一覧を省略した分（ほか N 人）は人数に含めていません。"
+        if guest_only:
+            message += "省略された人がゲストかは不明です。"
     if limited:
         message += "\n上限のため一部だけ表示"
     elif result.truncated:
         message += "\n※ 取得できた一部の投稿だけを表示しています。"
+    message += f"\nゲスト {guests} 人"
+    if not guest_only:
+        message += f"・社員 {len(user_posts) - guests} 人"
     logger.info(
         "slack_summary_reactions",
         request_id=request_id,
