@@ -13,7 +13,7 @@
 
 実物（cgr.dev/chainguard/node 3de92bf8…）を写したフェイク: db 形式（P/V/D/p/F/R 行・空行区切り・
 末尾空行・中間ディレクトリもすべて F: 行に載る）、/bin -> usr/bin、applet は /bin/busybox への絶対リンク。
-パッケージ版は 2026-11-12 の packages-25aa71b71fb3.txt に追随。新ベースのファイル配置は未実測。
+パッケージ版は 2026-11-13 の packages-d86b29fff56e.txt に追随。新ベースのファイル配置は未実測。
 """
 
 from __future__ import annotations
@@ -42,14 +42,14 @@ F:var/lib/db/sbom
 R:wolfi-baselayout-20230201-r31.spdx.json"""
 
 NODEJS = """P:nodejs-26
-V:26.13.0-r1
+V:26.13.1-r0
 D:so:libc.so.6 so:libuv.so.1
-p:cmd:node=26.13.0-r1 nodejs=26.13.0-r1
+p:cmd:node=26.13.1-r0 nodejs=26.13.1-r0
 F:usr
 F:usr/bin
 R:node
 F:var/lib/db/sbom
-R:nodejs-26-26.13.0-r1.spdx.json"""
+R:nodejs-26-26.13.1-r0.spdx.json"""
 
 NODE_GYP = """P:node-gyp
 V:13.1.0-r1
@@ -66,9 +66,9 @@ F:var/lib/db/sbom
 R:node-gyp-13.1.0-r1.spdx.json"""
 
 NPM = """P:npm-12
-V:12.2.2-r0
+V:12.2.2-r1
 D:node-gyp
-p:npm=12.2.2-r0
+p:npm=12.2.2-r1
 F:usr
 F:usr/bin
 R:npm
@@ -84,7 +84,7 @@ F:usr/lib/node_modules/npm/node_modules
 F:usr/lib/node_modules/npm/node_modules/brace-expansion
 R:package.json
 F:var/lib/db/sbom
-R:npm-12-12.2.2-r0.spdx.json"""
+R:npm-12-12.2.2-r1.spdx.json"""
 
 BUSYBOX = """P:busybox
 V:1.38.0-r3
@@ -146,7 +146,7 @@ def test_removes_packages_applets_and_db_entries(tmp_path: Path) -> None:
     result = _strip(root)
     assert result.returncode == 0, result.stderr
     assert (
-        '"removedPackages":["node-gyp-13.1.0-r1","npm-12-12.2.2-r0","busybox-1.38.0-r3"]'
+        '"removedPackages":["node-gyp-13.1.0-r1","npm-12-12.2.2-r1","busybox-1.38.0-r3"]'
         in result.stdout
     )
     assert '"removedBusyboxApplets":4' in result.stdout
@@ -160,7 +160,7 @@ def test_removes_packages_applets_and_db_entries(tmp_path: Path) -> None:
         *APPLETS,
         "etc/securetty",
         "etc/busybox-paths.d",
-        "var/lib/db/sbom/npm-12-12.2.2-r0.spdx.json",
+        "var/lib/db/sbom/npm-12-12.2.2-r1.spdx.json",
         "var/lib/db/sbom/node-gyp-13.1.0-r1.spdx.json",
         "var/lib/db/sbom/busybox-1.38.0-r3.spdx.json",
     ):
@@ -168,7 +168,7 @@ def test_removes_packages_applets_and_db_entries(tmp_path: Path) -> None:
     # 残すパッケージのファイル・共有ディレクトリ・merged-usr のリンクは残る
     assert (root / "usr/bin/node").read_text() == "x"
     assert (root / "etc/os-release").exists()
-    assert (root / "var/lib/db/sbom/nodejs-26-26.13.0-r1.spdx.json").exists()
+    assert (root / "var/lib/db/sbom/nodejs-26-26.13.1-r0.spdx.json").exists()
     assert (root / "bin").is_symlink()
     assert (root / "usr/lib/apk/db/installed").read_text() == f"{BASELAYOUT}\n\n{NODEJS}\n\n"
 

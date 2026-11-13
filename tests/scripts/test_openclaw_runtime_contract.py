@@ -229,6 +229,11 @@ NODE_BINARY_SHA256_BY_RUNTIME_DIGEST = {
     "sha256:25aa71b71fb30bee71daf1b8451f8b12ba1a83af29b9e1b486325aff06ac0db6": (
         "7a25b7cb0de67da8f32bb33b27671da1d4233669c64f82201bed17b9ad5df380"
     ),
+    # 2026-11-13 Claude のホスト実測: nodejs-26 26.13.1-r0（v26.13.1）。
+    # nodejs-26 26.13.0-r1 の HIGH CVE-2026-123863 に対応。
+    "sha256:d86b29fff56e966fe729c5aa402dfc7426b2241708188ac9ad011f48eb5e727a": (
+        "3bc261117b6087134801dfd2581d4eeba22dfd70b7fc21e7719b9c7f3718524d"
+    ),
 }
 
 
