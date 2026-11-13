@@ -532,6 +532,12 @@ locals {
       content_type                  = "text/yaml"
       object_lock_retain_until_date = "2099-12-31T00:00:00Z"
     }
+    # 2026-11-13 オフライン導出（未公開）。OpenClaw の CVE-2026-123863 HIGH 対応で nodejs-26 26.13.1-r0 の土台へ更新。
+    # SHA 確認済み live 本文の OpenClaw 契約1か所だけを置換し、逆置換で一致を確認。
+    "7f5ff99cf07a7256ed6fe77cd674f542e93dfd115f13f9bf68fdb1b43824bab2" = {
+      content_type                  = "text/yaml"
+      object_lock_retain_until_date = "2099-12-31T00:00:00Z"
+    }
   }
 
   image_promoter_buildspec_generations = {
@@ -971,8 +977,8 @@ import {
 }
 
 import {
-  to = aws_s3_object.image_attestor_buildspec_generation["e556d63bd19b57a0de7fdcddee501fae4ac37faa31fd45526a2193d1dd7f1835"]
-  id = "teamagent-dev-image-release-evidence/codebuild-buildspecs/teamagent-dev-image-attestor/e556d63bd19b57a0de7fdcddee501fae4ac37faa31fd45526a2193d1dd7f1835.yml"
+  to = aws_s3_object.image_attestor_buildspec_generation["7f5ff99cf07a7256ed6fe77cd674f542e93dfd115f13f9bf68fdb1b43824bab2"]
+  id = "teamagent-dev-image-release-evidence/codebuild-buildspecs/teamagent-dev-image-attestor/7f5ff99cf07a7256ed6fe77cd674f542e93dfd115f13f9bf68fdb1b43824bab2.yml"
 }
 
 import {
