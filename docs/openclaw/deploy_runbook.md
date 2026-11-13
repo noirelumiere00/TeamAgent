@@ -109,6 +109,11 @@ nodejs-26 26.13.0-r1・glibc 2.44-r16・ca-certificates-bundle 20261020-r0・ICU
 Claude がホストの Docker で2回実測し一致した `/usr/bin/node` の SHA-256 `7a25b7cb0de67da8f32bb33b27671da1d4233669c64f82201bed17b9ad5df380` に契約の node probe とテスト表を同期した。
 提供されたホストの Trivy 記録では、このベースの HIGH/CRITICAL は 0 件。最終 OpenClaw イメージの実ビルドと ECR 検査は便で確認する。
 
+2026-11-13: nodejs-26 26.13.0-r1 の HIGH `CVE-2026-123863` に対応し、runtime ベースを arm64 `sha256:d86b29fff56e966fe729c5aa402dfc7426b2241708188ac9ad011f48eb5e727a` へ更新する。
+nodejs-26 26.13.1-r0・npm-12 12.2.2-r1 のみが前日から変わり、glibc 2.44-r16・ca-certificates-bundle 20261020-r0 は同じ。npm は従来どおり runtime から除去する。
+Claude がホストで確認した `/usr/bin/node`（v26.13.1）の SHA-256 `3bc261117b6087134801dfd2581d4eeba22dfd70b7fc21e7719b9c7f3718524d` に契約の node probe とテスト表を同期した。
+提供されたホストの Trivy 記録では、このベースの HIGH/CRITICAL は 0 件。同じ DB で旧土台の CVE を検出したとの確認も提供されている。最終 OpenClaw イメージの実ビルドと ECR 検査は便で確認する。
+
 build role は candidate/release repository、publisher evidence、deployment
 resource を変更できません。publisher/launcher も ECS、EventBridge、
 task definition、service を変更できません。

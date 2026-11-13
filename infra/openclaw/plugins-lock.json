@@ -11,9 +11,9 @@
   "runtime": {
     "image": "cgr.dev/chainguard/node",
     "tag": "latest",
-    "imageIndexDigest": "sha256:5564bc90ca0933f9b217920d7285b5ea449d7e7406dc97782931e234475c45c5",
-    "linuxArm64Digest": "sha256:25aa71b71fb30bee71daf1b8451f8b12ba1a83af29b9e1b486325aff06ac0db6",
-    "nodeVersion": "26.13.0",
+    "imageIndexDigest": "sha256:8828c6e74c782babb020e684f026a7747d91a0699e7f2a2163f905c47f65e4da",
+    "linuxArm64Digest": "sha256:d86b29fff56e966fe729c5aa402dfc7426b2241708188ac9ad011f48eb5e727a",
+    "nodeVersion": "26.13.1",
     "uid": 65532,
     "gid": 65532
   },

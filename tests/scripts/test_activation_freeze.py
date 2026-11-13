@@ -216,12 +216,18 @@ def test_unlock_matches_the_committed_declaration() -> None:
     ]
     assert (
         unlock["reason"]
-        == "human gate 2026-11-12（小俣さん 11-12 OK・openclaw 土台の glibc 2.44-r9 が CVE-2026-84243 HIGH。Chainguard node arm64 25aa71b7… へ）"
+        == "human gate 2026-11-13（小俣さん 11-13 OK・openclaw 土台の nodejs-26 26.13.0-r1 が CVE-2026-123863 HIGH。Chainguard node arm64 d86b29ff… へ）"
     )
     assert (
         unlock["gate"]
-        == "human gate 2026-11-12（小俣さん 11-12 OK・openclaw 土台の glibc 2.44-r9 が CVE-2026-84243 HIGH。Chainguard node arm64 25aa71b7… へ）"
+        == "human gate 2026-11-13（小俣さん 11-13 OK・openclaw 土台の nodejs-26 26.13.0-r1 が CVE-2026-123863 HIGH。Chainguard node arm64 d86b29ff… へ）"
     )
+    assert unlock["previous_scope_20261113_ocbase"] == {
+        "active": True,
+        "scope_paths": ["infra/codebuild/openclaw_bundle_contract.json"],
+        "reason": "human gate 2026-11-12（小俣さん 11-12 OK・openclaw 土台の glibc 2.44-r9 が CVE-2026-84243 HIGH。Chainguard node arm64 25aa71b7… へ）",
+        "gate": "human gate 2026-11-12（小俣さん 11-12 OK・openclaw 土台の glibc 2.44-r9 が CVE-2026-84243 HIGH。Chainguard node arm64 25aa71b7… へ）",
+    }
     assert unlock["previous_scope_20261112c_node"] == {
         "active": True,
         "scope_paths": ["infra/codebuild/teamagent_core_media_release_contract.json"],
