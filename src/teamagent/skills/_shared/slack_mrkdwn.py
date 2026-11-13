@@ -89,7 +89,7 @@ def scrub_outbound_reply(text: str, permanent_urls: dict[str, str] | None = None
         # マップ外の名前を従来どおり消す（消すと文に穴が開くため）。
         def term(m: re.Match[str]) -> str:
             bare = m[0].strip("` \t　").removeprefix("teamagent__")
-            return _TOOL_TERMS.get(bare, m[0])
+            return str(_TOOL_TERMS.get(bare, m[0]))
 
         return _TOOL.sub("", _TOOL_TERM.sub(term, _TERM.sub(lambda m: _TERMS[m[0].lower()], value)))
 
