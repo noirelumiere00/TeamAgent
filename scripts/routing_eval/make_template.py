@@ -64,11 +64,7 @@ def _expand_refs(schema: Any, defs: dict[str, Any]) -> Any:
         if name not in defs:
             raise SystemExit(f"未定義の $ref: {schema['$ref']}")
         resolved = _expand_refs(json.loads(json.dumps(defs[name])), defs)
-        extras = {
-            k: _expand_refs(v, defs)
-            for k, v in schema.items()
-            if k not in {"$ref", "$defs"}
-        }
+        extras = {k: _expand_refs(v, defs) for k, v in schema.items() if k not in {"$ref", "$defs"}}
         return {**resolved, **extras}
     return {k: _expand_refs(v, defs) for k, v in schema.items() if k != "$defs"}
 
