@@ -1,0 +1,30 @@
+{"id": "om-01", "utterance": "来週初回訪問のあるAフーズに持っていく、TikTokの調査資料をお土産で1冊作って", "expect": "omiyage_report_submit"}
+{"id": "om-02", "utterance": "うちの商品と競合2社をTikTok検索で比べた比較資料をパワポにして", "expect": "omiyage_report_submit"}
+{"id": "om-03", "utterance": "初対面の営業先に持っていくお土産資料をお任せで作って。自社はB茶", "expect": "omiyage_report_submit"}
+{"id": "om-04", "utterance": "初回商談のネタに、TikTokでうちらがどう検索に出るか調べてスライドにまとめて", "expect": "omiyage_report_submit"}
+{"id": "om-05", "utterance": "さっきのTikTokの調査、パワポにして", "expect": "omiyage_report_submit", "forbid": ["video_algorithm"], "note": "10/30 DM実害「パワポにしてで動画分析が始まった」の再現行。資料化の既定の受け皿はお土産"}
+{"id": "om-06", "utterance": "C社のTikTok調査資料まだ?", "expect": "omiyage_report_status"}
+{"id": "om-07", "utterance": "お土産資料のジョブ、進捗教えて", "expect": "omiyage_report_status"}
+{"id": "om-08", "utterance": "お土産資料をもう1冊。競合をE社とF社に変えて", "expect": "omiyage_report_submit"}
+{"id": "om-09", "utterance": "はじめて伺う取引先用にTikTokの市場調査スライドを作ってほしい。中立ワードも選んで", "expect": "omiyage_report_submit", "note": "中立ワード・競合の自動選定（sales25のお任せ）もお土産側"}
+{"id": "om-10", "utterance": "競合のTikTokでの出方を調査して、比較表のある資料にして", "expect": "omiyage_report_submit"}
+{"id": "pb-01", "utterance": "新商材の企画提案書を作って。86枚の統合FMTで", "expect": "proposal_builder_submit"}
+{"id": "pb-02", "utterance": "Dの商品の提案書をFMTどおりに作って。与件は資料に書いた通り", "expect": "proposal_builder_submit"}
+{"id": "pb-03", "utterance": "提案書のジョブ、まだ完了してない?", "expect": "proposal_builder_status"}
+{"id": "pb-04", "utterance": "商品発表用の86枚FMTの提案書を非同期で作成して", "expect": "proposal_builder_submit"}
+{"id": "va-01", "utterance": "TikTokでハンバーグ市場の上位動画を新しく取得して、何が効いたか分析して", "expect": "video_algorithm", "note": "catalog corpusのiter1-new-market-videosと同型"}
+{"id": "va-02", "utterance": "競合の上位動画の構成・フック・CTAの共通点を読み解いて", "expect": "video_algorithm"}
+{"id": "va-03", "utterance": "動画分析のレポート、まだ?", "expect": "video_algorithm_status"}
+{"id": "va-04", "utterance": "上位10本のテロップの傾向を調べて", "expect": "video_algorithm"}
+{"id": "bd-01", "utterance": "上位動画を分析して、その結果を持っていける資料にして", "expect": "omiyage_report_submit", "alt_ok": ["video_algorithm"], "note": "成果物が資料ならお土産が正解。分析語がありでも資料化が目的ならこちら"}
+{"id": "bd-02", "utterance": "この分析、パワポにして", "expect": "omiyage_report_submit", "forbid": ["video_algorithm"]}
+{"id": "bd-03", "utterance": "資料にして", "expect": "__ask_back__", "note": "一語入力。何の資料か聞き返す（R4一語クラス）"}
+{"id": "bd-04", "utterance": "Xでの生活者の声（不満・欲求）を集めて、提案書に貼れる形にして", "expect": "x_voice_search", "forbid": ["omiyage_report_submit", "proposal_builder_submit"], "note": "素材収集であって資料作成ではない"}
+{"id": "bd-05", "utterance": "伊藤ハムに似た過去の提案書を探して", "expect": "recommend", "forbid": ["proposal_draft"], "note": "catalog R4行と同型"}
+{"id": "bd-06", "utterance": "伊藤ハムの提案の骨子を作って", "expect": "proposal_draft", "forbid": ["recommend"], "note": "catalog R4行と同型"}
+{"id": "bd-07", "utterance": "86枚の提案書をパワポで作って", "expect": "proposal_builder_submit", "forbid": ["omiyage_report_submit"], "note": "「パワポ」語があっても86枚提案書なら提案書側"}
+{"id": "bd-08", "utterance": "TikTok調査のお土産資料と、86枚の提案書を両方作って", "expect": "__ask_back__", "note": "複数成果物。どちらを先にするか聞き返す"}
+{"id": "bd-09", "utterance": "なんであの動画がバズったのか分析したレポートをちょうだい", "expect": "video_algorithm", "note": "分析レポート自体が成果物なら video_algorithm"}
+{"id": "bd-10", "utterance": "営業に持ってけるようなTikTokの話題の資料", "expect": "omiyage_report_submit", "alt_ok": ["__ask_back__"]}
+{"id": "ow-01", "utterance": "パワポ", "expect": "__ask_back__", "note": "一語入力。聞き返す"}
+{"id": "ow-02", "utterance": "スライド", "expect": "__ask_back__", "note": "一語入力。聞き返す"}

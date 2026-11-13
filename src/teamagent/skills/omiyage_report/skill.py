@@ -506,15 +506,19 @@ class OmiyageReportSubmitSkill(BaseSkill[OmiyageReportSubmitInput, OmiyageReport
 
     name: ClassVar[str] = "omiyage_report_submit"
     description: ClassVar[str] = (
-        "お土産資料の最終成果物（PPTX）はこのツールでのみ生成する。x_voice_search / "
-        "search_surface_check / web_research / "
+        "初対面の営業先へ持っていくTikTok調査のお土産資料（PPTX）を作る依頼で使う"
+        "（お土産・初回訪問・初回商談のネタ・競合比較・パワポ/スライド化）。"
+        "x_voice_search / search_surface_check / web_research / "
         "tiktok_acquireの先行調査はresearch_notesへ（生活者の声・検索面の勢力図、"
-        "出典URL付き）。競合は本人指定のみ（親会社・飲食店・小売を推測しない）。"
+        "出典URL付き）。"
+        "競合は本人指定のみ（親会社・飲食店・小売を推測しない）。"
         "sales25は自社名だけでsubmit可（未指定条件はサーバ補完）、"
         "通常はブランド・競合・一般KWが必要。needs_inputに回答し再submit。"
         "KWがおまかせなら聞き返さずカテゴリからブランド名なしの3語を選ぶ。"
         "busyは指定秒数後に再submit。queued/running中は再submitせず"
         "omiyage_report_statusで照会、retry_after_secondsは完成予定ではない。"
+        "商材の企画提案書（86枚FMT）はproposal_builder_submit。"
+        "動画の中身の分析・なぜ上位かの読み解きはvideo_algorithm。"
     )
     input_schema: ClassVar[type[BaseModel]] = OmiyageReportSubmitInput
     output_schema: ClassVar[type[BaseModel]] = OmiyageReportSubmitOutput

@@ -62,7 +62,10 @@ def test_rev224_tool_budget_and_input_contract(tmp_path: Path) -> None:
         encoded = json.dumps(_contract(tool["inputSchema"]), ensure_ascii=False, sort_keys=True)
         assert hashlib.sha256(encoded.encode()).hexdigest() == baseline[tool["name"]], tool["name"]
     count = len(json.dumps(tools, ensure_ascii=False))
-    assert count <= 37_000, f"rev224 tools/list: {count:,} characters (limit 37,000)"
+    # 37,000 は 2026-11-13 時点の baseline が 36,995 でほぼいっぱいだった。お土産D1の
+    # 資料系4ツールへのトリガー語＋相互排他注記（+412）を入れるには上限調整が必須で、
+    # 他ツールの文言（routing ポリシーが詰まっている）は触らず 37,500 へ緩めた。
+    assert count <= 37_500, f"rev224 tools/list: {count:,} characters (limit 37,500)"
 
 
 def test_contract_preserves_fields_named_like_annotations() -> None:

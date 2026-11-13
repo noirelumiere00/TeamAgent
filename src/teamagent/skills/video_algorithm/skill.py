@@ -483,6 +483,8 @@ class VideoAlgorithmSkill(BaseSkill[VideoAlgorithmInput, VideoAlgorithmOutput]):
         "TikTok競合・市場の上位動画を新しく取得・分析する依頼のときだけ使う（構成・テ"
         "ロップ・ブランド認識・フック・CTAと共通点をレポート化）。"
         "既知施策の何が効いたかはsearchで施策実績・動画ごとの数字・資料を探す。"
+        "資料・パワポ・スライドの作成は対象外（お土産資料はomiyage_report_submit・"
+        "86枚提案書はproposal_builder_submit）。"
     )
     input_schema: ClassVar[type[BaseModel]] = VideoAlgorithmInput
     output_schema: ClassVar[type[BaseModel]] = VideoAlgorithmOutput
