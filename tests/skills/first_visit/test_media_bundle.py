@@ -110,7 +110,7 @@ def test_media_adds_no_apk_and_keeps_fixed_inputs_in_the_build_context() -> None
     apk = (ROOT / "infra/docker/media-apk.lock").read_bytes()
     assert len(apk.splitlines()) == 240
     assert hashlib.sha256(apk).hexdigest() == (
-        "f29e70f8f918ecc0ecca5b4cbabd948b5ad0bf5cd9e63e162e91c3b9ff243fce"
+        "002efb5aeb6eab6dbffa622b505d9031e3bba7e6311f2ae0f90b61d62e5309c1"
     )
     packages = docker[
         docker.index("FROM 718959508629") : docker.index("FROM runtime-packages AS python-deps")
