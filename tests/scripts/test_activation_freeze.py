@@ -208,21 +208,29 @@ def test_unrelated_changes_still_pass(base: str, head: str, reason: str) -> None
 
 
 def test_unlock_matches_the_committed_declaration() -> None:
-    """CVE-2025-15367 対応と、退避した過去の宣言を完全一致で封印する。"""
+    """nghttp2-libs の lock 追随と、退避した過去の宣言を完全一致で封印する。"""
     unlock = _freeze_doc()["unlock"]
     assert unlock["active"] is True
     assert unlock["scope_paths"] == [
-        "infra/codebuild/teamagent_runtime_contract.json",
         "infra/codebuild/teamagent_core_media_release_contract.json",
     ]
     assert (
         unlock["reason"]
-        == "human gate 2026-11-13（小俣さん 11-13『修正して』の便 r121 の続き・core の python-3.14 3.14.10_git20261028-r0 に CVE-2025-15367 MEDIUM。Wolfi 3.14.10_git20261104-r1 へ。r121 の段 3 ECR 検査で検出）"
+        == "human gate 2026-11-14（小俣さん 11-13『修正して』の便 r121 の続き・Alpine 上流で nghttp2-libs 1.70.0-r0 → 1.71.0-r0。r121 の段 3 media ビルドで検出）"
     )
     assert (
         unlock["gate"]
-        == "human gate 2026-11-13（小俣さん 11-13『修正して』の便 r121 の続き・core の python-3.14 3.14.10_git20261028-r0 に CVE-2025-15367 MEDIUM。Wolfi 3.14.10_git20261104-r1 へ。r121 の段 3 ECR 検査で検出）"
+        == "human gate 2026-11-14（小俣さん 11-13『修正して』の便 r121 の続き・Alpine 上流で nghttp2-libs 1.70.0-r0 → 1.71.0-r0。r121 の段 3 media ビルドで検出）"
     )
+    assert unlock["previous_scope_20261114_nghttp2"] == {
+        "active": True,
+        "scope_paths": [
+            "infra/codebuild/teamagent_runtime_contract.json",
+            "infra/codebuild/teamagent_core_media_release_contract.json",
+        ],
+        "reason": "human gate 2026-11-13（小俣さん 11-13『修正して』の便 r121 の続き・core の python-3.14 3.14.10_git20261028-r0 に CVE-2025-15367 MEDIUM。Wolfi 3.14.10_git20261104-r1 へ。r121 の段 3 ECR 検査で検出）",
+        "gate": "human gate 2026-11-13（小俣さん 11-13『修正して』の便 r121 の続き・core の python-3.14 3.14.10_git20261028-r0 に CVE-2025-15367 MEDIUM。Wolfi 3.14.10_git20261104-r1 へ。r121 の段 3 ECR 検査で検出）",
+    }
     assert unlock["previous_scope_20261113_corepy"] == {
         "active": True,
         "scope_paths": ["infra/codebuild/teamagent_core_media_release_contract.json"],

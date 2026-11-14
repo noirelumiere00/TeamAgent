@@ -65,7 +65,8 @@ UV_DIGEST = "9941e2d8e06ff884d328905091eac0a6bc1e40e5ce12e6dd0de4ef4ee26baac4"
 # 2026-11-09: Alpine 上流への追随（削除: ffmpeg8-libavdevice-8.1.3-r1、ffmpeg8-libavfilter-8.1.3-r1、ffmpeg8-libswscale-8.1.3-r1 / 追加: ffmpeg8-libavdevice-8.1.3-r2、ffmpeg8-libavfilter-8.1.3-r2、ffmpeg8-libswscale-8.1.3-r2）。apk 段の実ビルドで lock 差分 -3 +3（240→240 行）。
 # 2026-11-11: CVE 対応の明示 pin（libxslt 1.1.43-r3→1.1.43-r4）。lock は該当 1 行だけ差し替え（240→240 行・手元の実ビルドなし。段 3 の image-builder が照合）。
 # 2026-11-13: ffmpeg8 3 副パッケージ r2→r3・libplacebo 7.360.1→7.387.0。保存索引で再導出（240 行不変・実物一致は段 3）。
-APK_LOCK_SHA256 = "002efb5aeb6eab6dbffa622b505d9031e3bba7e6311f2ae0f90b61d62e5309c1"
+# 2026-11-14: nghttp2-libs 1.70.0-r0→1.71.0-r0。保存索引で再導出（240 行不変・実物一致は段 3）。
+APK_LOCK_SHA256 = "da3c1a8b18f331cd19dbfb8ae603970087a41d8ef5a86140890c737babaaa71a"
 CHROMIUM_PATH = "/usr/lib/chromium/chromium"
 
 
