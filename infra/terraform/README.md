@@ -624,3 +624,108 @@ live値から推測したり、source側でscheduleやdestinationを先行有効
 format、offline validate、shell/JQ syntax、runtime contract tests、dispatcher tests、
 archive reproducibility testsを実行します。real planはAWSのread-only refreshとstate lockを
 伴うため、外部変更停止中には実行しません。
+
+## media の APK 実インベントリ取得（独立 CodeBuild）
+
+`apk_probe.tf` は `teamagent-dev-apk-probe`、専用 bucket
+`teamagent-dev-apk-probe-718959508629`、専用 service role、30 日保持の
+`/aws/codebuild/teamagent-dev-apk-probe` を新設します。ARM の small/privileged
+builder が `runtime-packages` 段だけを build し、イメージを push せず lock を返します。
+`infra/codebuild/apk-probe-buildspec.yml` を inline で渡す `NO_SOURCE` project なので、
+既存の `codebuild-buildspecs/`、release pipeline、buildspec generation は更新しません。
+新しい Terraform 変数はありません。
+
+tfvars の正本は activation 版
+`~/dev/worktrees/teamagent-activation/infra/terraform/terraform.tfvars` です
+（`docs/runbooks/video_algorithm_detach.md` と同じ運用）。別 worktree の古い tfvars や
+example から値を作り直さず、担当者が正本の完全な owner-only コピーを用意してください。
+secret は repo、tar、build-arg、ログに入れません。
+
+この変更だけでは apply の許可は作りません。既存 guard は未 commit の Terraform、
+未レビューの create、trusted automation role 以外を拒否します。統合後、既存の
+`kind: "config"` migration の手順で live と同じ images/rule states と
+`allowed_env_changes: {}` を束縛し、`to.allowed_resource_changes` へ以下の 8 address
+だけを列挙して review します。
+
+```text
+aws_s3_bucket.apk_probe
+aws_s3_bucket_public_access_block.apk_probe
+aws_s3_bucket_server_side_encryption_configuration.apk_probe
+aws_s3_bucket_policy.apk_probe
+aws_cloudwatch_log_group.apk_probe
+aws_iam_role.apk_probe
+aws_iam_role_policy.apk_probe
+aws_codebuild_project.apk_probe
+```
+
+現在の trusted automation role の boundary は `iam:CreateRole` / `iam:PutRolePolicy`
+を明示 deny します（`runtime_evidence.tf` の `DenyIamSelfEscalation`）。新 service role の
+初回作成には、別途この exact resource 向けの承認済み provisioning 経路を整える必要が
+あります。さらに同ファイルの `PassOnlyExistingTeamAgentServiceRoles` は新しい
+`arn:aws:iam::718959508629:role/teamagent-dev-apk-probe` と
+`iam:PassedToService=codebuild.amazonaws.com` を許可していません。CodeBuild 作成用の
+この exact `iam:PassRole` も別途承認済み経路が必要です。
+この追加では boundary、migration manifest、freeze を変更しません。
+`--runtime-sync`、`-target`、plain `terraform plan/apply` で回避しないでください。
+現在の feat worktree から以下を実行することはできません。
+
+承認済み provisioning と config migration 登録後のコマンド例です。`review-plan` の
+出力を既存手順どおり manifest の `reviewed_plan` に束縛し `enabled=true` にした後、
+同じ fresh receipt で final plan を作ります。guard が要求する clean な統合済み dev と
+exact trusted automation session を使い、出力は repo 外の新しい private directory に置きます。
+
+```bash
+cd infra/terraform
+umask 077
+CANONICAL_TFVARS="$HOME/dev/worktrees/teamagent-activation/infra/terraform/terraform.tfvars"
+APK_PROBE_ARTIFACT_DIR="$(mktemp -d /tmp/teamagent-apk-probe.XXXXXX)"
+APK_PROBE_MIGRATION_ID=REVIEWED_APK_PROBE_CONFIG_MIGRATION_ID
+
+bash ../deploy/terraform_runtime_guard.sh preflight \
+  --migration "$APK_PROBE_MIGRATION_ID" \
+  --out "$APK_PROBE_ARTIFACT_DIR/preflight.json"
+bash ../deploy/terraform_runtime_guard.sh review-plan \
+  --var-file "$CANONICAL_TFVARS" \
+  --runtime-migration "$APK_PROBE_MIGRATION_ID" \
+  --preflight-receipt "$APK_PROBE_ARTIFACT_DIR/preflight.json" \
+  --out "$APK_PROBE_ARTIFACT_DIR/reviewed-plan.json"
+# 上の出力のレビューと manifest binding を既存手順で完了してから続ける。
+bash ../deploy/terraform_runtime_guard.sh plan \
+  --var-file "$CANONICAL_TFVARS" \
+  --runtime-migration "$APK_PROBE_MIGRATION_ID" \
+  --preflight-receipt "$APK_PROBE_ARTIFACT_DIR/preflight.json" \
+  --out "$APK_PROBE_ARTIFACT_DIR/apk-probe.tfplan"
+bash ../deploy/terraform_runtime_guard.sh verify \
+  --plan "$APK_PROBE_ARTIFACT_DIR/apk-probe.tfplan"
+bash ../deploy/terraform_runtime_guard.sh apply \
+  --plan "$APK_PROBE_ARTIFACT_DIR/apk-probe.tfplan" \
+  --out "$APK_PROBE_ARTIFACT_DIR/apk-probe-apply.json"
+```
+
+最初の入力は `s3://teamagent-dev-apk-probe-718959508629/inputs/<run-id>/repo.tar.gz`
+と `inputs/<run-id>/build-args.txt`、出力は同じ bucket の
+`outputs/<run-id>/apk-installed.lock` と `outputs/<run-id>/apk-build.log` です。
+S3 の prefix は事前作成不要で、初回 upload 時に使います。
+`run-id` は日時とランダム suffix を持ち、再利用しません。実行例は次のとおりです。
+
+```bash
+APK_PROBE_REMOTE=1 bash /path/to/apkwatch/apply_apklock.sh \
+  "<human gate の出所>" LIBEXPAT_PACKAGE_VERSION=2.9.0-r0
+```
+
+CodeBuild service role の Allow は ECR auth（この API だけ `Resource: "*"`）、
+`teamagent-mirror/chromium-headless` 1 repository の pull 3 action、専用 bucket の
+`inputs/*` の `s3:GetObject` と `outputs/*` の `s3:PutObject`、専用 log group の
+`logs:CreateLogStream` / `logs:PutLogEvents` だけです。起動する人の権限は別で、
+同 bucket の `inputs/*` の `s3:PutObject`、`outputs/*` の `s3:GetObject`、exact project の
+`codebuild:StartBuild` とその build ARN の `codebuild:BatchGetBuilds`、失敗ログを読む
+exact log group/stream の `logs:GetLogEvents` が必要です。既存 release launcher の権限は
+この project へ拡張しません。入力は Docker build を実行できるため、起動者はこれらに
+加え任意の project override を許可しない信頼できる担当者に限定してください。
+
+`infra/docker/Dockerfile.teamagent-media-worker` の `teamagent_ca` secret は
+`required=false` で、AWS 内の通常の
+公開 TLS では社内 CA を渡しません。buildspec は tar 内の Dockerfile をそのまま使い、
+空の secret や CA を新設しません。公開 TLS/Alpine index、ARM small のメモリ余裕、
+実 IAM と Docker/Buildx の稼働は、担当者の初回実 build で確認してください。
+S3 オブジェクトの自動削除は設定していないため、保管期間と削除は担当者が管理します。
