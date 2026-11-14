@@ -152,6 +152,24 @@ class SlackSearchSkill(BaseSkill[SlackSearchInput, SlackSearchOutput]):
         self._pgvector = pgvector
 
     def run(self, input: SlackSearchInput, ctx: SkillContext) -> SlackSearchOutput:
+        from teamagent.skills.slack_summary.reactions import handoff_reactions
+
+        request_text = str(ctx.metadata.get("request_text", "") or "")
+        reaction_result = handoff_reactions(
+            request_text, ctx, self._slack_store, self._reader_factory
+        )
+        if reaction_result is not None:
+            logger.info(
+                "slack_search_handoff_reactions", request_id=ctx.request_id, has_channel=True
+            )
+            return SlackSearchOutput(
+                message=reaction_result.message,
+                match_count=reaction_result.message_count,
+                error=reaction_result.error,
+                truncated=reaction_result.truncated,
+                total_cost_usd=reaction_result.total_cost_usd,
+            )
+
         log = ctx.bind_logger(self.name)
 
         # ── S4: 本人限定（fail-closed）。MCP 外殻が slack_user_id→email を解決して注入。

@@ -12,6 +12,7 @@ import structlog
 from teamagent.adapters.slack_user_reader import SlackThreadRead
 from teamagent.skills._shared.slack_context import _neutralize
 from teamagent.skills._shared.source_url import slack_permalink
+from teamagent.skills.base import SkillContext
 from teamagent.skills.slack_summary.period import JST
 from teamagent.skills.slack_summary.schema import SlackSummaryOutput
 
@@ -25,6 +26,7 @@ _USER_ID = re.compile(r"(?<![A-Za-z0-9_])[UW](?=[A-Z0-9]*[0-9])[A-Z0-9]{8,}(?![A
 
 
 _ACTION_WORDS = ("押し", "つけ", "付け", "反応し", "誰", "した人", "ユーザー", "一覧", "リスト")
+_LABELLED_TERMS = re.compile(r"(?:含む文字列|文字列)\s*[:：]\s*([^\n\r]+)")
 
 
 def wants_reactions(intent: str) -> bool:
@@ -52,15 +54,47 @@ def reaction_channel(intent: str) -> dict[str, str]:
     return {"channel_name": labelled[1]} if labelled and not labelled[1].isdecimal() else {}
 
 
+def handoff_reactions(
+    request_text: str,
+    ctx: SkillContext,
+    slack_store: Any,
+    reader_factory: Any,
+) -> SlackSummaryOutput | None:
+    channel = reaction_channel(request_text) if wants_reactions(request_text) else {}
+    if not channel:
+        return None
+    from teamagent.skills.slack_summary.schema import SlackSummaryInput
+    from teamagent.skills.slack_summary.skill import SlackSummarySkill
+
+    return SlackSummarySkill(slack_store=slack_store, reader_factory=reader_factory).run(
+        SlackSummaryInput(scope="channel", **channel), ctx
+    )
+
+
 def reaction_terms(intent: str) -> list[str]:
     intent = intent.replace("**", "").replace("`", "")
     quoted = [a or b for a, b in re.findall(r"「([^」]+)」|『([^』]+)』", intent)]
-    labelled = re.findall(r"(?:含む文字列|文字列)\s*[:：]\s*([^\n\r]+)", intent)
+    labelled = _LABELLED_TERMS.findall(intent)
     bare = re.findall(r"文字列\s*(?![:：\sを])([^\s、。「『:：]+)", intent)
     before = re.findall(r"([^\s、。]+?)\s*を含む\s*(?:投稿|メッセージ)", intent)
     # 明記された検索語があるとき、「ユニーク」等の依頼中の引用を検索語に混ぜない。
     terms = labelled or [*quoted, *bare, *before]
-    return list(dict.fromkeys(t.strip(" *_「」『』") for t in terms))
+    if labelled:
+        # 原文を先に試し、改行が空白になった依頼だけ短い候補へフォールバックする。
+        terms = [
+            candidate
+            for term in labelled
+            for candidate in (
+                term,
+                re.split(
+                    r"\s|[、。]|(?:対象)?(?:チャンネル(?:名)?|期間)\s*[:：]"
+                    r"|\*使用して送信されました\*",
+                    term,
+                    maxsplit=1,
+                )[0],
+            )
+        ]
+    return [t for t in dict.fromkeys(t.strip(" *_「」『』") for t in terms) if t]
 
 
 def _safe_text(text: str, limit: int) -> str:
@@ -85,7 +119,14 @@ def render_reactions(
     unique = any(w in intent for w in ("ユニーク", "重複なし", "重複を除", "一意", "列挙"))
     guest_only = any(w in intent for w in ("マルチチャンネルゲスト", "ゲストだけ", "ゲストのみ"))
     reacted = [m for m in result.messages if m.reactions]
-    posts = [m for m in reacted if not terms or any(t in m.text for t in terms)]
+    posts = reacted if not terms else []
+    candidates = [[t] for t in terms] if _LABELLED_TERMS.search(intent) else [terms]
+    for candidate in candidates:
+        if not candidate:
+            break
+        posts = [m for m in reacted if any(t in m.text for t in candidate)]
+        if posts:
+            break
     # 「」はモデルが focus に足した語のこともある。絞って 0 件なら絞らずに出し、そう書く。
     widened = bool(terms) and not posts and bool(reacted)
     if widened:
