@@ -241,6 +241,14 @@ class Stages:
     prefetch: Step | None = None
 
 
+# §8-1(a)（2026-11-13・持ち主推奨・確認中）: 取れた実数で 25 ページを完成扱いにする。
+# 取得の未達（search partial / shortfall）や原音未確認は「一部の数字が足りません」を付けず、
+# P2/P25 に実数と理由を明記した上で ready で届ける（明記は deck_plan._acquisition_note）。
+# §8-1 が (b)（語を広げて 100 件に近づける）に転換したら False に戻すと現行どおり
+# report_status=partial＋文言付きの応答に変わる。
+SHORTFALL_DELIVERABLE = True
+
+
 def can_continue(key: str, result: StepResult) -> bool:
     if key.startswith("search_"):
         return result.status in {"complete", "partial", "zero"}
@@ -654,8 +662,27 @@ class Parent:
                 analysis_check is not None
                 and (analysis_check.status == "incomplete" or analysis_check.reason is not None)
             )
+            # §8-1(a) で完成扱いにする不足は「検索軸の取得未達」だけ。原音未確認・媒体欠落・
+            # 分析欠落・TOP5 候補不足はページや根拠が欠けるため partial を維持する（D4(b) で
+            # 原音は P25 への明記とともに完成扱いへ移す）。正常0件は取れた実数が無いため対象外。
+            search_shortfall = any(
+                k.startswith("search_") and r.status == "partial" for k, r in steps.items()
+            )
+            other_gap = any(
+                k != "page_qa"
+                and not k.startswith("search_")
+                and (r.status != "complete" or r.reason in {"audio_unverified", "shortfall"})
+                for k, r in steps.items()
+            ) or (
+                analysis_check is not None
+                and (analysis_check.status == "incomplete" or analysis_check.reason is not None)
+            )
             report_status: Literal["ready", "partial", "incomplete"] = (
-                "partial" if complete and partial else "ready" if complete else "incomplete"
+                "incomplete"
+                if not complete
+                else "ready"
+                if not partial or (SHORTFALL_DELIVERABLE and search_shortfall and not other_gap)
+                else "partial"
             )
             stage = "delivery" if complete else state["stage"]
             reasons = {

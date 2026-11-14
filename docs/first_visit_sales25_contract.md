@@ -34,9 +34,9 @@ sales25 の検索実行・受付見積もりは720秒、呼出側の既定期限
 
 Actor が `SUCCEEDED` でも目標未達なら `accepted=true / status=partial`、`actual=取得行数 / shortfall=target-actual` を保持する。raw の `requested=target / actual=取得行数` は整数で整合している必要があり、正の実数が目標以下なら入力契約で受け入れる。URL、表示順位、欠測、owner、全IDの関連判定などの検証は維持する。Actor 完了を表す既存の `stop_reason=exhausted / stop_reason_basis=apify_actor_completed` は、検索結果を全件取得できた証明ではない。
 
-目標未達かつ Apify 予算・親期限内に時間が残る場合は、同じ語を1回だけ再取得する。既存の `tiktok_search` が追加run分も費用予約・精算する。2回の行は結合せず、多く取れた単一runの表示順を採用し、両runの根拠を `apify_attempts` に保持する。再取得が失敗・予算不足・期限切れでも先の有効なpartialを破棄しない。試行マーカーと保存済み結果により再開時の追加課金を防ぐ。最終配送は既存の「一部の数字が足りません」を使う。
+目標未達かつ Apify 予算・親期限内に時間が残る場合は、同じ語を1回だけ再取得する。既存の `tiktok_search` が追加run分も費用予約・精算する。2回の行は結合せず、多く取れた単一runの表示順を採用し、両runの根拠を `apify_attempts` に保持する。再取得が失敗・予算不足・期限切れでも先の有効なpartialを破棄しない。試行マーカーと保存済み結果により再開時の追加課金を防ぐ。最終配送は「一部の数字が足りません」を付けない（D2・§8-1(a): 未達は P2/P25 に実数と理由を明記して完成扱いにする）。
 
-r81相当の偽物（6語中5語50件、3語目は221秒・`SUCCEEDED / Scraped 0/1 search queries / 13件`）で関連判定・PPTX生成・偽DM配送を検証する。再取得50件では検索3のcheckpointは `complete`。固定キットの100件基準は維持するため、資料全体のQAでは引き続きpartialになり得る。
+r81相当の偽物（6語中5語50件、3語目は221秒・`SUCCEEDED / Scraped 0/1 search queries / 13件`）で関連判定・PPTX生成・偽DM配送を検証する。再取得50件では検索3のcheckpointは `complete`。固定キットの100件基準は維持するが、D2（§8-1(a)）により取得未達は `status=passed / delivery_status=delivered` を維持する（MCP側も検索未達のみの不足は ready）。媒体欠落・原音未確認・TOP5 候補不足は根拠が欠けるため従来どおり partial／incomplete に落とす。
 
 調査上の限界: 修正前のsrcでも `_evidence → _source → judge_query → prepare_inputs` は13/50の偽物を受け入れた。件数不足だけから本番の `ValueError` は再現できず、原因は未特定。元raw・モデル応答または例外メッセージが必要。prefetch警告とstageの未完了化には、例外型に加えてURL・トークン等を伏せたメッセージ先頭200字を記録する。
 
@@ -107,9 +107,9 @@ output_dir/
 
 checker は片方が invalid でも両方を実行して記録する。stdout/stderr と終了コードを保持し、analysis の exit 2 は `incomplete` として保存する。filler の失敗はログを残して停止する。新規出力だけを許し、既存の成果物を上書きしない。入力 manifest は実行前後に再検証する。
 
-result.json の `acquisition` には6 queryすべての `query_id / target / actual / shortfall` を保存する。実数は重複除外後の source の件数。ブランド3社のcheckerが合格しても、中立queryを含むいずれかの100件未達は全体の `incomplete` として残す。
+result.json の `acquisition` には6 queryすべての `query_id / target / actual / shortfall` を保存する。実数は重複除外後の source の件数。D2（§8-1(a)）により、いずれかの語の100件未達は `status=passed` を維持したまま P2/P25 に実数と理由を明記し、`delivery_status=delivered` を出す。正常0件（`observed_zero`）は取れた実数が無いため対象外。媒体欠落・原音未確認・TOP5 候補不足は根拠が欠けるため `incomplete` に落とす（原音は D4(b) で P25 への明記とともに完成扱いへ移す）。
 
-機械検査の `passed` は納品完了ではない。`delivery_status: incomplete / visual_review: not_verified` は常に維持する。全25頁の描画、字体、見切れ、音声確認の実証、全編分析の品質、本人限定公開は後続 PR の責任。この段階で本番経路は接続しない。
+機械検査の `passed` は納品完了ではない。`visual_review: not_verified` は D3 が着地するまで維持する。全25頁の描画、字体、見切れ、音声確認の実証、全編分析の品質、本人限定公開は後続 PR の責任。この段階で本番経路は接続しない。
 
 ## Pillow 13 と再現テスト
 

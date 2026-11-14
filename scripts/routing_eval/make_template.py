@@ -50,6 +50,10 @@ def _expand_refs(schema: Any, defs: dict[str, Any]) -> Any:
     OpenClaw は MCP の inputSchema を Bedrock へ送る前に $ref を展開する
     （2026.7.1 実機 capture で確認）。展開後の形で比較しないと $ref を持つ
     ツール定義が必ず不一致になる。
+    `{"$ref": …, "description": …}` のように $ref と他のキーが併記されて
+    いる場合は、展開実体に併記キーを上書きしてから返す（OpenClaw は併記
+    キーを保持して送る・proposal_builder_submit の estimate_terms で実機
+    capture と確認）。
     """
     if isinstance(schema, list):
         return [_expand_refs(x, defs) for x in schema]
@@ -59,7 +63,9 @@ def _expand_refs(schema: Any, defs: dict[str, Any]) -> Any:
         name = schema["$ref"].split("/")[-1]
         if name not in defs:
             raise SystemExit(f"未定義の $ref: {schema['$ref']}")
-        return _expand_refs(json.loads(json.dumps(defs[name])), defs)
+        resolved = _expand_refs(json.loads(json.dumps(defs[name])), defs)
+        extras = {k: _expand_refs(v, defs) for k, v in schema.items() if k not in {"$ref", "$defs"}}
+        return {**resolved, **extras}
     return {k: _expand_refs(v, defs) for k, v in schema.items() if k != "$defs"}
 
 
@@ -80,9 +86,9 @@ def check_tools(sent: list[dict[str, Any]], source: list[dict[str, Any]]) -> Non
             raise SystemExit(f"OpenClaw がツール定義を書き換えている: {bare}")
         src_schema = _expand_refs(src["inputSchema"], src["inputSchema"].get("$defs", {}))
         if spec["inputSchema"]["json"] != src_schema:
-            # 定義の本体（$ref 展開）の差は落とさず警告にする（dump_tools の生成精度の差分。
-            # 評価は OpenClaw が送った実物＝sent 側を使うため判定の正しさには影響しない）。
-            print(f"⚠️ inputSchema の差分（展開後・評価は sent 側の実物を使う）: {bare}")
+            # $ref 展開（併記キーの引き継ぎ含む）後も差が残るのは OpenClaw の書き換えなので
+            # 止める（レビュー指摘 2026-11-13・OpenClaw による実際の書き換えを見逃さないため）。
+            raise SystemExit(f"OpenClaw がツール定義を書き換えている: {bare}")
     missing = sorted(set(by_name) - set(sent_names))
     if missing:
         raise SystemExit(

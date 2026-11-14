@@ -10,6 +10,14 @@ from typing import Any, Literal
 
 from teamagent.skills.first_visit import sales25_contract as contract
 
+# §8-1(a)（2026-11-13・持ち主推奨・確認中）: 取れた実数で 25 ページを完成扱いにする。
+# 取得の未達（shortfall）は P2/P25 に実数と理由を明記する（sales25_authoring.build_manuscript）
+# ため、status を incomplete に落とさず delivery_status も incomplete 以外を出す。媒体欠落
+# （media_missing）は TOP5 の根拠が欠けるため従来どおり incomplete に落とす。原音と全 25 頁の
+# 描画確認は後続 PR（D4(b)/D3）の責任のまま。§8-1 が転換したら False に戻すと現行の
+# 「passed を incomplete に落とし・delivery_status=incomplete 固定」に戻る。
+SHORTFALL_DELIVERABLE = True
+
 
 def _cli(
     script: Literal["fill_template", "check_fmt", "check_top5_analysis"],
@@ -97,14 +105,14 @@ def check_deck(
         )
     status = "invalid" if not valid else analysis["result"]["status"]
     if status == "passed" and (
-        any(q["shortfall"] for q in acquisition)
+        (not SHORTFALL_DELIVERABLE and any(q["shortfall"] for q in acquisition))
         or contract.read_json(root / "top5-analysis.json").get("media_missing")
     ):
         status = "incomplete"
     result = {
         "status": status,
         "acquisition": acquisition,
-        "delivery_status": "incomplete",
+        "delivery_status": "incomplete" if status != "passed" else "delivered",
         "visual_review": "not_verified",
         "output_sha256": after,
         "input_manifest_sha256": hashlib.sha256(
