@@ -24,6 +24,7 @@ from pydantic import (
     model_validator,
 )
 
+from teamagent.skills._deck.text import ORGANIC_NOTE_FRAGMENT, organic_without_definition
 from teamagent.skills.omiyage_report.contract import VOICE_UNMEASURED_NOTE
 from teamagent.skills.omiyage_report.fmt.spec import BEN1_SLIDE_TYPES, FmtDeckSpec
 
@@ -32,9 +33,9 @@ TagVariant = Literal["発見", "結論", "所見"]
 ImageKind = Literal["real_frame", "real_screen_browser", "provided_thumbnail"]
 
 _DATA_URI = re.compile(r"^data:image/(?:jpeg|png);base64,(?P<body>[A-Za-z0-9+/=\s]+)$")
-_ORGANIC_WORD = "オーガニック"
-# 「オーガニック」使用時に必須の初出定義注記（spec text_rules.pr_labels.alternative）
-_ORGANIC_NOTE_FRAGMENT = "#PR等の表記が確認できない投稿"
+# 「オーガニック」使用時に必須の初出定義注記（spec text_rules.pr_labels.alternative）。
+# 判定はレポートの PowerPoint（_deck）と共用。
+_ORGANIC_NOTE_FRAGMENT = ORGANIC_NOTE_FRAGMENT
 
 Text = Annotated[str, StringConstraints(min_length=1, max_length=2000)]
 ShortText = Annotated[str, StringConstraints(min_length=1, max_length=400)]
@@ -413,10 +414,7 @@ def validate_deck_content(raw: object, spec: FmtDeckSpec) -> DeckContent:
     if total > total_max:
         raise FmtContractError(f"images exceed deck budget ({total} > {total_max} bytes)")
 
-    texts = content.display_texts()
-    if any(_ORGANIC_WORD in text for text in texts) and not any(
-        _ORGANIC_NOTE_FRAGMENT in text for text in texts
-    ):
+    if organic_without_definition(content.display_texts()):
         raise FmtContractError(
             "「オーガニック」を使う場合は初出の定義注記"
             f"（{_ORGANIC_NOTE_FRAGMENT} …）が必須（pr_labels ゲート）"
