@@ -39,7 +39,7 @@ PRIVATE_DATA = re.compile(
 
 def test_corpus_structure_and_privacy() -> None:
     rows = [json.loads(line) for line in CORPUS.read_text().splitlines()]
-    assert Counter(row["split"] for row in rows) == {"tune": 80, "eval": 40}
+    assert Counter(row["split"] for row in rows) == {"tune": 84, "eval": 43}
     assert len({row["id"] for row in rows}) == len(rows)
     plugin = (ROOT / "infra/openclaw/caller-identity-plugin/dist/index.js").read_text()
     classifier = plugin.split("export function classifyInboundRoute(text) {", 1)[1].split(
@@ -88,7 +88,7 @@ def test_privacy_patterns(value: str) -> None:
 
 
 @pytest.mark.skipif(NODE is None, reason="node is not installed")
-@pytest.mark.parametrize(("split", "size"), [("eval", 40), ("tune", 80), ("all", 120)])
+@pytest.mark.parametrize(("split", "size"), [("eval", 43), ("tune", 84), ("all", 127)])
 def test_classifier_emits_json(split: str, size: int) -> None:
     result = subprocess.run(
         [NODE, str(RUNNER), "--split", split],

@@ -4,7 +4,7 @@ import {readFileSync} from 'node:fs';
 import {join} from 'node:path';
 import {pathToFileURL} from 'node:url';
 import {createHmac} from 'node:crypto';
-import {createCallerIdentityPlugin, classifyInboundRoute} from '../dist/index.js';
+import {createCallerIdentityPlugin, classifyInboundRoute, canonicalRequestSha256} from '../dist/index.js';
 
 const scenarios = JSON.parse(readFileSync(new URL('./fixtures/router-scenarios.json', import.meta.url)));
 const wrap = data => ({content: [{type: 'text', text: JSON.stringify(data)}]});
@@ -70,6 +70,7 @@ for (const scenario of scenarios) {
     const route = classifyInboundRoute(scenario.query);
     assert.equal(route.intent, scenario.intent);
     assert.equal(route.requires_internal_evidence, scenario.evidence);
+    if (scenario.rule_id) assert.equal(route.rule_id, scenario.rule_id);
     const p = setup({query: scenario.query, mode: 'shadow'});
     await p.prompt(); await p.prompt();
     const baseline = setup({query: scenario.query, mode: 'off'}); await baseline.prompt();
@@ -394,7 +395,7 @@ for (const [query, rule, intent, evidence, output, fallback] of [
   ['事例を探して、提案資料を作って', 'unknown', 'mixed', true, 'answer', true],
   ['Slackの案件一覧を探して', 'existing_operation', 'slack', true, 'list', true],
   ['Slackの会話をまとめて', 'existing_operation', 'slack', true, 'answer', true],
-  ['#proj--動作チェック用 の直近1週間の投稿で、スタンプを押した人を一覧にして', 'existing_operation', 'slack', true, 'list', true],
+  ['#proj--動作チェック用 の直近1週間の投稿で、スタンプを押した人を一覧にして', 'slack_reactions', 'slack', true, 'list', false],
   ['この投稿にリアクションした人のリストを出して', 'existing_operation', 'slack', true, 'list', true],
   ['スタンプラリーの事例を一覧で', 'case_list', 'cases', true, 'list', false],
   ['Slackの合意を確認して、メールの返信案も書いて', 'unknown', 'mixed', true, 'answer', true],
@@ -443,3 +444,97 @@ test('email lookup warning is once per run even when runs share a receipt', asyn
   assert.equal(p.logs.filter(line => line.includes('router route_version=1')).length, 1);
   assert.equal(p.calls.length, 0);
 });
+
+for (const scenario of scenarios.filter(row => row.rule_id === 'slack_reactions')) {
+  test(`slack_reactions opens signed pre-model search to another verified email: ${scenario.id}`, async () => {
+    const list = '架空花子（ゲスト） — 3 投稿\n架空太郎（ゲスト） — 1 投稿\nゲスト 2 人';
+    const p = setup({query: scenario.query, email: 'other@example.test',
+      env: {SEARCH_DIRECT_ANSWER: '0', SEARCH_DIRECT_ANSWER_ALLOWED_EMAILS: ''},
+      search: {found: true, answer: list, answer_format: 'list'}});
+    const route = classifyInboundRoute(scenario.query);
+    assert.deepEqual([route.rule_id, route.intent, route.requires_internal_evidence,
+      route.requested_output, route.fallback, route.secondary_intent],
+    ['slack_reactions', 'slack', true, 'list', false, undefined]);
+    assert.ok((await p.prompt()).appendContext.includes('架空花子'));
+    assert.equal(p.calls.length, 1);
+    const call = p.calls[0];
+    assert.equal(call.name, 'search');
+    assert.equal(call.arguments.query, scenario.query);
+    const context = call.arguments._user_context;
+    assert.equal(context.request_text, scenario.query);
+    const [encoded, signature] = context.caller_claim.split('.');
+    assert.equal(signature, createHmac('sha256', 'x'.repeat(48)).update(encoded).digest('base64url'));
+    const claim = JSON.parse(Buffer.from(encoded, 'base64url'));
+    assert.equal(claim.tool, 'search');
+    assert.equal(claim.arguments_sha256, canonicalRequestSha256(call.arguments));
+    assert.notEqual(claim.arguments_sha256, canonicalRequestSha256({...call.arguments,
+      _user_context: {...context, request_text: 'モデルが差し替えた依頼'}}));
+    assert.ok(p.logs.some(line => line.includes('rule_id=slack_reactions intent=slack gate_allowed=true')));
+    await p.finalize(); p.end();
+    assert.equal((await p.send('現在のツールではリアクション者を取得できません')).payload.text,
+      '架空花子（ゲスト）、3 投稿\n架空太郎（ゲスト）、1 投稿\nゲスト 2 人');
+    assert.equal((await p.send()).cancel, true);
+    assert.equal(p.calls.length, 1); assert.equal(p.posts.length, 0);
+  });
+}
+
+for (const reference of ['#xxx', '<#C12345678>', '<#G12345678|private>', 'チャンネル：xxx',
+  'チャンネル名: `xxx`', 'チャンネル xxx', 'チャンネルxxx', '#日本語-チャンネル', '#予定調整']) {
+  for (const people of ['押した人', '誰', 'ユーザー', '一覧', '列挙', 'リスト']) {
+    test(`slack_reactions explicit channel and people: ${reference} ${people}`, () => {
+      const route = classifyInboundRoute(`${reference} スタンプの${people}を出して`);
+      assert.equal(route.rule_id, 'slack_reactions'); assert.equal(route.fallback, false);
+    });
+  }
+}
+
+for (const query of ['#xxx を要約して', 'スタンプラリーの事例', 'リアクション動画の事例を一覧で', '今日の予定',
+  '#xxx のスタンプラリーの事例を一覧で', '#xxx のリアクション動画の事例を一覧で',
+  'スタンプを押した人の一覧', 'この投稿にリアクションした人のリストを出して',
+  '指定チャンネル内のスタンプを押した人の一覧', '#xxx の人気の投稿をスタンプなしで要約して',
+  '#xxx のリアクションが多い人気の投稿を要約して',
+  '#123 スタンプを押した人の一覧', 'チャンネル：123 スタンプを押した人の一覧',
+  'https://example.invalid/page#xxx スタンプを押した人の一覧',
+  '<https://example.invalid/page#xxx|リンク> スタンプを押した人の一覧',
+  'www.example.invalid/#xxx スタンプを押した人の一覧',
+  '「#xxx のスタンプを押した人の一覧」と書いてある',
+  '> #xxx のスタンプを押した人の一覧']) {
+  test(`slack_reactions rejects non-reaction lists or implicit channels: ${query}`, async () => {
+    assert.notEqual(classifyInboundRoute(query).rule_id, 'slack_reactions');
+    const p = setup({query, email: 'other@example.test'}); await p.prompt();
+    assert.equal(p.calls.length, 0);
+  });
+}
+
+for (const env of [
+  {TEAMAGENT_INBOUND_ROUTER_ALLOWED_EMAILS: undefined, TEAMAGENT_INBOUND_ROUTER_ALLOWED_RULES: undefined},
+  {TEAMAGENT_INBOUND_ROUTER_ALLOWED_EMAILS: '', TEAMAGENT_INBOUND_ROUTER_ALLOWED_RULES: ''},
+]) {
+  test('slack_reactions opens independently of both router allowlists: ' + JSON.stringify(env), async () => {
+    const p = setup({query: '#xxx のスタンプを押した人の一覧', email: 'other@example.test', env});
+    await p.prompt(); assert.equal(p.calls.length, 1);
+    assert.ok(p.logs.some(line => line.includes('gate_allowed=true')));
+  });
+}
+
+for (const options of [{mode: 'off'}, {mode: 'shadow'}, {email: ''},
+  {profile: {id: 'U22222222'}}, {profile: {team_id: 'T22222222'}}]) {
+  test('slack_reactions retains mode and identity requirements: ' + JSON.stringify(options), async () => {
+    const p = setup({query: '#xxx のスタンプを押した人の一覧', email: 'other@example.test', ...options});
+    await p.prompt(); assert.equal(p.calls.length, 0); assert.equal(p.posts.length, 0);
+    if (options.email === '') {
+      assert.ok(p.logs.some(line => line.includes('reason=email_unavailable')));
+      assert.ok(p.logs.some(line => line.includes('gate_allowed=false')));
+    }
+    if (options.mode === 'shadow') assert.ok(p.logs.some(line => line.includes('gate_allowed=true')));
+  });
+}
+
+for (const query of ['施策の事例を一覧で', '案件は失注で確定した？', '案件の受注金額は？']) {
+  test(`slack_reactions does not open other rules: ${query}`, async () => {
+    const owner = setup({query}), other = setup({query, email: 'other@example.test'});
+    await owner.prompt(); await other.prompt();
+    assert.equal(owner.calls.length, 1); assert.equal(other.calls.length, 0);
+    assert.ok(other.logs.some(line => line.includes('gate_allowed=false')));
+  });
+}
