@@ -35,6 +35,9 @@ _TERM = re.compile(
     re.IGNORECASE,
 )
 _TOOLS = _OUTBOUND_RULES["tool_names"]
+# §8-2（2026-11-13・持ち主指示「営業さんに見える文には、進める前の説明も含めて一切出さない」）:
+# ツール名は消さずに営業さん向けの自然な表現へ言い換える（マップ外は従来どおり消す）。
+_TOOL_TERMS = _OUTBOUND_RULES.get("tool_name_terms", {})
 _TOOL = re.compile(
     r"(?:`\s*(?:"
     + "|".join(_TOOLS)
@@ -42,6 +45,14 @@ _TOOL = re.compile(
     + "|".join(name for name in _TOOLS if "_" in name)
     + r")(?![a-z0-9_]))[ \t　]*(?:を[ \t　]*呼(?:び出して|んで|び出し|び)[ \t　]*[、,]?"
     r"|では?[ \t　]*|[をにのがはへと][ \t　]*)?[、,]?[ \t　]*",
+    re.IGNORECASE,
+)
+_TOOL_TERM = re.compile(
+    r"(?:`\s*(?:"
+    + "|".join(_TOOLS)
+    + r")\s*`|(?<![a-z0-9_])(?:teamagent__[a-z0-9_]*|"
+    + "|".join(name for name in _TOOLS if "_" in name)
+    + r")(?![a-z0-9_]))",
     re.IGNORECASE,
 )
 _LINK_START = re.compile(r"<https?://|<[@!#][^<>\n]*>|\[[^\]\n]*\]\(https?://|https?://", re.I)
@@ -74,7 +85,13 @@ def scrub_outbound_reply(text: str, permanent_urls: dict[str, str] | None = None
         text = re.sub("(?:" + re.escape(error) + r"\n)+", error + "\n", text).rstrip()
 
     def plain(value: str) -> str:
-        return _TOOL.sub("", _TERM.sub(lambda m: _TERMS[m[0].lower()], value))
+        # §8-2: マップにある名前は助詞を飲まずに自然な表現へ言い換えてから、
+        # マップ外の名前を従来どおり消す（消すと文に穴が開くため）。
+        def term(m: re.Match[str]) -> str:
+            bare = m[0].strip("` \t　").removeprefix("teamagent__")
+            return str(_TOOL_TERMS.get(bare, m[0]))
+
+        return _TOOL.sub("", _TOOL_TERM.sub(term, _TERM.sub(lambda m: _TERMS[m[0].lower()], value)))
 
     parts: list[str] = []
     end = 0

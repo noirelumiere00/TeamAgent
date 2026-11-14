@@ -15,6 +15,11 @@ ROOT = Path(__file__).resolve().parents[1]
 UNIT_PROBE = ROOT / "tests/scripts/openclaw_outbound_scrub_probe.mjs"
 CALLER_PROBE = ROOT / "tests/scripts/openclaw_caller_identity_probe.mjs"
 OMITTED_LINK = "（社内リンクは省略しました）"
+# §8-2（2026-11-13）: マップにある名前は消さずに自然な表現へ言い換える（caller-identity plugin と
+# skills/_shared/slack_mrkdwn.py が同じ正本 outbound_rules.json を読む）。
+_TOOL_TERMS = json.loads(
+    (ROOT / "infra/openclaw/caller-identity-plugin/outbound_rules.json").read_text(encoding="utf-8")
+)["tool_name_terms"]
 
 
 def _run_unit_probe(texts: list[str]) -> dict[str, Any]:
@@ -129,10 +134,12 @@ def test_single_quotes_around_signed_bare_url_are_preserved() -> None:
 @pytest.mark.parametrize(
     ("text", "expected"),
     [
-        ("`omiyage_report_submit` を呼んで、", ""),
-        ("omiyage_report_submit を呼んで、確認します。", "確認します。"),
-        ("`attachment_assist` で確認・加工できます。", "確認・加工できます。"),
-        ("attachment_assistで確認できます。", "確認できます。"),
+        # §8-2（2026-11-13）: マップにある名前（tool_name_terms）は消さずに自然な表現へ言い換える。
+        ("`omiyage_report_submit` を呼んで、", "お土産資料の作成 を呼んで、"),
+        ("omiyage_report_submit を呼んで、確認します。", "お土産資料の作成 を呼んで、確認します。"),
+        ("`attachment_assist` で確認・加工できます。", "添付資料の確認 で確認・加工できます。"),
+        ("attachment_assistで確認できます。", "添付資料の確認で確認できます。"),
+        # マップ外の名前・ teamagent__ 接頭辞は従来どおり消す。
         ("teamagent__future_tool を呼んで、確認します。", "確認します。"),
         ("`teamagent__future_tool` で確認します。", "確認します。"),
     ],
@@ -149,8 +156,12 @@ def test_only_whole_internal_names_are_removed() -> None:
 @pytest.mark.parametrize(
     ("text", "expected", "tools"),
     [
-        ("`attachment_assist`、`omiyage_report_submit`で確認します。", "確認します。", 2),
-        ("`attachment_assist` では確認できません。", "確認できません。", 1),
+        (
+            "`attachment_assist`、`omiyage_report_submit`で確認します。",
+            "添付資料の確認、お土産資料の作成で確認します。",
+            2,
+        ),
+        ("`attachment_assist` では確認できません。", "添付資料の確認 では確認できません。", 1),
     ],
 )
 def test_tool_lists_and_compound_particles_are_removed_naturally(
@@ -162,13 +173,14 @@ def test_tool_lists_and_compound_particles_are_removed_naturally(
 @pytest.mark.parametrize(
     ("text", "expected"),
     [
+        # §8-2: リンクの表示ラベルも営業さんに見える文。マップ内の名前は言い換える（リンクは壊さない）。
         (
             "<https://example.test/doc|attachment_assist>",
-            "<https://example.test/doc|リンク>",
+            "<https://example.test/doc|添付資料の確認>",
         ),
         (
             "[omiyage_report_submit](https://example.test/doc)",
-            "[リンク](https://example.test/doc)",
+            "[お土産資料の作成](https://example.test/doc)",
         ),
     ],
 )
@@ -200,13 +212,20 @@ def test_signed_url_in_unsigned_link_label_or_title_is_scrubbed(text: str, expec
 
 
 def test_every_registered_tool_name_is_scrubbed_bare_and_in_code_spans() -> None:
-    """コードスパンでは全部消す。素の文では _ を含む名前だけ消す（search 等は普通の語と同じ綴り）。"""
+    """コードスパンでは全部消す。素の文では _ を含む名前だけ消す（search 等は普通の語と同じ綴り）。
+
+    §8-2（2026-11-13）: ただし tool_name_terms のマップにある名前は消さずに自然な表現へ
+    言い換える（bare・コードスパンとも）。
+    """
     names = _run_unit_probe([])["toolNames"]
     texts = [text for name in names for text in (name, f"`{name}`")]
     report = _run_unit_probe(texts)
     assert names and len(names) == len(set(names))
     for text, result in zip(texts, report["results"], strict=True):
-        if text.startswith("`") or "_" in text:
+        bare = text.strip("`").strip()
+        if bare in _TOOL_TERMS:
+            assert result["text"] == _TOOL_TERMS[bare], text
+        elif text.startswith("`") or "_" in text:
             assert result == {"text": "", "counts": _counts(tools=1)}, text
         else:
             assert result == {"text": text, "counts": _counts()}, text
@@ -321,7 +340,7 @@ def test_reply_payload_sending_scrubs_display_text_and_logs_counts_without_body(
     assert result["payload"] == {
         **{key: value for key, value in original.items() if key != "blocks"},
         "text": (
-            f"確認します。資料: {OMITTED_LINK} "
+            f"お土産資料の作成 を呼んで、確認します。資料: {OMITTED_LINK} "
             "（http://aicheck.newstv.co.jp/app ）への貼り付け。 "
             "<https://example.test/search|検索> <@U0123456789>"
         ),
