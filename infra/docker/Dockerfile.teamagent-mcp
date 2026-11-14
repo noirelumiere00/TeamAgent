@@ -10,14 +10,14 @@ ARG UV_ARM64_DIGEST=sha256:9941e2d8e06ff884d328905091eac0a6bc1e40e5ce12e6dd0de4e
 ARG UV_VERSION=0.11.29
 ARG UV_BINARY_SHA256=f32f61ced7feb20342032cdac4d0825cebbda61911554f5de5231ec72821812e
 ARG PYTHON_VERSION=3.14.10
-# CVE-2025-15367: pin the fixed Wolfi Python APKs.
-ARG PYTHON_PACKAGE_VERSION=3.14.10_git20261104-r1
-ARG PYTHON_META_APK_SHA256=da51933a5b46b6ded9fd303cf5d4db5c0a74e70b9ffabc1efc1ec42a54a99b44
-ARG PYTHON_BASE_APK_SHA256=4fc451764fe7c5fa70ec798580b447258db354f2620a5db48ff0f1b92abd5f94
-ARG PYTHON_RUNTIME_APK_SHA256=722d2be4b435d9859853da220f7dedf4607e4e3bb67a02f9054152ac125955ed
-ARG PYTHON_BASE_DEV_APK_SHA256=610a67ce14d9a76c0c3452de29b5ba67bd31b067512391cc6c0fbd5a2b8f880d
-ARG PYTHON_DEV_APK_SHA256=210037e39b9943a294256027b3211c3737437c89407f702a29a08f27c32aedd8
-ARG PYTHON_BINARY_SHA256=1d3492dd86db28c07dfef561ffc9c8ed534d671da9f7385cec99d07098a449cd
+# CVE-2026-119170 / CVE-2026-116566: pin the fixed Wolfi Python APKs.
+ARG PYTHON_PACKAGE_VERSION=3.14.10_git20261111-r0
+ARG PYTHON_META_APK_SHA256=40a3d2878179bf2a0796cfcba8d8108aed1782390443ba272a19f134cb11d0bd
+ARG PYTHON_BASE_APK_SHA256=4e4c550b7d048c64b2fa56c3314e809518a1c66d531698ee61de4df41765774c
+ARG PYTHON_RUNTIME_APK_SHA256=277131e5fa8a289f8c5b3d91ce9cdd91609f2c48df14015523642fd812b5f385
+ARG PYTHON_BASE_DEV_APK_SHA256=1109eced40d1b805082e0d35118c4e5ac99bb75586b2b1719ba375062027917d
+ARG PYTHON_DEV_APK_SHA256=311a378958d381648d48487c7358f6d295898e8b92f8c4055c8d8a8f622e2a2e
+ARG PYTHON_BINARY_SHA256=c3b7571c68c2cce519dee91506d2966f2299559768e99918d8d01c9a93e210d7
 ARG E5_MODEL_REVISION=3d7cfbdacd47fdda877c5cd8a79fbcc4f2a574f3
 ARG TORCH_VERSION=2.13.0+cpu
 ARG TORCH_ARM64_WHEEL_URL=https://download-r2.pytorch.org/whl/cpu/torch-2.13.0%2Bcpu-cp314-cp314-manylinux_2_28_aarch64.whl
@@ -148,26 +148,26 @@ COPY infra/docker/vendor/ld-linux-2.44-2.44-r16.apk /tmp/core-glibc/
 COPY infra/docker/core-ld-linux-2.44.lock.json /tmp/core-glibc/
 COPY infra/docker/vendor/libexpat1-2.10.0-r0.apk /tmp/core-expat/
 COPY infra/docker/core-libexpat1.lock.json /tmp/core-expat/
-COPY infra/docker/vendor/python-3.14-3.14.10_git20261104-r1.apk /tmp/core-python/
+COPY infra/docker/vendor/python-3.14-3.14.10_git20261111-r0.apk /tmp/core-python/
 COPY infra/docker/core-python-3.14.lock.json /tmp/core-python/
-COPY infra/docker/vendor/python-3.14-base-3.14.10_git20261104-r1.apk /tmp/core-python/
+COPY infra/docker/vendor/python-3.14-base-3.14.10_git20261111-r0.apk /tmp/core-python/
 COPY infra/docker/core-python-3.14-base.lock.json /tmp/core-python/
-COPY infra/docker/vendor/python-3.14-runtime-3.14.10_git20261104-r1.apk /tmp/core-python/
+COPY infra/docker/vendor/python-3.14-runtime-3.14.10_git20261111-r0.apk /tmp/core-python/
 COPY infra/docker/core-python-3.14-runtime.lock.json /tmp/core-python/
-COPY infra/docker/vendor/python-3.14-base-dev-3.14.10_git20261104-r1.apk /tmp/core-python/
+COPY infra/docker/vendor/python-3.14-base-dev-3.14.10_git20261111-r0.apk /tmp/core-python/
 COPY infra/docker/core-python-3.14-base-dev.lock.json /tmp/core-python/
-COPY infra/docker/vendor/python-3.14-dev-3.14.10_git20261104-r1.apk /tmp/core-python/
+COPY infra/docker/vendor/python-3.14-dev-3.14.10_git20261111-r0.apk /tmp/core-python/
 COPY infra/docker/core-python-3.14-dev.lock.json /tmp/core-python/
 RUN set -eu; \
     printf '%s  %s\n' 9a00558cf00a77753f317474a4429649cb88d282adaad4078a787d25109ea326 /tmp/core-glibc/core-glibc-2.44.lock.json | sha256sum -c -; \
     printf '%s  %s\n' 72e43f05a9dfef3bc3d052641dfd34ca1d7959bbcc480f7587f384b3d002b911 /tmp/core-glibc/core-glibc-2.44-locale-posix.lock.json | sha256sum -c -; \
     printf '%s  %s\n' a3e455d0e0d2f92915c650911ed2b3395f9131150f904a9615337ad80d03dccb /tmp/core-glibc/core-ld-linux-2.44.lock.json | sha256sum -c -; \
     printf '%s  %s\n' f102c3d4301b773dd6741072294d456637ed5e7bf9b8990aca5f92904abd5f40 /tmp/core-expat/core-libexpat1.lock.json | sha256sum -c -; \
-    printf '%s  %s\n' 67ad2c49fc3718938954d4cc994444ad9e25b202e2c57b444ca1f456ade3e3ac /tmp/core-python/core-python-3.14.lock.json | sha256sum -c -; \
-    printf '%s  %s\n' 4498d66e5f0f351fe5b133bdb3d6397f1f23ba7c41e7b3cfeb78865ac87a497d /tmp/core-python/core-python-3.14-base.lock.json | sha256sum -c -; \
-    printf '%s  %s\n' da8352b4884b1c87a40543f802bc36c1659e121179eee5fef5e98a5a623045bf /tmp/core-python/core-python-3.14-runtime.lock.json | sha256sum -c -; \
-    printf '%s  %s\n' e5f51614474037f0a22d87980e9ff8a20324b1e447e41c19ea59d8f4292ed764 /tmp/core-python/core-python-3.14-base-dev.lock.json | sha256sum -c -; \
-    printf '%s  %s\n' 98ecee14fb15da87667a34dda13b48e7bebba67a9f56c9525c7bd4c11772826a /tmp/core-python/core-python-3.14-dev.lock.json | sha256sum -c -; \
+    printf '%s  %s\n' b558c8c5bb9ee2c248f668d6282e8e0371fce5d20cd82ffe08deda1dce2ca96d /tmp/core-python/core-python-3.14.lock.json | sha256sum -c -; \
+    printf '%s  %s\n' cb228780027d62481ef3f1c4f7b6b14115981df5d64acd2966a815dd34d2b236 /tmp/core-python/core-python-3.14-base.lock.json | sha256sum -c -; \
+    printf '%s  %s\n' 25cce750a8674587f8c0e6d672553f04ededb0f3241a3bb8c3a4df2e4c66a190 /tmp/core-python/core-python-3.14-runtime.lock.json | sha256sum -c -; \
+    printf '%s  %s\n' ceb27c8e02d7d330c77e193084715f656095f6a529443e3b97ba695f36df52b2 /tmp/core-python/core-python-3.14-base-dev.lock.json | sha256sum -c -; \
+    printf '%s  %s\n' 8fe7fdb76e8b1d157abbf12b96769ff4dce6953e81d98e8e137be0bf0640dde2 /tmp/core-python/core-python-3.14-dev.lock.json | sha256sum -c -; \
     printf '%s  %s\n' 0533366dfd74a1df3c01286ed6bbdff9c6977b03b62a360c755a131168c3d3a1 /tmp/core-ca/lock.json | sha256sum -c -; \
     printf '%s  %s\n' 90de1897152e745869e5953cf359cd2ecfd4afb993a4451560f0ac4c617479a0 /tmp/core-ca/pip-wheel.lock.json | sha256sum -c -; \
     python /tmp/core-ca/replace_core_ca_bundle.py prepare \
@@ -185,11 +185,11 @@ RUN set -eu; \
       --apk-sha256 "$LIBEXPAT_APK_SHA256" --version "$EXPAT_PACKAGE_VERSION" \
       --apk /tmp/core-ca/pip-wheel.apk --lock /tmp/core-ca/pip-wheel.lock.json \
       --apk-sha256 "$PIP_WHEEL_APK_SHA256" --version "$PIP_WHEEL_VERSION" \
-      --apk /tmp/core-python/python-3.14-3.14.10_git20261104-r1.apk --lock /tmp/core-python/core-python-3.14.lock.json \
+      --apk /tmp/core-python/python-3.14-3.14.10_git20261111-r0.apk --lock /tmp/core-python/core-python-3.14.lock.json \
       --apk-sha256 "$PYTHON_META_APK_SHA256" --version "$PYTHON_PACKAGE_VERSION" \
-      --apk /tmp/core-python/python-3.14-base-3.14.10_git20261104-r1.apk --lock /tmp/core-python/core-python-3.14-base.lock.json \
+      --apk /tmp/core-python/python-3.14-base-3.14.10_git20261111-r0.apk --lock /tmp/core-python/core-python-3.14-base.lock.json \
       --apk-sha256 "$PYTHON_BASE_APK_SHA256" --version "$PYTHON_PACKAGE_VERSION" \
-      --apk /tmp/core-python/python-3.14-runtime-3.14.10_git20261104-r1.apk --lock /tmp/core-python/core-python-3.14-runtime.lock.json \
+      --apk /tmp/core-python/python-3.14-runtime-3.14.10_git20261111-r0.apk --lock /tmp/core-python/core-python-3.14-runtime.lock.json \
       --apk-sha256 "$PYTHON_RUNTIME_APK_SHA256" --version "$PYTHON_PACKAGE_VERSION"; \
     python /tmp/core-ca/replace_core_ca_bundle.py prepare \
       --root / --base-db /tmp/core-python/builder-installed \
@@ -197,15 +197,15 @@ RUN set -eu; \
       --apk-sha256 "$LIBEXPAT_APK_SHA256" --version "$EXPAT_PACKAGE_VERSION" \
       --apk /tmp/core-ca/pip-wheel.apk --lock /tmp/core-ca/pip-wheel.lock.json \
       --apk-sha256 "$PIP_WHEEL_APK_SHA256" --version "$PIP_WHEEL_VERSION" \
-      --apk /tmp/core-python/python-3.14-3.14.10_git20261104-r1.apk --lock /tmp/core-python/core-python-3.14.lock.json \
+      --apk /tmp/core-python/python-3.14-3.14.10_git20261111-r0.apk --lock /tmp/core-python/core-python-3.14.lock.json \
       --apk-sha256 "$PYTHON_META_APK_SHA256" --version "$PYTHON_PACKAGE_VERSION" \
-      --apk /tmp/core-python/python-3.14-base-3.14.10_git20261104-r1.apk --lock /tmp/core-python/core-python-3.14-base.lock.json \
+      --apk /tmp/core-python/python-3.14-base-3.14.10_git20261111-r0.apk --lock /tmp/core-python/core-python-3.14-base.lock.json \
       --apk-sha256 "$PYTHON_BASE_APK_SHA256" --version "$PYTHON_PACKAGE_VERSION" \
-      --apk /tmp/core-python/python-3.14-runtime-3.14.10_git20261104-r1.apk --lock /tmp/core-python/core-python-3.14-runtime.lock.json \
+      --apk /tmp/core-python/python-3.14-runtime-3.14.10_git20261111-r0.apk --lock /tmp/core-python/core-python-3.14-runtime.lock.json \
       --apk-sha256 "$PYTHON_RUNTIME_APK_SHA256" --version "$PYTHON_PACKAGE_VERSION" \
-      --apk /tmp/core-python/python-3.14-base-dev-3.14.10_git20261104-r1.apk --lock /tmp/core-python/core-python-3.14-base-dev.lock.json \
+      --apk /tmp/core-python/python-3.14-base-dev-3.14.10_git20261111-r0.apk --lock /tmp/core-python/core-python-3.14-base-dev.lock.json \
       --apk-sha256 "$PYTHON_BASE_DEV_APK_SHA256" --version "$PYTHON_PACKAGE_VERSION" \
-      --apk /tmp/core-python/python-3.14-dev-3.14.10_git20261104-r1.apk --lock /tmp/core-python/core-python-3.14-dev.lock.json \
+      --apk /tmp/core-python/python-3.14-dev-3.14.10_git20261111-r0.apk --lock /tmp/core-python/core-python-3.14-dev.lock.json \
       --apk-sha256 "$PYTHON_DEV_APK_SHA256" --version "$PYTHON_PACKAGE_VERSION"; \
     mkdir -p /tmp/core-glibc/root/usr/lib/locale /tmp/core-glibc/root/usr/bin \
       /tmp/core-glibc/root/etc/apk/commit_hooks.d /tmp/core-glibc/root/etc/ld.so.conf.d \
@@ -441,12 +441,12 @@ RUN --mount=type=bind,from=builder,source=/tmp/core-ca,target=/tmp/core-ca \
      "--apk", "/tmp/core-ca/pip-wheel.apk", "--lock", "/tmp/core-ca/pip-wheel.lock.json", \
      "--apk-sha256", "6dcca154f23de54db689ec2006bb65c67de74d556f55f8836bf5d438da8b8ee1", \
      "--version", "26.2.2-r2", \
-     "--apk", "/tmp/core-python/python-3.14-3.14.10_git20261104-r1.apk", "--lock", "/tmp/core-python/core-python-3.14.lock.json", \
-     "--apk-sha256", "da51933a5b46b6ded9fd303cf5d4db5c0a74e70b9ffabc1efc1ec42a54a99b44", "--version", "3.14.10_git20261104-r1", \
-     "--apk", "/tmp/core-python/python-3.14-base-3.14.10_git20261104-r1.apk", "--lock", "/tmp/core-python/core-python-3.14-base.lock.json", \
-     "--apk-sha256", "4fc451764fe7c5fa70ec798580b447258db354f2620a5db48ff0f1b92abd5f94", "--version", "3.14.10_git20261104-r1", \
-     "--apk", "/tmp/core-python/python-3.14-runtime-3.14.10_git20261104-r1.apk", "--lock", "/tmp/core-python/core-python-3.14-runtime.lock.json", \
-     "--apk-sha256", "722d2be4b435d9859853da220f7dedf4607e4e3bb67a02f9054152ac125955ed", "--version", "3.14.10_git20261104-r1"]
+     "--apk", "/tmp/core-python/python-3.14-3.14.10_git20261111-r0.apk", "--lock", "/tmp/core-python/core-python-3.14.lock.json", \
+     "--apk-sha256", "40a3d2878179bf2a0796cfcba8d8108aed1782390443ba272a19f134cb11d0bd", "--version", "3.14.10_git20261111-r0", \
+     "--apk", "/tmp/core-python/python-3.14-base-3.14.10_git20261111-r0.apk", "--lock", "/tmp/core-python/core-python-3.14-base.lock.json", \
+     "--apk-sha256", "4e4c550b7d048c64b2fa56c3314e809518a1c66d531698ee61de4df41765774c", "--version", "3.14.10_git20261111-r0", \
+     "--apk", "/tmp/core-python/python-3.14-runtime-3.14.10_git20261111-r0.apk", "--lock", "/tmp/core-python/core-python-3.14-runtime.lock.json", \
+     "--apk-sha256", "277131e5fa8a289f8c5b3d91ce9cdd91609f2c48df14015523642fd812b5f385", "--version", "3.14.10_git20261111-r0"]
 
 COPY --from=builder /runtime-etc/passwd /etc/passwd
 COPY --from=builder /runtime-etc/group /etc/group

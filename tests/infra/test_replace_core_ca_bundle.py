@@ -387,13 +387,13 @@ def test_python_updates_binary_libpython_and_inventory_with_runtime_split(tmp_pa
     module.prepare(base, packages)
     module.verify(base, before, packages)
     assert hashlib.sha256((base / "usr/bin/python3.14").read_bytes()).hexdigest() == (
-        "1d3492dd86db28c07dfef561ffc9c8ed534d671da9f7385cec99d07098a449cd"
+        "c3b7571c68c2cce519dee91506d2966f2299559768e99918d8d01c9a93e210d7"
     )
     assert (base / "usr/bin/python3.14").stat().st_mode & 0o777 == 0o755
     assert (base / "usr/lib/libpython3.14.so.1.0").read_bytes()[:4] == b"\x7fELF"
     assert os.readlink(base / "usr/bin/python3") == "python3.14"
     assert not (base / "usr/lib/python3.14/obsolete.py").exists()
-    assert (base / DB).read_bytes().count(b"V:3.14.10_git20261104-r1\n") == 3
+    assert (base / DB).read_bytes().count(b"V:3.14.10_git20261111-r0\n") == 3
     # Every unrelated record remains byte-identical, even across the package split.
     blocks = (base / DB).read_bytes().split(b"\n\n")
     assert blocks[0:2] == before.split(b"\n\n")[0:2]
@@ -460,7 +460,7 @@ def test_python_development_packages_follow_the_same_version(tmp_path):
     packages = _python_packages(module, dev=True)
     module.prepare(base, packages)
     module.verify(base, before, packages)
-    assert (base / DB).read_bytes().count(b"V:3.14.10_git20261104-r1\n") == 5
+    assert (base / DB).read_bytes().count(b"V:3.14.10_git20261111-r0\n") == 5
     assert os.readlink(base / "usr/bin/python3-config") == "python3.14-config"
     assert os.readlink(base / "usr/lib/libpython3.14.so") == "libpython3.14.so.1.0"
 

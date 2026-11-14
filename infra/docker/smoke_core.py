@@ -18,8 +18,8 @@ from pathlib import Path
 
 EXPECTED_BAKED_APP_HTML_SHA256 = "716ac25a96516efd6443277c903102d514f3f86729f8706baea41ee48f0ecdeb"
 EXPECTED_E5_REVISION = "3d7cfbdacd47fdda877c5cd8a79fbcc4f2a574f3"
-EXPECTED_PYTHON_SHA256 = "1d3492dd86db28c07dfef561ffc9c8ed534d671da9f7385cec99d07098a449cd"
-EXPECTED_LIBPYTHON_SHA256 = "fd4012ca01b6d83fb014eb8cbd1f753bdd83fba79baed779e66396c4857c2585"
+EXPECTED_PYTHON_SHA256 = "c3b7571c68c2cce519dee91506d2966f2299559768e99918d8d01c9a93e210d7"
+EXPECTED_LIBPYTHON_SHA256 = "493ed4f111e928d5b09ff2453fbdad93d300d9f0004adf8788f739cf1f5baf3c"
 EXPECTED_PIP_WHEEL_SHA256 = "38f4aacff7c3b0d7b216cac0a106a1036eef98b0a7ff5b932ea2fcb787e97bc5"
 EXPECTED_LIBEXPAT_SHA256 = "a152dbe6777769de636347b3cd3c53cd46ccdae7b911a2acb76cf8f66ab9c366"
 EXPECTED_LIBC_SHA256 = "15e7e70edb8e6e3dc19305fd646ee9477cc5e9181fd0ed88314adf073262565d"
@@ -125,7 +125,7 @@ def _assert_pip_wheel(root: Path = Path("/")) -> None:
 
 
 def _assert_python_packages(root: Path = Path("/")) -> None:
-    version = "3.14.10_git20261104-r1"
+    version = "3.14.10_git20261111-r0"
     expected = {"python-3.14", "python-3.14-base", "python-3.14-runtime"}
     records = (root / "usr/lib/apk/db/installed").read_text().split("\n\n")
     actual = {}
