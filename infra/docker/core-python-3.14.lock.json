@@ -1,23 +1,23 @@
 {
   "schema_version": 1,
-  "url": "https://packages.wolfi.dev/os/aarch64/python-3.14-3.14.10_git20261104-r1.apk",
-  "archive": "python-3.14-3.14.10_git20261104-r1.apk",
-  "archive_sha256": "da51933a5b46b6ded9fd303cf5d4db5c0a74e70b9ffabc1efc1ec42a54a99b44",
+  "url": "https://packages.wolfi.dev/os/aarch64/python-3.14-3.14.10_git20261111-r0.apk",
+  "archive": "python-3.14-3.14.10_git20261111-r0.apk",
+  "archive_sha256": "40a3d2878179bf2a0796cfcba8d8108aed1782390443ba272a19f134cb11d0bd",
   "base_version": "3.14.8_git20261008-r0",
   "apkindex": {
-    "C": "Q1c57SnS/NxMVnFxCssiTU86E75AE=",
+    "C": "Q18kLKvEKhmNukdWroE12acih6hHs=",
     "P": "python-3.14",
-    "V": "3.14.10_git20261104-r1",
+    "V": "3.14.10_git20261111-r0",
     "A": "aarch64",
-    "S": "35437",
+    "S": "39172",
     "I": "25979",
     "T": "the Python programming language (metapackage)",
     "L": "PSF-2.0",
     "o": "python-3.14",
     "m": "wolfi",
-    "t": "1794267226",
-    "c": "5814b2679d0f5744ba0a7c94e97a1e3226c496f8",
-    "D": "python-3.14-runtime=3.14.10_git20261104-r1",
+    "t": "1794410192",
+    "c": "2283fc0b206ee1f8c592ed0633b432fa86f5a9c3",
+    "D": "python-3.14-runtime=3.14.10_git20261111-r0",
     "p": "python-3=0 python3=0"
   }
 }

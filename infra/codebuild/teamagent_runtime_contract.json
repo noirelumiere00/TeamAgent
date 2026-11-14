@@ -61,7 +61,7 @@
         "component": "python",
         "evidence": "binary_sha256",
         "value_kind": "sha256",
-        "value": "1d3492dd86db28c07dfef561ffc9c8ed534d671da9f7385cec99d07098a449cd",
+        "value": "c3b7571c68c2cce519dee91506d2966f2299559768e99918d8d01c9a93e210d7",
         "build_arg": "PYTHON_BINARY_SHA256",
         "oci_label": "io.teamagent.contract.python-binary-sha256",
         "dockerfile_uses": [

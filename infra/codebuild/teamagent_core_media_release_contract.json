@@ -13,7 +13,7 @@
   },
   "source_runtime_contract": {
     "path": "infra/codebuild/teamagent_runtime_contract.json",
-    "sha256": "2d75cd8786dce4cbd5a6b89b0336b5aefd6c2b2279cff1e930ec88141e6cd73a"
+    "sha256": "e26e7c1ba98d6cd94b22f93822b080a6569ee3fa268c053e7bc5b65a3ad90e87"
   },
   "app_html": {
     "bucket": "teamagent-dev-raw-files",
@@ -81,7 +81,7 @@
         {
           "key": "binary.python.sha256",
           "path": "/usr/bin/python3.14",
-          "sha256": "1d3492dd86db28c07dfef561ffc9c8ed534d671da9f7385cec99d07098a449cd"
+          "sha256": "c3b7571c68c2cce519dee91506d2966f2299559768e99918d8d01c9a93e210d7"
         }
       ],
       "source_assertions": [
@@ -170,7 +170,7 @@
         },
         {
           "key": "artifact.python-3.14-apk-sha256",
-          "value": "da51933a5b46b6ded9fd303cf5d4db5c0a74e70b9ffabc1efc1ec42a54a99b44",
+          "value": "40a3d2878179bf2a0796cfcba8d8108aed1782390443ba272a19f134cb11d0bd",
           "build_arg": "PYTHON_META_APK_SHA256",
           "oci_label": "io.teamagent.contract.python-3.14-apk-sha256",
           "dockerfile_uses": [
@@ -179,7 +179,7 @@
         },
         {
           "key": "artifact.python-3.14-base-apk-sha256",
-          "value": "4fc451764fe7c5fa70ec798580b447258db354f2620a5db48ff0f1b92abd5f94",
+          "value": "4e4c550b7d048c64b2fa56c3314e809518a1c66d531698ee61de4df41765774c",
           "build_arg": "PYTHON_BASE_APK_SHA256",
           "oci_label": "io.teamagent.contract.python-3.14-base-apk-sha256",
           "dockerfile_uses": [
@@ -188,7 +188,7 @@
         },
         {
           "key": "artifact.python-3.14-base-dev-apk-sha256",
-          "value": "610a67ce14d9a76c0c3452de29b5ba67bd31b067512391cc6c0fbd5a2b8f880d",
+          "value": "1109eced40d1b805082e0d35118c4e5ac99bb75586b2b1719ba375062027917d",
           "build_arg": "PYTHON_BASE_DEV_APK_SHA256",
           "oci_label": "io.teamagent.contract.python-3.14-base-dev-apk-sha256",
           "dockerfile_uses": [
@@ -197,7 +197,7 @@
         },
         {
           "key": "artifact.python-3.14-dev-apk-sha256",
-          "value": "210037e39b9943a294256027b3211c3737437c89407f702a29a08f27c32aedd8",
+          "value": "311a378958d381648d48487c7358f6d295898e8b92f8c4055c8d8a8f622e2a2e",
           "build_arg": "PYTHON_DEV_APK_SHA256",
           "oci_label": "io.teamagent.contract.python-3.14-dev-apk-sha256",
           "dockerfile_uses": [
@@ -206,7 +206,7 @@
         },
         {
           "key": "artifact.python-3.14-runtime-apk-sha256",
-          "value": "722d2be4b435d9859853da220f7dedf4607e4e3bb67a02f9054152ac125955ed",
+          "value": "277131e5fa8a289f8c5b3d91ce9cdd91609f2c48df14015523642fd812b5f385",
           "build_arg": "PYTHON_RUNTIME_APK_SHA256",
           "oci_label": "io.teamagent.contract.python-3.14-runtime-apk-sha256",
           "dockerfile_uses": [
@@ -251,7 +251,7 @@
         },
         {
           "key": "package.python.version",
-          "value": "3.14.10_git20261104-r1",
+          "value": "3.14.10_git20261111-r0",
           "build_arg": "PYTHON_PACKAGE_VERSION",
           "oci_label": "io.teamagent.contract.python-package-version",
           "dockerfile_uses": [

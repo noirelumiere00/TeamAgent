@@ -24,7 +24,7 @@ Core:
 - Chainguard Python runtime child:
   `sha256:f9552d99b5fcf870d9cd1d285e0086ae90aa2f0758aeff8d1f80dc9346fb52c5`
 - Python `3.14.10`; `/usr/bin/python3.14` SHA-256
-  `1d3492dd86db28c07dfef561ffc9c8ed534d671da9f7385cec99d07098a449cd`
+  `c3b7571c68c2cce519dee91506d2966f2299559768e99918d8d01c9a93e210d7`
 - Wolfi `ca-certificates-bundle` `20260909-r3` は
   [`core-ca-bundle.lock.json`](./core-ca-bundle.lock.json) の取得元・SHA-256で固定した
   公式APKをvendorし、Python 3.14の土台から証明書bundleだけを差し替える。
@@ -48,16 +48,16 @@ Core:
 - baked fallback `app.html` SHA-256
   `716ac25a96516efd6443277c903102d514f3f86729f8706baea41ee48f0ecdeb`
 
-2026-11-13: r121 段3の ECR 検査で core の Python に CVE-2025-15367 MEDIUM を検出。
-上記の3.14系base digestは維持し、Wolfi secdb の修正版として指定された
-`3.14.10_git20261104-r1` の公式APKを固定SHA・APKINDEXの行でvendorする。
+2026-11-14: r121 段3の ECR 検査で core の Python に CVE-2026-119170 HIGH / CVE-2026-116566 MEDIUM を検出。
+上記の3.14系base digestは維持し、保存済み Wolfi secdb で両 CVE と CVE-2025-15367 の修正を確認した
+`3.14.10_git20261111-r0` の公式APKを固定SHA・APKINDEXの行でvendorする。
 5 APK の依存変更は同梱 Python パッケージ間の版指定のみで、外部依存は不変。
 `core-python-3.14*.lock.json` がメタパッケージ・base・runtime・開発用2パッケージを固定し、
 同じ検証器がbuilderとruntimeのPython実体・libpython・stdlib・SBOM・APK DBを更新する。
 新版で分離されたruntimeパッケージは旧DBに存在しないことを必須とし、コマンドsymlinkの所有を移す。
 依存不整合・予期しない旧版は書き込み前に拒否し、旧pyc/SBOMなど新版に無いファイルを除去する。
 対象外のAPK DBレコードはbyte単位で不変。実行中のPython/libpythonはrenameで置換し、実行権限も照合する。
-libpython SHA-256は `fd4012ca01b6d83fb014eb8cbd1f753bdd83fba79baed779e66396c4857c2585`。
+libpython SHA-256は `493ed4f111e928d5b09ff2453fbdad93d300d9f0004adf8788f739cf1f5baf3c`。
 Python の実行版は3.14.10を維持する。runtime receiptはbinary SHAのみを更新し、release契約は各APK SHA・package版を束縛し、libpythonの実byteはsmokeで照合する。
 TrivyとECR Inspectorの実スキャン結果は通常便でも確認する。
 

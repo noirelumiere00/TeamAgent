@@ -1,22 +1,22 @@
 {
   "schema_version": 1,
-  "url": "https://packages.wolfi.dev/os/aarch64/python-3.14-runtime-3.14.10_git20261104-r1.apk",
-  "archive": "python-3.14-runtime-3.14.10_git20261104-r1.apk",
-  "archive_sha256": "722d2be4b435d9859853da220f7dedf4607e4e3bb67a02f9054152ac125955ed",
+  "url": "https://packages.wolfi.dev/os/aarch64/python-3.14-runtime-3.14.10_git20261111-r0.apk",
+  "archive": "python-3.14-runtime-3.14.10_git20261111-r0.apk",
+  "archive_sha256": "277131e5fa8a289f8c5b3d91ce9cdd91609f2c48df14015523642fd812b5f385",
   "base_version": null,
   "apkindex": {
-    "C": "Q1EnSzSX7TsEJHwCIO9Yqz/E2bUYk=",
+    "C": "Q1D4JA9rydLyME84Gah0LkHF226uY=",
     "P": "python-3.14-runtime",
-    "V": "3.14.10_git20261104-r1",
+    "V": "3.14.10_git20261111-r0",
     "A": "aarch64",
-    "S": "35751",
+    "S": "39499",
     "I": "42528",
     "T": "python-3.14 with the python, python3 and pydoc3 commands",
     "L": "PSF-2.0",
     "o": "python-3.14",
     "m": "wolfi",
-    "t": "1794267226",
-    "c": "5814b2679d0f5744ba0a7c94e97a1e3226c496f8",
-    "D": "python-3.14-base=3.14.10_git20261104-r1"
+    "t": "1794410192",
+    "c": "2283fc0b206ee1f8c592ed0633b432fa86f5a9c3",
+    "D": "python-3.14-base=3.14.10_git20261111-r0"
   }
 }
