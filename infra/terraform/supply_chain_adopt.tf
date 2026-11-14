@@ -283,6 +283,12 @@ locals {
       content_type                  = "text/yaml"
       object_lock_retain_until_date = "2099-12-31T00:00:00Z"
     }
+    # 2026-11-13 オフライン導出（未公開）。CVE-2025-15367 MEDIUM 対応・core Python の Wolfi APK 5本を 3.14.10_git20261104-r1 へ。
+    # SHA 確認済み live 本文の core_media/runtime 契約を各1か所置換し、逆置換で一致を確認。
+    "08804fb7b52536376a9fa4720913c37765dae1c619a8cf71a81f1df05bcc20e3" = {
+      content_type                  = "text/yaml"
+      object_lock_retain_until_date = "2099-12-31T00:00:00Z"
+    }
   }
 
   image_attestor_buildspec_generations = {
@@ -550,6 +556,12 @@ locals {
       content_type                  = "text/yaml"
       object_lock_retain_until_date = "2099-12-31T00:00:00Z"
     }
+    # 2026-11-13 オフライン導出（未公開）。CVE-2025-15367 MEDIUM 対応・core Python の Wolfi APK 5本を 3.14.10_git20261104-r1 へ。
+    # SHA 確認済み live 本文の core_media/runtime 契約を各1か所置換し、逆置換で一致を確認。
+    "6dddc53248f4d515c97a088a84c1967d272e3b427a130d8f7f5d3f1c55c67b54" = {
+      content_type                  = "text/yaml"
+      object_lock_retain_until_date = "2099-12-31T00:00:00Z"
+    }
   }
 
   image_promoter_buildspec_generations = {
@@ -795,6 +807,12 @@ locals {
       content_type                  = "text/yaml"
       object_lock_retain_until_date = "2099-12-31T00:00:00Z"
     }
+    # 2026-11-13 オフライン導出（未公開）。CVE-2025-15367 MEDIUM 対応・core Python の Wolfi APK 5本を 3.14.10_git20261104-r1 へ。
+    # SHA 確認済み live 本文の core_media/runtime 契約を各1か所置換し、逆置換で一致を確認。
+    "21fcac9248654f207319b565bb1add44afa0a7e8c3d80f4c3ac4d54b777eae81" = {
+      content_type                  = "text/yaml"
+      object_lock_retain_until_date = "2099-12-31T00:00:00Z"
+    }
   }
 
   approval_publisher_resolved_source_buildspec_generations = {
@@ -990,18 +1008,18 @@ removed {
 }
 
 import {
-  to = aws_s3_object.mcp_source_publisher_buildspec_generation["e415b0898b3f4fe1d3a901381050945a1bc96d09ae7c00158450ed34a56cd41e"]
-  id = "teamagent-dev-image-release-evidence/codebuild-buildspecs/teamagent-dev-mcp-source-publisher/e415b0898b3f4fe1d3a901381050945a1bc96d09ae7c00158450ed34a56cd41e.yml"
+  to = aws_s3_object.mcp_source_publisher_buildspec_generation["08804fb7b52536376a9fa4720913c37765dae1c619a8cf71a81f1df05bcc20e3"]
+  id = "teamagent-dev-image-release-evidence/codebuild-buildspecs/teamagent-dev-mcp-source-publisher/08804fb7b52536376a9fa4720913c37765dae1c619a8cf71a81f1df05bcc20e3.yml"
 }
 
 import {
-  to = aws_s3_object.image_attestor_buildspec_generation["11106192d12426e6a11e0beb682a67106dda2352a576513942524c6bae7a4b57"]
-  id = "teamagent-dev-image-release-evidence/codebuild-buildspecs/teamagent-dev-image-attestor/11106192d12426e6a11e0beb682a67106dda2352a576513942524c6bae7a4b57.yml"
+  to = aws_s3_object.image_attestor_buildspec_generation["6dddc53248f4d515c97a088a84c1967d272e3b427a130d8f7f5d3f1c55c67b54"]
+  id = "teamagent-dev-image-release-evidence/codebuild-buildspecs/teamagent-dev-image-attestor/6dddc53248f4d515c97a088a84c1967d272e3b427a130d8f7f5d3f1c55c67b54.yml"
 }
 
 import {
-  to = aws_s3_object.image_promoter_buildspec_generation["454a6172eb7cf0c549bc01a75728893b45042a0e99081ae043fb507b6c5c5c56"]
-  id = "teamagent-dev-image-release-evidence/codebuild-buildspecs/teamagent-dev-image-promoter/454a6172eb7cf0c549bc01a75728893b45042a0e99081ae043fb507b6c5c5c56.yml"
+  to = aws_s3_object.image_promoter_buildspec_generation["21fcac9248654f207319b565bb1add44afa0a7e8c3d80f4c3ac4d54b777eae81"]
+  id = "teamagent-dev-image-release-evidence/codebuild-buildspecs/teamagent-dev-image-promoter/21fcac9248654f207319b565bb1add44afa0a7e8c3d80f4c3ac4d54b777eae81.yml"
 }
 
 import {

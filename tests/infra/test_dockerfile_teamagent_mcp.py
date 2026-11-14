@@ -18,7 +18,7 @@ TEXT = DOCKERFILE.read_text(encoding="utf-8")
 PYTHON_BUILDER_DIGEST = "2c8414a1ab05655dc3a88e88f4cac4fde9db3342daab7772f1b45f2b937b2fd5"
 PYTHON_RUNTIME_DIGEST = "f9552d99b5fcf870d9cd1d285e0086ae90aa2f0758aeff8d1f80dc9346fb52c5"
 UV_DIGEST = "9941e2d8e06ff884d328905091eac0a6bc1e40e5ce12e6dd0de4ef4ee26baac4"
-PYTHON_BINARY_SHA256 = "81060a4e37f0e6746c7f53468dcd28c200053b4a2bb377a3fe2169edf3f770ac"
+PYTHON_BINARY_SHA256 = "1d3492dd86db28c07dfef561ffc9c8ed534d671da9f7385cec99d07098a449cd"
 UV_BINARY_SHA256 = "f32f61ced7feb20342032cdac4d0825cebbda61911554f5de5231ec72821812e"
 TORCH_WHEEL_SHA256 = "ca021f9eb2f8345c83fa03e3a04587308afb8df71bd472670b3ece00df58621c"
 CA_BUNDLE_APK_SHA256 = "4f57ebd7dc21d78ecce228f397d0a4ee46b5cfc777ac5f292821d41a97bfd896"
@@ -309,7 +309,7 @@ def test_python_apks_are_pinned_in_both_builder_and_final_runtime() -> None:
         data = json.loads(lock.read_bytes())
         apk = ROOT / "infra/docker/vendor" / data["archive"]
         assert hashlib.sha256(apk.read_bytes()).hexdigest() == data["archive_sha256"]
-        assert data["apkindex"]["V"] == "3.14.10_git20261028-r0"
+        assert data["apkindex"]["V"] == "3.14.10_git20261104-r1"
         assert (
             f"{hashlib.sha256(lock.read_bytes()).hexdigest()} /tmp/core-python/{lock.name} | sha256sum -c -"
             in builder
