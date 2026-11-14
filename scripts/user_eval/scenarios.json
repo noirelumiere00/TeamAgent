@@ -1,0 +1,336 @@
+[
+  {
+    "id": "completed_status",
+    "_comment": "2026-10-14〜15: 終了済み施策を古い営業 FB から進行中と回答。",
+    "utterances": [
+      "{client_a} の {campaign_a} は今どうなっている？"
+    ],
+    "checks": [
+      {
+        "type": "must_not_contain",
+        "patterns": [
+          "現在は",
+          "進行中",
+          "詰めの段階"
+        ]
+      },
+      {
+        "type": "status_freshness"
+      },
+      {
+        "type": "must_contain_link",
+        "kind": "any"
+      },
+      {
+        "type": "must_not_ask_back"
+      },
+      {
+        "type": "max_latency_s",
+        "seconds": 120
+      },
+      {
+        "type": "llm_judge"
+      }
+    ],
+    "critical_patterns": [
+      "進行中",
+      "詰めの段階",
+      "実施中"
+    ]
+  },
+  {
+    "id": "named_proposal",
+    "_comment": "2026-10-14〜15: 取引先を名指ししても提案書 PDF が届かない。",
+    "utterances": [
+      "{client_a} の提案書 PDF を出して"
+    ],
+    "checks": [
+      {
+        "type": "must_attach_file",
+        "extensions": [
+          "pdf"
+        ]
+      },
+      {
+        "type": "must_not_ask_back"
+      },
+      {
+        "type": "max_latency_s",
+        "seconds": 120
+      },
+      {
+        "type": "llm_judge"
+      }
+    ]
+  },
+  {
+    "id": "metrics_explanation",
+    "_comment": "2026-10-14〜15: 📊 投稿の再生・保存数を説明で再掲。",
+    "utterances": [
+      "{campaign_a} の動画ごとの結果と、何が効いたか教えて"
+    ],
+    "checks": [
+      {
+        "type": "must_not_repeat_numbers_after_metrics_post"
+      },
+      {
+        "type": "must_not_ask_back"
+      },
+      {
+        "type": "max_latency_s",
+        "seconds": 120
+      },
+      {
+        "type": "llm_judge"
+      }
+    ]
+  },
+  {
+    "id": "own_answer_source",
+    "_comment": "2026-10-14〜15: 昨日の Aico DM を Slack 資料として自己引用。",
+    "utterances": [
+      "{client_a} の施策ってどんな感じだった？",
+      "昨日のあなたの返事ではなく、元の資料を根拠に説明して"
+    ],
+    "checks": [
+      {
+        "type": "must_not_cite_own_answers"
+      },
+      {
+        "type": "must_contain_link",
+        "kind": "any"
+      },
+      {
+        "type": "must_not_ask_back"
+      },
+      {
+        "type": "max_latency_s",
+        "seconds": 120
+      },
+      {
+        "type": "llm_judge"
+      }
+    ]
+  },
+  {
+    "id": "start_without_intake",
+    "_comment": "2026-10-14〜15: ブランド・競合・キーワードを必須として聞き返し、着手しない。",
+    "utterances": [
+      "{brand_a} の提案資料を作って。競合やキーワードはお任せ"
+    ],
+    "checks": [
+      {
+        "type": "must_attach_file",
+        "extensions": [
+          "pdf",
+          "pptx"
+        ]
+      },
+      {
+        "type": "must_not_ask_back"
+      },
+      {
+        "type": "max_latency_s",
+        "seconds": 120
+      },
+      {
+        "type": "llm_judge"
+      }
+    ]
+  },
+  {
+    "id": "food_industry",
+    "_comment": "2026-10-06: 業種だけの事例検索で候補を取りこぼす（検索回帰の代表ケース）。",
+    "utterances": [
+      "食品メーカーのショート動画の事例ってある？"
+    ],
+    "checks": [
+      {
+        "type": "must_contain_link",
+        "kind": "any"
+      },
+      {
+        "type": "must_not_ask_back"
+      },
+      {
+        "type": "max_latency_s",
+        "seconds": 120
+      },
+      {
+        "type": "llm_judge"
+      }
+    ]
+  },
+  {
+    "id": "delivery_kanji",
+    "_comment": "2026-10-06: 漢字表記の宅配系検索の取りこぼし（表記揺れ回帰の代表ケース）。",
+    "utterances": [
+      "{delivery_kanji} の事例を教えて"
+    ],
+    "checks": [
+      {
+        "type": "must_contain_link",
+        "kind": "any"
+      },
+      {
+        "type": "must_not_ask_back"
+      },
+      {
+        "type": "max_latency_s",
+        "seconds": 120
+      },
+      {
+        "type": "llm_judge"
+      }
+    ]
+  },
+  {
+    "id": "list_cases",
+    "_comment": "2026-10-06: 「全部リストアップして」で偽の該当なし（評価31）。",
+    "utterances": [
+      "{client_a} の事例ある？",
+      "一覧で出して"
+    ],
+    "checks": [
+      {
+        "type": "must_contain_link",
+        "kind": "any"
+      },
+      {
+        "type": "must_not_ask_back"
+      },
+      {
+        "type": "max_latency_s",
+        "seconds": 120
+      },
+      {
+        "type": "llm_judge"
+      }
+    ]
+  },
+  {
+    "id": "compare_effect",
+    "_comment": "2026-10-14〜15: 数字の再掲に終始し効果の説明がない（比較への拡張ケース）。",
+    "utterances": [
+      "{campaign_a} と {campaign_b} の結果を見せて",
+      "比較して何が効いた？"
+    ],
+    "checks": [
+      {
+        "type": "must_contain_link",
+        "kind": "any"
+      },
+      {
+        "type": "must_not_repeat_numbers_after_metrics_post"
+      },
+      {
+        "type": "must_not_ask_back"
+      },
+      {
+        "type": "max_latency_s",
+        "seconds": 120
+      },
+      {
+        "type": "llm_judge"
+      }
+    ]
+  },
+  {
+    "id": "slack_integration",
+    "_comment": "2026-10-06: 依頼に答えず確認で作業を戻す回帰の拡張ケース。個別障害日は未確認。",
+    "utterances": [
+      "Slack 連携で何ができて、どう使い始めるか教えて"
+    ],
+    "checks": [
+      {
+        "type": "must_contain_link",
+        "kind": "slack"
+      },
+      {
+        "type": "must_not_ask_back"
+      },
+      {
+        "type": "max_latency_s",
+        "seconds": 120
+      },
+      {
+        "type": "llm_judge"
+      }
+    ]
+  },
+  {
+    "id": "brand_only_souvenir",
+    "_comment": "2026-10-14〜15: ブランドだけでお土産資料に着手しない。",
+    "utterances": [
+      "{brand_a} のお土産資料を作って。キーワードはお任せ"
+    ],
+    "checks": [
+      {
+        "type": "must_attach_file",
+        "extensions": [
+          "pdf",
+          "pptx"
+        ]
+      },
+      {
+        "type": "must_not_ask_back"
+      },
+      {
+        "type": "max_latency_s",
+        "seconds": 120
+      },
+      {
+        "type": "llm_judge"
+      }
+    ]
+  },
+  {
+    "id": "internal_term",
+    "_comment": "2026-10-06: 用語の意味を依頼に沿って説明する回帰の拡張ケース。個別障害日は未確認。",
+    "utterances": [
+      "社内でいうビデオリリースって何？"
+    ],
+    "checks": [
+      {
+        "type": "must_contain_link",
+        "kind": "any"
+      },
+      {
+        "type": "must_not_cite_own_answers"
+      },
+      {
+        "type": "must_not_ask_back"
+      },
+      {
+        "type": "max_latency_s",
+        "seconds": 120
+      },
+      {
+        "type": "llm_judge"
+      }
+    ]
+  },
+  {
+    "id": "unjoined_channel_topic",
+    "_comment": "2026-10-15: 本人が未参加の公開チャンネルにだけ出ている話題。発話に「Slack」「検索」など場所・ツールのヒントを入れない（小俣さん指摘）。Aico が自分で Slack も探すかを見る。",
+    "utterances": [
+      "{slack_only_topic} って何？うちも関わってる？"
+    ],
+    "checks": [
+      {
+        "type": "must_contain_link",
+        "kind": "any"
+      },
+      {
+        "type": "must_not_ask_back"
+      },
+      {
+        "type": "max_latency_s",
+        "seconds": 120
+      },
+      {
+        "type": "llm_judge"
+      }
+    ]
+  }
+]

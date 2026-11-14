@@ -185,3 +185,7 @@ src/teamagent/connect_web/static/app.html
 
 # scripts/routing_eval の作業場所（雛形・実行結果。コミットしない）
 /runs/
+
+# 利用者目線評価の実名割当と、DM 本文を含む実機結果
+scripts/user_eval/scenarios.local.json
+scripts/user_eval/results/
