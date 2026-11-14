@@ -365,8 +365,63 @@ def test_unquoted_no_match_still_widens() -> None:
 
 def test_terms_strip_decorations_and_keep_labelled_spaces() -> None:
     assert reaction_terms("メッセージに含む文字列：**制作 パートナー募集**") == [
-        "制作 パートナー募集"
+        "制作 パートナー募集",
+        "制作",
     ]
+
+
+@pytest.mark.parametrize(
+    "suffix",
+    [
+        " 対象チャンネル：#fictional",
+        "、一覧で",
+        "。一覧で",
+        "対象チャンネル：#fictional",
+        "チャンネル名:#fictional",
+        "対象期間：先週",
+        "期間:先週",
+        "*使用して送信されました* <@U0B3HLF45JB|Claude>",
+    ],
+)
+def test_labelled_term_falls_back_before_next_sentence(
+    suffix: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("SLACK_SUMMARY_NAMED_PERIOD_ENABLED", "1")
+    skill, factory, _, _ = _build(
+        history_messages=[
+            _post("連絡"),
+            _post("制作パートナー募集のご案内", ts="1755400050.000100"),
+        ]
+    )
+    _names(factory._client)
+    out = _run(
+        skill,
+        scope="channel",
+        focus=FOCUS + "\n文字列:制作パートナー募集のご案内" + suffix,
+    )
+    assert out.message_count == 1 and "制作パートナー募集のご案内" in out.message
+    assert "連絡" not in out.message and "指定の語を含む投稿には無かったので" not in out.message
+
+
+@pytest.mark.parametrize(
+    "term", ["制作 パートナー募集", "制作、パートナー募集", "制作。パートナー募集"]
+)
+def test_original_labelled_term_wins_before_shorter_candidate(term: str) -> None:
+    skill, factory, _, _ = _build(
+        history_messages=[_post("制作の連絡"), _post(term, ts="1755400050.000100")]
+    )
+    _names(factory._client)
+    out = _run(skill, scope="channel", focus=FOCUS + "\n文字列:" + term)
+    assert out.message_count == 1 and term in out.message and "制作の連絡" not in out.message
+
+
+def test_quoted_alternatives_still_match_all_posts() -> None:
+    skill, factory, _, _ = _build(
+        history_messages=[_post("募集"), _post("連絡", ts="1755400050.000100")]
+    )
+    _names(factory._client)
+    out = _run(skill, scope="channel", focus=FOCUS + "「募集」「連絡」")
+    assert out.message_count == 2 and "募集" in out.message and "連絡" in out.message
 
 
 def test_default_period_uses_90_days_and_existing_read_cap() -> None:

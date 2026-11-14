@@ -1,7 +1,7 @@
 """search に選ばれたリアクション依頼も既存の本人読取・面ガードを通す。"""
 
 from datetime import datetime
-from typing import Any
+from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -17,6 +17,16 @@ from tests.skills.slack_summary.test_slack_summary import ORIGIN_CH, OTHER_CH, _
 PRODUCTION_REQUEST = """指定チャンネル内の指定文字列を含んだメッセージを走査し、絵文字スタンプでリアクションをしたユーザー（マルチチャンネルゲスト）を「ユニーク」で取得し、列挙してください
 対象チャンネル：#team-newstvショート動画パートナー
 メッセージに含む文字列：制作パートナー募集のご案内"""
+_REORDERED_REQUEST = "\n".join(reversed(PRODUCTION_REQUEST.splitlines()))
+_SEND_FOOTER = "\n*使用して送信されました* <@U0B3HLF45JB|Claude>"
+PRODUCTION_REQUESTS = [
+    PRODUCTION_REQUEST,
+    " ".join(PRODUCTION_REQUEST.splitlines()),
+    _REORDERED_REQUEST,
+    " ".join(_REORDERED_REQUEST.splitlines()),
+    " ".join((PRODUCTION_REQUEST + _SEND_FOOTER).splitlines()),
+    " ".join((_REORDERED_REQUEST + _SEND_FOOTER).splitlines()),
+]
 CHANNEL_NAME = "team-newstvショート動画パートナー"
 NOW = datetime(2026, 11, 13, 17, tzinfo=JST)
 
@@ -58,7 +68,9 @@ def setup_handoff(monkeypatch: pytest.MonkeyPatch) -> tuple[Any, ...]:
 
     factory._client.search_messages = AsyncMock(side_effect=search)
     pg = MagicMock()
-    skill = SearchSkill(bedrock=bed, pgvector=pg, slack_store=store, slack_reader_factory=factory)
+    skill = SearchSkill(
+        bedrock=cast(Any, bed), pgvector=pg, slack_store=store, slack_reader_factory=factory
+    )
     pg.reset_mock()
     ctx = SkillContext(
         request_id="req-fiction",
@@ -71,11 +83,14 @@ def setup_handoff(monkeypatch: pytest.MonkeyPatch) -> tuple[Any, ...]:
     return skill, factory, bed, pg, ctx, store
 
 
+@pytest.mark.parametrize("request_text", PRODUCTION_REQUESTS)
 def test_production_request_handoff_returns_unique_guests_from_90_days(
+    request_text: str,
     setup_handoff: tuple[Any, ...],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     skill, factory, bed, pg, ctx, store = setup_handoff
+    ctx.metadata["request_text"] = request_text
     log = MagicMock()
     monkeypatch.setattr("teamagent.skills.search.skill.logger", log)
     out = skill.run(SearchInput(query="モデルが作った短い検索語"), ctx)
@@ -85,6 +100,7 @@ def test_production_request_handoff_returns_unique_guests_from_90_days(
     assert out.answer.endswith("ゲスト 1 人") and "架空メンバーA" not in out.answer
     assert "別の連絡" not in out.answer and "制作パートナー募集のご案内" not in out.answer
     assert out.found and not out.error and out.answer_format == "list" and out.hits == []
+    assert "指定の語を含む投稿には無かったので" not in out.answer
     assert not bed.calls and not pg.mock_calls
     assert store.asked == ["me@example.test"] and factory.tokens == ["xoxp-personal-token-of-me"]
     params = factory._client.conversations_history.await_args.kwargs
@@ -213,8 +229,12 @@ def test_production_factory_connects_search_with_only_summary_enabled(
     monkeypatch.setattr(factory, "_build_search_skill", lambda: skill)
     monkeypatch.setattr(factory, "_build_slack_store", lambda: store)
     specs = {spec.name: spec for spec in factory.build_production_tools()}
-    assert specs["search"].instantiate()._slack_store is store
-    assert specs["slack_summary"].instantiate()._slack_store is store
+    from teamagent.skills.slack_summary.skill import SlackSummarySkill
+
+    search_skill = specs["search"].instantiate()
+    summary_skill = specs["slack_summary"].instantiate()
+    assert isinstance(search_skill, SearchSkill) and search_skill._slack_store is store
+    assert isinstance(summary_skill, SlackSummarySkill) and summary_skill._slack_store is store
 
 
 @pytest.mark.parametrize(
