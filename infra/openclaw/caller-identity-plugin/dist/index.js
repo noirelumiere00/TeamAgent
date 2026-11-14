@@ -3043,6 +3043,8 @@ function legacySearchRequirement(text) {
         ? "source" : null);
 }
 
+const ROUTER_OPEN_RULES = new Set(["slack_reactions"]);
+
 // Rules describe the request, never caller authority or facts about the answer.
 export function classifyInboundRoute(text) {
   const request = typeof text === "string" ? text.slice(0, 4096).normalize("NFKC").trim() : "";
@@ -3051,12 +3053,12 @@ export function classifyInboundRoute(text) {
   const count = own.match(/(\d{1,3})\s*件/u);
   const industry = own.match(/化粧品|食品|飲食|宅配|美容|金融|不動産/u)?.[0];
   const route = (intent, evidence, output, rule) => {
-    const secondary = intent === "mixed" || (evidence &&
+    const secondary = intent === "mixed" || (evidence && rule !== "slack_reactions" &&
       (/メール|予定|カレンダー|翻訳|要約して|資料も送|資料を作/u.test(own) ||
        ["slack", "document_operation", "clientkarte"].includes(intent)));
     return {intent, requires_internal_evidence: evidence, requested_output: output, rule_id: rule,
       // Only these rules are eligible for pre-model execution.
-      fallback: !evidence || secondary || !["case_list", "internal_status", "internal_metrics"].includes(rule),
+      fallback: !evidence || secondary || !["case_list", "internal_status", "internal_metrics", "slack_reactions"].includes(rule),
       ...(secondary ? {secondary_intent: "existing_operation"} : {}),
       ...(count ? {requested_count: Number(count[1])} : {}), ...(industry ? {industry} : {})};
   };
@@ -3077,6 +3079,15 @@ export function classifyInboundRoute(text) {
     return route("mixed", true, "answer", "unknown");
   // スタンプ／リアクションを押した人の一覧は Slack の操作（「一覧」で事例一覧に回さない）。
   if (/Slack|スタンプ(?!ラリー)|リアクション/iu.test(own)) {
+    const reactions = own.replace(/スタンプラリー|リアクション動画/gu, "");
+    // MCP の reaction_channel と同じく、URL の断片や数字だけの # はチャンネルとみなさない。
+    const channels = own.replace(/(?:https?:\/\/|www\.)[^\s<>]+/giu, "");
+    const labelled = channels.match(/チャンネル(?:名)?(?:\s*[:：]\s*|[ \t]+|[「『]|(?=[A-Za-z0-9_-]))[*`]*([\p{L}\p{N}_-]+)/u)?.[1];
+    const hasChannel = /<#[CG][A-Za-z0-9]+(?:\|[^>]*)?>/u.test(channels) ||
+      [...channels.matchAll(/(?<![\p{L}\p{N}_/#])#([\p{L}\p{N}_-]+)/gu)].some(match => !/^\p{Nd}+$/u.test(match[1])) ||
+      Boolean(labelled && !/^\p{Nd}+$/u.test(labelled));
+    if (/スタンプ|リアクション/u.test(reactions) && /押した人|誰|ユーザー|一覧|列挙|リスト/u.test(reactions) && hasChannel)
+      return route("slack", true, "list", "slack_reactions");
     if (/要約|まとめて|整理して|箇条書き|説明して/u.test(own))
       return route("slack", true, "answer", "existing_operation");
     return route("slack", true, "list", "existing_operation");
@@ -6774,9 +6785,9 @@ export function createCallerIdentityPlugin({
         const route = classifyInboundRoute(saved.query);
         entry.route = route;
         // Classification remains observable when email scope is missing; execution still needs verified email.
-        const gateAllowed = Boolean(email) && (inboundRouterAllowedEmails.has("*") ||
-          inboundRouterAllowedEmails.has(email)) &&
-          inboundRouterAllowedRules.has(route.rule_id) && route.fallback === false;
+        const gateAllowed = Boolean(email) && route.fallback === false && (ROUTER_OPEN_RULES.has(route.rule_id) ||
+          ((inboundRouterAllowedEmails.has("*") || inboundRouterAllowedEmails.has(email)) &&
+            inboundRouterAllowedRules.has(route.rule_id)));
         emitPluginLog(logger, "info", `router route_version=1 mode=${inboundRouterMode}` +
           ` rule_id=${route.rule_id} intent=${route.intent} gate_allowed=${gateAllowed}` +
           ` requires_internal_evidence=${route.requires_internal_evidence} requested_output=${route.requested_output}` +
@@ -6789,7 +6800,7 @@ export function createCallerIdentityPlugin({
         const documentFollowup = documentFollowupEnabled && documentFollowupPattern.test(saved.query.trim()) &&
           (documentFollowupAllowedEmails.has("*") || documentFollowupAllowedEmails.has(email.trim().toLowerCase()));
         ingress.searchRequired = documentFollowup ? "document_followup" : ({cases: "list", document: "source", metrics: "internal_topic",
-          status: "internal_topic"})[route.intent] ?? route.intent;
+          status: "internal_topic", slack: "list"})[route.intent] ?? route.intent;
         try {
           entry.channel = await resolveCanonicalChannel(ingress);
           if (!SLACK_DM_CHANNEL_RE.test(entry.channel) || ingressByRun.get(runId) !== ingress)

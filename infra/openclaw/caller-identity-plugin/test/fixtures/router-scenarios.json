@@ -11,5 +11,8 @@
   {"id":"slack_integration","query":"Slack連携","intent":"existing_operation","evidence":false,"presearch":false},
   {"id":"brand_only_souvenir","query":"青空社のお土産資料を作って","intent":"generation","evidence":false,"presearch":false},
   {"id":"internal_term","query":"社内でいうTTOとVVSは何？","intent":"internal_term","evidence":true,"presearch":false},
-  {"id":"unjoined_channel_topic","query":"新星展って何？うちも関わってる？","intent":"internal_topic","evidence":true,"presearch":false}
+  {"id":"unjoined_channel_topic","query":"新星展って何？うちも関わってる？","intent":"internal_topic","evidence":true,"presearch":false},
+  {"id":"slack_reactions_multiline","query":"指定チャンネル内の指定文字列を含んだメッセージを走査し、絵文字スタンプでリアクションをしたユーザー（マルチチャンネルゲスト）を「ユニーク」で取得し、列挙してください\n対象チャンネル：#team-newstvショート動画パートナー\nメッセージに含む文字列：制作パートナー募集のご案内","intent":"slack","evidence":true,"presearch":true,"rule_id":"slack_reactions"},
+  {"id":"slack_reactions_flattened","query":"指定チャンネル内の指定文字列を含んだメッセージを走査し、絵文字スタンプでリアクションをしたユーザー（マルチチャンネルゲスト）を「ユニーク」で取得し、列挙してください 対象チャンネル：#team-newstvショート動画パートナー メッセージに含む文字列：制作パートナー募集のご案内","intent":"slack","evidence":true,"presearch":true,"rule_id":"slack_reactions"},
+  {"id":"slack_reactions_reordered","query":"メッセージに含む文字列：制作パートナー募集のご案内\n対象チャンネル：#team-newstvショート動画パートナー\n指定チャンネル内の指定文字列を含んだメッセージを走査し、絵文字スタンプでリアクションをしたユーザー（マルチチャンネルゲスト）を「ユニーク」で取得し、列挙してください","intent":"slack","evidence":true,"presearch":true,"rule_id":"slack_reactions"}
 ]
